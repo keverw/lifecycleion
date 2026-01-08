@@ -1,0 +1,14 @@
+{
+  "css.lint.unknownAtRules": "ignore",
+  "editor.defaultFormatter": "esbenp.prettier-vscode",
+  "editor.formatOnSave": true,
+  "editor.formatOnPaste": true,
+  "editor.codeActionsOnSave": {
+    "source.fixAll.eslint": "explicit"
+  },
+  "editor.snippetSuggestions": "top",
+  "files.autoSave": "afterDelay",
+  "prettier.prettierPath": "./node_modules/prettier",
+  "prettier.requireConfig": true,
+  "jestrunner.jestCommand": "bun test"
+}

@@ -1,0 +1,1 @@
+* Write a actual package.json desc, keywords and readme file
