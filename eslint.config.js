@@ -62,6 +62,15 @@ export default [
             match: false,
           },
         },
+        // Allow class names starting with common acronyms (ID, IO, IP, etc.)
+        {
+          selector: 'class',
+          format: ['PascalCase'],
+          filter: {
+            regex: '^(ID|IO|IP)[A-Z]',
+            match: true,
+          },
+        },
         // Boolean variables
         {
           selector: 'variable',
