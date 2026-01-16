@@ -50,9 +50,19 @@ export default [
       },
     },
     rules: {
-      // Enforce boolean variable naming conventions
+      // Enforce naming conventions
       '@typescript-eslint/naming-convention': [
         'error',
+        // Types and Interfaces: Must be PascalCase, no I prefix
+        {
+          selector: 'typeLike',
+          format: ['PascalCase'],
+          custom: {
+            regex: '^I[A-Z]',
+            match: false,
+          },
+        },
+        // Boolean variables
         {
           selector: 'variable',
           types: ['boolean'],
@@ -120,13 +130,25 @@ export default [
       '@typescript-eslint/explicit-function-return-type': 'off',
       '@typescript-eslint/explicit-module-boundary-types': 'off',
       '@typescript-eslint/no-non-null-assertion': 'warn',
+      // Enforce consistent type imports and prevent inline imports
+      '@typescript-eslint/consistent-type-imports': [
+        'error',
+        {
+          prefer: 'type-imports',
+          disallowTypeAnnotations: true, // Prevent inline imports like import('...').Type
+          fixStyle: 'separate-type-imports',
+        },
+      ],
+      '@typescript-eslint/no-import-type-side-effects': 'error',
       // General code quality rules
       'no-console': 'warn',
       'no-debugger': 'error',
       'prefer-const': 'error',
       'no-var': 'error',
       // Import/export rules
-      'no-duplicate-imports': 'error',
+      'no-duplicate-imports': 'off',
+      'import/no-duplicates': 'error',
+      'import/first': 'error',
       // Enforce case-sensitive import paths (prevents macOS/Windows vs Linux issues)
       'import/no-unresolved': [
         'error',
@@ -160,6 +182,7 @@ export default [
       curly: ['error', 'all'],
       'no-eval': 'error',
       'no-implied-eval': 'error',
+      'import/newline-after-import': 'error',
       // Prevent function declarations inside blocks
       'no-inner-declarations': 'error',
       // Limit callback nesting to prevent callback hell

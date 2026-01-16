@@ -1,0 +1,316 @@
+// Bun Snapshot v1, https://bun.sh/docs/test/snapshots
+
+exports[`KeyValueASCIITable should render a table with word wrapping 1`] = `
+"
++==================+
+| Name   | John    |
+|        | Doe     |
++------------------+
+| Age    | 30      |
++------------------+
+|   Description    |
++------------------+
+| Lorem ipsum      |
+| dolor sit amet,  |
+| consectetur      |
+| adipiscing elit. |
++==================+"
+`;
+
+exports[`KeyValueASCIITable should render a table with nested tables 1`] = `
+"
++======================================+
+| Name         | John Doe              |
++--------------------------------------+
+|             Nested Table             |
++--------------------------------------+
+| +==================+                 |
+| | Nested | Nested  |                 |
+| | Key 1  | Value 1 |                 |
+| +------------------+                 |
+| | Nested | Nested  |                 |
+| | Key 2  | Value 2 |                 |
+| +==================+                 |
++======================================+"
+`;
+
+exports[`KeyValueASCIITable should render a table with nested values 1`] = `
+"
++======================================+
+|            Nested values             |
++--------------------------------------+
+| Nested Key 1:                        |
+|     Nested Value 1                   |
+|                                      |
+| Nested Key 2:                        |
+|     Nested Value 2                   |
++======================================+"
+`;
+
+exports[`KeyValueASCIITable should render a table with deeply nested values 1`] = `
+"
++==========================================================+
+|                      Deeply Nested                       |
++----------------------------------------------------------+
+| Level 1:                                                 |
+|     Level 2:                                             |
+|         Value 2                                          |
+|                                                          |
+|     Level 2 Nested:                                      |
+|         Level 3:                                         |
+|             Value 3                                      |
+|                                                          |
+|         Level 3 Nested:                                  |
+|             XYZ Value 3 Nested                           |
++==========================================================+"
+`;
+
+exports[`KeyValueASCIITable should handle long keys and values 1`] = `
+"
++======================================+
+| Very Long Key    | Even Longer Value |
+| That Exceeds Max | That Needs To Be  |
+| Length           | Wrapped           |
++======================================+"
+`;
+
+exports[`KeyValueASCIITable should handle empty tables 1`] = `
+"
++--------------------------------------+
+|                                      |
++--------------------------------------+"
+`;
+
+exports[`KeyValueASCIITable should handle empty tables with a short custom empty message 1`] = `
+"
++--------------------------------------+
+|          No data available           |
++--------------------------------------+"
+`;
+
+exports[`KeyValueASCIITable should handle empty tables with a very long custom empty message 1`] = `
+"
++--------------------------------------+
+|  This is a very long empty message   |
+|   that will be wrapped to multiple   |
+|                lines                 |
++--------------------------------------+"
+`;
+
+exports[`KeyValueASCIITable should render a table with a MultiColumnASCIITable as a value that exceeds the table - headers should stay the same but decided to not wrap and break the table 1`] = `
+"
++======================================+
+| Name             | John Doe          |
++--------------------------------------+
+|          Multi-Column Table          |
++--------------------------------------+
+| +=========================================================+ |
+| | Column 1          | Column 2         | Column 3         | |
+| +---------------------------------------------------------+ |
+| | Value 1           | Value 2          | Value 3          | |
+| +---------------------------------------------------------+ |
+| | Longer Value 1    | Longer Value 2   | Longer Value 3   | |
+| +=========================================================+ |
++======================================+"
+`;
+
+exports[`KeyValueASCIITable should render a table with a MultiColumnASCIITable as a value - smaller table 1`] = `
+"
++======================================+
+| Name             | John Doe          |
++--------------------------------------+
+|          Multi-Column Table          |
++--------------------------------------+
+| +==========================+         |
+| | Column | Column | Column |         |
+| | 1      | 2      | 3      |         |
+| +--------------------------+         |
+| | Value  | Value  | Value  |         |
+| | 1      | 2      | 3      |         |
+| +--------------------------+         |
+| | Longer | Longer | Longer |         |
+| | Value  | Value  | Value  |         |
+| | 1      | 2      | 3      |         |
+| +==========================+         |
++======================================+"
+`;
+
+exports[`KeyValueASCIITable should render a table with a MultiColumnASCIITable as a value - wider table 1`] = `
+"
++==============================================================================+
+| Name               | John Doe                                                |
++------------------------------------------------------------------------------+
+|                              Multi-Column Table                              |
++------------------------------------------------------------------------------+
+| +=====================================+                                      |
+| | Column 1   | Column 2   | Column 3  |                                      |
+| +-------------------------------------+                                      |
+| | Value 1    | Value 2    | Value 3   |                                      |
+| +-------------------------------------+                                      |
+| | Longer     | Longer     | Longer    |                                      |
+| | Value 1    | Value 2    | Value 3   |                                      |
+| +=====================================+                                      |
++==============================================================================+"
+`;
+
+exports[`KeyValueASCIITable should render a table with a nested KeyValueASCIITable that adjusts its width when autoAdjustWidthWhenPossible is true 1`] = `
+"
++======================================+
+| Name         | John Doe              |
++--------------------------------------+
+|             Nested Table             |
++--------------------------------------+
+| +==========================================================+ |
+| | Nested Key 1 | Nested Value 1                            | |
+| +----------------------------------------------------------+ |
+| | Nested Key 2 | Nested Value 2                            | |
+| +----------------------------------------------------------+ |
+| | Nested Key 3 | Nested Value 3                            | |
+| +==========================================================+ |
++======================================+"
+`;
+
+exports[`KeyValueASCIITable should render a table with a nested KeyValueASCIITable that adjusts its width when autoAdjustWidthWhenPossible is true 2`] = `
+"
++======================================+
+| Name         | John Doe              |
++--------------------------------------+
+|             Nested Table             |
++--------------------------------------+
+| +==================================+ |
+| | Nested Key 1 | Nested Value 1    | |
+| +----------------------------------+ |
+| | Nested Key 2 | Nested Value 2    | |
+| +----------------------------------+ |
+| | Nested Key 3 | Nested Value 3    | |
+| +==================================+ |
++======================================+"
+`;
+
+exports[`KeyValueASCIITable should render a table with a nested MultiColumnASCIITable that adjusts its width when autoAdjustWidthWhenPossible is true 1`] = `
+"
++======================================+
+| Name         | John Doe              |
++--------------------------------------+
+|             Nested Table             |
++--------------------------------------+
+| +=========================================================+ |
+| | Column 1          | Column 2         | Column 3         | |
+| +---------------------------------------------------------+ |
+| | Value 1           | Value 2          | Value 3          | |
+| +---------------------------------------------------------+ |
+| | Longer Value 1    | Longer Value 2   | Longer Value 3   | |
+| +=========================================================+ |
++======================================+"
+`;
+
+exports[`KeyValueASCIITable should render a table with a nested MultiColumnASCIITable that adjusts its width when autoAdjustWidthWhenPossible is true 2`] = `
+"
++======================================+
+| Name         | John Doe              |
++--------------------------------------+
+|             Nested Table             |
++--------------------------------------+
+| +=================================+  |
+| | Column 1  | Column 2 | Column 3 |  |
+| +---------------------------------+  |
+| | Value 1   | Value 2  | Value 3  |  |
+| +---------------------------------+  |
+| | Longer    | Longer   | Longer   |  |
+| | Value 1   | Value 2  | Value 3  |  |
+| +=================================+  |
++======================================+"
+`;
+
+exports[`KeyValueASCIITable should handle emojis in the table 1`] = `
+"
++==============================================================================+
+| 👨‍💻       | 🚀                                                                |
++------------------------------------------------------------------------------+
+| Hello 🌍 | 👋 👨‍👩‍👧‍👦                                                             |
++------------------------------------------------------------------------------+
+|                                      😃                                      |
++------------------------------------------------------------------------------+
+| Lorem ipsum dolor sit amet 🎉                                                |
++==============================================================================+"
+`;
+
+exports[`KeyValueASCIITable should handle emojis in nested tables 1`] = `
+"
++==============================================================================+
+| Name 👤   | John Doe                                                         |
++------------------------------------------------------------------------------+
+|                                  Nested 📜                                   |
++------------------------------------------------------------------------------+
+| +==========================================================================+ |
+| | Nested 🔑 1 | Nested 🌟 1                                                | |
+| +--------------------------------------------------------------------------+ |
+| | Nested 🔑 2 | Nested 🌟 2                                                | |
+| +==========================================================================+ |
++==============================================================================+"
+`;
+
+exports[`KeyValueASCIITable should handle emojis in the table with a small width 1`] = `
+"
++==================+
+| 👨‍💻     | 🚀      |
++------------------+
+| Hello  | 👋 👨‍👩‍👧‍👦   |
+| 🌍     |         |
++------------------+
+|        😃        |
++------------------+
+| Lorem ipsum      |
+| dolor sit amet   |
+| 🎉               |
++==================+"
+`;
+
+exports[`KeyValueASCIITable should handle emojis in nested tables with a small width 1`] = `
+"
++==================+
+| Name   | John    |
+| 👤     | Doe     |
++------------------+
+|    Nested 📜     |
++------------------+
+| +==============+ |
+| | Nest | Neste | |
+| | ed   | d 🌟  | |
+| | 🔑 1 | 1     | |
+| +--------------+ |
+| | Nest | Neste | |
+| | ed   | d 🌟  | |
+| | 🔑 2 | 2     | |
+| +==============+ |
++==================+"
+`;
+
+exports[`KeyValueASCIITable should handle number values 1`] = `
+"
++============================+
+| Integer  | 42              |
++----------------------------+
+| Float    | 3.14159         |
++----------------------------+
+| Negative | -10             |
++============================+"
+`;
+
+exports[`KeyValueASCIITable should handle boolean values 1`] = `
+"
++============================+
+| True Value  | true         |
++----------------------------+
+| False Value | false        |
++============================+"
+`;
+
+exports[`KeyValueASCIITable should handle null and undefined values 1`] = `
+"
++======================================+
+| Null Value      | null               |
++--------------------------------------+
+| Undefined Value | undefined          |
++======================================+"
+`;

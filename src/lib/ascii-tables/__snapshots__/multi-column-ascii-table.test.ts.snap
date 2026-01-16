@@ -1,0 +1,114 @@
+// Bun Snapshot v1, https://bun.sh/docs/test/snapshots
+
+exports[`MultiColumnASCIITable should render a table with multiple columns - flex default 1`] = `
+"
++=============================================================================+
+| Column 1                | Column 2                | Column 3                |
++-----------------------------------------------------------------------------+
+| Value 1                 | Value 2                 | Value 3                 |
++-----------------------------------------------------------------------------+
+| Longer Value 1          | Longer Value 2          | Longer Value 3          |
++=============================================================================+"
+`;
+
+exports[`MultiColumnASCIITable should render a table with multiple columns - fixed option 1`] = `
+"
++=========================================================+
+| Column 1          | Column 2         | Column 3         |
++---------------------------------------------------------+
+| Value 1           | Value 2          | Value 3          |
++---------------------------------------------------------+
+| Longer Value 1    | Longer Value 2   | Longer Value 3   |
++=========================================================+"
+`;
+
+exports[`MultiColumnASCIITable should handle empty tables 1`] = `
+"
++--------------------------------------+
+|                                      |
++--------------------------------------+"
+`;
+
+exports[`MultiColumnASCIITable should handle empty tables with a short custom empty message 1`] = `
+"
++--------------------------------------+
+|          No data available           |
++--------------------------------------+"
+`;
+
+exports[`MultiColumnASCIITable should handle empty tables with a very long custom empty message 1`] = `
+"
++--------------------------------------+
+|  This is a very long empty message   |
+|   that will be wrapped to multiple   |
+|                lines                 |
++--------------------------------------+"
+`;
+
+exports[`MultiColumnASCIITable should handle long cell values with wrapping 1`] = `
+"
++===========================+
+| Column 1    | Column 2    |
++---------------------------+
+| Short Value | A very long |
+|             | value that  |
+|             | needs to be |
+|             | wrapped     |
++===========================+"
+`;
+
+exports[`MultiColumnASCIITable should handle long header values with wrapping 1`] = `
+"
++===============================================+
+| Column 1              | A very long header    |
+|                       | that needs to be      |
+|                       | wrapped               |
++-----------------------------------------------+
+| Short Value           | Short Value           |
++===============================================+"
+`;
+
+exports[`MultiColumnASCIITable should render a table with a very small table width should split even words 1`] = `
+"
++=================+
+| Col | Col | Col |
+| umn | umn | umn |
+| 1   | 2   | 3   |
++-----------------+
+| Val | Val | Val |
+| ue  | ue  | ue  |
+| 1   | 2   | 3   |
++-----------------+
+| Lon | Lon | Lon |
+| ger | ger | ger |
+| Val | Val | Val |
+| ue  | ue  | ue  |
+| 1   | 2   | 3   |
++=================+"
+`;
+
+exports[`MultiColumnASCIITable should handle emojis in the table 1`] = `
+"
++=============================================================================+
+| Column 1                | Column 2                | Column 3                |
++-----------------------------------------------------------------------------+
+| 👨‍💻                      | 🚀                      | 🌍                      |
++-----------------------------------------------------------------------------+
+| Hello 🌍                | 👋 👨‍👩‍👧‍👦                   | 😃                      |
++=============================================================================+"
+`;
+
+exports[`MultiColumnASCIITable should handle emojis in the table with a small width 1`] = `
+"
++=================+
+| Col | Col | Col |
+| umn | umn | umn |
+| 1   | 2   | 3   |
++-----------------+
+| 👨‍💻  | 🚀  | 🌍  |
++-----------------+
+| Hel | 👋  | 😃  |
+| lo  | 👨‍👩‍👧‍👦  |     |
+| 🌍  |     |     |
++=================+"
+`;

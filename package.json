@@ -14,14 +14,15 @@
     "dist"
   ],
   "scripts": {
-    "build": "bun run update-readme && tsup",
+    "build": "bun run update-docs && tsup",
     "dev": "tsup --watch",
     "test": "bun test",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
     "format": "prettier --write \"**/*.{js,jsx,ts,tsx,json,css,md}\"",
     "format:check": "prettier --check \"**/*.{js,jsx,ts,tsx,json,css,md}\"",
-    "update-readme": "markdown-toc-gen update README.md && bun run scripts/update-readme-version.ts"
+    "format:docs": "prettier --write README.md \"docs/**/*.md\"",
+    "update-docs": "markdown-toc-gen update README.md && find docs -type f -name '*.md' -print0 | xargs -0 -n1 markdown-toc-gen update && bun run scripts/update-readme-version.ts && bun run format:docs"
   },
   "keywords": [],
   "author": "Kevin Whitman (https://github.com/keverw)",
@@ -49,5 +50,10 @@
     "typescript": "^5.9.3",
     "typescript-eslint": "^8.46.3"
   },
-  "dependencies": {}
+  "dependencies": {
+    "bson-objectid": "^2.0.4",
+    "string-width": "^8.1.0",
+    "ulid": "^3.0.2",
+    "uuid": "^13.0.0"
+  }
 }
