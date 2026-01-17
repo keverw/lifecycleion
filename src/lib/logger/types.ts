@@ -4,6 +4,16 @@
 export type LogType = 'error' | 'info' | 'warn' | 'success' | 'note' | 'raw';
 
 /**
+ * Options for log methods
+ */
+export interface LogOptions {
+  exitCode?: number;
+  params?: Record<string, unknown>;
+  tags?: string[];
+  redactedKeys?: string[];
+}
+
+/**
  * Complete log entry that gets passed to sinks
  */
 export interface LogEntry {
@@ -17,6 +27,7 @@ export interface LogEntry {
   redactedKeys?: string[]; // List of keys that were redacted (e.g., ['password', 'user.apiKey'])
   error?: unknown; // Original error object from errorObject() calls
   exitCode?: number; // Exit code if this log triggers a process exit
+  tags?: string[]; // Optional tags for categorizing/filtering logs (e.g., ['auth', 'security'])
 }
 
 /**
@@ -46,7 +57,6 @@ export interface LoggerOptions {
   sinks?: LogSink[];
 
   // Security
-  redactedKeys?: string[];
   redactFunction?: RedactFunction;
 
   // Behavior

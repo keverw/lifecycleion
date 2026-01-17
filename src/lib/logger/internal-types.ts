@@ -3,12 +3,13 @@
  * These are not part of the public API
  */
 
+import type { LogOptions } from './types';
+
 /**
  * Internal options for handleLog method
+ * Extends LogOptions with internal-only fields
  */
-export interface HandleLogOptions {
-  exitCode?: number;
+export interface HandleLogOptions extends LogOptions {
   serviceName?: string;
-  params?: Record<string, unknown>;
   error?: unknown;
 }

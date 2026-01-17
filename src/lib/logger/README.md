@@ -8,6 +8,7 @@ A modern, flexible logging library with sink-based architecture, template string
 - **Dynamic Sink Management**: Add, remove, and query sinks at runtime
 - **Template Strings**: Use `{{variable}}` syntax for dynamic log messages
 - **Redaction**: Built-in support for masking sensitive data (passwords, API keys, etc.)
+- **Tags**: Categorize and filter logs with optional string tags
 - **Service Loggers**: Create scoped loggers with service names
 - **EventEmitter Integration**: React to logging events for monitoring and alerting
 - **Error Handling**: Custom error handlers for sink failures with access to the failing sink
@@ -34,6 +35,8 @@ import {
 ### Simple Logging
 
 ```typescript
+import { Logger, ConsoleSink } from '@/lib/logger';
+
 const logger = new Logger({
   sinks: [new ConsoleSink({ colors: true, timestamps: true })],
 });
@@ -82,11 +85,18 @@ logger.info('User {{userID}} logged in from {{ip}}', {
     ip: '10.0.0.30',
   },
 });
-
 // Output: "User 456 logged in from 10.0.0.30"
+
+logger.success('Payment of ${{amount}} processed for order {{orderId}}', {
+  params: {
+    amount: 99.99,
+    orderId: 'ORD-12345',
+  },
+});
+// Output: "Payment of $99.99 processed for order ORD-12345"
 ```
 
-**Nested Object Support:**
+#### Nested Object Support
 
 Templates support nested object properties using dot notation:
 
@@ -104,7 +114,6 @@ logger.info('User {{user.name}} (ID: {{user.id}}) from {{session.ip}}', {
     },
   },
 });
-
 // Output: "User Alice (ID: 123) from 192.168.1.1"
 ```
 
@@ -112,31 +121,38 @@ logger.info('User {{user.name}} (ID: {{user.id}}) from {{session.ip}}', {
 
 ### Redaction of Sensitive Data
 
+Redaction is specified per-log to match the specific structure being logged:
+
 ```typescript
 const logger = new Logger({
   sinks: [new ConsoleSink({ colors: true })],
-  redactedKeys: ['password', 'apiKey', 'ssn'],
 });
 
-logger.info('Login attempt', {
+logger.info('Login attempt for user {{username}}', {
   params: {
-    username: 'john',
-    password: 'secret123', // Will be masked: ********
-    ip: '10.0.1.75',
+    username: 'john_doe',
+    password: 'super_secret_123', // This will be redacted
+    ip: '10.0.1.50',
   },
+  redactedKeys: ['password'],
+});
+// Output: "Login attempt for user john_doe"
+// But password is masked in params
+
+logger.warn('API call with key {{apiKey}}', {
+  params: {
+    apiKey: 'sk_live_1234567890', // This will be redacted
+    endpoint: '/api/users',
+  },
+  redactedKeys: ['apiKey'],
 });
 ```
 
-**Nested Object Redaction:**
+#### Nested Object Redaction
 
 Redaction supports nested object properties using dot notation, just like templates:
 
 ```typescript
-const logger = new Logger({
-  sinks: [new ConsoleSink({ colors: true })],
-  redactedKeys: ['user.password', 'credentials.apiKey', 'personalInfo.ssn'],
-});
-
 logger.info('User login attempt', {
   params: {
     user: {
@@ -153,6 +169,7 @@ logger.info('User login attempt', {
       address: '123 Main St',
     },
   },
+  redactedKeys: ['user.password', 'credentials.apiKey', 'personalInfo.ssn'],
 });
 
 // The params object will have nested values redacted:
@@ -163,28 +180,112 @@ logger.info('User login attempt', {
 
 **Note:** Array indexing (e.g., `users[0].password`) is not supported. Only object property paths using dot notation are supported.
 
+#### Custom Redaction Function
+
+You can customize how values are masked at the logger level:
+
+```typescript
+const logger = new Logger({
+  sinks: [new ConsoleSink({ colors: true })],
+  redactFunction: (key, _value) => `[REDACTED-${key}]`,
+});
+
+logger.info('API call', {
+  params: { apiKey: 'sk_12345' },
+  redactedKeys: ['apiKey'],
+});
+// apiKey will be masked as: [REDACTED-apiKey]
+```
+
+### Tags for Categorization and Filtering
+
+Tags allow you to categorize and filter log entries for better organization and querying:
+
+```typescript
+const logger = new Logger({
+  sinks: [new ConsoleSink({ colors: true })],
+});
+
+// Tag logs for filtering and categorization
+logger.info('User logged in', {
+  tags: ['auth', 'security'],
+  params: { userId: 123 },
+});
+
+logger.warn('Slow database query', {
+  tags: ['database', 'performance'],
+  params: { duration: 1500 },
+});
+
+logger.error('Payment processing failed', {
+  tags: ['payment', 'critical'],
+  params: { orderId: 'ORD-456' },
+});
+
+// With service loggers
+const apiService = logger.service('API');
+apiService.info('Request completed', {
+  tags: ['http', 'success'],
+  params: { endpoint: '/users', status: 200 },
+});
+```
+
+#### Use Cases
+
+- **Filtering**: Create custom sinks that route logs based on tags (e.g., send all `['critical']` logs to alerting)
+- **Analysis**: Query logs by tag in your log aggregation system
+- **Monitoring**: Track specific categories of events
+- **Debugging**: Add `['debug']` tags to verbose logs and filter them out in production
+
+#### Notes
+
+- Tags are optional and only included in `LogEntry` when provided
+- Empty tag arrays are treated as undefined to keep log entries clean
+- Tags work with all log levels and features (params, exitCode, error objects, services)
+
 ### Multiple Sinks
 
 ```typescript
 const arraySink = new ArraySink();
+const fileSink = new FileSink({
+  logDir: './logs',
+  basename: 'app',
+  maxSizeMB: 10,
+  jsonFormat: true,
+  onError: (error, entry, attempt, willRetry) => {
+    console.error(`File write failed (attempt ${attempt}):`, error.message);
+    if (!willRetry) {
+      console.error('Entry lost:', entry.message);
+    }
+  },
+});
 
 const logger = new Logger({
   sinks: [
-    new ConsoleSink({ colors: true }),
+    new ConsoleSink({ colors: true, timestamps: false }),
     arraySink,
-    new FileSink({
-      logDir: './logs',
-      basename: 'app',
-      maxSizeMB: 10,
-      jsonFormat: true,
-    }),
+    fileSink,
   ],
 });
 
-logger.info('This goes to console, array, and file');
+logger.info('This message goes to console, array, and file');
+logger.error('Error logged to all sinks');
 
 // Access array logs
-console.log(arraySink.logs);
+console.log(`ArraySink has ${arraySink.logs.length} logs stored`);
+console.log('ArraySink logs:', arraySink.getSnapshotFriendlyLogs());
+
+// Check file sink health
+const health = fileSink.getHealth();
+if (!health.isHealthy) {
+  console.warn(`File sink unhealthy: ${health.consecutiveFailures} failures`);
+}
+
+// Flush and get statistics before shutdown
+const result = await fileSink.flush();
+console.log(
+  `Flushed ${result.entriesWritten} entries, ${result.entriesFailed} failed`,
+);
 ```
 
 ### Dynamic Sink Management
@@ -216,7 +317,7 @@ console.log(logger.closed); // true
 console.log(logger.getSinks().length); // 0
 ```
 
-**Important notes:**
+#### Important Notes
 
 - `removeSink()` does NOT close the sink - you are responsible for closing it if needed
 - `logger.close()` closes all sinks AND removes them from the logger
@@ -233,11 +334,15 @@ const logger = new Logger({
 const authService = logger.service('Auth');
 const dbService = logger.service('Database');
 
-authService.info('User authenticated');
-// Output: [INFO] [Auth] User authenticated
+authService.info('User authentication started');
+authService.success('User authenticated successfully');
+// Output: [INFO] [Auth] User authenticated successfully
 
-dbService.warn('Slow query detected');
-// Output: [WARN] [Database] Slow query detected
+dbService.info('Connecting to database');
+dbService.warn('Slow query detected: {{duration}}ms', {
+  params: { duration: 1234 },
+});
+// Output: [WARN] [Database] Slow query detected: 1234ms
 ```
 
 ## Built-in Sinks
@@ -255,7 +360,7 @@ new ConsoleSink({
 });
 ```
 
-**Mute/Unmute Control:**
+#### Mute/Unmute Control
 
 You can dynamically mute and unmute console output:
 
@@ -300,7 +405,7 @@ console.log(arraySink.getSnapshotFriendlyLogs());
 arraySink.clear();
 ```
 
-**With Transformer:**
+#### With Transformer
 
 You can optionally transform log entries when they're written to the ArraySink. This is useful for:
 
@@ -358,12 +463,12 @@ new FileSink({
 });
 ```
 
-**File Naming:**
+#### File Naming
 
 - Current: `app-2024-01-15.log`
 - Rotated: `app-2024-01-15-1705334400.log`
 
-**Features:**
+#### Features
 
 - Automatic rotation on size limit
 - Automatic rotation on date change (UTC)
@@ -372,7 +477,7 @@ new FileSink({
 - Health monitoring and statistics
 - Redacted params in file output
 
-**Error Handling & Retry:**
+#### Error Handling & Retry
 
 FileSink automatically retries failed writes up to `maxRetries` times (default: 3). The `onError` callback is invoked for each failure:
 
@@ -400,7 +505,7 @@ const fileSink = new FileSink({
 });
 ```
 
-**Health Monitoring:**
+#### Health Monitoring
 
 Check the health status of the sink to monitor failures and queue size:
 
@@ -416,7 +521,7 @@ console.log(health);
 // }
 ```
 
-**Flush Pending Writes:**
+#### Flush Pending Writes
 
 Wait for all pending writes to complete and get statistics:
 
@@ -458,9 +563,11 @@ const pipeSink = new NamedPipeSink({
     pipeSink.reconnect();
   },
 });
+
+logger.info('This goes to console and named pipe (if available)');
 ```
 
-**Error Types:**
+#### Error Types
 
 The `onError` callback receives a `PipeErrorType` enum indicating what kind of error occurred:
 
@@ -475,7 +582,7 @@ enum PipeErrorType {
 }
 ```
 
-**Error Handling & Reconnection:**
+#### Error Handling & Reconnection
 
 When a pipe error occurs (e.g., reader disconnects), the `onError` callback is invoked with the error type, error object, and pipe path. You can use the `reconnect()` method to attempt to reestablish the connection:
 
@@ -517,7 +624,7 @@ if (pipeSink.isReconnecting) {
 
 Writes that occur while disconnected are queued and flushed upon successful reconnection.
 
-**Custom Formatter:**
+#### Custom Formatter
 
 You can provide a custom formatter to control exactly what gets written to the pipe:
 
@@ -540,7 +647,7 @@ const pipeSink = new NamedPipeSink({
 
 The formatter receives the full `LogEntry` and should return a string (newline is added automatically).
 
-**Setup:**
+#### Setup
 
 ```bash
 # Create named pipe
@@ -595,9 +702,11 @@ logger.unregisterReportErrorListener()
 ### Options for Log Methods
 
 ```typescript
-{
-  exitCode?: number,           // Exit process with specified code after logging
-  params?: Record<string, any> // Template parameters
+interface LogOptions {
+  exitCode?: number; // Exit process with specified code after logging
+  params?: Record<string, unknown>; // Template parameters
+  tags?: string[]; // Tags for categorizing/filtering logs
+  redactedKeys?: string[]; // Keys to redact in params (per-log basis)
 }
 ```
 
@@ -606,7 +715,6 @@ logger.unregisterReportErrorListener()
 ```typescript
 interface LoggerOptions {
   sinks?: LogSink[]; // Output destinations
-  redactedKeys?: string[]; // Keys to redact
   redactFunction?: (keyName, value) => unknown; // Custom redaction (default: masks with asterisks using datamask)
   callProcessExit?: boolean; // Actually call process.exit() (default: true, disable for tests/browser)
   beforeExitCallback?: (code, isFirst) => void | Promise<void>; // Hook called before exit (runs even if callProcessExit is false)
@@ -618,7 +726,7 @@ interface LoggerOptions {
 }
 ```
 
-**Sink Error Handling:**
+#### Sink Error Handling
 
 By default, when a sink fails to write or close, the error is logged to `console.error`. You can provide a custom error handler to intercept these errors:
 
@@ -649,7 +757,7 @@ This allows you to:
 - Switch to backup sinks
 - Track failure statistics
 
-**Exit Behavior:**
+#### Exit Behavior
 
 When a log includes an `exitCode`, the logger will:
 
@@ -689,6 +797,9 @@ logger.on('logger', (event) => {
       break;
   }
 });
+
+logger.info('This will trigger an event');
+logger.error('Error event will be emitted');
 ```
 
 ## Custom Sinks
@@ -714,6 +825,27 @@ class DatabaseSink implements LogSink {
   }
 }
 
+// Custom metrics sink example
+class CustomMetricsSink implements LogSink {
+  private errorCount = 0;
+  private infoCount = 0;
+
+  write(entry: LogEntry): void {
+    if (entry.type === 'error') {
+      this.errorCount++;
+    } else if (entry.type === 'info') {
+      this.infoCount++;
+    }
+  }
+
+  getMetrics() {
+    return {
+      errors: this.errorCount,
+      infos: this.infoCount,
+    };
+  }
+}
+
 // Use it
 const logger = new Logger({
   sinks: [new DatabaseSink()],
@@ -736,32 +868,37 @@ interface LogEntry {
   redactedKeys?: string[]; // List of keys that were redacted: ['password', 'user.apiKey']
   error?: unknown; // Original error object from errorObject() calls
   exitCode?: number; // Exit code if this log triggers a process exit
+  tags?: string[]; // Optional tags for categorizing/filtering logs: ['auth', 'security']
 }
 ```
 
-**Important Notes:**
+### Important Notes
 
 - **`message`**: Contains the fully interpolated template with all parameter values (including sensitive data if included in the template)
 - **`params`**: Raw unredacted parameters
 - **`redactedParams`**: Parameters with sensitive values masked according to `redactedKeys`
 - **`redactedKeys`**: List of parameter keys that were redacted (useful for auditing and metadata)
 
-**Security Note:** The `message` field is computed from the original unredacted `params`. If you include sensitive parameters in your template (e.g., `{{password}}`), they will appear in plain text in the message. Only include non-sensitive fields in your templates, and rely on `redactedParams` for structured data storage.
+### Security Note
+
+The `message` field is computed from the original unredacted `params`. If you include sensitive parameters in your template (e.g., `{{password}}`), they will appear in plain text in the message. Only include non-sensitive fields in your templates, and rely on `redactedParams` for structured data storage.
 
 ## Testing
 
 ```typescript
-const { logger, arraySink } = Logger.createTestOptimizedLogger({
+const { logger, arraySink } = Logger.createTestOptimizedLogger();
+
+logger.info('Test message', {
+  params: { password: 'secret' },
   redactedKeys: ['password'],
 });
 
-logger.info('Test message');
-
 expect(arraySink.logs.length).toBe(1);
 expect(arraySink.logs[0].message).toBe('Test message');
+expect(arraySink.logs[0].redactedParams?.password).not.toBe('secret');
 ```
 
-**With Transformer for Consistent Test Snapshots:**
+### With Transformer for Consistent Test Snapshots
 
 Transformers are useful for normalizing log output in tests by stripping timestamps or other dynamic values:
 
@@ -780,7 +917,7 @@ expect(arraySink.getSnapshotFriendlyLogs()).toMatchSnapshot();
 // Snapshot: ["info: User logged in"]
 ```
 
-**With Console Sink for Debugging Tests:**
+### With Console Sink for Debugging Tests
 
 Sometimes you want to see console output while debugging tests:
 
@@ -804,9 +941,7 @@ expect(arraySink.logs.length).toBe(2);
 For frontend applications, use the `createFrontendOptimizedLogger` factory method which is pre-configured for browser environments:
 
 ```typescript
-const { logger, consoleSink } = Logger.createFrontendOptimizedLogger({
-  redactedKeys: ['password', 'apiKey', 'accessToken'],
-});
+const { logger, consoleSink } = Logger.createFrontendOptimizedLogger();
 
 logger.info('Application started');
 logger.error('Failed to fetch data');
@@ -819,15 +954,14 @@ for (let i = 0; i < 1000; i++) {
 consoleSink.unmute();
 ```
 
-**Features:**
+### Features
 
 - Pre-configured with `ConsoleSink` for browser devtools output
 - Process exit disabled (browsers don't have `process.exit`)
-- Optional redaction for sensitive data
 - Can add additional sinks if needed
 - Mute/unmute console dynamically
 
-**With Additional Sinks:**
+### With Additional Sinks and Redaction
 
 ```typescript
 const { logger, consoleSink } = Logger.createFrontendOptimizedLogger({
@@ -835,7 +969,6 @@ const { logger, consoleSink } = Logger.createFrontendOptimizedLogger({
     new ArraySink(), // For capturing logs in-app
     // Could add custom sinks for remote logging services
   ],
-  redactedKeys: ['password', 'sessionToken'],
   muteConsole: false, // Start with console enabled (default)
 });
 
@@ -844,6 +977,7 @@ logger.info('User {{username}} logged in', {
     username: 'alice',
     sessionToken: 'secret123', // Will be redacted
   },
+  redactedKeys: ['sessionToken'],
 });
 
 // Mute console in production, unmute in development
@@ -875,224 +1009,3 @@ Each sink receives the complete `LogEntry` and can process it independently. Thi
 - Create custom sinks for specific needs
 - Configure each sink independently
 - Add/remove sinks without changing your code
-
-## Examples
-
-### Example 1: Simple Console Logging
-
-```typescript
-import { Logger, ConsoleSink } from '@/lib/logger';
-
-const logger = new Logger({
-  sinks: [new ConsoleSink({ colors: true, timestamps: true })],
-});
-
-logger.info('Application started');
-logger.warn('This is a warning');
-logger.success('Operation completed');
-logger.error('An error occurred');
-```
-
-### Example 2: Template Strings with Parameters
-
-```typescript
-const logger = new Logger({
-  sinks: [new ConsoleSink({ colors: true })],
-});
-
-logger.info('User {{userID}} logged in from {{ip}}', {
-  params: {
-    userID: 789,
-    ip: '10.0.0.25',
-  },
-});
-// Output: "User 789 logged in from 10.0.0.25"
-
-logger.success('Payment of ${{amount}} processed for order {{orderId}}', {
-  params: {
-    amount: 99.99,
-    orderId: 'ORD-12345',
-  },
-});
-// Output: "Payment of $99.99 processed for order ORD-12345"
-```
-
-### Example 3: Redaction of Sensitive Data
-
-```typescript
-const logger = new Logger({
-  sinks: [new ConsoleSink({ colors: true })],
-  redactedKeys: ['password', 'apiKey', 'ssn'],
-});
-
-logger.info('Login attempt for user {{username}}', {
-  params: {
-    username: 'john_doe',
-    password: 'super_secret_123', // This will be redacted
-    ip: '10.0.1.50',
-  },
-});
-// Output: "Login attempt for user john_doe"
-// But password is masked in params
-
-logger.warn('API call with key {{apiKey}}', {
-  params: {
-    apiKey: 'sk_live_1234567890', // This will be redacted
-    endpoint: '/api/users',
-  },
-});
-```
-
-### Example 4: Multiple Sinks with Error Handling
-
-```typescript
-const arraySink = new ArraySink();
-const fileSink = new FileSink({
-  logDir: './logs',
-  basename: 'app',
-  maxSizeMB: 10,
-  jsonFormat: true,
-  onError: (error, entry, attempt, willRetry) => {
-    console.error(`File write failed (attempt ${attempt}):`, error.message);
-    if (!willRetry) {
-      console.error('Entry lost:', entry.message);
-    }
-  },
-});
-
-const logger = new Logger({
-  sinks: [
-    new ConsoleSink({ colors: true, timestamps: false }),
-    arraySink,
-    fileSink,
-  ],
-});
-
-logger.info('This message goes to console, array, and file');
-logger.error('Error logged to all sinks');
-
-console.log(`ArraySink has ${arraySink.logs.length} logs stored`);
-console.log('ArraySink logs:', arraySink.getSnapshotFriendlyLogs());
-
-// Check file sink health
-const health = fileSink.getHealth();
-if (!health.isHealthy) {
-  console.warn(`File sink unhealthy: ${health.consecutiveFailures} failures`);
-}
-
-// Flush and get statistics before shutdown
-const result = await fileSink.flush();
-console.log(
-  `Flushed ${result.entriesWritten} entries, ${result.entriesFailed} failed`,
-);
-```
-
-### Example 5: Service Loggers
-
-```typescript
-const logger = new Logger({
-  sinks: [new ConsoleSink({ colors: true, typeLabels: true })],
-});
-
-const authService = logger.service('Auth');
-const dbService = logger.service('Database');
-
-authService.info('User authentication started');
-authService.success('User authenticated successfully');
-// Output: [INFO] [Auth] User authenticated successfully
-
-dbService.info('Connecting to database');
-dbService.warn('Slow query detected: {{duration}}ms', {
-  params: { duration: 1234 },
-});
-// Output: [WARN] [Database] Slow query detected: 1234ms
-```
-
-### Example 6: EventEmitter Integration
-
-```typescript
-const logger = new Logger({
-  sinks: [new ConsoleSink({ colors: false })],
-});
-
-// Listen to all log events
-logger.on('logger', (event) => {
-  if (event.eventType === 'log') {
-    console.log(`[EVENT] ${event.logType}: ${event.message}`);
-  }
-});
-
-logger.info('This will trigger an event');
-logger.error('Error event will be emitted');
-```
-
-### Example 7: Custom Sink
-
-```typescript
-import { LogSink, LogEntry } from '@/lib/logger';
-
-class CustomMetricsSink implements LogSink {
-  private errorCount = 0;
-  private infoCount = 0;
-
-  write(entry: LogEntry): void {
-    if (entry.type === 'error') {
-      this.errorCount++;
-    } else if (entry.type === 'info') {
-      this.infoCount++;
-    }
-  }
-
-  getMetrics() {
-    return {
-      errors: this.errorCount,
-      infos: this.infoCount,
-    };
-  }
-}
-
-const metricsSink = new CustomMetricsSink();
-
-const logger = new Logger({
-  sinks: [new ConsoleSink({ colors: true }), metricsSink],
-});
-
-logger.info('Info message 1');
-logger.info('Info message 2');
-logger.error('Error message 1');
-logger.info('Info message 3');
-
-console.log(metricsSink.getMetrics());
-// Output: { errors: 1, infos: 3 }
-```
-
-### Example 8: Named Pipe (Linux/macOS)
-
-```typescript
-const logger = new Logger({
-  sinks: [
-    new ConsoleSink({ colors: true }),
-    new NamedPipeSink({
-      pipePath: '/tmp/app_logs',
-      jsonFormat: true,
-      onError: (err) => {
-        console.error('Pipe error:', err.message);
-      },
-    }),
-  ],
-});
-
-logger.info('This goes to console and named pipe (if available)');
-```
-
-**Setup:**
-
-```bash
-# Create named pipe
-mkfifo /tmp/app_logs
-
-# Read from pipe in another terminal
-cat /tmp/app_logs
-
-# Or use with log aggregation tools
-```

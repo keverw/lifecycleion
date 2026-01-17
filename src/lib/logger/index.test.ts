@@ -120,17 +120,12 @@ describe('Logger', () => {
 
   describe('Redaction', () => {
     test('should redact specified keys', () => {
-      const redactedLogger = new Logger({
-        sinks: [arraySink],
-        redactedKeys: ['password'],
-        callProcessExit: false,
-      });
-
-      redactedLogger.info('Login attempt', {
+      logger.info('Login attempt', {
         params: {
           username: 'john',
           password: 'secret123',
         },
+        redactedKeys: ['password'],
       });
 
       const log = arraySink.logs[0];
@@ -142,26 +137,20 @@ describe('Logger', () => {
     test('should use custom redaction function', () => {
       const customLogger = new Logger({
         sinks: [arraySink],
-        redactedKeys: ['apiKey'],
         redactFunction: (key, _value) => `[HIDDEN-${key}]`,
         callProcessExit: false,
       });
 
       customLogger.info('API call', {
         params: { apiKey: 'sk_12345' },
+        redactedKeys: ['apiKey'],
       });
 
       expect(arraySink.logs[0].redactedParams?.apiKey).toBe('[HIDDEN-apiKey]');
     });
 
     test('should redact nested keys using dot notation', () => {
-      const redactedLogger = new Logger({
-        sinks: [arraySink],
-        redactedKeys: ['user.password', 'credentials.apiKey'],
-        callProcessExit: false,
-      });
-
-      redactedLogger.info('Auth attempt', {
+      logger.info('Auth attempt', {
         params: {
           user: {
             id: 123,
@@ -173,6 +162,7 @@ describe('Logger', () => {
             apiKey: 'sk_12345',
           },
         },
+        redactedKeys: ['user.password', 'credentials.apiKey'],
       });
 
       const log = arraySink.logs[0];
@@ -200,13 +190,7 @@ describe('Logger', () => {
     });
 
     test('should handle deeply nested redaction', () => {
-      const redactedLogger = new Logger({
-        sinks: [arraySink],
-        redactedKeys: ['data.auth.token', 'data.user.ssn'],
-        callProcessExit: false,
-      });
-
-      redactedLogger.info('Deep nested data', {
+      logger.info('Deep nested data', {
         params: {
           data: {
             auth: {
@@ -219,6 +203,7 @@ describe('Logger', () => {
             },
           },
         },
+        redactedKeys: ['data.auth.token', 'data.user.ssn'],
       });
 
       const log = arraySink.logs[0];
@@ -231,13 +216,7 @@ describe('Logger', () => {
     });
 
     test('should handle both top-level and nested redaction', () => {
-      const redactedLogger = new Logger({
-        sinks: [arraySink],
-        redactedKeys: ['password', 'user.apiKey'],
-        callProcessExit: false,
-      });
-
-      redactedLogger.info('Mixed redaction', {
+      logger.info('Mixed redaction', {
         params: {
           password: 'top-level-secret',
           user: {
@@ -245,6 +224,7 @@ describe('Logger', () => {
             apiKey: 'nested-secret',
           },
         },
+        redactedKeys: ['password', 'user.apiKey'],
       });
 
       const log = arraySink.logs[0];
@@ -256,18 +236,13 @@ describe('Logger', () => {
     });
 
     test('should include redactedKeys in log entry', () => {
-      const redactedLogger = new Logger({
-        sinks: [arraySink],
-        redactedKeys: ['password', 'user.apiKey', 'data.ssn'],
-        callProcessExit: false,
-      });
-
-      redactedLogger.info('Test with redacted keys', {
+      logger.info('Test with redacted keys', {
         params: {
           username: 'test',
           password: 'secret',
           user: { apiKey: 'key123', name: 'John' },
         },
+        redactedKeys: ['password', 'user.apiKey', 'data.ssn'],
       });
 
       const log = arraySink.logs[0];
@@ -277,13 +252,9 @@ describe('Logger', () => {
     });
 
     test('should not include redactedKeys when no params', () => {
-      const redactedLogger = new Logger({
-        sinks: [arraySink],
+      logger.info('Test without params', {
         redactedKeys: ['password'],
-        callProcessExit: false,
       });
-
-      redactedLogger.info('Test without params');
 
       const log = arraySink.logs[0];
 
@@ -292,12 +263,7 @@ describe('Logger', () => {
     });
 
     test('should not include redactedKeys when no redacted keys configured', () => {
-      const plainLogger = new Logger({
-        sinks: [arraySink],
-        callProcessExit: false,
-      });
-
-      plainLogger.info('Test with params', {
+      logger.info('Test with params', {
         params: { username: 'test', password: 'secret' },
       });
 
@@ -823,6 +789,94 @@ describe('Logger', () => {
       expect(consoleErrorSpy.mock.calls[0][0]).toContain(
         'Unhandled async error',
       );
+    });
+  });
+
+  describe('Tags', () => {
+    test('should add tags to log entry', () => {
+      logger.info('Tagged message', { tags: ['auth', 'security'] });
+
+      expect(arraySink.logs.length).toBe(1);
+      expect(arraySink.logs[0].tags).toEqual(['auth', 'security']);
+    });
+
+    test('should support tags with all log levels', () => {
+      logger.error('Error', { tags: ['critical'] });
+      logger.warn('Warning', { tags: ['performance'] });
+      logger.success('Success', { tags: ['deploy'] });
+      logger.note('Note', { tags: ['reminder'] });
+      logger.raw('Raw', { tags: ['debug'] });
+
+      expect(arraySink.logs[0].tags).toEqual(['critical']);
+      expect(arraySink.logs[1].tags).toEqual(['performance']);
+      expect(arraySink.logs[2].tags).toEqual(['deploy']);
+      expect(arraySink.logs[3].tags).toEqual(['reminder']);
+      expect(arraySink.logs[4].tags).toEqual(['debug']);
+    });
+
+    test('should support multiple tags', () => {
+      logger.info('Multi-tag message', {
+        tags: ['api', 'slow-query', 'database', 'production'],
+      });
+
+      expect(arraySink.logs[0].tags).toEqual([
+        'api',
+        'slow-query',
+        'database',
+        'production',
+      ]);
+    });
+
+    test('should not include tags field when empty array', () => {
+      logger.info('Empty tags', { tags: [] });
+
+      expect(arraySink.logs[0].tags).toBeUndefined();
+    });
+
+    test('should not include tags field when not provided', () => {
+      logger.info('No tags');
+
+      expect(arraySink.logs[0].tags).toBeUndefined();
+    });
+
+    test('should work with tags and params together', () => {
+      logger.info('User {{userId}} action', {
+        params: { userId: 123 },
+        tags: ['auth', 'user-action'],
+      });
+
+      expect(arraySink.logs[0].message).toBe('User 123 action');
+      expect(arraySink.logs[0].params).toEqual({ userId: 123 });
+      expect(arraySink.logs[0].tags).toEqual(['auth', 'user-action']);
+    });
+
+    test('should work with tags and exitCode together', () => {
+      logger.error('Fatal error', {
+        exitCode: 1,
+        tags: ['critical', 'shutdown'],
+      });
+
+      expect(arraySink.logs[0].exitCode).toBe(1);
+      expect(arraySink.logs[0].tags).toEqual(['critical', 'shutdown']);
+      expect(logger.didExit).toBe(true);
+    });
+
+    test('should work with errorObject and tags', () => {
+      const testError = new Error('Test error');
+      logger.errorObject('Error occurred', testError, {
+        tags: ['exception', 'unhandled'],
+      });
+
+      expect(arraySink.logs[0].error).toBe(testError);
+      expect(arraySink.logs[0].tags).toEqual(['exception', 'unhandled']);
+    });
+
+    test('should work with service logger and tags', () => {
+      const authService = logger.service('auth');
+      authService.info('Login successful', { tags: ['login', 'success'] });
+
+      expect(arraySink.logs[0].serviceName).toBe('auth');
+      expect(arraySink.logs[0].tags).toEqual(['login', 'success']);
     });
   });
 });

@@ -1,4 +1,4 @@
-import type { LogType } from './types';
+import type { LogType, LogOptions } from './types';
 import type { HandleLogOptions } from './internal-types';
 import { prepareErrorObjectLog } from './utils/error-object';
 
@@ -28,14 +28,10 @@ export class LoggerService {
   /**
    * Log an error message
    */
-  public error(
-    message: string,
-    options?: { exitCode?: number; params?: Record<string, unknown> },
-  ): void {
+  public error(message: string, options?: LogOptions): void {
     this.handleLog('error', message, {
-      exitCode: options?.exitCode,
+      ...(options ?? {}),
       serviceName: this.serviceName,
-      params: options?.params,
     });
   }
 
@@ -45,14 +41,13 @@ export class LoggerService {
   public errorObject(
     prefix: string,
     error: unknown,
-    options?: { exitCode?: number; params?: Record<string, unknown> },
+    options?: LogOptions,
   ): void {
     const message = prepareErrorObjectLog(prefix, error);
 
     this.handleLog('error', message, {
-      exitCode: options?.exitCode,
+      ...(options ?? {}),
       serviceName: this.serviceName,
-      params: options?.params,
       error,
     });
   }
@@ -60,69 +55,50 @@ export class LoggerService {
   /**
    * Log an informational message
    */
-  public info(
-    message: string,
-    options?: { exitCode?: number; params?: Record<string, unknown> },
-  ): void {
+  public info(message: string, options?: LogOptions): void {
     this.handleLog('info', message, {
-      exitCode: options?.exitCode,
+      ...(options ?? {}),
       serviceName: this.serviceName,
-      params: options?.params,
     });
   }
 
   /**
    * Log a warning message
    */
-  public warn(
-    message: string,
-    options?: { params?: Record<string, unknown> },
-  ): void {
+  public warn(message: string, options?: LogOptions): void {
     this.handleLog('warn', message, {
+      ...(options ?? {}),
       serviceName: this.serviceName,
-      params: options?.params,
     });
   }
 
   /**
    * Log a success message
    */
-  public success(
-    message: string,
-    options?: { exitCode?: number; params?: Record<string, unknown> },
-  ): void {
+  public success(message: string, options?: LogOptions): void {
     this.handleLog('success', message, {
-      exitCode: options?.exitCode,
+      ...(options ?? {}),
       serviceName: this.serviceName,
-      params: options?.params,
     });
   }
 
   /**
    * Log a note message
    */
-  public note(
-    message: string,
-    options?: { exitCode?: number; params?: Record<string, unknown> },
-  ): void {
+  public note(message: string, options?: LogOptions): void {
     this.handleLog('note', message, {
-      exitCode: options?.exitCode,
+      ...(options ?? {}),
       serviceName: this.serviceName,
-      params: options?.params,
     });
   }
 
   /**
    * Log a raw message without any formatting
    */
-  public raw(
-    message: string,
-    options?: { exitCode?: number; params?: Record<string, unknown> },
-  ): void {
+  public raw(message: string, options?: LogOptions): void {
     this.handleLog('raw', message, {
-      exitCode: options?.exitCode,
+      ...(options ?? {}),
       serviceName: this.serviceName,
-      params: options?.params,
     });
   }
 }

@@ -4,7 +4,13 @@ import { safeHandleCallbackAndWait } from '../safe-handle-callback';
 import { CurlyBrackets } from '../curly-brackets';
 import { isNumber } from '../is-number';
 import { isPromise } from '../is-promise';
-import type { LogEntry, LogSink, LogType, LoggerOptions } from './types';
+import type {
+  LogEntry,
+  LogSink,
+  LogType,
+  LoggerOptions,
+  LogOptions,
+} from './types';
 import type { HandleLogOptions } from './internal-types';
 import { ArraySink } from './sinks/array';
 import { ConsoleSink } from './sinks/console';
@@ -19,7 +25,6 @@ export class Logger extends EventEmitter {
   public readonly isLoggerClass = true;
 
   private sinks: LogSink[];
-  private redactedKeys?: string[];
   private redactFunction?: (key: string, value: unknown) => unknown;
   private callProcessExit: boolean;
   private beforeExitCallback?: (
@@ -45,7 +50,6 @@ export class Logger extends EventEmitter {
     super();
 
     this.sinks = options.sinks || [];
-    this.redactedKeys = options.redactedKeys;
     this.redactFunction = options.redactFunction;
     this.callProcessExit = options.callProcessExit ?? true;
     this.beforeExitCallback = options.beforeExitCallback;
@@ -108,14 +112,8 @@ export class Logger extends EventEmitter {
   /**
    * Log an error message
    */
-  public error(
-    message: string,
-    options?: { exitCode?: number; params?: Record<string, unknown> },
-  ): void {
-    this.handleLog('error', message, {
-      exitCode: options?.exitCode,
-      params: options?.params,
-    });
+  public error(message: string, options?: LogOptions): void {
+    this.handleLog('error', message, options);
   }
 
   /**
@@ -124,79 +122,46 @@ export class Logger extends EventEmitter {
   public errorObject(
     prefix: string,
     error: unknown,
-    options?: { exitCode?: number; params?: Record<string, unknown> },
+    options?: LogOptions,
   ): void {
     const message = prepareErrorObjectLog(prefix, error);
 
-    this.handleLog('error', message, {
-      exitCode: options?.exitCode,
-      params: options?.params,
-      error,
-    });
+    this.handleLog('error', message, { ...(options ?? {}), error });
   }
 
   /**
    * Log an informational message
    */
-  public info(
-    message: string,
-    options?: { exitCode?: number; params?: Record<string, unknown> },
-  ): void {
-    this.handleLog('info', message, {
-      exitCode: options?.exitCode,
-      params: options?.params,
-    });
+  public info(message: string, options?: LogOptions): void {
+    this.handleLog('info', message, options);
   }
 
   /**
    * Log a warning message
    */
-  public warn(
-    message: string,
-    options?: { params?: Record<string, unknown> },
-  ): void {
-    this.handleLog('warn', message, {
-      params: options?.params,
-    });
+  public warn(message: string, options?: LogOptions): void {
+    this.handleLog('warn', message, options);
   }
 
   /**
    * Log a success message
    */
-  public success(
-    message: string,
-    options?: { exitCode?: number; params?: Record<string, unknown> },
-  ): void {
-    this.handleLog('success', message, {
-      exitCode: options?.exitCode,
-      params: options?.params,
-    });
+  public success(message: string, options?: LogOptions): void {
+    this.handleLog('success', message, options);
   }
 
   /**
    * Log a note message
    */
-  public note(
-    message: string,
-    options?: { exitCode?: number; params?: Record<string, unknown> },
-  ): void {
-    this.handleLog('note', message, {
-      exitCode: options?.exitCode,
-      params: options?.params,
-    });
+  public note(message: string, options?: LogOptions): void {
+    this.handleLog('note', message, options);
   }
 
   /**
    * Log a raw message without any formatting
    */
-  public raw(
-    message: string,
-    options?: { exitCode?: number; params?: Record<string, unknown> },
-  ): void {
-    this.handleLog('raw', message, {
-      exitCode: options?.exitCode,
-      params: options?.params,
-    });
+  public raw(message: string, options?: LogOptions): void {
+    this.handleLog('raw', message, options);
   }
 
   /**
@@ -346,7 +311,6 @@ export class Logger extends EventEmitter {
    */
   public static createTestOptimizedLogger(options?: {
     sinks?: LogSink[];
-    redactedKeys?: string[];
     arrayLogTransformer?: (entry: LogEntry) => LogEntry | false;
     includeConsoleSink?: boolean;
     muteConsole?: boolean;
@@ -371,7 +335,6 @@ export class Logger extends EventEmitter {
       logger: new Logger({
         sinks,
         callProcessExit: false,
-        redactedKeys: options?.redactedKeys,
       }),
       arraySink,
       consoleSink,
@@ -385,7 +348,6 @@ export class Logger extends EventEmitter {
    */
   public static createFrontendOptimizedLogger(options?: {
     sinks?: LogSink[];
-    redactedKeys?: string[];
     muteConsole?: boolean;
   }): { logger: Logger; consoleSink: ConsoleSink } {
     const consoleSink = new ConsoleSink({
@@ -396,7 +358,6 @@ export class Logger extends EventEmitter {
       logger: new Logger({
         sinks: [consoleSink, ...(options?.sinks || [])],
         callProcessExit: false,
-        redactedKeys: options?.redactedKeys,
       }),
       consoleSink,
     };
@@ -421,11 +382,13 @@ export class Logger extends EventEmitter {
     const exitCode = options?.exitCode;
     const serviceName = options?.serviceName?.trim() || '';
     const params = options?.params;
+    const tags = options?.tags;
+    const redactedKeys = options?.redactedKeys;
 
     // Process template and apply redaction
     const message = params ? CurlyBrackets(template, params) : template;
     const redactedParams = params
-      ? applyRedaction(params, this.redactedKeys, this.redactFunction)
+      ? applyRedaction(params, redactedKeys, this.redactFunction)
       : undefined;
 
     // Create log entry
@@ -438,11 +401,12 @@ export class Logger extends EventEmitter {
       params,
       redactedParams,
       redactedKeys:
-        params && this.redactedKeys && this.redactedKeys.length > 0
-          ? this.redactedKeys
+        params && redactedKeys && redactedKeys.length > 0
+          ? redactedKeys
           : undefined,
       error: options?.error,
       exitCode: isNumber(exitCode) ? exitCode : undefined,
+      tags: tags && tags.length > 0 ? tags : undefined,
     };
 
     // Write to all sinks
