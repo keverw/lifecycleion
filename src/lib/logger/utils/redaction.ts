@@ -89,7 +89,7 @@ export function applyRedaction(
   const redactFn = redactFunction || defaultRedactFunction;
 
   // Deep clone to avoid mutating original
-  const redactedParams = deepClone(params) as Record<string, unknown>;
+  const redactedParams = deepClone(params);
 
   // Apply redaction to specified keys (supports dot notation)
   for (const key of redactedKeys) {

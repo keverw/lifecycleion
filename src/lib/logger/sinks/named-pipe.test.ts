@@ -2,16 +2,19 @@ import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
 import { promises as fsPromises } from 'fs';
 import * as fs from 'fs';
 import * as os from 'os';
+import { exec } from 'node:child_process';
+import { promisify } from 'node:util';
 import { NamedPipeSink, PipeErrorType } from './named-pipe';
 import type { LogEntry } from '../types';
 import { TmpDir } from '../../tmp-dir';
+
+const execAsync = promisify(exec);
 
 let tmpDir: TmpDir;
 
 // Helper to create a named pipe
 async function createNamedPipe(pipePath: string): Promise<void> {
-  const { execSync } = require('child_process');
-  execSync(`mkfifo "${pipePath}"`);
+  await execAsync(`mkfifo "${pipePath}"`);
 }
 
 // Helper to read from pipe in background
@@ -20,7 +23,7 @@ function startPipeReader(pipePath: string): {
   stop: () => void;
 } {
   const data: string[] = [];
-  let stopped = false;
+  let isStopped = false;
 
   // Open pipe for reading in non-blocking mode
   const stream = fs.createReadStream(pipePath, {
@@ -28,7 +31,7 @@ function startPipeReader(pipePath: string): {
   });
 
   stream.on('data', (chunk: string | Buffer) => {
-    if (!stopped) {
+    if (!isStopped) {
       const text = typeof chunk === 'string' ? chunk : chunk.toString('utf8');
       data.push(text);
     }
@@ -37,7 +40,7 @@ function startPipeReader(pipePath: string): {
   return {
     data,
     stop: () => {
-      stopped = true;
+      isStopped = true;
       stream.destroy();
     },
   };

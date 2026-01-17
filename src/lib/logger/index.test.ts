@@ -1,6 +1,7 @@
 import { describe, expect, test, beforeEach, spyOn } from 'bun:test';
 import { Logger } from './index';
 import { ArraySink } from './sinks/array';
+import { sleep } from '../sleep';
 
 describe('Logger', () => {
   let arraySink: ArraySink;
@@ -601,8 +602,9 @@ describe('Logger', () => {
     });
 
     test('should create frontend optimized logger with muted console', () => {
-      const { logger: frontendLogger, consoleSink } =
-        Logger.createFrontendOptimizedLogger({ muteConsole: true });
+      const { consoleSink } = Logger.createFrontendOptimizedLogger({
+        muteConsole: true,
+      });
 
       expect(consoleSink.isMuted()).toBe(true);
 
@@ -612,33 +614,38 @@ describe('Logger', () => {
     });
 
     test('should allow muting/unmuting console in test logger', () => {
-      const { logger: testLogger, consoleSink } =
-        Logger.createTestOptimizedLogger({ includeConsoleSink: true });
+      const { consoleSink } = Logger.createTestOptimizedLogger({
+        includeConsoleSink: true,
+      });
 
       expect(consoleSink).toBeDefined();
-      expect(consoleSink!.isMuted()).toBe(true); // Default is muted for tests
+      if (!consoleSink) {
+        throw new Error('consoleSink should be defined');
+      }
+      expect(consoleSink.isMuted()).toBe(true); // Default is muted for tests
 
-      consoleSink!.unmute();
-      expect(consoleSink!.isMuted()).toBe(false);
+      consoleSink.unmute();
+      expect(consoleSink.isMuted()).toBe(false);
 
-      consoleSink!.mute();
-      expect(consoleSink!.isMuted()).toBe(true);
+      consoleSink.mute();
+      expect(consoleSink.isMuted()).toBe(true);
     });
 
     test('should create test logger with unmuted console', () => {
-      const { logger: testLogger, consoleSink } =
-        Logger.createTestOptimizedLogger({
-          includeConsoleSink: true,
-          muteConsole: false,
-        });
+      const { consoleSink } = Logger.createTestOptimizedLogger({
+        includeConsoleSink: true,
+        muteConsole: false,
+      });
 
       expect(consoleSink).toBeDefined();
-      expect(consoleSink!.isMuted()).toBe(false);
+      if (!consoleSink) {
+        throw new Error('consoleSink should be defined');
+      }
+      expect(consoleSink.isMuted()).toBe(false);
     });
 
     test('should not include console sink in test logger by default', () => {
-      const { logger: testLogger, consoleSink } =
-        Logger.createTestOptimizedLogger();
+      const { consoleSink } = Logger.createTestOptimizedLogger();
 
       expect(consoleSink).toBeUndefined();
     });
@@ -708,6 +715,7 @@ describe('Logger', () => {
       const errors: any[] = [];
       const asyncErrorSink = {
         write: async () => {
+          await sleep(1);
           throw new Error('Async write error');
         },
       };
@@ -739,6 +747,7 @@ describe('Logger', () => {
       };
       const asyncErrorSink = {
         write: async () => {
+          await sleep(1);
           throw new Error('Async error');
         },
       };
@@ -771,6 +780,7 @@ describe('Logger', () => {
       const consoleErrorSpy = spyOn(console, 'error');
       const asyncErrorSink = {
         write: async () => {
+          await sleep(1);
           throw new Error('Unhandled async error');
         },
       };

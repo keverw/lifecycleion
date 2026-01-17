@@ -79,8 +79,8 @@ describe('TmpDir', () => {
 
     try {
       await anotherTempDir.cleanup();
-    } catch (e) {
-      err = e;
+    } catch (error) {
+      err = error;
     }
 
     expect(err).toBeInstanceOf(FSUtilsErrTmpDirCleanupFailedNotEmpty);
