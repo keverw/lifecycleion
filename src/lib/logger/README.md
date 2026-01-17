@@ -10,6 +10,7 @@ A modern, flexible logging library with sink-based architecture, template string
 - **Redaction**: Built-in support for masking sensitive data (passwords, API keys, etc.)
 - **Tags**: Categorize and filter logs with optional string tags
 - **Service Loggers**: Create scoped loggers with service names
+- **Entity Loggers**: Create loggers for specific instances within services (components, game objects, workers, sessions)
 - **EventEmitter Integration**: React to logging events for monitoring and alerting
 - **Error Handling**: Custom error handlers for sink failures with access to the failing sink
 - **Closed State Tracking**: All sinks track closed state and prevent writes after closing
@@ -345,6 +346,91 @@ dbService.warn('Slow query detected: {{duration}}ms', {
 // Output: [WARN] [Database] Slow query detected: 1234ms
 ```
 
+### Entity Loggers
+
+Entity loggers allow you to create scoped loggers for specific instances within a service. This is particularly useful for:
+
+- **Component lifecycle management**: Track individual component instances
+- **Game engines**: Log events for specific game actor objects (doors, NPCs, players)
+- **Worker pools**: Monitor individual workers
+- **Session management**: Track individual user sessions
+- **Connection pools**: Monitor specific connections
+
+```typescript
+const logger = new Logger({
+  sinks: [new ConsoleSink({ colors: true })],
+});
+
+// Component lifecycle example
+const lifecycleService = logger.service('component-lifecycle');
+lifecycleService.info('Lifecycle manager started');
+
+const audioComponent = lifecycleService.entity('audio-component-123');
+audioComponent.info('Component initialized');
+audioComponent.success('Audio system ready');
+// Output: [component-lifecycle] [audio-component-123] Audio system ready
+
+const renderComponent = lifecycleService.entity('render-component-456');
+renderComponent.warn('Low GPU memory');
+// Output: [component-lifecycle] [render-component-456] Low GPU memory
+```
+
+#### Game Engine Example
+
+```typescript
+const scriptingService = logger.service('scripting');
+
+const door = scriptingService.entity('objects/door-main-entrance');
+door.info('Door created');
+door.info('Player interaction', { params: { action: 'open' } });
+// Output: [scripting] [objects/door-main-entrance] Player interaction
+
+const enemy = scriptingService.entity('objects/enemy-goblin-15');
+enemy.info('Enemy spawned at {{x}}, {{y}}', {
+  params: { x: 100, y: 200 },
+});
+// Output: [scripting] [objects/enemy-goblin-15] Enemy spawned at 100, 200
+```
+
+#### Session Management with UUIDs
+
+Entity names can be anything - including UUIDs for unique session tracking:
+
+```typescript
+const sessionManager = logger.service('session-manager');
+const session = sessionManager.entity('550e8400-e29b-41d4-a716-446655440000');
+
+session.info('Session created');
+session.info('User authenticated', {
+  params: { userId: 123 },
+  tags: ['auth', 'security'],
+});
+// Output: [session-manager] [550e8400-e29b-41d4-a716-446655440000] User authenticated
+```
+
+#### Worker Pool Example
+
+```typescript
+const workerPool = logger.service('worker-pool');
+workerPool.info('Pool initialized with 4 workers');
+
+const worker1 = workerPool.entity('worker-1');
+worker1.info('Processing task {{taskId}}', { params: { taskId: 'task-abc' } });
+worker1.success('Task completed');
+
+const worker2 = workerPool.entity('worker-2');
+worker2.error('Task failed', { tags: ['error', 'retry'] });
+// Output: [worker-pool] [worker-2] Task failed
+```
+
+#### Key Points
+
+- Entity loggers are created from service loggers using `.entity(entityName)`
+- The `entityName` can be any string: IDs, UUIDs, hierarchical paths (e.g., `objects/door-main`)
+- Entity loggers support all the same methods as service loggers (error, info, warn, etc.)
+- The entity name appears in log output: `[service-name] [entity-name] message`
+- Entity names are included in the `LogEntry` structure for filtering and analysis
+
 ## Built-in Sinks
 
 ### ConsoleSink
@@ -678,6 +764,16 @@ logger.errorObject(prefix, error, options?)
 // Service loggers
 logger.service(name: string): LoggerService
 
+// LoggerService methods (same as Logger but with service name)
+service.error(message, options?)
+service.info(message, options?)
+service.warn(message, options?)
+service.success(message, options?)
+service.note(message, options?)
+service.raw(message, options?)
+service.errorObject(prefix, error, options?)
+service.entity(entityName: string): LoggerService  // Create entity logger
+
 // Sink management
 logger.addSink(sink: LogSink): void
 logger.removeSink(sink: LogSink): boolean
@@ -860,7 +956,8 @@ Each sink receives a complete `LogEntry`:
 interface LogEntry {
   timestamp: number; // Unix timestamp in ms
   type: LogType; // 'error' | 'info' | 'warn' | 'success' | 'note' | 'raw'
-  serviceName: string; // Service name (if using service logger)
+  serviceName?: string; // Service name (only present when using service logger)
+  entityName?: string; // Entity identifier (only present when using entity logger)
   template: string; // Original template: "User {{userID}} logged in"
   message: string; // Computed message: "User 456 logged in"
   params?: Record<string, any>; // Raw params: { userID: 456, password: 'secret' }

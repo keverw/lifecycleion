@@ -12,6 +12,7 @@ export class LoggerService {
     options?: HandleLogOptions,
   ) => void;
   private serviceName: string;
+  private entityName?: string;
 
   constructor(
     handleLog: (
@@ -20,9 +21,18 @@ export class LoggerService {
       options?: HandleLogOptions,
     ) => void,
     serviceName: string,
+    entityName?: string,
   ) {
     this.handleLog = handleLog;
     this.serviceName = serviceName;
+    this.entityName = entityName;
+  }
+
+  /**
+   * Create a scoped logger for a specific entity within this service
+   */
+  public entity(entityName: string): LoggerService {
+    return new LoggerService(this.handleLog, this.serviceName, entityName);
   }
 
   /**
@@ -32,6 +42,7 @@ export class LoggerService {
     this.handleLog('error', message, {
       ...(options ?? {}),
       serviceName: this.serviceName,
+      entityName: this.entityName,
     });
   }
 
@@ -48,6 +59,7 @@ export class LoggerService {
     this.handleLog('error', message, {
       ...(options ?? {}),
       serviceName: this.serviceName,
+      entityName: this.entityName,
       error,
     });
   }
@@ -59,6 +71,7 @@ export class LoggerService {
     this.handleLog('info', message, {
       ...(options ?? {}),
       serviceName: this.serviceName,
+      entityName: this.entityName,
     });
   }
 
@@ -69,6 +82,7 @@ export class LoggerService {
     this.handleLog('warn', message, {
       ...(options ?? {}),
       serviceName: this.serviceName,
+      entityName: this.entityName,
     });
   }
 
@@ -79,6 +93,7 @@ export class LoggerService {
     this.handleLog('success', message, {
       ...(options ?? {}),
       serviceName: this.serviceName,
+      entityName: this.entityName,
     });
   }
 
@@ -89,6 +104,7 @@ export class LoggerService {
     this.handleLog('note', message, {
       ...(options ?? {}),
       serviceName: this.serviceName,
+      entityName: this.entityName,
     });
   }
 
@@ -99,6 +115,7 @@ export class LoggerService {
     this.handleLog('raw', message, {
       ...(options ?? {}),
       serviceName: this.serviceName,
+      entityName: this.entityName,
     });
   }
 }

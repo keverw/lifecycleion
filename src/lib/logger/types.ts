@@ -19,7 +19,8 @@ export interface LogOptions {
 export interface LogEntry {
   timestamp: number;
   type: LogType;
-  serviceName: string;
+  serviceName?: string; // Service name (if using service logger)
+  entityName?: string; // Optional entity identifier (e.g., 'audio-component-123', 'door-main', UUID)
   template: string; // Original template: "User {{userID}} logged in"
   message: string; // Computed: "User 456 logged in"
   params?: Record<string, unknown>; // Raw params: { userID: 456, password: 'secret' }

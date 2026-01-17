@@ -52,8 +52,13 @@ export class ConsoleSink implements LogSink {
     }
 
     // Add service name if present
-    if (entry.serviceName.length > 0) {
+    if (entry.serviceName) {
       formattedMessage += `[${entry.serviceName}] `;
+    }
+
+    // Add entity name if present
+    if (entry.entityName) {
+      formattedMessage += `[${entry.entityName}] `;
     }
 
     // Add the message

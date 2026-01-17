@@ -346,16 +346,22 @@ export class FileSink implements LogSink {
       formatted = JSON.stringify({
         timestamp: entry.timestamp,
         type: entry.type,
-        serviceName: entry.serviceName || undefined,
+        serviceName: entry.serviceName,
+        entityName: entry.entityName,
         message: entry.message,
         params: entry.redactedParams, // Use redacted params for file output
       });
     } else {
       let text = '';
+
       if (entry.type !== 'raw') {
         text = `[${entry.type}] `;
         if (entry.serviceName) {
           text += `[${entry.serviceName}] `;
+        }
+
+        if (entry.entityName) {
+          text += `[${entry.entityName}] `;
         }
       }
       text += entry.message;

@@ -260,7 +260,8 @@ export class NamedPipeSink implements LogSink {
       formatted = JSON.stringify({
         timestamp: entry.timestamp,
         type: entry.type,
-        serviceName: entry.serviceName || undefined,
+        serviceName: entry.serviceName,
+        entityName: entry.entityName,
         message: entry.message,
         params: entry.redactedParams,
       });
@@ -270,6 +271,10 @@ export class NamedPipeSink implements LogSink {
         text = `[${entry.type}] `;
         if (entry.serviceName) {
           text += `[${entry.serviceName}] `;
+        }
+
+        if (entry.entityName) {
+          text += `[${entry.entityName}] `;
         }
       }
       text += entry.message;

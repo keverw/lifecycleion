@@ -380,7 +380,8 @@ export class Logger extends EventEmitter {
 
     // Extract options
     const exitCode = options?.exitCode;
-    const serviceName = options?.serviceName?.trim() || '';
+    const serviceName = options?.serviceName?.trim() || undefined;
+    const entityName = options?.entityName?.trim() || undefined;
     const params = options?.params;
     const tags = options?.tags;
     const redactedKeys = options?.redactedKeys;
@@ -396,6 +397,7 @@ export class Logger extends EventEmitter {
       timestamp,
       type,
       serviceName,
+      entityName,
       template,
       message,
       params,

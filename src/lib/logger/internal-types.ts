@@ -11,5 +11,6 @@ import type { LogOptions } from './types';
  */
 export interface HandleLogOptions extends LogOptions {
   serviceName?: string;
+  entityName?: string;
   error?: unknown;
 }

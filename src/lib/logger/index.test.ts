@@ -22,6 +22,8 @@ describe('Logger', () => {
       expect(arraySink.logs.length).toBe(1);
       expect(arraySink.logs[0].type).toBe('info');
       expect(arraySink.logs[0].message).toBe('Test info message');
+      expect(arraySink.logs[0].serviceName).toBeUndefined();
+      expect(arraySink.logs[0].entityName).toBeUndefined();
     });
 
     test('should log error message', () => {
@@ -887,6 +889,148 @@ describe('Logger', () => {
 
       expect(arraySink.logs[0].serviceName).toBe('auth');
       expect(arraySink.logs[0].tags).toEqual(['login', 'success']);
+    });
+  });
+
+  describe('Entity Loggers', () => {
+    test('should create entity logger from service', () => {
+      const service = logger.service('component-lifecycle');
+      const entity = service.entity('audio-component-123');
+
+      entity.info('Component initialized');
+
+      expect(arraySink.logs.length).toBe(1);
+      expect(arraySink.logs[0].serviceName).toBe('component-lifecycle');
+      expect(arraySink.logs[0].entityName).toBe('audio-component-123');
+      expect(arraySink.logs[0].message).toBe('Component initialized');
+    });
+
+    test('should support multiple entities under same service', () => {
+      const service = logger.service('scripting');
+      const door = service.entity('objects/door-main');
+      const enemy = service.entity('objects/enemy-goblin-5');
+
+      door.info('Door opened');
+      enemy.warn('Enemy spotted player');
+
+      expect(arraySink.logs.length).toBe(2);
+      expect(arraySink.logs[0].serviceName).toBe('scripting');
+      expect(arraySink.logs[0].entityName).toBe('objects/door-main');
+      expect(arraySink.logs[1].serviceName).toBe('scripting');
+      expect(arraySink.logs[1].entityName).toBe('objects/enemy-goblin-5');
+    });
+
+    test('should support all log levels in entity logger', () => {
+      const service = logger.service('game-engine');
+      const entity = service.entity('player-1');
+
+      entity.error('Health depleted');
+      entity.info('Picked up item');
+      entity.warn('Low health');
+      entity.success('Level completed');
+      entity.note('Checkpoint reached');
+      entity.raw('Debug info');
+
+      expect(arraySink.logs.length).toBe(6);
+      expect(arraySink.logs.map((l) => l.type)).toEqual([
+        'error',
+        'info',
+        'warn',
+        'success',
+        'note',
+        'raw',
+      ]);
+
+      for (const log of arraySink.logs) {
+        expect(log.serviceName).toBe('game-engine');
+        expect(log.entityName).toBe('player-1');
+      }
+    });
+
+    test('should support templates in entity logger', () => {
+      const service = logger.service('database');
+      const entity = service.entity('connection-pool-1');
+
+      entity.info('Connection {{connId}} established', {
+        params: { connId: 'conn_xyz123' },
+      });
+
+      expect(arraySink.logs[0].message).toBe(
+        'Connection conn_xyz123 established',
+      );
+      expect(arraySink.logs[0].serviceName).toBe('database');
+      expect(arraySink.logs[0].entityName).toBe('connection-pool-1');
+    });
+
+    test('should support error objects in entity logger', () => {
+      const service = logger.service('worker-pool');
+      const entity = service.entity('worker-42');
+      const error = new Error('Task failed');
+
+      entity.errorObject('Processing error', error);
+
+      expect(arraySink.logs[0].message).toContain('Processing error');
+      expect(arraySink.logs[0].message).toContain('Task failed');
+      expect(arraySink.logs[0].serviceName).toBe('worker-pool');
+      expect(arraySink.logs[0].entityName).toBe('worker-42');
+    });
+
+    test('should support tags in entity logger', () => {
+      const service = logger.service('api');
+      const entity = service.entity('request-abc123');
+
+      entity.warn('Slow response time', {
+        tags: ['performance', 'monitoring'],
+      });
+
+      expect(arraySink.logs[0].serviceName).toBe('api');
+      expect(arraySink.logs[0].entityName).toBe('request-abc123');
+      expect(arraySink.logs[0].tags).toEqual(['performance', 'monitoring']);
+    });
+
+    test('should support UUID as entity name', () => {
+      const service = logger.service('session-manager');
+      const entity = service.entity('550e8400-e29b-41d4-a716-446655440000');
+
+      entity.info('Session created');
+
+      expect(arraySink.logs[0].entityName).toBe(
+        '550e8400-e29b-41d4-a716-446655440000',
+      );
+    });
+
+    test('should not include entityName when logging from service directly', () => {
+      const service = logger.service('test-service');
+
+      service.info('Service level message');
+
+      expect(arraySink.logs[0].serviceName).toBe('test-service');
+      expect(arraySink.logs[0].entityName).toBeUndefined();
+    });
+
+    test('should convert empty/whitespace service names to undefined', () => {
+      const emptyService = logger.service('');
+      const whitespaceService = logger.service('   ');
+
+      emptyService.info('Empty service');
+      whitespaceService.info('Whitespace service');
+
+      expect(arraySink.logs[0].serviceName).toBeUndefined();
+      expect(arraySink.logs[1].serviceName).toBeUndefined();
+    });
+
+    test('should convert empty/whitespace entity names to undefined', () => {
+      const service = logger.service('test-service');
+      const emptyEntity = service.entity('');
+      const whitespaceEntity = service.entity('   ');
+
+      emptyEntity.info('Empty entity');
+      whitespaceEntity.info('Whitespace entity');
+
+      expect(arraySink.logs[0].serviceName).toBe('test-service');
+      expect(arraySink.logs[0].entityName).toBeUndefined();
+      expect(arraySink.logs[1].serviceName).toBe('test-service');
+      expect(arraySink.logs[1].entityName).toBeUndefined();
     });
   });
 });
