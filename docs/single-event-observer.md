@@ -2,6 +2,22 @@
 
 A lightweight, type-safe implementation of the Observer pattern in TypeScript.
 
+<!-- toc -->
+
+- [Overview](#overview)
+- [Installation](#installation)
+- [Usage](#usage)
+  - [Basic Usage](#basic-usage)
+  - [Protected Notify](#protected-notify)
+- [API](#api)
+  - [`SingleEventObserver<T>`](#singleeventobservert)
+    - [Methods](#methods)
+  - [`SingleEventObserverProtected<T>`](#singleeventobserverprotectedt)
+- [Why use single-event-observer?](#why-use-single-event-observer)
+- [Comparison to other libraries](#comparison-to-other-libraries)
+
+<!-- tocstop -->
+
 ## Overview
 
 `single-event-observer` provides a simple and efficient way to implement the Observer pattern for a single event type. It's designed to be a lightweight alternative to more complex event emitters when you only need to handle one type of event.

@@ -60,7 +60,7 @@ const missingReplacement = `
         <ul>
 
         <footer>
-            <p>Made in Norway by null<p>
+            <p>Made in Norway by (null)<p>
         </footer>
     </body>
 </html>
@@ -79,6 +79,11 @@ describe('CurlyBrackets', () => {
 
   it('should be blank if called with no parameters', () => {
     expect(CurlyBrackets()).toEqual('');
+  });
+
+  it('should short-circuit if no brackets found', () => {
+    const simpleString = 'This is a simple message without any brackets';
+    expect(CurlyBrackets(simpleString, { name: 'test' })).toEqual(simpleString);
   });
 
   it('should work with a string fallback', () => {

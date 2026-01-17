@@ -2,6 +2,28 @@
 
 A lightweight, type-safe event emitter implementation that works in both browser and Node.js environments. This library provides a simple yet powerful event handling system with memory management and error handling built-in.
 
+<!-- toc -->
+
+- [Classes](#classes)
+  - [`EventEmitter`](#eventemitter)
+  - [`EventEmitterProtected`](#eventemitterprotected)
+- [Features](#features)
+- [Usage](#usage)
+- [API](#api)
+  - [`constructor()`](#constructor)
+  - [`on<T>(event: string, callback: (data: T) => void | Promise<void>): () => void`](#ontevent-string-callback-data-t--void--promisevoid---void)
+  - [`once<T>(event: string, callback: (data: T) => void | Promise<void>): () => void`](#oncetevent-string-callback-data-t--void--promisevoid---void)
+  - [`emit<T>(event: string, data?: T): void`](#emittevent-string-data-t-void)
+  - [`hasListener(event: string, callback: Function): boolean`](#haslistenerevent-string-callback-function-boolean)
+  - [`hasListeners(event: string): boolean`](#haslistenersevent-string-boolean)
+  - [`listenerCount(event: string): number`](#listenercountevent-string-number)
+  - [`clear(event?: string): void`](#clearevent-string-void)
+- [Error Handling](#error-handling)
+- [Memory Management](#memory-management)
+- [Testing](#testing)
+
+<!-- tocstop -->
+
 ## Classes
 
 ### `EventEmitter`

@@ -18,8 +18,13 @@ interface CurlyBracketsFunction {
 const CurlyBrackets: CurlyBracketsFunction = function (
   str: string = '',
   locals: Record<string, unknown> = {},
-  fallback: string = 'null',
+  fallback: string = '(null)',
 ): string {
+  // Short-circuit if no brackets - no need to process
+  if (!str.includes('{{')) {
+    return str;
+  }
+
   const compiled = CurlyBrackets.compileTemplate(str, fallback);
 
   return compiled(locals);
@@ -37,7 +42,7 @@ const CurlyBrackets: CurlyBracketsFunction = function (
 
 CurlyBrackets.compileTemplate = function (
   str: string,
-  fallback: string = 'null',
+  fallback: string = '(null)',
 ): TemplateFunction {
   const pattern = /(?:\\)?{{(\s*[\w.]+?)(?:\\)?\s*}}/g;
 

@@ -2,8 +2,22 @@
 
 `curly-brackets` is a versatile string templating library designed for TypeScript applications. It enhances the standard templating capabilities with features like configurable fallbacks for undefined values, support for escaped brackets, and an efficient `compileTemplate` method for reusing templates with different datasets. This makes it a powerful tool for generating dynamic content in a variety of contexts.
 
+<!-- toc -->
+
+- [Features](#features)
+- [Usage](#usage)
+  - [Basic Usage](#basic-usage)
+  - [Using a Fallback](#using-a-fallback)
+  - [Escaping Brackets](#escaping-brackets)
+  - [Compiling Templates](#compiling-templates)
+  - [Escaping Utility](#escaping-utility)
+- [Credits / Inspiration](#credits--inspiration)
+
+<!-- tocstop -->
+
 ## Features
 
+- **Performance Optimized**: Automatically short-circuits when no placeholders are detected, avoiding unnecessary processing for plain strings.
 - **Fallback Support**: Specify a fallback string to use whenever a placeholder's corresponding value is not found, instead of the default `undefined`.
 - **Escaped Brackets**: Safely include literal `{{` and `}}` in your templates without them being replaced, by escaping them with a backslash (`\`).
 - **Efficient Template Reuse**: With `compileTemplate`, compile your template once and reuse it with different sets of data, improving performance for repeated template processing.
