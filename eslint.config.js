@@ -82,9 +82,22 @@ export default [
           modifiers: ['requiresQuotes'],
           format: null,
         },
-        // Variables/properties: camelCase, UPPER_CASE, or PascalCase starting with acronym
+        // Properties: Allow snake_case for API compatibility (interfaces/types)
         {
-          selector: ['variable', 'property'],
+          selector: 'property',
+          format: ['camelCase', 'UPPER_CASE', 'PascalCase', 'snake_case'],
+          custom: {
+            // Reject: lowercase acronyms in camelCase/PascalCase (but allow snake_case like user_id)
+            // Matches: userId, getUserId, UserId but NOT user_id, USER_ID
+            regex:
+              '[a-z](?!_)(Id|Ip|Io|Ui|Api|Url|Html|Css|Json|Xml|Svg|Pdf|Uri|Uuid|Jwt|Sql|Http|Https|Ws|Wss|Sse|Db|Os|Cpu|Gpu|Ram|Usb)([A-Z_]|$)|^[A-Z][a-z]',
+            match: false,
+          },
+          leadingUnderscore: 'allow',
+        },
+        // Variables: camelCase, UPPER_CASE, or PascalCase starting with acronym
+        {
+          selector: 'variable',
           format: ['camelCase', 'UPPER_CASE', 'PascalCase'],
           custom: {
             // Reject: lowercase acronyms OR PascalCase not starting with acronym
