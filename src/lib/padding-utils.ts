@@ -10,12 +10,12 @@
  * @category String Padding
  */
 
-import { blank_space } from './constants';
+import { BLANK_SPACE } from './constants';
 
 export function padLeft(
   str: string,
   length: number,
-  padStr = blank_space,
+  padStr = BLANK_SPACE,
 ): string {
   return str.padStart(length, padStr);
 }
@@ -33,7 +33,7 @@ export function padLeft(
 export function padRight(
   str: string,
   length: number,
-  padStr = blank_space,
+  padStr = BLANK_SPACE,
 ): string {
   return str.padEnd(length, padStr);
 }
@@ -50,7 +50,7 @@ export function padCenter(
   str: string,
   length: number,
   prefer: 'left' | 'right' = 'left',
-  padStr = blank_space,
+  padStr = BLANK_SPACE,
 ): string {
   const midStrLength = length - str.length;
 
@@ -84,7 +84,7 @@ export function padCenter(
 export function padCenterPreferLeft(
   str: string,
   length: number,
-  padStr = blank_space,
+  padStr = BLANK_SPACE,
 ): string {
   return padCenter(str, length, 'left', padStr);
 }
@@ -98,7 +98,7 @@ export function padCenterPreferLeft(
 export function padCenterPreferRight(
   str: string,
   length: number,
-  padStr = blank_space,
+  padStr = BLANK_SPACE,
 ): string {
   return padCenter(str, length, 'right', padStr);
 }

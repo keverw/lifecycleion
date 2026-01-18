@@ -41,7 +41,7 @@ export type IdentifierType = 'objectID' | 'uuid4' | 'uuid7' | 'ulid';
 /**
  * Array of all supported identifier types.
  */
-export const IdentifierTypes = ['objectID', 'uuid4', 'uuid7', 'ulid'] as const;
+export const IDENTIFIER_TYPES = ['objectID', 'uuid4', 'uuid7', 'ulid'] as const;
 
 /**
  * Generates a unique identifier of the specified type.
@@ -99,7 +99,7 @@ export function generateID(type: IdentifierType, seedTime?: number): string {
     }
   } else {
     throw new TypeError(
-      `Invalid ID type given: "${type as string}". Expected one of: ${IdentifierTypes.join(', ')}`,
+      `Invalid ID type given: "${type as string}". Expected one of: ${IDENTIFIER_TYPES.join(', ')}`,
     );
   }
 }
@@ -163,7 +163,7 @@ export function validateID(type: IdentifierType, id: string): boolean {
     }
   } else {
     throw new TypeError(
-      `Invalid ID type given: "${type as string}". Expected one of: ${IdentifierTypes.join(', ')}`,
+      `Invalid ID type given: "${type as string}". Expected one of: ${IDENTIFIER_TYPES.join(', ')}`,
     );
   }
 }
@@ -200,7 +200,7 @@ export function emptyID(type: IdentifierType): string {
     return '0'.repeat(26);
   } else {
     throw new TypeError(
-      `Invalid ID type given: "${type as string}". Expected one of: ${IdentifierTypes.join(', ')}`,
+      `Invalid ID type given: "${type as string}". Expected one of: ${IDENTIFIER_TYPES.join(', ')}`,
     );
   }
 }
@@ -235,7 +235,7 @@ export function isEmptyID(type: IdentifierType, id: string): boolean {
     return emptyID(type) === id;
   } else {
     throw new TypeError(
-      `Invalid ID type given: "${type as string}". Expected one of: ${IdentifierTypes.join(', ')}`,
+      `Invalid ID type given: "${type as string}". Expected one of: ${IDENTIFIER_TYPES.join(', ')}`,
     );
   }
 }

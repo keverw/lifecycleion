@@ -6,7 +6,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 
-interface PackageJson {
+interface PackageJSON {
   version: string;
   name?: string;
 }
@@ -15,11 +15,11 @@ interface PackageJson {
 const rootDir = path.resolve(__dirname, '..');
 
 // Read the package.json file
-const packageJsonPath = path.join(rootDir, 'package.json');
-const packageJson = JSON.parse(
-  fs.readFileSync(packageJsonPath, 'utf8'),
-) as PackageJson;
-const version = packageJson.version;
+const packageJSONPath = path.join(rootDir, 'package.json');
+const packageJSON = JSON.parse(
+  fs.readFileSync(packageJSONPath, 'utf8'),
+) as PackageJSON;
+const version = packageJSON.version;
 
 // Human-friendly package name (capitalized)
 // You can customize this if your package name differs from the display name

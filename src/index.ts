@@ -10,7 +10,7 @@ export {
   isEmptyID,
   IDHelpers,
   type IdentifierType,
-  IdentifierTypes,
+  IDENTIFIER_TYPES,
 } from './lib/id-helpers';
 
 // Event handling

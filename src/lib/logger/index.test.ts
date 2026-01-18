@@ -852,13 +852,13 @@ describe('Logger', () => {
     });
 
     test('should work with tags and params together', () => {
-      logger.info('User {{userId}} action', {
-        params: { userId: 123 },
+      logger.info('User {{userID}} action', {
+        params: { userID: 123 },
         tags: ['auth', 'user-action'],
       });
 
       expect(arraySink.logs[0].message).toBe('User 123 action');
-      expect(arraySink.logs[0].params).toEqual({ userId: 123 });
+      expect(arraySink.logs[0].params).toEqual({ userID: 123 });
       expect(arraySink.logs[0].tags).toEqual(['auth', 'user-action']);
     });
 
@@ -951,8 +951,8 @@ describe('Logger', () => {
       const service = logger.service('database');
       const entity = service.entity('connection-pool-1');
 
-      entity.info('Connection {{connId}} established', {
-        params: { connId: 'conn_xyz123' },
+      entity.info('Connection {{connID}} established', {
+        params: { connID: 'conn_xyz123' },
       });
 
       expect(arraySink.logs[0].message).toBe(

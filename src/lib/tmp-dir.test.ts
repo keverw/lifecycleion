@@ -123,12 +123,12 @@ describe('TmpDir', () => {
       anotherTempDir.path,
     ).split('-')[2];
 
-    const TamperedTempDir = new TmpDir({
+    const tamperedTempDir = new TmpDir({
       baseDirectory: tempDir.path,
     });
 
     // @ts-expect-error: tampering random generation for testing purposes
-    TamperedTempDir.generateTempDirName = (): string => {
+    tamperedTempDir.generateTempDirName = (): string => {
       return [
         // @ts-expect-error: tampering random generation for testing purposes
         tempDir.prefix.length > 0 ? tempDir.prefix + '-' : '',
@@ -143,9 +143,9 @@ describe('TmpDir', () => {
     let err: unknown;
 
     try {
-      await TamperedTempDir.initialize();
+      await tamperedTempDir.initialize();
 
-      console.log(TamperedTempDir.path);
+      console.log(tamperedTempDir.path);
     } catch (error) {
       err = error;
     }

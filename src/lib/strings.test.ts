@@ -12,7 +12,7 @@ import {
   toConstantCase,
   toPascalCase,
 } from './strings';
-import { ascii_uppercase } from './constants';
+import { ASCII_UPPERCASE } from './constants';
 
 describe('toPascalCase', () => {
   test('converts a regular string to Pascal Case', () => {
@@ -238,19 +238,19 @@ describe('skipTrailingNewLines', () => {
 describe('characterAllowedOnly', () => {
   test('test with disallowed characters', () => {
     expect(
-      characterAllowedOnly('ABC.DEF#GHI', ascii_uppercase.split('')),
+      characterAllowedOnly('ABC.DEF#GHI', ASCII_UPPERCASE.split('')),
     ).toEqual('ABCDEFGHI');
   });
 
   test('default as case sensitive', () => {
-    expect(characterAllowedOnly('ABC.def', ascii_uppercase.split(''))).toEqual(
+    expect(characterAllowedOnly('ABC.def', ASCII_UPPERCASE.split(''))).toEqual(
       'ABC',
     );
   });
 
   test('test as case insensitive', () => {
     expect(
-      characterAllowedOnly('ABC.def', ascii_uppercase.split(''), true),
+      characterAllowedOnly('ABC.def', ASCII_UPPERCASE.split(''), true),
     ).toEqual('abcdef');
   });
 
@@ -258,7 +258,7 @@ describe('characterAllowedOnly', () => {
     expect(
       characterAllowedOnly(
         'ABC.DEF#GHI',
-        ascii_uppercase.split(''),
+        ASCII_UPPERCASE.split(''),
         false,
         '-',
       ),
@@ -267,7 +267,7 @@ describe('characterAllowedOnly', () => {
 
   test('test with replacement character and case insensitive', () => {
     expect(
-      characterAllowedOnly('ABC.def#GHI', ascii_uppercase.split(''), true, '-'),
+      characterAllowedOnly('ABC.def#GHI', ASCII_UPPERCASE.split(''), true, '-'),
     ).toEqual('abc-def-ghi');
   });
 });

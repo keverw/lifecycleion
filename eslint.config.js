@@ -54,25 +54,59 @@ export default [
       // Enforce naming conventions
       '@typescript-eslint/naming-convention': [
         'error',
-        // Types and Interfaces: Must be PascalCase, no I prefix
+        // Types and Interfaces: Must be PascalCase, no I prefix (except IO, IP, ID), uppercase acronyms (ID not Id, IP not Ip, etc.)
         {
           selector: 'typeLike',
           format: ['PascalCase'],
           custom: {
-            regex: '^I[A-Z]',
+            // Reject: I-prefix (but not IO, IP, ID) OR lowercase acronyms anywhere (Id, Ip, Api, etc.)
+            regex:
+              '^I(?!O|P|D)[A-Z]|(^|[A-Z][a-z]+)(Id|Ip|Io|Ui|Api|Url|Html|Css|Json|Xml|Svg|Pdf|Uri|Uuid|Jwt|Sql|Http|Https|Ws|Wss|Sse|Db|Os|Cpu|Gpu|Ram|Usb)([A-Z]|$)',
             match: false,
           },
         },
-        // Allow class names starting with common acronyms (ID, IO, IP, etc.)
+        // Classes: PascalCase with uppercase acronyms (ID not Id, IP not Ip, etc.)
         {
           selector: 'class',
           format: ['PascalCase'],
-          filter: {
-            regex: '^(ID|IO|IP)[A-Z]',
-            match: true,
+          custom: {
+            // Reject: lowercase acronyms anywhere (Id, Ip, Api, etc.)
+            regex:
+              '(^|[A-Z][a-z]+)(Id|Ip|Io|Ui|Api|Url|Html|Css|Json|Xml|Svg|Pdf|Uri|Uuid|Jwt|Sql|Http|Https|Ws|Wss|Sse|Db|Os|Cpu|Gpu|Ram|Usb)([A-Z]|$)',
+            match: false,
           },
         },
-        // Boolean variables
+        // Quoted properties: Allow any format (for config files like '@': '...', 'some-key': '...', etc.)
+        {
+          selector: 'property',
+          modifiers: ['requiresQuotes'],
+          format: null,
+        },
+        // Variables/properties: camelCase, UPPER_CASE, or PascalCase starting with acronym
+        {
+          selector: ['variable', 'property'],
+          format: ['camelCase', 'UPPER_CASE', 'PascalCase'],
+          custom: {
+            // Reject: lowercase acronyms OR PascalCase not starting with acronym
+            regex:
+              '[a-z](Id|Ip|Io|Ui|Api|Url|Html|Css|Json|Xml|Svg|Pdf|Uri|Uuid|Jwt|Sql|Http|Https|Ws|Wss|Sse|Db|Os|Cpu|Gpu|Ram|Usb)([A-Z]|$)|^[A-Z][a-z]',
+            match: false,
+          },
+          leadingUnderscore: 'allow',
+        },
+        // Parameters/methods/functions: camelCase or PascalCase with uppercase acronyms
+        {
+          selector: ['parameter', 'method', 'function'],
+          format: ['camelCase', 'PascalCase'],
+          custom: {
+            // Reject: lowercase acronyms after lowercase letter (userId, getUserId, etc.)
+            regex:
+              '[a-z](Id|Ip|Io|Ui|Api|Url|Html|Css|Json|Xml|Svg|Pdf|Uri|Uuid|Jwt|Sql|Http|Https|Ws|Wss|Sse|Db|Os|Cpu|Gpu|Ram|Usb)([A-Z]|$)',
+            match: false,
+          },
+          leadingUnderscore: 'allow',
+        },
+        // Boolean variables with prefix requirement
         {
           selector: 'variable',
           types: ['boolean'],
@@ -91,6 +125,12 @@ export default [
             'use',
             'show',
           ],
+          // Enforce acronyms stay uppercase
+          custom: {
+            regex:
+              '(Id|Ip|Io|Ui|Api|Url|Html|Css|Json|Xml|Svg|Pdf|Uri|Uuid|Jwt|Sql|Http|Https|Ws|Wss|Sse|Db|Os|Cpu|Gpu|Ram|Usb)([A-Z]|$)',
+            match: false,
+          },
           // Allow UPPER_CASE without prefix for constants
           filter: {
             regex: '^[A-Z][A-Z0-9_]*$',
@@ -121,6 +161,12 @@ export default [
             'use',
             'show',
           ],
+          // Enforce acronyms stay uppercase
+          custom: {
+            regex:
+              '(Id|Ip|Io|Ui|Api|Url|Html|Css|Json|Xml|Svg|Pdf|Uri|Uuid|Jwt|Sql|Http|Https|Ws|Wss|Sse|Db|Os|Cpu|Gpu|Ram|Usb)([A-Z]|$)',
+            match: false,
+          },
           // Allow unused parameters prefixed with _ to bypass the naming requirement
           filter: {
             regex: '^_',

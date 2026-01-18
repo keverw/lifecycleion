@@ -1,7 +1,7 @@
 import { errorToString } from './error-to-string';
 import { isPromise } from './is-promise';
 import { isFunction } from './is-function';
-import { doubleEOL } from './constants';
+import { DOUBLE_EOL } from './constants';
 
 /**
  * Safely handles a callback function by catching any errors and reporting them
@@ -37,7 +37,7 @@ export function safeHandleCallback(
       ).dispatchEvent(
         new ErrorEvent('reportError', {
           error: new Error(
-            `Error in a callback ${callbackName}: ${doubleEOL}${errorToString(error)}`,
+            `Error in a callback ${callbackName}: ${DOUBLE_EOL}${errorToString(error)}`,
           ),
         }),
       );
@@ -103,7 +103,7 @@ export async function safeHandleCallbackAndWait<T>(
       ).dispatchEvent(
         new ErrorEvent('reportError', {
           error: new Error(
-            `Error in a callback ${callbackName}: ${doubleEOL}${errorToString(error)}`,
+            `Error in a callback ${callbackName}: ${DOUBLE_EOL}${errorToString(error)}`,
           ),
         }),
       );

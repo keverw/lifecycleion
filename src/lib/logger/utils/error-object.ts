@@ -1,5 +1,5 @@
 import { errorToString } from '../../error-to-string';
-import { doubleEOL } from '../../constants';
+import { DOUBLE_EOL } from '../../constants';
 
 /**
  * Prepare an error object for logging with an optional prefix
@@ -10,7 +10,7 @@ export function prepareErrorObjectLog(prefix: string, error: unknown): string {
   let prefixLine = '';
 
   if (prefix.length > 0) {
-    prefixLine = prefix + ': ' + doubleEOL;
+    prefixLine = prefix + ': ' + DOUBLE_EOL;
   }
 
   return prefixLine + errorToString(error);
