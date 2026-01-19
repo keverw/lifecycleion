@@ -61,7 +61,7 @@ export default [
           custom: {
             // Reject: I-prefix (but not IO, IP, ID) OR lowercase acronyms anywhere (Id, Ip, Api, etc.)
             regex:
-              '^I(?!O|P|D)[A-Z]|(^|[A-Z][a-z]+)(Id|Ip|Io|Ui|Api|Url|Html|Css|Json|Xml|Svg|Pdf|Uri|Uuid|Jwt|Sql|Http|Https|Ws|Wss|Sse|Db|Os|Cpu|Gpu|Ram|Usb)([A-Z]|$)',
+              '^I(?!O|P|D)[A-Z]|(^|[A-Z][a-z]+)(Id|Ip|Io|Ui|Api|Url|Html|Css|Json|Xml|Svg|Pdf|Uri|Uuid|Jwt|Sql|Http|Https|Ws|Wss|Sse|Db|Os|Cpu|Gpu|Ram|Usb|Ms)([A-Z]|$)',
             match: false,
           },
         },
@@ -72,7 +72,7 @@ export default [
           custom: {
             // Reject: lowercase acronyms anywhere (Id, Ip, Api, etc.)
             regex:
-              '(^|[A-Z][a-z]+)(Id|Ip|Io|Ui|Api|Url|Html|Css|Json|Xml|Svg|Pdf|Uri|Uuid|Jwt|Sql|Http|Https|Ws|Wss|Sse|Db|Os|Cpu|Gpu|Ram|Usb)([A-Z]|$)',
+              '(^|[A-Z][a-z]+)(Id|Ip|Io|Ui|Api|Url|Html|Css|Json|Xml|Svg|Pdf|Uri|Uuid|Jwt|Sql|Http|Https|Ws|Wss|Sse|Db|Os|Cpu|Gpu|Ram|Usb|Ms)([A-Z]|$)',
             match: false,
           },
         },
@@ -90,7 +90,7 @@ export default [
             // Reject: lowercase acronyms in camelCase/PascalCase (but allow snake_case like user_id)
             // Matches: userId, getUserId but NOT user_id, USER_ID, or PascalCase like ComponentType
             regex:
-              '[a-z](?!_)(Id|Ip|Io|Ui|Api|Url|Html|Css|Json|Xml|Svg|Pdf|Uri|Uuid|Jwt|Sql|Http|Https|Ws|Wss|Sse|Db|Os|Cpu|Gpu|Ram|Usb)([A-Z_]|$)',
+              '[a-z](?!_)(Id|Ip|Io|Ui|Api|Url|Html|Css|Json|Xml|Svg|Pdf|Uri|Uuid|Jwt|Sql|Http|Https|Ws|Wss|Sse|Db|Os|Cpu|Gpu|Ram|Usb|Ms)([A-Z_]|$)',
             match: false,
           },
           leadingUnderscore: 'allow',
@@ -103,8 +103,7 @@ export default [
           custom: {
             // Reject: lowercase acronyms in camelCase/PascalCase (but allow PascalCase variables)
             // Matches: userId, getUserId but NOT userID, UserID, UPPER_CASE
-            regex:
-              '[a-z](Id|Ip|Io|Ui|Api|Url|Html|Css|Json|Xml|Svg|Pdf|Uri|Uuid|Jwt|Sql|Http|Https|Ws|Wss|Sse|Db|Os|Cpu|Gpu|Ram|Usb)([A-Z]|$)',
+            regex: '[a-z](Id|Ip|Io|Ui|Api|Url|Html|Css|Json|Xml|Svg|Pdf|Uri|Uuid|Jwt|Sql|Http|Https|Ws|Wss|Sse|Db|Os|Cpu|Gpu|Ram|Usb|Ms)([A-Z]|$)',
             match: false,
           },
           leadingUnderscore: 'allow',
@@ -116,7 +115,7 @@ export default [
           custom: {
             // Reject: lowercase acronyms after lowercase letter (userId, getUserId, etc.)
             regex:
-              '[a-z](Id|Ip|Io|Ui|Api|Url|Html|Css|Json|Xml|Svg|Pdf|Uri|Uuid|Jwt|Sql|Http|Https|Ws|Wss|Sse|Db|Os|Cpu|Gpu|Ram|Usb)([A-Z]|$)',
+              '[a-z](Id|Ip|Io|Ui|Api|Url|Html|Css|Json|Xml|Svg|Pdf|Uri|Uuid|Jwt|Sql|Http|Https|Ws|Wss|Sse|Db|Os|Cpu|Gpu|Ram|Usb|Ms)([A-Z]|$)',
             match: false,
           },
           leadingUnderscore: 'allow',
@@ -143,7 +142,7 @@ export default [
           // Enforce acronyms stay uppercase
           custom: {
             regex:
-              '(Id|Ip|Io|Ui|Api|Url|Html|Css|Json|Xml|Svg|Pdf|Uri|Uuid|Jwt|Sql|Http|Https|Ws|Wss|Sse|Db|Os|Cpu|Gpu|Ram|Usb)([A-Z]|$)',
+              '(Id|Ip|Io|Ui|Api|Url|Html|Css|Json|Xml|Svg|Pdf|Uri|Uuid|Jwt|Sql|Http|Https|Ws|Wss|Sse|Db|Os|Cpu|Gpu|Ram|Usb|Ms)([A-Z]|$)',
             match: false,
           },
           // Allow UPPER_CASE without prefix for constants
@@ -179,7 +178,7 @@ export default [
           // Enforce acronyms stay uppercase
           custom: {
             regex:
-              '(Id|Ip|Io|Ui|Api|Url|Html|Css|Json|Xml|Svg|Pdf|Uri|Uuid|Jwt|Sql|Http|Https|Ws|Wss|Sse|Db|Os|Cpu|Gpu|Ram|Usb)([A-Z]|$)',
+              '(Id|Ip|Io|Ui|Api|Url|Html|Css|Json|Xml|Svg|Pdf|Uri|Uuid|Jwt|Sql|Http|Https|Ws|Wss|Sse|Db|Os|Cpu|Gpu|Ram|Usb|Ms)([A-Z]|$)',
             match: false,
           },
           // Allow unused parameters prefixed with _ to bypass the naming requirement
