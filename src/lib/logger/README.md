@@ -93,7 +93,7 @@ enum LogLevel {
   ERROR = 0,   // Highest priority - always shown
   WARN = 1,    // Warnings and errors
   NOTICE = 2,  // Important, noteworthy information (not a problem)
-  SUCCESS = 3, // Success, info, notice, warnings, and errors
+  SUCCESS = 3, // Errors, warnings, notice, info, and success shown
   INFO = 3,    // Same level as SUCCESS (routine operational info)
   DEBUG = 4,   // Lowest priority - shows everything
   RAW = 99,    // Special: always shown regardless of minLevel
@@ -1143,13 +1143,13 @@ Each sink receives a complete `LogEntry`:
 ```typescript
 interface LogEntry {
   timestamp: number; // Unix timestamp in ms
-  type: LogType; // 'error' | 'warn' | 'success' | 'info' | 'note' | 'debug' | 'raw'
+  type: LogType; // 'error' | 'warn' | 'notice' | 'success' | 'info' | 'debug' | 'raw'
   serviceName?: string; // Service name (only present when using service logger)
   entityName?: string; // Entity identifier (only present when using entity logger)
   template: string; // Original template: "User {{userID}} logged in"
   message: string; // Computed message: "User 456 logged in"
-  params?: Record<string, any>; // Raw params: { userID: 456, password: 'secret' }
-  redactedParams?: Record<string, any>; // Redacted: { userID: 456, password: '***' }
+  params?: Record<string, unknown>; // Raw params: { userID: 456, password: 'secret' }
+  redactedParams?: Record<string, unknown>; // Redacted: { userID: 456, password: '***' }
   redactedKeys?: string[]; // List of keys that were redacted: ['password', 'user.apiKey']
   error?: unknown; // Original error object from errorObject() calls
   exitCode?: number; // Exit code if this log triggers a process exit
