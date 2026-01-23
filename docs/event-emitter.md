@@ -20,7 +20,6 @@ A lightweight, type-safe event emitter implementation that works in both browser
   - [`clear(event?: string): void`](#clearevent-string-void)
 - [Error Handling](#error-handling)
 - [Memory Management](#memory-management)
-- [Testing](#testing)
 
 <!-- tocstop -->
 
@@ -176,11 +175,3 @@ The library includes several features to prevent memory leaks:
 2. Automatic cleanup of empty event lists
 3. `clear()` method for bulk cleanup
 4. Auto-cleanup for `once()` handlers
-
-## Testing
-
-The library includes a comprehensive test suite using Bun's test framework. Run tests with:
-
-```bash
-bun test
-```

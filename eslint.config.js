@@ -103,7 +103,8 @@ export default [
           custom: {
             // Reject: lowercase acronyms in camelCase/PascalCase (but allow PascalCase variables)
             // Matches: userId, getUserId but NOT userID, UserID, UPPER_CASE
-            regex: '[a-z](Id|Ip|Io|Ui|Api|Url|Html|Css|Json|Xml|Svg|Pdf|Uri|Uuid|Jwt|Sql|Http|Https|Ws|Wss|Sse|Db|Os|Cpu|Gpu|Ram|Usb|Ms)([A-Z]|$)',
+            regex:
+              '[a-z](Id|Ip|Io|Ui|Api|Url|Html|Css|Json|Xml|Svg|Pdf|Uri|Uuid|Jwt|Sql|Http|Https|Ws|Wss|Sse|Db|Os|Cpu|Gpu|Ram|Usb|Ms)([A-Z]|$)',
             match: false,
           },
           leadingUnderscore: 'allow',
