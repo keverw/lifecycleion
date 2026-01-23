@@ -44,11 +44,11 @@ const logger = new Logger({
   sinks: [new ConsoleSink({ colors: true, timestamps: true })],
 });
 
-logger.info('Application started');
-logger.warn('Warning message');
 logger.error('Error message');
-logger.success('Operation successful');
+logger.warn('Warning message');
 logger.notice('Important notice');
+logger.success('Operation successful');
+logger.info('Application started');
 logger.debug('Debug information'); // Filtered by default
 ```
 
@@ -939,9 +939,9 @@ cat /tmp/app_logs
 // Log levels
 logger.error(message, options?)
 logger.warn(message, options?)
+logger.notice(message, options?)
 logger.success(message, options?)
 logger.info(message, options?)
-logger.notice(message, options?)
 logger.debug(message, options?)  // Debug level (filtered by default)
 logger.raw(message, options?)    // No formatting, always shown
 
@@ -954,9 +954,9 @@ logger.service(name: string): LoggerService
 // LoggerService methods (same as Logger but with service name)
 service.error(message, options?)
 service.warn(message, options?)
+service.notice(message, options?)
 service.success(message, options?)
 service.info(message, options?)
-service.notice(message, options?)
 service.debug(message, options?)
 service.raw(message, options?)
 service.errorObject(prefix, error, options?)
