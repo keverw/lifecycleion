@@ -48,11 +48,11 @@ describe('Logger', () => {
       expect(arraySink.logs[0].type).toBe('success');
     });
 
-    test('should log note message', () => {
-      logger.note('Important note');
+    test('should log notice message', () => {
+      logger.notice('Important notice');
 
       expect(arraySink.logs.length).toBe(1);
-      expect(arraySink.logs[0].type).toBe('note');
+      expect(arraySink.logs[0].type).toBe('notice');
     });
 
     test('should log debug message', () => {
@@ -336,7 +336,7 @@ describe('Logger', () => {
       service.info('Info');
       service.warn('Warning');
       service.success('Success');
-      service.note('Note');
+      service.notice('Notice');
       service.debug('Debug');
       service.raw('Raw');
 
@@ -346,7 +346,7 @@ describe('Logger', () => {
         'info',
         'warn',
         'success',
-        'note',
+        'notice',
         'debug',
         'raw',
       ]);
@@ -825,7 +825,7 @@ describe('Logger', () => {
       logger.error('Error', { tags: ['critical'] });
       logger.warn('Warning', { tags: ['performance'] });
       logger.success('Success', { tags: ['deploy'] });
-      logger.note('Note', { tags: ['reminder'] });
+      logger.notice('Notice', { tags: ['reminder'] });
       logger.raw('Raw', { tags: ['debug'] });
 
       expect(arraySink.logs[0].tags).toEqual(['critical']);
@@ -937,7 +937,7 @@ describe('Logger', () => {
       entity.info('Picked up item');
       entity.warn('Low health');
       entity.success('Level completed');
-      entity.note('Checkpoint reached');
+      entity.notice('Checkpoint reached');
       entity.raw('Debug info');
 
       expect(arraySink.logs.length).toBe(6);
@@ -946,7 +946,7 @@ describe('Logger', () => {
         'info',
         'warn',
         'success',
-        'note',
+        'notice',
         'raw',
       ]);
 

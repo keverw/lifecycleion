@@ -6,10 +6,10 @@
 export enum LogLevel {
   ERROR = 0,
   WARN = 1,
-  SUCCESS = 2,
-  INFO = 2,
-  NOTE = 2,
-  DEBUG = 3,
+  NOTICE = 2, // Normal but significant condition
+  SUCCESS = 3,
+  INFO = 3,
+  DEBUG = 4,
   RAW = 99,
 }
 
@@ -21,7 +21,7 @@ export type LogType =
   | 'info'
   | 'warn'
   | 'success'
-  | 'note'
+  | 'notice'
   | 'debug'
   | 'raw';
 
@@ -34,12 +34,12 @@ export function getLogLevel(type: LogType): LogLevel {
       return LogLevel.ERROR;
     case 'warn':
       return LogLevel.WARN;
-    case 'info':
-      return LogLevel.INFO;
+    case 'notice':
+      return LogLevel.NOTICE;
     case 'success':
       return LogLevel.SUCCESS;
-    case 'note':
-      return LogLevel.NOTE;
+    case 'info':
+      return LogLevel.INFO;
     case 'debug':
       return LogLevel.DEBUG;
     case 'raw':

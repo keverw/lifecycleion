@@ -44,11 +44,11 @@ const logger = new Logger({
   sinks: [new ConsoleSink({ colors: true, timestamps: true })],
 });
 
-logger.info('Application started');
-logger.warn('Warning message');
 logger.error('Error message');
+logger.warn('Warning message');
+logger.notice('Important notice');
 logger.success('Operation successful');
-logger.note('Important note');
+logger.info('Application started');
 logger.debug('Debug information'); // Filtered by default
 ```
 
@@ -59,15 +59,15 @@ Control which log levels are output on a per-sink basis using the `LogLevel` enu
 ```typescript
 import { Logger, ConsoleSink, LogLevel } from '@/lib/logger';
 
-// Default behavior: INFO level (shows ERROR, WARN, SUCCESS, INFO, NOTE)
+// Default behavior: INFO level (shows ERROR, WARN, NOTICE, SUCCESS, INFO)
 const consoleSink = new ConsoleSink();
 const logger = new Logger({ sinks: [consoleSink] });
 
 logger.error('Error message'); // ✓ Shown
 logger.warn('Warning message'); // ✓ Shown
-logger.info('Info message'); // ✓ Shown
+logger.notice('Notice message'); // ✓ Shown
 logger.success('Success message'); // ✓ Shown
-logger.note('Note message'); // ✓ Shown
+logger.info('Info message'); // ✓ Shown
 logger.debug('Debug message'); // ✗ Hidden (filtered out)
 
 // Enable debug mode to see all logs
@@ -90,12 +90,12 @@ The `LogLevel` enum uses numeric values where lower numbers = higher priority:
 
 ```typescript
 enum LogLevel {
-  ERROR = 0,   // Highest priority - always shown
-  WARN = 1,    // Warnings and errors
-  SUCCESS = 2, // Success, info, note, warnings, and errors
-  INFO = 2,    // Same level as SUCCESS and NOTE
-  NOTE = 2,    // Same level as SUCCESS and INFO
-  DEBUG = 3,   // Lowest priority - shows everything
+  ERROR = 0,   // Critical failures and errors
+  WARN = 1,    // Potential problems or degraded functionality
+  NOTICE = 2,  // Normal but significant condition
+  SUCCESS = 3, // Positive confirmations of operations
+  INFO = 3,    // Same level as SUCCESS (routine operational info)
+  DEBUG = 4,   // Verbose development and debugging details
   RAW = 99,    // Special: always shown regardless of minLevel
 }
 ```
@@ -104,10 +104,49 @@ When you set `minLevel` to a specific level, all logs at that level **and higher
 
 - `LogLevel.ERROR` → Only errors
 - `LogLevel.WARN` → Errors and warnings
-- `LogLevel.INFO` → Errors, warnings, success, info, and note messages (default)
+- `LogLevel.NOTICE` → Errors, warnings, and important notices
+- `LogLevel.INFO` → Errors, warnings, notices, success, and info messages (default)
 - `LogLevel.DEBUG` → Everything including debug messages
 
 **Note:** `RAW` logs are always output regardless of the `minLevel` setting, as they're intended for unformatted output that bypasses filtering.
+
+#### Log Level Use Cases
+
+Understanding when to use each log level helps maintain consistent, meaningful logs:
+
+```typescript
+// ERROR - Something is broken
+logger.error('Database connection failed');
+logger.error('Failed to process payment');
+
+// WARN - Potential problem or degraded functionality
+logger.warn('Slow query detected: 2.5s');
+logger.warn('API rate limit at 90%');
+logger.warn('Disk space running low: 5% remaining');
+
+// NOTICE - Important but not problematic (blue, stands out)
+logger.notice('Configuration loaded from defaults');
+logger.notice('Running in fallback mode');
+logger.notice('First-time user onboarding triggered');
+logger.notice('Scheduled maintenance in 10 minutes');
+
+// SUCCESS - Positive confirmation of operations
+logger.success('User registration complete');
+logger.success('Payment processed successfully');
+logger.success('Database migration completed');
+
+// INFO - Routine operational information
+logger.info('Request received: GET /api/users');
+logger.info('Cache hit for key: user:123');
+logger.info('Background job started');
+
+// DEBUG - Verbose development details
+logger.debug('Parsing JWT token');
+logger.debug('Cache miss, fetching from DB');
+logger.debug('Request headers: {...}');
+```
+
+**Key distinction between NOTICE and INFO:** Use `notice` for information that warrants attention but isn't a problem (sits between WARN and INFO in priority). Use `info` for routine operational logs that track normal activity.
 
 #### Per-Sink Filtering
 
@@ -900,9 +939,9 @@ cat /tmp/app_logs
 // Log levels
 logger.error(message, options?)
 logger.warn(message, options?)
+logger.notice(message, options?)
 logger.success(message, options?)
 logger.info(message, options?)
-logger.note(message, options?)
 logger.debug(message, options?)  // Debug level (filtered by default)
 logger.raw(message, options?)    // No formatting, always shown
 
@@ -915,9 +954,9 @@ logger.service(name: string): LoggerService
 // LoggerService methods (same as Logger but with service name)
 service.error(message, options?)
 service.warn(message, options?)
+service.notice(message, options?)
 service.success(message, options?)
 service.info(message, options?)
-service.note(message, options?)
 service.debug(message, options?)
 service.raw(message, options?)
 service.errorObject(prefix, error, options?)
@@ -1104,13 +1143,13 @@ Each sink receives a complete `LogEntry`:
 ```typescript
 interface LogEntry {
   timestamp: number; // Unix timestamp in ms
-  type: LogType; // 'error' | 'warn' | 'success' | 'info' | 'note' | 'debug' | 'raw'
+  type: LogType; // 'error' | 'warn' | 'notice' | 'success' | 'info' | 'debug' | 'raw'
   serviceName?: string; // Service name (only present when using service logger)
   entityName?: string; // Entity identifier (only present when using entity logger)
   template: string; // Original template: "User {{userID}} logged in"
   message: string; // Computed message: "User 456 logged in"
-  params?: Record<string, any>; // Raw params: { userID: 456, password: 'secret' }
-  redactedParams?: Record<string, any>; // Redacted: { userID: 456, password: '***' }
+  params?: Record<string, unknown>; // Raw params: { userID: 456, password: 'secret' }
+  redactedParams?: Record<string, unknown>; // Redacted: { userID: 456, password: '***' }
   redactedKeys?: string[]; // List of keys that were redacted: ['password', 'user.apiKey']
   error?: unknown; // Original error object from errorObject() calls
   exitCode?: number; // Exit code if this log triggers a process exit

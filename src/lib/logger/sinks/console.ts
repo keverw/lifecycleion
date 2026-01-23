@@ -107,7 +107,7 @@ export class ConsoleSink implements LogSink {
           }
           break;
         case 'success':
-        case 'note':
+        case 'notice':
         case 'debug':
           if (style) {
             // eslint-disable-next-line no-console
@@ -134,7 +134,7 @@ export class ConsoleSink implements LogSink {
           console.warn(formattedMessage);
           break;
         case 'success':
-        case 'note':
+        case 'notice':
         case 'debug':
           // eslint-disable-next-line no-console
           console.log(formattedMessage);
