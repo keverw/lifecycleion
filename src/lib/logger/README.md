@@ -48,7 +48,7 @@ logger.info('Application started');
 logger.warn('Warning message');
 logger.error('Error message');
 logger.success('Operation successful');
-logger.note('Important note');
+logger.notice('Important notice');
 logger.debug('Debug information'); // Filtered by default
 ```
 
@@ -59,15 +59,15 @@ Control which log levels are output on a per-sink basis using the `LogLevel` enu
 ```typescript
 import { Logger, ConsoleSink, LogLevel } from '@/lib/logger';
 
-// Default behavior: INFO level (shows ERROR, WARN, SUCCESS, INFO, NOTE)
+// Default behavior: INFO level (shows ERROR, WARN, NOTICE, SUCCESS, INFO)
 const consoleSink = new ConsoleSink();
 const logger = new Logger({ sinks: [consoleSink] });
 
 logger.error('Error message'); // ✓ Shown
 logger.warn('Warning message'); // ✓ Shown
-logger.info('Info message'); // ✓ Shown
+logger.notice('Notice message'); // ✓ Shown
 logger.success('Success message'); // ✓ Shown
-logger.note('Note message'); // ✓ Shown
+logger.info('Info message'); // ✓ Shown
 logger.debug('Debug message'); // ✗ Hidden (filtered out)
 
 // Enable debug mode to see all logs
@@ -92,10 +92,10 @@ The `LogLevel` enum uses numeric values where lower numbers = higher priority:
 enum LogLevel {
   ERROR = 0,   // Highest priority - always shown
   WARN = 1,    // Warnings and errors
-  SUCCESS = 2, // Success, info, note, warnings, and errors
-  INFO = 2,    // Same level as SUCCESS and NOTE
-  NOTE = 2,    // Same level as SUCCESS and INFO
-  DEBUG = 3,   // Lowest priority - shows everything
+  NOTICE = 2,  // Important, noteworthy information (not a problem)
+  SUCCESS = 3, // Success, info, notice, warnings, and errors
+  INFO = 3,    // Same level as SUCCESS (routine operational info)
+  DEBUG = 4,   // Lowest priority - shows everything
   RAW = 99,    // Special: always shown regardless of minLevel
 }
 ```
@@ -104,10 +104,49 @@ When you set `minLevel` to a specific level, all logs at that level **and higher
 
 - `LogLevel.ERROR` → Only errors
 - `LogLevel.WARN` → Errors and warnings
-- `LogLevel.INFO` → Errors, warnings, success, info, and note messages (default)
+- `LogLevel.NOTICE` → Errors, warnings, and important notices
+- `LogLevel.INFO` → Errors, warnings, notices, success, and info messages (default)
 - `LogLevel.DEBUG` → Everything including debug messages
 
 **Note:** `RAW` logs are always output regardless of the `minLevel` setting, as they're intended for unformatted output that bypasses filtering.
+
+#### Log Level Use Cases
+
+Understanding when to use each log level helps maintain consistent, meaningful logs:
+
+```typescript
+// ERROR - Something is broken
+logger.error('Database connection failed');
+logger.error('Failed to process payment');
+
+// WARN - Potential problem or degraded functionality
+logger.warn('Slow query detected: 2.5s');
+logger.warn('API rate limit at 90%');
+logger.warn('Disk space running low: 5% remaining');
+
+// NOTICE - Important but not problematic (blue, stands out)
+logger.notice('Configuration loaded from defaults');
+logger.notice('Running in fallback mode');
+logger.notice('First-time user onboarding triggered');
+logger.notice('Scheduled maintenance in 10 minutes');
+
+// SUCCESS - Positive confirmation of operations
+logger.success('User registration complete');
+logger.success('Payment processed successfully');
+logger.success('Database migration completed');
+
+// INFO - Routine operational information
+logger.info('Request received: GET /api/users');
+logger.info('Cache hit for key: user:123');
+logger.info('Background job started');
+
+// DEBUG - Verbose development details
+logger.debug('Parsing JWT token');
+logger.debug('Cache miss, fetching from DB');
+logger.debug('Request headers: {...}');
+```
+
+**Key distinction between NOTICE and INFO:** Use `notice` for information that warrants attention but isn't a problem (sits between WARN and INFO in priority). Use `info` for routine operational logs that track normal activity.
 
 #### Per-Sink Filtering
 
@@ -902,7 +941,7 @@ logger.error(message, options?)
 logger.warn(message, options?)
 logger.success(message, options?)
 logger.info(message, options?)
-logger.note(message, options?)
+logger.notice(message, options?)
 logger.debug(message, options?)  // Debug level (filtered by default)
 logger.raw(message, options?)    // No formatting, always shown
 
@@ -917,7 +956,7 @@ service.error(message, options?)
 service.warn(message, options?)
 service.success(message, options?)
 service.info(message, options?)
-service.note(message, options?)
+service.notice(message, options?)
 service.debug(message, options?)
 service.raw(message, options?)
 service.errorObject(prefix, error, options?)

@@ -151,10 +151,10 @@ export class Logger extends EventEmitter {
   }
 
   /**
-   * Log a note message
+   * Log a notice message
    */
-  public note(message: string, options?: LogOptions): void {
-    this.handleLog('note', message, options);
+  public notice(message: string, options?: LogOptions): void {
+    this.handleLog('notice', message, options);
   }
 
   /**

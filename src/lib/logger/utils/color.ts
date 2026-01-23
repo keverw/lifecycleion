@@ -11,7 +11,7 @@ const browserColors: Record<Exclude<LogType, 'raw'>, string> = {
   info: 'color: #ffffff;', // white
   warn: 'color: #f5f566;', // yellow
   success: 'color: #56b97f;', // green
-  note: 'color: #5883bf;', // blue
+  notice: 'color: #5883bf;', // blue
   debug: 'color: #808080;', // gray
 };
 
@@ -20,7 +20,7 @@ const chalkColors: Record<Exclude<LogType, 'raw'>, keyof typeof chalk> = {
   info: 'white',
   warn: 'yellow',
   success: 'green',
-  note: 'blue',
+  notice: 'blue',
   debug: 'gray',
 };
 

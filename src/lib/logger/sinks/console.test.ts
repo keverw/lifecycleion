@@ -97,22 +97,22 @@ describe('ConsoleSink', () => {
     expect(call[0]).toContain('Success!');
   });
 
-  test('should write note message to console.log', () => {
+  test('should write notice message to console.log', () => {
     const sink = new ConsoleSink();
 
     const entry: LogEntry = {
       timestamp: Date.now(),
-      type: 'note',
-      serviceName: 'NoteService',
-      template: 'Note message',
-      message: 'Note message',
+      type: 'notice',
+      serviceName: 'NoticeService',
+      template: 'Notice message',
+      message: 'Notice message',
     };
 
     sink.write(entry);
 
     expect(consoleLogSpy).toHaveBeenCalled();
     const call = consoleLogSpy.mock.calls[0];
-    expect(call[0]).toContain('Note message');
+    expect(call[0]).toContain('Notice message');
   });
 
   test('should write raw message without formatting', () => {
@@ -274,7 +274,7 @@ describe('ConsoleSink', () => {
       'info',
       'warn',
       'success',
-      'note',
+      'notice',
       'debug',
       'raw',
     ];
@@ -295,7 +295,7 @@ describe('ConsoleSink', () => {
     expect(consoleErrorSpy).toHaveBeenCalledTimes(1);
     expect(consoleInfoSpy).toHaveBeenCalledTimes(1);
     expect(consoleWarnSpy).toHaveBeenCalledTimes(1);
-    expect(consoleLogSpy).toHaveBeenCalledTimes(4); // success, note, debug, raw
+    expect(consoleLogSpy).toHaveBeenCalledTimes(4); // success, notice, debug, raw
   });
 
   test('should format message with all options enabled', () => {
@@ -484,21 +484,21 @@ describe('ConsoleSink', () => {
     expect(consoleLogSpy.mock.calls[0][0]).toContain('Success message');
   });
 
-  test('should handle note with colors disabled', () => {
+  test('should handle notice with colors disabled', () => {
     const sink = new ConsoleSink({ colors: false });
 
     const entry: LogEntry = {
       timestamp: Date.now(),
-      type: 'note',
-      serviceName: 'NoteNoColor',
-      template: 'Note message',
-      message: 'Note message',
+      type: 'notice',
+      serviceName: 'NoticeNoColor',
+      template: 'Notice message',
+      message: 'Notice message',
     };
 
     sink.write(entry);
 
     expect(consoleLogSpy).toHaveBeenCalled();
-    expect(consoleLogSpy.mock.calls[0][0]).toContain('Note message');
+    expect(consoleLogSpy.mock.calls[0][0]).toContain('Notice message');
   });
 
   test('should write debug message to console.log', () => {

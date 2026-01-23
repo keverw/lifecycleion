@@ -31,10 +31,10 @@ describe('colorize', () => {
       expect(result.style).toBeUndefined();
     });
 
-    test('should return chalk-colored text for note type', () => {
-      const result = colorize('note', 'Note message');
+    test('should return chalk-colored text for notice type', () => {
+      const result = colorize('notice', 'Notice message');
 
-      expect(result.coloredText).toContain('Note message');
+      expect(result.coloredText).toContain('Notice message');
       expect(result.style).toBeUndefined();
     });
 
@@ -98,10 +98,10 @@ describe('colorize', () => {
       expect(result.style).toBe('color: #56b97f;');
     });
 
-    test('should return browser-formatted text for note type', () => {
-      const result = colorize('note', 'Note message');
+    test('should return browser-formatted text for notice type', () => {
+      const result = colorize('notice', 'Notice message');
 
-      expect(result.coloredText).toBe('%cNote message');
+      expect(result.coloredText).toBe('%cNotice message');
       expect(result.style).toBe('color: #5883bf;');
     });
 
