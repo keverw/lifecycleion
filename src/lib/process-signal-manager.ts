@@ -621,10 +621,10 @@ export class ProcessSignalManager {
           try {
             if (process.stdin.isTTY && process.stdin.isRaw) {
               process.stdin.setRawMode(false);
+              // Only clear the flag if setRawMode succeeded
+              // If it failed, we still control raw mode and need to track it
+              ProcessSignalManager.rawModeEnabledByClass = false;
             }
-            // Only clear the flag if setRawMode succeeded
-            // If it failed, we still control raw mode and need to track it
-            ProcessSignalManager.rawModeEnabledByClass = false;
           } catch {
             // If setRawMode fails, leave the flag set so future instances can try to disable it
             // This prevents the terminal from being permanently stuck in raw mode
@@ -661,10 +661,10 @@ export class ProcessSignalManager {
         try {
           if (process.stdin.isTTY) {
             process.stdin.setRawMode(false);
+            // Only clear the flag if setRawMode succeeded
+            // If it failed, we still control raw mode and need to track it
+            ProcessSignalManager.rawModeEnabledByClass = false;
           }
-          // Only clear the flag if setRawMode succeeded
-          // If it failed, we still control raw mode and need to track it
-          ProcessSignalManager.rawModeEnabledByClass = false;
         } catch {
           // If setRawMode fails, leave the flag set so future instances can try to disable it
           // This prevents the terminal from being permanently stuck in raw mode
