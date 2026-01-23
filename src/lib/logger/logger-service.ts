@@ -109,6 +109,17 @@ export class LoggerService {
   }
 
   /**
+   * Log a debug message
+   */
+  public debug(message: string, options?: LogOptions): void {
+    this.handleLog('debug', message, {
+      ...(options ?? {}),
+      serviceName: this.serviceName,
+      entityName: this.entityName,
+    });
+  }
+
+  /**
    * Log a raw message without any formatting
    */
   public raw(message: string, options?: LogOptions): void {

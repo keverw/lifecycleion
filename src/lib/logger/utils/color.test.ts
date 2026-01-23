@@ -37,6 +37,13 @@ describe('colorize', () => {
       expect(result.coloredText).toContain('Note message');
       expect(result.style).toBeUndefined();
     });
+
+    test('should return chalk-colored text for debug type', () => {
+      const result = colorize('debug', 'Debug message');
+
+      expect(result.coloredText).toContain('Debug message');
+      expect(result.style).toBeUndefined();
+    });
   });
 
   describe('Browser environment (simulated)', () => {
@@ -96,6 +103,13 @@ describe('colorize', () => {
 
       expect(result.coloredText).toBe('%cNote message');
       expect(result.style).toBe('color: #5883bf;');
+    });
+
+    test('should return browser-formatted text for debug type', () => {
+      const result = colorize('debug', 'Debug message');
+
+      expect(result.coloredText).toBe('%cDebug message');
+      expect(result.style).toBe('color: #808080;');
     });
   });
 });

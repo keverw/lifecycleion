@@ -158,6 +158,13 @@ export class Logger extends EventEmitter {
   }
 
   /**
+   * Log a debug message
+   */
+  public debug(message: string, options?: LogOptions): void {
+    this.handleLog('debug', message, options);
+  }
+
+  /**
    * Log a raw message without any formatting
    */
   public raw(message: string, options?: LogOptions): void {
