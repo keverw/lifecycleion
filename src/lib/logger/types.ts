@@ -6,7 +6,7 @@
 export enum LogLevel {
   ERROR = 0,
   WARN = 1,
-  NOTICE = 2,
+  NOTICE = 2, // Normal but significant condition
   SUCCESS = 3,
   INFO = 3,
   DEBUG = 4,
