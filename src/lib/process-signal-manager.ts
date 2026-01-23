@@ -1,10 +1,107 @@
 import { safeHandleCallback } from './safe-handle-callback';
+import { ulid } from 'ulid';
 import readline from 'readline';
 
 /**
  * The shutdown signal types that can trigger the shutdown callback
  */
 export type ShutdownSignal = 'SIGINT' | 'SIGTERM' | 'SIGTRAP';
+
+/**
+ * Shared state stored on globalThis to survive module duplication from bundlers.
+ * Uses Symbol.for() to ensure the same symbol across all copies of this module.
+ */
+interface ProcessSignalManagerSharedState {
+  /**
+   * Whether emitKeypressEvents was called on process.stdin.
+   * Since process.stdin is a global singleton, this prevents multiple calls.
+   */
+  keypressEventsEmittedOnStdin: boolean;
+
+  /**
+   * Set of instance IDs that have successfully attached.
+   * Used to coordinate shared resources (raw mode, stdin pause/resume).
+   */
+  attachedInstances: Set<string>;
+
+  /**
+   * The instance ID that enabled raw mode, or null if raw mode wasn't enabled by us.
+   * Only this instance (or the last remaining instance) should disable raw mode.
+   */
+  rawModeOwner: string | null;
+
+  /**
+   * Whether raw mode was enabled by ProcessSignalManager.
+   *
+   * This is necessary because an instance may fail to disable raw mode during detach,
+   * leaving stdin in raw mode while the recorded owner is stale. When a new instance
+   * later attaches and finds raw mode already enabled, it can safely adopt ownership
+   * *only if* this flag indicates we were responsible for enabling raw mode.
+   *
+   * If raw mode was enabled by external code, this stays false and we will not disable it.
+   */
+  rawModeEnabledByManager: boolean;
+}
+
+// Use Symbol.for() for a global symbol registry - survives module duplication
+const SHARED_STATE_KEY = Symbol.for('lifecycleion.ProcessSignalManager.v1');
+
+/**
+ * Get or initialize the shared state on globalThis.
+ * This ensures all copies of this module (from bundler duplication) share the same state.
+ */
+function getSharedState(): ProcessSignalManagerSharedState {
+  const g = globalThis as Record<
+    symbol,
+    ProcessSignalManagerSharedState | undefined
+  >;
+  if (!g[SHARED_STATE_KEY]) {
+    g[SHARED_STATE_KEY] = {
+      keypressEventsEmittedOnStdin: false,
+      attachedInstances: new Set(),
+      rawModeOwner: null,
+      rawModeEnabledByManager: false,
+    };
+  }
+  return g[SHARED_STATE_KEY];
+}
+
+/**
+ * Transfer raw mode ownership to another attached instance, or clear it if none remain.
+ * This is a centralized helper to ensure ownership is always valid.
+ *
+ * @param shared - The shared state object
+ * @param currentOwner - The instance ID giving up ownership (only transfers if this matches current owner)
+ * @returns The new owner ID, or null if ownership was cleared
+ */
+function transferRawModeOwnership(
+  shared: ProcessSignalManagerSharedState,
+  currentOwner: string,
+): string | null {
+  // Only transfer if we're actually the current owner
+  if (shared.rawModeOwner !== currentOwner) {
+    return shared.rawModeOwner;
+  }
+
+  // If no instances remain, clear ownership
+  if (shared.attachedInstances.size === 0) {
+    shared.rawModeOwner = null;
+    return null;
+  }
+
+  // Find a valid new owner from remaining instances
+  // Re-validate that the chosen instance is still attached (defensive against concurrent modifications)
+  for (const candidateID of shared.attachedInstances) {
+    if (shared.attachedInstances.has(candidateID)) {
+      shared.rawModeOwner = candidateID;
+      return candidateID;
+    }
+  }
+
+  // Fallback: no valid instances (shouldn't happen, but be safe)
+  shared.rawModeOwner = null;
+  return null;
+}
 
 /**
  * Status information about what the manager is attached to
@@ -170,21 +267,8 @@ export interface ProcessSignalManagerOptions {
  * All callbacks are executed safely with automatic error handling.
  */
 export class ProcessSignalManager {
-  // Static flag shared across all instances to track if emitKeypressEvents was called on process.stdin
-  // Since process.stdin is a global singleton, this prevents multiple calls to emitKeypressEvents
-  private static keypressEventsEmittedOnStdin = false;
-
-  // Static reference counter tracking how many instances are currently listening for keypresses
-  // Since process.stdin is a global singleton shared by ALL instances, we use reference counting to:
-  // - Only resume stdin when the first instance attaches (counter: 0 -> 1)
-  // - Only pause stdin when the last instance detaches (counter: 1 -> 0)
-  // This allows multiple instances to coexist without breaking each other's keypress handling
-  private static activeKeypressListeners = 0;
-
-  // Static flag tracking whether the ProcessSignalManager class enabled raw mode
-  // Only the class should disable raw mode if it was the one that enabled it
-  // This prevents disabling raw mode that was enabled by external code
-  private static rawModeEnabledByClass = false;
+  // Unique identifier for this instance, used for tracking in shared state
+  private readonly instanceID: string;
 
   private onShutdownRequested?: (
     method: ShutdownSignal,
@@ -205,7 +289,6 @@ export class ProcessSignalManager {
   private infoSignalListener?: () => void;
   private debugSignalListener?: () => void;
   private keypressHandler?: (str: string, key: unknown) => void;
-  private rawModeEnabledByUs = false;
   private _isAttached = false;
 
   // Throttle state for keyboard events (default 200ms, 0 disables)
@@ -220,6 +303,9 @@ export class ProcessSignalManager {
   };
 
   constructor(options: ProcessSignalManagerOptions) {
+    // Generate unique ID for this instance to track it in the activeInstances Set
+    this.instanceID = ulid();
+
     this.onShutdownRequested = options.onShutdownRequested;
     this.onReloadRequested = options.onReloadRequested;
     this.onInfoRequested = options.onInfoRequested;
@@ -557,248 +643,316 @@ export class ProcessSignalManager {
    *
    * Note: Letter keys are case-insensitive (R/r, I/i, D/d all work).
    *
-   * Defensive: Only registers once to prevent duplicate handlers.
+   * Uses add-then-check pattern to prevent race conditions:
+   * 1. Add ourselves to attachedInstances first
+   * 2. Check if we're the first (size === 1) to enable raw mode
+   * This ensures no gap where another instance could read stale state.
    */
   private listenForKeyPresses(): void {
-    if (process.stdin.isTTY && !this.keypressHandler) {
-      // Only call emitKeypressEvents once per stream to avoid duplicate events
-      // Node.js warns against calling this multiple times on the same stream
-      // Use static flag since process.stdin is a global singleton shared across all instances
-      if (!ProcessSignalManager.keypressEventsEmittedOnStdin) {
-        readline.emitKeypressEvents(process.stdin);
-        ProcessSignalManager.keypressEventsEmittedOnStdin = true;
+    if (!process.stdin.isTTY || this.keypressHandler) {
+      return;
+    }
+
+    const shared = getSharedState();
+
+    // Only call emitKeypressEvents once per stream to avoid duplicate events
+    // Node.js warns against calling this multiple times on the same stream
+    // IMPORTANT: Set flag BEFORE calling to prevent race condition where two instances
+    // both see false and both call emitKeypressEvents. The call is idempotent-ish
+    // (just causes warnings), but we want to avoid it.
+    if (!shared.keypressEventsEmittedOnStdin) {
+      shared.keypressEventsEmittedOnStdin = true;
+      readline.emitKeypressEvents(process.stdin);
+    }
+
+    // Create the keypress handler
+    // Note: Keypresses directly invoke callbacks
+    // They don't emit actual process signals to avoid recursion and keep it simple
+    this.keypressHandler = (str, key): void => {
+      const keyObj = key as Record<string, unknown>;
+      const keyName = keyObj.name as string;
+      // Note: key.name is always lowercase for letter keys, regardless of shift state
+      // So checking for 'r' catches both 'r' and 'R' (making it case-insensitive)
+
+      // Handle Ctrl+C manually (if shutdown handler is registered)
+      if (keyObj.ctrl && keyName === 'c' && this.onShutdownRequested) {
+        if (this.shouldThrottle('shutdown')) {
+          return;
+        }
+
+        safeHandleCallback(
+          this.shutdownCallbackName,
+          this.onShutdownRequested,
+          'SIGINT',
+        );
       }
-
-      // Enable raw mode only when the first instance attaches (counter is 0)
-      // This ensures raw mode stays enabled as long as ANY instance is listening for keypresses
-      if (ProcessSignalManager.activeKeypressListeners === 0) {
-        if (!process.stdin.isRaw) {
-          // Set flags BEFORE enabling raw mode to ensure proper cleanup on exceptions
-          ProcessSignalManager.rawModeEnabledByClass = true;
-          this.rawModeEnabledByUs = true;
-
-          try {
-            process.stdin.setRawMode(true);
-          } catch (error) {
-            // If setRawMode fails, roll back the flags
-            ProcessSignalManager.rawModeEnabledByClass = false;
-            this.rawModeEnabledByUs = false;
-            throw error;
-          }
+      // Treat escape as a SIGINT signal (if shutdown handler is registered)
+      else if (keyName === 'escape' && this.onShutdownRequested) {
+        if (this.shouldThrottle('shutdown')) {
+          return;
         }
+
+        safeHandleCallback(
+          this.shutdownCallbackName,
+          this.onShutdownRequested,
+          'SIGINT',
+        );
       }
-
-      // Note: Keypresses directly invoke callbacks
-      // They don't emit actual process signals to avoid recursion and keep it simple
-      this.keypressHandler = (str, key): void => {
-        const keyObj = key as Record<string, unknown>;
-        const keyName = keyObj.name as string;
-        // Note: key.name is always lowercase for letter keys, regardless of shift state
-        // So checking for 'r' catches both 'r' and 'R' (making it case-insensitive)
-
-        // Handle Ctrl+C manually (if shutdown handler is registered)
-        if (keyObj.ctrl && keyName === 'c' && this.onShutdownRequested) {
-          if (this.shouldThrottle('shutdown')) {
-            return;
-          }
-
-          safeHandleCallback(
-            this.shutdownCallbackName,
-            this.onShutdownRequested,
-            'SIGINT',
-          );
+      // Handle R key for reload (case-insensitive)
+      else if (keyName === 'r' && this.onReloadRequested) {
+        if (this.shouldThrottle('reload')) {
+          return;
         }
-        // Treat escape as a SIGINT signal (if shutdown handler is registered)
-        else if (keyName === 'escape' && this.onShutdownRequested) {
-          if (this.shouldThrottle('shutdown')) {
-            return;
-          }
 
-          safeHandleCallback(
-            this.shutdownCallbackName,
-            this.onShutdownRequested,
-            'SIGINT',
-          );
-        }
-        // Handle R key for reload (case-insensitive)
-        else if (keyName === 'r' && this.onReloadRequested) {
-          if (this.shouldThrottle('reload')) {
-            return;
-          }
-
-          safeHandleCallback(this.reloadCallbackName, this.onReloadRequested);
-        }
-        // Handle I key for info (case-insensitive)
-        else if (keyName === 'i' && this.onInfoRequested) {
-          if (this.shouldThrottle('info')) {
-            return;
-          }
-
-          safeHandleCallback(this.infoCallbackName, this.onInfoRequested);
-        }
-        // Handle D key for debug (case-insensitive)
-        else if (keyName === 'd' && this.onDebugRequested) {
-          if (this.shouldThrottle('debug')) {
-            return;
-          }
-
-          safeHandleCallback(this.debugCallbackName, this.onDebugRequested);
-        }
-      };
-
-      // Increment counter before registering to ensure it's balanced even if registration fails
-      ProcessSignalManager.activeKeypressListeners++;
-
-      try {
-        // Register this instance's keypress handler
-        // Note: Multiple instances can coexist - each gets its own handler, all receive the same keypresses
-        process.stdin.on('keypress', this.keypressHandler);
-      } catch (error) {
-        // If registration fails, roll back the counter increment and clear the handler
-        // Clearing the handler prevents restoreStdin() from decrementing the counter again
-        // if attach() catches this error and calls cleanup (avoiding double-decrement)
-        ProcessSignalManager.activeKeypressListeners--;
-        this.keypressHandler = undefined;
-        throw error;
+        safeHandleCallback(this.reloadCallbackName, this.onReloadRequested);
       }
+      // Handle I key for info (case-insensitive)
+      else if (keyName === 'i' && this.onInfoRequested) {
+        if (this.shouldThrottle('info')) {
+          return;
+        }
 
-      // Resume stdin only when first instance attaches (counter becomes 1)
-      // If other instances are already attached (counter > 1), stdin is already resumed
-      // Wrapped in separate try-catch so handler registration isn't rolled back if resume fails
-      if (ProcessSignalManager.activeKeypressListeners === 1) {
+        safeHandleCallback(this.infoCallbackName, this.onInfoRequested);
+      }
+      // Handle D key for debug (case-insensitive)
+      else if (keyName === 'd' && this.onDebugRequested) {
+        if (this.shouldThrottle('debug')) {
+          return;
+        }
+
+        safeHandleCallback(this.debugCallbackName, this.onDebugRequested);
+      }
+    };
+
+    // ADD FIRST, then check - prevents race condition where two instances
+    // both see size === 0 before either adds themselves
+    shared.attachedInstances.add(this.instanceID);
+    const isFirstInstance = shared.attachedInstances.size === 1;
+
+    try {
+      // Register this instance's keypress handler
+      // Note: Multiple instances can coexist - each gets its own handler, all receive the same keypresses
+      process.stdin.on('keypress', this.keypressHandler);
+    } catch (error) {
+      // If registration fails, clean up and rethrow
+      shared.attachedInstances.delete(this.instanceID);
+      this.keypressHandler = undefined;
+      throw error;
+    }
+
+    // Enable raw mode only when the first instance attaches
+    // Check AFTER adding ourselves to prevent race condition
+    if (isFirstInstance) {
+      if (!process.stdin.isRaw) {
         try {
-          process.stdin.resume();
+          process.stdin.setRawMode(true);
+          // Only record ownership AFTER success - prevents rollback race
+          shared.rawModeOwner = this.instanceID;
+          shared.rawModeEnabledByManager = true;
         } catch (error) {
-          // If resume fails, clean up the handler we just registered
-          // This keeps the state consistent - if we can't resume, we shouldn't leave a dangling handler
-          ProcessSignalManager.activeKeypressListeners--;
-
-          try {
-            process.stdin.off('keypress', this.keypressHandler);
-            // Only clear handler reference if removal succeeded
-            // If off() throws, we leave the reference so restoreStdin() can retry removal later
-            this.keypressHandler = undefined;
-          } catch {
-            // Handler removal failed - increment counter back to maintain consistency
-            // Leave this.keypressHandler set so restoreStdin() can attempt removal later
-            ProcessSignalManager.activeKeypressListeners++;
-            // Throw the original resume error, not the off() error, since that's the root cause
-            throw error;
-          }
-
+          // setRawMode failed - clean up the handler we registered
+          // Pass attemptedRawModeEnable=true because setRawMode may have enabled raw mode
+          // before throwing (edge case with some terminal emulators)
+          this.cleanupKeypressHandler(shared, true);
           throw error;
         }
+      } else if (
+        shared.rawModeEnabledByManager &&
+        (shared.rawModeOwner === null ||
+          !shared.attachedInstances.has(shared.rawModeOwner))
+      ) {
+        // Raw mode is already enabled, and we previously enabled it (per shared flag),
+        // but ownership is missing or stale (e.g., last detach failed to disable raw mode).
+        // Adopt ownership so the eventual last detach will restore the terminal.
+        shared.rawModeOwner = this.instanceID;
+      } else if (!shared.rawModeEnabledByManager) {
+        // If raw mode is already enabled but we didn't enable it, treat it as external.
+        // Ensure we don't carry forward a stale owner value from a prior run/version.
+        shared.rawModeOwner = null;
+      }
+    }
+
+    // Resume stdin only when first instance attaches
+    if (isFirstInstance) {
+      try {
+        process.stdin.resume();
+      } catch (error) {
+        // resume() failed - clean up everything
+        this.cleanupKeypressHandler(shared);
+        throw error;
+      }
+    }
+  }
+
+  /**
+   * Helper to clean up keypress handler registration on error.
+   * Removes handler, clears instance from shared state, and restores raw mode if needed.
+   *
+   * @param shared - The shared state object
+   * @param didAttemptRawModeEnable - If true, we attempted to enable raw mode (even if ownership wasn't recorded).
+   *   This handles the edge case where setRawMode(true) throws after actually enabling raw mode.
+   */
+  private cleanupKeypressHandler(
+    shared: ProcessSignalManagerSharedState,
+    didAttemptRawModeEnable = false,
+  ): void {
+    if (this.keypressHandler) {
+      try {
+        process.stdin.off('keypress', this.keypressHandler);
+      } catch {
+        // Ignore - best effort cleanup
+      }
+      this.keypressHandler = undefined;
+    }
+
+    shared.attachedInstances.delete(this.instanceID);
+
+    // If we attempted to enable raw mode and it appears to have been enabled,
+    // record that raw mode is managed by us (even if the original setRawMode(true) threw).
+    // This allows future instances to adopt ownership and restore the terminal.
+    if (didAttemptRawModeEnable && process.stdin.isTTY && process.stdin.isRaw) {
+      shared.rawModeEnabledByManager = true;
+      if (shared.rawModeOwner === null) {
+        shared.rawModeOwner = this.instanceID;
+      }
+    }
+
+    // If we were the raw mode owner but other instances remain, transfer ownership.
+    // Use centralized helper to ensure atomic ownership transfer.
+    if (
+      shared.rawModeEnabledByManager &&
+      shared.rawModeOwner === this.instanceID &&
+      shared.attachedInstances.size > 0
+    ) {
+      transferRawModeOwnership(shared, this.instanceID);
+    } else if (
+      shared.rawModeOwner !== null &&
+      shared.attachedInstances.size > 0 &&
+      shared.rawModeEnabledByManager &&
+      !shared.attachedInstances.has(shared.rawModeOwner)
+    ) {
+      // Defensive: if ownership somehow points to a detached instance, re-anchor it.
+      // Find any valid attached instance to take ownership.
+      for (const candidateID of shared.attachedInstances) {
+        if (shared.attachedInstances.has(candidateID)) {
+          shared.rawModeOwner = candidateID;
+          break;
+        }
+      }
+    }
+
+    // Restore raw mode if we're the last instance AND either:
+    // 1. We own raw mode (normal case), OR
+    // 2. We attempted to enable raw mode but ownership wasn't recorded (setRawMode threw after enabling)
+    const shouldRestoreRawMode =
+      shared.attachedInstances.size === 0 &&
+      shared.rawModeEnabledByManager &&
+      (shared.rawModeOwner === this.instanceID ||
+        (didAttemptRawModeEnable && shared.rawModeOwner === null));
+
+    if (shouldRestoreRawMode) {
+      try {
+        if (process.stdin.isTTY && process.stdin.isRaw) {
+          process.stdin.setRawMode(false);
+        }
+
+        // Clear ownership after successful operation
+        // (either raw mode was disabled, or it was already off and doesn't need disabling)
+        shared.rawModeOwner = null;
+        shared.rawModeEnabledByManager = false;
+      } catch {
+        // If setRawMode(false) fails, ensure there's a non-null owner so future detaches can retry.
+        // This matters in the edge case where setRawMode(true) threw after enabling raw mode:
+        // rawModeOwner would still be null, and without setting it here we'd never retry disabling.
+        if (didAttemptRawModeEnable && shared.rawModeOwner === null) {
+          shared.rawModeOwner = this.instanceID;
+        }
+        // rawModeEnabledByManager stays true so future instances can adopt and retry.
+        // Terminal will be restored on process exit anyway.
       }
     }
   }
 
   /**
    * Restore stdin to normal mode and clean up keypress listener.
-   * Removes the keypress event listener, disables raw mode (only if we enabled it),
-   * pauses stdin, and clears the handler reference to prevent memory leaks.
+   * Uses remove-then-check pattern (mirror of add-then-check in attach):
+   * 1. Remove ourselves from attachedInstances first
+   * 2. Check if we're the last (size === 0) to disable raw mode and pause stdin
    *
-   * Note: Raw mode restoration is performed independently of handler cleanup to ensure
-   * raw mode gets disabled even if handler registration failed (preventing broken terminal state).
-   * Pause/resume and keypress listener removal only happen if handler was successfully registered.
+   * Note: Can be called even if keypressHandler is undefined (e.g., during error recovery).
+   * In that case, we still update shared state and attempt terminal restoration if we
+   * were the recorded raw mode owner.
    */
   private restoreStdin(): void {
-    // Track any error that occurs during handler removal so we can rethrow after cleanup
-    // This ensures terminal cleanup happens even if handler removal fails
-    let handlerRemovalError: Error | undefined;
+    const shared = getSharedState();
 
-    // Only perform keypress listener cleanup if a handler was successfully registered
+    // Remove handler if it exists
     if (this.keypressHandler) {
-      // Decrement counter before removing to ensure it's balanced even if removal fails
-      ProcessSignalManager.activeKeypressListeners--;
-
-      // Capture whether this is the last instance BEFORE attempting removal
-      // This ensures terminal cleanup proceeds even if handler removal fails
-      const isLastInstance = ProcessSignalManager.activeKeypressListeners === 0;
-
       try {
-        // Remove this instance's keypress handler
         process.stdin.off('keypress', this.keypressHandler);
-        // Only clear handler reference if removal succeeded
-        // This prevents stale references that would block subsequent attach() calls
-        this.keypressHandler = undefined;
-      } catch (error) {
-        // If removal fails, roll back the counter decrement
-        // Leave this.keypressHandler set so future attempts can retry removal
-        ProcessSignalManager.activeKeypressListeners++;
-        // Capture the error but don't throw yet - we need to complete terminal cleanup first
-        handlerRemovalError = error as Error;
+      } catch {
+        // Best effort - continue with cleanup even if off() fails
+        // This is extremely rare (stdin closed mid-operation)
       }
+      this.keypressHandler = undefined;
+    }
 
-      // Only restore raw mode when last instance detaches AND the class enabled it
-      // This ensures we don't disable raw mode that was enabled by external code
-      // Note: "the class" = any ProcessSignalManager instance, not this specific instance
-      // IMPORTANT: Use captured isLastInstance flag so cleanup runs even if handler removal failed
-      if (isLastInstance && ProcessSignalManager.rawModeEnabledByClass) {
-        try {
-          if (process.stdin.isTTY && process.stdin.isRaw) {
-            process.stdin.setRawMode(false);
-          }
-          // Clear the flag after attempting restoration
-          // If setRawMode wasn't called (stdin not TTY or not raw), that's fine - we've done our cleanup
-          // Only exception handling prevents flag clearing (when setRawMode was called but failed)
-          ProcessSignalManager.rawModeEnabledByClass = false;
-        } catch {
-          // If setRawMode fails, leave the flag set so future instances can try to disable it
-          // This prevents the terminal from being permanently stuck in raw mode
-          // Note: setRawMode failure is extremely rare (stdin closed mid-operation, etc.)
-          // Terminal will be restored on process exit anyway, and there's no better solution
-          // without making detach() async or changing the API to return status
-        }
-      }
+    // Remove this instance from shared state even if we never registered a handler.
+    // (Set.delete is a safe no-op if we weren't attached.)
+    shared.attachedInstances.delete(this.instanceID);
 
-      // Clear our instance tracking flag if we were the one who enabled it
-      if (this.rawModeEnabledByUs) {
-        this.rawModeEnabledByUs = false;
-      }
+    // Re-check ownership AFTER deletion to get accurate state
+    // (avoids race where ownership is transferred to us between capture and deletion)
+    const isLastInstance = shared.attachedInstances.size === 0;
+    const isCurrentOwner = shared.rawModeOwner === this.instanceID;
 
-      // Pause stdin only when last instance detaches
-      // If other instances are still attached, leave stdin running for them
-      // Wrapped in separate try-catch - pause failure shouldn't affect the cleanup already done
-      // IMPORTANT: Use captured isLastInstance flag so cleanup runs even if handler removal failed
-      if (isLastInstance) {
-        try {
-          process.stdin.pause();
-        } catch {
-          // If pause fails, we've still successfully cleaned up the handler and raw mode
-          // The stdin may remain active but this is a rare edge case and won't cause issues
-          // (stdin being active without handlers just means it's doing nothing)
-        }
-      }
-
-      // Now that cleanup is complete, rethrow the handler removal error if one occurred
-      if (handlerRemovalError) {
-        throw handlerRemovalError;
-      }
+    // If we were the raw mode owner but other instances remain, transfer ownership.
+    // Use centralized helper to ensure atomic ownership transfer.
+    if (!isLastInstance && isCurrentOwner && shared.rawModeEnabledByManager) {
+      transferRawModeOwnership(shared, this.instanceID);
     } else if (
-      this.rawModeEnabledByUs &&
-      ProcessSignalManager.rawModeEnabledByClass
+      !isLastInstance &&
+      shared.rawModeOwner !== null &&
+      shared.rawModeEnabledByManager &&
+      !shared.attachedInstances.has(shared.rawModeOwner)
     ) {
-      // Edge case: Raw mode was enabled but handler was never registered (registration failed)
-      // Only disable raw mode if no other instances are still attached
-      // If other instances are attached, they still need raw mode enabled
-      if (ProcessSignalManager.activeKeypressListeners === 0) {
-        try {
-          if (process.stdin.isTTY) {
-            process.stdin.setRawMode(false);
-          }
-          // Clear the flag after attempting restoration
-          // If setRawMode wasn't called (stdin not TTY), that's fine - we've done our cleanup
-          // Only exception handling prevents flag clearing (when setRawMode was called but failed)
-          ProcessSignalManager.rawModeEnabledByClass = false;
-        } catch {
-          // If setRawMode fails, leave the flag set so future instances can try to disable it
-          // This prevents the terminal from being permanently stuck in raw mode
-          // Note: setRawMode failure is extremely rare (stdin closed mid-operation, etc.)
-          // Terminal will be restored on process exit anyway, and there's no better solution
-          // without making detach() async or changing the API to return status
+      // Defensive: if ownership somehow points to a detached instance, re-anchor it.
+      // Find any valid attached instance to take ownership.
+      for (const candidateID of shared.attachedInstances) {
+        if (shared.attachedInstances.has(candidateID)) {
+          shared.rawModeOwner = candidateID;
+          break;
         }
       }
-      this.rawModeEnabledByUs = false;
+    }
+
+    // Restore raw mode when last instance detaches, but only if we are the owner.
+    // Re-check isCurrentOwner as ownership may have been transferred above (shouldn't happen
+    // if isLastInstance is true, but be defensive).
+    if (
+      isLastInstance &&
+      shared.rawModeOwner === this.instanceID &&
+      shared.rawModeEnabledByManager
+    ) {
+      try {
+        if (process.stdin.isTTY && process.stdin.isRaw) {
+          process.stdin.setRawMode(false);
+        }
+        shared.rawModeOwner = null;
+        shared.rawModeEnabledByManager = false;
+      } catch {
+        // If setRawMode fails, leave the owner set so future detaches can retry
+        // Terminal will be restored on process exit anyway
+      }
+    }
+
+    // Pause stdin when last instance detaches
+    if (isLastInstance) {
+      try {
+        process.stdin.pause();
+      } catch {
+        // Best effort - stdin staying active without handlers is harmless
+      }
     }
   }
 }
