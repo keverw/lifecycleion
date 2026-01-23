@@ -90,12 +90,12 @@ The `LogLevel` enum uses numeric values where lower numbers = higher priority:
 
 ```typescript
 enum LogLevel {
-  ERROR = 0,   // Highest priority - always shown
-  WARN = 1,    // Warnings and errors
+  ERROR = 0,   // Critical failures and errors
+  WARN = 1,    // Potential problems or degraded functionality
   NOTICE = 2,  // Important, noteworthy information (not a problem)
-  SUCCESS = 3, // Errors, warnings, notice, info, and success shown
+  SUCCESS = 3, // Positive confirmations of operations
   INFO = 3,    // Same level as SUCCESS (routine operational info)
-  DEBUG = 4,   // Lowest priority - shows everything
+  DEBUG = 4,   // Verbose development and debugging details
   RAW = 99,    // Special: always shown regardless of minLevel
 }
 ```
