@@ -138,6 +138,22 @@ export interface ProcessSignalManagerOptions {
    * @default 'onDebugRequested'
    */
   debugCallbackName?: string;
+
+  /**
+   * Throttle interval in milliseconds for keyboard events (leading-edge rate limiting).
+   * Allows an action to trigger at most once per interval. First press fires immediately,
+   * subsequent presses within the window are ignored.
+   * This prevents accidental double-triggers while allowing predictable repeated actions.
+   *
+   * Note: This only affects keyboard events, not process signals.
+   * Process signals are never throttled as they may come from external sources
+   * that expect immediate handling.
+   *
+   * @default 200 (200ms throttle, allowing 5 triggers per second maximum)
+   * @example 300 // Custom 300ms throttle (3.33 triggers per second max)
+   * @example 0 // Disable throttling entirely
+   */
+  keypressThrottleMS?: number;
 }
 
 /**
@@ -192,6 +208,17 @@ export class ProcessSignalManager {
   private rawModeEnabledByUs = false;
   private _isAttached = false;
 
+  // Throttle state for keyboard events (default 200ms, 0 disables)
+  // Track throttle separately per action type so different keys don't interfere with each other
+  // Use -Infinity to ensure first press is never throttled (always fires immediately)
+  private keypressThrottleMS: number;
+  private lastActionTimes = {
+    shutdown: -Infinity,
+    reload: -Infinity,
+    info: -Infinity,
+    debug: -Infinity,
+  };
+
   constructor(options: ProcessSignalManagerOptions) {
     this.onShutdownRequested = options.onShutdownRequested;
     this.onReloadRequested = options.onReloadRequested;
@@ -202,6 +229,8 @@ export class ProcessSignalManager {
     this.reloadCallbackName = options.reloadCallbackName ?? 'onReloadRequested';
     this.infoCallbackName = options.infoCallbackName ?? 'onInfoRequested';
     this.debugCallbackName = options.debugCallbackName ?? 'onDebugRequested';
+    // Default to 200ms throttle (leading-edge rate limiting), 0 disables
+    this.keypressThrottleMS = options.keypressThrottleMS ?? 200;
 
     // Initialize shutdown signal handlers if callback is provided (not yet registered with process)
     // These will be registered when listen() is called
@@ -406,6 +435,35 @@ export class ProcessSignalManager {
   }
 
   /**
+   * Check if an action should be throttled based on the last time it was successfully triggered.
+   * Uses leading-edge throttle: first press fires immediately, subsequent presses within the
+   * throttle window are ignored. Only updates timestamp when action is allowed (not throttled).
+   *
+   * This is the standard pattern for keyboard shortcuts and prevents accidental double-triggers
+   * while allowing predictable repeated actions at a maximum rate.
+   *
+   * @param action - The action type to check throttling for
+   * @returns true if the action should be throttled (ignored), false otherwise
+   */
+  private shouldThrottle(action: keyof typeof this.lastActionTimes): boolean {
+    if (this.keypressThrottleMS <= 0) {
+      return false; // Throttling disabled
+    }
+
+    const now = Date.now();
+    const timeSinceLastTrigger = now - this.lastActionTimes[action];
+
+    if (timeSinceLastTrigger < this.keypressThrottleMS) {
+      return true; // Throttled - too soon after last successful trigger
+    }
+
+    // Only update timestamp when allowing the action (leading-edge throttle)
+    // This allows predictable rate limiting: action can fire at most once per interval
+    this.lastActionTimes[action] = now;
+    return false;
+  }
+
+  /**
    * Register handlers for all shutdown signals (SIGINT, SIGTERM, SIGTRAP) if callback is provided.
    * Each signal will trigger the shutdown callback with the appropriate method.
    */
@@ -540,6 +598,10 @@ export class ProcessSignalManager {
 
         // Handle Ctrl+C manually (if shutdown handler is registered)
         if (keyObj.ctrl && keyName === 'c' && this.onShutdownRequested) {
+          if (this.shouldThrottle('shutdown')) {
+            return;
+          }
+
           safeHandleCallback(
             this.shutdownCallbackName,
             this.onShutdownRequested,
@@ -548,6 +610,10 @@ export class ProcessSignalManager {
         }
         // Treat escape as a SIGINT signal (if shutdown handler is registered)
         else if (keyName === 'escape' && this.onShutdownRequested) {
+          if (this.shouldThrottle('shutdown')) {
+            return;
+          }
+
           safeHandleCallback(
             this.shutdownCallbackName,
             this.onShutdownRequested,
@@ -556,14 +622,26 @@ export class ProcessSignalManager {
         }
         // Handle R key for reload (case-insensitive)
         else if (keyName === 'r' && this.onReloadRequested) {
+          if (this.shouldThrottle('reload')) {
+            return;
+          }
+
           safeHandleCallback(this.reloadCallbackName, this.onReloadRequested);
         }
         // Handle I key for info (case-insensitive)
         else if (keyName === 'i' && this.onInfoRequested) {
+          if (this.shouldThrottle('info')) {
+            return;
+          }
+
           safeHandleCallback(this.infoCallbackName, this.onInfoRequested);
         }
         // Handle D key for debug (case-insensitive)
         else if (keyName === 'd' && this.onDebugRequested) {
+          if (this.shouldThrottle('debug')) {
+            return;
+          }
+
           safeHandleCallback(this.debugCallbackName, this.onDebugRequested);
         }
       };
@@ -575,12 +653,6 @@ export class ProcessSignalManager {
         // Register this instance's keypress handler
         // Note: Multiple instances can coexist - each gets its own handler, all receive the same keypresses
         process.stdin.on('keypress', this.keypressHandler);
-
-        // Resume stdin only when first instance attaches (counter becomes 1)
-        // If other instances are already attached (counter > 1), stdin is already resumed
-        if (ProcessSignalManager.activeKeypressListeners === 1) {
-          process.stdin.resume();
-        }
       } catch (error) {
         // If registration fails, roll back the counter increment and clear the handler
         // Clearing the handler prevents restoreStdin() from decrementing the counter again
@@ -588,6 +660,34 @@ export class ProcessSignalManager {
         ProcessSignalManager.activeKeypressListeners--;
         this.keypressHandler = undefined;
         throw error;
+      }
+
+      // Resume stdin only when first instance attaches (counter becomes 1)
+      // If other instances are already attached (counter > 1), stdin is already resumed
+      // Wrapped in separate try-catch so handler registration isn't rolled back if resume fails
+      if (ProcessSignalManager.activeKeypressListeners === 1) {
+        try {
+          process.stdin.resume();
+        } catch (error) {
+          // If resume fails, clean up the handler we just registered
+          // This keeps the state consistent - if we can't resume, we shouldn't leave a dangling handler
+          ProcessSignalManager.activeKeypressListeners--;
+
+          try {
+            process.stdin.off('keypress', this.keypressHandler);
+            // Only clear handler reference if removal succeeded
+            // If off() throws, we leave the reference so restoreStdin() can retry removal later
+            this.keypressHandler = undefined;
+          } catch {
+            // Handler removal failed - increment counter back to maintain consistency
+            // Leave this.keypressHandler set so restoreStdin() can attempt removal later
+            ProcessSignalManager.activeKeypressListeners++;
+            // Throw the original resume error, not the off() error, since that's the root cause
+            throw error;
+          }
+
+          throw error;
+        }
       }
     }
   }
@@ -602,53 +702,77 @@ export class ProcessSignalManager {
    * Pause/resume and keypress listener removal only happen if handler was successfully registered.
    */
   private restoreStdin(): void {
+    // Track any error that occurs during handler removal so we can rethrow after cleanup
+    // This ensures terminal cleanup happens even if handler removal fails
+    let handlerRemovalError: Error | undefined;
+
     // Only perform keypress listener cleanup if a handler was successfully registered
     if (this.keypressHandler) {
       // Decrement counter before removing to ensure it's balanced even if removal fails
       ProcessSignalManager.activeKeypressListeners--;
 
+      // Capture whether this is the last instance BEFORE attempting removal
+      // This ensures terminal cleanup proceeds even if handler removal fails
+      const isLastInstance = ProcessSignalManager.activeKeypressListeners === 0;
+
       try {
         // Remove this instance's keypress handler
         process.stdin.off('keypress', this.keypressHandler);
-
-        // Only restore raw mode when last instance detaches AND the class enabled it
-        // This ensures we don't disable raw mode that was enabled by external code
-        // Note: "the class" = any ProcessSignalManager instance, not this specific instance
-        if (
-          ProcessSignalManager.activeKeypressListeners === 0 &&
-          ProcessSignalManager.rawModeEnabledByClass
-        ) {
-          try {
-            if (process.stdin.isTTY && process.stdin.isRaw) {
-              process.stdin.setRawMode(false);
-              // Only clear the flag if setRawMode succeeded
-              // If it failed, we still control raw mode and need to track it
-              ProcessSignalManager.rawModeEnabledByClass = false;
-            }
-          } catch {
-            // If setRawMode fails, leave the flag set so future instances can try to disable it
-            // This prevents the terminal from being permanently stuck in raw mode
-          }
-        }
-
-        // Clear our instance tracking flag if we were the one who enabled it
-        if (this.rawModeEnabledByUs) {
-          this.rawModeEnabledByUs = false;
-        }
-
-        // Pause stdin only when last instance detaches (counter becomes 0)
-        // If other instances are still attached (counter > 0), leave stdin running for them
-        if (ProcessSignalManager.activeKeypressListeners === 0) {
-          process.stdin.pause();
-        }
-      } catch (error) {
-        // If removal fails, roll back the counter decrement
-        ProcessSignalManager.activeKeypressListeners++;
-        throw error;
-      } finally {
-        // Always clear the handler reference, even if an exception occurred
+        // Only clear handler reference if removal succeeded
         // This prevents stale references that would block subsequent attach() calls
         this.keypressHandler = undefined;
+      } catch (error) {
+        // If removal fails, roll back the counter decrement
+        // Leave this.keypressHandler set so future attempts can retry removal
+        ProcessSignalManager.activeKeypressListeners++;
+        // Capture the error but don't throw yet - we need to complete terminal cleanup first
+        handlerRemovalError = error as Error;
+      }
+
+      // Only restore raw mode when last instance detaches AND the class enabled it
+      // This ensures we don't disable raw mode that was enabled by external code
+      // Note: "the class" = any ProcessSignalManager instance, not this specific instance
+      // IMPORTANT: Use captured isLastInstance flag so cleanup runs even if handler removal failed
+      if (isLastInstance && ProcessSignalManager.rawModeEnabledByClass) {
+        try {
+          if (process.stdin.isTTY && process.stdin.isRaw) {
+            process.stdin.setRawMode(false);
+          }
+          // Clear the flag after attempting restoration
+          // If setRawMode wasn't called (stdin not TTY or not raw), that's fine - we've done our cleanup
+          // Only exception handling prevents flag clearing (when setRawMode was called but failed)
+          ProcessSignalManager.rawModeEnabledByClass = false;
+        } catch {
+          // If setRawMode fails, leave the flag set so future instances can try to disable it
+          // This prevents the terminal from being permanently stuck in raw mode
+          // Note: setRawMode failure is extremely rare (stdin closed mid-operation, etc.)
+          // Terminal will be restored on process exit anyway, and there's no better solution
+          // without making detach() async or changing the API to return status
+        }
+      }
+
+      // Clear our instance tracking flag if we were the one who enabled it
+      if (this.rawModeEnabledByUs) {
+        this.rawModeEnabledByUs = false;
+      }
+
+      // Pause stdin only when last instance detaches
+      // If other instances are still attached, leave stdin running for them
+      // Wrapped in separate try-catch - pause failure shouldn't affect the cleanup already done
+      // IMPORTANT: Use captured isLastInstance flag so cleanup runs even if handler removal failed
+      if (isLastInstance) {
+        try {
+          process.stdin.pause();
+        } catch {
+          // If pause fails, we've still successfully cleaned up the handler and raw mode
+          // The stdin may remain active but this is a rare edge case and won't cause issues
+          // (stdin being active without handlers just means it's doing nothing)
+        }
+      }
+
+      // Now that cleanup is complete, rethrow the handler removal error if one occurred
+      if (handlerRemovalError) {
+        throw handlerRemovalError;
       }
     } else if (
       this.rawModeEnabledByUs &&
@@ -661,13 +785,17 @@ export class ProcessSignalManager {
         try {
           if (process.stdin.isTTY) {
             process.stdin.setRawMode(false);
-            // Only clear the flag if setRawMode succeeded
-            // If it failed, we still control raw mode and need to track it
-            ProcessSignalManager.rawModeEnabledByClass = false;
           }
+          // Clear the flag after attempting restoration
+          // If setRawMode wasn't called (stdin not TTY), that's fine - we've done our cleanup
+          // Only exception handling prevents flag clearing (when setRawMode was called but failed)
+          ProcessSignalManager.rawModeEnabledByClass = false;
         } catch {
           // If setRawMode fails, leave the flag set so future instances can try to disable it
           // This prevents the terminal from being permanently stuck in raw mode
+          // Note: setRawMode failure is extremely rare (stdin closed mid-operation, etc.)
+          // Terminal will be restored on process exit anyway, and there's no better solution
+          // without making detach() async or changing the API to return status
         }
       }
       this.rawModeEnabledByUs = false;

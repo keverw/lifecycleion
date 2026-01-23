@@ -20,6 +20,7 @@ A robust process signal and keyboard event manager. This utility provides a unif
   - [Async Handlers](#async-handlers)
   - [Custom Callback Names](#custom-callback-names)
   - [Reload-Only Manager](#reload-only-manager)
+  - [Debouncing Keyboard Events](#debouncing-keyboard-events)
   - [Adding Info and Debug Handlers](#adding-info-and-debug-handlers)
 - [API](#api)
   - [`constructor(options: ProcessSignalManagerOptions)`](#constructoroptions-processsignalmanageroptions)
@@ -330,6 +331,63 @@ manager.attach();
 // Shutdown signals (SIGINT, SIGTERM, SIGTRAP) will not be handled
 ```
 
+### Throttling Keyboard Events
+
+Keyboard events are throttled by default (200ms) to prevent accidental double-triggers:
+
+```typescript
+// Default: 200ms throttle is applied automatically
+const manager = new ProcessSignalManager({
+  onShutdownRequested: handleShutdown,
+  onReloadRequested: handleReload,
+});
+
+// If user accidentally double-presses R quickly, only the first press triggers reload
+```
+
+You can customize the throttle interval:
+
+```typescript
+const manager = new ProcessSignalManager({
+  onShutdownRequested: handleShutdown,
+  onReloadRequested: handleReload,
+  keypressThrottleMS: 500, // Longer throttle for expensive operations
+});
+```
+
+Or disable throttling entirely:
+
+```typescript
+const manager = new ProcessSignalManager({
+  onShutdownRequested: handleShutdown,
+  onReloadRequested: handleReload,
+  keypressThrottleMS: 0, // No throttling - every keypress triggers immediately
+});
+```
+
+**How throttling works (leading-edge rate limiting):**
+
+- The first keypress triggers the action immediately
+- Subsequent presses within the 200ms window are ignored
+- You can press again exactly 200ms after each _successful_ trigger
+- This is the standard pattern for keyboard shortcuts and button clicks
+
+**Example timeline:**
+
+- t=0ms: Press 'R' → reload fires, timer starts
+- t=50ms: Press 'R' → blocked (only 50ms since last successful trigger)
+- t=150ms: Press 'R' → blocked (only 150ms since last successful trigger)
+- t=200ms: Press 'R' → **fires** (200ms window expired from t=0ms)
+- t=250ms: Press 'R' → blocked (only 50ms since trigger at t=200ms)
+- t=400ms: Press 'R' → **fires** (200ms window expired from t=200ms)
+
+**Notes:**
+
+- Throttling only affects keyboard events, never process signals
+- Process signals (sent via `kill -HUP <pid>`, etc.) are always processed immediately
+- The default 200ms is similar to typical UI throttle values for keyboard shortcuts
+- Allows predictable repeated actions at a maximum rate (e.g., reload at most 5 times per second)
+
 ### Adding Info and Debug Handlers
 
 For runtime introspection and debugging:
@@ -406,6 +464,14 @@ Creates a new ProcessSignalManager instance.
   - `debugCallbackName?`: `string` **(optional)**
     - Custom name for the debug callback used in error reporting
     - Default: `'onDebugRequested'`
+  - `keypressThrottleMS?`: `number` **(optional)**
+    - Throttle interval in milliseconds for keyboard events (uses leading-edge rate limiting)
+    - Allows an action to trigger at most once per interval
+    - First press fires immediately, subsequent presses within the window are ignored
+    - Prevents accidental double-triggers while allowing predictable repeated actions
+    - Only affects keyboard events, not process signals (signals are never throttled)
+    - Set to `0` to disable throttling entirely
+    - Default: `200` (200ms, allowing 5 triggers per second maximum)
 
 **Returns:** `ProcessSignalManager` instance
 
@@ -659,7 +725,39 @@ serverManager.attach();
 - ✅ **Raw mode**: Stays enabled as long as any instance is attached
 - ✅ **Clean lifecycle**: Each instance can attach/detach independently
 
-**Note:** With multiple instances, pressing `R` would trigger the reload callback in **all** attached instances. This is technically correct behavior but may not be desired. Most applications should use a single global instance.
+### Important: Shared Keypress Behavior
+
+**All attached instances receive every keypress.** When you press a key like `R`, `I`, or `D`:
+
+1. Every attached instance with the corresponding handler will invoke its callback
+2. There is no coordination between instances - callbacks run concurrently
+3. If callbacks are async, multiple async operations may run in parallel without synchronization
+
+This is by design to ensure all registered handlers respond to events, but it has implications:
+
+```typescript
+// Example: Both reload callbacks fire when R is pressed
+const manager1 = new ProcessSignalManager({
+  onReloadRequested: () => console.log('Manager 1 reloading'),
+});
+const manager2 = new ProcessSignalManager({
+  onReloadRequested: () => console.log('Manager 2 reloading'),
+});
+
+manager1.attach();
+manager2.attach();
+
+// Pressing R will print BOTH:
+// "Manager 1 reloading"
+// "Manager 2 reloading"
+```
+
+**Recommendations for multi-instance usage:**
+
+- Use a **single global instance** when possible - this is simpler and avoids duplicate callback execution
+- If you need multiple instances, ensure their callbacks are idempotent or coordinate externally
+- Consider using throttling (`keypressThrottleMS`) to prevent rapid accidental triggers
+- For async callbacks, implement your own guards against concurrent execution if needed
 
 **Demo:** See `scripts/demo-multiple-instances.ts` for a working example of multiple concurrent instances.
 
