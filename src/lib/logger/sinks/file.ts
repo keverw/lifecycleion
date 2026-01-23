@@ -407,6 +407,15 @@ export class FileSink implements LogSink {
     try {
       await fsPromises.mkdir(this.logDir, { recursive: true });
 
+      // Explicitly create the file if it doesn't exist to avoid race conditions
+      // This ensures the file exists on disk before we try to read it in tests
+      try {
+        await fsPromises.access(currentLogFile);
+      } catch {
+        // File doesn't exist, create it
+        await fsPromises.writeFile(currentLogFile, '', { flag: 'a' });
+      }
+
       this.logFileStream = fs.createWriteStream(currentLogFile, { flags: 'a' });
       this.currentLogFile = currentLogFile;
 
