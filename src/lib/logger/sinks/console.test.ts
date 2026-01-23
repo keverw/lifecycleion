@@ -1,6 +1,7 @@
 import { describe, test, expect, beforeEach, afterEach, spyOn } from 'bun:test';
 import { ConsoleSink } from './console';
 import type { LogEntry } from '../types';
+import { LogLevel } from '../types';
 
 describe('ConsoleSink', () => {
   // Spy on console methods
@@ -266,7 +267,7 @@ describe('ConsoleSink', () => {
   });
 
   test('should handle all log types correctly', () => {
-    const sink = new ConsoleSink();
+    const sink = new ConsoleSink({ minLevel: LogLevel.DEBUG });
 
     const types: Array<LogEntry['type']> = [
       'error',
@@ -274,6 +275,7 @@ describe('ConsoleSink', () => {
       'warn',
       'success',
       'note',
+      'debug',
       'raw',
     ];
 
@@ -293,7 +295,7 @@ describe('ConsoleSink', () => {
     expect(consoleErrorSpy).toHaveBeenCalledTimes(1);
     expect(consoleInfoSpy).toHaveBeenCalledTimes(1);
     expect(consoleWarnSpy).toHaveBeenCalledTimes(1);
-    expect(consoleLogSpy).toHaveBeenCalledTimes(3); // success, note, raw
+    expect(consoleLogSpy).toHaveBeenCalledTimes(4); // success, note, debug, raw
   });
 
   test('should format message with all options enabled', () => {
@@ -497,5 +499,134 @@ describe('ConsoleSink', () => {
 
     expect(consoleLogSpy).toHaveBeenCalled();
     expect(consoleLogSpy.mock.calls[0][0]).toContain('Note message');
+  });
+
+  test('should write debug message to console.log', () => {
+    const sink = new ConsoleSink({ minLevel: LogLevel.DEBUG });
+
+    const entry: LogEntry = {
+      timestamp: Date.now(),
+      type: 'debug',
+      serviceName: 'DebugService',
+      template: 'Debug message',
+      message: 'Debug message',
+    };
+
+    sink.write(entry);
+
+    expect(consoleLogSpy).toHaveBeenCalled();
+    const call = consoleLogSpy.mock.calls[0];
+    expect(call[0]).toContain('Debug message');
+  });
+
+  test('should filter out debug logs by default', () => {
+    const sink = new ConsoleSink();
+
+    const entry: LogEntry = {
+      timestamp: Date.now(),
+      type: 'debug',
+      serviceName: 'DebugService',
+      template: 'Debug message',
+      message: 'Debug message',
+    };
+
+    sink.write(entry);
+
+    expect(consoleLogSpy).not.toHaveBeenCalled();
+  });
+
+  test('should filter logs based on minLevel', () => {
+    const sink = new ConsoleSink({ minLevel: LogLevel.WARN });
+
+    const errorEntry: LogEntry = {
+      timestamp: Date.now(),
+      type: 'error',
+      serviceName: 'Test',
+      template: 'Error',
+      message: 'Error',
+    };
+
+    const warnEntry: LogEntry = {
+      timestamp: Date.now(),
+      type: 'warn',
+      serviceName: 'Test',
+      template: 'Warn',
+      message: 'Warn',
+    };
+
+    const infoEntry: LogEntry = {
+      timestamp: Date.now(),
+      type: 'info',
+      serviceName: 'Test',
+      template: 'Info',
+      message: 'Info',
+    };
+
+    const debugEntry: LogEntry = {
+      timestamp: Date.now(),
+      type: 'debug',
+      serviceName: 'Test',
+      template: 'Debug',
+      message: 'Debug',
+    };
+
+    sink.write(errorEntry);
+    sink.write(warnEntry);
+    sink.write(infoEntry);
+    sink.write(debugEntry);
+
+    expect(consoleErrorSpy).toHaveBeenCalledTimes(1);
+    expect(consoleWarnSpy).toHaveBeenCalledTimes(1);
+    expect(consoleInfoSpy).not.toHaveBeenCalled();
+    expect(consoleLogSpy).not.toHaveBeenCalled();
+  });
+
+  test('should allow changing minLevel dynamically', () => {
+    const sink = new ConsoleSink({ minLevel: LogLevel.INFO });
+
+    const debugEntry: LogEntry = {
+      timestamp: Date.now(),
+      type: 'debug',
+      serviceName: 'Test',
+      template: 'Debug',
+      message: 'Debug',
+    };
+
+    sink.write(debugEntry);
+    expect(consoleLogSpy).not.toHaveBeenCalled();
+
+    sink.setMinLevel(LogLevel.DEBUG);
+    sink.write(debugEntry);
+    expect(consoleLogSpy).toHaveBeenCalledTimes(1);
+  });
+
+  test('should get current minLevel', () => {
+    const sink = new ConsoleSink({ minLevel: LogLevel.WARN });
+
+    expect(sink.getMinLevel()).toBe(LogLevel.WARN);
+
+    sink.setMinLevel(LogLevel.DEBUG);
+    expect(sink.getMinLevel()).toBe(LogLevel.DEBUG);
+  });
+
+  test('should default to INFO level', () => {
+    const sink = new ConsoleSink();
+
+    expect(sink.getMinLevel()).toBe(LogLevel.INFO);
+  });
+
+  test('should always show raw logs regardless of minLevel', () => {
+    const sink = new ConsoleSink({ minLevel: LogLevel.ERROR });
+
+    const rawEntry: LogEntry = {
+      timestamp: Date.now(),
+      type: 'raw',
+      serviceName: 'Test',
+      template: 'Raw',
+      message: 'Raw',
+    };
+
+    sink.write(rawEntry);
+    expect(consoleLogSpy).toHaveBeenCalled();
   });
 });

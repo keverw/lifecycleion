@@ -2,6 +2,7 @@ import { describe, test, expect, mock, beforeEach, afterEach } from 'bun:test';
 import { promises as fsPromises } from 'fs';
 import { FileSink } from './file';
 import type { LogEntry } from '../types';
+import { LogLevel } from '../types';
 import { TmpDir } from '../../tmp-dir';
 
 let tmpDir: TmpDir;
@@ -601,5 +602,205 @@ describe('FileSink', () => {
       const content = await fsPromises.readFile(logFilePath, 'utf8');
       expect(content).not.toContain('Should not be written');
     }
+  });
+
+  test('should filter out debug logs by default', async () => {
+    const sink = new FileSink({
+      logDir: tmpDir.path,
+      basename: 'debug-test',
+      maxSizeMB: 1,
+      jsonFormat: false,
+    });
+
+    const debugEntry: LogEntry = {
+      timestamp: Date.now(),
+      type: 'debug',
+      serviceName: 'DebugTest',
+      template: 'Debug message',
+      message: 'Debug message',
+    };
+
+    const infoEntry: LogEntry = {
+      timestamp: Date.now(),
+      type: 'info',
+      serviceName: 'InfoTest',
+      template: 'Info message',
+      message: 'Info message',
+    };
+
+    sink.write(debugEntry);
+    sink.write(infoEntry);
+
+    await sink.flush();
+
+    const currentDate = new Date().toISOString().slice(0, 10);
+    const logFilePath = `${tmpDir.path}/debug-test-${currentDate}.log`;
+
+    const content = await fsPromises.readFile(logFilePath, 'utf8');
+    expect(content).not.toContain('Debug message');
+    expect(content).toContain('Info message');
+
+    await sink.close();
+  });
+
+  test('should write debug logs when minLevel is DEBUG', async () => {
+    const sink = new FileSink({
+      logDir: tmpDir.path,
+      basename: 'debug-enabled',
+      maxSizeMB: 1,
+      jsonFormat: false,
+      minLevel: LogLevel.DEBUG,
+    });
+
+    const debugEntry: LogEntry = {
+      timestamp: Date.now(),
+      type: 'debug',
+      serviceName: 'DebugTest',
+      template: 'Debug message',
+      message: 'Debug message',
+    };
+
+    sink.write(debugEntry);
+
+    await sink.flush();
+
+    const currentDate = new Date().toISOString().slice(0, 10);
+    const logFilePath = `${tmpDir.path}/debug-enabled-${currentDate}.log`;
+
+    const content = await fsPromises.readFile(logFilePath, 'utf8');
+    expect(content).toContain('Debug message');
+
+    await sink.close();
+  });
+
+  test('should filter logs based on minLevel', async () => {
+    const sink = new FileSink({
+      logDir: tmpDir.path,
+      basename: 'level-filter',
+      maxSizeMB: 1,
+      jsonFormat: false,
+      minLevel: LogLevel.WARN,
+    });
+
+    const errorEntry: LogEntry = {
+      timestamp: Date.now(),
+      type: 'error',
+      serviceName: 'Test',
+      template: 'Error message',
+      message: 'Error message',
+    };
+
+    const warnEntry: LogEntry = {
+      timestamp: Date.now(),
+      type: 'warn',
+      serviceName: 'Test',
+      template: 'Warn message',
+      message: 'Warn message',
+    };
+
+    const infoEntry: LogEntry = {
+      timestamp: Date.now(),
+      type: 'info',
+      serviceName: 'Test',
+      template: 'Info message',
+      message: 'Info message',
+    };
+
+    const debugEntry: LogEntry = {
+      timestamp: Date.now(),
+      type: 'debug',
+      serviceName: 'Test',
+      template: 'Debug message',
+      message: 'Debug message',
+    };
+
+    sink.write(errorEntry);
+    sink.write(warnEntry);
+    sink.write(infoEntry);
+    sink.write(debugEntry);
+
+    await sink.flush();
+
+    const currentDate = new Date().toISOString().slice(0, 10);
+    const logFilePath = `${tmpDir.path}/level-filter-${currentDate}.log`;
+
+    const content = await fsPromises.readFile(logFilePath, 'utf8');
+    expect(content).toContain('Error message');
+    expect(content).toContain('Warn message');
+    expect(content).not.toContain('Info message');
+    expect(content).not.toContain('Debug message');
+
+    await sink.close();
+  });
+
+  test('should allow changing minLevel dynamically', async () => {
+    const sink = new FileSink({
+      logDir: tmpDir.path,
+      basename: 'dynamic-level',
+      maxSizeMB: 1,
+      jsonFormat: false,
+      minLevel: LogLevel.INFO,
+    });
+
+    const debugEntry: LogEntry = {
+      timestamp: Date.now(),
+      type: 'debug',
+      serviceName: 'Test',
+      template: 'Debug message 1',
+      message: 'Debug message 1',
+    };
+
+    sink.write(debugEntry);
+    await sink.flush();
+
+    const currentDate = new Date().toISOString().slice(0, 10);
+    const logFilePath = `${tmpDir.path}/dynamic-level-${currentDate}.log`;
+
+    let content = await fsPromises.readFile(logFilePath, 'utf8');
+    expect(content).not.toContain('Debug message 1');
+
+    sink.setMinLevel(LogLevel.DEBUG);
+
+    const debugEntry2: LogEntry = {
+      timestamp: Date.now(),
+      type: 'debug',
+      serviceName: 'Test',
+      template: 'Debug message 2',
+      message: 'Debug message 2',
+    };
+
+    sink.write(debugEntry2);
+    await sink.flush();
+
+    content = await fsPromises.readFile(logFilePath, 'utf8');
+    expect(content).toContain('Debug message 2');
+
+    await sink.close();
+  });
+
+  test('should get current minLevel', () => {
+    const sink = new FileSink({
+      logDir: tmpDir.path,
+      basename: 'get-level',
+      maxSizeMB: 1,
+      jsonFormat: false,
+      minLevel: LogLevel.WARN,
+    });
+
+    expect(sink.getMinLevel()).toBe(LogLevel.WARN);
+
+    sink.setMinLevel(LogLevel.DEBUG);
+    expect(sink.getMinLevel()).toBe(LogLevel.DEBUG);
+  });
+
+  test('should default to INFO level', () => {
+    const sink = new FileSink({
+      logDir: tmpDir.path,
+      basename: 'default-level',
+      maxSizeMB: 1,
+      jsonFormat: false,
+    });
+
+    expect(sink.getMinLevel()).toBe(LogLevel.INFO);
   });
 });

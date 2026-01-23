@@ -1,7 +1,51 @@
 /**
+ * Log level enum for filtering logs by severity
+ * Lower numbers = more important/higher priority
+ * Higher numbers = less important/lower priority
+ */
+export enum LogLevel {
+  ERROR = 0,
+  WARN = 1,
+  SUCCESS = 2,
+  INFO = 2,
+  NOTE = 2,
+  DEBUG = 3,
+  RAW = 99,
+}
+
+/**
  * Log level types
  */
-export type LogType = 'error' | 'info' | 'warn' | 'success' | 'note' | 'raw';
+export type LogType =
+  | 'error'
+  | 'info'
+  | 'warn'
+  | 'success'
+  | 'note'
+  | 'debug'
+  | 'raw';
+
+/**
+ * Maps a LogType to its corresponding LogLevel
+ */
+export function getLogLevel(type: LogType): LogLevel {
+  switch (type) {
+    case 'error':
+      return LogLevel.ERROR;
+    case 'warn':
+      return LogLevel.WARN;
+    case 'info':
+      return LogLevel.INFO;
+    case 'success':
+      return LogLevel.SUCCESS;
+    case 'note':
+      return LogLevel.NOTE;
+    case 'debug':
+      return LogLevel.DEBUG;
+    case 'raw':
+      return LogLevel.RAW;
+  }
+}
 
 /**
  * Options for log methods

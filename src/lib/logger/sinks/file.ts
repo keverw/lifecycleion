@@ -1,5 +1,6 @@
 import fs, { promises as fsPromises } from 'fs';
 import type { LogEntry, LogSink } from '../types';
+import { LogLevel, getLogLevel } from '../types';
 
 export interface FileSinkOptions {
   logDir: string;
@@ -8,6 +9,7 @@ export interface FileSinkOptions {
   jsonFormat?: boolean;
   maxRetries?: number;
   closeTimeoutMs?: number;
+  minLevel?: LogLevel;
   onError?: (
     error: Error,
     entry: LogEntry,
@@ -58,6 +60,7 @@ export class FileSink implements LogSink {
   private maxSizeMB: number;
   private jsonFormat: boolean;
   private maxRetries: number;
+  private minLevel: LogLevel;
   private onError?: (
     error: Error,
     entry: LogEntry,
@@ -86,6 +89,7 @@ export class FileSink implements LogSink {
     this.jsonFormat = options.jsonFormat ?? false;
     this.maxRetries = options.maxRetries ?? 3;
     this.closeTimeoutMs = options.closeTimeoutMs ?? 30000;
+    this.minLevel = options.minLevel ?? LogLevel.INFO;
     this.onError = options.onError;
 
     // Initialize asynchronously
@@ -97,6 +101,14 @@ export class FileSink implements LogSink {
       return;
     }
 
+    // Check if log level is below minimum threshold (skip for raw logs)
+    if (entry.type !== 'raw') {
+      const logLevel = getLogLevel(entry.type);
+      if (logLevel > this.minLevel) {
+        return;
+      }
+    }
+
     // Add to queue with retry tracking
     this.writeQueue.push({ entry, attempts: 0 });
 
@@ -106,6 +118,20 @@ export class FileSink implements LogSink {
     } else if (this.initPromise) {
       void this.initPromise.then(() => this.processQueue());
     }
+  }
+
+  /**
+   * Set the minimum log level for this sink
+   */
+  public setMinLevel(level: LogLevel): void {
+    this.minLevel = level;
+  }
+
+  /**
+   * Get the current minimum log level
+   */
+  public getMinLevel(): LogLevel {
+    return this.minLevel;
   }
 
   /**

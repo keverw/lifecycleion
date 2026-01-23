@@ -1,5 +1,6 @@
 import { format } from 'date-fns';
 import type { LogEntry, LogSink } from '../types';
+import { LogLevel, getLogLevel } from '../types';
 import { colorize } from '../utils/color';
 
 export interface ConsoleSinkOptions {
@@ -7,6 +8,7 @@ export interface ConsoleSinkOptions {
   timestamps?: boolean;
   typeLabels?: boolean;
   muted?: boolean;
+  minLevel?: LogLevel;
 }
 
 /**
@@ -18,12 +20,14 @@ export class ConsoleSink implements LogSink {
   private typeLabels: boolean;
   private closed = false;
   private muted: boolean;
+  private minLevel: LogLevel;
 
   constructor(options: ConsoleSinkOptions = {}) {
     this.colors = options.colors ?? true;
     this.timestamps = options.timestamps ?? false;
     this.typeLabels = options.typeLabels ?? false;
     this.muted = options.muted ?? false;
+    this.minLevel = options.minLevel ?? LogLevel.INFO;
   }
 
   public write(entry: LogEntry): void {
@@ -31,10 +35,16 @@ export class ConsoleSink implements LogSink {
       return;
     }
 
-    // Raw type - no formatting
+    // Raw type - no formatting and always shown
     if (entry.type === 'raw') {
       // eslint-disable-next-line no-console
       console.log(entry.message);
+      return;
+    }
+
+    // Check if log level is below minimum threshold (after raw check)
+    const logLevel = getLogLevel(entry.type);
+    if (logLevel > this.minLevel) {
       return;
     }
 
@@ -98,6 +108,7 @@ export class ConsoleSink implements LogSink {
           break;
         case 'success':
         case 'note':
+        case 'debug':
           if (style) {
             // eslint-disable-next-line no-console
             console.log(coloredText, style);
@@ -124,11 +135,26 @@ export class ConsoleSink implements LogSink {
           break;
         case 'success':
         case 'note':
+        case 'debug':
           // eslint-disable-next-line no-console
           console.log(formattedMessage);
           break;
       }
     }
+  }
+
+  /**
+   * Set the minimum log level for this sink
+   */
+  public setMinLevel(level: LogLevel): void {
+    this.minLevel = level;
+  }
+
+  /**
+   * Get the current minimum log level
+   */
+  public getMinLevel(): LogLevel {
+    return this.minLevel;
   }
 
   /**

@@ -55,6 +55,13 @@ describe('Logger', () => {
       expect(arraySink.logs[0].type).toBe('note');
     });
 
+    test('should log debug message', () => {
+      logger.debug('Debug info');
+
+      expect(arraySink.logs.length).toBe(1);
+      expect(arraySink.logs[0].type).toBe('debug');
+    });
+
     test('should log raw message', () => {
       logger.raw('Raw output');
 
@@ -330,15 +337,17 @@ describe('Logger', () => {
       service.warn('Warning');
       service.success('Success');
       service.note('Note');
+      service.debug('Debug');
       service.raw('Raw');
 
-      expect(arraySink.logs.length).toBe(6);
+      expect(arraySink.logs.length).toBe(7);
       expect(arraySink.logs.map((l) => l.type)).toEqual([
         'error',
         'info',
         'warn',
         'success',
         'note',
+        'debug',
         'raw',
       ]);
     });
