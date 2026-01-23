@@ -14,15 +14,15 @@ console.log('Multiple ProcessSignalManager Instances Demo');
 console.log('='.repeat(60));
 console.log();
 
-let dbShutdownCalled = false;
-let serverShutdownCalled = false;
+let didDatabaseShutdown = false;
+let didServerShutdown = false;
 
 // Instance 1: Database manager
 const dbManager = new ProcessSignalManager({
   onShutdownRequested: (method) => {
     console.log(`[DB Manager] Shutdown requested via ${method}`);
     console.log('[DB Manager] Closing database connections...');
-    dbShutdownCalled = true;
+    didDatabaseShutdown = true;
   },
   onInfoRequested: () => {
     console.log('[DB Manager] Database stats:');
@@ -36,7 +36,7 @@ const serverManager = new ProcessSignalManager({
   onShutdownRequested: (method) => {
     console.log(`[HTTP Server] Shutdown requested via ${method}`);
     console.log('[HTTP Server] Closing server and active connections...');
-    serverShutdownCalled = true;
+    didServerShutdown = true;
   },
   onInfoRequested: () => {
     console.log('[HTTP Server] Server stats:');
@@ -92,8 +92,8 @@ console.log();
 
 // Verify both received the signal
 console.log('Results:');
-console.log(`  DB Manager shutdown called: ${dbShutdownCalled}`);
-console.log(`  Server Manager shutdown called: ${serverShutdownCalled}`);
+console.log(`  DB Manager shutdown called: ${didDatabaseShutdown}`);
+console.log(`  Server Manager shutdown called: ${didServerShutdown}`);
 console.log();
 
 // Cleanup

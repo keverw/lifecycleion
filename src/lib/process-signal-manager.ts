@@ -927,7 +927,7 @@ export class ProcessSignalManager {
     }
 
     // Restore raw mode when last instance detaches, but only if we are the owner.
-    // Re-check isCurrentOwner as ownership may have been transferred above (shouldn't happen
+    // Re-check isCurrentOwner as ownership may have been transferred above (shouldn't happen)
     // if isLastInstance is true, but be defensive).
     if (
       isLastInstance &&

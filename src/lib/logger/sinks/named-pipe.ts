@@ -18,7 +18,7 @@ export enum PipeErrorType {
 export interface NamedPipeSinkOptions {
   pipePath: string;
   jsonFormat?: boolean;
-  closeTimeoutMs?: number;
+  closeTimeoutMS?: number;
   onError?: (errorType: PipeErrorType, error: Error, pipePath: string) => void;
   formatter?: (entry: LogEntry) => string;
 }
@@ -48,14 +48,14 @@ export class NamedPipeSink implements LogSink {
   private initPromise: Promise<void>;
   private closing = false;
   private closed = false;
-  private closeTimeoutMs: number;
+  private closeTimeoutMS: number;
 
   constructor(options: NamedPipeSinkOptions) {
     this.pipePath = options.pipePath;
     this.jsonFormat = options.jsonFormat ?? false;
     this.onError = options.onError;
     this.formatter = options.formatter;
-    this.closeTimeoutMs = options.closeTimeoutMs ?? 30000;
+    this.closeTimeoutMS = options.closeTimeoutMS ?? 30000;
 
     this.initPromise = this.initializePipe();
   }
@@ -124,7 +124,7 @@ export class NamedPipeSink implements LogSink {
     // Wait for initialization with timeout
     await Promise.race([
       this.initPromise,
-      new Promise<void>((resolve) => setTimeout(resolve, this.closeTimeoutMs)),
+      new Promise<void>((resolve) => setTimeout(resolve, this.closeTimeoutMS)),
     ]);
 
     this.closed = true;

@@ -15,7 +15,6 @@ interface CurlyBracketsFunction {
  * @returns - The processed string with placeholders replaced by their corresponding values.
  */
 
-// eslint-disable-next-line @typescript-eslint/naming-convention
 const CurlyBrackets: CurlyBracketsFunction = function (
   str: string = '',
   locals: Record<string, unknown> = {},

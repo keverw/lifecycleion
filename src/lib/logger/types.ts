@@ -8,7 +8,8 @@ export enum LogLevel {
   WARN = 1,
   NOTICE = 2, // Normal but significant condition
   SUCCESS = 3,
-  INFO = 3,
+  // eslint-disable-next-line @typescript-eslint/no-duplicate-enum-values
+  INFO = 3, // Same level as SUCCESS (routine operational info)
   DEBUG = 4,
   RAW = 99,
 }

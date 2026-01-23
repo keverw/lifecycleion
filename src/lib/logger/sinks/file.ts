@@ -8,7 +8,7 @@ export interface FileSinkOptions {
   maxSizeMB?: number;
   jsonFormat?: boolean;
   maxRetries?: number;
-  closeTimeoutMs?: number;
+  closeTimeoutMS?: number;
   minLevel?: LogLevel;
   onError?: (
     error: Error,
@@ -80,7 +80,7 @@ export class FileSink implements LogSink {
   private totalEntriesFailed = 0;
   private closing = false;
   private closed = false;
-  private closeTimeoutMs: number;
+  private closeTimeoutMS: number;
 
   constructor(options: FileSinkOptions) {
     this.logDir = options.logDir;
@@ -88,7 +88,7 @@ export class FileSink implements LogSink {
     this.maxSizeMB = options.maxSizeMB ?? 10;
     this.jsonFormat = options.jsonFormat ?? false;
     this.maxRetries = options.maxRetries ?? 3;
-    this.closeTimeoutMs = options.closeTimeoutMs ?? 30000;
+    this.closeTimeoutMS = options.closeTimeoutMS ?? 30000;
     this.minLevel = options.minLevel ?? LogLevel.INFO;
     this.onError = options.onError;
 
@@ -150,9 +150,9 @@ export class FileSink implements LogSink {
   /**
    * Flush all pending writes and wait for completion
    * Returns statistics about the flush operation
-   * @param timeoutMs Maximum time to wait in milliseconds (default: 30000ms / 30s)
+   * @param timeoutMS Maximum time to wait in milliseconds (default: 30000ms / 30s)
    */
-  public async flush(timeoutMs: number = 30000): Promise<FlushResult> {
+  public async flush(timeoutMS: number = 30000): Promise<FlushResult> {
     // Wait for initialization
     if (this.initPromise) {
       await this.initPromise;
@@ -164,7 +164,7 @@ export class FileSink implements LogSink {
 
     // Wait for queue to finish processing with timeout
     while (this.writeQueue.length > 0 || this.isProcessing) {
-      if (Date.now() - startTime > timeoutMs) {
+      if (Date.now() - startTime > timeoutMS) {
         // Timeout reached
         const entriesWritten = this.totalEntriesWritten - startWritten;
         const entriesFailed = this.totalEntriesFailed - startFailed;
@@ -204,14 +204,14 @@ export class FileSink implements LogSink {
       await Promise.race([
         this.initPromise,
         new Promise<void>((resolve) =>
-          setTimeout(resolve, this.closeTimeoutMs),
+          setTimeout(resolve, this.closeTimeoutMS),
         ),
       ]);
     }
 
     // Wait for queue to finish processing with timeout
     while (this.writeQueue.length > 0 || this.isProcessing) {
-      if (Date.now() - startTime > this.closeTimeoutMs) {
+      if (Date.now() - startTime > this.closeTimeoutMS) {
         break;
       }
       await new Promise((resolve) => setTimeout(resolve, 10));

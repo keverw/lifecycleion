@@ -692,7 +692,7 @@ new FileSink({
   maxSizeMB: 10, // Rotate at 10MB (default: 10)
   jsonFormat: true, // Use JSON format (default: false)
   maxRetries: 3, // Retry failed writes (default: 3)
-  closeTimeoutMs: 30000, // Timeout for close() in ms (default: 30000)
+  closeTimeoutMS: 30000, // Timeout for close() in ms (default: 30000)
   minLevel: LogLevel.INFO, // Minimum log level to write (default: INFO)
   onError: (error, entry, attempt, willRetry) => {
     console.error(
@@ -827,7 +827,7 @@ import { NamedPipeSink, PipeErrorType } from '@/lib/logger';
 const pipeSink = new NamedPipeSink({
   pipePath: '/tmp/app_logs',
   jsonFormat: true,
-  closeTimeoutMs: 30000, // Timeout for close() in ms (default: 30000)
+  closeTimeoutMS: 30000, // Timeout for close() in ms (default: 30000)
   onError: (errorType, err, pipePath) => {
     console.error(`Pipe error (${errorType}) for ${pipePath}:`, err.message);
     // Optionally attempt to reconnect
