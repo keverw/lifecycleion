@@ -6,6 +6,8 @@ A modern, flexible logging library with sink-based architecture, template string
 
 - **Sink-Based Architecture**: Write logs to multiple destinations simultaneously (console, files, named pipes, custom sinks)
 - **Dynamic Sink Management**: Add, remove, and query sinks at runtime
+- **Log Level Filtering**: Filter logs by severity on a per-sink basis with dynamic control
+- **Debug Mode**: Separate debug log type with gray color, filtered by default
 - **Template Strings**: Use `{{variable}}` syntax for dynamic log messages
 - **Redaction**: Built-in support for masking sensitive data (passwords, API keys, etc.)
 - **Tags**: Categorize and filter logs with optional string tags
@@ -47,6 +49,94 @@ logger.warn('Warning message');
 logger.error('Error message');
 logger.success('Operation successful');
 logger.note('Important note');
+logger.debug('Debug information'); // Filtered by default
+```
+
+### Log Level Filtering
+
+Control which log levels are output on a per-sink basis using the `LogLevel` enum:
+
+```typescript
+import { Logger, ConsoleSink, LogLevel } from '@/lib/logger';
+
+// Default behavior: INFO level (shows ERROR, WARN, SUCCESS, INFO, NOTE)
+const consoleSink = new ConsoleSink();
+const logger = new Logger({ sinks: [consoleSink] });
+
+logger.error('Error message'); // ✓ Shown
+logger.warn('Warning message'); // ✓ Shown
+logger.info('Info message'); // ✓ Shown
+logger.success('Success message'); // ✓ Shown
+logger.note('Note message'); // ✓ Shown
+logger.debug('Debug message'); // ✗ Hidden (filtered out)
+
+// Enable debug mode to see all logs
+consoleSink.setMinLevel(LogLevel.DEBUG);
+logger.debug('Now this debug message shows!'); // ✓ Shown
+
+// Set to only show errors and warnings
+consoleSink.setMinLevel(LogLevel.WARN);
+logger.error('Error shown'); // ✓ Shown
+logger.warn('Warning shown'); // ✓ Shown
+logger.info('Info hidden'); // ✗ Hidden
+
+// Check current level
+console.log(consoleSink.getMinLevel()); // LogLevel.WARN
+```
+
+#### Log Levels
+
+The `LogLevel` enum uses numeric values where lower numbers = higher priority:
+
+```typescript
+enum LogLevel {
+  ERROR = 0,   // Highest priority - always shown
+  WARN = 1,    // Warnings and errors
+  SUCCESS = 2, // Success, info, note, warnings, and errors
+  INFO = 2,    // Same level as SUCCESS and NOTE
+  NOTE = 2,    // Same level as SUCCESS and INFO
+  DEBUG = 3,   // Lowest priority - shows everything
+  RAW = 99,    // Special: always shown regardless of minLevel
+}
+```
+
+When you set `minLevel` to a specific level, all logs at that level **and higher priority** (lower numbers) are shown:
+
+- `LogLevel.ERROR` → Only errors
+- `LogLevel.WARN` → Errors and warnings
+- `LogLevel.INFO` → Errors, warnings, success, info, and note messages (default)
+- `LogLevel.DEBUG` → Everything including debug messages
+
+**Note:** `RAW` logs are always output regardless of the `minLevel` setting, as they're intended for unformatted output that bypasses filtering.
+
+#### Per-Sink Filtering
+
+Different sinks can have different log levels:
+
+```typescript
+import { FileSink, ConsoleSink, LogLevel } from '@/lib/logger';
+
+const consoleSink = new ConsoleSink({
+  minLevel: LogLevel.INFO, // Console shows INFO and above
+});
+
+const fileSink = new FileSink({
+  logDir: './logs',
+  basename: 'debug',
+  minLevel: LogLevel.DEBUG, // File captures everything including debug
+});
+
+const logger = new Logger({
+  sinks: [consoleSink, fileSink],
+});
+
+logger.debug('Debug info');
+// Console: ✗ Not shown
+// File: ✓ Written
+
+logger.info('Important info');
+// Console: ✓ Shown
+// File: ✓ Written
 ```
 
 ### Exit Codes
@@ -435,15 +525,41 @@ worker2.error('Task failed', { tags: ['error', 'retry'] });
 
 ### ConsoleSink
 
-Writes logs to the console with optional colors, timestamps, and type labels.
+Writes logs to the console with optional colors, timestamps, type labels, and log level filtering.
 
 ```typescript
+import { ConsoleSink, LogLevel } from '@/lib/logger';
+
 new ConsoleSink({
   colors: true, // Enable colors (default: true)
   timestamps: true, // Show timestamps (default: false)
   typeLabels: true, // Show [ERROR], [INFO], etc. (default: false)
   muted: false, // Start muted (default: false)
+  minLevel: LogLevel.INFO, // Minimum log level to show (default: INFO)
 });
+```
+
+#### Log Level Control
+
+Dynamically change what log levels are shown:
+
+```typescript
+const consoleSink = new ConsoleSink();
+
+// Default is INFO level - debug logs are filtered
+logger.debug('Hidden');
+
+// Enable debug logs
+consoleSink.setMinLevel(LogLevel.DEBUG);
+logger.debug('Now visible!');
+
+// Set to only show errors
+consoleSink.setMinLevel(LogLevel.ERROR);
+logger.warn('Hidden');
+logger.error('Visible');
+
+// Check current level
+const currentLevel = consoleSink.getMinLevel(); // LogLevel.ERROR
 ```
 
 #### Mute/Unmute Control
@@ -526,9 +642,11 @@ service.error('Login failed');
 
 ### FileSink
 
-Writes logs to files with automatic rotation based on size and date.
+Writes logs to files with automatic rotation based on size and date, and log level filtering.
 
 ```typescript
+import { FileSink, LogLevel } from '@/lib/logger';
+
 new FileSink({
   logDir: './logs', // Directory for log files
   basename: 'app', // Base filename (creates app-2024-01-15.log)
@@ -536,6 +654,7 @@ new FileSink({
   jsonFormat: true, // Use JSON format (default: false)
   maxRetries: 3, // Retry failed writes (default: 3)
   closeTimeoutMs: 30000, // Timeout for close() in ms (default: 30000)
+  minLevel: LogLevel.INFO, // Minimum log level to write (default: INFO)
   onError: (error, entry, attempt, willRetry) => {
     console.error(
       `Write failed (attempt ${attempt}/${maxRetries}):`,
@@ -547,6 +666,34 @@ new FileSink({
     }
   },
 });
+```
+
+#### Log Level Control for Files
+
+Control what gets written to log files:
+
+```typescript
+// Create a debug log file that captures everything
+const debugSink = new FileSink({
+  logDir: './logs',
+  basename: 'debug',
+  minLevel: LogLevel.DEBUG, // Capture all logs including debug
+});
+
+// Create an error-only log file
+const errorSink = new FileSink({
+  logDir: './logs',
+  basename: 'errors',
+  minLevel: LogLevel.ERROR, // Only capture errors
+});
+
+const logger = new Logger({
+  sinks: [debugSink, errorSink],
+});
+
+// Dynamically change file sink level
+debugSink.setMinLevel(LogLevel.WARN); // Now only warnings and errors
+console.log(debugSink.getMinLevel()); // LogLevel.WARN
 ```
 
 #### File Naming
@@ -752,11 +899,12 @@ cat /tmp/app_logs
 ```typescript
 // Log levels
 logger.error(message, options?)
-logger.info(message, options?)
 logger.warn(message, options?)
 logger.success(message, options?)
+logger.info(message, options?)
 logger.note(message, options?)
-logger.raw(message, options?)  // No formatting
+logger.debug(message, options?)  // Debug level (filtered by default)
+logger.raw(message, options?)    // No formatting, always shown
 
 // Error objects
 logger.errorObject(prefix, error, options?)
@@ -766,10 +914,11 @@ logger.service(name: string): LoggerService
 
 // LoggerService methods (same as Logger but with service name)
 service.error(message, options?)
-service.info(message, options?)
 service.warn(message, options?)
 service.success(message, options?)
+service.info(message, options?)
 service.note(message, options?)
+service.debug(message, options?)
 service.raw(message, options?)
 service.errorObject(prefix, error, options?)
 service.entity(entityName: string): LoggerService  // Create entity logger
@@ -955,7 +1104,7 @@ Each sink receives a complete `LogEntry`:
 ```typescript
 interface LogEntry {
   timestamp: number; // Unix timestamp in ms
-  type: LogType; // 'error' | 'info' | 'warn' | 'success' | 'note' | 'raw'
+  type: LogType; // 'error' | 'warn' | 'success' | 'info' | 'note' | 'debug' | 'raw'
   serviceName?: string; // Service name (only present when using service logger)
   entityName?: string; // Entity identifier (only present when using entity logger)
   template: string; // Original template: "User {{userID}} logged in"
