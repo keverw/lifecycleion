@@ -209,18 +209,34 @@ await lifecycle.startComponent('database');
 
 Identified but **NOT implemented** to keep changes minimal:
 
-### Option 1: Sync Unregister Variant (MEDIUM effort)
+### ~~Option 1: Sync Unregister Variant~~ (REJECTED by maintainer)
 ```typescript
-// Current: always async
+// Current: always async (CORRECT)
 await lifecycle.unregisterComponent('db');
-
-// Future: sync variant for non-running components
-lifecycle.unregisterComponentSync('db'); // Throws if running
 ```
 
-**Why deferred:** Current API works fine, breaking change would need major version bump.
+**Why rejected:** The async pattern is correct since unregister may need to stop the component. Having two methods would add confusion. TypeScript catches missing `await` anyway.
 
-### Option 2: Return Status in Results (LOW effort)
+### Option 2: Unified Base Result Interface (SUGGESTED by maintainer)
+```typescript
+// Future: Base interface for all results
+interface BaseOperationResult {
+  success: boolean;
+  targetName: string;
+  reason?: string;
+  code?: string;
+  error?: Error;
+}
+
+// All result types extend this
+interface ComponentOperationResult extends BaseOperationResult {
+  componentName: string; // alias for targetName
+}
+```
+
+**Why interesting:** Provides consistency across all operations, enables generic result handlers, reduces type duplication.
+
+### Option 3: Return Status in Results (LOW effort)
 ```typescript
 // Current
 const result = await lifecycle.startComponent('db');
@@ -235,7 +251,7 @@ if (result.status) {
 
 **Why deferred:** Nice-to-have, not critical for v1.0.
 
-### Option 3: Type Naming Polish (LOW effort)
+### Option 4: Type Naming Polish (LOW effort)
 ```typescript
 // Current
 GetValueResult<T>
@@ -263,9 +279,10 @@ ValueResult<T>  // Consistent noun-first pattern
 ### For Future Releases
 
 Consider these enhancements in v1.1+:
-1. Add sync `unregisterComponent()` variant
-2. Include `status` in operation results
-3. Polish type naming (`GetValueResult` → `ValueResult`)
+1. ~~Add sync `unregisterComponent()` variant~~ (Rejected - async is correct)
+2. Consider unified base result interface (Maintainer interested)
+3. Include `status` in operation results
+4. Polish type naming (`GetValueResult` → `ValueResult`)
 
 None of these are blocking - they're polish items.
 

@@ -44,44 +44,16 @@ Developers expect similar operations to have similar async patterns. The inconsi
 
 **Recommendation:**
 
-**Option A (Preferred):** Add sync variant for common case
-```typescript
-// Sync version (throws if running)
-public unregisterComponent(name: string): UnregisterComponentResult {
-  if (this.isComponentRunning(name)) {
-    return { success: false, reason: 'Component is running', ... };
-  }
-  // ... remove from registry
-}
+**✅ ACCEPTED BY MAINTAINER:** Keep async pattern with clear documentation
 
-// Async version (can stop first)
-public async unregisterComponentAsync(
-  name: string, 
-  options?: { stopIfRunning?: boolean }
-): Promise<UnregisterComponentResult> {
-  if (options?.stopIfRunning && this.isComponentRunning(name)) {
-    await this.stopComponent(name);
-  }
-  return this.unregisterComponent(name);
-}
-```
+The async pattern is actually correct since unregister may need to stop the component. Having two methods would be confusing. Better to:
+1. Document clearly that it's async
+2. Accept that registration operations have different patterns based on their side effects
+3. TypeScript will catch if developers forget `await`
 
-**Option B:** Keep async but document prominently
-```typescript
-/**
- * Unregister a component from the registry.
- * 
- * ⚠️ ASYNC METHOD - Must use `await` even if component is not running.
- * 
- * @example
- * await lifecycle.unregisterComponent('database'); // ✓ Must await
- */
-public async unregisterComponent(...)
-```
-
-**Impact:** HIGH - Affects every developer using the API  
-**Effort:** MEDIUM (Option A), LOW (Option B)  
-**Priority:** 🔴 **Fix before v1.0**
+**Impact:** LOW - TypeScript catches missing await, pattern is correct  
+**Effort:** LOW - Documentation only  
+**Priority:** 🟢 **Accept as-is, improve documentation**
 
 ---
 
@@ -437,13 +409,14 @@ The following aspects of the API are **well-designed and should NOT be changed**
 
 | Priority | Issue | Recommendation | Effort |
 |----------|-------|----------------|--------|
-| 🔴 HIGH | Async/sync registration mismatch | Add sync `unregisterComponent()` variant | Medium |
+| ~~🔴 HIGH~~ 🟢 LOW | Async/sync registration mismatch | ~~Add sync variant~~ Accept async pattern, improve docs | Low |
 | 🔴 HIGH | Result type proliferation | Add `code` field to all result types (Option B) | Low |
 | 🟡 MEDIUM | Parameter inconsistency | Add `StopComponentOptions` (even if empty) | Low |
 | 🟡 MEDIUM | Missing return metadata | Add optional `status` to operation results | Low |
 | 🟡 MEDIUM | Error handling documentation | Document 3-pattern strategy in JSDoc | Low |
 | 🟢 LOW | Type naming | Rename `GetValueResult` → `ValueResult` | Low |
 | 🟢 LOW | Query method docs | Add naming convention docs | Low |
+| 💡 NEW | Unified base result interface | Create base interface for all results | Medium |
 
 ---
 
@@ -458,9 +431,10 @@ The following aspects of the API are **well-designed and should NOT be changed**
 3. Add `StopComponentOptions` type even if empty (LOW effort, future-proof)
 
 **Nice to Have (v1.1+):**
-1. Add sync `unregisterComponent()` variant
+1. ~~Add sync `unregisterComponent()` variant~~ (Rejected by maintainer - async pattern is correct)
 2. Add `status` to operation results
 3. Rename `GetValueResult` → `ValueResult`
+4. Consider unified base result interface (Maintainer interested in this)
 
 ---
 

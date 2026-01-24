@@ -41,9 +41,11 @@ if (!result.success) {
 }
 ```
 
-### 2. Exceptions (Programmer Errors)
+### 2. Exceptions (Programmer Errors) - UNDER REVIEW
 
-Invalid input or system errors throw exceptions. These represent **programmer mistakes** or configuration errors that should be fixed in code.
+> **Note from maintainer:** Preference is to NOT throw even for programming errors. This section documents current behavior but may change to return result objects for all failures.
+
+Invalid input or system errors currently throw exceptions. These represent **programmer mistakes** or configuration errors that should be fixed in code.
 
 **When thrown:**
 - Invalid component name format
@@ -65,6 +67,15 @@ try {
   if (err instanceof DependencyCycleError) {
     console.error(`Dependency cycle: ${err.additionalInfo.cycle}`);
   }
+}
+```
+
+**Future direction:** May migrate to result objects for consistency:
+```typescript
+// Potential future API (all failures as results, no exceptions)
+const result = lifecycle.registerComponent(component);
+if (!result.success && result.code === 'dependency_cycle') {
+  console.error(`Dependency cycle: ${result.cycle}`);
 }
 ```
 
@@ -268,6 +279,57 @@ try {
   }
 }
 ```
+
+## Future Direction: Unified Base Result Interface
+
+The maintainer is interested in creating a unified base result interface for consistency across all operations. This would:
+
+1. **Eliminate type proliferation** - Single base interface extended by all operations
+2. **Enable generic handlers** - Write code that works with any result type
+3. **Improve consistency** - All results have the same core fields
+
+**Proposed design:**
+```typescript
+// Base interface for ALL operation results
+interface BaseOperationResult {
+  success: boolean;
+  targetName: string;     // Generic name for the entity
+  reason?: string;        // Human-readable explanation
+  code?: string;          // Machine-readable code
+  error?: Error;          // Underlying error if applicable
+  metadata?: unknown;     // Operation-specific data
+}
+
+// Specific results extend base
+interface ComponentOperationResult extends BaseOperationResult {
+  componentName: string;  // Alias for targetName for backward compatibility
+  // metadata could be: { state?: ComponentState, startedAt?: number }
+}
+
+interface RegisterComponentResult extends BaseOperationResult {
+  componentName: string;
+  metadata: {
+    action: 'register';
+    registrationIndex: number;
+    startupOrder: string[];
+  };
+}
+
+// Generic result handler
+function handleResult<T extends BaseOperationResult>(result: T): void {
+  if (!result.success) {
+    console.error(`${result.targetName} failed: ${result.reason} (${result.code})`);
+  }
+}
+```
+
+**Benefits:**
+- Consistent error handling patterns
+- Less TypeScript type duplication
+- Easier to understand and predict API behavior
+- Generic utility functions possible
+
+**Implementation effort:** MEDIUM (requires refactoring existing types, but maintains backward compatibility through field aliases)
 
 ## Migration Notes
 
