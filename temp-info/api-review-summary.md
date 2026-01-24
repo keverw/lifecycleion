@@ -20,16 +20,19 @@
 
 ## Changes Implemented ✅
 
-### 1. Result Object Consistency
-- Added `code` field to `UnregisterComponentResult` for programmatic error handling
-- Added `error` field for error propagation
-- Machine-readable codes: `component_not_found`, `component_running`, `stop_failed`
+### 1. Result Object Simplification
+- Removed redundant `reason` field from all result objects
+- Kept only `code` field for machine-readable error codes
+- Codes are descriptive enough (e.g., `component_not_found`, `component_running`, `stop_failed`)
+- Added `error` field for underlying error details when available
 
 ```typescript
 const result = await lifecycle.unregisterComponent('db');
-if (!result.success && result.code === 'component_running') {
-  // Pass UnregisterOptions with stopIfRunning flag
-  await lifecycle.unregisterComponent('db', { stopIfRunning: true });
+if (!result.success) {
+  console.error(`Failed: ${result.code}`); // e.g., "component_running"
+  if (result.code === 'component_running') {
+    await lifecycle.unregisterComponent('db', { stopIfRunning: true });
+  }
 }
 ```
 
@@ -60,9 +63,8 @@ Create consistent base for all result types:
 interface BaseOperationResult {
   success: boolean;
   targetName: string;     // Generic entity name
-  reason?: string;        // Human-readable explanation
-  code?: string;          // Machine-readable code
-  error?: Error;          // Underlying error
+  code?: string;          // Machine-readable error code
+  error?: Error;          // Underlying error details
   metadata?: unknown;     // Operation-specific data
 }
 
@@ -85,6 +87,7 @@ interface RegisterComponentResult extends BaseOperationResult {
 - Enables generic result handlers
 - Improves API predictability
 - Reduces TypeScript duplication
+- Clean interface with only `code` for errors (no redundant `reason`)
 
 **Effort:** MEDIUM (requires refactoring existing types, maintains backward compatibility via aliases)
 

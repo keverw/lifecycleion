@@ -95,9 +95,6 @@ export interface ComponentOperationResult {
   /** Component name */
   componentName: string;
 
-  /** Human-readable explanation if !success */
-  reason?: string;
-
   /** Machine-readable failure code if !success */
   code?: ComponentOperationFailureCode;
 
@@ -175,9 +172,6 @@ export interface UnregisterComponentResult {
 
   /** Component name */
   componentName: string;
-
-  /** Human-readable explanation if !success */
-  reason?: string;
 
   /** Machine-readable failure code if !success */
   code?: UnregisterFailureCode;
@@ -460,9 +454,6 @@ export interface RegistrationResultBase {
   /** Component name */
   componentName: string;
 
-  /** Human-readable explanation if !success */
-  reason?: string;
-
   /** Machine-readable failure code if !success */
   code?: RegistrationFailureCode;
 
@@ -493,9 +484,6 @@ export interface StartupOrderResult {
 
   /** Resolved startup order after applying dependency constraints */
   startupOrder: string[];
-
-  /** Human-readable explanation if !success */
-  reason?: string;
 
   /** Machine-readable failure code if !success */
   code?: StartupOrderFailureCode;
