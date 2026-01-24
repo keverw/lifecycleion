@@ -8,6 +8,8 @@ import type {
   ComponentStallInfo,
   ComponentOperationResult,
   StartComponentOptions,
+  StopComponentOptions,
+  RestartComponentOptions,
   LifecycleManagerOptions,
   RegisterOptions,
   RegisterComponentResult,
@@ -460,6 +462,7 @@ export class LifecycleManager extends EventEmitterProtected {
         success: false,
         componentName: name,
         reason: 'Component not found',
+        code: 'component_not_found',
         wasStopped: false,
         wasRegistered: false,
       };
@@ -479,6 +482,7 @@ export class LifecycleManager extends EventEmitterProtected {
         componentName: name,
         reason:
           'Component is running. Use stopIfRunning option or stop manually first',
+        code: 'component_running',
         wasStopped: false,
         wasRegistered: true,
       };
@@ -513,6 +517,8 @@ export class LifecycleManager extends EventEmitterProtected {
           success: false,
           componentName: name,
           reason: stopResult.reason ?? 'Failed to stop component',
+          code: 'stop_failed',
+          error: stopResult.error,
           wasStopped: false,
           wasRegistered: true,
         };
@@ -871,8 +877,13 @@ export class LifecycleManager extends EventEmitterProtected {
 
   /**
    * Stop a specific component
+  /**
+   * Stop a single component
    */
-  public async stopComponent(name: string): Promise<ComponentOperationResult> {
+  public async stopComponent(
+    name: string,
+    _options?: StopComponentOptions,
+  ): Promise<ComponentOperationResult> {
     const component = this.getComponent(name);
 
     if (!component) {
@@ -1029,9 +1040,10 @@ export class LifecycleManager extends EventEmitterProtected {
    */
   public async restartComponent(
     name: string,
+    options?: RestartComponentOptions,
   ): Promise<ComponentOperationResult> {
     // First stop the component
-    const stopResult = await this.stopComponent(name);
+    const stopResult = await this.stopComponent(name, options?.stopOptions);
 
     if (!stopResult.success) {
       return {
@@ -1044,7 +1056,7 @@ export class LifecycleManager extends EventEmitterProtected {
     }
 
     // Then start it
-    const startResult = await this.startComponent(name);
+    const startResult = await this.startComponent(name, options?.startOptions);
 
     if (!startResult.success) {
       return {

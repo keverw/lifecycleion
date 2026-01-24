@@ -117,6 +117,31 @@ export interface StartComponentOptions {
 }
 
 /**
+ * Options for manually stopping a component
+ * 
+ * Currently empty but reserved for future options like:
+ * - skipWarningPhase?: boolean
+ * - forceImmediate?: boolean
+ * - timeout?: number
+ */
+export interface StopComponentOptions {
+  // Reserved for future use
+}
+
+/**
+ * Options for restarting a component (stop + start)
+ * 
+ * Combines options for both stop and start phases.
+ */
+export interface RestartComponentOptions {
+  /** Options for the stop phase */
+  stopOptions?: StopComponentOptions;
+  
+  /** Options for the start phase */
+  startOptions?: StartComponentOptions;
+}
+
+/**
  * Stable, machine-readable failure codes for individual component operations
  */
 export type ComponentOperationFailureCode =
@@ -134,6 +159,14 @@ export type ComponentOperationFailureCode =
   | 'unknown_error';
 
 /**
+ * Failure codes for unregister operations
+ */
+export type UnregisterFailureCode =
+  | 'component_not_found'
+  | 'component_running'
+  | 'stop_failed';
+
+/**
  * Result of unregistering a component
  */
 export interface UnregisterComponentResult {
@@ -145,6 +178,12 @@ export interface UnregisterComponentResult {
 
   /** Human-readable explanation if !success */
   reason?: string;
+
+  /** Machine-readable failure code if !success */
+  code?: UnregisterFailureCode;
+
+  /** Underlying error if applicable */
+  error?: Error;
 
   /** Whether the component was stopped before unregistering */
   wasStopped: boolean;
