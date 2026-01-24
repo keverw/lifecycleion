@@ -87,7 +87,7 @@ export type ShutdownMethod = 'manual' | 'SIGINT' | 'SIGTERM' | 'SIGTRAP';
 
 /**
  * Base interface for all operation results
- * 
+ *
  * Provides consistent structure across all operations with common fields
  * for success status, error handling, and optional component status.
  */
@@ -151,13 +151,13 @@ export interface StopComponentOptions {
 
 /**
  * Options for restarting a component (stop + start)
- * 
+ *
  * Combines options for both stop and start phases.
  */
 export interface RestartComponentOptions {
   /** Options for the stop phase */
   stopOptions?: StopComponentOptions;
-  
+
   /** Options for the start phase */
   startOptions?: StartComponentOptions;
 }
@@ -169,6 +169,7 @@ export type ComponentOperationFailureCode =
   | 'component_not_found'
   | 'component_already_running'
   | 'component_already_starting'
+  | 'component_already_stopping'
   | 'component_not_running'
   | 'missing_dependency'
   | 'dependency_not_running'

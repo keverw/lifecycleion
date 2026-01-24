@@ -1089,6 +1089,43 @@ describe('LifecycleManager - Phase 2: Core Registration & Individual Lifecycle',
       expect(lifecycle.isComponentRunning('test')).toBe(true);
     });
 
+    test('stopComponent should reject concurrent stops while stopping', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+      let stopCalls = 0;
+      let resolveStop: (() => void) | undefined;
+
+      class SlowStopComponent extends BaseComponent {
+        public start(): Promise<void> {
+          return Promise.resolve();
+        }
+
+        public stop(): Promise<void> {
+          stopCalls += 1;
+          return new Promise<void>((resolve) => {
+            resolveStop = resolve;
+          });
+        }
+      }
+
+      const component = new SlowStopComponent(logger, { name: 'test' });
+      lifecycle.registerComponent(component);
+      await lifecycle.startComponent('test');
+
+      const firstStopPromise = lifecycle.stopComponent('test');
+      const secondResult = await lifecycle.stopComponent('test');
+
+      expect(secondResult.success).toBe(false);
+      expect(secondResult.reason).toBe('Component is already stopping');
+      expect(secondResult.code).toBe('component_already_stopping');
+      expect(stopCalls).toBe(1);
+
+      resolveStop?.();
+      const firstResult = await firstStopPromise;
+
+      expect(firstResult.success).toBe(true);
+      expect(lifecycle.isComponentRunning('test')).toBe(false);
+    });
+
     test('stopComponent should call component.stop() and update state', async () => {
       const lifecycle = new LifecycleManager({ logger });
       const component = new TestComponent(logger, { name: 'test' });
@@ -1267,6 +1304,44 @@ describe('LifecycleManager - Phase 2: Core Registration & Individual Lifecycle',
       const status = lifecycle.getComponentStatus('failing');
       const definedStatus = requireDefined(status, 'status');
       expect(definedStatus.state).toBe('stalled');
+      const stallInfo = requireDefined(definedStatus.stallInfo, 'stallInfo');
+      expect(stallInfo.reason).toBe('error');
+    });
+
+    test('stopComponent with forceImmediate should mark as stalled when onShutdownForce throws', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      class FailingForceStopComponent extends BaseComponent {
+        public start(): Promise<void> {
+          return Promise.resolve();
+        }
+        public stop(): Promise<void> {
+          return Promise.resolve();
+        }
+        public onShutdownForce(): void {
+          throw new Error('Force stop error');
+        }
+      }
+
+      const component = new FailingForceStopComponent(logger, {
+        name: 'failing-force',
+      });
+
+      lifecycle.registerComponent(component);
+      await lifecycle.startComponent('failing-force');
+
+      const result = await lifecycle.stopComponent('failing-force', {
+        forceImmediate: true,
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.error?.message).toBe('Force stop error');
+      expect(result.code).toBe('unknown_error');
+
+      const status = lifecycle.getComponentStatus('failing-force');
+      const definedStatus = requireDefined(status, 'status');
+      expect(definedStatus.state).toBe('stalled');
+      expect(lifecycle.isComponentRunning('failing-force')).toBe(false);
       const stallInfo = requireDefined(definedStatus.stallInfo, 'stallInfo');
       expect(stallInfo.reason).toBe('error');
     });
@@ -1611,6 +1686,914 @@ describe('LifecycleManager - Phase 2: Core Registration & Individual Lifecycle',
         'failedStopStatus',
       );
       expect(failedStopStatus.state).toBe('stalled');
+    });
+  });
+});
+
+describe('LifecycleManager - Phase 3: Bulk Operations', () => {
+  let logger: Logger;
+  let arraySink: ArraySink;
+
+  beforeEach(() => {
+    arraySink = new ArraySink();
+    logger = new Logger({
+      sinks: [arraySink],
+      callProcessExit: false,
+    });
+  });
+
+  describe('startAllComponents()', () => {
+    test('should start all components in registration order', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      const startOrder: string[] = [];
+
+      class OrderedComponent extends BaseComponent {
+        public start(): Promise<void> {
+          startOrder.push(this.getName());
+          return Promise.resolve();
+        }
+        public stop(): Promise<void> {
+          return Promise.resolve();
+        }
+      }
+
+      lifecycle.registerComponent(
+        new OrderedComponent(logger, { name: 'first' }),
+      );
+      lifecycle.registerComponent(
+        new OrderedComponent(logger, { name: 'second' }),
+      );
+      lifecycle.registerComponent(
+        new OrderedComponent(logger, { name: 'third' }),
+      );
+
+      const result = await lifecycle.startAllComponents();
+
+      expect(result.success).toBe(true);
+      expect(result.startedComponents).toEqual(['first', 'second', 'third']);
+      expect(startOrder).toEqual(['first', 'second', 'third']);
+    });
+
+    test('should reject if partial state (some already running)', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      lifecycle.registerComponent(new TestComponent(logger, { name: 'comp1' }));
+      lifecycle.registerComponent(new TestComponent(logger, { name: 'comp2' }));
+
+      // Start one component manually
+      await lifecycle.startComponent('comp1');
+
+      // Try to start all - should fail
+      const result = await lifecycle.startAllComponents();
+
+      expect(result.success).toBe(false);
+      expect(result.startedComponents).toEqual(['comp1']); // Only comp1 was running
+    });
+
+    test('should return success if all components already running', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      lifecycle.registerComponent(new TestComponent(logger, { name: 'comp1' }));
+      lifecycle.registerComponent(new TestComponent(logger, { name: 'comp2' }));
+
+      // Start all components
+      await lifecycle.startAllComponents();
+
+      // Try to start all again - should succeed with no-op
+      const result = await lifecycle.startAllComponents();
+
+      expect(result.success).toBe(true);
+      expect(result.startedComponents).toEqual(['comp1', 'comp2']);
+    });
+
+    test('should trigger rollback when required component fails', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      const stopOrder: string[] = [];
+
+      class TrackingComponent extends BaseComponent {
+        public start(): Promise<void> {
+          return Promise.resolve();
+        }
+        public stop(): Promise<void> {
+          stopOrder.push(this.getName());
+          return Promise.resolve();
+        }
+      }
+
+      class FailingComponent extends BaseComponent {
+        public start(): Promise<void> {
+          return Promise.reject(new Error('Startup failed'));
+        }
+        public stop(): Promise<void> {
+          stopOrder.push(this.getName());
+          return Promise.resolve();
+        }
+      }
+
+      lifecycle.registerComponent(
+        new TrackingComponent(logger, { name: 'comp1' }),
+      );
+      lifecycle.registerComponent(
+        new TrackingComponent(logger, { name: 'comp2' }),
+      );
+      lifecycle.registerComponent(
+        new FailingComponent(logger, { name: 'failing' }),
+      );
+      lifecycle.registerComponent(
+        new TrackingComponent(logger, { name: 'comp4' }),
+      );
+
+      const result = await lifecycle.startAllComponents();
+
+      expect(result.success).toBe(false);
+      expect(result.startedComponents).toEqual([]);
+      // Rollback should stop comp1 and comp2 in reverse order
+      expect(stopOrder).toEqual(['comp2', 'comp1']);
+    });
+
+    test('should rollback in reverse order', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      const startOrder: string[] = [];
+      const stopOrder: string[] = [];
+
+      class TrackingComponent extends BaseComponent {
+        public start(): Promise<void> {
+          startOrder.push(this.getName());
+          return Promise.resolve();
+        }
+        public stop(): Promise<void> {
+          stopOrder.push(this.getName());
+          return Promise.resolve();
+        }
+      }
+
+      class FailingComponent extends BaseComponent {
+        public start(): Promise<void> {
+          return Promise.reject(new Error('Startup failed'));
+        }
+        public stop(): Promise<void> {
+          return Promise.resolve();
+        }
+      }
+
+      lifecycle.registerComponent(new TrackingComponent(logger, { name: 'a' }));
+      lifecycle.registerComponent(new TrackingComponent(logger, { name: 'b' }));
+      lifecycle.registerComponent(new TrackingComponent(logger, { name: 'c' }));
+      lifecycle.registerComponent(
+        new FailingComponent(logger, { name: 'fail' }),
+      );
+
+      await lifecycle.startAllComponents();
+
+      expect(startOrder).toEqual(['a', 'b', 'c']);
+      expect(stopOrder).toEqual(['c', 'b', 'a']); // Reverse order
+    });
+
+    test('should handle optional components without triggering rollback', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      class FailingComponent extends BaseComponent {
+        public start(): Promise<void> {
+          return Promise.reject(new Error('Optional component failed'));
+        }
+        public stop(): Promise<void> {
+          return Promise.resolve();
+        }
+      }
+
+      lifecycle.registerComponent(new TestComponent(logger, { name: 'comp1' }));
+      lifecycle.registerComponent(
+        new FailingComponent(logger, { name: 'optional', optional: true }),
+      );
+      lifecycle.registerComponent(new TestComponent(logger, { name: 'comp2' }));
+
+      const result = await lifecycle.startAllComponents();
+
+      expect(result.success).toBe(true);
+      expect(result.startedComponents).toEqual(['comp1', 'comp2']);
+      expect(result.failedOptionalComponents).toHaveLength(1);
+      expect(result.failedOptionalComponents[0].name).toBe('optional');
+
+      // Optional component should have 'failed' state
+      const optionalStatus = lifecycle.getComponentStatus('optional');
+      expect(optionalStatus?.state).toBe('failed');
+    });
+
+    test('should handle shutdown signal during startup', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      const stopOrder: string[] = [];
+
+      class SlowComponent extends BaseComponent {
+        public async start(): Promise<void> {
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+        public stop(): Promise<void> {
+          stopOrder.push(this.getName());
+          return Promise.resolve();
+        }
+      }
+
+      lifecycle.registerComponent(new SlowComponent(logger, { name: 'comp1' }));
+      lifecycle.registerComponent(new SlowComponent(logger, { name: 'comp2' }));
+      lifecycle.registerComponent(new SlowComponent(logger, { name: 'comp3' }));
+      lifecycle.registerComponent(new SlowComponent(logger, { name: 'comp4' }));
+
+      // Start all components
+      const startPromise = lifecycle.startAllComponents();
+
+      // Wait a bit for first component to start
+      await new Promise((resolve) => setTimeout(resolve, 25));
+
+      // Trigger shutdown during startup (simulate by setting the flag)
+      // Note: This is a bit hacky for testing, but we're testing the internal behavior
+      (lifecycle as unknown as { isShuttingDown: boolean }).isShuttingDown =
+        true;
+
+      const result = await startPromise;
+
+      expect(result.success).toBe(false);
+      expect(result.startedComponents).toEqual([]);
+      // Should have rolled back started components
+      expect(stopOrder.length).toBeGreaterThan(0);
+    });
+
+    test('should not emit duplicate shutdown events when stopAllComponents() called during startup', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      // Track shutdown events
+      let shutdownInitiatedCount = 0;
+      let shutdownCompletedCount = 0;
+      let wasDuringStartup: boolean | undefined;
+
+      lifecycle.on(
+        'lifecycle-manager:shutdown-initiated',
+        (data: { method: string; duringStartup: boolean }) => {
+          shutdownInitiatedCount++;
+          wasDuringStartup = data.duringStartup;
+        },
+      );
+
+      lifecycle.on('lifecycle-manager:shutdown-completed', () => {
+        shutdownCompletedCount++;
+      });
+
+      class SlowComponent extends BaseComponent {
+        public async start(): Promise<void> {
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+        public stop(): Promise<void> {
+          return Promise.resolve();
+        }
+      }
+
+      lifecycle.registerComponent(new SlowComponent(logger, { name: 'comp1' }));
+      lifecycle.registerComponent(new SlowComponent(logger, { name: 'comp2' }));
+
+      // Start all components
+      const startPromise = lifecycle.startAllComponents();
+
+      // Wait a bit for startup to begin
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      // Call stopAllComponents() during startup
+      const stopPromise = lifecycle.stopAllComponents();
+
+      await Promise.all([startPromise, stopPromise]);
+
+      // Verify shutdown events emitted only once (by stopAllComponents)
+      expect(shutdownInitiatedCount).toBe(1);
+      expect(shutdownCompletedCount).toBe(1);
+      // Verify duringStartup flag is correctly set to true
+      expect(wasDuringStartup).toBe(true);
+    });
+
+    test('should block startup if stalled components exist', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      class FailingStopComponent extends BaseComponent {
+        public start(): Promise<void> {
+          return Promise.resolve();
+        }
+        public stop(): Promise<void> {
+          return Promise.reject(new Error('Stop failed'));
+        }
+      }
+
+      const component = new FailingStopComponent(logger, { name: 'stalled' });
+      lifecycle.registerComponent(component);
+
+      // Start and fail to stop (creates stalled component)
+      await lifecycle.startComponent('stalled');
+      await lifecycle.stopComponent('stalled');
+
+      // Verify component is stalled
+      const status = lifecycle.getComponentStatus('stalled');
+      expect(status?.state).toBe('stalled');
+
+      // Register a new component
+      lifecycle.registerComponent(
+        new TestComponent(logger, { name: 'new-comp' }),
+      );
+
+      // Try to start all - should fail due to stalled component
+      const result = await lifecycle.startAllComponents();
+
+      expect(result.success).toBe(false);
+      expect(result.blockedByStalledComponents).toEqual(['stalled']);
+    });
+
+    test('should allow startup if ignoreStalledComponents option is true', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      class FailingStopComponent extends BaseComponent {
+        public start(): Promise<void> {
+          return Promise.resolve();
+        }
+        public stop(): Promise<void> {
+          return Promise.reject(new Error('Stop failed'));
+        }
+      }
+
+      lifecycle.registerComponent(
+        new FailingStopComponent(logger, { name: 'stalled' }),
+      );
+      lifecycle.registerComponent(
+        new TestComponent(logger, { name: 'new-comp' }),
+      );
+
+      // Create stalled component
+      await lifecycle.startComponent('stalled');
+      await lifecycle.stopComponent('stalled');
+
+      // Try to start all with ignoreStalledComponents
+      const result = await lifecycle.startAllComponents({
+        ignoreStalledComponents: true,
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.startedComponents).toEqual(['new-comp']);
+    });
+
+    test('should emit lifecycle-manager:started event on success', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      lifecycle.registerComponent(new TestComponent(logger, { name: 'comp1' }));
+
+      let wasStartedEventEmitted = false;
+      lifecycle.on('lifecycle-manager:started', () => {
+        wasStartedEventEmitted = true;
+      });
+
+      await lifecycle.startAllComponents();
+
+      expect(wasStartedEventEmitted).toBe(true);
+    });
+
+    test('should emit component:startup-rollback events', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      const rollbackEvents: string[] = [];
+
+      class FailingComponent extends BaseComponent {
+        public start(): Promise<void> {
+          return Promise.reject(new Error('Startup failed'));
+        }
+        public stop(): Promise<void> {
+          return Promise.resolve();
+        }
+      }
+
+      lifecycle.registerComponent(new TestComponent(logger, { name: 'comp1' }));
+      lifecycle.registerComponent(new TestComponent(logger, { name: 'comp2' }));
+      lifecycle.registerComponent(
+        new FailingComponent(logger, { name: 'failing' }),
+      );
+
+      lifecycle.on('component:startup-rollback', (data: { name: string }) => {
+        rollbackEvents.push(data.name);
+      });
+
+      await lifecycle.startAllComponents();
+
+      expect(rollbackEvents).toEqual(['comp2', 'comp1']);
+    });
+
+    test('should return components in consistent registration order across all scenarios', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      // Register components in specific order
+      lifecycle.registerComponent(new TestComponent(logger, { name: 'alpha' }));
+      lifecycle.registerComponent(new TestComponent(logger, { name: 'beta' }));
+      lifecycle.registerComponent(new TestComponent(logger, { name: 'gamma' }));
+
+      // Scenario 1: Start all and verify order
+      const startResult = await lifecycle.startAllComponents();
+      expect(startResult.success).toBe(true);
+      expect(startResult.startedComponents).toEqual(['alpha', 'beta', 'gamma']);
+
+      // Scenario 2: All running - should return same order
+      const alreadyRunningResult = await lifecycle.startAllComponents();
+      expect(alreadyRunningResult.success).toBe(true);
+      expect(alreadyRunningResult.startedComponents).toEqual([
+        'alpha',
+        'beta',
+        'gamma',
+      ]);
+
+      // Scenario 3: Partial state - manually stop one to create partial state
+      await lifecycle.stopComponent('gamma');
+      const partialResult = await lifecycle.startAllComponents();
+      expect(partialResult.success).toBe(false);
+      expect(partialResult.startedComponents).toEqual(['alpha', 'beta']);
+    });
+  });
+
+  describe('stopAllComponents()', () => {
+    test('should stop all components in reverse order', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      const stopOrder: string[] = [];
+
+      class OrderedComponent extends BaseComponent {
+        public start(): Promise<void> {
+          return Promise.resolve();
+        }
+        public stop(): Promise<void> {
+          stopOrder.push(this.getName());
+          return Promise.resolve();
+        }
+      }
+
+      lifecycle.registerComponent(
+        new OrderedComponent(logger, { name: 'first' }),
+      );
+      lifecycle.registerComponent(
+        new OrderedComponent(logger, { name: 'second' }),
+      );
+      lifecycle.registerComponent(
+        new OrderedComponent(logger, { name: 'third' }),
+      );
+
+      await lifecycle.startAllComponents();
+
+      const result = await lifecycle.stopAllComponents();
+
+      expect(result.success).toBe(true);
+      expect(result.stoppedComponents).toEqual(['third', 'second', 'first']);
+      expect(stopOrder).toEqual(['third', 'second', 'first']);
+    });
+
+    test('should continue on errors and track stalled components', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      class FailingStopComponent extends BaseComponent {
+        public start(): Promise<void> {
+          return Promise.resolve();
+        }
+        public stop(): Promise<void> {
+          return Promise.reject(new Error('Stop failed'));
+        }
+      }
+
+      lifecycle.registerComponent(new TestComponent(logger, { name: 'comp1' }));
+      lifecycle.registerComponent(
+        new FailingStopComponent(logger, { name: 'failing' }),
+      );
+      lifecycle.registerComponent(new TestComponent(logger, { name: 'comp2' }));
+
+      await lifecycle.startAllComponents();
+
+      const result = await lifecycle.stopAllComponents();
+
+      expect(result.success).toBe(false); // Not successful due to stalled component
+      expect(result.stoppedComponents).toEqual(['comp2', 'comp1']);
+      expect(result.stalledComponents).toHaveLength(1);
+      expect(result.stalledComponents[0].name).toBe('failing');
+    });
+
+    test('should emit shutdown-initiated and shutdown-completed events', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      lifecycle.registerComponent(new TestComponent(logger, { name: 'comp1' }));
+
+      let wasShutdownInitiatedEmitted = false;
+      let wasShutdownCompletedEmitted = false;
+
+      lifecycle.on('lifecycle-manager:shutdown-initiated', () => {
+        wasShutdownInitiatedEmitted = true;
+      });
+
+      lifecycle.on('lifecycle-manager:shutdown-completed', () => {
+        wasShutdownCompletedEmitted = true;
+      });
+
+      await lifecycle.startAllComponents();
+      await lifecycle.stopAllComponents();
+
+      expect(wasShutdownInitiatedEmitted).toBe(true);
+      expect(wasShutdownCompletedEmitted).toBe(true);
+    });
+
+    test('should reset state flags after completion', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      lifecycle.registerComponent(new TestComponent(logger, { name: 'comp1' }));
+
+      await lifecycle.startAllComponents();
+      await lifecycle.stopAllComponents();
+
+      // After shutdown, isShuttingDown should be false
+      const systemState = lifecycle.getSystemState();
+      expect(systemState).not.toBe('shutting-down');
+    });
+
+    test('should calculate shutdown duration', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      class SlowStopComponent extends BaseComponent {
+        public start(): Promise<void> {
+          return Promise.resolve();
+        }
+        public async stop(): Promise<void> {
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+      }
+
+      lifecycle.registerComponent(
+        new SlowStopComponent(logger, { name: 'slow' }),
+      );
+
+      await lifecycle.startAllComponents();
+
+      const result = await lifecycle.stopAllComponents();
+
+      expect(result.durationMS).toBeGreaterThan(40); // Should take at least 50ms
+    });
+  });
+
+  describe('restartAllComponents()', () => {
+    test('should perform stop then start', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      const events: string[] = [];
+
+      class TrackingComponent extends BaseComponent {
+        public start(): Promise<void> {
+          events.push(`${this.getName()}:start`);
+          return Promise.resolve();
+        }
+        public stop(): Promise<void> {
+          events.push(`${this.getName()}:stop`);
+          return Promise.resolve();
+        }
+      }
+
+      lifecycle.registerComponent(
+        new TrackingComponent(logger, { name: 'comp1' }),
+      );
+      lifecycle.registerComponent(
+        new TrackingComponent(logger, { name: 'comp2' }),
+      );
+
+      await lifecycle.startAllComponents();
+
+      events.length = 0; // Clear events
+
+      const result = await lifecycle.restartAllComponents();
+
+      expect(result.success).toBe(true);
+      expect(result.shutdownResult.success).toBe(true);
+      expect(result.startupResult.success).toBe(true);
+
+      // Should have stop events followed by start events
+      expect(events).toEqual([
+        'comp2:stop',
+        'comp1:stop',
+        'comp1:start',
+        'comp2:start',
+      ]);
+    });
+
+    test('should return combined result', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      lifecycle.registerComponent(new TestComponent(logger, { name: 'comp1' }));
+
+      await lifecycle.startAllComponents();
+
+      const result = await lifecycle.restartAllComponents();
+
+      expect(result).toHaveProperty('shutdownResult');
+      expect(result).toHaveProperty('startupResult');
+      expect(result).toHaveProperty('success');
+      expect(result.success).toBe(
+        result.shutdownResult.success && result.startupResult.success,
+      );
+    });
+
+    test('should handle stalled components in shutdown phase', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      class FailingStopComponent extends BaseComponent {
+        public start(): Promise<void> {
+          return Promise.resolve();
+        }
+        public stop(): Promise<void> {
+          return Promise.reject(new Error('Stop failed'));
+        }
+      }
+
+      lifecycle.registerComponent(
+        new FailingStopComponent(logger, { name: 'failing' }),
+      );
+
+      await lifecycle.startAllComponents();
+
+      const result = await lifecycle.restartAllComponents({
+        ignoreStalledComponents: true,
+      });
+
+      expect(result.shutdownResult.success).toBe(false);
+      expect(result.shutdownResult.stalledComponents).toHaveLength(1);
+      // Startup should still succeed with ignoreStalledComponents
+      expect(result.startupResult.success).toBe(true);
+    });
+  });
+
+  describe('Concurrent Operation Prevention', () => {
+    test('should prevent individual start during bulk startup', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      class SlowComponent extends BaseComponent {
+        public async start(): Promise<void> {
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+        public stop(): Promise<void> {
+          return Promise.resolve();
+        }
+      }
+
+      lifecycle.registerComponent(new SlowComponent(logger, { name: 'comp1' }));
+      lifecycle.registerComponent(new SlowComponent(logger, { name: 'comp2' }));
+      lifecycle.registerComponent(new TestComponent(logger, { name: 'comp3' }));
+
+      // Start all components (will take a while)
+      const startAllPromise = lifecycle.startAllComponents();
+
+      // Wait a bit to ensure bulk startup is in progress
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      // Try to start individual component - should fail
+      const result = await lifecycle.startComponent('comp3');
+
+      expect(result.success).toBe(false);
+      expect(result.code).toBe('shutdown_in_progress'); // Reused code
+
+      await startAllPromise;
+    });
+
+    test('should prevent individual stop during bulk startup', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      class SlowComponent extends BaseComponent {
+        public async start(): Promise<void> {
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+        public stop(): Promise<void> {
+          return Promise.resolve();
+        }
+      }
+
+      lifecycle.registerComponent(new SlowComponent(logger, { name: 'comp1' }));
+      lifecycle.registerComponent(new TestComponent(logger, { name: 'comp2' }));
+
+      // Pre-start comp2
+      await lifecycle.startComponent('comp2');
+      await lifecycle.stopComponent('comp2');
+
+      lifecycle.registerComponent(new SlowComponent(logger, { name: 'comp3' }));
+
+      // Start all components
+      const startAllPromise = lifecycle.startAllComponents();
+
+      // Wait a bit
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      // Try to stop individual component - should fail
+      const result = await lifecycle.stopComponent('comp2');
+
+      expect(result.success).toBe(false);
+      expect(result.code).toBe('shutdown_in_progress');
+
+      await startAllPromise;
+    });
+
+    test('should prevent individual stop during bulk shutdown', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      class SlowStopComponent extends BaseComponent {
+        public start(): Promise<void> {
+          return Promise.resolve();
+        }
+        public async stop(): Promise<void> {
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+      }
+
+      lifecycle.registerComponent(
+        new SlowStopComponent(logger, { name: 'comp1' }),
+      );
+      lifecycle.registerComponent(
+        new SlowStopComponent(logger, { name: 'comp2' }),
+      );
+
+      await lifecycle.startAllComponents();
+
+      // Start shutdown
+      const stopAllPromise = lifecycle.stopAllComponents();
+
+      // Wait a bit to ensure shutdown is in progress
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      // Try to stop individual component - should fail
+      const result = await lifecycle.stopComponent('comp2');
+
+      expect(result.success).toBe(false);
+      expect(result.code).toBe('shutdown_in_progress');
+
+      await stopAllPromise;
+    });
+
+    test('should prevent restart during bulk operations', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      class SlowComponent extends BaseComponent {
+        public async start(): Promise<void> {
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+        public stop(): Promise<void> {
+          return Promise.resolve();
+        }
+      }
+
+      lifecycle.registerComponent(new SlowComponent(logger, { name: 'comp1' }));
+      lifecycle.registerComponent(new SlowComponent(logger, { name: 'comp2' }));
+      lifecycle.registerComponent(new SlowComponent(logger, { name: 'comp3' }));
+
+      // Start all components (will take a while)
+      const startAllPromise = lifecycle.startAllComponents();
+
+      // Wait a bit to ensure bulk startup is in progress
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      // Try to restart individual component - should fail
+      const result = await lifecycle.restartComponent('comp2');
+
+      expect(result.success).toBe(false);
+      expect(result.code).toBe('shutdown_in_progress');
+
+      await startAllPromise;
+    });
+
+    test('should prevent start during shutdown', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      class SlowStopComponent extends BaseComponent {
+        public start(): Promise<void> {
+          return Promise.resolve();
+        }
+        public async stop(): Promise<void> {
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+      }
+
+      lifecycle.registerComponent(
+        new SlowStopComponent(logger, { name: 'comp1' }),
+      );
+      lifecycle.registerComponent(new TestComponent(logger, { name: 'comp2' }));
+
+      await lifecycle.startAllComponents();
+
+      // Start shutdown
+      const stopAllPromise = lifecycle.stopAllComponents();
+
+      // Wait a bit
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      // Try to start individual component - should fail
+      const result = await lifecycle.startComponent('comp2');
+
+      expect(result.success).toBe(false);
+      expect(result.code).toBe('shutdown_in_progress');
+
+      await stopAllPromise;
+    });
+
+    test('should prevent bulk startup during shutdown', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      class SlowStopComponent extends BaseComponent {
+        public start(): Promise<void> {
+          return Promise.resolve();
+        }
+        public async stop(): Promise<void> {
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+      }
+
+      lifecycle.registerComponent(
+        new SlowStopComponent(logger, { name: 'comp1' }),
+      );
+      lifecycle.registerComponent(new TestComponent(logger, { name: 'comp2' }));
+
+      await lifecycle.startAllComponents();
+
+      // Start shutdown
+      const stopAllPromise = lifecycle.stopAllComponents();
+
+      // Wait a bit to ensure shutdown is in progress
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      // Try to start all components - should fail
+      const result = await lifecycle.startAllComponents();
+
+      expect(result.success).toBe(false);
+      expect(result.startedComponents).toEqual([]);
+      expect(result.failedOptionalComponents).toEqual([]);
+      expect(result.skippedDueToDependency).toEqual([]);
+
+      await stopAllPromise;
+    });
+
+    test('should prevent concurrent startAllComponents() calls', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      class SlowComponent extends BaseComponent {
+        public async start(): Promise<void> {
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+        public stop(): Promise<void> {
+          return Promise.resolve();
+        }
+      }
+
+      lifecycle.registerComponent(new SlowComponent(logger, { name: 'comp1' }));
+      lifecycle.registerComponent(new SlowComponent(logger, { name: 'comp2' }));
+
+      // Start first bulk startup
+      const firstStartPromise = lifecycle.startAllComponents();
+
+      // Wait a bit to ensure first startup is in progress
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      // Try to start all components again - should fail
+      const result = await lifecycle.startAllComponents();
+
+      expect(result.success).toBe(false);
+      expect(result.startedComponents).toEqual([]);
+
+      await firstStartPromise;
+    });
+
+    test('should prevent concurrent stopAllComponents() calls', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      class SlowStopComponent extends BaseComponent {
+        public start(): Promise<void> {
+          return Promise.resolve();
+        }
+        public async stop(): Promise<void> {
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+      }
+
+      lifecycle.registerComponent(
+        new SlowStopComponent(logger, { name: 'comp1' }),
+      );
+      lifecycle.registerComponent(
+        new SlowStopComponent(logger, { name: 'comp2' }),
+      );
+
+      await lifecycle.startAllComponents();
+
+      // Start first shutdown
+      const firstStopPromise = lifecycle.stopAllComponents();
+
+      // Wait a bit to ensure first shutdown is in progress
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      // Try to stop all components again - should return success immediately
+      const result = await lifecycle.stopAllComponents();
+
+      expect(result.success).toBe(true);
+      expect(result.stoppedComponents).toEqual([]);
+      expect(result.durationMS).toBe(0);
+
+      await firstStopPromise;
     });
   });
 });

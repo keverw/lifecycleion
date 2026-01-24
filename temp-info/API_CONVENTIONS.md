@@ -11,12 +11,13 @@ The LifecycleManager uses **result objects for all operations** with a consisten
 All async operations return result objects extending `BaseOperationResult`. These represent both successful operations and normal operational failures like "component not found" or "component already running".
 
 **Base Pattern:**
+
 ```typescript
 interface BaseOperationResult {
   success: boolean;
-  reason?: string;        // Human-readable explanation
-  code?: string;          // Machine-readable code for programmatic handling
-  error?: Error;          // Underlying error if applicable
+  reason?: string; // Human-readable explanation
+  code?: string; // Machine-readable code for programmatic handling
+  error?: Error; // Underlying error if applicable
   status?: ComponentStatus; // Component state after operation (when applicable)
 }
 
@@ -27,6 +28,7 @@ interface ComponentOperationResult extends BaseOperationResult {
 ```
 
 **When used:**
+
 - Component not found
 - Component already in desired state
 - Dependencies not met
@@ -35,17 +37,18 @@ interface ComponentOperationResult extends BaseOperationResult {
 - Timeout errors
 
 **Example:**
+
 ```typescript
 const result = await lifecycle.startComponent('database');
 if (!result.success) {
   console.error(`Failed to start: ${result.reason}`);
   console.error(`Error code: ${result.code}`);
-  
+
   // Check component state if available
   if (result.status) {
     console.log(`Current state: ${result.status.state}`);
   }
-  
+
   // Handle specific failures
   if (result.code === 'missing_dependency') {
     // Install missing dependency
@@ -63,6 +66,7 @@ if (result.success && result.status) {
 The only place that throws exceptions is `BaseComponent` constructor validation:
 
 **When thrown:**
+
 - `InvalidComponentNameError` - Component name doesn't match kebab-case pattern
 
 **All lifecycle-manager methods return result objects** - no exceptions are thrown to callers.
@@ -72,10 +76,12 @@ The only place that throws exceptions is `BaseComponent` constructor validation:
 Status and query methods return `undefined` when the requested entity doesn't exist.
 
 **When used:**
+
 - `getComponentStatus(name)` - Returns `undefined` if component not found
 - `getComponent(name)` - Internal method returns `undefined`
 
 **Example:**
+
 ```typescript
 const status = lifecycle.getComponentStatus('database');
 if (status) {
@@ -93,9 +99,9 @@ All result types extend `BaseOperationResult` providing consistent structure:
 ```typescript
 interface BaseOperationResult {
   success: boolean;
-  reason?: string;          // Human-readable explanation
-  code?: string;            // Machine-readable failure code
-  error?: Error;            // Underlying error if applicable
+  reason?: string; // Human-readable explanation
+  code?: string; // Machine-readable failure code
+  error?: Error; // Underlying error if applicable
   status?: ComponentStatus; // Component state after operation (when applicable)
 }
 
@@ -108,14 +114,14 @@ interface ComponentOperationResult extends BaseOperationResult {
 
 ### Result Types
 
-| Operation | Result Type | Extends Base | Failure Codes |
-|-----------|-------------|--------------|---------------|
-| `startComponent()` | `ComponentOperationResult` | ✅ | `component_not_found`, `component_already_running`, `missing_dependency`, `shutdown_in_progress`, etc. |
-| `stopComponent()` | `ComponentOperationResult` | ✅ | `component_not_found`, `component_not_running`, `stop_timeout` |
-| `restartComponent()` | `ComponentOperationResult` | ✅ | `restart_stop_failed`, `restart_start_failed` |
-| `registerComponent()` | `RegisterComponentResult` | ✅ | `duplicate_name`, `shutdown_in_progress`, `dependency_cycle` |
-| `unregisterComponent()` | `UnregisterComponentResult` | ✅ | `component_not_found`, `component_running`, `stop_failed` |
-| `getStartupOrder()` | `StartupOrderResult` | ✅ | `dependency_cycle`, `unknown_error` |
+| Operation               | Result Type                 | Extends Base | Failure Codes                                                                                          |
+| ----------------------- | --------------------------- | ------------ | ------------------------------------------------------------------------------------------------------ |
+| `startComponent()`      | `ComponentOperationResult`  | ✅           | `component_not_found`, `component_already_running`, `missing_dependency`, `shutdown_in_progress`, etc. |
+| `stopComponent()`       | `ComponentOperationResult`  | ✅           | `component_not_found`, `component_not_running`, `stop_timeout`                                         |
+| `restartComponent()`    | `ComponentOperationResult`  | ✅           | `restart_stop_failed`, `restart_start_failed`                                                          |
+| `registerComponent()`   | `RegisterComponentResult`   | ✅           | `duplicate_name`, `shutdown_in_progress`, `dependency_cycle`                                           |
+| `unregisterComponent()` | `UnregisterComponentResult` | ✅           | `component_not_found`, `component_running`, `stop_failed`                                              |
+| `getStartupOrder()`     | `StartupOrderResult`        | ✅           | `dependency_cycle`, `unknown_error`                                                                    |
 
 ## Parameter Patterns
 
@@ -133,6 +139,7 @@ unregisterComponent(name: string, options?: UnregisterOptions)
 ```
 
 **Benefits:**
+
 - Easy to remember
 - Future-proof (can add new options without breaking changes)
 - IDE autocomplete works well
@@ -158,6 +165,7 @@ export interface StopComponentOptions {
 ```
 
 **Example:**
+
 ```typescript
 // Force immediate shutdown
 await lifecycle.stopComponent('db', { forceImmediate: true });
@@ -176,6 +184,7 @@ unregisterComponent(name: string, options?: UnregisterOptions)
 ```
 
 **Benefits:**
+
 - Easy to remember
 - Future-proof (can add new options without breaking changes)
 - IDE autocomplete works well
@@ -187,7 +196,7 @@ Even if an options object is currently empty, we define the type to reserve the 
 ```typescript
 /**
  * Options for manually stopping a component
- * 
+ *
  * Currently empty but reserved for future options like:
  * - skipWarningPhase?: boolean
  * - forceImmediate?: boolean
@@ -202,15 +211,16 @@ export interface StopComponentOptions {
 
 Query methods follow consistent naming conventions:
 
-| Pattern | Usage | Examples |
-|---------|-------|----------|
-| `hasX()` | Boolean check for existence | `hasComponent()` |
-| `isX()` | Boolean check for state | `isComponentRunning()` |
-| `getX()` | Retrieve object/value | `getComponentStatus()` |
-| `getXs()` | Retrieve collection | `getComponentNames()` |
-| `getXCount()` | Count items | `getComponentCount()` |
+| Pattern       | Usage                       | Examples               |
+| ------------- | --------------------------- | ---------------------- |
+| `hasX()`      | Boolean check for existence | `hasComponent()`       |
+| `isX()`       | Boolean check for state     | `isComponentRunning()` |
+| `getX()`      | Retrieve object/value       | `getComponentStatus()` |
+| `getXs()`     | Retrieve collection         | `getComponentNames()`  |
+| `getXCount()` | Count items                 | `getComponentCount()`  |
 
 **Examples:**
+
 ```typescript
 // Boolean predicates
 if (lifecycle.hasComponent('database')) { ... }
@@ -230,10 +240,12 @@ const running = lifecycle.getRunningComponentCount();
 The API clearly separates synchronous and asynchronous operations:
 
 ### Synchronous (Immediate)
+
 - All query methods: `hasComponent()`, `getComponentStatus()`, etc.
 - Registration (no side effects): `registerComponent()`, `insertComponentAt()`
 
 ### Asynchronous (Must await)
+
 - All lifecycle operations: `startComponent()`, `stopComponent()`, `restartComponent()`
 - Unregistration (may stop component): `unregisterComponent()`
 - Bulk operations: `startAllComponents()`, `stopAllComponents()`
@@ -246,14 +258,14 @@ Types follow noun-first naming:
 
 ```typescript
 // ✓ Good (noun-first)
-ComponentStatus
-HealthCheckResult
-MessageResult
-StartupResult
-ValueResult
+ComponentStatus;
+HealthCheckResult;
+MessageResult;
+StartupResult;
+ValueResult;
 
 // ✗ Avoid (verb-first - deprecated)
-GetValueResult  // Renamed to ValueResult
+GetValueResult; // Renamed to ValueResult
 ```
 
 ## Future Extensibility
@@ -268,6 +280,7 @@ The API is designed for backward-compatible evolution:
 ## Best Practices
 
 ### Check result.success before proceeding
+
 ```typescript
 const result = await lifecycle.startComponent('db');
 if (!result.success) {
@@ -278,6 +291,7 @@ if (!result.success) {
 ```
 
 ### Use failure codes for programmatic handling
+
 ```typescript
 if (!result.success) {
   switch (result.code) {
@@ -294,6 +308,7 @@ if (!result.success) {
 ```
 
 ### Handle nullable query results
+
 ```typescript
 const status = lifecycle.getComponentStatus('db');
 if (!status) {
@@ -304,6 +319,7 @@ console.log(`State: ${status.state}`);
 ```
 
 ### Use try/catch for registration
+
 ```typescript
 try {
   const result = lifecycle.registerComponent(component);
@@ -326,20 +342,21 @@ The maintainer is interested in creating a unified base result interface for con
 3. **Improve consistency** - All results have the same core fields
 
 **Proposed design:**
+
 ```typescript
 // Base interface for ALL operation results
 interface BaseOperationResult {
   success: boolean;
-  targetName: string;     // Generic name for the entity
-  reason?: string;        // Human-readable explanation
-  code?: string;          // Machine-readable code
-  error?: Error;          // Underlying error if applicable
-  metadata?: unknown;     // Operation-specific data
+  targetName: string; // Generic name for the entity
+  reason?: string; // Human-readable explanation
+  code?: string; // Machine-readable code
+  error?: Error; // Underlying error if applicable
+  metadata?: unknown; // Operation-specific data
 }
 
 // Specific results extend base
 interface ComponentOperationResult extends BaseOperationResult {
-  componentName: string;  // Alias for targetName for backward compatibility
+  componentName: string; // Alias for targetName for backward compatibility
   // metadata could be: { state?: ComponentState, startedAt?: number }
 }
 
@@ -355,12 +372,15 @@ interface RegisterComponentResult extends BaseOperationResult {
 // Generic result handler
 function handleResult<T extends BaseOperationResult>(result: T): void {
   if (!result.success) {
-    console.error(`${result.targetName} failed: ${result.reason} (${result.code})`);
+    console.error(
+      `${result.targetName} failed: ${result.reason} (${result.code})`,
+    );
   }
 }
 ```
 
 **Benefits:**
+
 - Consistent error handling patterns
 - Less TypeScript type duplication
 - Easier to understand and predict API behavior
@@ -375,6 +395,7 @@ If you're upgrading from an earlier version, note these changes:
 ### v0.0.1 → v0.1.0
 
 **Added:**
+
 - `code` field to `UnregisterComponentResult` for consistent error handling
 - `StopComponentOptions` type (currently empty, reserved for future use)
 - `RestartComponentOptions` type for restart configuration

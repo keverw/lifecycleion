@@ -20,6 +20,10 @@ import type {
   SystemState,
   RegistrationFailureCode,
   StartupOrderResult,
+  StartupOptions,
+  StartupResult,
+  ShutdownResult,
+  RestartResult,
 } from './types';
 import {
   ComponentStartTimeoutError,
@@ -99,7 +103,8 @@ export class LifecycleManager extends EventEmitterProtected {
           componentName,
           registrationIndexBefore,
           code: 'shutdown_in_progress',
-          reason: 'Cannot register component while shutdown is in progress (isShuttingDown=true).',
+          reason:
+            'Cannot register component while shutdown is in progress (isShuttingDown=true).',
         });
       }
 
@@ -187,7 +192,9 @@ export class LifecycleManager extends EventEmitterProtected {
     } catch (error) {
       const err = error as Error;
       const code: RegistrationFailureCode =
-        err instanceof DependencyCycleError ? 'dependency_cycle' : 'unknown_error';
+        err instanceof DependencyCycleError
+          ? 'dependency_cycle'
+          : 'unknown_error';
 
       this.logger
         .entity(componentName)
@@ -270,7 +277,8 @@ export class LifecycleManager extends EventEmitterProtected {
           targetComponentName,
           registrationIndexBefore,
           code: 'shutdown_in_progress',
-          reason: 'Cannot register component while shutdown is in progress (isShuttingDown=true).',
+          reason:
+            'Cannot register component while shutdown is in progress (isShuttingDown=true).',
           targetFound: undefined,
         });
       }
@@ -407,7 +415,9 @@ export class LifecycleManager extends EventEmitterProtected {
     } catch (error) {
       const err = error as Error;
       const code: RegistrationFailureCode =
-        err instanceof DependencyCycleError ? 'dependency_cycle' : 'unknown_error';
+        err instanceof DependencyCycleError
+          ? 'dependency_cycle'
+          : 'unknown_error';
 
       this.logger
         .entity(componentName)
@@ -478,7 +488,8 @@ export class LifecycleManager extends EventEmitterProtected {
       return {
         success: false,
         componentName: name,
-        reason: 'Component is running. Use stopIfRunning option or stop manually first',
+        reason:
+          'Component is running. Use stopIfRunning option or stop manually first',
         code: 'component_running',
         wasStopped: false,
         wasRegistered: true,
@@ -678,7 +689,9 @@ export class LifecycleManager extends EventEmitterProtected {
     } catch (error) {
       const err = error as Error;
       const code =
-        err instanceof DependencyCycleError ? 'dependency_cycle' : 'unknown_error';
+        err instanceof DependencyCycleError
+          ? 'dependency_cycle'
+          : 'unknown_error';
 
       this.logger.error('Failed to resolve startup order', {
         params: { error: err },
@@ -695,6 +708,335 @@ export class LifecycleManager extends EventEmitterProtected {
   }
 
   // ============================================================================
+  // Bulk Operations
+  // ============================================================================
+
+  /**
+   * Start all registered components in registration order.
+   *
+   * Phase 3 Note: Dependencies are not yet considered - components start in
+   * registration order. Dependency ordering will be added in Phase 4.
+   *
+   * Behavior:
+   * - Rejects if some components are already running (partial state)
+   * - Sets isStarting flag during operation
+   * - On failure: triggers rollback (stops all started components)
+   * - Optional components don't trigger rollback on failure
+   * - Handles shutdown signal during startup (aborts and rolls back)
+   */
+  public async startAllComponents(
+    options?: StartupOptions,
+  ): Promise<StartupResult> {
+    // Reject if already starting
+    if (this.isStarting) {
+      this.logger.warn(
+        'Cannot start all components: startup already in progress',
+      );
+      return {
+        success: false,
+        startedComponents: [],
+        failedOptionalComponents: [],
+        skippedDueToDependency: [],
+      };
+    }
+
+    // Reject if shutdown is in progress
+    if (this.isShuttingDown) {
+      this.logger.warn('Cannot start all components: shutdown in progress');
+      return {
+        success: false,
+        startedComponents: [],
+        failedOptionalComponents: [],
+        skippedDueToDependency: [],
+      };
+    }
+
+    const totalCount = this.getComponentCount();
+    const runningCount = this.getRunningComponentCount();
+
+    // Check for stalled components
+    if (this.stalledComponents.size > 0 && !options?.ignoreStalledComponents) {
+      const stalledNames = Array.from(this.stalledComponents.keys());
+      this.logger.warn('Cannot start: stalled components exist', {
+        params: { stalled: stalledNames },
+      });
+
+      return {
+        success: false,
+        startedComponents: [],
+        failedOptionalComponents: [],
+        skippedDueToDependency: [],
+        blockedByStalledComponents: stalledNames,
+      };
+    }
+
+    // All running - nothing to do
+    if (runningCount === totalCount && totalCount > 0) {
+      this.logger.info('All components already running');
+      return {
+        success: true,
+        startedComponents: this.components
+          .filter((c) => this.runningComponents.has(c.getName()))
+          .map((c) => c.getName()),
+        failedOptionalComponents: [],
+        skippedDueToDependency: [],
+      };
+    }
+
+    // Partial state - reject to avoid inconsistent startup
+    if (runningCount > 0) {
+      this.logger.error(
+        `Cannot start: ${runningCount}/${totalCount} components already running. ` +
+          `Call stopAllComponents() first to ensure clean state.`,
+      );
+
+      return {
+        success: false,
+        startedComponents: this.components
+          .filter((c) => this.runningComponents.has(c.getName()))
+          .map((c) => c.getName()),
+        failedOptionalComponents: [],
+        skippedDueToDependency: [],
+      };
+    }
+
+    // Set starting flag
+    this.isStarting = true;
+    this.logger.info('Starting all components');
+
+    // Snapshot component list
+    const componentsToStart = [...this.components];
+    const startedComponents: string[] = [];
+    const failedOptionalComponents: Array<{ name: string; error: Error }> = [];
+
+    try {
+      // Start each component in order
+      for (const component of componentsToStart) {
+        const name = component.getName();
+
+        // Skip stalled components (even with ignoreStalledComponents:true)
+        if (this.stalledComponents.has(name)) {
+          this.logger
+            .entity(name)
+            .info('Skipping stalled component during startup');
+          continue;
+        }
+
+        // Check if shutdown was triggered during startup
+        if (this.isShuttingDown) {
+          this.logger.warn('Shutdown signal received during startup, aborting');
+
+          // Rollback: stop all started components in reverse order
+          // Note: Do NOT emit shutdown-initiated/shutdown-completed here, as
+          // stopAllComponents() has already emitted them. We just need to rollback.
+          await this.rollbackStartup(startedComponents);
+
+          return {
+            success: false,
+            startedComponents: [],
+            failedOptionalComponents: [],
+            skippedDueToDependency: [],
+          };
+        }
+
+        // Start the component (using internal method to bypass bulk operation check)
+        const result = await this.startComponentInternal(name);
+
+        if (result.success) {
+          startedComponents.push(name);
+        } else {
+          // Check if component is optional
+          if (component.isOptional()) {
+            this.logger
+              .entity(name)
+              .warn('Optional component failed to start, continuing', {
+                params: { error: result.error?.message },
+              });
+
+            this.safeEmit('component:start-failed-optional', {
+              name,
+              error: result.error,
+            });
+
+            // Mark as failed state
+            this.componentStates.set(name, 'failed');
+            if (result.error) {
+              this.componentErrors.set(name, result.error);
+            }
+
+            failedOptionalComponents.push({
+              name,
+              error:
+                result.error || new Error(result.reason || 'Unknown error'),
+            });
+          } else {
+            // Required component failed - trigger rollback
+            this.logger
+              .entity(name)
+              .error('Required component failed to start, rolling back', {
+                params: { error: result.error?.message },
+              });
+
+            await this.rollbackStartup(startedComponents);
+
+            return {
+              success: false,
+              startedComponents: [],
+              failedOptionalComponents,
+              skippedDueToDependency: [],
+            };
+          }
+        }
+      }
+
+      // Success - all components started (or optional ones failed gracefully)
+      this.isStarted = true;
+      this.logger.success('All components started', {
+        params: {
+          started: startedComponents.length,
+          failed: failedOptionalComponents.length,
+        },
+      });
+
+      this.safeEmit('lifecycle-manager:started', {
+        startedComponents,
+        failedOptionalComponents,
+      });
+
+      return {
+        success: true,
+        startedComponents,
+        failedOptionalComponents,
+        skippedDueToDependency: [],
+      };
+    } finally {
+      this.isStarting = false;
+    }
+  }
+
+  /**
+   * Stop all running components in reverse order
+   */
+  public async stopAllComponents(): Promise<ShutdownResult> {
+    const startTime = Date.now();
+
+    // Reject if already shutting down
+    if (this.isShuttingDown) {
+      this.logger.warn(
+        'Cannot stop all components: shutdown already in progress',
+      );
+      return {
+        success: true,
+        stoppedComponents: [],
+        stalledComponents: [],
+        durationMS: 0,
+      };
+    }
+
+    // Set shutting down flag
+    this.isShuttingDown = true;
+    const isDuringStartup = this.isStarting;
+    this.logger.info('Stopping all components');
+    this.safeEmit('lifecycle-manager:shutdown-initiated', {
+      method: 'manual',
+      duringStartup: isDuringStartup,
+    });
+
+    // Snapshot running components in reverse order
+    const componentsToStop = [...this.components]
+      .filter((c) => this.isComponentRunning(c.getName()))
+      .reverse();
+
+    const stoppedComponents: string[] = [];
+    const stalledComponents: ComponentStallInfo[] = [];
+
+    try {
+      // Stop each component
+      for (const component of componentsToStop) {
+        const name = component.getName();
+
+        this.logger.entity(name).info('Stopping component');
+        // Use internal method to bypass bulk operation checks
+        const result = await this.stopComponentInternal(name);
+
+        if (result.success) {
+          stoppedComponents.push(name);
+        } else {
+          // Component failed to stop - track as stalled but continue
+          this.logger
+            .entity(name)
+            .error('Component failed to stop, continuing with others', {
+              params: { error: result.error?.message },
+            });
+
+          const stallInfo = this.stalledComponents.get(name);
+          if (stallInfo) {
+            stalledComponents.push(stallInfo);
+          }
+        }
+      }
+
+      const durationMS = Date.now() - startTime;
+      const isSuccess = stalledComponents.length === 0;
+
+      this.logger[isSuccess ? 'success' : 'warn']('Shutdown completed', {
+        params: {
+          stopped: stoppedComponents.length,
+          stalled: stalledComponents.length,
+          durationMS,
+        },
+      });
+
+      this.safeEmit('lifecycle-manager:shutdown-completed', {
+        durationMS,
+        stoppedComponents,
+        stalledComponents,
+      });
+
+      return {
+        success: isSuccess,
+        stoppedComponents,
+        stalledComponents,
+        durationMS,
+      };
+    } finally {
+      // Reset state
+      this.isShuttingDown = false;
+      this.isStarted = false;
+    }
+  }
+
+  /**
+   * Restart all components (stop then start)
+   */
+  public async restartAllComponents(
+    options?: StartupOptions,
+  ): Promise<RestartResult> {
+    this.logger.info('Restarting all components');
+
+    // Phase 1: Stop all components
+    const shutdownResult = await this.stopAllComponents();
+
+    // Phase 2: Start all components
+    const startupResult = await this.startAllComponents(options);
+
+    const isSuccess = shutdownResult.success && startupResult.success;
+
+    this.logger[isSuccess ? 'success' : 'warn']('Restart completed', {
+      params: {
+        shutdownSuccess: shutdownResult.success,
+        startupSuccess: startupResult.success,
+      },
+    });
+
+    return {
+      shutdownResult,
+      startupResult,
+      success: isSuccess,
+    };
+  }
+
+  // ============================================================================
   // Individual Component Lifecycle
   // ============================================================================
 
@@ -705,6 +1047,149 @@ export class LifecycleManager extends EventEmitterProtected {
     name: string,
     options?: StartComponentOptions,
   ): Promise<ComponentOperationResult> {
+    // Reject during bulk operations
+    if (this.isStarting) {
+      this.logger
+        .entity(name)
+        .warn('Cannot start component during bulk startup', {
+          params: { isStarting: this.isStarting },
+        });
+
+      return {
+        success: false,
+        componentName: name,
+        reason: 'Bulk startup in progress',
+        code: 'shutdown_in_progress', // Reuse this code for any bulk operation
+      };
+    }
+
+    if (this.isShuttingDown) {
+      this.logger.entity(name).warn('Cannot start component during shutdown', {
+        params: { isShuttingDown: this.isShuttingDown },
+      });
+
+      return {
+        success: false,
+        componentName: name,
+        reason: 'Shutdown in progress',
+        code: 'shutdown_in_progress',
+      };
+    }
+
+    return this.startComponentInternal(name, options);
+  }
+
+  /**
+   * Stop a specific component
+   */
+  public async stopComponent(
+    name: string,
+    options?: StopComponentOptions,
+  ): Promise<ComponentOperationResult> {
+    // Reject during bulk operations
+    if (this.isStarting) {
+      this.logger
+        .entity(name)
+        .warn('Cannot stop component during bulk startup', {
+          params: { isStarting: this.isStarting },
+        });
+
+      return {
+        success: false,
+        componentName: name,
+        reason: 'Bulk startup in progress',
+        code: 'shutdown_in_progress',
+      };
+    }
+
+    if (this.isShuttingDown) {
+      this.logger.entity(name).warn('Cannot stop component during shutdown', {
+        params: { isShuttingDown: this.isShuttingDown },
+      });
+
+      return {
+        success: false,
+        componentName: name,
+        reason: 'Shutdown in progress',
+        code: 'shutdown_in_progress',
+      };
+    }
+
+    return this.stopComponentInternal(name, options);
+  }
+
+  /**
+   * Restart a component (stop then start)
+   */
+  public async restartComponent(
+    name: string,
+    options?: RestartComponentOptions,
+  ): Promise<ComponentOperationResult> {
+    // Reject during bulk operations
+    if (this.isStarting || this.isShuttingDown) {
+      this.logger
+        .entity(name)
+        .warn('Cannot restart component during bulk operation', {
+          params: {
+            isStarting: this.isStarting,
+            isShuttingDown: this.isShuttingDown,
+          },
+        });
+
+      return {
+        success: false,
+        componentName: name,
+        reason: this.isStarting
+          ? 'Bulk startup in progress'
+          : 'Shutdown in progress',
+        code: 'shutdown_in_progress',
+      };
+    }
+
+    // First stop the component
+    const stopResult = await this.stopComponent(name, options?.stopOptions);
+
+    if (!stopResult.success) {
+      return {
+        success: false,
+        componentName: name,
+        reason: `Failed to stop: ${stopResult.reason}`,
+        code: 'restart_stop_failed',
+        error: stopResult.error,
+      };
+    }
+
+    // Then start it
+    const startResult = await this.startComponent(name, options?.startOptions);
+
+    if (!startResult.success) {
+      return {
+        success: false,
+        componentName: name,
+        reason: `Failed to start: ${startResult.reason}`,
+        code: 'restart_start_failed',
+        error: startResult.error,
+      };
+    }
+
+    return {
+      success: true,
+      componentName: name,
+      status: this.getComponentStatus(name),
+    };
+  }
+
+  /**
+   * Internal start component method - bypasses bulk operation checks
+   * Used by both startComponent() and startAllComponents()
+   */
+  private async startComponentInternal(
+    name: string,
+    options?: StartComponentOptions,
+  ): Promise<ComponentOperationResult> {
+    const allowOptionalDependencies =
+      (options as { allowOptionalDependencies?: boolean } | undefined)
+        ?.allowOptionalDependencies === true;
     const component = this.getComponent(name);
 
     if (!component) {
@@ -729,7 +1214,7 @@ export class LifecycleManager extends EventEmitterProtected {
       }
 
       if (!this.isComponentRunning(dependencyName)) {
-        if (options?.allowOptionalDependencies && dependency.isOptional()) {
+        if (allowOptionalDependencies && dependency.isOptional()) {
           continue;
         }
         return {
@@ -758,16 +1243,6 @@ export class LifecycleManager extends EventEmitterProtected {
         componentName: name,
         reason: 'Component already running',
         code: 'component_already_running',
-      };
-    }
-
-    // Check if shutdown in progress
-    if (this.isShuttingDown) {
-      return {
-        success: false,
-        componentName: name,
-        reason: 'Shutdown in progress',
-        code: 'shutdown_in_progress',
       };
     }
 
@@ -875,11 +1350,10 @@ export class LifecycleManager extends EventEmitterProtected {
   }
 
   /**
-   * Stop a specific component
-  /**
-   * Stop a single component
+   * Internal stop component method - bypasses bulk operation checks
+   * Used by both stopComponent() and stopAllComponents()
    */
-  public async stopComponent(
+  private async stopComponentInternal(
     name: string,
     options?: StopComponentOptions,
   ): Promise<ComponentOperationResult> {
@@ -904,6 +1378,17 @@ export class LifecycleManager extends EventEmitterProtected {
       };
     }
 
+    // Check if already stopping to prevent concurrent stop operations
+    const currentState = this.componentStates.get(name);
+    if (currentState === 'stopping' || currentState === 'force-stopping') {
+      return {
+        success: false,
+        componentName: name,
+        reason: `Component is already ${currentState}`,
+        code: 'component_already_stopping',
+      };
+    }
+
     // Handle forceImmediate option - skip graceful shutdown
     if (options?.forceImmediate) {
       this.logger.entity(name).info('Force stopping component immediately');
@@ -914,10 +1399,11 @@ export class LifecycleManager extends EventEmitterProtected {
         if (component.onShutdownForce) {
           await component.onShutdownForce();
         }
-        
+
         // Update state
         this.componentStates.set(name, 'stopped');
         this.runningComponents.delete(name);
+        this.stalledComponents.delete(name); // Clear stalled status on successful force stop
         const timestamps = this.componentTimestamps.get(name) ?? {
           startedAt: null,
           stoppedAt: null,
@@ -938,7 +1424,21 @@ export class LifecycleManager extends EventEmitterProtected {
         this.logger.entity(name).error('Component failed to force stop', {
           params: { error: err.message },
         });
-        
+
+        // Mark as stalled since force stop failed
+        const stallInfo: ComponentStallInfo = {
+          name,
+          reason: 'error',
+          stalledAt: Date.now(),
+          error: err,
+        };
+        this.stalledComponents.set(name, stallInfo);
+        this.componentStates.set(name, 'stalled');
+        this.runningComponents.delete(name);
+        this.componentErrors.set(name, err);
+
+        this.safeEmit('component:stalled', { name, stallInfo });
+
         return {
           success: false,
           componentName: name,
@@ -994,6 +1494,7 @@ export class LifecycleManager extends EventEmitterProtected {
       // Update state
       this.componentStates.set(name, 'stopped');
       this.runningComponents.delete(name);
+      this.stalledComponents.delete(name); // Clear stalled status on successful stop
       const timestamps = this.componentTimestamps.get(name) ?? {
         startedAt: null,
         stoppedAt: null,
@@ -1081,46 +1582,6 @@ export class LifecycleManager extends EventEmitterProtected {
     }
   }
 
-  /**
-   * Restart a component (stop then start)
-   */
-  public async restartComponent(
-    name: string,
-    options?: RestartComponentOptions,
-  ): Promise<ComponentOperationResult> {
-    // First stop the component
-    const stopResult = await this.stopComponent(name, options?.stopOptions);
-
-    if (!stopResult.success) {
-      return {
-        success: false,
-        componentName: name,
-        reason: `Failed to stop: ${stopResult.reason}`,
-        code: 'restart_stop_failed',
-        error: stopResult.error,
-      };
-    }
-
-    // Then start it
-    const startResult = await this.startComponent(name, options?.startOptions);
-
-    if (!startResult.success) {
-      return {
-        success: false,
-        componentName: name,
-        reason: `Failed to start: ${startResult.reason}`,
-        code: 'restart_start_failed',
-        error: startResult.error,
-      };
-    }
-
-    return {
-      success: true,
-      componentName: name,
-      status: this.getComponentStatus(name),
-    };
-  }
-
   // ============================================================================
   // Private Helper Methods
   // ============================================================================
@@ -1130,6 +1591,36 @@ export class LifecycleManager extends EventEmitterProtected {
    */
   private getComponent(name: string): BaseComponent | undefined {
     return this.components.find((c) => c.getName() === name);
+  }
+
+  /**
+   * Rollback startup by stopping all started components in reverse order
+   * Used when a required component fails to start during startAllComponents()
+   */
+  private async rollbackStartup(startedComponents: string[]): Promise<void> {
+    this.logger.warn('Rolling back startup, stopping started components', {
+      params: { components: startedComponents },
+    });
+
+    // Stop components in reverse order
+    const componentsToRollback = [...startedComponents].reverse();
+
+    for (const name of componentsToRollback) {
+      this.logger.entity(name).info('Rolling back component');
+      this.safeEmit('component:startup-rollback', { name });
+
+      // Use internal method to bypass bulk operation checks
+      const result = await this.stopComponentInternal(name);
+      if (!result.success) {
+        this.logger
+          .entity(name)
+          .warn('Failed to stop component during rollback, continuing', {
+            params: { error: result.error?.message },
+          });
+      }
+    }
+
+    this.logger.info('Rollback completed');
   }
 
   /**
@@ -1337,15 +1828,15 @@ export class LifecycleManager extends EventEmitterProtected {
     if (order.length !== names.length) {
       const remaining = names.filter((n) => !order.includes(n));
       const cycle = this.findDependencyCycle(adjacency);
-      throw new DependencyCycleError({ cycle: cycle.length > 0 ? cycle : remaining });
+      throw new DependencyCycleError({
+        cycle: cycle.length > 0 ? cycle : remaining,
+      });
     }
 
     return order;
   }
 
-  private findDependencyCycle(
-    adjacency: Map<string, Set<string>>,
-  ): string[] {
+  private findDependencyCycle(adjacency: Map<string, Set<string>>): string[] {
     const visited = new Set<string>();
     const inStack = new Set<string>();
     const path: string[] = [];

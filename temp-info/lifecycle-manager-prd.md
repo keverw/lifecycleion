@@ -594,197 +594,6 @@ lifecycle.registerComponent(new CacheComponent(logger, { name: 'cache' }), {
 
 ### 2. Component Lifecycle Management
 
-**Bulk Operations**:
-
-```typescript
-// Start all components in dependency order
-startAllComponents(options?: StartupOptions): Promise<StartupResult>
-
-// Stop all components in reverse dependency order
-stopAllComponents(): Promise<ShutdownResult>
-
-// Restart all components (like rebooting)
-restartAllComponents(options?: StartupOptions): Promise<RestartResult>
-
-interface StartupOptions {
-  ignoreStalledComponents?: boolean; // Allow start even if stalled components exist
-}
-
-interface StartupResult {
-  success: boolean;
-  startedComponents: string[];
-  failedOptionalComponents: Array<{ name: string; error: Error }>;
-  skippedDueToDependency: string[];
-  blockedByStalledComponents?: string[]; // Present if stalled components blocked startup
-}
-
-interface ShutdownResult {
-  success: boolean; // True if all components stopped cleanly
-  stoppedComponents: string[];
-  stalledComponents: ComponentStallInfo[];
-  durationMS: number;
-}
-
-interface RestartResult {
-  shutdownResult: ShutdownResult;
-  startupResult: StartupResult;
-  success: boolean; // True only if both shutdown and startup succeeded
-}
-```
-
-**`restartAllComponents()` Behavior**:
-
-Restart is like rebooting a computer - a full stop followed by a full start:
-
-```typescript
-async restartAllComponents(options?: StartupOptions): Promise<RestartResult> {
-  // Phase 1: Stop all components (reverse dependency order)
-  const shutdownResult = await this.stopAllComponents();
-
-  // Phase 2: Start all components (dependency order)
-  const startupResult = await this.startAllComponents(options);
-
-  return {
-    shutdownResult,
-    startupResult,
-    success: shutdownResult.success && startupResult.success,
-  };
-}
-```
-
-**Important considerations**:
-
-1. If `stopAllComponents()` has stalled components, the restart still attempts `startAllComponents()`. This is intentional - a reboot should try to bring the system back up even if shutdown was messy. However, `startAllComponents()` will fail if stalled components exist (unless `ignoreStalledComponents: true`).
-
-2. If `startAllComponents()` fails after stop, normal startup rollback occurs. You're left with no running components (same as a failed boot).
-
-3. There's no "atomic restart" - components are fully stopped before any are started. If you need rolling restarts (one at a time, keeping others running), use `restartComponent(name)` in a loop.
-
-4. Events emitted: `lifecycle-manager:shutdown-initiated`, `lifecycle-manager:shutdown-completed`, then `lifecycle-manager:started` (or startup failure events).
-
-```typescript
-// Example: Handle restart failure
-try {
-  await lifecycle.restartAllComponents();
-  console.log('Restart successful');
-} catch (error) {
-  if (error instanceof ComponentStartupError) {
-    // Stop succeeded, but start failed
-    console.error('System stopped but failed to restart:', error.message);
-    process.exit(1); // Or attempt recovery
-  }
-}
-```
-
-**Partial Start Prevention**:
-
-`startAllComponents()` requires a clean state - either no components running, or all components running:
-
-```typescript
-async startAllComponents(): Promise<void> {
-  const runningCount = this.getRunningComponentCount();
-  const totalCount = this.getComponentCount();
-
-  // All running - nothing to do
-  if (runningCount === totalCount) {
-    this.logger.info('All components already running');
-    return;
-  }
-
-  // Partial state - reject to avoid inconsistent startup
-  if (runningCount > 0) {
-    throw new Error(
-      `Cannot start: ${runningCount}/${totalCount} components already running. ` +
-      `Call stopAllComponents() first to ensure clean state.`
-    );
-  }
-
-  // Clean state (0 running) - proceed with startup
-  // ...
-}
-```
-
-This prevents weird inconsistent states where some components started in a previous run and others didn't. If you need to start specific components individually, use `startComponent(name)` instead.
-
-**Error Handling**:
-
-- If a component fails to start: **rollback** - stop all previously started components in reverse order, then return a failure result
-- If a component fails to stop: log error, mark as stalled, continue with others
-- Distinguish between startup errors (critical, triggers rollback) and shutdown errors (best effort)
-- Operational methods return result objects with machine-readable failure codes; unexpected exceptions are mapped to `unknown_error`
-
-**Startup Rollback Behavior**:
-
-When a component fails to start, the manager performs a rollback:
-
-1. Emit `component:start-failed` event with error details
-2. Stop all previously started components in **reverse order** (same as shutdown)
-3. Emit `component:startup-rollback` event for each component being rolled back
-4. After rollback completes, return a failure result with the original failure reason
-5. The manager is left in a clean state (no running components)
-
-```typescript
-// Example: If web-server fails to start after database started
-// 1. database.start() ✓
-// 2. cache.start() ✓
-// 3. web-server.start() ✗ (throws error)
-// 4. Rollback: cache.stop(), database.stop()
-// 5. Throw: "Startup failed: web-server failed to start"
-```
-
-**Startup Timeout**:
-
-Each component can configure a startup timeout via `startupTimeoutMS` (default: 30000ms).
-If `start()` takes longer than this timeout:
-
-1. Emit `component:start-timeout` event
-2. Treat as startup failure, trigger rollback
-3. The component's `start()` promise is NOT cancelled (no way to do this in JS), but the manager proceeds with rollback
-
-`start()` and `stop()` may be sync or async; the manager awaits only when a Promise is returned.
-
-There's also a global `startupTimeoutMS` on `LifecycleManagerOptions` (default: 60000ms) that acts as a hard ceiling for the entire `startAllComponents()` operation.
-
-**Shutdown During Startup**:
-
-If a shutdown signal is received while `startAllComponents()` is in progress:
-
-1. Set `isShuttingDown = true`, abort further startup
-2. Don't start any remaining components
-3. Rollback already-started components (stop in reverse order)
-4. Do NOT proceed with full shutdown sequence (we're already stopping everything)
-5. Emit `lifecycle-manager:shutdown-initiated` with context indicating it was during startup
-6. After rollback completes, emit `lifecycle-manager:shutdown-completed`
-
-```typescript
-// Example: Startup interrupted by SIGINT
-// Components: [database, cache, web-server, api-server]
-// 1. database.start() ✓
-// 2. cache.start() ✓
-// 3. SIGINT received!
-// 4. Skip web-server, api-server
-// 5. Rollback: cache.stop(), database.stop()
-// 6. Done - no further shutdown needed
-```
-
-**Concurrent Operation Prevention**:
-
-Individual component operations are rejected during bulk operations:
-
-```typescript
-// During startAllComponents():
-startComponent(name); // Returns false, logs warning
-stopComponent(name); // Returns false, logs warning
-restartComponent(name); // Returns false, logs warning
-
-// During stopAllComponents():
-startComponent(name); // Returns false, logs warning
-stopComponent(name); // Returns false, logs warning (already stopping)
-restartComponent(name); // Returns false, logs warning
-```
-
-This prevents race conditions and ensures predictable behavior. If you need fine-grained control, wait for bulk operations to complete first.
-
 ### 3. Signal Integration
 
 **Automatic Signal Handling**:
@@ -1753,23 +1562,23 @@ The LifecycleManager uses a consistent pattern for error handling:
 
 **Return result objects** for runtime operations that can fail for expected reasons:
 
-| Method                     | Returns                             | Failure Examples                                    |
-| -------------------------- | ----------------------------------- | --------------------------------------------------- |
-| `startComponent(name)`     | `Promise<ComponentOperationResult>` | Already running, not found, during shutdown         |
-| `stopComponent(name)`      | `Promise<ComponentOperationResult>` | Not running, not found, stalled                     |
-| `startAllComponents()`     | `Promise<StartupResult>`            | Optional component failed, stalled components exist |
-| `stopAllComponents()`      | `Promise<ShutdownResult>`           | Components stalled                                  |
-| `sendMessageToComponent()` | `Promise<MessageResult>`            | Component not found, not running, handler error     |
-| `registerComponent()`      | `RegisterComponentResult`           | Duplicate name, during shutdown                     |
-| `insertComponentAt()`      | `InsertComponentAtResult`           | Target not found, duplicate name, during shutdown   |
-| `unregisterComponent()`    | `Promise<UnregisterComponentResult>` | Not found, running without stopIfRunning           |
+| Method                     | Returns                              | Failure Examples                                    |
+| -------------------------- | ------------------------------------ | --------------------------------------------------- |
+| `startComponent(name)`     | `Promise<ComponentOperationResult>`  | Already running, not found, during shutdown         |
+| `stopComponent(name)`      | `Promise<ComponentOperationResult>`  | Not running, not found, stalled                     |
+| `startAllComponents()`     | `Promise<StartupResult>`             | Optional component failed, stalled components exist |
+| `stopAllComponents()`      | `Promise<ShutdownResult>`            | Components stalled                                  |
+| `sendMessageToComponent()` | `Promise<MessageResult>`             | Component not found, not running, handler error     |
+| `registerComponent()`      | `RegisterComponentResult`            | Duplicate name, during shutdown                     |
+| `insertComponentAt()`      | `InsertComponentAtResult`            | Target not found, duplicate name, during shutdown   |
+| `unregisterComponent()`    | `Promise<UnregisterComponentResult>` | Not found, running without stopIfRunning            |
 
 **Throw errors** only for programmer mistakes (bugs in calling code) outside lifecycle operations:
 
-| Error                        | When Thrown                                  |
-| ---------------------------- | -------------------------------------------- |
-| `InvalidComponentNameError`  | Component name isn't valid kebab-case        |
-| `ComponentRegistrationError` | Invalid registration inputs (bug in caller)  |
+| Error                        | When Thrown                                 |
+| ---------------------------- | ------------------------------------------- |
+| `InvalidComponentNameError`  | Component name isn't valid kebab-case       |
+| `ComponentRegistrationError` | Invalid registration inputs (bug in caller) |
 
 **Result Object Pattern**:
 
