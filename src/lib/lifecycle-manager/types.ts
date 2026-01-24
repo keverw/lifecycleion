@@ -399,7 +399,14 @@ export interface InsertComponentAtResult extends RegistrationResultBase {
 
   /** Requested insertion position */
   requestedPosition: {
-    position: InsertPosition;
+    /**
+     * The requested position.
+     *
+     * Note: This is `string` (not just `InsertPosition`) so untyped/JS callers can
+     * still get back the original invalid value when the operation fails with
+     * `code: 'invalid_position'`.
+     */
+    position: InsertPosition | (string & {});
     targetComponentName?: string;
   };
 

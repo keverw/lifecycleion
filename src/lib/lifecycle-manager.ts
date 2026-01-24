@@ -96,6 +96,18 @@ export class LifecycleManager {
     const componentName = component.getName();
     const registrationIndexBefore = this.getComponentIndex(componentName);
 
+    if (!this.isInsertPosition(position)) {
+      return this.buildInsertResultFailure({
+        componentName,
+        position,
+        targetComponentName,
+        registrationIndexBefore,
+        code: 'invalid_position',
+        reason: `Invalid insert position: "${String(position)}". Expected one of: start, end, before, after.`,
+        targetFound: undefined,
+      });
+    }
+
     if (this.isShuttingDown) {
       return this.buildInsertResultFailure({
         componentName,
@@ -197,7 +209,7 @@ export class LifecycleManager {
 
   private buildInsertResultFailure(input: {
     componentName: string;
-    position: InsertPosition;
+    position: InsertPosition | (string & {});
     targetComponentName?: string;
     registrationIndexBefore: number | null;
     code: RegistrationFailureCode;
@@ -227,6 +239,15 @@ export class LifecycleManager {
   private getComponentIndex(name: string): number | null {
     const idx = this.components.findIndex((c) => c.getName() === name);
     return idx === -1 ? null : idx;
+  }
+
+  private isInsertPosition(value: unknown): value is InsertPosition {
+    return (
+      value === 'start' ||
+      value === 'end' ||
+      value === 'before' ||
+      value === 'after'
+    );
   }
 
   private getInsertIndex(

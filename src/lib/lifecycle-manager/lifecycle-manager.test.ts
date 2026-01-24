@@ -459,6 +459,20 @@ describe('LifecycleManager - Phase 1: Foundation', () => {
       expect(result.manualPositionRespected).toBe(false);
     });
 
+    test('insertComponentAt() should return invalid_position failure result for untyped callers', () => {
+      const lifecycle = new LifecycleManager({ logger });
+      const component = new TestComponent(logger, { name: 'api' });
+
+      const result = (lifecycle as any).insertComponentAt(component, 'weird');
+      expect(result.success).toBe(false);
+      expect(result.registered).toBe(false);
+      expect(result.code).toBe('invalid_position');
+      expect(result.componentName).toBe('api');
+      expect(result.startupOrder).toEqual([]);
+      expect(result.manualPositionRespected).toBe(false);
+      expect(result.requestedPosition.position).toBe('weird');
+    });
+
     test('insertComponentAt() should report manualPositionRespected=false when dependencies override requested order', () => {
       const lifecycle = new LifecycleManager({ logger });
 
