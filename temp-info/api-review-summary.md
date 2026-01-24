@@ -28,6 +28,7 @@
 ```typescript
 const result = await lifecycle.unregisterComponent('db');
 if (!result.success && result.code === 'component_running') {
+  // Pass UnregisterOptions with stopIfRunning flag
   await lifecycle.unregisterComponent('db', { stopIfRunning: true });
 }
 ```
@@ -38,8 +39,8 @@ if (!result.success && result.code === 'component_running') {
 - All lifecycle methods now follow `(name, options?)` pattern
 
 ```typescript
-stopComponent(name: string, options?: StopComponentOptions)
-restartComponent(name: string, options?: RestartComponentOptions)
+stopComponent(name: string, options?: StopComponentOptions): Promise<ComponentOperationResult>
+restartComponent(name: string, options?: RestartComponentOptions): Promise<ComponentOperationResult>
 ```
 
 ### 3. Type Exports
@@ -96,17 +97,18 @@ interface RegisterComponentResult extends BaseOperationResult {
 **Future:** Return result objects for all failures, including programmer errors
 
 ```typescript
-// Instead of throwing
+// Current API (throws for cycles)
 try {
-  lifecycle.registerComponent(component);
+  const result = lifecycle.registerComponent(component);
+  // result is RegisterComponentResult
 } catch (err) {
   if (err instanceof DependencyCycleError) { ... }
 }
 
-// Return result object
+// Potential future API (no throwing)
 const result = lifecycle.registerComponent(component);
 if (!result.success && result.code === 'dependency_cycle') {
-  console.error(`Cycle: ${result.metadata.cycle}`);
+  console.error(`Cycle: ${result.metadata?.cycle}`);
 }
 ```
 
@@ -190,5 +192,5 @@ ValueResult<T>  // Noun-first pattern matches other types
 ---
 
 **Review Complete** ✅  
-**Security Status:** Clean (0 vulnerabilities)  
-**Ready for v1.0:** Yes
+**Security Status:** No new vulnerabilities introduced  
+**Recommendation:** Changes ready for integration
