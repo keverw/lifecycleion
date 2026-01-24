@@ -99,6 +99,7 @@ export class LifecycleManager extends EventEmitterProtected {
           componentName,
           registrationIndexBefore,
           code: 'shutdown_in_progress',
+          reason: 'Cannot register component while shutdown is in progress (isShuttingDown=true).',
         });
       }
 
@@ -115,6 +116,7 @@ export class LifecycleManager extends EventEmitterProtected {
           componentName,
           registrationIndexBefore,
           code: 'duplicate_name',
+          reason: `Component "${componentName}" is already registered.`,
         });
       }
 
@@ -144,6 +146,7 @@ export class LifecycleManager extends EventEmitterProtected {
             componentName,
             registrationIndexBefore,
             code: 'dependency_cycle',
+            reason: error.message,
             error,
           });
         }
@@ -204,6 +207,7 @@ export class LifecycleManager extends EventEmitterProtected {
         success: false,
         registered: false,
         componentName,
+        reason: err.message,
         code,
         error: err,
         registrationIndexBefore,
@@ -246,6 +250,7 @@ export class LifecycleManager extends EventEmitterProtected {
           targetComponentName,
           registrationIndexBefore,
           code: 'invalid_position',
+          reason: `Invalid insert position: "${String(position)}". Expected one of: start, end, before, after.`,
           targetFound: undefined,
         });
       }
@@ -265,6 +270,7 @@ export class LifecycleManager extends EventEmitterProtected {
           targetComponentName,
           registrationIndexBefore,
           code: 'shutdown_in_progress',
+          reason: 'Cannot register component while shutdown is in progress (isShuttingDown=true).',
           targetFound: undefined,
         });
       }
@@ -284,6 +290,7 @@ export class LifecycleManager extends EventEmitterProtected {
           targetComponentName,
           registrationIndexBefore,
           code: 'duplicate_name',
+          reason: `Component "${componentName}" is already registered.`,
           targetFound: undefined,
         });
       }
@@ -305,6 +312,7 @@ export class LifecycleManager extends EventEmitterProtected {
           success: false,
           registered: false,
           componentName,
+          reason: `Target component "${targetComponentName ?? ''}" not found in registry.`,
           code: 'target_not_found',
           registrationIndexBefore: null,
           registrationIndexAfter: null,
@@ -343,6 +351,7 @@ export class LifecycleManager extends EventEmitterProtected {
             targetComponentName,
             registrationIndexBefore,
             code: 'dependency_cycle',
+            reason: error.message,
             error,
             targetFound:
               position === 'before' || position === 'after' ? true : undefined,
@@ -418,6 +427,7 @@ export class LifecycleManager extends EventEmitterProtected {
         success: false,
         registered: false,
         componentName,
+        reason: err.message,
         code,
         error: err,
         registrationIndexBefore,
@@ -449,6 +459,7 @@ export class LifecycleManager extends EventEmitterProtected {
       return {
         success: false,
         componentName: name,
+        reason: 'Component not found',
         code: 'component_not_found',
         wasStopped: false,
         wasRegistered: false,
@@ -467,6 +478,7 @@ export class LifecycleManager extends EventEmitterProtected {
       return {
         success: false,
         componentName: name,
+        reason: 'Component is running. Use stopIfRunning option or stop manually first',
         code: 'component_running',
         wasStopped: false,
         wasRegistered: true,
@@ -493,6 +505,7 @@ export class LifecycleManager extends EventEmitterProtected {
           .entity(name)
           .warn('Failed to stop component before unregistering', {
             params: {
+              reason: stopResult.reason,
               code: stopResult.code,
               state: stateAfterStopAttempt,
             },
@@ -501,6 +514,7 @@ export class LifecycleManager extends EventEmitterProtected {
         return {
           success: false,
           componentName: name,
+          reason: stopResult.reason ?? 'Failed to stop component',
           code: 'stop_failed',
           error: stopResult.error,
           wasStopped: false,
@@ -673,6 +687,7 @@ export class LifecycleManager extends EventEmitterProtected {
       return {
         success: false,
         startupOrder: [],
+        reason: err.message,
         code,
         error: err,
       };
@@ -696,6 +711,7 @@ export class LifecycleManager extends EventEmitterProtected {
       return {
         success: false,
         componentName: name,
+        reason: 'Component not found',
         code: 'component_not_found',
       };
     }
@@ -707,6 +723,7 @@ export class LifecycleManager extends EventEmitterProtected {
         return {
           success: false,
           componentName: name,
+          reason: `Missing dependency "${dependencyName}"`,
           code: 'missing_dependency',
         };
       }
@@ -718,6 +735,7 @@ export class LifecycleManager extends EventEmitterProtected {
         return {
           success: false,
           componentName: name,
+          reason: `Dependency "${dependencyName}" is not running`,
           code: 'dependency_not_running',
         };
       }
@@ -728,6 +746,7 @@ export class LifecycleManager extends EventEmitterProtected {
       return {
         success: false,
         componentName: name,
+        reason: 'Component already starting',
         code: 'component_already_starting',
       };
     }
@@ -737,6 +756,7 @@ export class LifecycleManager extends EventEmitterProtected {
       return {
         success: false,
         componentName: name,
+        reason: 'Component already running',
         code: 'component_already_running',
       };
     }
@@ -746,6 +766,7 @@ export class LifecycleManager extends EventEmitterProtected {
       return {
         success: false,
         componentName: name,
+        reason: 'Shutdown in progress',
         code: 'shutdown_in_progress',
       };
     }
@@ -835,6 +856,7 @@ export class LifecycleManager extends EventEmitterProtected {
       return {
         success: false,
         componentName: name,
+        reason: err.message,
         code:
           err instanceof ComponentStartTimeoutError
             ? 'start_timeout'
@@ -866,6 +888,7 @@ export class LifecycleManager extends EventEmitterProtected {
       return {
         success: false,
         componentName: name,
+        reason: 'Component not found',
         code: 'component_not_found',
       };
     }
@@ -875,6 +898,7 @@ export class LifecycleManager extends EventEmitterProtected {
       return {
         success: false,
         componentName: name,
+        reason: 'Component not running',
         code: 'component_not_running',
       };
     }
@@ -968,6 +992,7 @@ export class LifecycleManager extends EventEmitterProtected {
         return {
           success: false,
           componentName: name,
+          reason: 'Component stop timed out',
           code: 'stop_timeout',
           error: err,
         };
@@ -993,6 +1018,7 @@ export class LifecycleManager extends EventEmitterProtected {
         return {
           success: false,
           componentName: name,
+          reason: err.message,
           code: 'unknown_error',
           error: err,
         };
@@ -1021,6 +1047,7 @@ export class LifecycleManager extends EventEmitterProtected {
       return {
         success: false,
         componentName: name,
+        reason: `Failed to stop: ${stopResult.reason}`,
         code: 'restart_stop_failed',
         error: stopResult.error,
       };
@@ -1033,6 +1060,7 @@ export class LifecycleManager extends EventEmitterProtected {
       return {
         success: false,
         componentName: name,
+        reason: `Failed to start: ${startResult.reason}`,
         code: 'restart_start_failed',
         error: startResult.error,
       };
@@ -1072,6 +1100,7 @@ export class LifecycleManager extends EventEmitterProtected {
     componentName: string;
     registrationIndexBefore: number | null;
     code: RegistrationFailureCode;
+    reason: string;
     error?: Error;
   }): RegisterComponentResult {
     const startupOrder = this.getStartupOrderInternal();
@@ -1080,6 +1109,7 @@ export class LifecycleManager extends EventEmitterProtected {
       success: false,
       registered: false,
       componentName: input.componentName,
+      reason: input.reason,
       code: input.code,
       error: input.error,
       registrationIndexBefore: input.registrationIndexBefore,
@@ -1094,6 +1124,7 @@ export class LifecycleManager extends EventEmitterProtected {
     targetComponentName?: string;
     registrationIndexBefore: number | null;
     code: RegistrationFailureCode;
+    reason: string;
     error?: Error;
     targetFound?: boolean;
   }): InsertComponentAtResult {
@@ -1103,6 +1134,7 @@ export class LifecycleManager extends EventEmitterProtected {
       success: false,
       registered: false,
       componentName: input.componentName,
+      reason: input.reason,
       code: input.code,
       error: input.error,
       registrationIndexBefore: input.registrationIndexBefore,
