@@ -2,7 +2,7 @@
 
 ## Overview
 
-Implementing a comprehensive lifecycle orchestration system with 30+ events, multi-phase shutdown, component dependencies, health checks, messaging, and ProcessSignalManager integration. Breaking the ~3000-line PRD into 8 manageable, testable phases following "implement → test → document → delete PRD section" workflow.
+Implementing a comprehensive lifecycle orchestration system with 30+ events, multi-phase shutdown, component dependencies, health checks, messaging, and ProcessSignalManager integration. Breaking the ~3000-line PRD (lifecycle-manager-prd.md within this same directory) into 8 manageable, testable phases following "implement → test → document → delete PRD section" workflow.
 
 ## Project Structure
 
@@ -16,60 +16,19 @@ src/lib/lifecycle-manager/
 └── lifecycle-manager.integration.test.ts  # Integration tests (Phase 9)
 ```
 
-## Phase 1: Foundation (1 day)
+## ~~Phase 1: Foundation~~ ✅ **COMPLETED**
 
-### Implement
+**Implemented files:**
 
-**errors.ts** - Error classes with `errPrefix`, `errType`, `errCode` pattern:
-- `InvalidComponentNameError` - kebab-case validation
-- `ComponentRegistrationError` - duplicate names, registration during shutdown
-- `DependencyCycleError` - circular dependencies
-- `MissingDependencyError` - dependency not found
-- `ComponentStartupError` - startup failure wrapper
-- `StartupTimeoutError` - global startup timeout
-- `ComponentNotFoundError` - component not in registry
+- ✅ [errors.ts](../../src/lib/lifecycle-manager/errors.ts) - All error classes with errPrefix/errType/errCode pattern
+- ✅ [types.ts](../../src/lib/lifecycle-manager/types.ts) - All TypeScript type definitions
+- ✅ [base-component.ts](../../src/lib/lifecycle-manager/base-component.ts) - Abstract BaseComponent class with full JSDoc
+- ✅ [lifecycle-manager.test.ts](../../src/lib/lifecycle-manager/lifecycle-manager.test.ts) - Unit tests (27 tests passing, 113 assertions)
+- ✅ [index.ts](../../src/lib/lifecycle-manager/index.ts) - Module exports
 
-**types.ts** - Core type definitions:
-- `ComponentOptions` (name, dependencies, optional, all timeout configs)
-- `ComponentState` (registered | starting | running | failed | stopping | force-stopping | stopped | stalled)
-- `ComponentStatus`, `ComponentStallInfo`, `ShutdownMethod`
-- Result types: `ComponentOperationResult`, `StartupResult`, `ShutdownResult`, `RestartResult`
-- Message types: `MessageResult`, `BroadcastResult`
-- Health types: `ComponentHealthResult`, `HealthCheckResult`, `HealthReport`
-- Signal types: `SignalBroadcastResult`, `ComponentSignalResult`
-- `GetValueResult`, `SystemState`, `RegisterOptions`, `UnregisterOptions`, `StartupOptions`
-- `LifecycleManagerOptions`
-
-**base-component.ts** - Abstract base class:
-- Constructor with kebab-case name validation (regex: `/^[a-z][a-z0-9]*(-[a-z0-9]+)*$/`)
-- Create component logger: `rootLogger.service(name)`
-- Store options with defaults (startupTimeoutMS: 30000, healthCheckTimeoutMS: 5000)
-- Enforce minimums: gracefulTimeoutMS ≥ 1000ms, forceTimeoutMS ≥ 500ms
-- Protected `lifecycle` reference (set by manager)
-- Abstract: `start()`, `stop()`
-- Optional: `onShutdownWarning()`, `onShutdownForce()`, `onReload()`, `onInfo()`, `onDebug()`
-- Optional: `healthCheck()`, `onMessage(payload, from)`, `getValue(key, from)`
-- Optional abort callbacks: `onStartupAborted()`, `onStopAborted()`, `onShutdownWarningAborted()`, `onShutdownForceAborted()`
-- Getters: `getName()`, `getDependencies()`, `isOptional()`
-
-### Tests
-- Valid/invalid component names
-- Default timeout values
-- Timeout minimums enforced
-- Logger scope creation
-- Dependencies stored
-- Optional flag works
-- Error classes have correct properties
-
-### Documentation
-- JSDoc on BaseComponent explaining lifecycle
-- Comment each optional method's purpose
-- Document when abort callbacks are called
-
-### PRD Sections to Delete
-- Section 2 (Component Interface) - lines 107-235
-- Error class portions of "Component Registration"
-- Timeout minimum enforcement portions
+**Test results:** 27 tests passing, 113 expect() assertions, 0 failures
+**Build:** ✅ No TypeScript errors, no linting errors
+**PRD updated:** ✅ Deleted Component Interface section, error class portions, timeout minimums
 
 ---
 
@@ -78,6 +37,7 @@ src/lib/lifecycle-manager/
 ### Implement
 
 **index.ts** - LifecycleManager skeleton:
+
 - Extend `EventEmitterProtected`
 - Constructor: create `logger.service(name || 'lifecycle-manager')`
 - Private: `components: BaseComponent[]`, `runningComponents: Set<string>`, `componentStates: Map<string, ComponentState>`, `stalledComponents: Map<string, ComponentStallInfo>`
@@ -85,13 +45,15 @@ src/lib/lifecycle-manager/
 - Private `safeEmit()` wrapper for error-safe events
 
 **Registration methods**:
-- `registerComponent(component, options?)` - add at end, set `component.lifecycle = this`
-- `insertComponentAt(component, position, targetName?, options?)` - flexible positioning
+
+- `registerComponent(component, options?)` - add at end, set `component.lifecycle = this`, return `RegisterComponentResult` (includes `startupOrder`)
+- `insertComponentAt(component, position, targetName?, options?)` - flexible positioning, return `InsertComponentAtResult` (includes `startupOrder` + `manualPositionRespected`)
 - `unregisterComponent(name, options?)` - async, with `stopIfRunning` option
 - Validation: unique names, kebab-case, no registration during shutdown
 - Emit: `component:registered`, `component:registration-rejected`, `component:unregistered`
 
 **Status tracking**:
+
 - `hasComponent(name): boolean`
 - `isComponentRunning(name): boolean`
 - `getComponentNames(): string[]`
@@ -104,6 +66,7 @@ src/lib/lifecycle-manager/
 - Private: `getComponent(name)` helper
 
 **Individual lifecycle**:
+
 - `startComponent(name)` - set state 'starting', call `start()` with timeout, update state/runningComponents
 - `stopComponent(name)` - set state 'stopping', call `stop()` with timeout, handle stall
 - `restartComponent(name)` - stop then start
@@ -111,10 +74,14 @@ src/lib/lifecycle-manager/
 - Emit events: `component:starting`, `component:started`, `component:start-failed`, `component:start-timeout`, `component:stopping`, `component:stopped`, `component:stop-timeout`, `component:stalled`
 
 ### Tests
+
 - Register/unregister components
 - Insert at start/end/before/after
 - Duplicate names rejected
 - Registration during shutdown rejected
+- Registration failure codes returned (`duplicate_name`, `shutdown_in_progress`, `target_not_found`)
+- Registration results include `startupOrder` (dependency-aware)
+- Insert results report `manualPositionRespected` (false when dependencies override requested placement)
 - Status tracking correct
 - Individual start/stop/restart
 - Timeout handling
@@ -124,11 +91,13 @@ src/lib/lifecycle-manager/
 - Event handler errors don't break lifecycle
 
 ### Documentation
+
 - JSDoc on all public methods
 - Explain result objects vs throwing
 - Document state machine
 
 ### PRD Sections to Delete
+
 - "Component Registration" (lines 690-748, excluding dependencies)
 - "Component Lifecycle Management" - Individual control (lines 817-835)
 - "Status Tracking" - Component status (lines 1028-1082)
@@ -141,6 +110,7 @@ src/lib/lifecycle-manager/
 ### Implement
 
 **Bulk methods**:
+
 - `startAllComponents(options?)`:
   - Reject if partial state (some already running)
   - Set `isStarting` flag
@@ -164,10 +134,12 @@ src/lib/lifecycle-manager/
   - Return combined result
 
 **Concurrent operation prevention**:
+
 - Track `isStarting`, `isStopping` flags
 - Reject individual operations during bulk operations
 
 ### Tests
+
 - Start all in registration order
 - Partial state rejected
 - Startup failure triggers rollback
@@ -182,11 +154,13 @@ src/lib/lifecycle-manager/
 - State reset after completion
 
 ### Documentation
+
 - Explain partial state prevention
 - Document rollback behavior
 - Explain snapshot lists
 
 ### PRD Sections to Delete
+
 - "Bulk Operations" (lines 839-873)
 - "Partial Start Prevention" (lines 920-948)
 - "Error Handling" (lines 950-953)
@@ -202,20 +176,26 @@ src/lib/lifecycle-manager/
 ### Implement
 
 **Dependency resolution**:
+
 - Private `topologicalSort()` - Kahn's algorithm or DFS-based
 - `getStartupOrder(): string[]` - public API for topological order
+- Ensure the sorter is the single source of truth for both `getStartupOrder()` and registration result objects (`RegisterComponentResult.startupOrder`, `InsertComponentAtResult.startupOrder`)
+- `validateDependencies(): DependencyValidationResult` - non-throwing validation that returns report of all issues (missing deps + cycles)
 - Automatic validation: throw `DependencyCycleError` or `MissingDependencyError` when issues detected
 
 **Update bulk operations**:
+
 - Modify `startAllComponents()` to use topological order
 - Modify `stopAllComponents()` to use reverse topological order
 - Optional component dependency handling (skip dependents if optional dep fails)
 
 **Cycle detection on registration**:
+
 - Check for cycles when registering component with dependencies
 - Throw early feedback
 
 ### Tests
+
 - Linear dependencies: A → B → C starts as C, B, A
 - Diamond dependencies work
 - Multiple independent chains
@@ -224,13 +204,19 @@ src/lib/lifecycle-manager/
 - Cycle detection (simple, complex, self)
 - Missing dependencies detected
 - Optional component dependencies
+- validateDependencies() returns correct report (valid: true when no issues)
+- validateDependencies() reports missing dependencies
+- validateDependencies() reports cycles
+- validateDependencies() reports multiple issues at once
 
 ### Documentation
+
 - Explain topological sort
 - Document dependency rules
 - Show dependency graph examples
 
 ### PRD Sections to Delete
+
 - "Component Dependencies" (lines 1365-1427)
 - "Dependencies" test section (lines 2818-2822)
 - Dependency portions of "Optional Components"
@@ -242,6 +228,7 @@ src/lib/lifecycle-manager/
 ### Implement
 
 **Three-phase shutdown** (private method):
+
 - `private async shutdownComponent(component): Promise<ComponentShutdownResult>`
   - **Phase 1: Warning** (if `shutdownWarningTimeoutMS > 0` and implemented)
     - Call `onShutdownWarning()`
@@ -261,18 +248,22 @@ src/lib/lifecycle-manager/
     - Pass context (timeout vs error)
 
 **Update methods**:
+
 - Replace simple stop in `stopComponent()` with multi-phase
 - Use multi-phase in `stopAllComponents()`
 
 **Stalled tracking**:
+
 - `getStalledComponents(): ComponentStallInfo[]`
 - Clear on shutdown completion
 
 **Events**:
+
 - `component:shutdown-warning`, `component:shutdown-warning-completed`, `component:shutdown-warning-timeout`
 - `component:shutdown-force`, `component:shutdown-force-completed`, `component:shutdown-force-timeout`
 
 ### Tests
+
 - Three-phase flow (warning → graceful → stopped)
 - Graceful timeout → force → stopped
 - Graceful error → force → stopped
@@ -283,11 +274,13 @@ src/lib/lifecycle-manager/
 - Context passed to force handler
 
 ### Documentation
+
 - Diagram three-phase flow
 - Explain when each phase runs
 - Document context parameter
 
 ### PRD Sections to Delete
+
 - "Multi-Phase Shutdown Strategy" (lines 255-310)
 - "Timeout Configuration" - per-component (lines 1317-1364)
 - Three-phase shutdown test portions
@@ -299,37 +292,44 @@ src/lib/lifecycle-manager/
 ### Implement
 
 **ProcessSignalManager composition**:
+
 - Private `processSignalManager: ProcessSignalManager | null`
 - `attachSignals()` - create and attach ProcessSignalManager
 - `detachSignals()` - wrapper
 - `getSignalStatus()` - wrapper
 
 **Signal mapping**:
+
 - Shutdown signals (SIGINT, SIGTERM, SIGTRAP) → `initiateShutdown(method)`
 - Reload signal → custom callback OR `broadcastReload()`
 - Info signal → custom callback OR log warning
 - Debug signal → custom callback OR log warning
 
 **Custom callbacks in options**:
+
 - `onReloadRequested?: (broadcastReload: () => Promise<SignalBroadcastResult>) => void | Promise<void>`
 - `onInfoRequested?: () => void | Promise<void>`
 - `onDebugRequested?: () => void | Promise<void>`
 
 **Broadcast methods** (private):
+
 - `broadcastReload()`, `broadcastInfo()`, `broadcastDebug()`
 - Call `onReload()`, `onInfo()`, `onDebug()` on running components
 - Continue on errors, aggregate results
 
 **Manual triggers**:
+
 - `triggerShutdown(method?)`, `triggerReload()`, `triggerInfo()`, `triggerDebug()`
 
 **Events**:
+
 - `signal:shutdown`, `signal:reload`, `signal:info`, `signal:debug`
 - `component:reload-started`, `component:reload-completed`, `component:reload-failed`
 - Same for info/debug
 - `lifecycle-manager:signals-attached`, `lifecycle-manager:signals-detached`
 
 ### Tests
+
 - Attach/detach work
 - Shutdown signals trigger shutdown
 - Reload custom callback vs default broadcast
@@ -340,11 +340,13 @@ src/lib/lifecycle-manager/
 - Events emitted
 
 ### Documentation
+
 - Signal-to-lifecycle mapping
 - Custom callback usage
 - broadcastReload example
 
 ### PRD Sections to Delete
+
 - "ProcessSignalManager Integration" (lines 20-106)
 - "Signal Integration" (lines 1116-1198)
 - "Signal Handling" test section
@@ -356,6 +358,7 @@ src/lib/lifecycle-manager/
 ### Implement
 
 **Component messaging**:
+
 - Private `getCallerComponentName(): string | null` - track caller via lifecycle reference
 - `sendMessageToComponent(name, payload)`:
   - Determine `from` automatically
@@ -369,6 +372,7 @@ src/lib/lifecycle-manager/
 - Emit: `component:message-sent`, `component:message-failed`, `component:broadcast-started`, `component:broadcast-completed`
 
 **Health checks**:
+
 - `checkComponentHealth(name)`:
   - Call `component.healthCheck()` if implemented
   - Race against `healthCheckTimeoutMS`
@@ -380,6 +384,7 @@ src/lib/lifecycle-manager/
 - Emit: `component:health-check-started`, `component:health-check-completed`, `component:health-check-failed`
 
 **Shared values**:
+
 - `getValue<T>(componentName, key)`:
   - Determine `from` automatically
   - Call `component.getValue(key, from)`
@@ -387,6 +392,7 @@ src/lib/lifecycle-manager/
 - Emit: `component:value-requested`, `component:value-returned`
 
 ### Tests
+
 - Send message, return data
 - Async/sync handlers
 - `from` tracking (external = null, component = name)
@@ -400,12 +406,14 @@ src/lib/lifecycle-manager/
 - Result metadata correct
 
 ### Documentation
+
 - Explain `from` tracking
 - Messaging examples
 - Health check patterns
 - getValue vs onMessage
 
 ### PRD Sections to Delete
+
 - "Component Messaging" (lines 312-509)
 - "Health Checks" (lines 1428-1592)
 - "Shared Values" (lines 1593-1745)
@@ -418,6 +426,7 @@ src/lib/lifecycle-manager/
 ### Implement
 
 **Optional components**:
+
 - Update `startAllComponents()`:
   - On failure, check `component.isOptional()`
   - If optional: log warning, set state 'failed', add to `failedOptionalComponents`, continue
@@ -425,29 +434,35 @@ src/lib/lifecycle-manager/
   - Track `skippedDueToDependency`
 
 **AutoStart on registration**:
+
 - In `registerComponent()` and `insertComponentAt()`:
   - If `autoStart: true` and `isStarted || isStarting`, start component
   - Handle failures
 
 **Stalled component restart blocking**:
+
 - In `startAllComponents()`:
   - Check stalled components exist
   - If yes and not `ignoreStalledComponents`, throw error
 
 **Dynamic removal during shutdown**:
+
 - In `unregisterComponent()`:
   - Handle shutdown in progress
   - Emit `component:unregistered-during-shutdown`
 
 **Final events**:
+
 - `component:start-failed-optional`
 - `component:start-skipped`
 - `component:unregistered-during-shutdown`
 
 **Status tracking**:
+
 - `shutdownMethod`, `shutdownStartTime`, `shutdownDuration`
 
 ### Tests
+
 - Optional fails, app continues
 - Required fails, rollback
 - Dependency chains with optional
@@ -461,12 +476,14 @@ src/lib/lifecycle-manager/
 - All optional, all fail
 
 ### Documentation
+
 - Optional component behavior
 - AutoStart nuances
 - Stalled recovery
 - Comprehensive examples
 
 ### PRD Sections to Delete
+
 - "Optional Components" (lines 1747-1819)
 - "Abort Callbacks" (lines 1820-1932)
 - AutoStart portions
@@ -481,6 +498,7 @@ src/lib/lifecycle-manager/
 ### Implement
 
 **Integration tests** (`lifecycle-manager.integration.test.ts`):
+
 - Multi-component with complex dependencies
 - Full signal handling
 - Shutdown during startup with real components
@@ -488,6 +506,7 @@ src/lib/lifecycle-manager/
 - Health monitoring workflows
 
 **Example app** (`examples/lifecycle-demo/`):
+
 - Database, cache, web server, API components
 - Dependency declaration
 - Optional components
@@ -496,14 +515,17 @@ src/lib/lifecycle-manager/
 - Signal handling demo
 
 **Documentation**:
+
 - README.md for LifecycleManager (quick start, architecture, API reference, best practices)
 - Migration guide from old implementations
 - Event reference
 
 **Export**:
+
 - Update `src/index.ts` to export LifecycleManager, BaseComponent, types, errors
 
 ### Success Criteria
+
 - Integration tests pass
 - Example app runs and demonstrates all features
 - README is comprehensive
@@ -552,6 +574,7 @@ Based on exploration of existing codebase:
 ## Verification
 
 After each phase:
+
 1. All unit tests pass (`bun test`)
 2. Code coverage ≥ 95%
 3. No TypeScript errors (`bun run build`)
@@ -560,6 +583,7 @@ After each phase:
 6. Corresponding PRD sections deleted
 
 Final verification (Phase 9):
+
 1. Integration tests pass
 2. Example app runs successfully
 3. All features demonstrated

@@ -20,7 +20,7 @@ A robust process signal and keyboard event manager. This utility provides a unif
   - [Async Handlers](#async-handlers)
   - [Custom Callback Names](#custom-callback-names)
   - [Reload-Only Manager](#reload-only-manager)
-  - [Debouncing Keyboard Events](#debouncing-keyboard-events)
+  - [Throttling Keyboard Events](#throttling-keyboard-events)
   - [Adding Info and Debug Handlers](#adding-info-and-debug-handlers)
 - [API](#api)
   - [`constructor(options: ProcessSignalManagerOptions)`](#constructoroptions-processsignalmanageroptions)
@@ -32,8 +32,11 @@ A robust process signal and keyboard event manager. This utility provides a unif
 - [Signal and Key Mappings](#signal-and-key-mappings)
 - [Stdin Raw Mode Behavior](#stdin-raw-mode-behavior)
 - [Multiple Instances](#multiple-instances)
+  - [Important: Shared Keypress Behavior](#important-shared-keypress-behavior)
 - [Error Handling](#error-handling)
 - [Demo](#demo)
+  - [Interactive Demo](#interactive-demo)
+  - [Multiple Instances Demo](#multiple-instances-demo)
 
 <!-- tocstop -->
 

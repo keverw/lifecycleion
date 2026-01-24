@@ -104,137 +104,7 @@ await lifecycleManager.triggerInfo(); // Manual info trigger (returns results)
 await lifecycleManager.triggerDebug(); // Manual debug trigger (returns results)
 ```
 
-### 2. Component Interface
-
-**BaseComponent Abstract Class**:
-
-```typescript
-export interface ComponentOptions {
-  name: string;
-
-  // Dependency configuration
-  dependencies?: string[]; // Names of components this one depends on (default: [])
-  optional?: boolean; // If true, startup failure doesn't trigger rollback (default: false)
-
-  // Startup timeout configuration
-  startupTimeoutMS?: number; // Time to wait for start() (default: 30000, 0 = disabled)
-
-  // Shutdown timeout configuration
-  shutdownWarningTimeoutMS?: number; // Time to wait after warning (default: 0 = skip warning)
-  shutdownGracefulTimeoutMS?: number; // Time to wait for graceful shutdown (default: 5000)
-  shutdownForceTimeoutMS?: number; // Time to wait for force shutdown (default: 2000)
-
-  // Health check configuration
-  healthCheckTimeoutMS?: number; // Time to wait for healthCheck() (default: 5000)
-}
-
-export abstract class BaseComponent {
-  protected logger: LoggerService;
-  protected name: string;
-
-  // Dependency configuration
-  public readonly dependencies: string[];
-  public readonly optional: boolean;
-
-  // Startup timeout configuration
-  public readonly startupTimeoutMS: number;
-
-  // Shutdown timeout configuration
-  public readonly shutdownWarningTimeoutMS: number;
-  public readonly shutdownGracefulTimeoutMS: number;
-  public readonly shutdownForceTimeoutMS: number;
-
-  // Health check configuration
-  public readonly healthCheckTimeoutMS: number;
-
-  constructor(rootLogger: Logger, options: ComponentOptions) {
-    // Validate kebab-case name (throws InvalidComponentNameError)
-    if (!/^[a-z][a-z0-9]*(-[a-z0-9]+)*$/.test(options.name)) {
-      throw new InvalidComponentNameError(options.name);
-    }
-
-    this.name = options.name;
-    // Component logs as its own service (not as child of LifecycleManager)
-    this.logger = rootLogger.service(this.name);
-
-    // Dependency configuration
-    this.dependencies = options.dependencies ?? [];
-    this.optional = options.optional ?? false;
-
-    // Timeout configuration
-    this.startupTimeoutMS = options.startupTimeoutMS ?? 30000;
-    this.shutdownWarningTimeoutMS = options.shutdownWarningTimeoutMS ?? 0;
-    this.healthCheckTimeoutMS = options.healthCheckTimeoutMS ?? 5000;
-
-    // Enforce minimums for shutdown timeouts
-    this.shutdownGracefulTimeoutMS = Math.max(
-      options.shutdownGracefulTimeoutMS ?? 5000,
-      1000, // Minimum 1 second
-    );
-    this.shutdownForceTimeoutMS = Math.max(
-      options.shutdownForceTimeoutMS ?? 2000,
-      500, // Minimum 500ms
-    );
-  }
-
-  // Reference to lifecycle manager (set by manager when registered)
-  protected lifecycle: LifecycleManager;
-
-  // Required implementations - clean signatures, no signal parameter
-  public abstract start(): Promise<void>;
-  public abstract stop(): Promise<void>;
-
-  // Optional abort callbacks - called when manager times out the operation
-  // Use these to set internal flags, cancel pending work, cleanup resources
-  public onStartupAborted?(): void;
-  public onStopAborted?(): void; // Called when graceful stop times out, before force phase
-
-  // Optional shutdown lifecycle hooks (React-like pattern)
-  // Can be sync or async - manager will await if Promise is returned
-  public onShutdownWarning?(): Promise<void> | void;
-  public onShutdownWarningAborted?(): void; // Called if warning phase times out
-  public onShutdownForce?(): Promise<void> | void;
-  public onShutdownForceAborted?(): void; // Called if force phase times out
-
-  // Optional signal handlers (can be sync or async)
-  public onReload?(): Promise<void> | void;
-  public onInfo?(): Promise<void> | void;
-  public onDebug?(): Promise<void> | void;
-
-  // Optional health check - return boolean OR rich result with metadata
-  public healthCheck?():
-    | Promise<boolean | ComponentHealthResult>
-    | boolean
-    | ComponentHealthResult;
-
-  // Optional message handler for arbitrary component messaging
-  // Can return data (any type) which will be included in MessageResult.data
-  // payload = the message content, from = sender component name (null if external)
-  public onMessage?(
-    payload: unknown,
-    from: string | null,
-  ): Promise<unknown> | unknown;
-
-  // Optional value provider - return values on-demand for other components
-  // from = component name if another component requested, null if external
-  // Return undefined if key not found
-  public getValue?(key: string, from: string | null): unknown;
-
-  public getName(): string {
-    return this.name;
-  }
-
-  public getDependencies(): string[] {
-    return this.dependencies;
-  }
-
-  public isOptional(): boolean {
-    return this.optional;
-  }
-}
-```
-
-### 3. Logger Hierarchy
+### 2. Logger Hierarchy
 
 **Two separate logging contexts**:
 
@@ -693,7 +563,10 @@ if (result.success) {
 
 ```typescript
 // Add at end (default)
-registerComponent(component: BaseComponent, options?: RegisterOptions): boolean
+registerComponent(
+  component: BaseComponent,
+  options?: RegisterOptions,
+): RegisterComponentResult
 
 // Insert at specific position
 insertComponentAt(
@@ -701,7 +574,7 @@ insertComponentAt(
   position: 'start' | 'end' | 'before' | 'after',
   targetComponentName?: string,
   options?: RegisterOptions
-): boolean
+): InsertComponentAtResult
 
 // Remove component (async because it may need to stop the component first)
 unregisterComponent(componentName: string, options?: UnregisterOptions): Promise<boolean>
@@ -747,34 +620,13 @@ async unregisterComponent(name: string, options?: UnregisterOptions): Promise<bo
 }
 ```
 
-**Component Name Validation**:
-
-Component names must be **kebab-case** (lowercase letters, numbers, and hyphens):
-
-```typescript
-// Valid names
-'database';
-'web-server';
-'api-gateway-v2';
-'cache-redis';
-
-// Invalid names (will throw ComponentRegistrationError)
-'Database'; // No uppercase
-'web_server'; // No underscores
-'WebServer'; // No camelCase
-''; // No empty strings
-'my server'; // No spaces
-```
-
-Validation regex: `/^[a-z][a-z0-9]*(-[a-z0-9]+)*$/`
-
 **Validation**:
 
 - Enforce unique component names
 - Enforce kebab-case naming convention
 - **Prevent registration during shutdown** (while `isShuttingDown === true`)
-  - `registerComponent()` returns `false` and logs warning
-  - `insertComponentAt()` returns `false` and logs warning
+  - `registerComponent()` returns `{ success: false, code: 'shutdown_in_progress', ... }` and may log warning
+  - `insertComponentAt()` returns `{ success: false, code: 'shutdown_in_progress', ... }` and may log warning
   - Emit event: `component:registration-rejected` with reason
 - Validate target component exists for 'before'/'after' positions
 - Log warnings for failed registrations
@@ -1322,25 +1174,6 @@ Per-component timeouts are configured in `ComponentOptions`, not `LifecycleManag
 - `shutdownWarningTimeoutMS` - per-component warning phase timeout (default: 0 = skip warning phase)
 - `shutdownGracefulTimeoutMS` - per-component graceful shutdown timeout (default: 5000ms, minimum: 1000ms)
 - `shutdownForceTimeoutMS` - per-component force shutdown timeout (default: 2000ms, minimum: 500ms)
-
-**Timeout Minimums**:
-
-Graceful and force shutdown timeouts have enforced minimums to prevent dangerous configurations:
-
-```typescript
-// In BaseComponent constructor
-this.shutdownGracefulTimeoutMS = Math.max(
-  options.shutdownGracefulTimeoutMS ?? 5000,
-  1000, // Minimum 1 second for graceful shutdown
-);
-
-this.shutdownForceTimeoutMS = Math.max(
-  options.shutdownForceTimeoutMS ?? 2000,
-  500, // Minimum 500ms for force shutdown
-);
-```
-
-Setting these to 0 would skip the shutdown phase entirely, which is dangerous. If you want faster shutdown, use reasonable minimums. The warning phase (`shutdownWarningTimeoutMS: 0`) can be skipped because it's an optional preparation phase, not the actual shutdown.
 
 **Global vs Per-Component Timeout Interaction**:
 
@@ -2103,7 +1936,8 @@ The LifecycleManager uses a consistent pattern for error handling:
 | `startAllComponents()`     | `Promise<StartupResult>`            | Optional component failed, stalled components exist |
 | `stopAllComponents()`      | `Promise<ShutdownResult>`           | Components stalled                                  |
 | `sendMessageToComponent()` | `Promise<MessageResult>`            | Component not found, not running, handler error     |
-| `registerComponent()`      | `boolean`                           | Duplicate name, during shutdown                     |
+| `registerComponent()`      | `RegisterComponentResult`           | Duplicate name, during shutdown                     |
+| `insertComponentAt()`      | `InsertComponentAtResult`           | Target not found, duplicate name, during shutdown   |
 | `unregisterComponent()`    | `Promise<boolean>`                  | Not found, running without stopIfRunning            |
 
 **Throw errors** only for programmer mistakes (bugs in calling code):
@@ -2112,7 +1946,7 @@ The LifecycleManager uses a consistent pattern for error handling:
 | ---------------------------- | -------------------------------------------- |
 | `InvalidComponentNameError`  | Component name isn't valid kebab-case        |
 | `DependencyCycleError`       | Circular dependency detected at registration |
-| `InvalidInsertPositionError` | `insertComponentAt()` with invalid target    |
+| `ComponentRegistrationError` | Invalid registration inputs (bug in caller)  |
 
 **Result Object Pattern**:
 
@@ -2180,20 +2014,12 @@ export class DependencyCycleError extends LifecycleError {
 }
 
 /**
- * Thrown when insertComponentAt() targets a non-existent component
+ * Note on insertComponentAt() targeting:
+ *
+ * Target-not-found is treated as an expected runtime failure and is returned
+ * as a result object (e.g. `{ success: false, code: 'target_not_found', ... }`)
+ * rather than thrown.
  */
-export class InvalidInsertPositionError extends LifecycleError {
-  constructor(
-    public readonly componentName: string,
-    public readonly targetName: string,
-  ) {
-    super(
-      `Cannot insert '${componentName}': target component '${targetName}' not found`,
-    );
-    this.name = 'InvalidInsertPositionError';
-  }
-}
-
 /**
  * Thrown when a required dependency is not registered
  * (only at startAllComponents() time, not registration)
