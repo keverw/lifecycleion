@@ -20,16 +20,16 @@
 
 ## Changes Implemented ✅
 
-### 1. Result Object Simplification
-- Removed redundant `reason` field from all result objects
-- Kept only `code` field for machine-readable error codes
-- Codes are descriptive enough (e.g., `component_not_found`, `component_running`, `stop_failed`)
+### 1. Result Object Consistency
+- Added both `reason` (human-readable) and `code` (machine-readable) fields to all result objects
+- Best of both worlds approach: `reason` for logging/display, `code` for programmatic handling
 - Added `error` field for underlying error details when available
 
 ```typescript
 const result = await lifecycle.unregisterComponent('db');
 if (!result.success) {
-  console.error(`Failed: ${result.code}`); // e.g., "component_running"
+  console.error(result.reason);  // "Component is running. Use stopIfRunning option..."
+  
   if (result.code === 'component_running') {
     await lifecycle.unregisterComponent('db', { stopIfRunning: true });
   }
@@ -56,13 +56,14 @@ restartComponent(name: string, options?: RestartComponentOptions): Promise<Compo
 
 ### Unified Base Result Interface (HIGH INTEREST)
 
-Create consistent base for all result types:
+Create consistent base for all result types to eliminate type proliferation and enable generic handlers:
 
 ```typescript
 // Base interface for ALL operation results
 interface BaseOperationResult {
   success: boolean;
   targetName: string;     // Generic entity name
+  reason?: string;        // Human-readable explanation
   code?: string;          // Machine-readable error code
   error?: Error;          // Underlying error details
   metadata?: unknown;     // Operation-specific data
@@ -70,26 +71,54 @@ interface BaseOperationResult {
 
 // All results extend this
 interface ComponentOperationResult extends BaseOperationResult {
-  componentName: string;  // Alias for backward compatibility
+  componentName: string;  // Alias for targetName (backward compatibility)
 }
 
 interface RegisterComponentResult extends BaseOperationResult {
+  componentName: string;
   metadata: {
+    registered: boolean;
     action: 'register';
-    registrationIndex: number;
+    registrationIndexBefore: number | null;
+    registrationIndexAfter: number | null;
     startupOrder: string[];
   };
+}
+
+interface UnregisterComponentResult extends BaseOperationResult {
+  componentName: string;
+  metadata: {
+    wasStopped: boolean;
+    wasRegistered: boolean;
+  };
+}
+
+// Generic result handler example
+function logOperationResult(result: BaseOperationResult): void {
+  if (result.success) {
+    console.log(`✓ ${result.targetName} operation succeeded`);
+  } else {
+    console.error(`✗ ${result.targetName}: ${result.reason} [${result.code}]`);
+  }
 }
 ```
 
 **Benefits:**
 - Eliminates type proliferation (currently 4+ different result types)
-- Enables generic result handlers
-- Improves API predictability
+- Enables generic result handlers (single function works with all results)
+- Improves API predictability (all results have same base shape)
 - Reduces TypeScript duplication
-- Clean interface with only `code` for errors (no redundant `reason`)
+- Maintains both `reason` and `code` for flexibility
+- Operation-specific data moved to `metadata` for clean separation
 
-**Effort:** MEDIUM (requires refactoring existing types, maintains backward compatibility via aliases)
+**Effort:** MEDIUM (requires refactoring existing types, maintains backward compatibility via field aliases)
+
+**Implementation Strategy:**
+1. Define `BaseOperationResult` interface
+2. Update existing interfaces to extend base (additive changes only)
+3. Move operation-specific fields into `metadata` object
+4. Keep direct fields as aliases for backward compatibility during transition
+5. Deprecate direct fields in favor of metadata access
 
 ---
 
