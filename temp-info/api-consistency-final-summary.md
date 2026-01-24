@@ -279,10 +279,10 @@ ValueResult<T>  // Consistent noun-first pattern
 ### For Future Releases
 
 Consider these enhancements in v1.1+:
-1. ~~Add sync `unregisterComponent()` variant~~ (Rejected - async is correct)
-2. Consider unified base result interface (Maintainer interested)
-3. Include `status` in operation results
-4. Polish type naming (`GetValueResult` → `ValueResult`)
+- ~~Add sync `unregisterComponent()` variant~~ (Rejected - async is correct)
+- Consider unified base result interface (Maintainer interested)
+- Include `status` in operation results
+- Polish type naming (`GetValueResult` → `ValueResult`)
 
 None of these are blocking - they're polish items.
 

@@ -41,9 +41,9 @@ if (!result.success) {
 }
 ```
 
-### 2. Exceptions (Programmer Errors) - UNDER REVIEW
+### 2. Exceptions (Currently Used - May Transition to Result Objects)
 
-> **Note from maintainer:** Preference is to NOT throw even for programming errors. This section documents current behavior but may change to return result objects for all failures.
+> **Note from maintainer:** Preference is to NOT throw even for programming errors. Current behavior documented below may change to return result objects for all failures.
 
 Invalid input or system errors currently throw exceptions. These represent **programmer mistakes** or configuration errors that should be fixed in code.
 
