@@ -963,6 +963,82 @@ describe('LifecycleManager - Phase 2: Core Registration & Individual Lifecycle',
       expect(result.code).toBe('component_not_found');
     });
 
+    test('startComponent should fail when dependencies are missing', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+      const component = new TestComponent(logger, {
+        name: 'api',
+        dependencies: ['database'],
+      });
+
+      lifecycle.registerComponent(component);
+
+      const result = await lifecycle.startComponent('api');
+
+      expect(result.success).toBe(false);
+      expect(result.code).toBe('missing_dependency');
+      expect(result.reason).toContain('database');
+      expect(lifecycle.isComponentRunning('api')).toBe(false);
+    });
+
+    test('startComponent should fail when dependencies are not running', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+      const database = new TestComponent(logger, { name: 'database' });
+      const api = new TestComponent(logger, {
+        name: 'api',
+        dependencies: ['database'],
+      });
+
+      lifecycle.registerComponent(database);
+      lifecycle.registerComponent(api);
+
+      const result = await lifecycle.startComponent('api');
+
+      expect(result.success).toBe(false);
+      expect(result.code).toBe('dependency_not_running');
+      expect(result.reason).toContain('database');
+      expect(lifecycle.isComponentRunning('api')).toBe(false);
+    });
+
+    test('startComponent should allow optional dependencies when enabled', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+      const database = new TestComponent(logger, {
+        name: 'database',
+        optional: true,
+      });
+      const api = new TestComponent(logger, {
+        name: 'api',
+        dependencies: ['database'],
+      });
+
+      lifecycle.registerComponent(database);
+      lifecycle.registerComponent(api);
+
+      const result = await lifecycle.startComponent('api', {
+        allowOptionalDependencies: true,
+      });
+
+      expect(result.success).toBe(true);
+      expect(lifecycle.isComponentRunning('api')).toBe(true);
+    });
+
+    test('startComponent should allow start when dependencies are running', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+      const database = new TestComponent(logger, { name: 'database' });
+      const api = new TestComponent(logger, {
+        name: 'api',
+        dependencies: ['database'],
+      });
+
+      lifecycle.registerComponent(database);
+      lifecycle.registerComponent(api);
+
+      await lifecycle.startComponent('database');
+      const result = await lifecycle.startComponent('api');
+
+      expect(result.success).toBe(true);
+      expect(lifecycle.isComponentRunning('api')).toBe(true);
+    });
+
     test('startComponent should return failure for already running component', async () => {
       const lifecycle = new LifecycleManager({ logger });
       const component = new TestComponent(logger, { name: 'test' });

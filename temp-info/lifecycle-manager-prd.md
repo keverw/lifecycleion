@@ -1045,8 +1045,9 @@ class ApiComponent extends BaseComponent {
 
 - **Startup**: Dependencies start before dependents. `database` and `cache` start before `api`.
 - **Shutdown**: Reverse order. `api` stops before `database` and `cache`.
-- **Cycle Detection**: Circular dependencies return a failure result with `code: 'dependency_cycle'` (and `error` set to `DependencyCycleError`) from registration and startup-order APIs.
+- **Cycle Detection**: Circular dependencies return a failure result with `code: 'dependency_cycle'` (and `error` set to `DependencyCycleError`) from registration and startup-order APIs. Error details include a detected cycle path when available.
 - **Missing Dependencies**: If a dependency isn't registered, startup methods return failure results with machine-readable codes rather than throwing.
+- **Manual Start**: `startComponent()` requires dependencies to be registered and running by default. Missing dependencies return `missing_dependency`; registered-but-stopped dependencies return `dependency_not_running`. Pass `{ allowOptionalDependencies: true }` to allow registered-but-stopped optional dependencies; optional status does not bypass missing dependencies.
 
 **Interaction with Registration Order**:
 
@@ -1418,7 +1419,7 @@ new CacheComponent(logger, {
 
 - **Startup failure**: Log warning, mark component as `'failed'`, continue with other components
 - **No rollback**: Other components keep running
-- **Dependency handling**: If an optional component fails, components that depend on it also fail (but don't rollback if they're also optional)
+- **Dependency handling**: If an optional component fails, components that depend on it are skipped with a warning and `component:start-skipped` event (no rollback, even if they are also optional)
 - **State tracking**: Failed optional components have state `'failed'` (new state)
 
 **New Component State**:

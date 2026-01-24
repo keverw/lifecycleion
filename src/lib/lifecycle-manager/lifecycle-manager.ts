@@ -7,6 +7,7 @@ import type {
   ComponentStatus,
   ComponentStallInfo,
   ComponentOperationResult,
+  StartComponentOptions,
   LifecycleManagerOptions,
   RegisterOptions,
   RegisterComponentResult,
@@ -696,7 +697,10 @@ export class LifecycleManager extends EventEmitterProtected {
   /**
    * Start a specific component
    */
-  public async startComponent(name: string): Promise<ComponentOperationResult> {
+  public async startComponent(
+    name: string,
+    options?: StartComponentOptions,
+  ): Promise<ComponentOperationResult> {
     const component = this.getComponent(name);
 
     if (!component) {
@@ -706,6 +710,31 @@ export class LifecycleManager extends EventEmitterProtected {
         reason: 'Component not found',
         code: 'component_not_found',
       };
+    }
+
+    // Ensure dependencies are registered and running before starting.
+    for (const dependencyName of component.getDependencies()) {
+      const dependency = this.getComponent(dependencyName);
+      if (!dependency) {
+        return {
+          success: false,
+          componentName: name,
+          reason: `Missing dependency "${dependencyName}"`,
+          code: 'missing_dependency',
+        };
+      }
+
+      if (!this.isComponentRunning(dependencyName)) {
+        if (options?.allowOptionalDependencies && dependency.isOptional()) {
+          continue;
+        }
+        return {
+          success: false,
+          componentName: name,
+          reason: `Dependency "${dependencyName}" is not running`,
+          code: 'dependency_not_running',
+        };
+      }
     }
 
     const currentState = this.componentStates.get(name);
@@ -1248,9 +1277,52 @@ export class LifecycleManager extends EventEmitterProtected {
 
     if (order.length !== names.length) {
       const remaining = names.filter((n) => !order.includes(n));
-      throw new DependencyCycleError({ cycle: remaining });
+      const cycle = this.findDependencyCycle(adjacency);
+      throw new DependencyCycleError({ cycle: cycle.length > 0 ? cycle : remaining });
     }
 
     return order;
+  }
+
+  private findDependencyCycle(
+    adjacency: Map<string, Set<string>>,
+  ): string[] {
+    const visited = new Set<string>();
+    const inStack = new Set<string>();
+    const path: string[] = [];
+
+    const visit = (node: string): string[] | null => {
+      visited.add(node);
+      inStack.add(node);
+      path.push(node);
+
+      for (const neighbor of adjacency.get(node) ?? []) {
+        if (!visited.has(neighbor)) {
+          const result = visit(neighbor);
+          if (result) {
+            return result;
+          }
+        } else if (inStack.has(neighbor)) {
+          const cycleStart = path.indexOf(neighbor);
+          return cycleStart >= 0 ? path.slice(cycleStart) : [neighbor];
+        }
+      }
+
+      inStack.delete(node);
+      path.pop();
+      return null;
+    };
+
+    for (const node of adjacency.keys()) {
+      if (visited.has(node)) {
+        continue;
+      }
+      const result = visit(node);
+      if (result) {
+        return result;
+      }
+    }
+
+    return [];
   }
 }

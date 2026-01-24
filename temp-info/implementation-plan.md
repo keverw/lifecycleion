@@ -74,6 +74,19 @@ src/lib/lifecycle-manager/
 
 ---
 
+## ~~Phase 2.6: Manual Dependency Validation & Cycle Reporting~~ ✅ **COMPLETED**
+
+**Implemented updates:**
+
+- ✅ `startComponent()` validates dependencies are registered and running (optional bypass option for optional dependencies)
+- ✅ Operation failure codes added for missing/not-running dependencies
+- ✅ Cycle errors report detected cycle path when available
+
+**Tests:** Not run (not requested)
+**PRD updated:** ✅ Component Dependencies section updated (manual start + cycle reporting)
+
+---
+
 ## Phase 3: Bulk Operations (1.5 days)
 
 ### Implement

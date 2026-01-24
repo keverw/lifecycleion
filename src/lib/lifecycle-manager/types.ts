@@ -106,6 +106,17 @@ export interface ComponentOperationResult {
 }
 
 /**
+ * Options for manually starting a component
+ */
+export interface StartComponentOptions {
+  /**
+   * If true, allow dependencies that are registered but not running
+   * when those dependencies are optional components.
+   */
+  allowOptionalDependencies?: boolean;
+}
+
+/**
  * Stable, machine-readable failure codes for individual component operations
  */
 export type ComponentOperationFailureCode =
@@ -113,6 +124,8 @@ export type ComponentOperationFailureCode =
   | 'component_already_running'
   | 'component_already_starting'
   | 'component_not_running'
+  | 'missing_dependency'
+  | 'dependency_not_running'
   | 'shutdown_in_progress'
   | 'start_timeout'
   | 'stop_timeout'
