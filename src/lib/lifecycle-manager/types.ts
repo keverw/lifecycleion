@@ -135,13 +135,8 @@ export interface StartComponentOptions {
  */
 export interface StopComponentOptions {
   /**
-   * If true, skip the warning phase and go directly to graceful shutdown
-   * (default: false)
-   */
-  skipWarningPhase?: boolean;
-
-  /**
    * If true, force immediate shutdown without graceful period
+   * Calls onShutdownForce() directly, bypassing normal stop() flow
    * (default: false)
    */
   forceImmediate?: boolean;
@@ -149,6 +144,7 @@ export interface StopComponentOptions {
   /**
    * Override the component's configured shutdown timeout in milliseconds
    * If not specified, uses the component's shutdownGracefulTimeoutMS
+   * Only applies when forceImmediate is false
    */
   timeout?: number;
 }
