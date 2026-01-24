@@ -86,23 +86,37 @@ export interface ComponentStallInfo {
 export type ShutdownMethod = 'manual' | 'SIGINT' | 'SIGTERM' | 'SIGTRAP';
 
 /**
- * Result of an individual component operation (start/stop/restart)
+ * Base interface for all operation results
+ * 
+ * Provides consistent structure across all operations with common fields
+ * for success status, error handling, and optional component status.
  */
-export interface ComponentOperationResult {
+export interface BaseOperationResult {
   /** Whether the operation succeeded */
   success: boolean;
-
-  /** Component name */
-  componentName: string;
 
   /** Human-readable explanation if !success */
   reason?: string;
 
   /** Machine-readable failure code if !success */
-  code?: ComponentOperationFailureCode;
+  code?: string;
 
   /** Underlying error if applicable */
   error?: Error;
+
+  /** Component status after the operation (if applicable) */
+  status?: ComponentStatus;
+}
+
+/**
+ * Result of an individual component operation (start/stop/restart)
+ */
+export interface ComponentOperationResult extends BaseOperationResult {
+  /** Component name */
+  componentName: string;
+
+  /** Machine-readable failure code if !success */
+  code?: ComponentOperationFailureCode;
 }
 
 /**
@@ -114,6 +128,38 @@ export interface StartComponentOptions {
    * when those dependencies are optional components.
    */
   allowOptionalDependencies?: boolean;
+}
+
+/**
+ * Options for manually stopping a component
+ */
+export interface StopComponentOptions {
+  /**
+   * If true, force immediate shutdown without graceful period
+   * Calls onShutdownForce() directly, bypassing normal stop() flow
+   * (default: false)
+   */
+  forceImmediate?: boolean;
+
+  /**
+   * Override the component's configured shutdown timeout in milliseconds
+   * If not specified, uses the component's shutdownGracefulTimeoutMS
+   * Only applies when forceImmediate is false
+   */
+  timeout?: number;
+}
+
+/**
+ * Options for restarting a component (stop + start)
+ * 
+ * Combines options for both stop and start phases.
+ */
+export interface RestartComponentOptions {
+  /** Options for the stop phase */
+  stopOptions?: StopComponentOptions;
+  
+  /** Options for the start phase */
+  startOptions?: StartComponentOptions;
 }
 
 /**
@@ -134,17 +180,22 @@ export type ComponentOperationFailureCode =
   | 'unknown_error';
 
 /**
+ * Failure codes for unregister operations
+ */
+export type UnregisterFailureCode =
+  | 'component_not_found'
+  | 'component_running'
+  | 'stop_failed';
+
+/**
  * Result of unregistering a component
  */
-export interface UnregisterComponentResult {
-  /** Whether the operation succeeded */
-  success: boolean;
-
+export interface UnregisterComponentResult extends BaseOperationResult {
   /** Component name */
   componentName: string;
 
-  /** Human-readable explanation if !success */
-  reason?: string;
+  /** Machine-readable failure code if !success */
+  code?: UnregisterFailureCode;
 
   /** Whether the component was stopped before unregistering */
   wasStopped: boolean;
@@ -335,7 +386,7 @@ export interface ComponentSignalResult {
 /**
  * Result of requesting a value from a component
  */
-export interface GetValueResult<T = unknown> {
+export interface ValueResult<T = unknown> {
   /** True if getValue returned non-undefined */
   found: boolean;
 
@@ -411,24 +462,15 @@ export type RegistrationFailureCode =
 /**
  * Common result shape for component registration operations
  */
-export interface RegistrationResultBase {
-  /** Whether the operation succeeded */
-  success: boolean;
-
+export interface RegistrationResultBase extends BaseOperationResult {
   /** Whether the component was added to the registry */
   registered: boolean;
 
   /** Component name */
   componentName: string;
 
-  /** Human-readable explanation if !success */
-  reason?: string;
-
   /** Machine-readable failure code if !success */
   code?: RegistrationFailureCode;
-
-  /** Underlying error if applicable */
-  error?: Error;
 
   /** Registration index before the operation (null if not previously registered) */
   registrationIndexBefore: number | null;
@@ -448,21 +490,12 @@ export type StartupOrderFailureCode = 'dependency_cycle' | 'unknown_error';
 /**
  * Result of getStartupOrder()
  */
-export interface StartupOrderResult {
-  /** Whether the operation succeeded */
-  success: boolean;
-
+export interface StartupOrderResult extends BaseOperationResult {
   /** Resolved startup order after applying dependency constraints */
   startupOrder: string[];
 
-  /** Human-readable explanation if !success */
-  reason?: string;
-
   /** Machine-readable failure code if !success */
   code?: StartupOrderFailureCode;
-
-  /** Underlying error if applicable */
-  error?: Error;
 }
 
 /**
