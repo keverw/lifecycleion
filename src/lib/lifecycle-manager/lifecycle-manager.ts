@@ -828,6 +828,7 @@ export class LifecycleManager extends EventEmitterProtected {
       return {
         success: true,
         componentName: name,
+        status: this.getComponentStatus(name),
       };
     } catch (error) {
       const err = error as Error;
@@ -930,6 +931,7 @@ export class LifecycleManager extends EventEmitterProtected {
         return {
           success: true,
           componentName: name,
+          status: this.getComponentStatus(name),
         };
       } catch (error) {
         const err = error as Error;
@@ -1005,6 +1007,7 @@ export class LifecycleManager extends EventEmitterProtected {
       return {
         success: true,
         componentName: name,
+        status: this.getComponentStatus(name),
       };
     } catch (error) {
       const err = error as Error;
@@ -1114,6 +1117,7 @@ export class LifecycleManager extends EventEmitterProtected {
     return {
       success: true,
       componentName: name,
+      status: this.getComponentStatus(name),
     };
   }
 
