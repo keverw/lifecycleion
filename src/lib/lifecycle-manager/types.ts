@@ -197,6 +197,11 @@ export type UnregisterFailureCode =
   | 'bulk_operation_in_progress';
 
 /**
+ * Additional details for why unregister stop failed
+ */
+export type UnregisterStopFailureReason = 'stalled' | 'timeout' | 'error';
+
+/**
  * Result of unregistering a component
  */
 export interface UnregisterComponentResult extends BaseOperationResult {
@@ -205,6 +210,9 @@ export interface UnregisterComponentResult extends BaseOperationResult {
 
   /** Machine-readable failure code if !success */
   code?: UnregisterFailureCode;
+
+  /** More detail when stop_failed occurs */
+  stopFailureReason?: UnregisterStopFailureReason;
 
   /** Whether the component was stopped before unregistering */
   wasStopped: boolean;
@@ -462,6 +470,7 @@ export type InsertPosition = 'start' | 'end' | 'before' | 'after';
  */
 export type RegistrationFailureCode =
   | 'duplicate_name'
+  | 'duplicate_instance'
   | 'shutdown_in_progress'
   | 'target_not_found'
   | 'invalid_position'

@@ -450,6 +450,50 @@ describe('LifecycleManager - Phase 1: Foundation', () => {
       expect(result2.startupOrder).toEqual(['database']);
     });
 
+    test('registerComponent() should reject duplicate instance even if renamed', () => {
+      class RenamableComponent extends TestComponent {
+        public rename(newName: string): void {
+          this.name = newName;
+        }
+      }
+
+      const lifecycle = new LifecycleManager({ logger });
+      const component = new RenamableComponent(logger, { name: 'database' });
+
+      const result1 = lifecycle.registerComponent(component);
+      expect(result1.success).toBe(true);
+
+      component.rename('database-copy');
+
+      const result2 = lifecycle.registerComponent(component);
+      expect(result2.success).toBe(false);
+      expect(result2.registered).toBe(false);
+      expect(result2.code).toBe('duplicate_instance');
+      expect(result2.componentName).toBe('database-copy');
+    });
+
+    test('insertComponentAt() should reject duplicate instance even if renamed', () => {
+      class RenamableComponent extends TestComponent {
+        public rename(newName: string): void {
+          this.name = newName;
+        }
+      }
+
+      const lifecycle = new LifecycleManager({ logger });
+      const component = new RenamableComponent(logger, { name: 'database' });
+
+      const result1 = lifecycle.registerComponent(component);
+      expect(result1.success).toBe(true);
+
+      component.rename('database-copy');
+
+      const result2 = lifecycle.insertComponentAt(component, 'end');
+      expect(result2.success).toBe(false);
+      expect(result2.registered).toBe(false);
+      expect(result2.code).toBe('duplicate_instance');
+      expect(result2.componentName).toBe('database-copy');
+    });
+
     test('registerComponent() should return dependency_cycle failure result and not register component', () => {
       const lifecycle = new LifecycleManager({ logger });
 
@@ -701,6 +745,7 @@ describe('LifecycleManager - Phase 2: Core Registration & Individual Lifecycle',
       expect(result.wasRegistered).toBe(true);
       expect(result.wasStopped).toBe(false);
       expect(result.reason).toBe('Stop failed');
+      expect(result.stopFailureReason).toBe('error');
 
       // Critical: component should remain registered when stop fails.
       expect(lifecycle.hasComponent('failing')).toBe(true);
@@ -740,6 +785,7 @@ describe('LifecycleManager - Phase 2: Core Registration & Individual Lifecycle',
       expect(result.wasRegistered).toBe(true);
       expect(result.wasStopped).toBe(false);
       expect(result.reason).toBe('Component stop timed out');
+      expect(result.stopFailureReason).toBe('timeout');
 
       // Critical: component should remain registered when stop stalls.
       expect(lifecycle.hasComponent('slow-stop')).toBe(true);
@@ -749,6 +795,47 @@ describe('LifecycleManager - Phase 2: Core Registration & Individual Lifecycle',
       expect(definedStatus.state).toBe('stalled');
       const stallInfo = requireDefined(definedStatus.stallInfo, 'stallInfo');
       expect(stallInfo.reason).toBe('timeout');
+    });
+
+    test('unregisterComponent should fail if stopIfRunning is set on a stalled component', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      class SlowStopComponent extends BaseComponent {
+        public start(): Promise<void> {
+          return Promise.resolve();
+        }
+        public async stop() {
+          await new Promise((resolve) => setTimeout(resolve, 1500));
+        }
+      }
+
+      const component = new SlowStopComponent(logger, {
+        name: 'slow-stop',
+        shutdownGracefulTimeoutMS: 1000, // Minimum enforced
+      });
+
+      lifecycle.registerComponent(component);
+      await lifecycle.startComponent('slow-stop');
+
+      await lifecycle.stopComponent('slow-stop', { timeout: 10 });
+      const status = lifecycle.getComponentStatus('slow-stop');
+      const definedStatus = requireDefined(status, 'status');
+      expect(definedStatus.state).toBe('stalled');
+
+      const result = await lifecycle.unregisterComponent('slow-stop', {
+        stopIfRunning: true,
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.componentName).toBe('slow-stop');
+      expect(result.wasRegistered).toBe(true);
+      expect(result.wasStopped).toBe(false);
+      expect(result.reason).toBe('Component is stalled');
+      expect(result.code).toBe('stop_failed');
+      expect(result.stopFailureReason).toBe('stalled');
+
+      // Component should remain registered when stalled and stopIfRunning is set.
+      expect(lifecycle.hasComponent('slow-stop')).toBe(true);
     });
   });
 
@@ -808,6 +895,18 @@ describe('LifecycleManager - Phase 2: Core Registration & Individual Lifecycle',
         'database',
         'web-server',
       ]);
+    });
+
+    test('getComponentInstance should return the registered instance', () => {
+      const lifecycle = new LifecycleManager({ logger });
+      const component = new TestComponent(logger, { name: 'database' });
+
+      expect(lifecycle.getComponentInstance('database')).toBe(undefined);
+
+      lifecycle.registerComponent(component);
+
+      expect(lifecycle.getComponentInstance('database')).toBe(component);
+      expect(lifecycle.getComponentInstance('missing')).toBe(undefined);
     });
 
     test('getComponentCount should return total registered count', () => {

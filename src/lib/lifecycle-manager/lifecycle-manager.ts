@@ -109,6 +109,23 @@ export class LifecycleManager extends EventEmitterProtected {
         });
       }
 
+      if (this.hasComponentInstance(component)) {
+        this.logger
+          .entity(componentName)
+          .warn('Component instance already registered');
+        this.safeEmit('component:registration-rejected', {
+          name: componentName,
+          reason: 'duplicate_instance',
+        });
+
+        return this.buildRegisterResultFailure({
+          componentName,
+          registrationIndexBefore,
+          code: 'duplicate_instance',
+          reason: 'Component instance is already registered.',
+        });
+      }
+
       if (registrationIndexBefore !== null) {
         this.logger
           .entity(componentName)
@@ -281,6 +298,26 @@ export class LifecycleManager extends EventEmitterProtected {
           code: 'shutdown_in_progress',
           reason:
             'Cannot register component while shutdown is in progress (isShuttingDown=true).',
+          targetFound: undefined,
+        });
+      }
+
+      if (this.hasComponentInstance(component)) {
+        this.logger
+          .entity(componentName)
+          .warn('Component instance already registered');
+        this.safeEmit('component:registration-rejected', {
+          name: componentName,
+          reason: 'duplicate_instance',
+        });
+
+        return this.buildInsertResultFailure({
+          componentName,
+          position,
+          targetComponentName,
+          registrationIndexBefore,
+          code: 'duplicate_instance',
+          reason: 'Component instance is already registered.',
           targetFound: undefined,
         });
       }
@@ -474,6 +511,12 @@ export class LifecycleManager extends EventEmitterProtected {
    *
    * @param name - Component name to unregister
    * @param options - Unregister options (stopIfRunning)
+   *
+   * Notes:
+   * - Stopped or stalled components can be unregistered directly
+   * - Running components require stopIfRunning (otherwise returns component_running)
+   * - If stopIfRunning is set and stop fails, unregister is aborted
+   * - If stopIfRunning is set and the component is stalled, unregister is aborted
    * @returns True if component was unregistered, false otherwise
    */
   public async unregisterComponent(
@@ -510,6 +553,22 @@ export class LifecycleManager extends EventEmitterProtected {
         code: 'component_not_found',
         wasStopped: false,
         wasRegistered: false,
+      };
+    }
+
+    const isStalled = this.stalledComponents.has(name);
+    if (isStalled && options?.stopIfRunning) {
+      this.logger
+        .entity(name)
+        .warn('Cannot unregister stalled component when stopIfRunning is set');
+      return {
+        success: false,
+        componentName: name,
+        reason: 'Component is stalled',
+        code: 'stop_failed',
+        stopFailureReason: 'stalled',
+        wasStopped: false,
+        wasRegistered: true,
       };
     }
 
@@ -564,6 +623,8 @@ export class LifecycleManager extends EventEmitterProtected {
           componentName: name,
           reason: stopResult.reason ?? 'Failed to stop component',
           code: 'stop_failed',
+          stopFailureReason:
+            stopResult.code === 'stop_timeout' ? 'timeout' : 'error',
           error: stopResult.error,
           wasStopped: false,
           wasRegistered: true,
@@ -624,6 +685,17 @@ export class LifecycleManager extends EventEmitterProtected {
    */
   public getRunningComponentNames(): string[] {
     return Array.from(this.runningComponents);
+  }
+
+  /**
+   * Get the actual component instance by name.
+   *
+   * Note: This returns the live instance registered with the manager. Mutating it
+   * directly can bypass lifecycle invariants, so treat it as read-only unless you
+   * fully control the component and understand the implications.
+   */
+  public getComponentInstance(name: string): BaseComponent | undefined {
+    return this.getComponent(name);
   }
 
   /**
@@ -1830,6 +1902,13 @@ export class LifecycleManager extends EventEmitterProtected {
    */
   private getComponent(name: string): BaseComponent | undefined {
     return this.components.find((c) => c.getName() === name);
+  }
+
+  /**
+   * Check if a component instance is already registered
+   */
+  private hasComponentInstance(component: BaseComponent): boolean {
+    return this.components.includes(component);
   }
 
   /**
