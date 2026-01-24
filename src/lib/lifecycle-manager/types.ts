@@ -407,11 +407,6 @@ export interface ValueResult<T = unknown> {
 }
 
 /**
- * @deprecated Use ValueResult instead
- */
-export type GetValueResult<T = unknown> = ValueResult<T>;
-
-/**
  * Overall system state
  */
 export type SystemState =

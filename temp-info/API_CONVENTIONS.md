@@ -4,28 +4,35 @@ This document describes the API design conventions used in the LifecycleManager 
 
 ## Error Handling Strategy
 
-The LifecycleManager uses **three error patterns** depending on the situation:
+The LifecycleManager uses **result objects for all operations** with a consistent structure based on `BaseOperationResult`.
 
-### 1. Result Objects (Expected Failures)
+### Unified Result Objects
 
-Async operations that may fail normally return result objects with `success: false`. These are **not exceptions** - they represent normal operational failures like "component not found" or "component already running".
+All async operations return result objects extending `BaseOperationResult`. These represent both successful operations and normal operational failures like "component not found" or "component already running".
+
+**Base Pattern:**
+```typescript
+interface BaseOperationResult {
+  success: boolean;
+  reason?: string;        // Human-readable explanation
+  code?: string;          // Machine-readable code for programmatic handling
+  error?: Error;          // Underlying error if applicable
+  status?: ComponentStatus; // Component state after operation (when applicable)
+}
+
+interface ComponentOperationResult extends BaseOperationResult {
+  componentName: string;
+  code?: ComponentOperationFailureCode;
+}
+```
 
 **When used:**
 - Component not found
 - Component already in desired state
 - Dependencies not met
 - Shutdown in progress
-
-**Pattern:**
-```typescript
-interface OperationResult {
-  success: boolean;
-  componentName: string;
-  reason?: string;      // Human-readable explanation
-  code?: string;        // Machine-readable code for programmatic handling
-  error?: Error;        // Underlying error if applicable
-}
-```
+- Dependency cycles
+- Timeout errors
 
 **Example:**
 ```typescript
@@ -34,52 +41,33 @@ if (!result.success) {
   console.error(`Failed to start: ${result.reason}`);
   console.error(`Error code: ${result.code}`);
   
+  // Check component state if available
+  if (result.status) {
+    console.log(`Current state: ${result.status.state}`);
+  }
+  
   // Handle specific failures
   if (result.code === 'missing_dependency') {
     // Install missing dependency
   }
 }
+
+// On success, status is included
+if (result.success && result.status) {
+  console.log(`Started at: ${result.status.startedAt}`);
+}
 ```
 
-### 2. Exceptions (Currently Used - May Transition to Result Objects)
+### Constructor Validation (Exceptions)
 
-> **Note from maintainer:** Preference is to NOT throw even for programming errors. Current behavior documented below may change to return result objects for all failures.
-
-Invalid input or system errors currently throw exceptions. These represent **programmer mistakes** or configuration errors that should be fixed in code.
+The only place that throws exceptions is `BaseComponent` constructor validation:
 
 **When thrown:**
-- Invalid component name format
-- Dependency cycles detected
-- Invalid method arguments
-
-**Available errors:**
 - `InvalidComponentNameError` - Component name doesn't match kebab-case pattern
-- `DependencyCycleError` - Circular dependency detected
-- `ComponentStartTimeoutError` - Component start timed out
-- `ComponentStopTimeoutError` - Component stop timed out
 
-**Example:**
-```typescript
-try {
-  // This throws if a cycle is detected
-  lifecycle.registerComponent(component);
-} catch (err) {
-  if (err instanceof DependencyCycleError) {
-    console.error(`Dependency cycle: ${err.additionalInfo.cycle}`);
-  }
-}
-```
+**All lifecycle-manager methods return result objects** - no exceptions are thrown to callers.
 
-**Future direction:** May migrate to result objects for consistency:
-```typescript
-// Potential future API (all failures as results, no exceptions)
-const result = lifecycle.registerComponent(component);
-if (!result.success && result.code === 'dependency_cycle') {
-  console.error(`Dependency cycle: ${result.cycle}`);
-}
-```
-
-### 3. Nullable Returns (Queries)
+### Nullable Returns (Queries)
 
 Status and query methods return `undefined` when the requested entity doesn't exist.
 
@@ -100,35 +88,83 @@ if (status) {
 
 ## Result Object Consistency
 
-All result objects now include consistent fields for programmatic error handling:
+All result types extend `BaseOperationResult` providing consistent structure:
 
 ```typescript
-// All operation results include these fields
-{
+interface BaseOperationResult {
   success: boolean;
-  componentName: string;    // or 'targetName' in some contexts
   reason?: string;          // Human-readable explanation
   code?: string;            // Machine-readable failure code
   error?: Error;            // Underlying error if applicable
-  // ... operation-specific fields
+  status?: ComponentStatus; // Component state after operation (when applicable)
+}
+
+// Example: Component operations extend the base
+interface ComponentOperationResult extends BaseOperationResult {
+  componentName: string;
+  code?: ComponentOperationFailureCode;
 }
 ```
 
 ### Result Types
 
-| Operation | Result Type | Failure Codes |
-|-----------|-------------|---------------|
-| `startComponent()` | `ComponentOperationResult` | `component_not_found`, `component_already_running`, `missing_dependency`, `shutdown_in_progress`, etc. |
-| `stopComponent()` | `ComponentOperationResult` | `component_not_found`, `component_not_running`, `stop_timeout` |
-| `restartComponent()` | `ComponentOperationResult` | `restart_stop_failed`, `restart_start_failed` |
-| `registerComponent()` | `RegisterComponentResult` | `duplicate_name`, `shutdown_in_progress`, `dependency_cycle` |
-| `unregisterComponent()` | `UnregisterComponentResult` | `component_not_found`, `component_running`, `stop_failed` |
+| Operation | Result Type | Extends Base | Failure Codes |
+|-----------|-------------|--------------|---------------|
+| `startComponent()` | `ComponentOperationResult` | ✅ | `component_not_found`, `component_already_running`, `missing_dependency`, `shutdown_in_progress`, etc. |
+| `stopComponent()` | `ComponentOperationResult` | ✅ | `component_not_found`, `component_not_running`, `stop_timeout` |
+| `restartComponent()` | `ComponentOperationResult` | ✅ | `restart_stop_failed`, `restart_start_failed` |
+| `registerComponent()` | `RegisterComponentResult` | ✅ | `duplicate_name`, `shutdown_in_progress`, `dependency_cycle` |
+| `unregisterComponent()` | `UnregisterComponentResult` | ✅ | `component_not_found`, `component_running`, `stop_failed` |
+| `getStartupOrder()` | `StartupOrderResult` | ✅ | `dependency_cycle`, `unknown_error` |
 
 ## Parameter Patterns
 
 ### Options Objects
 
 All methods that accept options use **trailing options parameters**:
+
+```typescript
+// ✓ Consistent pattern
+startComponent(name: string, options?: StartComponentOptions)
+stopComponent(name: string, options?: StopComponentOptions)
+restartComponent(name: string, options?: RestartComponentOptions)
+registerComponent(component: BaseComponent, options?: RegisterOptions)
+unregisterComponent(name: string, options?: UnregisterOptions)
+```
+
+**Benefits:**
+- Easy to remember
+- Future-proof (can add new options without breaking changes)
+- IDE autocomplete works well
+
+### StopComponentOptions
+
+Currently implemented options for enhanced shutdown control:
+
+```typescript
+export interface StopComponentOptions {
+  /**
+   * If true, force immediate shutdown without graceful period
+   * Calls onShutdownForce() directly, bypassing normal stop() flow
+   */
+  forceImmediate?: boolean;
+
+  /**
+   * Override the component's configured shutdown timeout in milliseconds
+   * Only applies when forceImmediate is false
+   */
+  timeout?: number;
+}
+```
+
+**Example:**
+```typescript
+// Force immediate shutdown
+await lifecycle.stopComponent('db', { forceImmediate: true });
+
+// Custom timeout
+await lifecycle.stopComponent('db', { timeout: 10000 });
+```
 
 ```typescript
 // ✓ Consistent pattern
@@ -214,9 +250,10 @@ ComponentStatus
 HealthCheckResult
 MessageResult
 StartupResult
+ValueResult
 
-// ✗ Avoid (verb-first)
-GetValueResult  // Should be ValueResult
+// ✗ Avoid (verb-first - deprecated)
+GetValueResult  // Renamed to ValueResult
 ```
 
 ## Future Extensibility

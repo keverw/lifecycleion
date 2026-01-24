@@ -42,7 +42,6 @@ export type {
   SignalBroadcastResult,
   ComponentSignalResult,
   ValueResult,
-  GetValueResult,
   SystemState,
   RegisterOptions,
   UnregisterOptions,
