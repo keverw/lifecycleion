@@ -557,79 +557,7 @@ if (result.success) {
 
 ## Core Features
 
-### 1. Component Registration
-
-**Registration Methods**:
-
-```typescript
-// Add at end (default)
-registerComponent(
-  component: BaseComponent,
-  options?: RegisterOptions,
-): RegisterComponentResult
-
-// Insert at specific position
-insertComponentAt(
-  component: BaseComponent,
-  position: 'start' | 'end' | 'before' | 'after',
-  targetComponentName?: string,
-  options?: RegisterOptions
-): InsertComponentAtResult
-
-// Remove component (async because it may need to stop the component first)
-unregisterComponent(componentName: string, options?: UnregisterOptions): Promise<boolean>
-```
-
-**Unregister Options**:
-
-```typescript
-interface UnregisterOptions {
-  stopIfRunning?: boolean; // Stop the component first if it's running (default: false)
-}
-```
-
-**Unregister Behavior**:
-
-```typescript
-async unregisterComponent(name: string, options?: UnregisterOptions): Promise<boolean> {
-  const component = this.getComponent(name);
-  if (!component) {
-    return false; // Component not found
-  }
-
-  const isRunning = this.isComponentRunning(name);
-
-  // If running and stopIfRunning not set, reject
-  if (isRunning && !options?.stopIfRunning) {
-    this.logger.entity(name).warn(
-      'Cannot unregister running component. Call stopComponent() first or pass { stopIfRunning: true }'
-    );
-    return false;
-  }
-
-  // If running and stopIfRunning is true, stop first
-  if (isRunning && options?.stopIfRunning) {
-    this.logger.entity(name).info('Stopping component before unregistering...');
-    await this.stopComponent(name);
-  }
-
-  // Remove from registry
-  this.components = this.components.filter(c => c.getName() !== name);
-  this.emit('component:unregistered', { name });
-  return true;
-}
-```
-
-**Validation**:
-
-- Enforce unique component names
-- Enforce kebab-case naming convention
-- **Prevent registration during shutdown** (while `isShuttingDown === true`)
-  - `registerComponent()` returns `{ success: false, code: 'shutdown_in_progress', ... }` and may log warning
-  - `insertComponentAt()` returns `{ success: false, code: 'shutdown_in_progress', ... }` and may log warning
-  - Emit event: `component:registration-rejected` with reason
-- Validate target component exists for 'before'/'after' positions
-- Log warnings for failed registrations
+### 1. Component Registration (Auto-Start Feature - Phase 8)
 
 **Registration During Startup/Runtime**:
 
@@ -665,26 +593,6 @@ lifecycle.registerComponent(new CacheComponent(logger, { name: 'cache' }), {
 **Note**: Auto-started components are started at the end of the current component list. If component order matters (dependencies), register before calling `startAllComponents()` or manage order manually.
 
 ### 2. Component Lifecycle Management
-
-**Individual Component Control**:
-
-```typescript
-// Start a specific component
-startComponent(componentName: string): Promise<ComponentOperationResult>
-
-// Stop a specific component
-stopComponent(componentName: string): Promise<ComponentOperationResult>
-
-// Restart a component (stop then start)
-restartComponent(componentName: string): Promise<ComponentOperationResult>
-
-interface ComponentOperationResult {
-  success: boolean;
-  componentName: string;
-  reason?: string; // Human-readable explanation if !success
-  error?: Error; // Underlying error if applicable
-}
-```
 
 **Bulk Operations**:
 
@@ -874,99 +782,11 @@ restartComponent(name); // Returns false, logs warning
 
 This prevents race conditions and ensures predictable behavior. If you need fine-grained control, wait for bulk operations to complete first.
 
-### 3. Status Tracking
-
-**Component Status**:
-
-```typescript
-// Check if component is registered
-hasComponent(componentName: string): boolean
-
-// Check if component is running
-isComponentRunning(componentName: string): boolean
-
-// Get all registered component names
-getComponentNames(): string[]
-
-// Get all running component names
-getRunningComponentNames(): string[]
-
-// Get component count
-getComponentCount(): number
-getRunningComponentCount(): number
-
-// Get detailed component status
-getComponentStatus(componentName: string): ComponentStatus | undefined
-
-// Get all component statuses
-getAllComponentStatuses(): ComponentStatus[]
-```
-
-**Component Status Details**:
-
-```typescript
-type ComponentState =
-  | 'registered' // Registered but never started
-  | 'starting' // start() in progress
-  | 'running' // start() completed successfully
-  | 'stopping' // stop() in progress (graceful phase)
-  | 'force-stopping' // onShutdownForce() in progress
-  | 'stopped' // stop() completed (can be restarted)
-  | 'stalled'; // Failed to stop within timeout
-
-interface ComponentStatus {
-  name: string;
-  state: ComponentState;
-  startedAt: number | null; // Unix timestamp ms when start() completed
-  stoppedAt: number | null; // Unix timestamp ms when stop() completed
-  lastError: Error | null; // Last error from start/stop/message
-  stallInfo: ComponentStallInfo | null; // If stalled, details about why
-}
-```
-
-This detailed status allows you to:
-
-- Know exactly what phase a component is in during transitions
-- Track timing information for monitoring
-- Access error details without relying on events
-- Distinguish between "not started yet" and "stopped after running"
-
-**Manager Status**:
-
-```typescript
-// Overall state
-isStarting: boolean          // startAllComponents() in progress
-isStarted: boolean           // All components started successfully
-isShuttingDown: boolean      // Shutdown in progress
-isShutdownComplete: boolean  // All components stopped
-
-// Detailed system state
-getSystemState(): SystemState
-
-type SystemState =
-  | 'idle'           // No components, nothing happening
-  | 'ready'          // Components registered, not started
-  | 'starting'       // startAllComponents() in progress
-  | 'running'        // All components running
-  | 'partial'        // Some components running (after individual start/stop)
-  | 'shutting-down'  // stopAllComponents() in progress
-  | 'stopped'        // All components stopped (can restart)
-  | 'error';         // Startup failed with rollback
-
-// Shutdown details
-shutdownMethod: ShutdownMethod | null    // 'manual' | 'SIGINT' | 'SIGTERM' | 'SIGTRAP'
-shutdownStartTime: number               // Unix timestamp ms
-shutdownDuration: number                // ms
-stalledComponents: ComponentStallInfo[] // Components that failed to stop
-```
-
-**Note on `isStarted`**:
-
-The `isStarted` flag is `true` only after `startAllComponents()` completes successfully. If you start components individually via `startComponent()`, use `getSystemState()` which will return `'partial'` or check `getRunningComponentCount() > 0`.
-
-### 4. Signal Integration
+### 3. Signal Integration
 
 **Automatic Signal Handling**:
+
+- **Repo note (for implementers)**: `ProcessSignalManager` already exists in this codebase (`src/lib/process-signal-manager.ts`). LifecycleManager should **compose** it (own an instance and delegate to it) rather than re-implementing low-level signal wiring.
 
 - When `attachSignals()` is called, ProcessSignalManager handles:
   - **Shutdown signals** (SIGINT, SIGTERM, SIGTRAP, Ctrl+C, Escape): trigger `stopAllComponents()`
@@ -1049,7 +869,7 @@ if (failures.length > 0) {
 'component:debug-failed'; // { name, error }
 ```
 
-### 5. Restart Behavior and State Management
+### 4. Restart Behavior and State Management
 
 **Shutdown-to-Restart Cycle**:
 
@@ -1153,7 +973,7 @@ coreLifecycle.on('lifecycle-manager:shutdown-initiated', async () => {
 });
 ```
 
-### 6. Timeout Configuration
+### 5. Timeout Configuration
 
 ```typescript
 interface LifecycleManagerOptions {
@@ -1195,7 +1015,7 @@ The global timeouts (`startupTimeoutMS`, `shutdownTimeoutMS`) act as hard ceilin
 
 **Recommendation**: Set global timeouts to be larger than the sum of expected per-component timeouts, with some buffer.
 
-### 7. Component Dependencies
+### 6. Component Dependencies
 
 Components can declare explicit dependencies on other components. The LifecycleManager performs topological sort to determine startup order and reverses it for shutdown.
 
@@ -1254,7 +1074,7 @@ getStartupOrder(): string[]
 - **Cycle Detection**: Circular dependencies throw `DependencyCycleError` at registration time
 - **Missing Dependencies**: If a dependency isn't registered, throw `MissingDependencyError` at `startAllComponents()` time
 
-### 8. Health Checks
+### 7. Health Checks
 
 Components can implement optional health checks for runtime monitoring. Health checks can return a simple boolean or a rich result with metadata.
 
@@ -1419,7 +1239,7 @@ const result = await Promise.race([
 'component:health-check-failed'; // { name, error }
 ```
 
-### 9. Shared Values (getValue Pattern)
+### 8. Shared Values (getValue Pattern)
 
 Components can expose values that other components or external code can request. This follows the same pattern as messaging for consistency.
 
@@ -1572,7 +1392,7 @@ Both use the same pattern:
 - Both return result objects with detailed status
 - Both are optional handlers
 
-### 10. Optional Components
+### 9. Optional Components
 
 Components can be marked as optional so their startup failures don't trigger rollback.
 
@@ -1645,7 +1465,7 @@ if (result.failedOptionalComponents.length > 0) {
 }
 ```
 
-### 11. Abort Callbacks
+### 10. Abort Callbacks
 
 Components can implement optional abort callbacks that are called when the manager times out an operation. This provides cooperative cancellation without cluttering method signatures.
 
@@ -1742,7 +1562,7 @@ class FetchComponent extends BaseComponent {
 }
 ```
 
-### 12. Snapshot List Guarantee
+### 11. Snapshot List Guarantee
 
 Bulk operations (`startAllComponents()`, `stopAllComponents()`, `restartAllComponents()`) operate on a **snapshot** of the component list taken at invocation.
 
@@ -1771,7 +1591,7 @@ await lifecycle.unregisterComponent('api', { stopIfRunning: false });
 // Final start order: database -> cache -> (api skipped) -> metrics
 ```
 
-### 13. Shutdown Result and Stalled Component Handling
+### 12. Shutdown Result and Stalled Component Handling
 
 **Shutdown Result Persistence**:
 

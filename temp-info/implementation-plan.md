@@ -26,82 +26,38 @@ src/lib/lifecycle-manager/
 - ✅ [lifecycle-manager.test.ts](../../src/lib/lifecycle-manager/lifecycle-manager.test.ts) - Unit tests (27 tests passing, 113 assertions)
 - ✅ [index.ts](../../src/lib/lifecycle-manager/index.ts) - Module exports
 
-**Test results:** 27 tests passing, 113 expect() assertions, 0 failures
+**Test results:** 27 tests passing, 113 expect() assertions, 0 failures (`bun test src/lib/lifecycle-manager/lifecycle-manager.test.ts`)
 **Build:** ✅ No TypeScript errors, no linting errors
 **PRD updated:** ✅ Deleted Component Interface section, error class portions, timeout minimums
 
 ---
 
-## Phase 2: Core Registration & Individual Lifecycle (2 days)
+## ~~Phase 2: Core Registration & Individual Lifecycle~~ ✅ **COMPLETED**
 
-### Implement
+**Implemented files:**
 
-**index.ts** - LifecycleManager skeleton:
+- ✅ [lifecycle-manager.ts](../../src/lib/lifecycle-manager/lifecycle-manager.ts) - Core LifecycleManager class with all Phase 2 functionality
+- ✅ [lifecycle-manager.test.ts](../../src/lib/lifecycle-manager/lifecycle-manager.test.ts) - Extended with Phase 2 tests (69 tests passing, 244 assertions)
+- ✅ [index.ts](../../src/lib/lifecycle-manager/index.ts) - Exports updated to include LifecycleManager
 
-- Extend `EventEmitterProtected`
-- Constructor: create `logger.service(name || 'lifecycle-manager')`
-- Private: `components: BaseComponent[]`, `runningComponents: Set<string>`, `componentStates: Map<string, ComponentState>`, `stalledComponents: Map<string, ComponentStallInfo>`
-- State flags: `isStarting`, `isStarted`, `isShuttingDown`
-- Private `safeEmit()` wrapper for error-safe events
+**Implemented functionality:**
 
-**Registration methods**:
+- ✅ LifecycleManager skeleton extending EventEmitterProtected
+- ✅ Constructor with logger hierarchy setup
+- ✅ All private fields: components, runningComponents, componentStates, stalledComponents, timestamps, errors
+- ✅ State flags: isStarting, isStarted, isShuttingDown
+- ✅ safeEmit() wrapper for error-safe events
+- ✅ Registration: registerComponent(), insertComponentAt(), unregisterComponent()
+- ✅ Status tracking: 13 methods (hasComponent, isComponentRunning, getComponentNames, etc.)
+- ✅ Individual lifecycle: startComponent(), stopComponent(), restartComponent()
+- ✅ Timeout handling with abort callbacks
+- ✅ Stall detection and tracking
+- ✅ 11 event types emitted with proper data
+- ✅ State transitions: registered → starting → running → stopping → stopped/stalled
 
-- `registerComponent(component, options?)` - add at end, set `component.lifecycle = this`, return `RegisterComponentResult` (includes `startupOrder`)
-- `insertComponentAt(component, position, targetName?, options?)` - flexible positioning, return `InsertComponentAtResult` (includes `startupOrder` + `manualPositionRespected`)
-- `unregisterComponent(name, options?)` - async, with `stopIfRunning` option
-- Validation: unique names, kebab-case, no registration during shutdown
-- Emit: `component:registered`, `component:registration-rejected`, `component:unregistered`
-
-**Status tracking**:
-
-- `hasComponent(name): boolean`
-- `isComponentRunning(name): boolean`
-- `getComponentNames(): string[]`
-- `getRunningComponentNames(): string[]`
-- `getComponentCount(): number`
-- `getRunningComponentCount(): number`
-- `getComponentStatus(name): ComponentStatus | undefined`
-- `getAllComponentStatuses(): ComponentStatus[]`
-- `getSystemState(): SystemState`
-- Private: `getComponent(name)` helper
-
-**Individual lifecycle**:
-
-- `startComponent(name)` - set state 'starting', call `start()` with timeout, update state/runningComponents
-- `stopComponent(name)` - set state 'stopping', call `stop()` with timeout, handle stall
-- `restartComponent(name)` - stop then start
-- Call abort callbacks on timeout
-- Emit events: `component:starting`, `component:started`, `component:start-failed`, `component:start-timeout`, `component:stopping`, `component:stopped`, `component:stop-timeout`, `component:stalled`
-
-### Tests
-
-- Register/unregister components
-- Insert at start/end/before/after
-- Duplicate names rejected
-- Registration during shutdown rejected
-- Registration failure codes returned (`duplicate_name`, `shutdown_in_progress`, `target_not_found`)
-- Registration results include `startupOrder` (dependency-aware)
-- Insert results report `manualPositionRespected` (false when dependencies override requested placement)
-- Status tracking correct
-- Individual start/stop/restart
-- Timeout handling
-- Abort callbacks called
-- State transitions correct
-- Events emitted
-- Event handler errors don't break lifecycle
-
-### Documentation
-
-- JSDoc on all public methods
-- Explain result objects vs throwing
-- Document state machine
-
-### PRD Sections to Delete
-
-- "Component Registration" (lines 690-748, excluding dependencies)
-- "Component Lifecycle Management" - Individual control (lines 817-835)
-- "Status Tracking" - Component status (lines 1028-1082)
-- "Restart Behavior" - Individual restart portion
+**Test results:** 69 tests passing, 244 expect() assertions, 0 failures (`bun test src/lib/lifecycle-manager/lifecycle-manager.test.ts`)
+**Build:** ✅ No TypeScript errors, clean build
+**PRD updated:** ✅ Deleted Component Registration, Individual Lifecycle, and Status Tracking sections
 
 ---
 
@@ -493,7 +449,29 @@ src/lib/lifecycle-manager/
 
 ---
 
-## Phase 9: Integration & Documentation (1.5 days)
+## Phase 9: Consolidation & Reorg (1 day)
+
+### Goals
+
+- Consolidate tests that were split by phase into a clearer, feature-based structure
+- Prune redundant or legacy references created during phased delivery
+
+### Tasks
+
+**Tests**:
+
+- Merge or regroup phase-specific `describe()` blocks into feature-focused sections
+- Deduplicate overlapping assertions
+- Add a short "test map" comment at the top of `lifecycle-manager.test.ts` if needed
+
+### Success Criteria
+
+- Tests read as a single, coherent suite without phase scaffolding
+- No leftover phase markers in tests or test file organization
+
+---
+
+## Phase 10: Integration & Documentation (1.5 days)
 
 ### Implement
 
@@ -514,11 +492,12 @@ src/lib/lifecycle-manager/
 - Health check endpoint
 - Signal handling demo
 
-**Documentation**:
+**Documentation** (final, not phase-based):
 
 - README.md for LifecycleManager (quick start, architecture, API reference, best practices)
 - Migration guide from old implementations
 - Event reference
+- Remove phase language and any PRD remnants that leaked into docs
 
 **Export**:
 
@@ -528,7 +507,7 @@ src/lib/lifecycle-manager/
 
 - Integration tests pass
 - Example app runs and demonstrates all features
-- README is comprehensive
+- Docs read as final product docs, not a phased work plan
 - Exported from main package
 
 ---
@@ -541,7 +520,7 @@ Based on exploration of existing codebase:
 2. **Async**: `async/await`, `Promise.race()` for timeouts, `isPromise()` for detection, `safeHandleCallback()` for events
 3. **Logging**: Manager uses `logger.service('lifecycle-manager')`, manager about component uses `.entity(componentName)`, component uses `rootLogger.service(componentName)`
 4. **State**: Private fields with public getters, immutable public state, logged/evented transitions
-5. **Testing**: Bun test, `describe`/`test`/`expect`, `mock()` for callbacks, `beforeEach`/`afterEach` cleanup, test sync and async paths
+5. **Testing**: Bun test runner. While iterating on LifecycleManager, prefer scoped runs like `bun test src/lib/lifecycle-manager/` (or the single file) instead of the entire repo test suite, to avoid unrelated environment-dependent suites.
 6. **Code Style**: Private methods/fields, early returns/guards, descriptive names, JSDoc, TypeScript strict
 
 ---
@@ -575,7 +554,7 @@ Based on exploration of existing codebase:
 
 After each phase:
 
-1. All unit tests pass (`bun test`)
+1. LifecycleManager unit tests pass (`bun test src/lib/lifecycle-manager/`)
 2. Code coverage ≥ 95%
 3. No TypeScript errors (`bun run build`)
 4. Linting passes (`bun run lint`)

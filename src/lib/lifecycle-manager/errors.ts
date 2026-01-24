@@ -109,6 +109,42 @@ export class ComponentStartupError extends Error {
 }
 
 /**
+ * Error thrown when a component start operation times out
+ */
+export class ComponentStartTimeoutError extends Error {
+  public errPrefix = 'LifecycleManagerErr';
+  public errType = 'Component';
+  public errCode = 'StartTimeout';
+  public additionalInfo: { componentName: string; timeoutMS: number };
+
+  constructor(additionalInfo: { componentName: string; timeoutMS: number }) {
+    super(
+      `Component "${additionalInfo.componentName}" start timed out after ${additionalInfo.timeoutMS}ms`,
+    );
+    this.name = 'ComponentStartTimeoutError';
+    this.additionalInfo = additionalInfo;
+  }
+}
+
+/**
+ * Error thrown when a component stop operation times out
+ */
+export class ComponentStopTimeoutError extends Error {
+  public errPrefix = 'LifecycleManagerErr';
+  public errType = 'Component';
+  public errCode = 'StopTimeout';
+  public additionalInfo: { componentName: string; timeoutMS: number };
+
+  constructor(additionalInfo: { componentName: string; timeoutMS: number }) {
+    super(
+      `Component "${additionalInfo.componentName}" stop timed out after ${additionalInfo.timeoutMS}ms`,
+    );
+    this.name = 'ComponentStopTimeoutError';
+    this.additionalInfo = additionalInfo;
+  }
+}
+
+/**
  * Error thrown when the global startup timeout is exceeded
  */
 export class StartupTimeoutError extends Error {
@@ -166,4 +202,6 @@ export const lifecycleManagerErrCodes = {
   NotFound: 'NotFound',
   StartupFailed: 'StartupFailed',
   StartupTimeout: 'StartupTimeout',
+  StartTimeout: 'StartTimeout',
+  StopTimeout: 'StopTimeout',
 } as const;

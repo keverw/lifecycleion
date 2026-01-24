@@ -103,6 +103,26 @@ export interface ComponentOperationResult {
 }
 
 /**
+ * Result of unregistering a component
+ */
+export interface UnregisterComponentResult {
+  /** Whether the operation succeeded */
+  success: boolean;
+
+  /** Component name */
+  componentName: string;
+
+  /** Human-readable explanation if !success */
+  reason?: string;
+
+  /** Whether the component was stopped before unregistering */
+  wasStopped: boolean;
+
+  /** Whether the component was found in registry */
+  wasRegistered: boolean;
+}
+
+/**
  * Result of starting all components
  */
 export interface StartupResult {
@@ -353,7 +373,8 @@ export type RegistrationFailureCode =
   | 'duplicate_name'
   | 'shutdown_in_progress'
   | 'target_not_found'
-  | 'invalid_position';
+  | 'invalid_position'
+  | 'dependency_cycle';
 
 /**
  * Common result shape for component registration operations

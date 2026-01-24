@@ -13,6 +13,7 @@
  */
 
 // Core classes
+export { LifecycleManager } from './lifecycle-manager';
 export { BaseComponent } from './base-component';
 
 // Types
@@ -23,6 +24,7 @@ export type {
   ComponentStallInfo,
   ShutdownMethod,
   ComponentOperationResult,
+  UnregisterComponentResult,
   StartupResult,
   ShutdownResult,
   RestartResult,
@@ -52,6 +54,8 @@ export {
   DependencyCycleError,
   MissingDependencyError,
   ComponentStartupError,
+  ComponentStartTimeoutError,
+  ComponentStopTimeoutError,
   StartupTimeoutError,
   ComponentNotFoundError,
   lifecycleManagerErrPrefix,
