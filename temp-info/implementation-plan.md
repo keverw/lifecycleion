@@ -87,6 +87,28 @@ src/lib/lifecycle-manager/
 
 ---
 
+## ~~Phase 2.7: Unified Base Interface & API Enhancements~~ ✅ **COMPLETED**
+
+**Implemented updates:**
+
+- ✅ Created `BaseOperationResult` interface with common fields (success, reason, code, error, status)
+- ✅ All result types now extend base interface:
+  - `ComponentOperationResult`
+  - `UnregisterComponentResult`
+  - `RegistrationResultBase`
+  - `StartupOrderResult`
+- ✅ Enhanced `StopComponentOptions` with `forceImmediate` and `timeout` options
+- ✅ Added `status?: ComponentStatus` field to operation results for immediate state access
+- ✅ Renamed `GetValueResult` to `ValueResult` for naming consistency
+- ✅ All public API methods return result objects (no exceptions thrown to callers)
+
+**Tests:** Not run (not requested)
+**Documentation updated:**
+- ✅ API_CONVENTIONS.md updated to reflect unified base interface and current implementation
+- ✅ api-review-summary.md deleted (review complete)
+
+---
+
 ## Phase 3: Bulk Operations (1.5 days)
 
 ### Implement
