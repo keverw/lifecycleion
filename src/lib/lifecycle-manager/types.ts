@@ -118,14 +118,25 @@ export interface StartComponentOptions {
 
 /**
  * Options for manually stopping a component
- * 
- * Currently empty but reserved for future options like:
- * - skipWarningPhase?: boolean
- * - forceImmediate?: boolean
- * - timeout?: number
  */
 export interface StopComponentOptions {
-  // Reserved for future use
+  /**
+   * If true, skip the warning phase and go directly to graceful shutdown
+   * (default: false)
+   */
+  skipWarningPhase?: boolean;
+
+  /**
+   * If true, force immediate shutdown without graceful period
+   * (default: false)
+   */
+  forceImmediate?: boolean;
+
+  /**
+   * Override the component's configured shutdown timeout in milliseconds
+   * If not specified, uses the component's shutdownGracefulTimeoutMS
+   */
+  timeout?: number;
 }
 
 /**
