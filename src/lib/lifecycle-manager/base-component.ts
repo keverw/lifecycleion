@@ -139,9 +139,11 @@ export abstract class BaseComponent {
    * Should perform all initialization, connection setup, etc.
    * Dependencies are guaranteed to have started before this is called.
    *
+   * Can be sync or async - manager will await if Promise is returned.
+   *
    * @throws Should throw an error if startup fails
    */
-  public abstract start(): Promise<void>;
+  public abstract start(): Promise<void> | void;
 
   /**
    * Stop the component (graceful shutdown)
@@ -150,9 +152,11 @@ export abstract class BaseComponent {
    * Should perform graceful cleanup, close connections, save state, etc.
    * Dependents are guaranteed to have stopped before this is called.
    *
+   * Can be sync or async - manager will await if Promise is returned.
+   *
    * @throws Should throw an error if stop fails (will trigger force phase)
    */
-  public abstract stop(): Promise<void>;
+  public abstract stop(): Promise<void> | void;
 
   /**
    * Called when start() times out

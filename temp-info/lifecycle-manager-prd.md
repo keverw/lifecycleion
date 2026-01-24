@@ -708,9 +708,10 @@ This prevents weird inconsistent states where some components started in a previ
 
 **Error Handling**:
 
-- If a component fails to start: **rollback** - stop all previously started components in reverse order, then throw error
+- If a component fails to start: **rollback** - stop all previously started components in reverse order, then return a failure result
 - If a component fails to stop: log error, mark as stalled, continue with others
 - Distinguish between startup errors (critical, triggers rollback) and shutdown errors (best effort)
+- Operational methods return result objects with machine-readable failure codes; unexpected exceptions are mapped to `unknown_error`
 
 **Startup Rollback Behavior**:
 
@@ -719,7 +720,7 @@ When a component fails to start, the manager performs a rollback:
 1. Emit `component:start-failed` event with error details
 2. Stop all previously started components in **reverse order** (same as shutdown)
 3. Emit `component:startup-rollback` event for each component being rolled back
-4. After rollback completes, throw an error with the original failure reason
+4. After rollback completes, return a failure result with the original failure reason
 5. The manager is left in a clean state (no running components)
 
 ```typescript
@@ -739,6 +740,8 @@ If `start()` takes longer than this timeout:
 1. Emit `component:start-timeout` event
 2. Treat as startup failure, trigger rollback
 3. The component's `start()` promise is NOT cancelled (no way to do this in JS), but the manager proceeds with rollback
+
+`start()` and `stop()` may be sync or async; the manager awaits only when a Promise is returned.
 
 There's also a global `startupTimeoutMS` on `LifecycleManagerOptions` (default: 60000ms) that acts as a hard ceiling for the entire `startAllComponents()` operation.
 
@@ -1042,8 +1045,8 @@ class ApiComponent extends BaseComponent {
 
 - **Startup**: Dependencies start before dependents. `database` and `cache` start before `api`.
 - **Shutdown**: Reverse order. `api` stops before `database` and `cache`.
-- **Cycle Detection**: Circular dependencies throw `DependencyCycleError` at registration time.
-- **Missing Dependencies**: If a dependency isn't registered, throw `MissingDependencyError` at `startAllComponents()`.
+- **Cycle Detection**: Circular dependencies return a failure result with `code: 'dependency_cycle'` (and `error` set to `DependencyCycleError`) from registration and startup-order APIs.
+- **Missing Dependencies**: If a dependency isn't registered, startup methods return failure results with machine-readable codes rather than throwing.
 
 **Interaction with Registration Order**:
 
@@ -1066,13 +1069,13 @@ await lifecycle.startAllComponents();
 
 ```typescript
 // Get resolved startup order (after topological sort)
-getStartupOrder(): string[]
+getStartupOrder(): StartupOrderResult
 ```
 
 **Automatic Validation**:
 
-- **Cycle Detection**: Circular dependencies throw `DependencyCycleError` at registration time
-- **Missing Dependencies**: If a dependency isn't registered, throw `MissingDependencyError` at `startAllComponents()` time
+- **Cycle Detection**: Circular dependencies return failure results (code: `dependency_cycle`) rather than throwing
+- **Missing Dependencies**: Missing dependencies are returned as failure results (no throw)
 
 ### 7. Health Checks
 
@@ -1758,14 +1761,13 @@ The LifecycleManager uses a consistent pattern for error handling:
 | `sendMessageToComponent()` | `Promise<MessageResult>`            | Component not found, not running, handler error     |
 | `registerComponent()`      | `RegisterComponentResult`           | Duplicate name, during shutdown                     |
 | `insertComponentAt()`      | `InsertComponentAtResult`           | Target not found, duplicate name, during shutdown   |
-| `unregisterComponent()`    | `Promise<boolean>`                  | Not found, running without stopIfRunning            |
+| `unregisterComponent()`    | `Promise<UnregisterComponentResult>` | Not found, running without stopIfRunning           |
 
-**Throw errors** only for programmer mistakes (bugs in calling code):
+**Throw errors** only for programmer mistakes (bugs in calling code) outside lifecycle operations:
 
 | Error                        | When Thrown                                  |
 | ---------------------------- | -------------------------------------------- |
 | `InvalidComponentNameError`  | Component name isn't valid kebab-case        |
-| `DependencyCycleError`       | Circular dependency detected at registration |
 | `ComponentRegistrationError` | Invalid registration inputs (bug in caller)  |
 
 **Result Object Pattern**:
@@ -1796,7 +1798,7 @@ if (!result.success) {
 
 ## Error Classes
 
-Error classes are used for **programmer mistakes only** (thrown, not returned). Runtime failures are communicated via result objects.
+Error classes are used for **programmer mistakes only** and may be attached to failure results instead of thrown during lifecycle operations. Runtime failures are communicated via result objects.
 
 ```typescript
 /**

@@ -61,6 +61,19 @@ src/lib/lifecycle-manager/
 
 ---
 
+## ~~Phase 2.5: API Consistency & Sync Lifecycle (0.5 day)~~ ✅ **COMPLETED**
+
+**Implemented updates:**
+
+- ✅ Result-object error handling for registration/startup-order APIs
+- ✅ Sync start/stop support test coverage
+- ✅ Types updated with startup-order result codes
+
+**Tests:** Not run (not requested)
+**PRD updated:** ✅ Error-handling policy updated (sync start/stop already documented)
+
+---
+
 ## Phase 3: Bulk Operations (1.5 days)
 
 ### Implement

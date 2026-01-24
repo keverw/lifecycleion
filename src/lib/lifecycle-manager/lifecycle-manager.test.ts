@@ -553,6 +553,39 @@ describe('LifecycleManager - Phase 1: Foundation', () => {
       expect(apiResult.startupOrder).toEqual(['database', 'api']);
       expect(apiResult.manualPositionRespected).toBe(false);
     });
+
+    test('getStartupOrder() should return success result with startupOrder', () => {
+      const lifecycle = new LifecycleManager({ logger });
+      const database = new TestComponent(logger, { name: 'database' });
+      const api = new TestComponent(logger, {
+        name: 'api',
+        dependencies: ['database'],
+      });
+
+      const dbResult = lifecycle.registerComponent(database);
+      expect(dbResult.success).toBe(true);
+
+      const apiResult = lifecycle.registerComponent(api);
+      expect(apiResult.success).toBe(true);
+
+      const orderResult = lifecycle.getStartupOrder();
+      expect(orderResult.success).toBe(true);
+      expect(orderResult.startupOrder).toEqual(['database', 'api']);
+    });
+
+    test('getStartupOrder() should return dependency_cycle result if registry contains a cycle', () => {
+      const lifecycle = new LifecycleManager({ logger });
+      const a = new TestComponent(logger, { name: 'a', dependencies: ['b'] });
+      const b = new TestComponent(logger, { name: 'b', dependencies: ['a'] });
+
+      (lifecycle as any).components = [a, b];
+
+      const orderResult = lifecycle.getStartupOrder();
+      expect(orderResult.success).toBe(false);
+      expect(orderResult.code).toBe('dependency_cycle');
+      expect(orderResult.startupOrder).toEqual([]);
+      expect(orderResult.error).toBeInstanceOf(DependencyCycleError);
+    });
   });
 });
 
@@ -891,6 +924,35 @@ describe('LifecycleManager - Phase 2: Core Registration & Individual Lifecycle',
       expect(definedStatus.startedAt).toBeGreaterThan(0);
     });
 
+    test('startComponent should support sync start/stop implementations', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+      let didStartCall = false;
+      let didStopCall = false;
+
+      class SyncComponent extends BaseComponent {
+        public start(): void {
+          didStartCall = true;
+        }
+
+        public stop(): void {
+          didStopCall = true;
+        }
+      }
+
+      const component = new SyncComponent(logger, { name: 'sync' });
+      lifecycle.registerComponent(component);
+
+      const startResult = await lifecycle.startComponent('sync');
+      expect(startResult.success).toBe(true);
+      expect(didStartCall).toBe(true);
+      expect(lifecycle.isComponentRunning('sync')).toBe(true);
+
+      const stopResult = await lifecycle.stopComponent('sync');
+      expect(stopResult.success).toBe(true);
+      expect(didStopCall).toBe(true);
+      expect(lifecycle.isComponentRunning('sync')).toBe(false);
+    });
+
     test('startComponent should return failure for non-existent component', async () => {
       const lifecycle = new LifecycleManager({ logger });
 
@@ -898,6 +960,7 @@ describe('LifecycleManager - Phase 2: Core Registration & Individual Lifecycle',
 
       expect(result.success).toBe(false);
       expect(result.reason).toBe('Component not found');
+      expect(result.code).toBe('component_not_found');
     });
 
     test('startComponent should return failure for already running component', async () => {
@@ -911,6 +974,7 @@ describe('LifecycleManager - Phase 2: Core Registration & Individual Lifecycle',
 
       expect(result.success).toBe(false);
       expect(result.reason).toBe('Component already running');
+      expect(result.code).toBe('component_already_running');
     });
 
     test('startComponent should reject concurrent starts while starting', async () => {
@@ -939,6 +1003,7 @@ describe('LifecycleManager - Phase 2: Core Registration & Individual Lifecycle',
 
       expect(secondResult.success).toBe(false);
       expect(secondResult.reason).toBe('Component already starting');
+      expect(secondResult.code).toBe('component_already_starting');
       expect(startCalls).toBe(1);
 
       resolveStart?.();
@@ -975,6 +1040,7 @@ describe('LifecycleManager - Phase 2: Core Registration & Individual Lifecycle',
 
       expect(result.success).toBe(false);
       expect(result.reason).toBe('Component not found');
+      expect(result.code).toBe('component_not_found');
     });
 
     test('stopComponent should return failure for non-running component', async () => {
@@ -987,6 +1053,7 @@ describe('LifecycleManager - Phase 2: Core Registration & Individual Lifecycle',
 
       expect(result.success).toBe(false);
       expect(result.reason).toBe('Component not running');
+      expect(result.code).toBe('component_not_running');
     });
 
     test('restartComponent should stop then start component', async () => {
@@ -1028,6 +1095,7 @@ describe('LifecycleManager - Phase 2: Core Registration & Individual Lifecycle',
 
       expect(result.success).toBe(false);
       expect(result.reason).toContain('Failed to stop');
+      expect(result.code).toBe('restart_stop_failed');
     });
   });
 
@@ -1055,6 +1123,7 @@ describe('LifecycleManager - Phase 2: Core Registration & Individual Lifecycle',
 
       expect(result.success).toBe(false);
       expect(result.error?.message).toContain('timed out');
+      expect(result.code).toBe('start_timeout');
       expect(lifecycle.isComponentRunning('slow')).toBe(false);
 
       const status = lifecycle.getComponentStatus('slow');
@@ -1086,6 +1155,7 @@ describe('LifecycleManager - Phase 2: Core Registration & Individual Lifecycle',
 
       expect(opResult.success).toBe(false);
       expect(opResult.error?.message).toContain('timed out');
+      expect(opResult.code).toBe('stop_timeout');
       expect(lifecycle.isComponentRunning('slow')).toBe(false);
 
       const status = lifecycle.getComponentStatus('slow');
@@ -1116,6 +1186,7 @@ describe('LifecycleManager - Phase 2: Core Registration & Individual Lifecycle',
 
       expect(result.success).toBe(false);
       expect(result.error?.message).toBe('Stop error');
+      expect(result.code).toBe('unknown_error');
 
       const status = lifecycle.getComponentStatus('failing');
       const definedStatus = requireDefined(status, 'status');

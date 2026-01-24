@@ -16,6 +16,7 @@ import type {
   UnregisterComponentResult,
   SystemState,
   RegistrationFailureCode,
+  StartupOrderResult,
 } from './types';
 import {
   ComponentStartTimeoutError,
@@ -81,104 +82,137 @@ export class LifecycleManager extends EventEmitterProtected {
     const componentName = component.getName();
     const registrationIndexBefore = this.getComponentIndex(componentName);
 
-    if (this.isShuttingDown) {
-      this.logger
-        .entity(componentName)
-        .warn('Cannot register component during shutdown');
-      this.safeEmit('component:registration-rejected', {
-        name: componentName,
-        reason: 'shutdown_in_progress',
-      });
-
-      return this.buildRegisterResultFailure({
-        componentName,
-        registrationIndexBefore,
-        code: 'shutdown_in_progress',
-        reason:
-          'Cannot register component while shutdown is in progress (isShuttingDown=true).',
-      });
-    }
-
-    if (registrationIndexBefore !== null) {
-      this.logger
-        .entity(componentName)
-        .warn('Component with this name already registered');
-      this.safeEmit('component:registration-rejected', {
-        name: componentName,
-        reason: 'duplicate_name',
-      });
-
-      return this.buildRegisterResultFailure({
-        componentName,
-        registrationIndexBefore,
-        code: 'duplicate_name',
-        reason: `Component "${componentName}" is already registered.`,
-      });
-    }
-
-    // Compute dependency order *before* committing registration mutations.
-    // This avoids leaving the registry/state maps inconsistent if a dependency
-    // cycle is detected.
-    let startupOrder: string[];
     try {
-      startupOrder = this.getStartupOrderInternal([
-        ...this.components,
-        component,
-      ]);
-    } catch (error) {
-      if (error instanceof DependencyCycleError) {
+      if (this.isShuttingDown) {
         this.logger
           .entity(componentName)
-          .warn('Registration rejected due to dependency cycle', {
-            params: { cycle: error.additionalInfo.cycle },
-          });
+          .warn('Cannot register component during shutdown');
         this.safeEmit('component:registration-rejected', {
           name: componentName,
-          reason: 'dependency_cycle',
-          cycle: error.additionalInfo.cycle,
+          reason: 'shutdown_in_progress',
         });
 
         return this.buildRegisterResultFailure({
           componentName,
           registrationIndexBefore,
-          code: 'dependency_cycle',
-          reason: error.message,
+          code: 'shutdown_in_progress',
+          reason:
+            'Cannot register component while shutdown is in progress (isShuttingDown=true).',
         });
       }
-      throw error;
+
+      if (registrationIndexBefore !== null) {
+        this.logger
+          .entity(componentName)
+          .warn('Component with this name already registered');
+        this.safeEmit('component:registration-rejected', {
+          name: componentName,
+          reason: 'duplicate_name',
+        });
+
+        return this.buildRegisterResultFailure({
+          componentName,
+          registrationIndexBefore,
+          code: 'duplicate_name',
+          reason: `Component "${componentName}" is already registered.`,
+        });
+      }
+
+      // Compute dependency order *before* committing registration mutations.
+      // This avoids leaving the registry/state maps inconsistent if a dependency
+      // cycle is detected.
+      let startupOrder: string[];
+      try {
+        startupOrder = this.getStartupOrderInternal([
+          ...this.components,
+          component,
+        ]);
+      } catch (error) {
+        if (error instanceof DependencyCycleError) {
+          this.logger
+            .entity(componentName)
+            .warn('Registration rejected due to dependency cycle', {
+              params: { cycle: error.additionalInfo.cycle },
+            });
+          this.safeEmit('component:registration-rejected', {
+            name: componentName,
+            reason: 'dependency_cycle',
+            cycle: error.additionalInfo.cycle,
+          });
+
+          return this.buildRegisterResultFailure({
+            componentName,
+            registrationIndexBefore,
+            code: 'dependency_cycle',
+            reason: error.message,
+            error,
+          });
+        }
+        throw error;
+      }
+
+      // Commit registration
+      this.components.push(component);
+      (component as unknown as { lifecycle: unknown }).lifecycle = this;
+
+      // Initialize state
+      this.componentStates.set(componentName, 'registered');
+      this.componentTimestamps.set(componentName, {
+        startedAt: null,
+        stoppedAt: null,
+      });
+      this.componentErrors.set(componentName, null);
+
+      const registrationIndexAfter = this.getComponentIndex(componentName);
+
+      this.logger.entity(componentName).info('Component registered', {
+        params: { index: registrationIndexAfter },
+      });
+      this.safeEmit('component:registered', {
+        name: componentName,
+        index: registrationIndexAfter,
+      });
+
+      return {
+        action: 'register',
+        success: true,
+        registered: true,
+        componentName,
+        registrationIndexBefore: null,
+        registrationIndexAfter,
+        startupOrder,
+      };
+    } catch (error) {
+      const err = error as Error;
+      const code: RegistrationFailureCode =
+        err instanceof DependencyCycleError ? 'dependency_cycle' : 'unknown_error';
+
+      this.logger
+        .entity(componentName)
+        .error('Registration failed with unexpected error', {
+          params: { error: err },
+        });
+      this.safeEmit('component:registration-rejected', {
+        name: componentName,
+        reason: code,
+        ...(err instanceof DependencyCycleError
+          ? { cycle: err.additionalInfo.cycle }
+          : {}),
+      });
+
+      return {
+        action: 'register',
+        success: false,
+        registered: false,
+        componentName,
+        code,
+        reason: err.message,
+        error: err,
+        registrationIndexBefore,
+        registrationIndexAfter: registrationIndexBefore,
+        startupOrder: [],
+      };
     }
-
-    // Commit registration
-    this.components.push(component);
-    (component as unknown as { lifecycle: unknown }).lifecycle = this;
-
-    // Initialize state
-    this.componentStates.set(componentName, 'registered');
-    this.componentTimestamps.set(componentName, {
-      startedAt: null,
-      stoppedAt: null,
-    });
-    this.componentErrors.set(componentName, null);
-
-    const registrationIndexAfter = this.getComponentIndex(componentName);
-
-    this.logger.entity(componentName).info('Component registered', {
-      params: { index: registrationIndexAfter },
-    });
-    this.safeEmit('component:registered', {
-      name: componentName,
-      index: registrationIndexAfter,
-    });
-
-    return {
-      action: 'register',
-      success: true,
-      registered: true,
-      componentName,
-      registrationIndexBefore: null,
-      registrationIndexAfter,
-      startupOrder,
-    };
   }
 
   /**
@@ -198,115 +232,14 @@ export class LifecycleManager extends EventEmitterProtected {
     const componentName = component.getName();
     const registrationIndexBefore = this.getComponentIndex(componentName);
 
-    if (!this.isInsertPosition(position)) {
-      this.logger.entity(componentName).warn('Invalid insertion position', {
-        params: { position },
-      });
-      this.safeEmit('component:registration-rejected', {
-        name: componentName,
-        reason: 'invalid_position',
-      });
-
-      return this.buildInsertResultFailure({
-        componentName,
-        position,
-        targetComponentName,
-        registrationIndexBefore,
-        code: 'invalid_position',
-        reason: `Invalid insert position: "${String(position)}". Expected one of: start, end, before, after.`,
-        targetFound: undefined,
-      });
-    }
-
-    if (this.isShuttingDown) {
-      this.logger
-        .entity(componentName)
-        .warn('Cannot register component during shutdown');
-      this.safeEmit('component:registration-rejected', {
-        name: componentName,
-        reason: 'shutdown_in_progress',
-      });
-
-      return this.buildInsertResultFailure({
-        componentName,
-        position,
-        targetComponentName,
-        registrationIndexBefore,
-        code: 'shutdown_in_progress',
-        reason:
-          'Cannot register component while shutdown is in progress (isShuttingDown=true).',
-        targetFound: undefined,
-      });
-    }
-
-    if (registrationIndexBefore !== null) {
-      this.logger
-        .entity(componentName)
-        .warn('Component with this name already registered');
-      this.safeEmit('component:registration-rejected', {
-        name: componentName,
-        reason: 'duplicate_name',
-      });
-
-      return this.buildInsertResultFailure({
-        componentName,
-        position,
-        targetComponentName,
-        registrationIndexBefore,
-        code: 'duplicate_name',
-        reason: `Component "${componentName}" is already registered.`,
-        targetFound: undefined,
-      });
-    }
-
-    const insertIndex = this.getInsertIndex(position, targetComponentName);
-    if (insertIndex === null) {
-      this.logger.entity(componentName).warn('Target component not found', {
-        params: { target: targetComponentName },
-      });
-      this.safeEmit('component:registration-rejected', {
-        name: componentName,
-        reason: 'target_not_found',
-        target: targetComponentName,
-      });
-
-      const startupOrder = this.getStartupOrderInternal();
-      return {
-        action: 'insert',
-        success: false,
-        registered: false,
-        componentName,
-        code: 'target_not_found',
-        reason: `Target component "${targetComponentName ?? ''}" not found in registry.`,
-        registrationIndexBefore: null,
-        registrationIndexAfter: null,
-        startupOrder,
-        requestedPosition: { position, targetComponentName },
-        manualPositionRespected: false,
-        targetFound: false,
-      };
-    }
-
-    // Compute dependency order *before* committing registration mutations.
-    // This avoids leaving the registry/state maps inconsistent if a dependency
-    // cycle is detected.
-    const nextComponents = [...this.components];
-    nextComponents.splice(insertIndex, 0, component);
-
-    let startupOrder: string[];
     try {
-      startupOrder = this.getStartupOrderInternal(nextComponents);
-    } catch (error) {
-      if (error instanceof DependencyCycleError) {
-        this.logger
-          .entity(componentName)
-          .warn('Registration rejected due to dependency cycle', {
-            params: { cycle: error.additionalInfo.cycle },
-          });
+      if (!this.isInsertPosition(position)) {
+        this.logger.entity(componentName).warn('Invalid insertion position', {
+          params: { position },
+        });
         this.safeEmit('component:registration-rejected', {
           name: componentName,
-          reason: 'dependency_cycle',
-          cycle: error.additionalInfo.cycle,
+          reason: 'invalid_position',
         });
 
         return this.buildInsertResultFailure({
@@ -314,59 +247,197 @@ export class LifecycleManager extends EventEmitterProtected {
           position,
           targetComponentName,
           registrationIndexBefore,
-          code: 'dependency_cycle',
-          reason: error.message,
-          targetFound:
-            position === 'before' || position === 'after' ? true : undefined,
+          code: 'invalid_position',
+          reason: `Invalid insert position: "${String(position)}". Expected one of: start, end, before, after.`,
+          targetFound: undefined,
         });
       }
-      throw error;
+
+      if (this.isShuttingDown) {
+        this.logger
+          .entity(componentName)
+          .warn('Cannot register component during shutdown');
+        this.safeEmit('component:registration-rejected', {
+          name: componentName,
+          reason: 'shutdown_in_progress',
+        });
+
+        return this.buildInsertResultFailure({
+          componentName,
+          position,
+          targetComponentName,
+          registrationIndexBefore,
+          code: 'shutdown_in_progress',
+          reason:
+            'Cannot register component while shutdown is in progress (isShuttingDown=true).',
+          targetFound: undefined,
+        });
+      }
+
+      if (registrationIndexBefore !== null) {
+        this.logger
+          .entity(componentName)
+          .warn('Component with this name already registered');
+        this.safeEmit('component:registration-rejected', {
+          name: componentName,
+          reason: 'duplicate_name',
+        });
+
+        return this.buildInsertResultFailure({
+          componentName,
+          position,
+          targetComponentName,
+          registrationIndexBefore,
+          code: 'duplicate_name',
+          reason: `Component "${componentName}" is already registered.`,
+          targetFound: undefined,
+        });
+      }
+
+      const insertIndex = this.getInsertIndex(position, targetComponentName);
+      if (insertIndex === null) {
+        this.logger.entity(componentName).warn('Target component not found', {
+          params: { target: targetComponentName },
+        });
+        this.safeEmit('component:registration-rejected', {
+          name: componentName,
+          reason: 'target_not_found',
+          target: targetComponentName,
+        });
+
+        const startupOrder = this.getStartupOrderInternal();
+        return {
+          action: 'insert',
+          success: false,
+          registered: false,
+          componentName,
+          code: 'target_not_found',
+          reason: `Target component "${targetComponentName ?? ''}" not found in registry.`,
+          registrationIndexBefore: null,
+          registrationIndexAfter: null,
+          startupOrder,
+          requestedPosition: { position, targetComponentName },
+          manualPositionRespected: false,
+          targetFound: false,
+        };
+      }
+
+      // Compute dependency order *before* committing registration mutations.
+      // This avoids leaving the registry/state maps inconsistent if a dependency
+      // cycle is detected.
+      const nextComponents = [...this.components];
+      nextComponents.splice(insertIndex, 0, component);
+
+      let startupOrder: string[];
+      try {
+        startupOrder = this.getStartupOrderInternal(nextComponents);
+      } catch (error) {
+        if (error instanceof DependencyCycleError) {
+          this.logger
+            .entity(componentName)
+            .warn('Registration rejected due to dependency cycle', {
+              params: { cycle: error.additionalInfo.cycle },
+            });
+          this.safeEmit('component:registration-rejected', {
+            name: componentName,
+            reason: 'dependency_cycle',
+            cycle: error.additionalInfo.cycle,
+          });
+
+          return this.buildInsertResultFailure({
+            componentName,
+            position,
+            targetComponentName,
+            registrationIndexBefore,
+            code: 'dependency_cycle',
+            reason: error.message,
+            error,
+            targetFound:
+              position === 'before' || position === 'after' ? true : undefined,
+          });
+        }
+        throw error;
+      }
+
+      // Commit registration
+      this.components.splice(insertIndex, 0, component);
+      (component as unknown as { lifecycle: unknown }).lifecycle = this;
+
+      // Initialize state
+      this.componentStates.set(componentName, 'registered');
+      this.componentTimestamps.set(componentName, {
+        startedAt: null,
+        stoppedAt: null,
+      });
+      this.componentErrors.set(componentName, null);
+
+      const isManualPositionRespected = this.isManualPositionRespected({
+        componentName,
+        position,
+        targetComponentName,
+        startupOrder,
+      });
+
+      const registrationIndexAfter = this.getComponentIndex(componentName);
+
+      this.logger.entity(componentName).info('Component inserted', {
+        params: { position, index: registrationIndexAfter },
+      });
+      this.safeEmit('component:registered', {
+        name: componentName,
+        index: registrationIndexAfter,
+      });
+
+      return {
+        action: 'insert',
+        success: true,
+        registered: true,
+        componentName,
+        registrationIndexBefore: null,
+        registrationIndexAfter,
+        startupOrder,
+        requestedPosition: { position, targetComponentName },
+        manualPositionRespected: isManualPositionRespected,
+        targetFound:
+          position === 'before' || position === 'after'
+            ? this.getComponentIndex(targetComponentName ?? '') !== null
+            : undefined,
+      };
+    } catch (error) {
+      const err = error as Error;
+      const code: RegistrationFailureCode =
+        err instanceof DependencyCycleError ? 'dependency_cycle' : 'unknown_error';
+
+      this.logger
+        .entity(componentName)
+        .error('Registration failed with unexpected error', {
+          params: { error: err },
+        });
+      this.safeEmit('component:registration-rejected', {
+        name: componentName,
+        reason: code,
+        ...(err instanceof DependencyCycleError
+          ? { cycle: err.additionalInfo.cycle }
+          : {}),
+      });
+
+      return {
+        action: 'insert',
+        success: false,
+        registered: false,
+        componentName,
+        code,
+        reason: err.message,
+        error: err,
+        registrationIndexBefore,
+        registrationIndexAfter: registrationIndexBefore,
+        startupOrder: [],
+        requestedPosition: { position, targetComponentName },
+        manualPositionRespected: false,
+        targetFound:
+          position === 'before' || position === 'after' ? false : undefined,
+      };
     }
-
-    // Commit registration
-    this.components.splice(insertIndex, 0, component);
-    (component as unknown as { lifecycle: unknown }).lifecycle = this;
-
-    // Initialize state
-    this.componentStates.set(componentName, 'registered');
-    this.componentTimestamps.set(componentName, {
-      startedAt: null,
-      stoppedAt: null,
-    });
-    this.componentErrors.set(componentName, null);
-
-    const isManualPositionRespected = this.isManualPositionRespected({
-      componentName,
-      position,
-      targetComponentName,
-      startupOrder,
-    });
-
-    const registrationIndexAfter = this.getComponentIndex(componentName);
-
-    this.logger.entity(componentName).info('Component inserted', {
-      params: { position, index: registrationIndexAfter },
-    });
-    this.safeEmit('component:registered', {
-      name: componentName,
-      index: registrationIndexAfter,
-    });
-
-    return {
-      action: 'insert',
-      success: true,
-      registered: true,
-      componentName,
-      registrationIndexBefore: null,
-      registrationIndexAfter,
-      startupOrder,
-      requestedPosition: { position, targetComponentName },
-      manualPositionRespected: isManualPositionRespected,
-      targetFound:
-        position === 'before' || position === 'after'
-          ? this.getComponentIndex(targetComponentName ?? '') !== null
-          : undefined,
-    };
   }
 
   /**
@@ -593,8 +664,29 @@ export class LifecycleManager extends EventEmitterProtected {
   /**
    * Get resolved startup order after applying dependency constraints.
    */
-  public getStartupOrder(): string[] {
-    return this.getStartupOrderInternal();
+  public getStartupOrder(): StartupOrderResult {
+    try {
+      return {
+        success: true,
+        startupOrder: this.getStartupOrderInternal(),
+      };
+    } catch (error) {
+      const err = error as Error;
+      const code =
+        err instanceof DependencyCycleError ? 'dependency_cycle' : 'unknown_error';
+
+      this.logger.error('Failed to resolve startup order', {
+        params: { error: err },
+      });
+
+      return {
+        success: false,
+        startupOrder: [],
+        code,
+        reason: err.message,
+        error: err,
+      };
+    }
   }
 
   // ============================================================================
@@ -612,6 +704,7 @@ export class LifecycleManager extends EventEmitterProtected {
         success: false,
         componentName: name,
         reason: 'Component not found',
+        code: 'component_not_found',
       };
     }
 
@@ -621,6 +714,7 @@ export class LifecycleManager extends EventEmitterProtected {
         success: false,
         componentName: name,
         reason: 'Component already starting',
+        code: 'component_already_starting',
       };
     }
 
@@ -630,6 +724,7 @@ export class LifecycleManager extends EventEmitterProtected {
         success: false,
         componentName: name,
         reason: 'Component already running',
+        code: 'component_already_running',
       };
     }
 
@@ -639,6 +734,7 @@ export class LifecycleManager extends EventEmitterProtected {
         success: false,
         componentName: name,
         reason: 'Shutdown in progress',
+        code: 'shutdown_in_progress',
       };
     }
 
@@ -728,6 +824,10 @@ export class LifecycleManager extends EventEmitterProtected {
         success: false,
         componentName: name,
         reason: err.message,
+        code:
+          err instanceof ComponentStartTimeoutError
+            ? 'start_timeout'
+            : 'unknown_error',
         error: err,
       };
     } finally {
@@ -751,6 +851,7 @@ export class LifecycleManager extends EventEmitterProtected {
         success: false,
         componentName: name,
         reason: 'Component not found',
+        code: 'component_not_found',
       };
     }
 
@@ -760,6 +861,7 @@ export class LifecycleManager extends EventEmitterProtected {
         success: false,
         componentName: name,
         reason: 'Component not running',
+        code: 'component_not_running',
       };
     }
 
@@ -853,6 +955,7 @@ export class LifecycleManager extends EventEmitterProtected {
           success: false,
           componentName: name,
           reason: 'Component stop timed out',
+          code: 'stop_timeout',
           error: err,
         };
       } else {
@@ -878,6 +981,7 @@ export class LifecycleManager extends EventEmitterProtected {
           success: false,
           componentName: name,
           reason: err.message,
+          code: 'unknown_error',
           error: err,
         };
       }
@@ -905,6 +1009,7 @@ export class LifecycleManager extends EventEmitterProtected {
         success: false,
         componentName: name,
         reason: `Failed to stop: ${stopResult.reason}`,
+        code: 'restart_stop_failed',
         error: stopResult.error,
       };
     }
@@ -917,6 +1022,7 @@ export class LifecycleManager extends EventEmitterProtected {
         success: false,
         componentName: name,
         reason: `Failed to start: ${startResult.reason}`,
+        code: 'restart_start_failed',
         error: startResult.error,
       };
     }
@@ -956,6 +1062,7 @@ export class LifecycleManager extends EventEmitterProtected {
     registrationIndexBefore: number | null;
     code: RegistrationFailureCode;
     reason: string;
+    error?: Error;
   }): RegisterComponentResult {
     const startupOrder = this.getStartupOrderInternal();
     return {
@@ -965,6 +1072,7 @@ export class LifecycleManager extends EventEmitterProtected {
       componentName: input.componentName,
       code: input.code,
       reason: input.reason,
+      error: input.error,
       registrationIndexBefore: input.registrationIndexBefore,
       registrationIndexAfter: input.registrationIndexBefore,
       startupOrder,
@@ -978,6 +1086,7 @@ export class LifecycleManager extends EventEmitterProtected {
     registrationIndexBefore: number | null;
     code: RegistrationFailureCode;
     reason: string;
+    error?: Error;
     targetFound?: boolean;
   }): InsertComponentAtResult {
     const startupOrder = this.getStartupOrderInternal();
@@ -988,6 +1097,7 @@ export class LifecycleManager extends EventEmitterProtected {
       componentName: input.componentName,
       code: input.code,
       reason: input.reason,
+      error: input.error,
       registrationIndexBefore: input.registrationIndexBefore,
       registrationIndexAfter: input.registrationIndexBefore,
       startupOrder,

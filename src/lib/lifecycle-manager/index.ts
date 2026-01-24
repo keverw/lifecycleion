@@ -42,6 +42,8 @@ export type {
   StartupOptions,
   InsertPosition,
   RegistrationFailureCode,
+  StartupOrderFailureCode,
+  StartupOrderResult,
   RegisterComponentResult,
   InsertComponentAtResult,
   LifecycleManagerOptions,

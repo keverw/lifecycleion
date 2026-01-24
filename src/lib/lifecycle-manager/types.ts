@@ -98,9 +98,27 @@ export interface ComponentOperationResult {
   /** Human-readable explanation if !success */
   reason?: string;
 
+  /** Machine-readable failure code if !success */
+  code?: ComponentOperationFailureCode;
+
   /** Underlying error if applicable */
   error?: Error;
 }
+
+/**
+ * Stable, machine-readable failure codes for individual component operations
+ */
+export type ComponentOperationFailureCode =
+  | 'component_not_found'
+  | 'component_already_running'
+  | 'component_already_starting'
+  | 'component_not_running'
+  | 'shutdown_in_progress'
+  | 'start_timeout'
+  | 'stop_timeout'
+  | 'restart_stop_failed'
+  | 'restart_start_failed'
+  | 'unknown_error';
 
 /**
  * Result of unregistering a component
@@ -374,7 +392,8 @@ export type RegistrationFailureCode =
   | 'shutdown_in_progress'
   | 'target_not_found'
   | 'invalid_position'
-  | 'dependency_cycle';
+  | 'dependency_cycle'
+  | 'unknown_error';
 
 /**
  * Common result shape for component registration operations
@@ -395,6 +414,9 @@ export interface RegistrationResultBase {
   /** Machine-readable failure code if !success */
   code?: RegistrationFailureCode;
 
+  /** Underlying error if applicable */
+  error?: Error;
+
   /** Registration index before the operation (null if not previously registered) */
   registrationIndexBefore: number | null;
 
@@ -403,6 +425,31 @@ export interface RegistrationResultBase {
 
   /** Resolved startup order after applying dependency constraints */
   startupOrder: string[];
+}
+
+/**
+ * Stable, machine-readable failure codes for getStartupOrder()
+ */
+export type StartupOrderFailureCode = 'dependency_cycle' | 'unknown_error';
+
+/**
+ * Result of getStartupOrder()
+ */
+export interface StartupOrderResult {
+  /** Whether the operation succeeded */
+  success: boolean;
+
+  /** Resolved startup order after applying dependency constraints */
+  startupOrder: string[];
+
+  /** Human-readable explanation if !success */
+  reason?: string;
+
+  /** Machine-readable failure code if !success */
+  code?: StartupOrderFailureCode;
+
+  /** Underlying error if applicable */
+  error?: Error;
 }
 
 /**
