@@ -827,67 +827,7 @@ The global timeouts (`startupTimeoutMS`, `shutdownTimeoutMS`) act as hard ceilin
 
 **Recommendation**: Set global timeouts to be larger than the sum of expected per-component timeouts, with some buffer.
 
-### 6. Component Dependencies
-
-Components can declare explicit dependencies on other components. The LifecycleManager performs topological sort to determine startup order and reverses it for shutdown.
-
-**Declaration**:
-
-```typescript
-export interface ComponentOptions {
-  name: string;
-  dependencies?: string[]; // Names of components this one depends on
-  // ... other options
-}
-
-class ApiComponent extends BaseComponent {
-  constructor(logger: Logger) {
-    super(logger, {
-      name: 'api',
-      dependencies: ['database', 'cache'], // API needs database and cache to start first
-    });
-  }
-}
-```
-
-**Behavior**:
-
-- **Startup**: Dependencies start before dependents. `database` and `cache` start before `api`.
-- **Shutdown**: Reverse order. `api` stops before `database` and `cache`.
-- **Cycle Detection**: Circular dependencies return a failure result with `code: 'dependency_cycle'` (and `error` set to `DependencyCycleError`) from registration and startup-order APIs. Error details include a detected cycle path when available.
-- **Missing Dependencies**: If a dependency isn't registered, startup methods return failure results with machine-readable codes rather than throwing.
-- **Manual Start**: `startComponent()` requires dependencies to be registered and running by default. Missing dependencies return `missing_dependency`; registered-but-stopped dependencies return `dependency_not_running`. Pass `{ allowOptionalDependencies: true }` to allow registered-but-stopped optional dependencies; optional status does not bypass missing dependencies.
-
-**Interaction with Registration Order**:
-
-- Dependencies take precedence over registration order
-- Components without dependencies maintain their registration order relative to each other
-- `insertComponentAt()` positions are respected within dependency constraints
-
-```typescript
-// Example: Registration order vs dependencies
-lifecycle.registerComponent(new ApiComponent(logger)); // depends on ['database']
-lifecycle.registerComponent(new DatabaseComponent(logger)); // no dependencies
-
-// Despite API being registered first, database starts first due to dependency
-await lifecycle.startAllComponents();
-// Start order: database -> api
-// Stop order: api -> database
-```
-
-**Public API**:
-
-```typescript
-// Get resolved startup order (after topological sort)
-getStartupOrder(): StartupOrderResult
-```
-
-**Automatic Validation**:
-
-- **Cycle Detection**: Circular dependencies return failure results (code: `dependency_cycle`) rather than throwing
-- **Missing Dependencies**: Missing dependencies are returned as failure results (no throw)
-
-### 7. Health Checks
+### 6. Health Checks
 
 Components can implement optional health checks for runtime monitoring. Health checks can return a simple boolean or a rich result with metadata.
 
@@ -1052,7 +992,7 @@ const result = await Promise.race([
 'component:health-check-failed'; // { name, error }
 ```
 
-### 8. Shared Values (getValue Pattern)
+### 7. Shared Values (getValue Pattern)
 
 Components can expose values that other components or external code can request. This follows the same pattern as messaging for consistency.
 
@@ -1205,7 +1145,7 @@ Both use the same pattern:
 - Both return result objects with detailed status
 - Both are optional handlers
 
-### 9. Optional Components
+### 8. Optional Components
 
 Components can be marked as optional so their startup failures don't trigger rollback.
 
@@ -1278,7 +1218,7 @@ if (result.failedOptionalComponents.length > 0) {
 }
 ```
 
-### 10. Abort Callbacks
+### 9. Abort Callbacks
 
 Components can implement optional abort callbacks that are called when the manager times out an operation. This provides cooperative cancellation without cluttering method signatures.
 
@@ -2267,30 +2207,24 @@ for (const status of allStatuses) {
    - Test error handling (startup failures, shutdown failures)
    - Test stall detection and recovery
 
-3. **Dependencies**
-   - Test topological sort ordering
-   - Test cycle detection (throws `DependencyCycleError`)
-   - Test missing dependency detection
-   - Test dependencies override registration order
-
-4. **Optional Components**
+3. **Optional Components**
    - Test optional component failure doesn't trigger rollback
    - Test dependent components are skipped when optional dependency fails
    - Test `'failed'` state tracking
 
-5. **Abort Callbacks**
+4. **Abort Callbacks**
    - Test onStartupAborted() called on timeout
    - Test onStopAborted() called before force phase
    - Test abort callbacks are optional (no error if not implemented)
 
-6. **Health Checks**
+5. **Health Checks**
    - Test healthCheck() invocation
    - Test health check timeout
    - Test aggregate health report
    - Test boolean return normalized to result object
    - Test rich result with message and details
 
-7. **Shared Values**
+6. **Shared Values**
    - Test getValue() handler called with correct key and from
    - Test lifecycle.getValue() returns result object
    - Test result.found true when value returned
@@ -2298,12 +2232,12 @@ for (const status of allStatuses) {
    - Test result includes componentFound, componentRunning, handlerImplemented
    - Test from parameter tracks requester (component name or null)
 
-8. **Signal Integration**
+7. **Signal Integration**
    - Test attach/detach
    - Test manual triggers
    - Test signal-to-lifecycle mapping
 
-9. **Event Emission**
+8. **Event Emission**
    - Test all event types are emitted
    - Test event data correctness
    - Test event handler errors don't break lifecycle

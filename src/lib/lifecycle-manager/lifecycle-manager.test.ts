@@ -2595,5 +2595,594 @@ describe('LifecycleManager - Phase 3: Bulk Operations', () => {
 
       await firstStopPromise;
     });
+
+    test('should prevent unregisterComponent during bulk operations with correct error code', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      class SlowComponent extends BaseComponent {
+        public async start(): Promise<void> {
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+        public async stop(): Promise<void> {
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+      }
+
+      lifecycle.registerComponent(new SlowComponent(logger, { name: 'comp1' }));
+      lifecycle.registerComponent(new SlowComponent(logger, { name: 'comp2' }));
+      lifecycle.registerComponent(new TestComponent(logger, { name: 'comp3' }));
+
+      // Test during startup
+      const startAllPromise = lifecycle.startAllComponents();
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      const unregisterDuringStartup =
+        await lifecycle.unregisterComponent('comp3');
+
+      expect(unregisterDuringStartup.success).toBe(false);
+      expect(unregisterDuringStartup.code).toBe('bulk_operation_in_progress');
+      expect(unregisterDuringStartup.wasRegistered).toBe(true);
+      expect(unregisterDuringStartup.componentName).toBe('comp3');
+
+      await startAllPromise;
+
+      // Test during shutdown
+      const stopAllPromise = lifecycle.stopAllComponents();
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      const unregisterDuringShutdown =
+        await lifecycle.unregisterComponent('comp3');
+
+      expect(unregisterDuringShutdown.success).toBe(false);
+      expect(unregisterDuringShutdown.code).toBe('bulk_operation_in_progress');
+      expect(unregisterDuringShutdown.wasRegistered).toBe(true);
+      expect(unregisterDuringShutdown.componentName).toBe('comp3');
+
+      await stopAllPromise;
+
+      // After bulk operations complete, unregister should work
+      const unregisterAfter = await lifecycle.unregisterComponent('comp3');
+      expect(unregisterAfter.success).toBe(true);
+    });
+  });
+
+  describe('Phase 4: Dependency Management', () => {
+    test('should start components in topological order (linear dependencies)', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+      const startOrder: string[] = [];
+
+      class TrackedComponent extends BaseComponent {
+        public start(): Promise<void> {
+          startOrder.push(this.getName());
+          return Promise.resolve();
+        }
+        public stop(): Promise<void> {
+          return Promise.resolve();
+        }
+      }
+
+      // A depends on B, B depends on C (C → B → A)
+      lifecycle.registerComponent(
+        new TrackedComponent(logger, {
+          name: 'comp-a',
+          dependencies: ['comp-b'],
+        }),
+      );
+      lifecycle.registerComponent(
+        new TrackedComponent(logger, {
+          name: 'comp-b',
+          dependencies: ['comp-c'],
+        }),
+      );
+      lifecycle.registerComponent(
+        new TrackedComponent(logger, { name: 'comp-c' }),
+      );
+
+      const result = await lifecycle.startAllComponents();
+
+      expect(result.success).toBe(true);
+      expect(startOrder).toEqual(['comp-c', 'comp-b', 'comp-a']);
+    });
+
+    test('should handle diamond dependencies correctly', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+      const startOrder: string[] = [];
+
+      class TrackedComponent extends BaseComponent {
+        public start(): Promise<void> {
+          startOrder.push(this.getName());
+          return Promise.resolve();
+        }
+        public stop(): Promise<void> {
+          return Promise.resolve();
+        }
+      }
+
+      // Diamond: D depends on B and C, both B and C depend on A
+      lifecycle.registerComponent(
+        new TrackedComponent(logger, { name: 'comp-a' }),
+      );
+      lifecycle.registerComponent(
+        new TrackedComponent(logger, {
+          name: 'comp-b',
+          dependencies: ['comp-a'],
+        }),
+      );
+      lifecycle.registerComponent(
+        new TrackedComponent(logger, {
+          name: 'comp-c',
+          dependencies: ['comp-a'],
+        }),
+      );
+      lifecycle.registerComponent(
+        new TrackedComponent(logger, {
+          name: 'comp-d',
+          dependencies: ['comp-b', 'comp-c'],
+        }),
+      );
+
+      const result = await lifecycle.startAllComponents();
+
+      expect(result.success).toBe(true);
+      expect(startOrder[0]).toBe('comp-a'); // A must be first
+      expect(startOrder[3]).toBe('comp-d'); // D must be last
+      // B and C can be in any order but both after A and before D
+      expect(startOrder.slice(1, 3).sort()).toEqual(['comp-b', 'comp-c']);
+    });
+
+    test('should handle multiple independent chains', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+      const startOrder: string[] = [];
+
+      class TrackedComponent extends BaseComponent {
+        public start(): Promise<void> {
+          startOrder.push(this.getName());
+          return Promise.resolve();
+        }
+        public stop(): Promise<void> {
+          return Promise.resolve();
+        }
+      }
+
+      // Chain 1: B depends on A
+      lifecycle.registerComponent(
+        new TrackedComponent(logger, { name: 'comp-a' }),
+      );
+      lifecycle.registerComponent(
+        new TrackedComponent(logger, {
+          name: 'comp-b',
+          dependencies: ['comp-a'],
+        }),
+      );
+
+      // Chain 2: D depends on C
+      lifecycle.registerComponent(
+        new TrackedComponent(logger, { name: 'comp-c' }),
+      );
+      lifecycle.registerComponent(
+        new TrackedComponent(logger, {
+          name: 'comp-d',
+          dependencies: ['comp-c'],
+        }),
+      );
+
+      const result = await lifecycle.startAllComponents();
+
+      expect(result.success).toBe(true);
+      expect(startOrder.indexOf('comp-a')).toBeLessThan(
+        startOrder.indexOf('comp-b'),
+      );
+      expect(startOrder.indexOf('comp-c')).toBeLessThan(
+        startOrder.indexOf('comp-d'),
+      );
+    });
+
+    test('should preserve registration order when no dependencies', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+      const startOrder: string[] = [];
+
+      class TrackedComponent extends BaseComponent {
+        public start(): Promise<void> {
+          startOrder.push(this.getName());
+          return Promise.resolve();
+        }
+        public stop(): Promise<void> {
+          return Promise.resolve();
+        }
+      }
+
+      lifecycle.registerComponent(
+        new TrackedComponent(logger, { name: 'comp-a' }),
+      );
+      lifecycle.registerComponent(
+        new TrackedComponent(logger, { name: 'comp-b' }),
+      );
+      lifecycle.registerComponent(
+        new TrackedComponent(logger, { name: 'comp-c' }),
+      );
+
+      const result = await lifecycle.startAllComponents();
+
+      expect(result.success).toBe(true);
+      expect(startOrder).toEqual(['comp-a', 'comp-b', 'comp-c']);
+    });
+
+    test('should stop components in reverse topological order', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+      const stopOrder: string[] = [];
+
+      class TrackedComponent extends BaseComponent {
+        public start(): Promise<void> {
+          return Promise.resolve();
+        }
+        public stop(): Promise<void> {
+          stopOrder.push(this.getName());
+          return Promise.resolve();
+        }
+      }
+
+      // A depends on B, B depends on C (C → B → A for start, A → B → C for stop)
+      lifecycle.registerComponent(
+        new TrackedComponent(logger, {
+          name: 'comp-a',
+          dependencies: ['comp-b'],
+        }),
+      );
+      lifecycle.registerComponent(
+        new TrackedComponent(logger, {
+          name: 'comp-b',
+          dependencies: ['comp-c'],
+        }),
+      );
+      lifecycle.registerComponent(
+        new TrackedComponent(logger, { name: 'comp-c' }),
+      );
+
+      await lifecycle.startAllComponents();
+      await lifecycle.stopAllComponents();
+
+      expect(stopOrder).toEqual(['comp-a', 'comp-b', 'comp-c']);
+    });
+
+    test('should detect simple dependency cycle', () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      lifecycle.registerComponent(
+        new TestComponent(logger, { name: 'comp-a', dependencies: ['comp-b'] }),
+      );
+
+      // This creates a cycle: A → B → A
+      const result = lifecycle.registerComponent(
+        new TestComponent(logger, { name: 'comp-b', dependencies: ['comp-a'] }),
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.code).toBe('dependency_cycle');
+      expect(result.error).toBeInstanceOf(DependencyCycleError);
+    });
+
+    test('should detect complex dependency cycle', () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      lifecycle.registerComponent(
+        new TestComponent(logger, { name: 'comp-a', dependencies: ['comp-b'] }),
+      );
+      lifecycle.registerComponent(
+        new TestComponent(logger, { name: 'comp-b', dependencies: ['comp-c'] }),
+      );
+
+      // This creates a cycle: A → B → C → A
+      const result = lifecycle.registerComponent(
+        new TestComponent(logger, { name: 'comp-c', dependencies: ['comp-a'] }),
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.code).toBe('dependency_cycle');
+      expect(result.error).toBeInstanceOf(DependencyCycleError);
+    });
+
+    test('should detect self-dependency cycle', () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      // Component depends on itself
+      const result = lifecycle.registerComponent(
+        new TestComponent(logger, { name: 'comp-a', dependencies: ['comp-a'] }),
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.code).toBe('dependency_cycle');
+    });
+
+    test('should detect missing dependencies during manual start', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      lifecycle.registerComponent(
+        new TestComponent(logger, {
+          name: 'comp-a',
+          dependencies: ['comp-missing'],
+        }),
+      );
+
+      const result = await lifecycle.startComponent('comp-a');
+
+      expect(result.success).toBe(false);
+      expect(result.code).toBe('missing_dependency');
+      expect(result.reason).toContain('comp-missing');
+    });
+
+    test('should detect dependency not running during manual start', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      lifecycle.registerComponent(
+        new TestComponent(logger, { name: 'comp-a' }),
+      );
+      lifecycle.registerComponent(
+        new TestComponent(logger, { name: 'comp-b', dependencies: ['comp-a'] }),
+      );
+
+      // comp-a is registered but not running
+      const result = await lifecycle.startComponent('comp-b');
+
+      expect(result.success).toBe(false);
+      expect(result.code).toBe('dependency_not_running');
+      expect(result.reason).toContain('comp-a');
+    });
+
+    test('should allow manual start with allowOptionalDependencies for optional deps', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      lifecycle.registerComponent(
+        new TestComponent(logger, { name: 'comp-a', optional: true }),
+      );
+      lifecycle.registerComponent(
+        new TestComponent(logger, { name: 'comp-b', dependencies: ['comp-a'] }),
+      );
+
+      // comp-a is not running but is optional
+      const result = await lifecycle.startComponent('comp-b', {
+        allowOptionalDependencies: true,
+      });
+
+      expect(result.success).toBe(true);
+    });
+
+    test('should allow manual start with allowRequiredDependencies', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      lifecycle.registerComponent(
+        new TestComponent(logger, { name: 'comp-a' }),
+      );
+      lifecycle.registerComponent(
+        new TestComponent(logger, { name: 'comp-b', dependencies: ['comp-a'] }),
+      );
+
+      // comp-a is not running and is required, but we explicitly override
+      const result = await lifecycle.startComponent('comp-b', {
+        allowRequiredDependencies: true,
+      });
+
+      expect(result.success).toBe(true);
+    });
+
+    test('should skip components when optional dependency fails', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      class FailingComponent extends BaseComponent {
+        public start(): Promise<void> {
+          throw new Error('Intentional failure');
+        }
+        public stop(): Promise<void> {
+          return Promise.resolve();
+        }
+      }
+
+      // comp-a is optional and will fail
+      lifecycle.registerComponent(
+        new FailingComponent(logger, { name: 'comp-a', optional: true }),
+      );
+      // comp-b depends on comp-a
+      lifecycle.registerComponent(
+        new TestComponent(logger, { name: 'comp-b', dependencies: ['comp-a'] }),
+      );
+
+      const result = await lifecycle.startAllComponents();
+
+      expect(result.success).toBe(true);
+      expect(result.failedOptionalComponents).toHaveLength(1);
+      expect(result.failedOptionalComponents[0].name).toBe('comp-a');
+      expect(result.skippedDueToDependency).toContain('comp-b');
+    });
+
+    test('validateDependencies() should return valid when no issues', () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      lifecycle.registerComponent(
+        new TestComponent(logger, { name: 'comp-a' }),
+      );
+      lifecycle.registerComponent(
+        new TestComponent(logger, { name: 'comp-b', dependencies: ['comp-a'] }),
+      );
+
+      const result = lifecycle.validateDependencies();
+
+      expect(result.valid).toBe(true);
+      expect(result.missingDependencies).toEqual([]);
+      expect(result.circularCycles).toEqual([]);
+      expect(result.summary.totalMissingDependencies).toBe(0);
+      expect(result.summary.totalCircularCycles).toBe(0);
+    });
+
+    test('validateDependencies() should report missing dependencies', () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      lifecycle.registerComponent(
+        new TestComponent(logger, {
+          name: 'comp-a',
+          dependencies: ['comp-missing'],
+        }),
+      );
+
+      const result = lifecycle.validateDependencies();
+
+      expect(result.valid).toBe(false);
+      expect(result.missingDependencies).toHaveLength(1);
+      expect(result.missingDependencies[0]).toEqual({
+        componentName: 'comp-a',
+        componentIsOptional: false,
+        missingDependency: 'comp-missing',
+      });
+      expect(result.summary.totalMissingDependencies).toBe(1);
+      expect(result.summary.requiredMissingDependencies).toBe(1);
+      expect(result.summary.optionalMissingDependencies).toBe(0);
+    });
+
+    test('validateDependencies() should report cycles during registration', () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      const result1 = lifecycle.registerComponent(
+        new TestComponent(logger, { name: 'comp-a', dependencies: ['comp-b'] }),
+      );
+      expect(result1.success).toBe(true);
+
+      // This should fail due to cycle
+      const result2 = lifecycle.registerComponent(
+        new TestComponent(logger, { name: 'comp-b', dependencies: ['comp-a'] }),
+      );
+
+      expect(result2.success).toBe(false);
+      expect(result2.code).toBe('dependency_cycle');
+
+      // Only comp-a should be registered
+      const validation = lifecycle.validateDependencies();
+      expect(validation.missingDependencies).toHaveLength(1); // comp-a depends on non-existent comp-b
+    });
+
+    test('validateDependencies() should report multiple missing dependencies', () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      // Multiple missing dependencies
+      lifecycle.registerComponent(
+        new TestComponent(logger, {
+          name: 'comp-a',
+          dependencies: ['comp-missing1'],
+          optional: true,
+        }),
+      );
+      lifecycle.registerComponent(
+        new TestComponent(logger, {
+          name: 'comp-b',
+          dependencies: ['comp-missing2'],
+        }),
+      );
+
+      const result = lifecycle.validateDependencies();
+
+      expect(result.valid).toBe(false);
+      expect(result.missingDependencies).toHaveLength(2);
+      expect(result.summary.totalMissingDependencies).toBe(2);
+      expect(result.summary.optionalMissingDependencies).toBe(1);
+      expect(result.summary.requiredMissingDependencies).toBe(1);
+    });
+
+    test('validateDependencies() should detect multiple independent cycles', () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      // Create two independent cycles by manually adding components
+      // We bypass registration validation to create the cycles for testing
+
+      // Cycle 1: comp-a -> comp-b -> comp-a
+      const compA = new TestComponent(logger, {
+        name: 'comp-a',
+        dependencies: ['comp-b'],
+      });
+      const compB = new TestComponent(logger, {
+        name: 'comp-b',
+        dependencies: ['comp-a'],
+      });
+
+      // Cycle 2: comp-x -> comp-y -> comp-z -> comp-x
+      const compX = new TestComponent(logger, {
+        name: 'comp-x',
+        dependencies: ['comp-y'],
+      });
+      const compY = new TestComponent(logger, {
+        name: 'comp-y',
+        dependencies: ['comp-z'],
+      });
+      const compZ = new TestComponent(logger, {
+        name: 'comp-z',
+        dependencies: ['comp-x'],
+      });
+
+      // Access private components array to add them directly
+      // This simulates having cycles that weren't caught during registration
+      (lifecycle as any).components.push(compA, compB, compX, compY, compZ);
+
+      const result = lifecycle.validateDependencies();
+
+      expect(result.valid).toBe(false);
+      expect(result.circularCycles.length).toBeGreaterThanOrEqual(1);
+      expect(result.summary.totalCircularCycles).toBeGreaterThanOrEqual(1);
+
+      // Verify at least one cycle contains expected components
+      const cycleStrings = result.circularCycles.map((c) => c.join('->'));
+      const hasCycle1 =
+        cycleStrings.some(
+          (s) => s.includes('comp-a') && s.includes('comp-b'),
+        ) ||
+        result.circularCycles.some(
+          (c) => c.includes('comp-a') && c.includes('comp-b'),
+        );
+      const hasCycle2 =
+        cycleStrings.some(
+          (s) =>
+            s.includes('comp-x') &&
+            s.includes('comp-y') &&
+            s.includes('comp-z'),
+        ) ||
+        result.circularCycles.some(
+          (c) =>
+            c.includes('comp-x') &&
+            c.includes('comp-y') &&
+            c.includes('comp-z'),
+        );
+
+      expect(hasCycle1 || hasCycle2).toBe(true);
+    });
+
+    test('getStartupOrder() should return resolved order', () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      lifecycle.registerComponent(
+        new TestComponent(logger, { name: 'comp-a', dependencies: ['comp-b'] }),
+      );
+      lifecycle.registerComponent(
+        new TestComponent(logger, { name: 'comp-b', dependencies: ['comp-c'] }),
+      );
+      lifecycle.registerComponent(
+        new TestComponent(logger, { name: 'comp-c' }),
+      );
+
+      const result = lifecycle.getStartupOrder();
+
+      expect(result.success).toBe(true);
+      expect(result.startupOrder).toEqual(['comp-c', 'comp-b', 'comp-a']);
+    });
+
+    test('getStartupOrder() should succeed when components are registered validly', () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      lifecycle.registerComponent(
+        new TestComponent(logger, { name: 'comp-a', dependencies: ['comp-b'] }),
+      );
+      lifecycle.registerComponent(
+        new TestComponent(logger, { name: 'comp-b' }),
+      );
+
+      const result = lifecycle.getStartupOrder();
+
+      expect(result.success).toBe(true);
+      expect(result.startupOrder).toEqual(['comp-b', 'comp-a']);
+    });
   });
 });

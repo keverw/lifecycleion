@@ -128,6 +128,13 @@ export interface StartComponentOptions {
    * when those dependencies are optional components.
    */
   allowOptionalDependencies?: boolean;
+
+  /**
+   * If true, allow dependencies that are registered but not running
+   * even when those dependencies are required components (not optional).
+   * This is an explicit override that bypasses normal dependency checks.
+   */
+  allowRequiredDependencies?: boolean;
 }
 
 /**
@@ -186,7 +193,8 @@ export type ComponentOperationFailureCode =
 export type UnregisterFailureCode =
   | 'component_not_found'
   | 'component_running'
-  | 'stop_failed';
+  | 'stop_failed'
+  | 'bulk_operation_in_progress';
 
 /**
  * Result of unregistering a component
@@ -530,6 +538,44 @@ export interface InsertComponentAtResult extends RegistrationResultBase {
 
   /** Present when inserting before/after a target */
   targetFound?: boolean;
+}
+
+/**
+ * Result of validateDependencies()
+ *
+ * Provides a report of dependency issues without throwing.
+ * Reports all issues regardless of whether components are optional - the optional
+ * flag affects startup behavior, not whether dependencies must exist.
+ */
+export interface DependencyValidationResult {
+  /** True if all dependencies are valid (no circular cycles, no missing dependencies) */
+  valid: boolean;
+
+  /** Missing dependencies: components that depend on non-registered components */
+  missingDependencies: Array<{
+    componentName: string;
+    /** Whether the component with the missing dependency is optional */
+    componentIsOptional: boolean;
+    missingDependency: string;
+  }>;
+
+  /**
+   * Detected circular dependency cycles.
+   * Each cycle is an array of component names forming a circle (e.g., ['A', 'B', 'C'] means A→B→C→A).
+   */
+  circularCycles: string[][];
+
+  /** Summary counts for quick overview */
+  summary: {
+    /** Total number of missing dependencies */
+    totalMissingDependencies: number;
+    /** Missing dependencies from required components */
+    requiredMissingDependencies: number;
+    /** Missing dependencies from optional components */
+    optionalMissingDependencies: number;
+    /** Total number of circular dependency cycles detected */
+    totalCircularCycles: number;
+  };
 }
 
 /**

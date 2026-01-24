@@ -24,6 +24,7 @@ import type {
   StartupResult,
   ShutdownResult,
   RestartResult,
+  DependencyValidationResult,
 } from './types';
 import {
   ComponentStartTimeoutError,
@@ -129,6 +130,7 @@ export class LifecycleManager extends EventEmitterProtected {
       // This avoids leaving the registry/state maps inconsistent if a dependency
       // cycle is detected.
       let startupOrder: string[];
+
       try {
         startupOrder = this.getStartupOrderInternal([
           ...this.components,
@@ -314,7 +316,22 @@ export class LifecycleManager extends EventEmitterProtected {
           target: targetComponentName,
         });
 
-        const startupOrder = this.getStartupOrderInternal();
+        let startupOrder: string[];
+
+        try {
+          startupOrder = this.getStartupOrderInternal();
+        } catch (error) {
+          // Defensive: This should never happen in normal operation since we validate
+          // cycles before registration. However, if this.components somehow contains
+          // a cycle (e.g., due to internal bugs or direct mutations), we must not
+          // throw from an error handler. Return empty array to fail gracefully.
+          this.logger.warn('Failed to compute startup order in error handler', {
+            params: { error: error instanceof Error ? error.message : error },
+          });
+
+          startupOrder = [];
+        }
+
         return {
           action: 'insert',
           success: false,
@@ -338,6 +355,7 @@ export class LifecycleManager extends EventEmitterProtected {
       nextComponents.splice(insertIndex, 0, component);
 
       let startupOrder: string[];
+
       try {
         startupOrder = this.getStartupOrderInternal(nextComponents);
       } catch (error) {
@@ -462,6 +480,25 @@ export class LifecycleManager extends EventEmitterProtected {
     name: string,
     options?: UnregisterOptions,
   ): Promise<UnregisterComponentResult> {
+    // Block unregistration during bulk operations
+    if (this.isStarting || this.isShuttingDown) {
+      this.logger.entity(name).warn('Cannot unregister during bulk operation', {
+        params: {
+          isStarting: this.isStarting,
+          isShuttingDown: this.isShuttingDown,
+        },
+      });
+
+      return {
+        success: false,
+        componentName: name,
+        reason: 'Cannot unregister during bulk operation',
+        code: 'bulk_operation_in_progress',
+        wasStopped: false,
+        wasRegistered: this.hasComponent(name),
+      };
+    }
+
     const component = this.getComponent(name);
 
     if (!component) {
@@ -707,21 +744,105 @@ export class LifecycleManager extends EventEmitterProtected {
     }
   }
 
+  /**
+   * Validate all component dependencies without throwing.
+   *
+   * Returns a report of dependency issues:
+   * - Missing dependencies (components that depend on non-registered components)
+   * - Circular dependency cycles (e.g., A→B→C→A)
+   *
+   * Reports all issues regardless of whether components are optional.
+   * The optional flag affects startup behavior (whether failures trigger rollback),
+   * not whether dependencies must exist in the registry.
+   *
+   * This is useful for pre-flight checks before starting components.
+   */
+  public validateDependencies(): DependencyValidationResult {
+    const missingDependencies: Array<{
+      componentName: string;
+      componentIsOptional: boolean;
+      missingDependency: string;
+    }> = [];
+
+    // Check for missing dependencies
+    for (const component of this.components) {
+      const componentName = component.getName();
+      const isComponentOptional = component.isOptional();
+      const dependencies = component.getDependencies();
+
+      for (const dep of dependencies) {
+        if (!this.hasComponent(dep)) {
+          missingDependencies.push({
+            componentName,
+            componentIsOptional: isComponentOptional,
+            missingDependency: dep,
+          });
+        }
+      }
+    }
+
+    // Build adjacency graph for cycle detection
+    const names = this.components.map((c) => c.getName());
+    const adjacency = new Map<string, Set<string>>();
+
+    for (const name of names) {
+      adjacency.set(name, new Set());
+    }
+
+    // Build edges: dependency -> dependent (only when dependency is registered)
+    for (const component of this.components) {
+      const dependent = component.getName();
+      for (const dep of component.getDependencies()) {
+        if (adjacency.has(dep)) {
+          adjacency.get(dep)?.add(dependent);
+        }
+      }
+    }
+
+    // Find circular dependency cycles
+    const circularCycles = this.findAllCircularCycles(adjacency);
+
+    const isValid =
+      missingDependencies.length === 0 && circularCycles.length === 0;
+
+    // Calculate summary counts
+    const totalMissingDependencies = missingDependencies.length;
+    const requiredMissingDependencies = missingDependencies.filter(
+      (md) => !md.componentIsOptional,
+    ).length;
+    const optionalMissingDependencies = missingDependencies.filter(
+      (md) => md.componentIsOptional,
+    ).length;
+
+    return {
+      valid: isValid,
+      missingDependencies,
+      circularCycles,
+      summary: {
+        totalMissingDependencies,
+        requiredMissingDependencies,
+        optionalMissingDependencies,
+        totalCircularCycles: circularCycles.length,
+      },
+    };
+  }
+
   // ============================================================================
   // Bulk Operations
   // ============================================================================
 
   /**
-   * Start all registered components in registration order.
+   * Start all registered components in dependency order.
    *
-   * Phase 3 Note: Dependencies are not yet considered - components start in
-   * registration order. Dependency ordering will be added in Phase 4.
+   * Components start in topological order (dependencies before dependents).
+   * Shutdown occurs in reverse topological order.
    *
    * Behavior:
    * - Rejects if some components are already running (partial state)
    * - Sets isStarting flag during operation
    * - On failure: triggers rollback (stops all started components)
    * - Optional components don't trigger rollback on failure
+   * - If optional component fails, its dependents are skipped
    * - Handles shutdown signal during startup (aborts and rolls back)
    */
   public async startAllComponents(
@@ -732,6 +853,7 @@ export class LifecycleManager extends EventEmitterProtected {
       this.logger.warn(
         'Cannot start all components: startup already in progress',
       );
+
       return {
         success: false,
         startedComponents: [],
@@ -804,21 +926,92 @@ export class LifecycleManager extends EventEmitterProtected {
     this.isStarting = true;
     this.logger.info('Starting all components');
 
-    // Snapshot component list
-    const componentsToStart = [...this.components];
-    const startedComponents: string[] = [];
-    const failedOptionalComponents: Array<{ name: string; error: Error }> = [];
+    // Get startup order (topological sort)
+    let startupOrder: string[];
 
     try {
-      // Start each component in order
-      for (const component of componentsToStart) {
-        const name = component.getName();
+      startupOrder = this.getStartupOrderInternal();
+    } catch (error) {
+      this.isStarting = false;
+      const err = error as Error;
+      this.logger.error('Failed to resolve startup order', {
+        params: { error: err.message },
+      });
+
+      return {
+        success: false,
+        startedComponents: [],
+        failedOptionalComponents: [],
+        skippedDueToDependency: [],
+      };
+    }
+
+    const startedComponents: string[] = [];
+    const failedOptionalComponents: Array<{ name: string; error: Error }> = [];
+    const skippedDueToDependency = new Set<string>();
+    const skippedDueToStall = new Set<string>();
+
+    try {
+      // Start each component in dependency order
+      for (const name of startupOrder) {
+        const component = this.getComponent(name);
+        if (!component) {
+          // Should not happen since unregisterComponent() is blocked during startup
+          this.logger
+            .entity(name)
+            .error('Component not found in startup order');
+          continue;
+        }
 
         // Skip stalled components (even with ignoreStalledComponents:true)
         if (this.stalledComponents.has(name)) {
           this.logger
             .entity(name)
             .info('Skipping stalled component during startup');
+          skippedDueToStall.add(name);
+          continue;
+        }
+
+        // Check if any required dependency failed or was skipped
+        const dependencies = component.getDependencies();
+        let shouldSkip = false;
+        let skipReason = '';
+
+        for (const depName of dependencies) {
+          if (skippedDueToStall.has(depName)) {
+            shouldSkip = true;
+            skipReason = `Dependency "${depName}" is stalled`;
+            break;
+          }
+
+          if (skippedDueToDependency.has(depName)) {
+            shouldSkip = true;
+            skipReason = `Dependency "${depName}" was skipped`;
+            break;
+          }
+
+          const depComponent = this.getComponent(depName);
+          if (depComponent) {
+            const depState = this.componentStates.get(depName);
+            if (depState === 'failed') {
+              shouldSkip = true;
+              skipReason = `Optional dependency "${depName}" failed to start`;
+              break;
+            }
+          }
+        }
+
+        if (shouldSkip) {
+          this.logger
+            .entity(name)
+            .warn('Skipping component due to dependency', {
+              params: { reason: skipReason },
+            });
+          this.safeEmit('component:start-skipped', {
+            name,
+            reason: skipReason,
+          });
+          skippedDueToDependency.add(name);
           continue;
         }
 
@@ -883,7 +1076,7 @@ export class LifecycleManager extends EventEmitterProtected {
               success: false,
               startedComponents: [],
               failedOptionalComponents,
-              skippedDueToDependency: [],
+              skippedDueToDependency: Array.from(skippedDueToDependency),
             };
           }
         }
@@ -891,23 +1084,30 @@ export class LifecycleManager extends EventEmitterProtected {
 
       // Success - all components started (or optional ones failed gracefully)
       this.isStarted = true;
+      const skippedComponentsArray = [
+        ...skippedDueToDependency,
+        ...skippedDueToStall,
+      ];
+
       this.logger.success('All components started', {
         params: {
           started: startedComponents.length,
           failed: failedOptionalComponents.length,
+          skipped: skippedComponentsArray.length,
         },
       });
 
       this.safeEmit('lifecycle-manager:started', {
         startedComponents,
         failedOptionalComponents,
+        skippedComponents: skippedComponentsArray,
       });
 
       return {
         success: true,
         startedComponents,
         failedOptionalComponents,
-        skippedDueToDependency: [],
+        skippedDueToDependency: Array.from(skippedDueToDependency),
       };
     } finally {
       this.isStarting = false;
@@ -915,7 +1115,9 @@ export class LifecycleManager extends EventEmitterProtected {
   }
 
   /**
-   * Stop all running components in reverse order
+   * Stop all running components in reverse dependency order
+   *
+   * Components stop in reverse topological order (dependents before dependencies).
    */
   public async stopAllComponents(): Promise<ShutdownResult> {
     const startTime = Date.now();
@@ -942,19 +1144,34 @@ export class LifecycleManager extends EventEmitterProtected {
       duringStartup: isDuringStartup,
     });
 
-    // Snapshot running components in reverse order
-    const componentsToStop = [...this.components]
-      .filter((c) => this.isComponentRunning(c.getName()))
-      .reverse();
+    // Get shutdown order (reverse topological order)
+    let shutdownOrder: string[];
+
+    try {
+      const startupOrder = this.getStartupOrderInternal();
+      shutdownOrder = [...startupOrder].reverse();
+    } catch (error) {
+      // If we can't resolve order due to cycle, fall back to reverse registration order
+      this.logger.warn(
+        'Could not resolve shutdown order, using registration order',
+        {
+          params: { error: (error as Error).message },
+        },
+      );
+      shutdownOrder = this.components.map((c) => c.getName()).reverse();
+    }
+
+    // Filter to only running components
+    const runningComponentsToStop = shutdownOrder.filter((name) =>
+      this.isComponentRunning(name),
+    );
 
     const stoppedComponents: string[] = [];
     const stalledComponents: ComponentStallInfo[] = [];
 
     try {
-      // Stop each component
-      for (const component of componentsToStop) {
-        const name = component.getName();
-
+      // Stop each component in reverse dependency order
+      for (const name of runningComponentsToStop) {
         this.logger.entity(name).info('Stopping component');
         // Use internal method to bypass bulk operation checks
         const result = await this.stopComponentInternal(name);
@@ -1188,8 +1405,10 @@ export class LifecycleManager extends EventEmitterProtected {
     options?: StartComponentOptions,
   ): Promise<ComponentOperationResult> {
     const allowOptionalDependencies =
-      (options as { allowOptionalDependencies?: boolean } | undefined)
-        ?.allowOptionalDependencies === true;
+      options?.allowOptionalDependencies === true;
+    const allowRequiredDependencies =
+      options?.allowRequiredDependencies === true;
+
     const component = this.getComponent(name);
 
     if (!component) {
@@ -1214,9 +1433,29 @@ export class LifecycleManager extends EventEmitterProtected {
       }
 
       if (!this.isComponentRunning(dependencyName)) {
-        if (allowOptionalDependencies && dependency.isOptional()) {
+        const isDependencyOptional = dependency.isOptional();
+
+        // Check if we can skip this dependency
+        if (allowRequiredDependencies) {
+          // Explicit override - allow skipping both optional and required dependencies
+          this.logger
+            .entity(name)
+            .warn(
+              `Starting with non-running dependency "${dependencyName}" (allowRequiredDependencies=true)`,
+            );
           continue;
         }
+
+        if (allowOptionalDependencies && isDependencyOptional) {
+          // Allow skipping optional dependencies only
+          this.logger
+            .entity(name)
+            .warn(
+              `Starting with non-running optional dependency "${dependencyName}"`,
+            );
+          continue;
+        }
+
         return {
           success: false,
           componentName: name,
@@ -1643,7 +1882,21 @@ export class LifecycleManager extends EventEmitterProtected {
     reason: string;
     error?: Error;
   }): RegisterComponentResult {
-    const startupOrder = this.getStartupOrderInternal();
+    let startupOrder: string[];
+
+    try {
+      startupOrder = this.getStartupOrderInternal();
+    } catch (error) {
+      // Defensive: This should never happen in normal operation since we validate
+      // cycles before registration. However, if this.components somehow contains
+      // a cycle (e.g., due to internal bugs or direct mutations), we must not
+      // throw from an error handler. Return empty array to fail gracefully.
+      this.logger.warn('Failed to compute startup order in error handler', {
+        params: { error: error instanceof Error ? error.message : error },
+      });
+
+      startupOrder = [];
+    }
     return {
       action: 'register',
       success: false,
@@ -1668,7 +1921,20 @@ export class LifecycleManager extends EventEmitterProtected {
     error?: Error;
     targetFound?: boolean;
   }): InsertComponentAtResult {
-    const startupOrder = this.getStartupOrderInternal();
+    let startupOrder: string[];
+
+    try {
+      startupOrder = this.getStartupOrderInternal();
+    } catch (error) {
+      // Defensive: This should never happen in normal operation since we validate
+      // cycles before registration. However, if this.components somehow contains
+      // a cycle (e.g., due to internal bugs or direct mutations), we must not
+      // throw from an error handler. Return empty array to fail gracefully.
+      this.logger.warn('Failed to compute startup order in error handler', {
+        params: { error: error instanceof Error ? error.message : error },
+      });
+      startupOrder = [];
+    }
     return {
       action: 'insert',
       success: false,
@@ -1836,6 +2102,14 @@ export class LifecycleManager extends EventEmitterProtected {
     return order;
   }
 
+  /**
+   * Find a single dependency cycle (for error reporting during registration)
+   * Returns the first cycle found, or empty array if no cycle exists
+   *
+   * Performance note: This method exits early after finding the first cycle,
+   * which is optimal for hot paths (registration, startup order resolution).
+   * For comprehensive validation that needs ALL cycles, use findAllCircularCycles().
+   */
   private findDependencyCycle(adjacency: Map<string, Set<string>>): string[] {
     const visited = new Set<string>();
     const inStack = new Set<string>();
@@ -1874,5 +2148,64 @@ export class LifecycleManager extends EventEmitterProtected {
     }
 
     return [];
+  }
+
+  /**
+   * Find circular dependency cycles using Depth-First Search (DFS) with cycle detection.
+   *
+   * Algorithm: DFS with visited set and recursion stack tracking
+   * - Uses 'visited' set to ensure each node is processed exactly once (prevents infinite loops)
+   * - Uses 'inStack' set to track the current DFS recursion path
+   * - When a node in the current path is encountered again, a cycle is detected
+   * - Extracts the cycle from the path and continues searching for more cycles
+   *
+   * Time Complexity: O(V + E) where V = components, E = dependency edges
+   * Space Complexity: O(V) for visited/inStack sets and recursion stack
+   *
+   * Performance note: This method finds a representative set of cycles while ensuring
+   * each node is visited once (prevents infinite loops). For hot paths that only need
+   * one cycle, use findDependencyCycle() which exits early.
+   *
+   * Returns an array of detected cycles, where each cycle is an array of component names.
+   */
+  private findAllCircularCycles(
+    adjacency: Map<string, Set<string>>,
+  ): string[][] {
+    const cycles: string[][] = [];
+    const visited = new Set<string>();
+    const inStack = new Set<string>();
+    const path: string[] = [];
+
+    const visit = (node: string): void => {
+      visited.add(node);
+      inStack.add(node);
+      path.push(node);
+
+      for (const neighbor of adjacency.get(node) ?? []) {
+        if (!visited.has(neighbor)) {
+          // Continue DFS to unvisited neighbor
+          visit(neighbor);
+        } else if (inStack.has(neighbor)) {
+          // Found a cycle - extract it from the path
+          const cycleStart = path.indexOf(neighbor);
+          if (cycleStart >= 0) {
+            const cycle = path.slice(cycleStart);
+            cycles.push(cycle);
+          }
+        }
+      }
+
+      inStack.delete(node);
+      path.pop();
+    };
+
+    // Visit all nodes to find all cycles (including disconnected components)
+    for (const node of adjacency.keys()) {
+      if (!visited.has(node)) {
+        visit(node);
+      }
+    }
+
+    return cycles;
   }
 }
