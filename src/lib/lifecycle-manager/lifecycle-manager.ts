@@ -91,6 +91,7 @@ export class LifecycleManager extends EventEmitterProtected {
     const registrationIndexBefore = this.getComponentIndex(componentName);
 
     try {
+      // Block registration during shutdown
       if (this.isShuttingDown) {
         this.logger
           .entity(componentName)
@@ -106,6 +107,28 @@ export class LifecycleManager extends EventEmitterProtected {
           code: 'shutdown_in_progress',
           reason:
             'Cannot register component while shutdown is in progress (isShuttingDown=true).',
+        });
+      }
+
+      // Block registration during startup if this component would be a dependency
+      // for any already-registered component (would break dependency ordering)
+      if (this.isRequiredDependencyDuringStartup(componentName)) {
+        this.logger
+          .entity(componentName)
+          .warn(
+            'Cannot register component during startup - it is a required dependency for other components',
+          );
+        this.safeEmit('component:registration-rejected', {
+          name: componentName,
+          reason: 'startup_in_progress',
+        });
+
+        return this.buildRegisterResultFailure({
+          componentName,
+          registrationIndexBefore,
+          code: 'startup_in_progress',
+          reason:
+            'Cannot register component during startup when it is a required dependency for other components.',
         });
       }
 
@@ -281,6 +304,7 @@ export class LifecycleManager extends EventEmitterProtected {
         });
       }
 
+      // Block registration during shutdown
       if (this.isShuttingDown) {
         this.logger
           .entity(componentName)
@@ -298,6 +322,31 @@ export class LifecycleManager extends EventEmitterProtected {
           code: 'shutdown_in_progress',
           reason:
             'Cannot register component while shutdown is in progress (isShuttingDown=true).',
+          targetFound: undefined,
+        });
+      }
+
+      // Block registration during startup if this component would be a dependency
+      // for any already-registered component (would break dependency ordering)
+      if (this.isRequiredDependencyDuringStartup(componentName)) {
+        this.logger
+          .entity(componentName)
+          .warn(
+            'Cannot register component during startup - it is a required dependency for other components',
+          );
+        this.safeEmit('component:registration-rejected', {
+          name: componentName,
+          reason: 'startup_in_progress',
+        });
+
+        return this.buildInsertResultFailure({
+          componentName,
+          position,
+          targetComponentName,
+          registrationIndexBefore,
+          code: 'startup_in_progress',
+          reason:
+            'Cannot register component during startup when it is a required dependency for other components.',
           targetFound: undefined,
         });
       }
@@ -510,13 +559,14 @@ export class LifecycleManager extends EventEmitterProtected {
    * Unregister a component
    *
    * @param name - Component name to unregister
-   * @param options - Unregister options (stopIfRunning)
+   * @param options - Unregister options (stopIfRunning defaults to true)
    *
    * Notes:
    * - Stopped or stalled components can be unregistered directly
-   * - Running components require stopIfRunning (otherwise returns component_running)
-   * - If stopIfRunning is set and stop fails, unregister is aborted
-   * - If stopIfRunning is set and the component is stalled, unregister is aborted
+   * - Running components are stopped first by default (stopIfRunning: true)
+   * - Set stopIfRunning: false to require manual stop before unregister
+   * - If stopIfRunning is true and stop fails, unregister is aborted
+   * - If stopIfRunning is true and the component is stalled, unregister is aborted
    * @returns True if component was unregistered, false otherwise
    */
   public async unregisterComponent(
@@ -556,8 +606,11 @@ export class LifecycleManager extends EventEmitterProtected {
       };
     }
 
+    // Default stopIfRunning to true (opt-out behavior)
+    const shouldStopIfRunning = options?.stopIfRunning !== false;
+
     const isStalled = this.stalledComponents.has(name);
-    if (isStalled && options?.stopIfRunning) {
+    if (isStalled && shouldStopIfRunning) {
       this.logger
         .entity(name)
         .warn('Cannot unregister stalled component when stopIfRunning is set');
@@ -574,8 +627,8 @@ export class LifecycleManager extends EventEmitterProtected {
 
     const isRunning = this.isComponentRunning(name);
 
-    // If running and stopIfRunning not set, reject
-    if (isRunning && !options?.stopIfRunning) {
+    // If running and stopIfRunning explicitly set to false, reject
+    if (isRunning && !shouldStopIfRunning) {
       this.logger
         .entity(name)
         .warn(
@@ -585,18 +638,20 @@ export class LifecycleManager extends EventEmitterProtected {
         success: false,
         componentName: name,
         reason:
-          'Component is running. Use stopIfRunning option or stop manually first',
+          'Component is running. Use stopIfRunning: true option or stop manually first',
         code: 'component_running',
         wasStopped: false,
         wasRegistered: true,
       };
     }
 
-    // If running and stopIfRunning is true, stop first
+    // If running and stopIfRunning is true (default), stop first
     let wasStopped = false;
-    if (isRunning && options?.stopIfRunning) {
+    if (isRunning && shouldStopIfRunning) {
       this.logger.entity(name).info('Stopping component before unregistering');
-      const stopResult = await this.stopComponent(name);
+      const stopResult = await this.stopComponent(name, {
+        force: options?.forceStop,
+      });
 
       // If stop fails and leaves the component stalled, do NOT unregister.
       // Caller expectation: success with stopIfRunning implies the component is stopped.
@@ -1404,6 +1459,25 @@ export class LifecycleManager extends EventEmitterProtected {
       };
     }
 
+    // Check for running dependents unless force option is true
+    if (!options?.force) {
+      const runningDependents = this.getRunningDependents(name);
+      if (runningDependents.length > 0) {
+        this.logger
+          .entity(name)
+          .warn('Cannot stop component with running dependents', {
+            params: { runningDependents },
+          });
+
+        return {
+          success: false,
+          componentName: name,
+          reason: `Component has running dependents: ${runningDependents.join(', ')}. Use { force: true } option to bypass.`,
+          code: 'has_running_dependents',
+        };
+      }
+    }
+
     return this.stopComponentInternal(name, options);
   }
 
@@ -1902,6 +1976,49 @@ export class LifecycleManager extends EventEmitterProtected {
    */
   private getComponent(name: string): BaseComponent | undefined {
     return this.components.find((c) => c.getName() === name);
+  }
+
+  /**
+   * Get all components that depend on the specified component (reverse lookup)
+   * @param name - Component name to find dependents for
+   * @returns Array of component names that depend on this component
+   */
+  private getDependents(name: string): string[] {
+    const dependents: string[] = [];
+    for (const component of this.components) {
+      const dependencies = component.getDependencies();
+      if (dependencies.includes(name)) {
+        dependents.push(component.getName());
+      }
+    }
+    return dependents;
+  }
+
+  /**
+   * Get running components that depend on the specified component
+   * @param name - Component name to check
+   * @returns Array of running component names that depend on this component
+   */
+  private getRunningDependents(name: string): string[] {
+    const dependents = this.getDependents(name);
+    return dependents.filter((dep) => this.isComponentRunning(dep));
+  }
+
+  /**
+   * Check if a component is a required dependency during startup
+   * Used to prevent registering dependencies mid-startup which would break ordering
+   * @param componentName - Component name to check
+   * @returns true if this component would be a required dependency
+   */
+  private isRequiredDependencyDuringStartup(componentName: string): boolean {
+    if (!this.isStarting) {
+      return false;
+    }
+
+    // Check if any existing component lists this new component as a dependency
+    return this.components.some((c) =>
+      c.getDependencies().includes(componentName),
+    );
   }
 
   /**
