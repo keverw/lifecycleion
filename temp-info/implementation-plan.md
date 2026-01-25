@@ -437,6 +437,15 @@ src/lib/lifecycle-manager/
 - In `registerComponent()` and `insertComponentAt()`:
   - If `autoStart: true` and `isStarted || isStarting`, start component
   - Handle failures
+  
+**Implementation requirements**:
+- Check if `isStarting` or `isStarted` (manager state)
+- Only start if dependencies are met (validate dependencies exist and are running)
+- Handle edge cases gracefully:
+  - During startup: component should be started immediately if deps are ready
+  - After startup: normal dependency validation applies
+  - During shutdown: reject registration attempt
+  - Missing dependencies: return appropriate error
 
 **Stalled component restart blocking**:
 
