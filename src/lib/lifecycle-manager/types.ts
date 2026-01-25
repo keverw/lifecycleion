@@ -154,6 +154,13 @@ export interface StopComponentOptions {
    * Only applies when forceImmediate is false
    */
   timeout?: number;
+
+  /**
+   * If true, allows stopping a component even if other components depend on it
+   * Without this flag, stopping a component with running dependents will fail
+   * (default: false)
+   */
+  force?: boolean;
 }
 
 /**
@@ -180,6 +187,7 @@ export type ComponentOperationFailureCode =
   | 'component_not_running'
   | 'missing_dependency'
   | 'dependency_not_running'
+  | 'has_running_dependents'
   | 'shutdown_in_progress'
   | 'start_timeout'
   | 'stop_timeout'
@@ -450,6 +458,13 @@ export interface RegisterOptions {
 export interface UnregisterOptions {
   /** Stop the component first if it's running (default: false) */
   stopIfRunning?: boolean;
+
+  /**
+   * If true (along with stopIfRunning), allows stopping a component even if
+   * other components depend on it before unregistering
+   * (default: false)
+   */
+  forceStop?: boolean;
 }
 
 /**

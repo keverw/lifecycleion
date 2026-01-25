@@ -91,22 +91,33 @@ export class LifecycleManager extends EventEmitterProtected {
     const registrationIndexBefore = this.getComponentIndex(componentName);
 
     try {
-      if (this.isShuttingDown) {
-        this.logger
-          .entity(componentName)
-          .warn('Cannot register component during shutdown');
-        this.safeEmit('component:registration-rejected', {
-          name: componentName,
-          reason: 'shutdown_in_progress',
-        });
+      // Block registration during startup if this component would be a dependency
+      // for any already-registered component (would break dependency ordering)
+      if (this.isStarting) {
+        // Check if any existing component lists this new component as a dependency
+        const isRequiredDependency = this.components.some((c) =>
+          c.getDependencies().includes(componentName),
+        );
 
-        return this.buildRegisterResultFailure({
-          componentName,
-          registrationIndexBefore,
-          code: 'shutdown_in_progress',
-          reason:
-            'Cannot register component while shutdown is in progress (isShuttingDown=true).',
-        });
+        if (isRequiredDependency) {
+          this.logger
+            .entity(componentName)
+            .warn(
+              'Cannot register component during startup - it is a required dependency for other components',
+            );
+          this.safeEmit('component:registration-rejected', {
+            name: componentName,
+            reason: 'startup_in_progress_with_dependents',
+          });
+
+          return this.buildRegisterResultFailure({
+            componentName,
+            registrationIndexBefore,
+            code: 'shutdown_in_progress', // Reuse existing code for similar scenario
+            reason:
+              'Cannot register component during startup when it is a required dependency for other components.',
+          });
+        }
       }
 
       if (this.hasComponentInstance(component)) {
@@ -281,25 +292,36 @@ export class LifecycleManager extends EventEmitterProtected {
         });
       }
 
-      if (this.isShuttingDown) {
-        this.logger
-          .entity(componentName)
-          .warn('Cannot register component during shutdown');
-        this.safeEmit('component:registration-rejected', {
-          name: componentName,
-          reason: 'shutdown_in_progress',
-        });
+      // Block registration during startup if this component would be a dependency
+      // for any already-registered component (would break dependency ordering)
+      if (this.isStarting) {
+        // Check if any existing component lists this new component as a dependency
+        const isRequiredDependency = this.components.some((c) =>
+          c.getDependencies().includes(componentName),
+        );
 
-        return this.buildInsertResultFailure({
-          componentName,
-          position,
-          targetComponentName,
-          registrationIndexBefore,
-          code: 'shutdown_in_progress',
-          reason:
-            'Cannot register component while shutdown is in progress (isShuttingDown=true).',
-          targetFound: undefined,
-        });
+        if (isRequiredDependency) {
+          this.logger
+            .entity(componentName)
+            .warn(
+              'Cannot register component during startup - it is a required dependency for other components',
+            );
+          this.safeEmit('component:registration-rejected', {
+            name: componentName,
+            reason: 'startup_in_progress_with_dependents',
+          });
+
+          return this.buildInsertResultFailure({
+            componentName,
+            position,
+            targetComponentName,
+            registrationIndexBefore,
+            code: 'shutdown_in_progress', // Reuse existing code for similar scenario
+            reason:
+              'Cannot register component during startup when it is a required dependency for other components.',
+            targetFound: undefined,
+          });
+        }
       }
 
       if (this.hasComponentInstance(component)) {
@@ -596,7 +618,9 @@ export class LifecycleManager extends EventEmitterProtected {
     let wasStopped = false;
     if (isRunning && options?.stopIfRunning) {
       this.logger.entity(name).info('Stopping component before unregistering');
-      const stopResult = await this.stopComponent(name);
+      const stopResult = await this.stopComponent(name, {
+        force: options?.forceStop,
+      });
 
       // If stop fails and leaves the component stalled, do NOT unregister.
       // Caller expectation: success with stopIfRunning implies the component is stopped.
@@ -1404,6 +1428,25 @@ export class LifecycleManager extends EventEmitterProtected {
       };
     }
 
+    // Check for running dependents unless force option is true
+    if (!options?.force) {
+      const runningDependents = this.getRunningDependents(name);
+      if (runningDependents.length > 0) {
+        this.logger
+          .entity(name)
+          .warn('Cannot stop component with running dependents', {
+            params: { runningDependents },
+          });
+
+        return {
+          success: false,
+          componentName: name,
+          reason: `Component has running dependents: ${runningDependents.join(', ')}. Use force option to bypass.`,
+          code: 'has_running_dependents',
+        };
+      }
+    }
+
     return this.stopComponentInternal(name, options);
   }
 
@@ -1902,6 +1945,32 @@ export class LifecycleManager extends EventEmitterProtected {
    */
   private getComponent(name: string): BaseComponent | undefined {
     return this.components.find((c) => c.getName() === name);
+  }
+
+  /**
+   * Get all components that depend on the specified component (reverse lookup)
+   * @param name - Component name to find dependents for
+   * @returns Array of component names that depend on this component
+   */
+  private getDependents(name: string): string[] {
+    const dependents: string[] = [];
+    for (const component of this.components) {
+      const dependencies = component.getDependencies();
+      if (dependencies.includes(name)) {
+        dependents.push(component.getName());
+      }
+    }
+    return dependents;
+  }
+
+  /**
+   * Get running components that depend on the specified component
+   * @param name - Component name to check
+   * @returns Array of running component names that depend on this component
+   */
+  private getRunningDependents(name: string): string[] {
+    const dependents = this.getDependents(name);
+    return dependents.filter((dep) => this.isComponentRunning(dep));
   }
 
   /**
