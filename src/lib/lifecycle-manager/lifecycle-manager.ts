@@ -113,7 +113,7 @@ export class LifecycleManager extends EventEmitterProtected {
           return this.buildRegisterResultFailure({
             componentName,
             registrationIndexBefore,
-            code: 'shutdown_in_progress', // Reuse existing code for similar scenario
+            code: 'startup_in_progress',
             reason:
               'Cannot register component during startup when it is a required dependency for other components.',
           });
@@ -316,7 +316,7 @@ export class LifecycleManager extends EventEmitterProtected {
             position,
             targetComponentName,
             registrationIndexBefore,
-            code: 'shutdown_in_progress', // Reuse existing code for similar scenario
+            code: 'startup_in_progress',
             reason:
               'Cannot register component during startup when it is a required dependency for other components.',
             targetFound: undefined,

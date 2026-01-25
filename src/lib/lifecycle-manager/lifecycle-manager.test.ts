@@ -907,7 +907,7 @@ describe('LifecycleManager - Phase 2: Core Registration & Individual Lifecycle',
       const result = lifecycle.registerComponent(database);
 
       expect(result.success).toBe(false);
-      expect(result.code).toBe('shutdown_in_progress');
+      expect(result.code).toBe('startup_in_progress');
       expect(result.reason).toContain(
         'required dependency for other components',
       );
@@ -955,7 +955,7 @@ describe('LifecycleManager - Phase 2: Core Registration & Individual Lifecycle',
       const result = lifecycle.insertComponentAt(database, 'start');
 
       expect(result.success).toBe(false);
-      expect(result.code).toBe('shutdown_in_progress');
+      expect(result.code).toBe('startup_in_progress');
       expect(result.reason).toContain(
         'required dependency for other components',
       );

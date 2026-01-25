@@ -487,6 +487,7 @@ export type RegistrationFailureCode =
   | 'duplicate_name'
   | 'duplicate_instance'
   | 'shutdown_in_progress'
+  | 'startup_in_progress'
   | 'target_not_found'
   | 'invalid_position'
   | 'dependency_cycle'
