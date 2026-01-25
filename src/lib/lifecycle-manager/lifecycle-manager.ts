@@ -91,6 +91,25 @@ export class LifecycleManager extends EventEmitterProtected {
     const registrationIndexBefore = this.getComponentIndex(componentName);
 
     try {
+      // Block registration during shutdown
+      if (this.isShuttingDown) {
+        this.logger
+          .entity(componentName)
+          .warn('Cannot register component during shutdown');
+        this.safeEmit('component:registration-rejected', {
+          name: componentName,
+          reason: 'shutdown_in_progress',
+        });
+
+        return this.buildRegisterResultFailure({
+          componentName,
+          registrationIndexBefore,
+          code: 'shutdown_in_progress',
+          reason:
+            'Cannot register component while shutdown is in progress (isShuttingDown=true).',
+        });
+      }
+
       // Block registration during startup if this component would be a dependency
       // for any already-registered component (would break dependency ordering)
       if (this.isRequiredDependencyDuringStartup(componentName)) {
@@ -281,6 +300,28 @@ export class LifecycleManager extends EventEmitterProtected {
           registrationIndexBefore,
           code: 'invalid_position',
           reason: `Invalid insert position: "${String(position)}". Expected one of: start, end, before, after.`,
+          targetFound: undefined,
+        });
+      }
+
+      // Block registration during shutdown
+      if (this.isShuttingDown) {
+        this.logger
+          .entity(componentName)
+          .warn('Cannot register component during shutdown');
+        this.safeEmit('component:registration-rejected', {
+          name: componentName,
+          reason: 'shutdown_in_progress',
+        });
+
+        return this.buildInsertResultFailure({
+          componentName,
+          position,
+          targetComponentName,
+          registrationIndexBefore,
+          code: 'shutdown_in_progress',
+          reason:
+            'Cannot register component while shutdown is in progress (isShuttingDown=true).',
           targetFound: undefined,
         });
       }
@@ -1427,7 +1468,7 @@ export class LifecycleManager extends EventEmitterProtected {
         return {
           success: false,
           componentName: name,
-          reason: `Component has running dependents: ${runningDependents.join(', ')}. Use force option to bypass.`,
+          reason: `Component has running dependents: ${runningDependents.join(', ')}. Use { force: true } option to bypass.`,
           code: 'has_running_dependents',
         };
       }
