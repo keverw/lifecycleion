@@ -8,7 +8,7 @@ The LifecycleManager is a comprehensive lifecycle orchestration system that mana
 
 - **Component-oriented**: Use "component" terminology for managed entities
 - **Ordered lifecycle**: Components start in registration order, stop in reverse order
-- **Multi-phase shutdown**: Warning -> Graceful -> Force (configurable per component)
+- **Multi-phase shutdown**: Global warning -> per-component graceful -> force
 - **Signal integration**: Built-in process signal handling for graceful shutdown, reload, info, and debug
 - **Hierarchical logging**: Components log as their own service (`logger.service('database')`), while the manager uses `.entity()` when logging about components it manages
 - **Flexible ordering**: Dynamic insertion at start, end, before, or after specific components
@@ -121,61 +121,6 @@ await lifecycleManager.triggerDebug(); // Manual debug trigger (returns results)
 - When LifecycleManager logs about a component: `this.logger.entity(componentName)`
 - Components receive the **root logger** and create their own service scope: `rootLogger.service(componentName)`
 - This means components are first-class services, not children of LifecycleManager
-
-### 4. Multi-Phase Shutdown Strategy
-
-**Three-Phase Shutdown Flow** (similar to React lifecycle):
-
-Each component can go through up to three phases during shutdown, with configurable timeouts:
-
-1. **Warning Phase** (optional, configurable per component):
-   - Call `component.onShutdownWarning()` if implemented
-   - Wait up to `shutdownWarningTimeoutMS` (default: 0 = skip)
-   - Purpose: Let component prepare for shutdown (stop accepting new work, drain queues, etc.)
-   - If times out: Log warning, proceed to graceful phase
-
-2. **Graceful Phase** (required):
-   - Call `component.stop()`
-   - Wait up to `shutdownGracefulTimeoutMS` (default: 5000ms)
-   - Purpose: Normal shutdown procedure (close connections, save state, etc.)
-   - If times out: Call `component.onStopAborted()` if implemented, then proceed to force phase
-   - If throws: Proceed to force phase
-
-3. **Force Phase** (if graceful times out OR throws error):
-   - Call `component.onShutdownForce()` if implemented
-   - Wait up to `shutdownForceTimeoutMS` (default: 2000ms)
-   - Purpose: More aggressive cleanup (kill connections, abandon work, etc.)
-   - If times out: Call `component.onShutdownForceAborted()` if implemented, mark as stalled, continue
-   - Receives context about why force was triggered (timeout vs error)
-
-**Overall Shutdown Flow**:
-
-1. Signal received (SIGINT, SIGTERM, SIGTRAP) or manual trigger
-2. Set `isShuttingDown` flag (prevents new registrations/operations)
-3. Stop components in **reverse dependency order** (dependents first, then their dependencies)
-4. For each component:
-   - Phase 1: Warning (if configured and implemented)
-   - Phase 2: Graceful shutdown (required)
-   - Phase 3: Force shutdown (if graceful times out OR throws error, and implemented)
-5. Track stalled components (timeout, error, both)
-6. Emit events throughout the process
-7. Global timeout applies to entire shutdown process
-8. Final cleanup: detach signals (logger is NOT closed - caller owns it)
-
-**Timeout Handling**:
-
-- Global shutdown timeout (e.g., 30s for all components combined)
-- Per-component timeouts (configurable in ComponentOptions)
-- Track which components stalled and why (error, timeout, both)
-- Continue stopping other components even if one stalls
-
-**Dynamic Component Removal During Shutdown**:
-
-- If a component is unregistered while shutdown is in progress:
-  - If not yet processed: Remove from shutdown queue, skip it
-  - If currently shutting down: Complete current phase, skip remaining phases
-  - If already stopped: No-op (already handled)
-- Emit event: `component:unregistered-during-shutdown`
 
 ### 5. Component Messaging
 
@@ -505,6 +450,9 @@ if (result.success) {
 // Lifecycle events
 'lifecycle-manager:started'; // LifecycleManager initialized
 'lifecycle-manager:shutdown-initiated'; // Shutdown requested
+'lifecycle-manager:shutdown-warning'; // Global warning phase started
+'lifecycle-manager:shutdown-warning-completed'; // Global warning phase completed
+'lifecycle-manager:shutdown-warning-timeout'; // Global warning phase timed out
 'lifecycle-manager:shutdown-completed'; // All components stopped
 'lifecycle-manager:shutdown-timeout'; // Shutdown timed out
 'lifecycle-manager:signals-attached'; // Signal handlers attached
@@ -526,9 +474,9 @@ if (result.success) {
 'component:startup-rollback'; // Rolling back due to startup failure
 
 // Component shutdown events (multi-phase)
-'component:shutdown-warning'; // onShutdownWarning() called
+'component:shutdown-warning'; // onShutdownWarning() called (global warning phase)
 'component:shutdown-warning-completed'; // onShutdownWarning() finished
-'component:shutdown-warning-timeout'; // onShutdownWarning() timed out
+'component:shutdown-warning-timeout'; // onShutdownWarning() pending at global timeout
 'component:stopping'; // stop() called (graceful phase)
 'component:stopped'; // stop() completed
 'component:stop-timeout'; // stop() timed out
@@ -784,48 +732,6 @@ coreLifecycle.on('lifecycle-manager:shutdown-initiated', async () => {
   await pluginLifecycle.stopAllComponents();
 });
 ```
-
-### 5. Timeout Configuration
-
-```typescript
-interface LifecycleManagerOptions {
-  name?: string; // Name for logger scope (default: 'lifecycle-manager')
-  logger: Logger; // Root logger instance
-  startupTimeoutMS?: number; // Global timeout for startup (default: 60000, 0 = disabled)
-  shutdownTimeoutMS?: number; // Global timeout for shutdown (default: 30000, 0 = disabled)
-  attachSignalsOnStart?: boolean; // Auto-attach signals when first component starts (default: false)
-  detachSignalsOnStop?: boolean; // Auto-detach signals when last component stops (default: false)
-}
-```
-
-**Timeout Precedence**:
-
-Per-component timeouts are configured in `ComponentOptions`, not `LifecycleManagerOptions`:
-
-- `startupTimeoutMS` - per-component startup timeout (default: 30000ms, 0 = no timeout)
-- `shutdownWarningTimeoutMS` - per-component warning phase timeout (default: 0 = skip warning phase)
-- `shutdownGracefulTimeoutMS` - per-component graceful shutdown timeout (default: 5000ms, minimum: 1000ms)
-- `shutdownForceTimeoutMS` - per-component force shutdown timeout (default: 2000ms, minimum: 500ms)
-
-**Global vs Per-Component Timeout Interaction**:
-
-The global timeouts (`startupTimeoutMS`, `shutdownTimeoutMS`) act as hard ceilings:
-
-- If the global timeout is reached, the operation aborts immediately
-- For startup: triggers rollback, throws `StartupTimeoutError`
-- For shutdown: remaining components are marked as stalled
-- Per-component timeouts are respected up until the global timeout
-- If a component's per-component timeout exceeds remaining global time, the global timeout wins
-
-```typescript
-// Example: Global shutdown timeout = 10s, Component has graceful timeout = 15s
-// Component will only get ~10s (or less if other components used some time)
-
-// Example: Global startup timeout = 60s, 5 components with 30s each
-// If first 2 components take 25s each, remaining components only get 10s total
-```
-
-**Recommendation**: Set global timeouts to be larger than the sum of expected per-component timeouts, with some buffer.
 
 ### 6. Health Checks
 
@@ -1232,9 +1138,6 @@ abstract class BaseComponent {
   // Called when stop() times out (before force phase begins)
   public onStopAborted?(): void;
 
-  // Called when onShutdownWarning() times out
-  public onShutdownWarningAborted?(): void;
-
   // Called when onShutdownForce() times out
   public onShutdownForceAborted?(): void;
 }
@@ -1488,7 +1391,7 @@ type SystemState =
 // Information about a component that failed to stop
 interface ComponentStallInfo {
   name: string;
-  phase: 'warning' | 'graceful' | 'force';
+  phase: 'graceful' | 'force';
   reason: 'timeout' | 'error' | 'both';
   error?: Error;
   startedAt: number; // Unix timestamp ms when shutdown started for this component
@@ -2323,7 +2226,7 @@ If a component stalls (times out during shutdown) and its promise never resolves
 
 ### 1. Warning/Force Shutdown
 
-**Status**: ✅ **RESOLVED** - Implementing three-phase shutdown (warning -> graceful -> force) with per-component timeout configuration.
+**Status**: ✅ **RESOLVED** - Implementing global warning phase + per-component graceful/force shutdown.
 
 ### 2. Component Dependencies
 
@@ -2374,7 +2277,7 @@ See [Shared Values](#shared-values-getvalue-pattern) section for full specificat
 9. ✅ Health checks with rich metadata support
 10. ✅ Abort callbacks for cooperative cancellation
 11. ✅ Shared values (provide/get) for component communication
-12. ✅ Multi-phase shutdown (warning -> graceful -> force on timeout OR error)
+12. ✅ Multi-phase shutdown (global warning -> per-component graceful -> force on timeout OR error)
 13. ✅ Stalled component tracking and restart blocking
 14. ✅ Well-documented with clear examples
 15. ✅ Comprehensive test coverage (unit + integration)

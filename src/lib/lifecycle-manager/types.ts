@@ -14,9 +14,6 @@ export interface ComponentOptions {
   /** Time to wait for start() in milliseconds (default: 30000, 0 = disabled) */
   startupTimeoutMS?: number;
 
-  /** Time to wait after warning in milliseconds (default: 0 = skip warning) */
-  shutdownWarningTimeoutMS?: number;
-
   /** Time to wait for graceful shutdown in milliseconds (default: 5000, minimum: 1000) */
   shutdownGracefulTimeoutMS?: number;
 
@@ -70,8 +67,14 @@ export interface ComponentStallInfo {
   /** Component name */
   name: string;
 
+  /** Which shutdown phase failed */
+  phase: 'graceful' | 'force';
+
   /** Reason for stall */
   reason: 'timeout' | 'error' | 'both';
+
+  /** When shutdown started for this component */
+  startedAt: number;
 
   /** When the stall occurred */
   stalledAt: number;
@@ -621,6 +624,9 @@ export interface LifecycleManagerOptions {
 
   /** Global timeout for shutdown in ms (default: 30000, 0 = disabled) */
   shutdownTimeoutMS?: number;
+
+  /** Global warning phase timeout in ms (default: 500, 0 = fire-and-forget, <0 = skip) */
+  shutdownWarningTimeoutMS?: number;
 
   /** Auto-attach signals when first component starts (default: false) */
   attachSignalsOnStart?: boolean;

@@ -114,7 +114,6 @@ describe('LifecycleManager - Phase 1: Foundation', () => {
       const component = new TestComponent(logger, { name: 'test' });
 
       expect(component.startupTimeoutMS).toBe(30000);
-      expect(component.shutdownWarningTimeoutMS).toBe(0);
       expect(component.shutdownGracefulTimeoutMS).toBe(5000);
       expect(component.shutdownForceTimeoutMS).toBe(2000);
       expect(component.healthCheckTimeoutMS).toBe(5000);
@@ -124,14 +123,12 @@ describe('LifecycleManager - Phase 1: Foundation', () => {
       const component = new TestComponent(logger, {
         name: 'test',
         startupTimeoutMS: 10000,
-        shutdownWarningTimeoutMS: 2000,
         shutdownGracefulTimeoutMS: 8000,
         shutdownForceTimeoutMS: 3000,
         healthCheckTimeoutMS: 3000,
       });
 
       expect(component.startupTimeoutMS).toBe(10000);
-      expect(component.shutdownWarningTimeoutMS).toBe(2000);
       expect(component.shutdownGracefulTimeoutMS).toBe(8000);
       expect(component.shutdownForceTimeoutMS).toBe(3000);
       expect(component.healthCheckTimeoutMS).toBe(3000);
@@ -3548,6 +3545,708 @@ describe('LifecycleManager - Phase 3: Bulk Operations', () => {
 
       expect(result.success).toBe(true);
       expect(result.startupOrder).toEqual(['comp-b', 'comp-a']);
+    });
+  });
+});
+
+// ============================================================================
+// Phase 5: Multi-Phase Shutdown
+// ============================================================================
+
+describe('LifecycleManager - Phase 5: Multi-Phase Shutdown', () => {
+  let logger: Logger;
+  let arraySink: ArraySink;
+
+  beforeEach(() => {
+    arraySink = new ArraySink();
+    logger = new Logger({
+      sinks: [arraySink],
+      callProcessExit: false,
+    });
+  });
+
+  describe('Warning Phase', () => {
+    test('should call onShutdownWarning when shutdownWarningTimeoutMS > 0', async () => {
+      const lifecycle = new LifecycleManager({
+        logger,
+        shutdownWarningTimeoutMS: 1000,
+      });
+      let isWarningCalled = false;
+
+      class WarningComponent extends TestComponent {
+        public onShutdownWarning() {
+          isWarningCalled = true;
+        }
+      }
+
+      lifecycle.registerComponent(
+        new WarningComponent(logger, {
+          name: 'warning-comp',
+        }),
+      );
+
+      await lifecycle.startAllComponents();
+      await lifecycle.stopAllComponents();
+
+      expect(isWarningCalled).toBe(true);
+    });
+
+    test('should fire warning phase without waiting when shutdownWarningTimeoutMS = 0 (fire-and-forget)', async () => {
+      const lifecycle = new LifecycleManager({
+        logger,
+        shutdownWarningTimeoutMS: 0,
+      });
+
+      let didWarningStart = false;
+      let didWarningComplete = false;
+      let didCompletionFireAfterWarningStarted = false;
+
+      class WarningComponent extends TestComponent {
+        public async onShutdownWarning() {
+          didWarningStart = true;
+          await new Promise((resolve) => setTimeout(resolve, 1));
+          didWarningComplete = true;
+        }
+      }
+
+      lifecycle.registerComponent(
+        new WarningComponent(logger, {
+          name: 'warning-comp',
+        }),
+      );
+
+      lifecycle.on('lifecycle-manager:shutdown-warning-completed', () => {
+        // When global completion fires, warning should have started
+        // (microtask queue was flushed before this event)
+        didCompletionFireAfterWarningStarted = didWarningStart;
+      });
+
+      await lifecycle.startAllComponents();
+      await lifecycle.stopAllComponents();
+
+      // Verify event ordering: warnings start before global completion is emitted
+      expect(didCompletionFireAfterWarningStarted).toBe(true);
+
+      // Fire-and-forget mode: stopAllComponents() returns immediately after
+      // broadcasting warnings. Delay is needed to verify the warning callback
+      // eventually completes (this is for testing only - production code should
+      // not rely on warnings completing in fire-and-forget mode).
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(didWarningComplete).toBe(true);
+    });
+
+    test('should skip warning phase when shutdownWarningTimeoutMS < 0', async () => {
+      const lifecycle = new LifecycleManager({
+        logger,
+        shutdownWarningTimeoutMS: -1,
+      });
+      let isWarningCalled = false;
+
+      class WarningComponent extends TestComponent {
+        public onShutdownWarning() {
+          isWarningCalled = true;
+        }
+      }
+
+      lifecycle.registerComponent(
+        new WarningComponent(logger, {
+          name: 'warning-comp',
+        }),
+      );
+
+      await lifecycle.startAllComponents();
+      await lifecycle.stopAllComponents();
+
+      expect(isWarningCalled).toBe(false);
+    });
+
+    test('should timeout warning phase and continue to graceful', async () => {
+      const lifecycle = new LifecycleManager({
+        logger,
+        shutdownWarningTimeoutMS: 100,
+      });
+      let hasWarningCompleted = false;
+      let wasStopCalled = false;
+
+      class SlowWarningComponent extends TestComponent {
+        public async onShutdownWarning() {
+          await new Promise((resolve) => setTimeout(resolve, 2000)); // 2s
+          hasWarningCompleted = true;
+        }
+
+        public stop() {
+          wasStopCalled = true;
+        }
+      }
+
+      lifecycle.registerComponent(
+        new SlowWarningComponent(logger, {
+          name: 'slow-warning',
+        }),
+      );
+
+      await lifecycle.startAllComponents();
+      await lifecycle.stopAllComponents();
+
+      expect(hasWarningCompleted).toBe(false); // Warning didn't complete
+      expect(wasStopCalled).toBe(true); // But graceful phase still ran
+    });
+
+    test('should emit warning phase events', async () => {
+      const lifecycle = new LifecycleManager({
+        logger,
+        shutdownWarningTimeoutMS: 1000,
+      });
+      const events: string[] = [];
+
+      class WarningComponent extends TestComponent {
+        public async onShutdownWarning() {
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+      }
+
+      lifecycle.on('component:shutdown-warning', () => {
+        events.push('warning-started');
+      });
+      lifecycle.on('component:shutdown-warning-completed', () => {
+        events.push('warning-completed');
+      });
+      lifecycle.on('lifecycle-manager:shutdown-warning', () => {
+        events.push('global-warning-started');
+      });
+      lifecycle.on('lifecycle-manager:shutdown-warning-completed', () => {
+        events.push('global-warning-completed');
+      });
+
+      lifecycle.registerComponent(
+        new WarningComponent(logger, {
+          name: 'warning-comp',
+        }),
+      );
+
+      await lifecycle.startAllComponents();
+      await lifecycle.stopAllComponents();
+
+      expect(events).toContain('warning-started');
+      expect(events).toContain('warning-completed');
+      expect(events).toContain('global-warning-started');
+      expect(events).toContain('global-warning-completed');
+    });
+
+    test('should emit warning timeout event', async () => {
+      const lifecycle = new LifecycleManager({
+        logger,
+        shutdownWarningTimeoutMS: 100,
+      });
+      let wasTimeoutEmitted = false;
+
+      class SlowWarningComponent extends TestComponent {
+        public async onShutdownWarning() {
+          await new Promise((resolve) => setTimeout(resolve, 2000));
+        }
+      }
+
+      lifecycle.on('component:shutdown-warning-timeout', () => {
+        wasTimeoutEmitted = true;
+      });
+
+      lifecycle.registerComponent(
+        new SlowWarningComponent(logger, {
+          name: 'slow-warning',
+        }),
+      );
+
+      await lifecycle.startAllComponents();
+      await lifecycle.stopAllComponents();
+
+      expect(wasTimeoutEmitted).toBe(true);
+    });
+  });
+
+  describe('Graceful to Force Transition', () => {
+    test('should call onShutdownForce when graceful times out', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+      let wasForceCalled = false;
+
+      class SlowStopComponent extends TestComponent {
+        public async stop() {
+          await new Promise((resolve) => setTimeout(resolve, 2000)); // 2s
+        }
+
+        public onShutdownForce() {
+          wasForceCalled = true;
+        }
+      }
+
+      lifecycle.registerComponent(
+        new SlowStopComponent(logger, {
+          name: 'slow-stop',
+          shutdownGracefulTimeoutMS: 100, // Very short timeout
+        }),
+      );
+
+      await lifecycle.startAllComponents();
+      const result = await lifecycle.stopAllComponents();
+
+      expect(wasForceCalled).toBe(true);
+      expect(result.success).toBe(true); // Force succeeded
+    });
+
+    test('should call onShutdownForce when graceful throws error', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+      let wasForceCalled = false;
+
+      class FailingStopComponent extends TestComponent {
+        public stop() {
+          throw new Error('Stop failed');
+        }
+
+        public onShutdownForce() {
+          wasForceCalled = true;
+        }
+      }
+
+      lifecycle.registerComponent(
+        new FailingStopComponent(logger, {
+          name: 'failing-stop',
+        }),
+      );
+
+      await lifecycle.startAllComponents();
+      await lifecycle.stopAllComponents();
+
+      expect(wasForceCalled).toBe(true);
+    });
+
+    test('should pass context to force phase events', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+      let eventContext: any = null;
+
+      class SlowStopComponent extends TestComponent {
+        public async stop() {
+          await new Promise((resolve) => setTimeout(resolve, 2000));
+        }
+
+        public onShutdownForce() {
+          // Force handler
+        }
+      }
+
+      lifecycle.on('component:shutdown-force', (data: any) => {
+        eventContext = data.context;
+      });
+
+      lifecycle.registerComponent(
+        new SlowStopComponent(logger, {
+          name: 'slow-stop',
+          shutdownGracefulTimeoutMS: 100,
+        }),
+      );
+
+      await lifecycle.startAllComponents();
+      await lifecycle.stopAllComponents();
+
+      expect(eventContext).toBeDefined();
+      expect(eventContext.gracefulPhaseRan).toBe(true);
+      expect(eventContext.gracefulTimedOut).toBe(true);
+    });
+  });
+
+  describe('Force Phase', () => {
+    test('should succeed when onShutdownForce completes', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+      let wasForceCalled = false;
+
+      class ForceComponent extends TestComponent {
+        public stop() {
+          throw new Error('Stop failed');
+        }
+
+        public onShutdownForce() {
+          wasForceCalled = true;
+          // Cleanup succeeds
+        }
+      }
+
+      lifecycle.registerComponent(
+        new ForceComponent(logger, { name: 'force-comp' }),
+      );
+
+      await lifecycle.startAllComponents();
+      const result = await lifecycle.stopAllComponents();
+
+      expect(wasForceCalled).toBe(true);
+      expect(result.success).toBe(true);
+      expect(result.stalledComponents.length).toBe(0);
+    });
+
+    test('should mark as stalled when onShutdownForce times out', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      class SlowForceComponent extends TestComponent {
+        public stop() {
+          throw new Error('Stop failed');
+        }
+
+        public async onShutdownForce() {
+          await new Promise((resolve) => setTimeout(resolve, 2000)); // 2s
+        }
+      }
+
+      lifecycle.registerComponent(
+        new SlowForceComponent(logger, {
+          name: 'slow-force',
+          shutdownForceTimeoutMS: 100, // Very short timeout
+        }),
+      );
+
+      await lifecycle.startAllComponents();
+      const result = await lifecycle.stopAllComponents();
+
+      expect(result.success).toBe(false);
+      expect(result.stalledComponents.length).toBe(1);
+      expect(result.stalledComponents[0].name).toBe('slow-force');
+      expect(result.stalledComponents[0].phase).toBe('force');
+      expect(result.stalledComponents[0].reason).toBe('timeout');
+    });
+
+    test('should mark as stalled when onShutdownForce throws', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      class FailingForceComponent extends TestComponent {
+        public stop() {
+          throw new Error('Stop failed');
+        }
+
+        public onShutdownForce() {
+          throw new Error('Force failed');
+        }
+      }
+
+      lifecycle.registerComponent(
+        new FailingForceComponent(logger, {
+          name: 'failing-force',
+        }),
+      );
+
+      await lifecycle.startAllComponents();
+      const result = await lifecycle.stopAllComponents();
+
+      expect(result.success).toBe(false);
+      expect(result.stalledComponents.length).toBe(1);
+      expect(result.stalledComponents[0].name).toBe('failing-force');
+      expect(result.stalledComponents[0].phase).toBe('force');
+    });
+
+    test('should emit force phase events', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+      const events: string[] = [];
+
+      class ForceComponent extends TestComponent {
+        public stop() {
+          throw new Error('Stop failed');
+        }
+
+        public async onShutdownForce() {
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+      }
+
+      lifecycle.on('component:shutdown-force', () => {
+        events.push('force-started');
+      });
+      lifecycle.on('component:shutdown-force-completed', () => {
+        events.push('force-completed');
+      });
+
+      lifecycle.registerComponent(
+        new ForceComponent(logger, { name: 'force-comp' }),
+      );
+
+      await lifecycle.startAllComponents();
+      await lifecycle.stopAllComponents();
+
+      expect(events).toContain('force-started');
+      expect(events).toContain('force-completed');
+    });
+
+    test('should emit force timeout event', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+      let wasTimeoutEmitted = false;
+
+      class SlowForceComponent extends TestComponent {
+        public stop() {
+          throw new Error('Stop failed');
+        }
+
+        public async onShutdownForce() {
+          await new Promise((resolve) => setTimeout(resolve, 2000));
+        }
+      }
+
+      lifecycle.on('component:shutdown-force-timeout', () => {
+        wasTimeoutEmitted = true;
+      });
+
+      lifecycle.registerComponent(
+        new SlowForceComponent(logger, {
+          name: 'slow-force',
+          shutdownForceTimeoutMS: 100,
+        }),
+      );
+
+      await lifecycle.startAllComponents();
+      await lifecycle.stopAllComponents();
+
+      expect(wasTimeoutEmitted).toBe(true);
+    });
+  });
+
+  describe('Stall Tracking', () => {
+    test('getStalledComponents should return stall info with phase', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      class StalledComponent extends TestComponent {
+        public stop() {
+          throw new Error('Stop failed');
+        }
+      }
+
+      lifecycle.registerComponent(
+        new StalledComponent(logger, { name: 'stalled-comp' }),
+      );
+
+      await lifecycle.startAllComponents();
+      await lifecycle.stopAllComponents();
+
+      const stalledComponents = lifecycle.getStalledComponents();
+
+      expect(stalledComponents.length).toBe(1);
+      expect(stalledComponents[0].name).toBe('stalled-comp');
+      expect(stalledComponents[0].phase).toBe('graceful'); // Failed in graceful, no force handler
+      expect(stalledComponents[0].reason).toBe('error');
+      expect(stalledComponents[0].startedAt).toBeGreaterThan(0);
+      expect(stalledComponents[0].stalledAt).toBeGreaterThan(0);
+      expect(stalledComponents[0].error).toBeDefined();
+    });
+
+    test('stall info should indicate "both" when graceful times out and force fails', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      class DoubleFailComponent extends TestComponent {
+        public async stop() {
+          await new Promise((resolve) => setTimeout(resolve, 2000)); // Timeout
+        }
+
+        public onShutdownForce() {
+          throw new Error('Force failed'); // Error
+        }
+      }
+
+      lifecycle.registerComponent(
+        new DoubleFailComponent(logger, {
+          name: 'double-fail',
+          shutdownGracefulTimeoutMS: 100,
+        }),
+      );
+
+      await lifecycle.startAllComponents();
+      await lifecycle.stopAllComponents();
+
+      const stalledComponents = lifecycle.getStalledComponents();
+
+      expect(stalledComponents.length).toBe(1);
+      expect(stalledComponents[0].reason).toBe('both'); // Both timeout and error
+    });
+
+    test('component status should include stall info', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      class StalledComponent extends TestComponent {
+        public stop() {
+          throw new Error('Stop failed');
+        }
+      }
+
+      lifecycle.registerComponent(
+        new StalledComponent(logger, { name: 'stalled-comp' }),
+      );
+
+      await lifecycle.startAllComponents();
+      await lifecycle.stopAllComponents();
+
+      const status = lifecycle.getComponentStatus('stalled-comp');
+
+      expect(status).toBeDefined();
+      if (!status) {
+        throw new Error('Expected component status to be defined');
+      }
+      expect(status.state).toBe('stalled');
+      expect(status.stallInfo).toBeDefined();
+      if (!status.stallInfo) {
+        throw new Error('Expected stall info to be defined');
+      }
+      expect(status.stallInfo.phase).toBe('graceful');
+    });
+  });
+
+  describe('Full Three-Phase Flow', () => {
+    test('should execute warning -> graceful -> stopped for successful shutdown', async () => {
+      const lifecycle = new LifecycleManager({
+        logger,
+        shutdownWarningTimeoutMS: 100,
+      });
+      const phases: string[] = [];
+
+      class ThreePhaseComponent extends TestComponent {
+        public onShutdownWarning() {
+          phases.push('warning');
+        }
+
+        public stop() {
+          phases.push('graceful');
+        }
+      }
+
+      lifecycle.registerComponent(
+        new ThreePhaseComponent(logger, {
+          name: 'three-phase',
+        }),
+      );
+
+      await lifecycle.startAllComponents();
+      const result = await lifecycle.stopAllComponents();
+
+      expect(phases).toEqual(['warning', 'graceful']);
+      expect(result.success).toBe(true);
+    });
+
+    test('should execute warning -> graceful(fail) -> force -> stopped', async () => {
+      const lifecycle = new LifecycleManager({
+        logger,
+        shutdownWarningTimeoutMS: 100,
+      });
+      const phases: string[] = [];
+
+      class ThreePhaseComponent extends TestComponent {
+        public onShutdownWarning() {
+          phases.push('warning');
+        }
+
+        public stop() {
+          phases.push('graceful');
+          throw new Error('Graceful failed');
+        }
+
+        public onShutdownForce() {
+          phases.push('force');
+        }
+      }
+
+      lifecycle.registerComponent(
+        new ThreePhaseComponent(logger, {
+          name: 'three-phase',
+        }),
+      );
+
+      await lifecycle.startAllComponents();
+      const result = await lifecycle.stopAllComponents();
+
+      expect(phases).toEqual(['warning', 'graceful', 'force']);
+      expect(result.success).toBe(true); // Force succeeded
+    });
+
+    test('should execute graceful(timeout) -> force for component without a warning method', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+      const phases: string[] = [];
+
+      class TwoPhaseComponent extends TestComponent {
+        public async stop() {
+          phases.push('graceful');
+          await new Promise((resolve) => setTimeout(resolve, 2000));
+        }
+
+        public onShutdownForce() {
+          phases.push('force');
+        }
+      }
+
+      lifecycle.registerComponent(
+        new TwoPhaseComponent(logger, {
+          name: 'two-phase',
+          shutdownGracefulTimeoutMS: 100,
+        }),
+      );
+
+      await lifecycle.startAllComponents();
+      const result = await lifecycle.stopAllComponents();
+
+      expect(phases).toEqual(['graceful', 'force']);
+      expect(result.success).toBe(true);
+    });
+  });
+
+  describe('Abort Callbacks', () => {
+    test('should call onStopAborted on graceful timeout', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+      let wasAbortCalled = false;
+
+      class AbortComponent extends TestComponent {
+        public async stop() {
+          await new Promise((resolve) => setTimeout(resolve, 2000));
+        }
+
+        public onStopAborted() {
+          wasAbortCalled = true;
+        }
+
+        public onShutdownForce() {
+          // Prevent stall
+        }
+      }
+
+      lifecycle.registerComponent(
+        new AbortComponent(logger, {
+          name: 'abort-comp',
+          shutdownGracefulTimeoutMS: 100,
+        }),
+      );
+
+      await lifecycle.startAllComponents();
+      await lifecycle.stopAllComponents();
+
+      expect(wasAbortCalled).toBe(true);
+    });
+
+    test('should call onShutdownForceAborted on force timeout', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+      let wasAbortCalled = false;
+
+      class AbortComponent extends TestComponent {
+        public stop() {
+          throw new Error('Stop failed');
+        }
+
+        public async onShutdownForce() {
+          await new Promise((resolve) => setTimeout(resolve, 2000));
+        }
+
+        public onShutdownForceAborted() {
+          wasAbortCalled = true;
+        }
+      }
+
+      lifecycle.registerComponent(
+        new AbortComponent(logger, {
+          name: 'abort-comp',
+          shutdownForceTimeoutMS: 100,
+        }),
+      );
+
+      await lifecycle.startAllComponents();
+      await lifecycle.stopAllComponents();
+
+      expect(wasAbortCalled).toBe(true);
     });
   });
 });

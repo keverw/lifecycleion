@@ -37,7 +37,7 @@ import {
  *
  * Manages startup, shutdown, and runtime control of application components.
  * Features:
- * - Multi-phase shutdown (warning -> graceful -> force)
+ * - Multi-phase shutdown (global warning -> per-component graceful -> force)
  * - Dependency-ordered component startup
  * - Process signal integration
  * - Component messaging and value sharing
@@ -49,6 +49,7 @@ export class LifecycleManager extends EventEmitterProtected {
   private readonly name: string;
   private readonly logger: LoggerService;
   private readonly rootLogger: Logger;
+  private readonly shutdownWarningTimeoutMS: number;
 
   // Component management
   private components: BaseComponent[] = [];
@@ -74,6 +75,7 @@ export class LifecycleManager extends EventEmitterProtected {
     this.name = options.name ?? 'lifecycle-manager';
     this.rootLogger = options.logger;
     this.logger = this.rootLogger.service(this.name);
+    this.shutdownWarningTimeoutMS = options.shutdownWarningTimeoutMS ?? 500;
   }
 
   // ============================================================================
@@ -842,6 +844,13 @@ export class LifecycleManager extends EventEmitterProtected {
   }
 
   /**
+   * Get information about components that are stalled (failed to stop)
+   */
+  public getStalledComponents(): ComponentStallInfo[] {
+    return Array.from(this.stalledComponents.values());
+  }
+
+  /**
    * Get resolved startup order after applying dependency constraints.
    */
   public getStartupOrder(): StartupOrderResult {
@@ -1297,6 +1306,8 @@ export class LifecycleManager extends EventEmitterProtected {
     const stalledComponents: ComponentStallInfo[] = [];
 
     try {
+      await this.runShutdownWarningPhase(runningComponentsToStop);
+
       // Stop each component in reverse dependency order
       for (const name of runningComponentsToStop) {
         this.logger.entity(name).info('Stopping component');
@@ -1736,7 +1747,7 @@ export class LifecycleManager extends EventEmitterProtected {
 
   /**
    * Internal stop component method - bypasses bulk operation checks
-   * Used by both stopComponent() and stopAllComponents()
+   * Implements individual component graceful -> force shutdown (global warning handled elsewhere)
    */
   private async stopComponentInternal(
     name: string,
@@ -1774,69 +1785,214 @@ export class LifecycleManager extends EventEmitterProtected {
       };
     }
 
-    // Handle forceImmediate option - skip graceful shutdown
+    // Handle forceImmediate option - skip all phases and go straight to force
     if (options?.forceImmediate) {
-      this.logger.entity(name).info('Force stopping component immediately');
-      this.componentStates.set(name, 'force-stopping');
-      this.safeEmit('component:force-stopping', { name });
+      return this.shutdownComponentForce(name, component, {
+        gracefulPhaseRan: false,
+        gracefulTimedOut: false,
+        gracefulError: undefined,
+        startedAt: Date.now(),
+      });
+    }
 
-      try {
-        if (component.onShutdownForce) {
-          await component.onShutdownForce();
-        }
+    // Run three-phase shutdown
+    return this.shutdownComponent(name, component, options);
+  }
 
-        // Update state
-        this.componentStates.set(name, 'stopped');
-        this.runningComponents.delete(name);
-        this.stalledComponents.delete(name); // Clear stalled status on successful force stop
-        const timestamps = this.componentTimestamps.get(name) ?? {
-          startedAt: null,
-          stoppedAt: null,
-        };
-        timestamps.stoppedAt = Date.now();
-        this.componentTimestamps.set(name, timestamps);
+  /**
+   * Two-phase shutdown: graceful -> force (global warning handled by stopAllComponents)
+   *
+   * Phase 1: Graceful (always - calls stop())
+   * Phase 2: Force (if Phase 1 failed - calls onShutdownForce())
+   */
+  private async shutdownComponent(
+    name: string,
+    component: BaseComponent,
+    options?: StopComponentOptions,
+  ): Promise<ComponentOperationResult> {
+    const shutdownStartedAt = Date.now();
 
-        this.logger.entity(name).success('Component force stopped');
-        this.safeEmit('component:stopped', { name });
+    // ============================================================================
+    // Phase 1: Graceful (always)
+    // ============================================================================
+    const gracefulResult = await this.shutdownComponentGraceful(
+      name,
+      component,
+      options,
+    );
 
-        return {
-          success: true,
-          componentName: name,
-          status: this.getComponentStatus(name),
-        };
-      } catch (error) {
-        const err = error as Error;
-        this.logger.entity(name).error('Component failed to force stop', {
-          params: { error: err.message },
-        });
+    if (gracefulResult.success) {
+      return gracefulResult; // Graceful shutdown succeeded
+    }
 
-        // Mark as stalled since force stop failed
-        const stallInfo: ComponentStallInfo = {
-          name,
-          reason: 'error',
-          stalledAt: Date.now(),
-          error: err,
-        };
-        this.stalledComponents.set(name, stallInfo);
-        this.componentStates.set(name, 'stalled');
-        this.runningComponents.delete(name);
-        this.componentErrors.set(name, err);
+    // ============================================================================
+    // Phase 2: Force (graceful failed)
+    // ============================================================================
+    this.logger
+      .entity(name)
+      .warn('Graceful shutdown failed, proceeding to force phase', {
+        params: {
+          reason: gracefulResult.reason,
+          code: gracefulResult.code,
+        },
+      });
 
-        this.safeEmit('component:stalled', { name, stallInfo });
+    return this.shutdownComponentForce(name, component, {
+      gracefulPhaseRan: true,
+      gracefulTimedOut: gracefulResult.code === 'stop_timeout',
+      gracefulError: gracefulResult.error,
+      startedAt: shutdownStartedAt,
+    });
+  }
 
-        return {
-          success: false,
-          componentName: name,
-          reason: err.message,
-          code: 'unknown_error',
-          error: err,
-        };
+  /**
+   * Global warning phase (stopAllComponents only)
+   * Calls onShutdownWarning() on running components with a global timeout
+   */
+  private async runShutdownWarningPhase(
+    componentNames: string[],
+  ): Promise<void> {
+    const timeoutMS = this.shutdownWarningTimeoutMS;
+    if (timeoutMS < 0 || componentNames.length === 0) {
+      return;
+    }
+
+    // Only target running components that implement onShutdownWarning().
+    const warningTargets: Array<{ name: string; component: BaseComponent }> =
+      [];
+
+    for (const name of componentNames) {
+      const component = this.getComponent(name);
+
+      if (component?.onShutdownWarning) {
+        warningTargets.push({ name, component });
       }
     }
 
+    if (warningTargets.length === 0) {
+      return;
+    }
+
+    this.logger.info('Shutdown warning phase');
+    this.safeEmit('lifecycle-manager:shutdown-warning', { timeoutMS });
+
+    if (timeoutMS === 0) {
+      // Fire-and-forget: broadcast warnings without waiting for completion
+      for (const { name, component } of warningTargets) {
+        this.safeEmit('component:shutdown-warning', { name });
+        Promise.resolve()
+          .then(() => component.onShutdownWarning?.())
+          .then(() => {
+            this.safeEmit('component:shutdown-warning-completed', { name });
+          })
+          .catch((error) => {
+            this.logger.entity(name).warn('Shutdown warning phase failed', {
+              params: { error: (error as Error).message },
+            });
+          });
+      }
+
+      // Flush microtask queue to ensure promises start executing before emitting completion
+      await Promise.resolve();
+
+      // Now that warnings are executing, emit global completion event
+      this.safeEmit('lifecycle-manager:shutdown-warning-completed', {
+        timeoutMS,
+      });
+
+      return;
+    }
+
+    // Track completion so we can identify which components are still pending at timeout.
+    const statuses = new Map<string, 'pending' | 'resolved' | 'rejected'>();
+    const warningPromises: Promise<void>[] = [];
+
+    for (const { name, component } of warningTargets) {
+      statuses.set(name, 'pending');
+      this.safeEmit('component:shutdown-warning', { name });
+
+      const warningPromise = Promise.resolve().then(() =>
+        component.onShutdownWarning?.(),
+      );
+
+      warningPromises.push(
+        warningPromise
+          .then(() => {
+            statuses.set(name, 'resolved');
+            this.safeEmit('component:shutdown-warning-completed', { name });
+          })
+          .catch((error) => {
+            statuses.set(name, 'rejected');
+            this.logger.entity(name).warn('Shutdown warning phase failed', {
+              params: { error: (error as Error).message },
+            });
+          }),
+      );
+    }
+
+    // Race overall completion vs global timeout.
+    let timeoutHandle: NodeJS.Timeout | undefined;
+    const timeoutPromise = new Promise<'timeout'>((resolve) => {
+      timeoutHandle = setTimeout(() => resolve('timeout'), timeoutMS);
+    });
+
+    try {
+      const result = await Promise.race([
+        Promise.allSettled(warningPromises).then(() => 'completed' as const),
+        timeoutPromise,
+      ]);
+
+      if (result === 'timeout') {
+        const pendingComponents = warningTargets.filter(
+          ({ name }) => statuses.get(name) === 'pending',
+        );
+
+        for (const { name } of pendingComponents) {
+          this.logger.entity(name).warn('Shutdown warning phase timed out', {
+            params: { timeoutMS },
+          });
+
+          this.safeEmit('component:shutdown-warning-timeout', {
+            name,
+            timeoutMS,
+          });
+        }
+
+        // Global timeout: proceed to graceful shutdown regardless of pending warnings.
+        this.logger.warn('Shutdown warning phase timed out', {
+          params: { timeoutMS, pending: pendingComponents.length },
+        });
+
+        this.safeEmit('lifecycle-manager:shutdown-warning-timeout', {
+          timeoutMS,
+          pending: pendingComponents.map(({ name }) => name),
+        });
+
+        return;
+      }
+
+      this.safeEmit('lifecycle-manager:shutdown-warning-completed', {
+        timeoutMS,
+      });
+    } finally {
+      if (timeoutHandle) {
+        clearTimeout(timeoutHandle);
+      }
+    }
+  }
+
+  /**
+   * Phase 2: Graceful shutdown
+   * Calls stop() with timeout
+   */
+  private async shutdownComponentGraceful(
+    name: string,
+    component: BaseComponent,
+    options?: StopComponentOptions,
+  ): Promise<ComponentOperationResult> {
     // Set state to stopping
     this.componentStates.set(name, 'stopping');
-    this.logger.entity(name).info('Stopping component');
+    this.logger.entity(name).info('Graceful shutdown started');
     this.safeEmit('component:stopping', { name });
 
     // Use custom timeout if provided, otherwise use component's configured timeout
@@ -1862,6 +2018,7 @@ export class LifecycleManager extends EventEmitterProtected {
                   });
               }
             }
+
             reject(
               new ComponentStopTimeoutError({
                 componentName: name,
@@ -1876,7 +2033,7 @@ export class LifecycleManager extends EventEmitterProtected {
         await stopPromise;
       }
 
-      // Update state
+      // Update state - graceful succeeded
       this.componentStates.set(name, 'stopped');
       this.runningComponents.delete(name);
       this.stalledComponents.delete(name); // Clear stalled status on successful stop
@@ -1887,7 +2044,7 @@ export class LifecycleManager extends EventEmitterProtected {
       timestamps.stoppedAt = Date.now();
       this.componentTimestamps.set(name, timestamps);
 
-      this.logger.entity(name).success('Component stopped');
+      this.logger.entity(name).success('Component stopped gracefully');
       this.safeEmit('component:stopped', { name });
 
       return {
@@ -1906,48 +2063,21 @@ export class LifecycleManager extends EventEmitterProtected {
         err instanceof ComponentStopTimeoutError &&
         err.additionalInfo.componentName === name
       ) {
-        // Mark as stalled
-        const stallInfo: ComponentStallInfo = {
-          name,
-          reason: 'timeout',
-          stalledAt: Date.now(),
-          error: err,
-        };
-        this.stalledComponents.set(name, stallInfo);
-        this.componentStates.set(name, 'stalled');
-        this.runningComponents.delete(name);
-
-        this.logger
-          .entity(name)
-          .error('Component stop timed out - marked as stalled');
+        this.logger.entity(name).warn('Graceful shutdown timed out');
         this.safeEmit('component:stop-timeout', { name, error: err });
-        this.safeEmit('component:stalled', { name, stallInfo });
 
         return {
           success: false,
           componentName: name,
-          reason: 'Component stop timed out',
+          reason: 'Graceful shutdown timed out',
           code: 'stop_timeout',
           error: err,
         };
       } else {
-        // Error during stop - also mark as stalled
-        const stallInfo: ComponentStallInfo = {
-          name,
-          reason: 'error',
-          stalledAt: Date.now(),
-          error: err,
-        };
-        this.stalledComponents.set(name, stallInfo);
-        this.componentStates.set(name, 'stalled');
-        this.runningComponents.delete(name);
-
-        this.logger
-          .entity(name)
-          .error('Component failed to stop - marked as stalled', {
-            params: { error: err.message },
-          });
-        this.safeEmit('component:stalled', { name, stallInfo });
+        // Error during graceful stop
+        this.logger.entity(name).warn('Graceful shutdown threw error', {
+          params: { error: err.message },
+        });
 
         return {
           success: false,
@@ -1958,9 +2088,179 @@ export class LifecycleManager extends EventEmitterProtected {
         };
       }
     } finally {
-      // Ensure we always clean up the timeout handle, even if component.stop()
-      // rejects (non-timeout failure). Otherwise onStopAborted() can fire
-      // unexpectedly later and the timer handle leaks.
+      if (timeoutHandle) {
+        clearTimeout(timeoutHandle);
+      }
+    }
+  }
+
+  /**
+   * Phase 3: Force shutdown
+   * Calls onShutdownForce() with timeout, or marks as stalled if not implemented
+   */
+  private async shutdownComponentForce(
+    name: string,
+    component: BaseComponent,
+    context: {
+      gracefulPhaseRan: boolean;
+      gracefulTimedOut: boolean;
+      gracefulError?: Error;
+      startedAt: number;
+    },
+  ): Promise<ComponentOperationResult> {
+    this.componentStates.set(name, 'force-stopping');
+    this.logger.entity(name).info('Force shutdown started', {
+      params: {
+        gracefulPhaseRan: context.gracefulPhaseRan,
+        gracefulTimedOut: context.gracefulTimedOut,
+      },
+    });
+
+    this.safeEmit('component:shutdown-force', {
+      name,
+      context: {
+        gracefulPhaseRan: context.gracefulPhaseRan,
+        gracefulTimedOut: context.gracefulTimedOut,
+      },
+    });
+
+    const timeoutMS = component.shutdownForceTimeoutMS;
+    let timeoutHandle: NodeJS.Timeout | undefined;
+
+    // If component doesn't implement onShutdownForce, mark as stalled immediately
+    if (!component.onShutdownForce) {
+      const stallInfo: ComponentStallInfo = {
+        name,
+        phase: 'graceful', // Failed in graceful phase
+        reason: context.gracefulTimedOut ? 'timeout' : 'error',
+        startedAt: context.startedAt,
+        stalledAt: Date.now(),
+        error: context.gracefulError,
+      };
+
+      this.stalledComponents.set(name, stallInfo);
+      this.componentStates.set(name, 'stalled');
+      this.runningComponents.delete(name);
+
+      this.logger
+        .entity(name)
+        .error('Component stalled - graceful shutdown failed', {
+          params: {
+            reason: context.gracefulTimedOut ? 'timeout' : 'error',
+            hasForceHandler: false,
+          },
+        });
+
+      this.safeEmit('component:stalled', { name, stallInfo });
+
+      // Return the original graceful phase error
+      return {
+        success: false,
+        componentName: name,
+        reason: context.gracefulTimedOut
+          ? 'Component stop timed out'
+          : (context.gracefulError?.message ?? 'Graceful shutdown failed'),
+        code: context.gracefulTimedOut ? 'stop_timeout' : 'unknown_error',
+        error: context.gracefulError,
+      };
+    }
+
+    try {
+      const forcePromise = component.onShutdownForce();
+
+      if (timeoutMS > 0) {
+        const timeoutPromise = new Promise<never>((_, reject) => {
+          timeoutHandle = setTimeout(() => {
+            // Call abort callback if implemented
+            if (component.onShutdownForceAborted) {
+              try {
+                component.onShutdownForceAborted();
+              } catch (error) {
+                this.logger
+                  .entity(name)
+                  .warn('Error in onShutdownForceAborted callback', {
+                    params: { error },
+                  });
+              }
+            }
+
+            reject(new Error('Force shutdown timed out'));
+          }, timeoutMS);
+        });
+
+        await Promise.race([forcePromise, timeoutPromise]);
+      } else {
+        await forcePromise;
+      }
+
+      // Update state - force succeeded
+      this.componentStates.set(name, 'stopped');
+      this.runningComponents.delete(name);
+      this.stalledComponents.delete(name); // Clear stalled status on successful force stop
+      const timestamps = this.componentTimestamps.get(name) ?? {
+        startedAt: null,
+        stoppedAt: null,
+      };
+      timestamps.stoppedAt = Date.now();
+      this.componentTimestamps.set(name, timestamps);
+
+      this.logger.entity(name).success('Component force stopped');
+      this.safeEmit('component:shutdown-force-completed', { name });
+      this.safeEmit('component:stopped', { name });
+
+      return {
+        success: true,
+        componentName: name,
+        status: this.getComponentStatus(name),
+      };
+    } catch (error) {
+      const err = error as Error;
+
+      // Determine if timeout or error
+      const isTimeout = err.message === 'Force shutdown timed out';
+
+      // Mark as stalled - force phase failed
+      const stallInfo: ComponentStallInfo = {
+        name,
+        phase: 'force',
+        reason: isTimeout
+          ? 'timeout'
+          : context.gracefulTimedOut
+            ? 'both'
+            : 'error',
+        startedAt: context.startedAt,
+        stalledAt: Date.now(),
+        error: err,
+      };
+      this.stalledComponents.set(name, stallInfo);
+      this.componentStates.set(name, 'stalled');
+      this.runningComponents.delete(name);
+      this.componentErrors.set(name, err);
+
+      if (isTimeout) {
+        this.logger.entity(name).error('Force shutdown timed out - stalled', {
+          params: { timeoutMS },
+        });
+        this.safeEmit('component:shutdown-force-timeout', {
+          name,
+          timeoutMS,
+        });
+      } else {
+        this.logger.entity(name).error('Force shutdown failed - stalled', {
+          params: { error: err.message },
+        });
+      }
+
+      this.safeEmit('component:stalled', { name, stallInfo });
+
+      return {
+        success: false,
+        componentName: name,
+        reason: isTimeout ? 'Force shutdown timed out' : err.message,
+        code: 'unknown_error',
+        error: err,
+      };
+    } finally {
       if (timeoutHandle) {
         clearTimeout(timeoutHandle);
       }

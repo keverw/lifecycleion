@@ -222,67 +222,12 @@ src/lib/lifecycle-manager/
 
 ---
 
-## Phase 5: Multi-Phase Shutdown (1.5 days)
+## ~~Phase 5: Multi-Phase Shutdown~~ ✅ **COMPLETED**
 
-### Implement
-
-**Three-phase shutdown** (private method):
-
-- `private async shutdownComponent(component): Promise<ComponentShutdownResult>`
-  - **Phase 1: Warning** (if `shutdownWarningTimeoutMS > 0` and implemented)
-    - Call `onShutdownWarning()`
-    - Race against timeout
-    - On timeout: call `onShutdownWarningAborted()`, proceed to Phase 2
-  - **Phase 2: Graceful** (always)
-    - Set state 'stopping'
-    - Call `stop()`
-    - Race against `shutdownGracefulTimeoutMS`
-    - On success: return
-    - On timeout/error: call `onStopAborted()`, proceed to Phase 3
-  - **Phase 3: Force** (if Phase 2 failed)
-    - Set state 'force-stopping'
-    - Call `onShutdownForce()` if implemented
-    - Race against `shutdownForceTimeoutMS`
-    - On timeout: call `onShutdownForceAborted()`, set state 'stalled'
-    - Pass context (timeout vs error)
-
-**Update methods**:
-
-- Replace simple stop in `stopComponent()` with multi-phase
-- Use multi-phase in `stopAllComponents()`
-
-**Stalled tracking**:
-
-- `getStalledComponents(): ComponentStallInfo[]`
-- Clear on shutdown completion
-
-**Events**:
-
-- `component:shutdown-warning`, `component:shutdown-warning-completed`, `component:shutdown-warning-timeout`
-- `component:shutdown-force`, `component:shutdown-force-completed`, `component:shutdown-force-timeout`
-
-### Tests
-
-- Three-phase flow (warning → graceful → stopped)
-- Graceful timeout → force → stopped
-- Graceful error → force → stopped
-- Force timeout → stalled
-- Skip warning if timeout = 0
-- Abort callbacks at right times
-- Per-component timeout configs
-- Context passed to force handler
-
-### Documentation
-
-- Diagram three-phase flow
-- Explain when each phase runs
-- Document context parameter
-
-### PRD Sections to Delete
-
-- "Multi-Phase Shutdown Strategy" (lines 255-310)
-- "Timeout Configuration" - per-component (lines 1317-1364)
-- Three-phase shutdown test portions
+- ✅ Implemented global warning phase (manager-level timeout) before per-component shutdown
+- ✅ Updated per-component shutdown flow to graceful → force only
+- ✅ Updated shutdown warning/force events and tests
+- ✅ Removed corresponding PRD sections after implementation
 
 ---
 
@@ -437,8 +382,9 @@ src/lib/lifecycle-manager/
 - In `registerComponent()` and `insertComponentAt()`:
   - If `autoStart: true` and `isStarted || isStarting`, start component
   - Handle failures
-  
+
 **Implementation requirements**:
+
 - Check if `isStarting` or `isStarted` (manager state)
 - Only start if dependencies are met (validate dependencies exist and are running)
 - Handle edge cases gracefully:

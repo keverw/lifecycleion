@@ -2,7 +2,7 @@
  * LifecycleManager - Comprehensive lifecycle orchestration system
  *
  * Manages startup, shutdown, and runtime control of application components with:
- * - Multi-phase shutdown (warning -> graceful -> force)
+ * - Multi-phase shutdown (global warning -> per-component graceful -> force)
  * - Dependency-ordered component startup
  * - Process signal integration (SIGINT, SIGTERM, SIGHUP, etc.)
  * - Component messaging and value sharing

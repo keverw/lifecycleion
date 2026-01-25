@@ -72,9 +72,6 @@ export abstract class BaseComponent {
   /** Time to wait for start() in milliseconds */
   public readonly startupTimeoutMS: number;
 
-  /** Time to wait after warning in milliseconds */
-  public readonly shutdownWarningTimeoutMS: number;
-
   /** Time to wait for graceful shutdown in milliseconds */
   public readonly shutdownGracefulTimeoutMS: number;
 
@@ -118,7 +115,6 @@ export abstract class BaseComponent {
 
     // Timeout configuration with defaults
     this.startupTimeoutMS = options.startupTimeoutMS ?? 30000;
-    this.shutdownWarningTimeoutMS = options.shutdownWarningTimeoutMS ?? 0;
     this.healthCheckTimeoutMS = options.healthCheckTimeoutMS ?? 5000;
 
     // Enforce minimums for shutdown timeouts
@@ -179,21 +175,12 @@ export abstract class BaseComponent {
   /**
    * Called before graceful shutdown to warn component
    *
-   * Optional lifecycle hook called before stop().
+   * Optional lifecycle hook called before stopAllComponents() begins stopping components.
    * Use this to prepare for shutdown (stop accepting new work, drain queues, etc.)
-   * Only called if shutdownWarningTimeoutMS > 0.
    *
    * Can be sync or async - manager will await if Promise is returned.
    */
   public onShutdownWarning?(): Promise<void> | void;
-
-  /**
-   * Called when onShutdownWarning() times out
-   *
-   * Invoked when onShutdownWarning() exceeds shutdownWarningTimeoutMS before graceful shutdown begins.
-   * Must be synchronous and fast - manager won't wait for it to complete.
-   */
-  public onShutdownWarningAborted?(): void;
 
   /**
    * Called for force shutdown if graceful shutdown times out or throws
