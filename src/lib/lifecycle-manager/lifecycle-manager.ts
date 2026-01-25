@@ -93,31 +93,24 @@ export class LifecycleManager extends EventEmitterProtected {
     try {
       // Block registration during startup if this component would be a dependency
       // for any already-registered component (would break dependency ordering)
-      if (this.isStarting) {
-        // Check if any existing component lists this new component as a dependency
-        const isRequiredDependency = this.components.some((c) =>
-          c.getDependencies().includes(componentName),
-        );
+      if (this.isRequiredDependencyDuringStartup(componentName)) {
+        this.logger
+          .entity(componentName)
+          .warn(
+            'Cannot register component during startup - it is a required dependency for other components',
+          );
+        this.safeEmit('component:registration-rejected', {
+          name: componentName,
+          reason: 'startup_in_progress',
+        });
 
-        if (isRequiredDependency) {
-          this.logger
-            .entity(componentName)
-            .warn(
-              'Cannot register component during startup - it is a required dependency for other components',
-            );
-          this.safeEmit('component:registration-rejected', {
-            name: componentName,
-            reason: 'startup_in_progress_with_dependents',
-          });
-
-          return this.buildRegisterResultFailure({
-            componentName,
-            registrationIndexBefore,
-            code: 'startup_in_progress',
-            reason:
-              'Cannot register component during startup when it is a required dependency for other components.',
-          });
-        }
+        return this.buildRegisterResultFailure({
+          componentName,
+          registrationIndexBefore,
+          code: 'startup_in_progress',
+          reason:
+            'Cannot register component during startup when it is a required dependency for other components.',
+        });
       }
 
       if (this.hasComponentInstance(component)) {
@@ -294,34 +287,27 @@ export class LifecycleManager extends EventEmitterProtected {
 
       // Block registration during startup if this component would be a dependency
       // for any already-registered component (would break dependency ordering)
-      if (this.isStarting) {
-        // Check if any existing component lists this new component as a dependency
-        const isRequiredDependency = this.components.some((c) =>
-          c.getDependencies().includes(componentName),
-        );
+      if (this.isRequiredDependencyDuringStartup(componentName)) {
+        this.logger
+          .entity(componentName)
+          .warn(
+            'Cannot register component during startup - it is a required dependency for other components',
+          );
+        this.safeEmit('component:registration-rejected', {
+          name: componentName,
+          reason: 'startup_in_progress',
+        });
 
-        if (isRequiredDependency) {
-          this.logger
-            .entity(componentName)
-            .warn(
-              'Cannot register component during startup - it is a required dependency for other components',
-            );
-          this.safeEmit('component:registration-rejected', {
-            name: componentName,
-            reason: 'startup_in_progress_with_dependents',
-          });
-
-          return this.buildInsertResultFailure({
-            componentName,
-            position,
-            targetComponentName,
-            registrationIndexBefore,
-            code: 'startup_in_progress',
-            reason:
-              'Cannot register component during startup when it is a required dependency for other components.',
-            targetFound: undefined,
-          });
-        }
+        return this.buildInsertResultFailure({
+          componentName,
+          position,
+          targetComponentName,
+          registrationIndexBefore,
+          code: 'startup_in_progress',
+          reason:
+            'Cannot register component during startup when it is a required dependency for other components.',
+          targetFound: undefined,
+        });
       }
 
       if (this.hasComponentInstance(component)) {
@@ -1971,6 +1957,23 @@ export class LifecycleManager extends EventEmitterProtected {
   private getRunningDependents(name: string): string[] {
     const dependents = this.getDependents(name);
     return dependents.filter((dep) => this.isComponentRunning(dep));
+  }
+
+  /**
+   * Check if a component is a required dependency during startup
+   * Used to prevent registering dependencies mid-startup which would break ordering
+   * @param componentName - Component name to check
+   * @returns true if this component would be a required dependency
+   */
+  private isRequiredDependencyDuringStartup(componentName: string): boolean {
+    if (!this.isStarting) {
+      return false;
+    }
+
+    // Check if any existing component lists this new component as a dependency
+    return this.components.some((c) =>
+      c.getDependencies().includes(componentName),
+    );
   }
 
   /**
