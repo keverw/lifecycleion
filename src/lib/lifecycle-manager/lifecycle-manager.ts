@@ -559,13 +559,14 @@ export class LifecycleManager extends EventEmitterProtected {
    * Unregister a component
    *
    * @param name - Component name to unregister
-   * @param options - Unregister options (stopIfRunning)
+   * @param options - Unregister options (stopIfRunning defaults to true)
    *
    * Notes:
    * - Stopped or stalled components can be unregistered directly
-   * - Running components require stopIfRunning (otherwise returns component_running)
-   * - If stopIfRunning is set and stop fails, unregister is aborted
-   * - If stopIfRunning is set and the component is stalled, unregister is aborted
+   * - Running components are stopped first by default (stopIfRunning: true)
+   * - Set stopIfRunning: false to require manual stop before unregister
+   * - If stopIfRunning is true and stop fails, unregister is aborted
+   * - If stopIfRunning is true and the component is stalled, unregister is aborted
    * @returns True if component was unregistered, false otherwise
    */
   public async unregisterComponent(
@@ -605,8 +606,11 @@ export class LifecycleManager extends EventEmitterProtected {
       };
     }
 
+    // Default stopIfRunning to true (opt-out behavior)
+    const shouldStopIfRunning = options?.stopIfRunning !== false;
+
     const isStalled = this.stalledComponents.has(name);
-    if (isStalled && options?.stopIfRunning) {
+    if (isStalled && shouldStopIfRunning) {
       this.logger
         .entity(name)
         .warn('Cannot unregister stalled component when stopIfRunning is set');
@@ -623,8 +627,8 @@ export class LifecycleManager extends EventEmitterProtected {
 
     const isRunning = this.isComponentRunning(name);
 
-    // If running and stopIfRunning not set, reject
-    if (isRunning && !options?.stopIfRunning) {
+    // If running and stopIfRunning explicitly set to false, reject
+    if (isRunning && !shouldStopIfRunning) {
       this.logger
         .entity(name)
         .warn(
@@ -634,16 +638,16 @@ export class LifecycleManager extends EventEmitterProtected {
         success: false,
         componentName: name,
         reason:
-          'Component is running. Use stopIfRunning option or stop manually first',
+          'Component is running. Use stopIfRunning: true option or stop manually first',
         code: 'component_running',
         wasStopped: false,
         wasRegistered: true,
       };
     }
 
-    // If running and stopIfRunning is true, stop first
+    // If running and stopIfRunning is true (default), stop first
     let wasStopped = false;
-    if (isRunning && options?.stopIfRunning) {
+    if (isRunning && shouldStopIfRunning) {
       this.logger.entity(name).info('Stopping component before unregistering');
       const stopResult = await this.stopComponent(name, {
         force: options?.forceStop,

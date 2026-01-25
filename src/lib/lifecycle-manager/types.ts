@@ -456,7 +456,10 @@ export interface RegisterOptions {
  * Options for unregistering a component
  */
 export interface UnregisterOptions {
-  /** Stop the component first if it's running (default: false) */
+  /**
+   * Stop the component first if it's running (default: true)
+   * Set to false to require manual stop before unregister
+   */
   stopIfRunning?: boolean;
 
   /**

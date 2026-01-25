@@ -688,13 +688,15 @@ describe('LifecycleManager - Phase 2: Core Registration & Individual Lifecycle',
       lifecycle.registerComponent(component);
       await lifecycle.startComponent('test');
 
-      const result = await lifecycle.unregisterComponent('test');
+      const result = await lifecycle.unregisterComponent('test', {
+        stopIfRunning: false,
+      });
       expect(result.success).toBe(false);
       expect(result.componentName).toBe('test');
       expect(result.wasRegistered).toBe(true);
       expect(result.wasStopped).toBe(false);
       expect(result.reason).toBe(
-        'Component is running. Use stopIfRunning option or stop manually first',
+        'Component is running. Use stopIfRunning: true option or stop manually first',
       );
       expect(lifecycle.hasComponent('test')).toBe(true);
     });
@@ -710,6 +712,24 @@ describe('LifecycleManager - Phase 2: Core Registration & Individual Lifecycle',
       const result = await lifecycle.unregisterComponent('test', {
         stopIfRunning: true,
       });
+      expect(result.success).toBe(true);
+      expect(result.componentName).toBe('test');
+      expect(result.wasRegistered).toBe(true);
+      expect(result.wasStopped).toBe(true);
+      expect(lifecycle.hasComponent('test')).toBe(false);
+      expect(component.stopCalled).toBe(true);
+    });
+
+    test('unregisterComponent should stop and remove component by default', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+      const component = new TestComponent(logger, { name: 'test' });
+
+      lifecycle.registerComponent(component);
+      await lifecycle.startComponent('test');
+      expect(lifecycle.isComponentRunning('test')).toBe(true);
+
+      // No options passed - should use default stopIfRunning: true
+      const result = await lifecycle.unregisterComponent('test');
       expect(result.success).toBe(true);
       expect(result.componentName).toBe('test');
       expect(result.wasRegistered).toBe(true);
@@ -855,6 +875,30 @@ describe('LifecycleManager - Phase 2: Core Registration & Individual Lifecycle',
       const result = await lifecycle.unregisterComponent('database', {
         stopIfRunning: true,
       });
+
+      expect(result.success).toBe(false);
+      expect(result.wasRegistered).toBe(true);
+      expect(result.wasStopped).toBe(false);
+      expect(lifecycle.hasComponent('database')).toBe(true);
+      expect(lifecycle.isComponentRunning('database')).toBe(true);
+    });
+
+    test('unregisterComponent should fail by default when component has running dependents', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+      const database = new TestComponent(logger, { name: 'database' });
+      const api = new TestComponent(logger, {
+        name: 'api',
+        dependencies: ['database'],
+      });
+
+      lifecycle.registerComponent(database);
+      lifecycle.registerComponent(api);
+
+      await lifecycle.startComponent('database');
+      await lifecycle.startComponent('api');
+
+      // No options - should use default stopIfRunning: true and still protect dependents
+      const result = await lifecycle.unregisterComponent('database');
 
       expect(result.success).toBe(false);
       expect(result.wasRegistered).toBe(true);
