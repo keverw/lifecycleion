@@ -1,3 +1,6 @@
+import type { Logger } from '../logger';
+import type { ProcessSignalManagerStatus } from '../process-signal-manager';
+
 /**
  * Component configuration options passed to BaseComponent constructor
  */
@@ -610,6 +613,14 @@ export interface DependencyValidationResult {
 }
 
 /**
+ * Extended signal status with lifecycle-specific information
+ */
+export interface LifecycleSignalStatus extends ProcessSignalManagerStatus {
+  /** How shutdown was triggered (null if not shut down) */
+  shutdownMethod: ShutdownMethod | null;
+}
+
+/**
  * Configuration options for LifecycleManager
  */
 export interface LifecycleManagerOptions {
@@ -617,7 +628,7 @@ export interface LifecycleManagerOptions {
   name?: string;
 
   /** Root logger instance (required) */
-  logger: unknown; // Will be Logger type, but avoiding circular dependency
+  logger: Logger;
 
   /** Global timeout for startup in ms (default: 60000, 0 = disabled) */
   startupTimeoutMS?: number;
@@ -634,14 +645,18 @@ export interface LifecycleManagerOptions {
   /** Auto-detach signals when last component stops (default: false) */
   detachSignalsOnStop?: boolean;
 
-  /** Custom reload signal handler (called instead of default broadcast) */
+  /** Custom reload signal handler (called instead of default broadcast, receives broadcast function you can optionally call) */
   onReloadRequested?: (
     broadcastReload: () => Promise<SignalBroadcastResult>,
   ) => void | Promise<void>;
 
-  /** Custom info signal handler */
-  onInfoRequested?: () => void | Promise<void>;
+  /** Custom info signal handler (called instead of default broadcast, receives broadcast function you can optionally call) */
+  onInfoRequested?: (
+    broadcastInfo: () => Promise<SignalBroadcastResult>,
+  ) => void | Promise<void>;
 
-  /** Custom debug signal handler */
-  onDebugRequested?: () => void | Promise<void>;
+  /** Custom debug signal handler (called instead of default broadcast, receives broadcast function you can optionally call) */
+  onDebugRequested?: (
+    broadcastDebug: () => Promise<SignalBroadcastResult>,
+  ) => void | Promise<void>;
 }

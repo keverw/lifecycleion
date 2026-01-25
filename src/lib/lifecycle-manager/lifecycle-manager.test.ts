@@ -15,18 +15,19 @@ import {
   lifecycleManagerErrTypes,
   lifecycleManagerErrCodes,
 } from './errors';
+import { sleep } from '../sleep';
 
 // Test component implementation
 class TestComponent extends BaseComponent {
   public startCalled = false;
   public stopCalled = false;
 
-  public start(): Promise<void> {
+  public start(): Promise<void> | void {
     this.startCalled = true;
     return Promise.resolve();
   }
 
-  public stop(): Promise<void> {
+  public stop(): Promise<void> | void {
     this.stopCalled = true;
     return Promise.resolve();
   }
@@ -4247,6 +4248,622 @@ describe('LifecycleManager - Phase 5: Multi-Phase Shutdown', () => {
       await lifecycle.stopAllComponents();
 
       expect(wasAbortCalled).toBe(true);
+    });
+  });
+});
+
+describe('LifecycleManager - Phase 6: Signal Integration', () => {
+  let logger: Logger;
+
+  beforeEach(() => {
+    logger = new Logger({
+      sinks: [],
+    });
+  });
+
+  describe('attachSignals() and detachSignals()', () => {
+    test('should attach and detach signal handlers', () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      // Initially not attached
+      expect(lifecycle.getSignalStatus().isAttached).toBe(false);
+
+      // Attach signals
+      lifecycle.attachSignals();
+      expect(lifecycle.getSignalStatus().isAttached).toBe(true);
+      expect(lifecycle.getSignalStatus().handlers.shutdown).toBe(true);
+
+      // Detach signals
+      lifecycle.detachSignals();
+      expect(lifecycle.getSignalStatus().isAttached).toBe(false);
+    });
+
+    test('should be idempotent (multiple attach/detach calls are safe)', () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      lifecycle.attachSignals();
+      lifecycle.attachSignals(); // Second call should be no-op
+      expect(lifecycle.getSignalStatus().isAttached).toBe(true);
+
+      lifecycle.detachSignals();
+      lifecycle.detachSignals(); // Second call should be no-op
+      expect(lifecycle.getSignalStatus().isAttached).toBe(false);
+    });
+
+    test('should emit lifecycle-manager:signals-attached event', (done) => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      lifecycle.on('lifecycle-manager:signals-attached', () => {
+        done();
+      });
+
+      lifecycle.attachSignals();
+    });
+
+    test('should emit lifecycle-manager:signals-detached event', (done) => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      lifecycle.attachSignals();
+
+      lifecycle.on('lifecycle-manager:signals-detached', () => {
+        done();
+      });
+
+      lifecycle.detachSignals();
+    });
+
+    test('should only emit signals-detached once when called twice', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+      let detachEvents = 0;
+
+      lifecycle.attachSignals();
+      lifecycle.on('lifecycle-manager:signals-detached', () => {
+        detachEvents += 1;
+      });
+
+      lifecycle.detachSignals();
+      lifecycle.detachSignals();
+
+      await sleep(1);
+      expect(detachEvents).toBe(1);
+    });
+  });
+
+  describe('triggerReload() with default behavior', () => {
+    test('should broadcast reload to all running components', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+      const reloadedComponents: string[] = [];
+
+      class ReloadableComponent extends TestComponent {
+        public onReload() {
+          reloadedComponents.push(this.getName());
+        }
+      }
+
+      lifecycle.registerComponent(
+        new ReloadableComponent(logger, { name: 'comp1' }),
+      );
+      lifecycle.registerComponent(
+        new ReloadableComponent(logger, { name: 'comp2' }),
+      );
+
+      await lifecycle.startAllComponents();
+
+      const result = await lifecycle.triggerReload();
+
+      expect(result.signal).toBe('reload');
+      expect(result.results).toHaveLength(2);
+      expect(result.results[0].called).toBe(true);
+      expect(result.results[0].error).toBeNull();
+      expect(result.results[1].called).toBe(true);
+      expect(result.results[1].error).toBeNull();
+      expect(reloadedComponents).toEqual(['comp1', 'comp2']);
+    });
+
+    test('should only call onReload on running components', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+      const reloadedComponents: string[] = [];
+
+      class ReloadableComponent extends TestComponent {
+        public onReload() {
+          reloadedComponents.push(this.getName());
+        }
+      }
+
+      lifecycle.registerComponent(
+        new ReloadableComponent(logger, { name: 'comp1' }),
+      );
+      lifecycle.registerComponent(
+        new ReloadableComponent(logger, { name: 'comp2' }),
+      );
+
+      // Only start comp1
+      await lifecycle.startComponent('comp1');
+
+      const result = await lifecycle.triggerReload();
+
+      expect(result.results).toHaveLength(1);
+      expect(result.results[0].name).toBe('comp1');
+      expect(reloadedComponents).toEqual(['comp1']);
+    });
+
+    test('should skip components without onReload', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      class NoReloadComponent extends TestComponent {
+        // No onReload method
+      }
+
+      lifecycle.registerComponent(
+        new NoReloadComponent(logger, { name: 'comp1' }),
+      );
+
+      await lifecycle.startAllComponents();
+
+      const result = await lifecycle.triggerReload();
+
+      expect(result.results).toHaveLength(1);
+      expect(result.results[0].called).toBe(false);
+      expect(result.results[0].error).toBeNull();
+    });
+
+    test('should continue on error and collect failures', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      class FailingReloadComponent extends TestComponent {
+        public onReload() {
+          if (this.getName() === 'comp2') {
+            throw new Error('Reload failed');
+          }
+        }
+      }
+
+      lifecycle.registerComponent(
+        new FailingReloadComponent(logger, { name: 'comp1' }),
+      );
+      lifecycle.registerComponent(
+        new FailingReloadComponent(logger, { name: 'comp2' }),
+      );
+      lifecycle.registerComponent(
+        new FailingReloadComponent(logger, { name: 'comp3' }),
+      );
+
+      await lifecycle.startAllComponents();
+
+      const result = await lifecycle.triggerReload();
+
+      expect(result.results).toHaveLength(3);
+      expect(result.results[0].called).toBe(true);
+      expect(result.results[0].error).toBeNull();
+      expect(result.results[1].called).toBe(true);
+      expect(result.results[1].error).toBeInstanceOf(Error);
+      expect(result.results[2].called).toBe(true);
+      expect(result.results[2].error).toBeNull();
+    });
+
+    test('should emit component events for reload', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+      const events: string[] = [];
+
+      lifecycle.on('component:reload-started', (data) => {
+        const { name } = data as { name: string };
+        events.push(`started:${name}`);
+      });
+      lifecycle.on('component:reload-completed', (data) => {
+        const { name } = data as { name: string };
+        events.push(`completed:${name}`);
+      });
+
+      class ReloadableComponent extends TestComponent {
+        public onReload() {
+          // Success
+        }
+      }
+
+      lifecycle.registerComponent(
+        new ReloadableComponent(logger, { name: 'comp1' }),
+      );
+
+      await lifecycle.startAllComponents();
+      await lifecycle.triggerReload();
+
+      expect(events).toEqual(['started:comp1', 'completed:comp1']);
+    });
+
+    test('should emit component:reload-failed on error', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+      let failedEvent: { name: string; error: Error } | null = null;
+
+      lifecycle.on('component:reload-failed', (data) => {
+        const eventData = data as { name: string; error: Error };
+        failedEvent = eventData;
+      });
+
+      class FailingReloadComponent extends TestComponent {
+        public onReload() {
+          throw new Error('Reload error');
+        }
+      }
+
+      lifecycle.registerComponent(
+        new FailingReloadComponent(logger, { name: 'comp1' }),
+      );
+
+      await lifecycle.startAllComponents();
+      await lifecycle.triggerReload();
+
+      expect(failedEvent).not.toBeNull();
+      const ensuredFailedEvent =
+        failedEvent ??
+        (() => {
+          throw new Error('Expected reload-failed event data.');
+        })();
+
+      expect((ensuredFailedEvent as { name: string }).name).toBe('comp1');
+      expect((ensuredFailedEvent as { error: Error }).error.message).toBe(
+        'Reload error',
+      );
+    });
+  });
+
+  describe('triggerReload() with custom callback', () => {
+    test('should call custom callback instead of broadcasting', async () => {
+      let wasCustomCallbackCalled = false;
+      let wasBroadcastFnProvided = false;
+
+      const lifecycle = new LifecycleManager({
+        logger,
+        onReloadRequested: (broadcastReload) => {
+          wasCustomCallbackCalled = true;
+          wasBroadcastFnProvided = typeof broadcastReload === 'function';
+        },
+      });
+
+      class ReloadableComponent extends TestComponent {
+        public onReload() {
+          throw new Error('Should not be called');
+        }
+      }
+
+      lifecycle.registerComponent(
+        new ReloadableComponent(logger, { name: 'comp1' }),
+      );
+
+      await lifecycle.startAllComponents();
+      const result = await lifecycle.triggerReload();
+
+      expect(wasCustomCallbackCalled).toBe(true);
+      expect(wasBroadcastFnProvided).toBe(true);
+      expect(result.results).toHaveLength(0); // Custom callback, no broadcast
+    });
+
+    test('should allow custom callback to call broadcastReload', async () => {
+      const reloadedComponents: string[] = [];
+
+      const lifecycle = new LifecycleManager({
+        logger,
+        onReloadRequested: async (broadcastReload) => {
+          // Do custom logic then broadcast
+          await broadcastReload();
+        },
+      });
+
+      class ReloadableComponent extends TestComponent {
+        public onReload() {
+          reloadedComponents.push(this.getName());
+        }
+      }
+
+      lifecycle.registerComponent(
+        new ReloadableComponent(logger, { name: 'comp1' }),
+      );
+
+      await lifecycle.startAllComponents();
+      await lifecycle.triggerReload();
+
+      // Callback was called but it invoked broadcast, so components reloaded
+      expect(reloadedComponents).toEqual(['comp1']);
+    });
+  });
+
+  describe('triggerInfo() and triggerDebug()', () => {
+    test('should emit signal events', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+      const events: string[] = [];
+
+      lifecycle.on('signal:info', () => {
+        events.push('info');
+      });
+      lifecycle.on('signal:debug', () => {
+        events.push('debug');
+      });
+
+      await lifecycle.triggerInfo();
+      await lifecycle.triggerDebug();
+
+      expect(events).toEqual(['info', 'debug']);
+    });
+
+    test('should call custom info callback instead of broadcasting', async () => {
+      let wasCustomCallbackCalled = false;
+      let wasBroadcastFnProvided = false;
+
+      const lifecycle = new LifecycleManager({
+        logger,
+        onInfoRequested: (broadcastInfo) => {
+          wasCustomCallbackCalled = true;
+          wasBroadcastFnProvided = typeof broadcastInfo === 'function';
+        },
+      });
+
+      class InfoComponent extends TestComponent {
+        public onInfo() {
+          throw new Error('Should not be called');
+        }
+      }
+
+      lifecycle.registerComponent(new InfoComponent(logger, { name: 'comp1' }));
+
+      await lifecycle.startAllComponents();
+      const result = await lifecycle.triggerInfo();
+
+      expect(wasCustomCallbackCalled).toBe(true);
+      expect(wasBroadcastFnProvided).toBe(true);
+      expect(result.results).toHaveLength(0); // Custom callback, no broadcast
+    });
+
+    test('should allow custom info callback to call broadcastInfo', async () => {
+      const notifiedComponents: string[] = [];
+
+      const lifecycle = new LifecycleManager({
+        logger,
+        onInfoRequested: async (broadcastInfo) => {
+          // Do custom logic then broadcast
+          await broadcastInfo();
+        },
+      });
+
+      class InfoComponent extends TestComponent {
+        public onInfo() {
+          notifiedComponents.push(this.getName());
+        }
+      }
+
+      lifecycle.registerComponent(new InfoComponent(logger, { name: 'comp1' }));
+
+      await lifecycle.startAllComponents();
+      await lifecycle.triggerInfo();
+
+      // Callback was called but it invoked broadcast, so components notified
+      expect(notifiedComponents).toEqual(['comp1']);
+    });
+
+    test('should call custom debug callback instead of broadcasting', async () => {
+      let wasCustomCallbackCalled = false;
+      let wasBroadcastFnProvided = false;
+
+      const lifecycle = new LifecycleManager({
+        logger,
+        onDebugRequested: (broadcastDebug) => {
+          wasCustomCallbackCalled = true;
+          wasBroadcastFnProvided = typeof broadcastDebug === 'function';
+        },
+      });
+
+      class DebugComponent extends TestComponent {
+        public onDebug() {
+          throw new Error('Should not be called');
+        }
+      }
+
+      lifecycle.registerComponent(
+        new DebugComponent(logger, { name: 'comp1' }),
+      );
+
+      await lifecycle.startAllComponents();
+      const result = await lifecycle.triggerDebug();
+
+      expect(wasCustomCallbackCalled).toBe(true);
+      expect(wasBroadcastFnProvided).toBe(true);
+      expect(result.results).toHaveLength(0); // Custom callback, no broadcast
+    });
+
+    test('should allow custom debug callback to call broadcastDebug', async () => {
+      const notifiedComponents: string[] = [];
+
+      const lifecycle = new LifecycleManager({
+        logger,
+        onDebugRequested: async (broadcastDebug) => {
+          // Do custom logic then broadcast
+          await broadcastDebug();
+        },
+      });
+
+      class DebugComponent extends TestComponent {
+        public onDebug() {
+          notifiedComponents.push(this.getName());
+        }
+      }
+
+      lifecycle.registerComponent(
+        new DebugComponent(logger, { name: 'comp1' }),
+      );
+
+      await lifecycle.startAllComponents();
+      await lifecycle.triggerDebug();
+
+      // Callback was called but it invoked broadcast, so components notified
+      expect(notifiedComponents).toEqual(['comp1']);
+    });
+
+    test('should broadcast to components if no info handler configured', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+      const notifiedComponents: string[] = [];
+
+      class InfoComponent extends TestComponent {
+        public onInfo() {
+          notifiedComponents.push(this.getName());
+        }
+      }
+
+      lifecycle.registerComponent(new InfoComponent(logger, { name: 'comp1' }));
+
+      await lifecycle.startAllComponents();
+      const result = await lifecycle.triggerInfo();
+
+      expect(result.signal).toBe('info');
+      expect(result.results).toHaveLength(1);
+      expect(notifiedComponents).toEqual(['comp1']);
+    });
+
+    test('should broadcast to components if no debug handler configured', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+      const notifiedComponents: string[] = [];
+
+      class DebugComponent extends TestComponent {
+        public onDebug() {
+          notifiedComponents.push(this.getName());
+        }
+      }
+
+      lifecycle.registerComponent(
+        new DebugComponent(logger, { name: 'comp1' }),
+      );
+
+      await lifecycle.startAllComponents();
+      const result = await lifecycle.triggerDebug();
+
+      expect(result.signal).toBe('debug');
+      expect(result.results).toHaveLength(1);
+      // Warning should be logged (verified by manual inspection)
+    });
+  });
+
+  describe('Signal handling during startup', () => {
+    test('should only reload already-started components during startup', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+      const reloadedComponents: string[] = [];
+      let wasReloadAttempted = false;
+
+      class SlowStartComponent extends TestComponent {
+        public async start() {
+          // Simulate slow startup
+          await new Promise((resolve) => setTimeout(resolve, 100));
+        }
+
+        public onReload() {
+          reloadedComponents.push(this.getName());
+        }
+      }
+
+      class FastStartComponent extends TestComponent {
+        public start(): void {
+          // Fast startup
+          wasReloadAttempted = true;
+        }
+
+        public onReload() {
+          reloadedComponents.push(this.getName());
+        }
+      }
+
+      lifecycle.registerComponent(
+        new FastStartComponent(logger, { name: 'fast' }),
+      );
+      lifecycle.registerComponent(
+        new SlowStartComponent(logger, { name: 'slow' }),
+      );
+
+      // Start startup, don't wait
+      const startPromise = lifecycle.startAllComponents();
+
+      // Trigger reload while startup is in progress
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      await lifecycle.triggerReload();
+
+      // Wait for startup to complete
+      await startPromise;
+
+      // Fast component should have reloaded (it was already running)
+      // Slow component was still starting, so it shouldn't have reloaded
+      expect(wasReloadAttempted).toBe(true);
+      expect(reloadedComponents).toContain('fast');
+    });
+  });
+
+  describe('getSignalStatus()', () => {
+    test('should return correct status when not attached', () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      const status = lifecycle.getSignalStatus();
+
+      expect(status.isAttached).toBe(false);
+      expect(status.handlers.shutdown).toBe(false);
+      expect(status.handlers.reload).toBe(false);
+      expect(status.handlers.info).toBe(false);
+      expect(status.handlers.debug).toBe(false);
+      expect(status.listeningFor.shutdownSignals).toBe(false);
+      expect(status.listeningFor.reloadSignal).toBe(false);
+      expect(status.listeningFor.infoSignal).toBe(false);
+      expect(status.listeningFor.debugSignal).toBe(false);
+    });
+
+    test('should return correct status when attached', () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      lifecycle.attachSignals();
+      const status = lifecycle.getSignalStatus();
+
+      expect(status.isAttached).toBe(true);
+      expect(status.handlers.shutdown).toBe(true);
+      expect(status.listeningFor.shutdownSignals).toBe(true);
+    });
+
+    test('should reflect custom handlers in status', () => {
+      const lifecycle = new LifecycleManager({
+        logger,
+        onReloadRequested: () => {},
+        onInfoRequested: () => {},
+        onDebugRequested: () => {},
+      });
+
+      lifecycle.attachSignals();
+      const status = lifecycle.getSignalStatus();
+
+      expect(status.handlers.reload).toBe(true);
+      expect(status.handlers.info).toBe(true);
+      expect(status.handlers.debug).toBe(true);
+    });
+
+    test('should track shutdownMethod in status', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      // Initially null
+      expect(lifecycle.getSignalStatus().shutdownMethod).toBeNull();
+
+      // Start components
+      lifecycle.registerComponent(new TestComponent(logger, { name: 'comp1' }));
+      await lifecycle.startAllComponents();
+
+      // Manual shutdown (default method is 'manual')
+      await lifecycle.stopAllComponents();
+      expect(lifecycle.getSignalStatus().shutdownMethod).toBe('manual');
+
+      // Start again - should clear shutdownMethod
+      await lifecycle.startAllComponents();
+      expect(lifecycle.getSignalStatus().shutdownMethod).toBeNull();
+
+      // Shutdown with specific method (simulating signal)
+      const shutdownCompleted = new Promise<void>((resolve) => {
+        lifecycle.on('lifecycle-manager:shutdown-completed', () => resolve());
+      });
+      (lifecycle as any).handleShutdownRequest('SIGTERM');
+      await shutdownCompleted;
+      expect(lifecycle.getSignalStatus().shutdownMethod).toBe('SIGTERM');
+
+      // Start again - should clear
+      await lifecycle.startAllComponents();
+      expect(lifecycle.getSignalStatus().shutdownMethod).toBeNull();
     });
   });
 });

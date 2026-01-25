@@ -25,12 +25,21 @@ import type {
   ShutdownResult,
   RestartResult,
   DependencyValidationResult,
+  ShutdownMethod,
+  SignalBroadcastResult,
+  ComponentSignalResult,
+  LifecycleSignalStatus,
 } from './types';
 import {
   ComponentStartTimeoutError,
   ComponentStopTimeoutError,
   DependencyCycleError,
 } from './errors';
+import {
+  ProcessSignalManager,
+  type ShutdownSignal,
+} from '../process-signal-manager';
+import { isPromise } from '../is-promise';
 
 /**
  * LifecycleManager - Comprehensive lifecycle orchestration system
@@ -68,14 +77,36 @@ export class LifecycleManager extends EventEmitterProtected {
   private isStarting = false;
   private isStarted = false;
   private isShuttingDown = false;
+  private shutdownMethod: ShutdownMethod | null = null;
+
+  // Signal management
+  private processSignalManager: ProcessSignalManager | null = null;
+  private readonly onReloadRequested?: (
+    broadcastReload: () => Promise<SignalBroadcastResult>,
+  ) => void | Promise<void>;
+  private readonly onInfoRequested?: (
+    broadcastInfo: () => Promise<SignalBroadcastResult>,
+  ) => void | Promise<void>;
+  private readonly onDebugRequested?: (
+    broadcastDebug: () => Promise<SignalBroadcastResult>,
+  ) => void | Promise<void>;
 
   constructor(options: LifecycleManagerOptions & { logger: Logger }) {
     super();
+
+    if (!options.logger) {
+      throw new Error('LifecycleManager requires a root logger');
+    }
 
     this.name = options.name ?? 'lifecycle-manager';
     this.rootLogger = options.logger;
     this.logger = this.rootLogger.service(this.name);
     this.shutdownWarningTimeoutMS = options.shutdownWarningTimeoutMS ?? 500;
+
+    // Store custom signal callbacks
+    this.onReloadRequested = options.onReloadRequested;
+    this.onInfoRequested = options.onInfoRequested;
+    this.onDebugRequested = options.onDebugRequested;
   }
 
   // ============================================================================
@@ -1058,8 +1089,9 @@ export class LifecycleManager extends EventEmitterProtected {
       };
     }
 
-    // Set starting flag
+    // Set starting flag and clear previous shutdown state
     this.isStarting = true;
+    this.shutdownMethod = null; // Clear previous shutdown method on fresh start
     this.logger.info('Starting all components');
 
     // Get startup order (topological sort)
@@ -1255,110 +1287,10 @@ export class LifecycleManager extends EventEmitterProtected {
    *
    * Components stop in reverse topological order (dependents before dependencies).
    */
+
   public async stopAllComponents(): Promise<ShutdownResult> {
-    const startTime = Date.now();
-
-    // Reject if already shutting down
-    if (this.isShuttingDown) {
-      this.logger.warn(
-        'Cannot stop all components: shutdown already in progress',
-      );
-      return {
-        success: true,
-        stoppedComponents: [],
-        stalledComponents: [],
-        durationMS: 0,
-      };
-    }
-
-    // Set shutting down flag
-    this.isShuttingDown = true;
-    const isDuringStartup = this.isStarting;
-    this.logger.info('Stopping all components');
-    this.safeEmit('lifecycle-manager:shutdown-initiated', {
-      method: 'manual',
-      duringStartup: isDuringStartup,
-    });
-
-    // Get shutdown order (reverse topological order)
-    let shutdownOrder: string[];
-
-    try {
-      const startupOrder = this.getStartupOrderInternal();
-      shutdownOrder = [...startupOrder].reverse();
-    } catch (error) {
-      // If we can't resolve order due to cycle, fall back to reverse registration order
-      this.logger.warn(
-        'Could not resolve shutdown order, using registration order',
-        {
-          params: { error: (error as Error).message },
-        },
-      );
-      shutdownOrder = this.components.map((c) => c.getName()).reverse();
-    }
-
-    // Filter to only running components
-    const runningComponentsToStop = shutdownOrder.filter((name) =>
-      this.isComponentRunning(name),
-    );
-
-    const stoppedComponents: string[] = [];
-    const stalledComponents: ComponentStallInfo[] = [];
-
-    try {
-      await this.runShutdownWarningPhase(runningComponentsToStop);
-
-      // Stop each component in reverse dependency order
-      for (const name of runningComponentsToStop) {
-        this.logger.entity(name).info('Stopping component');
-        // Use internal method to bypass bulk operation checks
-        const result = await this.stopComponentInternal(name);
-
-        if (result.success) {
-          stoppedComponents.push(name);
-        } else {
-          // Component failed to stop - track as stalled but continue
-          this.logger
-            .entity(name)
-            .error('Component failed to stop, continuing with others', {
-              params: { error: result.error?.message },
-            });
-
-          const stallInfo = this.stalledComponents.get(name);
-          if (stallInfo) {
-            stalledComponents.push(stallInfo);
-          }
-        }
-      }
-
-      const durationMS = Date.now() - startTime;
-      const isSuccess = stalledComponents.length === 0;
-
-      this.logger[isSuccess ? 'success' : 'warn']('Shutdown completed', {
-        params: {
-          stopped: stoppedComponents.length,
-          stalled: stalledComponents.length,
-          durationMS,
-        },
-      });
-
-      this.safeEmit('lifecycle-manager:shutdown-completed', {
-        durationMS,
-        stoppedComponents,
-        stalledComponents,
-      });
-
-      return {
-        success: isSuccess,
-        stoppedComponents,
-        stalledComponents,
-        durationMS,
-      };
-    } finally {
-      // Reset state
-      this.isShuttingDown = false;
-      this.isStarted = false;
-    }
+    // always use manual method for external public API as not from a signal
+    return this.stopAllComponentsInternal('manual');
   }
 
   /**
@@ -1370,7 +1302,7 @@ export class LifecycleManager extends EventEmitterProtected {
     this.logger.info('Restarting all components');
 
     // Phase 1: Stop all components
-    const shutdownResult = await this.stopAllComponents();
+    const shutdownResult = await this.stopAllComponentsInternal('manual');
 
     // Phase 2: Start all components
     const startupResult = await this.startAllComponents(options);
@@ -1551,6 +1483,222 @@ export class LifecycleManager extends EventEmitterProtected {
       componentName: name,
       status: this.getComponentStatus(name),
     };
+  }
+
+  // ============================================================================
+  // Signal Integration
+  // ============================================================================
+
+  /**
+   * Attach signal handlers for graceful shutdown, reload, info, and debug.
+   * Creates ProcessSignalManager instance if needed and attaches it.
+   * Idempotent - calling multiple times has no effect.
+   */
+  public attachSignals(): void {
+    // Check if already attached (not just if instance exists)
+    if (this.processSignalManager?.getStatus().isAttached) {
+      return; // Already attached
+    }
+
+    // Create instance if it doesn't exist
+    if (!this.processSignalManager) {
+      this.processSignalManager = new ProcessSignalManager({
+        onShutdownRequested: (method: ShutdownSignal) => {
+          this.handleShutdownRequest(method);
+        },
+        // Note: Signal-triggered handlers are fire-and-forget by design.
+        // Node.js signal handlers (process.on) cannot return values, so these
+        // async handlers execute but their return values are not accessible.
+        // Use triggerReload(), triggerInfo(), triggerDebug() for programmatic
+        // access to results.
+        onReloadRequested: () => this.handleReloadRequest('signal'),
+        onInfoRequested: () => this.handleInfoRequest('signal'),
+        onDebugRequested: () => this.handleDebugRequest('signal'),
+      });
+    }
+
+    this.processSignalManager.attach();
+    this.safeEmit('lifecycle-manager:signals-attached');
+  }
+
+  /**
+   * Detach signal handlers.
+   * Idempotent - calling multiple times has no effect.
+   */
+  public detachSignals(): void {
+    if (!this.processSignalManager?.getStatus().isAttached) {
+      return; // Not attached
+    }
+
+    this.processSignalManager.detach();
+    this.safeEmit('lifecycle-manager:signals-detached');
+  }
+
+  /**
+   * Get status information about signal handling.
+   */
+  public getSignalStatus(): LifecycleSignalStatus {
+    if (!this.processSignalManager) {
+      return {
+        isAttached: false,
+        handlers: {
+          shutdown: false,
+          reload: false,
+          info: false,
+          debug: false,
+        },
+        listeningFor: {
+          shutdownSignals: false,
+          reloadSignal: false,
+          infoSignal: false,
+          debugSignal: false,
+          keypresses: false,
+        },
+        shutdownMethod: this.shutdownMethod,
+      };
+    }
+
+    return {
+      ...this.processSignalManager.getStatus(),
+      shutdownMethod: this.shutdownMethod,
+    };
+  }
+
+  /**
+   * Manually trigger a reload event.
+   * @returns Result of broadcasting reload to components
+   */
+  public async triggerReload(): Promise<SignalBroadcastResult> {
+    return this.handleReloadRequest();
+  }
+
+  /**
+   * Manually trigger an info event.
+   * @returns Result of broadcasting info to components
+   */
+  public async triggerInfo(): Promise<SignalBroadcastResult> {
+    return this.handleInfoRequest();
+  }
+
+  /**
+   * Manually trigger a debug event.
+   * @returns Result of broadcasting debug to components
+   */
+  public async triggerDebug(): Promise<SignalBroadcastResult> {
+    return this.handleDebugRequest();
+  }
+
+  // ============================================================================
+  // Private Helper Methods
+  // ============================================================================
+
+  public async stopAllComponentsInternal(
+    method: ShutdownMethod,
+  ): Promise<ShutdownResult> {
+    const startTime = Date.now();
+
+    // Reject if already shutting down
+    if (this.isShuttingDown) {
+      this.logger.warn(
+        'Cannot stop all components: shutdown already in progress',
+      );
+      return {
+        success: true,
+        stoppedComponents: [],
+        stalledComponents: [],
+        durationMS: 0,
+      };
+    }
+
+    // Set shutting down flag and track how shutdown was triggered
+    this.isShuttingDown = true;
+    this.shutdownMethod = method;
+    const isDuringStartup = this.isStarting;
+    this.logger.info('Stopping all components', { params: { method } });
+    this.safeEmit('lifecycle-manager:shutdown-initiated', {
+      method,
+      duringStartup: isDuringStartup,
+    });
+
+    // Get shutdown order (reverse topological order)
+    let shutdownOrder: string[];
+
+    try {
+      const startupOrder = this.getStartupOrderInternal();
+      shutdownOrder = [...startupOrder].reverse();
+    } catch (error) {
+      // If we can't resolve order due to cycle, fall back to reverse registration order
+      this.logger.warn(
+        'Could not resolve shutdown order, using registration order',
+        {
+          params: { error: (error as Error).message },
+        },
+      );
+      shutdownOrder = this.components.map((c) => c.getName()).reverse();
+    }
+
+    // Filter to only running components
+    const runningComponentsToStop = shutdownOrder.filter((name) =>
+      this.isComponentRunning(name),
+    );
+
+    const stoppedComponents: string[] = [];
+    const stalledComponents: ComponentStallInfo[] = [];
+
+    try {
+      await this.runShutdownWarningPhase(runningComponentsToStop);
+
+      // Stop each component in reverse dependency order
+      for (const name of runningComponentsToStop) {
+        this.logger.entity(name).info('Stopping component');
+        // Use internal method to bypass bulk operation checks
+        const result = await this.stopComponentInternal(name);
+
+        if (result.success) {
+          stoppedComponents.push(name);
+        } else {
+          // Component failed to stop - track as stalled but continue
+          this.logger
+            .entity(name)
+            .error('Component failed to stop, continuing with others', {
+              params: { error: result.error?.message },
+            });
+
+          const stallInfo = this.stalledComponents.get(name);
+          if (stallInfo) {
+            stalledComponents.push(stallInfo);
+          }
+        }
+      }
+
+      const durationMS = Date.now() - startTime;
+      const isSuccess = stalledComponents.length === 0;
+
+      this.logger[isSuccess ? 'success' : 'warn']('Shutdown completed', {
+        params: {
+          stopped: stoppedComponents.length,
+          stalled: stalledComponents.length,
+          durationMS,
+        },
+      });
+
+      this.safeEmit('lifecycle-manager:shutdown-completed', {
+        durationMS,
+        stoppedComponents,
+        stalledComponents,
+      });
+
+      return {
+        success: isSuccess,
+        stoppedComponents,
+        stalledComponents,
+        durationMS,
+      };
+    } finally {
+      // Reset state
+      this.isShuttingDown = false;
+      this.isStarted = false;
+    }
   }
 
   /**
@@ -2703,5 +2851,290 @@ export class LifecycleManager extends EventEmitterProtected {
     }
 
     return cycles;
+  }
+
+  /**
+   * Handle shutdown signal - initiates stopAllComponents().
+   * Double signal protection: if already shutting down, log warning and ignore.
+   */
+  private handleShutdownRequest(method: ShutdownSignal): void {
+    if (this.isShuttingDown) {
+      this.logger.warn('Shutdown already in progress, ignoring signal', {
+        params: { method },
+      });
+      return;
+    }
+
+    this.logger.info('Shutdown signal received', { params: { method } });
+    this.safeEmit('signal:shutdown', { method });
+
+    // Initiate shutdown asynchronously (don't await in signal handler)
+    void this.stopAllComponentsInternal(method);
+  }
+
+  /**
+   * Handle reload request - calls custom callback or broadcasts to components.
+   *
+   * When called from signal handlers (source='signal'), the Promise is started
+   * but not awaited due to Node.js signal handler constraints. Components are
+   * still notified and the work completes, but return values are not accessible.
+   *
+   * When called from manual triggers (source='trigger'), the Promise is awaited
+   * and results are returned for programmatic use.
+   *
+   * @param source - Whether triggered from signal manager or manual trigger
+   */
+  private async handleReloadRequest(
+    source: 'signal' | 'trigger' = 'trigger',
+  ): Promise<SignalBroadcastResult> {
+    this.logger.info('Reload request received', { params: { source } });
+    this.safeEmit('signal:reload');
+
+    if (this.onReloadRequested) {
+      // Call custom callback with broadcast function
+      const broadcastFn = () => this.broadcastReload();
+      const result = this.onReloadRequested(broadcastFn);
+
+      if (isPromise(result)) {
+        await result;
+      }
+
+      // Return empty result (custom callback handled it)
+      return {
+        signal: 'reload',
+        results: [],
+      };
+    }
+
+    // No custom callback - broadcast to all components
+    return this.broadcastReload();
+  }
+
+  /**
+   * Handle info request - calls custom callback or broadcasts to components.
+   *
+   * When called from signal handlers, the Promise executes but return values
+   * are not accessible due to Node.js signal handler constraints.
+   *
+   * @param source - Whether triggered from signal manager or manual trigger
+   */
+  private async handleInfoRequest(
+    source: 'signal' | 'trigger' = 'trigger',
+  ): Promise<SignalBroadcastResult> {
+    this.logger.info('Info request received', { params: { source } });
+    this.safeEmit('signal:info');
+
+    if (this.onInfoRequested) {
+      // Call custom callback with broadcast function
+      const broadcastFn = () => this.broadcastInfo();
+      const result = this.onInfoRequested(broadcastFn);
+      if (isPromise(result)) {
+        await result;
+      }
+
+      // Return empty result (custom callback handled it)
+      return {
+        signal: 'info',
+        results: [],
+      };
+    }
+
+    // No custom callback - broadcast to all components
+    return this.broadcastInfo();
+  }
+
+  /**
+   * Handle debug request - calls custom callback or broadcasts to components.
+   *
+   * When called from signal handlers, the Promise executes but return values
+   * are not accessible due to Node.js signal handler constraints.
+   *
+   * @param source - Whether triggered from signal manager or manual trigger
+   */
+  private async handleDebugRequest(
+    source: 'signal' | 'trigger' = 'trigger',
+  ): Promise<SignalBroadcastResult> {
+    this.logger.info('Debug request received', { params: { source } });
+    this.safeEmit('signal:debug');
+
+    if (this.onDebugRequested) {
+      // Call custom callback with broadcast function
+      const broadcastFn = () => this.broadcastDebug();
+      const result = this.onDebugRequested(broadcastFn);
+      if (isPromise(result)) {
+        await result;
+      }
+
+      // Return empty result (custom callback handled it)
+      return {
+        signal: 'debug',
+        results: [],
+      };
+    }
+
+    // No custom callback - broadcast to all components
+    return this.broadcastDebug();
+  }
+
+  /**
+   * Broadcast reload signal to all running components.
+   * Calls onReload() on components that implement it.
+   * Continues on errors - collects all results.
+   */
+  private async broadcastReload(): Promise<SignalBroadcastResult> {
+    const results: ComponentSignalResult[] = [];
+
+    // Only call onReload() on running components
+    const componentsToReload = this.components.filter((component) =>
+      this.runningComponents.has(component.getName()),
+    );
+
+    if (this.isStarting) {
+      this.logger.info(
+        'Reload during startup: only reloading already-started components',
+      );
+    }
+
+    for (const component of componentsToReload) {
+      const name = component.getName();
+
+      if (!component.onReload) {
+        // Component doesn't implement onReload
+        results.push({ name, called: false, error: null });
+        continue;
+      }
+
+      this.safeEmit('component:reload-started', { name });
+
+      try {
+        const result = component.onReload();
+        if (isPromise(result)) {
+          await result;
+        }
+
+        this.safeEmit('component:reload-completed', { name });
+        results.push({ name, called: true, error: null });
+      } catch (error) {
+        const err = error instanceof Error ? error : new Error(String(error));
+        this.logger
+          .entity(name)
+          .error('Reload failed', { params: { error: err } });
+        this.safeEmit('component:reload-failed', { name, error: err });
+        results.push({ name, called: true, error: err });
+      }
+    }
+
+    return {
+      signal: 'reload',
+      results,
+    };
+  }
+
+  /**
+   * Broadcast info signal to all running components.
+   * Calls onInfo() on components that implement it.
+   * Continues on errors - collects all results.
+   */
+  private async broadcastInfo(): Promise<SignalBroadcastResult> {
+    const results: ComponentSignalResult[] = [];
+
+    // Only call onInfo() on running components
+    const componentsToNotify = this.components.filter((component) =>
+      this.runningComponents.has(component.getName()),
+    );
+
+    if (this.isStarting) {
+      this.logger.info(
+        'Info during startup: only notifying already-started components',
+      );
+    }
+
+    for (const component of componentsToNotify) {
+      const name = component.getName();
+
+      if (!component.onInfo) {
+        // Component doesn't implement onInfo
+        results.push({ name, called: false, error: null });
+        continue;
+      }
+
+      this.safeEmit('component:info-started', { name });
+
+      try {
+        const result = component.onInfo();
+        if (isPromise(result)) {
+          await result;
+        }
+
+        this.safeEmit('component:info-completed', { name });
+        results.push({ name, called: true, error: null });
+      } catch (error) {
+        const err = error instanceof Error ? error : new Error(String(error));
+        this.logger
+          .entity(name)
+          .error('Info handler failed', { params: { error: err } });
+        this.safeEmit('component:info-failed', { name, error: err });
+        results.push({ name, called: true, error: err });
+      }
+    }
+
+    return {
+      signal: 'info',
+      results,
+    };
+  }
+
+  /**
+   * Broadcast debug signal to all running components.
+   * Calls onDebug() on components that implement it.
+   * Continues on errors - collects all results.
+   */
+  private async broadcastDebug(): Promise<SignalBroadcastResult> {
+    const results: ComponentSignalResult[] = [];
+
+    // Only call onDebug() on running components
+    const componentsToNotify = this.components.filter((component) =>
+      this.runningComponents.has(component.getName()),
+    );
+
+    if (this.isStarting) {
+      this.logger.info(
+        'Debug during startup: only notifying already-started components',
+      );
+    }
+
+    for (const component of componentsToNotify) {
+      const name = component.getName();
+
+      if (!component.onDebug) {
+        // Component doesn't implement onDebug
+        results.push({ name, called: false, error: null });
+        continue;
+      }
+
+      this.safeEmit('component:debug-started', { name });
+
+      try {
+        const result = component.onDebug();
+        if (isPromise(result)) {
+          await result;
+        }
+
+        this.safeEmit('component:debug-completed', { name });
+        results.push({ name, called: true, error: null });
+      } catch (error) {
+        const err = error instanceof Error ? error : new Error(String(error));
+        this.logger
+          .entity(name)
+          .error('Debug handler failed', { params: { error: err } });
+        this.safeEmit('component:debug-failed', { name, error: err });
+        results.push({ name, called: true, error: err });
+      }
+    }
+
+    return {
+      signal: 'debug',
+      results,
+    };
   }
 }

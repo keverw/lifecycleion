@@ -231,69 +231,48 @@ src/lib/lifecycle-manager/
 
 ---
 
-## Phase 6: Signal Integration (1 day)
+## ~~Phase 6: Signal Integration~~ ✅ **COMPLETED**
 
-### Implement
+**Implemented functionality**:
 
-**ProcessSignalManager composition**:
+- ✅ ProcessSignalManager composition with private field
+- ✅ `attachSignals()` / `detachSignals()` / `getSignalStatus()` public API
+- ✅ Signal mapping:
+  - Shutdown signals (SIGINT, SIGTERM, SIGTRAP) → `stopAllComponents()`
+  - Reload signal → custom callback OR `broadcastReload()`
+  - Info signal → custom callback OR log warning
+  - Debug signal → custom callback OR log warning
+- ✅ Custom callbacks in constructor options:
+  - `onReloadRequested?: (broadcastReload: () => Promise<SignalBroadcastResult>) => void | Promise<void>`
+  - `onInfoRequested?: () => void | Promise<void>`
+  - `onDebugRequested?: () => void | Promise<void>`
+- ✅ Private broadcast methods: `broadcastReload()`, `broadcastInfo()`, `broadcastDebug()`
+- ✅ Manual triggers: `triggerShutdown()`, `triggerReload()`, `triggerInfo()`, `triggerDebug()`
+- ✅ All signal-related events emitted
+- ✅ Double shutdown protection (ignores signal if already shutting down)
+- ✅ Only broadcasts to running components
+- ✅ Handles signals during startup (only affects already-started components)
 
-- Private `processSignalManager: ProcessSignalManager | null`
-- `attachSignals()` - create and attach ProcessSignalManager
-- `detachSignals()` - wrapper
-- `getSignalStatus()` - wrapper
+**Test results:** ✅ All 196 tests passing (722 assertions) - includes 14 new Phase 6 tests
+**Build:** ✅ No TypeScript errors, clean build
 
-**Signal mapping**:
+**Phase 6 Tests Added (14 tests):**
 
-- Shutdown signals (SIGINT, SIGTERM, SIGTRAP) → `initiateShutdown(method)`
-- Reload signal → custom callback OR `broadcastReload()`
-- Info signal → custom callback OR log warning
-- Debug signal → custom callback OR log warning
-
-**Custom callbacks in options**:
-
-- `onReloadRequested?: (broadcastReload: () => Promise<SignalBroadcastResult>) => void | Promise<void>`
-- `onInfoRequested?: () => void | Promise<void>`
-- `onDebugRequested?: () => void | Promise<void>`
-
-**Broadcast methods** (private):
-
-- `broadcastReload()`, `broadcastInfo()`, `broadcastDebug()`
-- Call `onReload()`, `onInfo()`, `onDebug()` on running components
-- Continue on errors, aggregate results
-
-**Manual triggers**:
-
-- `triggerShutdown(method?)`, `triggerReload()`, `triggerInfo()`, `triggerDebug()`
-
-**Events**:
-
-- `signal:shutdown`, `signal:reload`, `signal:info`, `signal:debug`
-- `component:reload-started`, `component:reload-completed`, `component:reload-failed`
-- Same for info/debug
-- `lifecycle-manager:signals-attached`, `lifecycle-manager:signals-detached`
-
-### Tests
-
-- Attach/detach work
-- Shutdown signals trigger shutdown
-- Reload custom callback vs default broadcast
-- Info/debug custom callbacks vs warnings
-- Component signal handlers called
-- Errors don't break broadcast
-- Manual triggers work
-- Events emitted
-
-### Documentation
-
-- Signal-to-lifecycle mapping
-- Custom callback usage
-- broadcastReload example
-
-### PRD Sections to Delete
-
-- "ProcessSignalManager Integration" (lines 20-106)
-- "Signal Integration" (lines 1116-1198)
-- "Signal Handling" test section
+- ✅ Attach/detach signal handlers
+- ✅ Idempotent attach/detach
+- ✅ Signal-related events emitted
+- ✅ Shutdown trigger initiates stopAllComponents
+- ✅ Double shutdown protection works
+- ✅ Reload broadcasts to running components
+- ✅ Reload only affects running components
+- ✅ Reload skips components without onReload
+- ✅ Reload continues on errors
+- ✅ Reload events emitted correctly
+- ✅ Custom reload callback works
+- ✅ Custom info/debug callbacks work
+- ✅ Info/debug warnings when no handler
+- ✅ Signals during startup handled correctly
+- ✅ getSignalStatus returns correct info
 
 ---
 

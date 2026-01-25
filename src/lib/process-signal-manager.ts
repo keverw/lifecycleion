@@ -188,7 +188,7 @@ export interface ProcessSignalManagerOptions {
    * - Process signal: SIGHUP
    * - Keyboard: R key press (case-insensitive)
    */
-  onReloadRequested?: () => void | Promise<void>;
+  onReloadRequested?: () => void | Promise<unknown>;
 
   /**
    * Optional callback invoked when info/stats are requested.
@@ -199,7 +199,7 @@ export interface ProcessSignalManagerOptions {
    *
    * Common uses: Print stats, health check, show metrics
    */
-  onInfoRequested?: () => void | Promise<void>;
+  onInfoRequested?: () => void | Promise<unknown>;
 
   /**
    * Optional callback invoked when debug mode is toggled or verbose info is requested.
@@ -210,7 +210,7 @@ export interface ProcessSignalManagerOptions {
    *
    * Common uses: Toggle debug mode, dump full state, enable verbose logging
    */
-  onDebugRequested?: () => void | Promise<void>;
+  onDebugRequested?: () => void | Promise<unknown>;
 
   /**
    * Custom name for the shutdown callback used in error reporting.
@@ -273,9 +273,9 @@ export class ProcessSignalManager {
   private onShutdownRequested?: (
     method: ShutdownSignal,
   ) => void | Promise<void>;
-  private onReloadRequested?: () => void | Promise<void>;
-  private onInfoRequested?: () => void | Promise<void>;
-  private onDebugRequested?: () => void | Promise<void>;
+  private onReloadRequested?: () => void | Promise<unknown>;
+  private onInfoRequested?: () => void | Promise<unknown>;
+  private onDebugRequested?: () => void | Promise<unknown>;
 
   private shutdownCallbackName: string;
   private reloadCallbackName: string;
