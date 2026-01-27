@@ -311,6 +311,31 @@ export interface MessageResult {
 
   /** Error if handler threw */
   error: Error | null;
+
+  /** True if handler timed out before responding */
+  timedOut: boolean;
+}
+
+/**
+ * Options for sending a message to a component
+ */
+export interface SendMessageOptions {
+  /**
+   * Timeout in milliseconds for awaiting a response
+   * (default: manager messageTimeoutMS, 0 = disabled)
+   */
+  timeout?: number;
+}
+
+/**
+ * Options for broadcasting messages to components
+ */
+export interface BroadcastOptions extends SendMessageOptions {
+  /** Include non-running components (default: false) */
+  includeNonRunning?: boolean;
+
+  /** Filter to specific component names (default: all components) */
+  componentNames?: string[];
 }
 
 /**
@@ -331,6 +356,9 @@ export interface BroadcastResult {
 
   /** Error if handler threw */
   error: Error | null;
+
+  /** True if handler timed out before responding */
+  timedOut: boolean;
 }
 
 /**
@@ -486,6 +514,43 @@ export interface LifecycleCommon extends EventEmitterSurface {
   triggerReload(): Promise<SignalBroadcastResult>;
   triggerInfo(): Promise<SignalBroadcastResult>;
   triggerDebug(): Promise<SignalBroadcastResult>;
+
+  // Messaging, Health, Values methods
+  sendMessageToComponent(
+    componentName: string,
+    payload: unknown,
+    options?: SendMessageOptions,
+  ): Promise<MessageResult>;
+  broadcastMessage(
+    payload: unknown,
+    options?: BroadcastOptions,
+  ): Promise<BroadcastResult[]>;
+  checkComponentHealth(name: string): Promise<HealthCheckResult>;
+  checkAllHealth(): Promise<HealthReport>;
+  getValue<T = unknown>(componentName: string, key: string): ValueResult<T>;
+}
+
+/**
+ * Internal callback functions passed to ComponentLifecycle
+ * These allow ComponentLifecycle to call internal implementations with 'from' tracking
+ */
+export interface LifecycleInternalCallbacks {
+  sendMessageInternal: (
+    componentName: string,
+    payload: unknown,
+    from: string | null,
+    options?: SendMessageOptions,
+  ) => Promise<MessageResult>;
+  broadcastMessageInternal: (
+    payload: unknown,
+    from: string | null,
+    options?: BroadcastOptions,
+  ) => Promise<BroadcastResult[]>;
+  getValueInternal: <T = unknown>(
+    componentName: string,
+    key: string,
+    from: string | null,
+  ) => ValueResult<T>;
 }
 
 /**
@@ -695,6 +760,9 @@ export interface LifecycleManagerOptions {
 
   /** Global warning phase timeout in ms (default: 500, 0 = fire-and-forget, <0 = skip) */
   shutdownWarningTimeoutMS?: number;
+
+  /** Default message timeout in ms (default: 5000, 0 = disabled) */
+  messageTimeoutMS?: number;
 
   /** Auto-attach signals when first component starts (default: false) */
   attachSignalsOnStart?: boolean;

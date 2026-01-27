@@ -276,77 +276,93 @@ src/lib/lifecycle-manager/
 
 ---
 
-## Phase 7: Messaging, Health, Values (1.5 days)
+## ~~Phase 7: Messaging, Health, Values~~ ✅ **COMPLETED**
 
-### Implement
+**Implemented functionality**:
 
-**Prereq refactor (done earlier, Phase 6.x)**:
+- ✅ Component-scoped lifecycle proxy (`ComponentLifecycle`) with callback injection
+- ✅ Internal methods made private, accessed via `LifecycleInternalCallbacks`
+- ✅ `sendMessageToComponent(name, payload)`:
+  - Automatic `from` tracking (null for external, component name for component-to-component)
+  - Calls `component.onMessage(payload, from)` with sync/async support
+  - Returns `MessageResult` with sent status, data, and error
+  - Blocks during shutdown
+- ✅ `broadcastMessage(payload, options?)`:
+  - Filter by running state and component names
+  - Automatic `from` tracking
+  - Continues on errors, aggregates all results
+  - Returns `BroadcastResult[]` with per-component status
+- ✅ `checkComponentHealth(name)`:
+  - Calls `component.healthCheck()` if implemented
+  - Races against `healthCheckTimeoutMS`
+  - Normalizes boolean to `ComponentHealthResult`
+  - Returns `HealthCheckResult` with timing and details
+  - Components without handler return healthy (assume healthy)
+- ✅ `checkAllHealth()`:
+  - Checks all running components in parallel
+  - Returns `HealthReport` with aggregate status
+  - Overall healthy only if all components are healthy
+- ✅ `getValue<T>(componentName, key)`:
+  - Automatic `from` tracking
+  - Calls `component.getValue(key, from)`
+  - Returns `ValueResult<T>` with found/value/metadata
+  - Only works on running components
+- ✅ Events emitted:
+  - `component:message-sent`, `component:message-failed`
+  - `component:broadcast-started`, `component:broadcast-completed`
+  - `component:health-check-started`, `component:health-check-completed`, `component:health-check-failed`
+  - `component:value-requested`, `component:value-returned`
 
-- Component-scoped lifecycle proxy (`ComponentLifecycle`) injected into BaseComponent
-- Manager instance remains the external entry point
-- Messaging/value APIs will use the proxy to set `from` automatically (no runtime "caller tracking")
+**Test results:** ✅ All 229 tests passing (881 assertions) - includes 31 new Phase 7 tests
+**Build:** ✅ No TypeScript errors, clean build
 
-**Component messaging**:
+**Phase 7 Tests Added (31 tests):**
 
-- Private `getCallerComponentName(): string | null` - track caller via lifecycle reference
-- `sendMessageToComponent(name, payload)`:
-  - Determine `from` automatically
-  - Call `component.onMessage(payload, from)`
-  - Handle sync/async (use `isPromise()`)
-  - Return `MessageResult` with data/error
-- `broadcastMessage(payload, options?)`:
-  - Filter by running/all, componentNames
-  - Determine `from` automatically
-  - Aggregate results
-- Emit: `component:message-sent`, `component:message-failed`, `component:broadcast-started`, `component:broadcast-completed`
+- ✅ 7 tests for sendMessageToComponent()
+  - Send to running component with handler
+  - Component not found
+  - Component not running
+  - Component without handler
+  - Handler throwing error
+  - Reject during shutdown
+  - Automatic 'from' tracking
+- ✅ 7 tests for broadcastMessage()
+  - Broadcast to all running
+  - Skip non-running by default
+  - Include non-running option
+  - Filter by component names
+  - Some handlers failing
+  - Empty broadcast
+  - Automatic 'from' tracking
+- ✅ 9 tests for checkComponentHealth()
+  - Boolean result normalization
+  - Rich result with details
+  - Component not found
+  - Component not running
+  - No handler (assumes healthy)
+  - Handler throwing error
+  - Timeout handling
+  - Async health checks
+  - Boolean false = unhealthy
+- ✅ 4 tests for checkAllHealth()
+  - All healthy components
+  - Mixed health status
+  - Only running components checked
+  - Components without health check
+- ✅ 3 tests for getValue()
+  - Get value from component
+  - Component not found
+  - Component not running
+  - No handler
+  - Automatic 'from' tracking
+  - Various return types
+- ✅ 1 test for component-scoped lifecycle reference
 
-**Health checks**:
+**Architecture improvements**:
 
-- `checkComponentHealth(name)`:
-  - Call `component.healthCheck()` if implemented
-  - Race against `healthCheckTimeoutMS`
-  - Normalize boolean to `{ healthy: boolean }`
-  - Return rich result with timing
-- `checkAllHealth()`:
-  - Aggregate all component health
-  - Overall healthy = all healthy
-- Emit: `component:health-check-started`, `component:health-check-completed`, `component:health-check-failed`
-
-**Shared values**:
-
-- `getValue<T>(componentName, key)`:
-  - Determine `from` automatically
-  - Call `component.getValue(key, from)`
-  - Return `GetValueResult<T>` with found/value/metadata
-- Emit: `component:value-requested`, `component:value-returned`
-
-### Tests
-
-- Send message, return data
-- Async/sync handlers
-- `from` tracking (external = null, component = name)
-- Message to non-running rejected
-- Message during shutdown rejected
-- Error captured
-- Broadcast with filters
-- Health checks (boolean, rich, timeout, error)
-- Aggregate health
-- getValue returns value/undefined
-- Result metadata correct
-
-### Documentation
-
-- Explain `from` tracking
-- Messaging examples
-- Health check patterns
-- getValue vs onMessage
-
-### PRD Sections to Delete
-
-- "Component Messaging" (lines 312-509)
-- "Health Checks" (lines 1428-1592)
-- "Shared Values" (lines 1593-1745)
-- Corresponding test sections
+- Private internal methods with callback injection pattern
+- ComponentLifecycle receives callbacks in constructor, not public interface access
+- Cleaner separation: public API uses `null` for `from`, ComponentLifecycle uses component name
 
 ---
 

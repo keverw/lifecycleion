@@ -32,11 +32,21 @@ import type {
   LifecycleSignalStatus,
   ComponentLifecycleRef,
   LifecycleCommon,
+  MessageResult,
+  BroadcastResult,
+  BroadcastOptions,
+  SendMessageOptions,
+  HealthCheckResult,
+  HealthReport,
+  ValueResult,
+  ComponentHealthResult,
+  LifecycleInternalCallbacks,
 } from './types';
 import {
   ComponentStartTimeoutError,
   ComponentStopTimeoutError,
   DependencyCycleError,
+  MessageTimeoutError,
 } from './errors';
 import {
   ProcessSignalManager,
@@ -65,6 +75,7 @@ export class LifecycleManager
   private readonly logger: LoggerService;
   private readonly rootLogger: Logger;
   private readonly shutdownWarningTimeoutMS: number;
+  private readonly messageTimeoutMS: number;
 
   // Component management
   private components: BaseComponent[] = [];
@@ -108,6 +119,7 @@ export class LifecycleManager
     this.rootLogger = options.logger;
     this.logger = this.rootLogger.service(this.name);
     this.shutdownWarningTimeoutMS = options.shutdownWarningTimeoutMS ?? 500;
+    this.messageTimeoutMS = options.messageTimeoutMS ?? 5000;
 
     // Store custom signal callbacks
     this.onReloadRequested = options.onReloadRequested;
@@ -124,186 +136,28 @@ export class LifecycleManager
    */
   public registerComponent(
     component: BaseComponent,
-    _options?: RegisterOptions,
+    options?: RegisterOptions,
   ): RegisterComponentResult {
-    const componentName = component.getName();
-    const registrationIndexBefore = this.getComponentIndex(componentName);
+    const result = this.registerComponentInternal(
+      component,
+      'end',
+      undefined,
+      false,
+      options,
+    );
 
-    try {
-      // Block registration during shutdown
-      if (this.isShuttingDown) {
-        this.logger
-          .entity(componentName)
-          .warn('Cannot register component during shutdown');
-        this.safeEmit('component:registration-rejected', {
-          name: componentName,
-          reason: 'shutdown_in_progress',
-        });
-
-        return this.buildRegisterResultFailure({
-          componentName,
-          registrationIndexBefore,
-          code: 'shutdown_in_progress',
-          reason:
-            'Cannot register component while shutdown is in progress (isShuttingDown=true).',
-        });
-      }
-
-      // Block registration during startup if this component would be a dependency
-      // for any already-registered component (would break dependency ordering)
-      if (this.isRequiredDependencyDuringStartup(componentName)) {
-        this.logger
-          .entity(componentName)
-          .warn(
-            'Cannot register component during startup - it is a required dependency for other components',
-          );
-        this.safeEmit('component:registration-rejected', {
-          name: componentName,
-          reason: 'startup_in_progress',
-        });
-
-        return this.buildRegisterResultFailure({
-          componentName,
-          registrationIndexBefore,
-          code: 'startup_in_progress',
-          reason:
-            'Cannot register component during startup when it is a required dependency for other components.',
-        });
-      }
-
-      if (this.hasComponentInstance(component)) {
-        this.logger
-          .entity(componentName)
-          .warn('Component instance already registered');
-        this.safeEmit('component:registration-rejected', {
-          name: componentName,
-          reason: 'duplicate_instance',
-        });
-
-        return this.buildRegisterResultFailure({
-          componentName,
-          registrationIndexBefore,
-          code: 'duplicate_instance',
-          reason: 'Component instance is already registered.',
-        });
-      }
-
-      if (registrationIndexBefore !== null) {
-        this.logger
-          .entity(componentName)
-          .warn('Component with this name already registered');
-        this.safeEmit('component:registration-rejected', {
-          name: componentName,
-          reason: 'duplicate_name',
-        });
-
-        return this.buildRegisterResultFailure({
-          componentName,
-          registrationIndexBefore,
-          code: 'duplicate_name',
-          reason: `Component "${componentName}" is already registered.`,
-        });
-      }
-
-      // Compute dependency order *before* committing registration mutations.
-      // This avoids leaving the registry/state maps inconsistent if a dependency
-      // cycle is detected.
-      let startupOrder: string[];
-
-      try {
-        startupOrder = this.getStartupOrderInternal([
-          ...this.components,
-          component,
-        ]);
-      } catch (error) {
-        if (error instanceof DependencyCycleError) {
-          this.logger
-            .entity(componentName)
-            .warn('Registration rejected due to dependency cycle', {
-              params: { cycle: error.additionalInfo.cycle },
-            });
-          this.safeEmit('component:registration-rejected', {
-            name: componentName,
-            reason: 'dependency_cycle',
-            cycle: error.additionalInfo.cycle,
-          });
-
-          return this.buildRegisterResultFailure({
-            componentName,
-            registrationIndexBefore,
-            code: 'dependency_cycle',
-            reason: error.message,
-            error,
-          });
-        }
-        throw error;
-      }
-
-      // Commit registration
-      this.components.push(component);
-      (component as unknown as { lifecycle: ComponentLifecycleRef }).lifecycle =
-        new ComponentLifecycle(this, componentName);
-
-      // Initialize state
-      this.componentStates.set(componentName, 'registered');
-      this.componentTimestamps.set(componentName, {
-        startedAt: null,
-        stoppedAt: null,
-      });
-      this.componentErrors.set(componentName, null);
-
-      const registrationIndexAfter = this.getComponentIndex(componentName);
-
-      this.logger.entity(componentName).info('Component registered', {
-        params: { index: registrationIndexAfter },
-      });
-      this.safeEmit('component:registered', {
-        name: componentName,
-        index: registrationIndexAfter,
-      });
-
-      return {
-        action: 'register',
-        success: true,
-        registered: true,
-        componentName,
-        registrationIndexBefore: null,
-        registrationIndexAfter,
-        startupOrder,
-      };
-    } catch (error) {
-      const err = error as Error;
-      const code: RegistrationFailureCode =
-        err instanceof DependencyCycleError
-          ? 'dependency_cycle'
-          : 'unknown_error';
-
-      this.logger
-        .entity(componentName)
-        .error('Registration failed with unexpected error', {
-          params: { error: err },
-        });
-      this.safeEmit('component:registration-rejected', {
-        name: componentName,
-        reason: code,
-        ...(err instanceof DependencyCycleError
-          ? { cycle: err.additionalInfo.cycle }
-          : {}),
-      });
-
-      return {
-        action: 'register',
-        success: false,
-        registered: false,
-        componentName,
-        reason: err.message,
-        code,
-        error: err,
-        registrationIndexBefore,
-        registrationIndexAfter: registrationIndexBefore,
-        startupOrder: [],
-      };
-    }
+    return {
+      action: 'register',
+      success: result.success,
+      registered: result.registered,
+      componentName: result.componentName,
+      reason: result.reason,
+      code: result.code,
+      error: result.error,
+      registrationIndexBefore: result.registrationIndexBefore,
+      registrationIndexAfter: result.registrationIndexAfter,
+      startupOrder: result.startupOrder,
+    };
   }
 
   /**
@@ -318,282 +172,15 @@ export class LifecycleManager
     component: BaseComponent,
     position: InsertPosition,
     targetComponentName?: string,
-    _options?: RegisterOptions,
+    options?: RegisterOptions,
   ): InsertComponentAtResult {
-    const componentName = component.getName();
-    const registrationIndexBefore = this.getComponentIndex(componentName);
-
-    try {
-      if (!this.isInsertPosition(position)) {
-        this.logger.entity(componentName).warn('Invalid insertion position', {
-          params: { position },
-        });
-        this.safeEmit('component:registration-rejected', {
-          name: componentName,
-          reason: 'invalid_position',
-        });
-
-        return this.buildInsertResultFailure({
-          componentName,
-          position,
-          targetComponentName,
-          registrationIndexBefore,
-          code: 'invalid_position',
-          reason: `Invalid insert position: "${String(position)}". Expected one of: start, end, before, after.`,
-          targetFound: undefined,
-        });
-      }
-
-      // Block registration during shutdown
-      if (this.isShuttingDown) {
-        this.logger
-          .entity(componentName)
-          .warn('Cannot register component during shutdown');
-        this.safeEmit('component:registration-rejected', {
-          name: componentName,
-          reason: 'shutdown_in_progress',
-        });
-
-        return this.buildInsertResultFailure({
-          componentName,
-          position,
-          targetComponentName,
-          registrationIndexBefore,
-          code: 'shutdown_in_progress',
-          reason:
-            'Cannot register component while shutdown is in progress (isShuttingDown=true).',
-          targetFound: undefined,
-        });
-      }
-
-      // Block registration during startup if this component would be a dependency
-      // for any already-registered component (would break dependency ordering)
-      if (this.isRequiredDependencyDuringStartup(componentName)) {
-        this.logger
-          .entity(componentName)
-          .warn(
-            'Cannot register component during startup - it is a required dependency for other components',
-          );
-        this.safeEmit('component:registration-rejected', {
-          name: componentName,
-          reason: 'startup_in_progress',
-        });
-
-        return this.buildInsertResultFailure({
-          componentName,
-          position,
-          targetComponentName,
-          registrationIndexBefore,
-          code: 'startup_in_progress',
-          reason:
-            'Cannot register component during startup when it is a required dependency for other components.',
-          targetFound: undefined,
-        });
-      }
-
-      if (this.hasComponentInstance(component)) {
-        this.logger
-          .entity(componentName)
-          .warn('Component instance already registered');
-        this.safeEmit('component:registration-rejected', {
-          name: componentName,
-          reason: 'duplicate_instance',
-        });
-
-        return this.buildInsertResultFailure({
-          componentName,
-          position,
-          targetComponentName,
-          registrationIndexBefore,
-          code: 'duplicate_instance',
-          reason: 'Component instance is already registered.',
-          targetFound: undefined,
-        });
-      }
-
-      if (registrationIndexBefore !== null) {
-        this.logger
-          .entity(componentName)
-          .warn('Component with this name already registered');
-        this.safeEmit('component:registration-rejected', {
-          name: componentName,
-          reason: 'duplicate_name',
-        });
-
-        return this.buildInsertResultFailure({
-          componentName,
-          position,
-          targetComponentName,
-          registrationIndexBefore,
-          code: 'duplicate_name',
-          reason: `Component "${componentName}" is already registered.`,
-          targetFound: undefined,
-        });
-      }
-
-      const insertIndex = this.getInsertIndex(position, targetComponentName);
-      if (insertIndex === null) {
-        this.logger.entity(componentName).warn('Target component not found', {
-          params: { target: targetComponentName },
-        });
-        this.safeEmit('component:registration-rejected', {
-          name: componentName,
-          reason: 'target_not_found',
-          target: targetComponentName,
-        });
-
-        let startupOrder: string[];
-
-        try {
-          startupOrder = this.getStartupOrderInternal();
-        } catch (error) {
-          // Defensive: This should never happen in normal operation since we validate
-          // cycles before registration. However, if this.components somehow contains
-          // a cycle (e.g., due to internal bugs or direct mutations), we must not
-          // throw from an error handler. Return empty array to fail gracefully.
-          this.logger.warn('Failed to compute startup order in error handler', {
-            params: { error: error instanceof Error ? error.message : error },
-          });
-
-          startupOrder = [];
-        }
-
-        return {
-          action: 'insert',
-          success: false,
-          registered: false,
-          componentName,
-          reason: `Target component "${targetComponentName ?? ''}" not found in registry.`,
-          code: 'target_not_found',
-          registrationIndexBefore: null,
-          registrationIndexAfter: null,
-          startupOrder,
-          requestedPosition: { position, targetComponentName },
-          manualPositionRespected: false,
-          targetFound: false,
-        };
-      }
-
-      // Compute dependency order *before* committing registration mutations.
-      // This avoids leaving the registry/state maps inconsistent if a dependency
-      // cycle is detected.
-      const nextComponents = [...this.components];
-      nextComponents.splice(insertIndex, 0, component);
-
-      let startupOrder: string[];
-
-      try {
-        startupOrder = this.getStartupOrderInternal(nextComponents);
-      } catch (error) {
-        if (error instanceof DependencyCycleError) {
-          this.logger
-            .entity(componentName)
-            .warn('Registration rejected due to dependency cycle', {
-              params: { cycle: error.additionalInfo.cycle },
-            });
-          this.safeEmit('component:registration-rejected', {
-            name: componentName,
-            reason: 'dependency_cycle',
-            cycle: error.additionalInfo.cycle,
-          });
-
-          return this.buildInsertResultFailure({
-            componentName,
-            position,
-            targetComponentName,
-            registrationIndexBefore,
-            code: 'dependency_cycle',
-            reason: error.message,
-            error,
-            targetFound:
-              position === 'before' || position === 'after' ? true : undefined,
-          });
-        }
-        throw error;
-      }
-
-      // Commit registration
-      this.components.splice(insertIndex, 0, component);
-      (component as unknown as { lifecycle: ComponentLifecycleRef }).lifecycle =
-        new ComponentLifecycle(this, componentName);
-
-      // Initialize state
-      this.componentStates.set(componentName, 'registered');
-      this.componentTimestamps.set(componentName, {
-        startedAt: null,
-        stoppedAt: null,
-      });
-      this.componentErrors.set(componentName, null);
-
-      const isManualPositionRespected = this.isManualPositionRespected({
-        componentName,
-        position,
-        targetComponentName,
-        startupOrder,
-      });
-
-      const registrationIndexAfter = this.getComponentIndex(componentName);
-
-      this.logger.entity(componentName).info('Component inserted', {
-        params: { position, index: registrationIndexAfter },
-      });
-      this.safeEmit('component:registered', {
-        name: componentName,
-        index: registrationIndexAfter,
-      });
-
-      return {
-        action: 'insert',
-        success: true,
-        registered: true,
-        componentName,
-        registrationIndexBefore: null,
-        registrationIndexAfter,
-        startupOrder,
-        requestedPosition: { position, targetComponentName },
-        manualPositionRespected: isManualPositionRespected,
-        targetFound:
-          position === 'before' || position === 'after'
-            ? this.getComponentIndex(targetComponentName ?? '') !== null
-            : undefined,
-      };
-    } catch (error) {
-      const err = error as Error;
-      const code: RegistrationFailureCode =
-        err instanceof DependencyCycleError
-          ? 'dependency_cycle'
-          : 'unknown_error';
-
-      this.logger
-        .entity(componentName)
-        .error('Registration failed with unexpected error', {
-          params: { error: err },
-        });
-      this.safeEmit('component:registration-rejected', {
-        name: componentName,
-        reason: code,
-        ...(err instanceof DependencyCycleError
-          ? { cycle: err.additionalInfo.cycle }
-          : {}),
-      });
-
-      return {
-        action: 'insert',
-        success: false,
-        registered: false,
-        componentName,
-        reason: err.message,
-        code,
-        error: err,
-        registrationIndexBefore,
-        registrationIndexAfter: registrationIndexBefore,
-        startupOrder: [],
-        requestedPosition: { position, targetComponentName },
-        manualPositionRespected: false,
-        targetFound:
-          position === 'before' || position === 'after' ? false : undefined,
-      };
-    }
+    return this.registerComponentInternal(
+      component,
+      position,
+      targetComponentName,
+      true,
+      options,
+    );
   }
 
   /**
@@ -1597,10 +1184,911 @@ export class LifecycleManager
   }
 
   // ============================================================================
+  // Component Messaging
+  // ============================================================================
+
+  /**
+   * Send a message to a specific component
+   *
+   * Delivers a message to the component's onMessage handler if implemented.
+   * The 'from' parameter is automatically tracked based on calling context.
+   *
+   * @param componentName - Name of target component
+   * @param payload - Message payload (any type)
+   * @param options - Optional message options (timeout override)
+   * @returns Result with sent status, data returned from handler, and any errors
+   */
+  public async sendMessageToComponent(
+    componentName: string,
+    payload: unknown,
+    options?: SendMessageOptions,
+  ): Promise<MessageResult> {
+    return this.sendMessageInternal(componentName, payload, null, options);
+  }
+
+  /**
+   * Broadcast a message to multiple components
+   *
+   * Sends the same message to multiple components (by default, all running components).
+   * The 'from' parameter is automatically tracked based on calling context.
+   *
+   * @param payload - Message payload (any type)
+   * @param options - Filtering options and message timeout override
+   * @returns Array of results, one per component
+   */
+  public async broadcastMessage(
+    payload: unknown,
+    options?: BroadcastOptions,
+  ): Promise<BroadcastResult[]> {
+    return this.broadcastMessageInternal(payload, null, options);
+  }
+
+  // ============================================================================
+  // Health Checks
+  // ============================================================================
+
+  /**
+   * Check the health of a specific component
+   *
+   * Calls the component's healthCheck() method if implemented.
+   * Times out after component's healthCheckTimeoutMS.
+   *
+   * @param name - Component name
+   * @returns Health check result with status, message, details, and timing
+   */
+  public async checkComponentHealth(name: string): Promise<HealthCheckResult> {
+    const startTime = Date.now();
+
+    // Check if component exists
+    const component = this.components.find((c) => c.getName() === name);
+
+    if (!component) {
+      return {
+        name,
+        healthy: false,
+        message: 'Component not found',
+        checkedAt: startTime,
+        durationMS: 0,
+        error: new Error(`Component '${name}' not found`),
+      };
+    }
+
+    // Check if component is running
+    if (!this.isComponentRunning(name)) {
+      return {
+        name,
+        healthy: false,
+        message: 'Component not running',
+        checkedAt: startTime,
+        durationMS: Date.now() - startTime,
+        error: new Error(`Component '${name}' is not running`),
+      };
+    }
+
+    // Check if component implements healthCheck
+    if (!component.healthCheck) {
+      // No health check implemented - assume healthy
+      return {
+        name,
+        healthy: true,
+        message: 'No health check implemented',
+        checkedAt: startTime,
+        durationMS: Date.now() - startTime,
+        error: null,
+      };
+    }
+
+    this.safeEmit('component:health-check-started', { name });
+
+    try {
+      // Create timeout promise
+      const timeoutMS = component.healthCheckTimeoutMS;
+      const timeoutPromise = new Promise<ComponentHealthResult>((resolve) => {
+        setTimeout(() => {
+          resolve({
+            healthy: false,
+            message: 'Health check timed out',
+          });
+        }, timeoutMS);
+      });
+
+      // Race health check against timeout
+      const result = await Promise.race([
+        component.healthCheck(),
+        timeoutPromise,
+      ]);
+
+      // Normalize boolean to ComponentHealthResult
+      const healthResult: ComponentHealthResult =
+        typeof result === 'boolean' ? { healthy: result } : result;
+
+      const durationMS = Date.now() - startTime;
+
+      this.safeEmit('component:health-check-completed', {
+        name,
+        healthy: healthResult.healthy,
+        message: healthResult.message,
+        details: healthResult.details,
+        durationMS,
+      });
+
+      return {
+        name,
+        healthy: healthResult.healthy,
+        message: healthResult.message,
+        details: healthResult.details,
+        checkedAt: startTime,
+        durationMS,
+        error: null,
+      };
+    } catch (error) {
+      const durationMS = Date.now() - startTime;
+      const err = error as Error;
+
+      this.logger
+        .entity(name)
+        .error('Health check failed', { params: { error: err.message } });
+      this.safeEmit('component:health-check-failed', { name, error: err });
+
+      return {
+        name,
+        healthy: false,
+        message: 'Health check threw error',
+        checkedAt: startTime,
+        durationMS,
+        error: err,
+      };
+    }
+  }
+
+  /**
+   * Check the health of all running components
+   *
+   * Runs health checks on all running components in parallel.
+   * Overall health is true only if ALL components are healthy.
+   *
+   * @returns Aggregate health report with individual component results
+   */
+  public async checkAllHealth(): Promise<HealthReport> {
+    const startTime = Date.now();
+
+    // Get all running components
+    const runningComponents = this.components.filter((c) =>
+      this.isComponentRunning(c.getName()),
+    );
+
+    // Check health of all running components in parallel
+    const healthChecks = runningComponents.map((c) =>
+      this.checkComponentHealth(c.getName()),
+    );
+
+    const results = await Promise.all(healthChecks);
+
+    // Overall healthy only if all components are healthy
+    const isOverallHealthy = results.every((r) => r.healthy);
+
+    return {
+      healthy: isOverallHealthy,
+      components: results,
+      checkedAt: startTime,
+      durationMS: Date.now() - startTime,
+    };
+  }
+
+  // ============================================================================
+  // Shared Values (getValue Pattern)
+  // ============================================================================
+
+  /**
+   * Request a value from a component by key
+   *
+   * Calls the component's getValue(key, from) method if implemented.
+   * The 'from' parameter is automatically tracked based on calling context.
+   *
+   * @param componentName - Name of component to request value from
+   * @param key - Value key to request
+   * @returns Result with found status, value, and metadata
+   */
+  public getValue<T = unknown>(
+    componentName: string,
+    key: string,
+  ): ValueResult<T> {
+    return this.getValueInternal<T>(componentName, key, null);
+  }
+
+  // ============================================================================
+  // Internal Methods (Private - accessed via callbacks)
+  // ============================================================================
+
+  /**
+   * Internal message sending with explicit 'from' parameter
+   *
+   * @param componentName - Target component name
+   * @param payload - Message payload
+   * @param from - Sender component name (null if external)
+   */
+  private async sendMessageInternal(
+    componentName: string,
+    payload: unknown,
+    from: string | null,
+    options?: SendMessageOptions,
+  ): Promise<MessageResult> {
+    // Check if shutting down
+    if (this.isShuttingDown) {
+      return {
+        sent: false,
+        componentFound: this.hasComponent(componentName),
+        componentRunning: false,
+        handlerImplemented: false,
+        data: undefined,
+        error: new Error('Cannot send message: shutdown in progress'),
+        timedOut: false,
+      };
+    }
+
+    // Find component
+    const component = this.components.find(
+      (c) => c.getName() === componentName,
+    );
+
+    if (!component) {
+      return {
+        sent: false,
+        componentFound: false,
+        componentRunning: false,
+        handlerImplemented: false,
+        data: undefined,
+        error: null,
+        timedOut: false,
+      };
+    }
+
+    // Check if running
+    if (!this.isComponentRunning(componentName)) {
+      return {
+        sent: false,
+        componentFound: true,
+        componentRunning: false,
+        handlerImplemented: false,
+        data: undefined,
+        error: null,
+        timedOut: false,
+      };
+    }
+
+    // Check if handler implemented
+    if (!component.onMessage) {
+      return {
+        sent: false,
+        componentFound: true,
+        componentRunning: true,
+        handlerImplemented: false,
+        data: undefined,
+        error: null,
+        timedOut: false,
+      };
+    }
+
+    // Send message
+    this.safeEmit('component:message-sent', {
+      componentName,
+      from,
+      payload,
+    });
+
+    const timeoutMS = options?.timeout ?? this.messageTimeoutMS;
+    let timeoutHandle: NodeJS.Timeout | undefined;
+
+    try {
+      let result: unknown;
+      try {
+        result = component.onMessage(payload, from);
+      } catch (error) {
+        const err = error instanceof Error ? error : new Error(String(error));
+        this.logger
+          .entity(componentName)
+          .error('Message handler failed', { params: { error: err, from } });
+        this.safeEmit('component:message-failed', {
+          componentName,
+          from,
+          error: err,
+        });
+
+        return {
+          sent: true,
+          componentFound: true,
+          componentRunning: true,
+          handlerImplemented: true,
+          data: undefined,
+          error: err,
+          timedOut: false,
+        };
+      }
+
+      const handlerPromise = isPromise(result)
+        ? result
+        : Promise.resolve(result);
+
+      const data =
+        timeoutMS > 0
+          ? await Promise.race([
+              handlerPromise,
+              new Promise<never>((_, reject) => {
+                timeoutHandle = setTimeout(() => {
+                  reject(new MessageTimeoutError({ componentName, timeoutMS }));
+                }, timeoutMS);
+              }),
+            ])
+          : await handlerPromise;
+
+      return {
+        sent: true,
+        componentFound: true,
+        componentRunning: true,
+        handlerImplemented: true,
+        data,
+        error: null,
+        timedOut: false,
+      };
+    } catch (error) {
+      const err = error instanceof Error ? error : new Error(String(error));
+      const timedOut = err instanceof MessageTimeoutError;
+      if (timedOut) {
+        this.logger.entity(componentName).warn('Message handler timed out', {
+          params: { error: err, from, timeoutMS },
+        });
+      } else {
+        this.logger.entity(componentName).error('Message handler failed', {
+          params: { error: err, from, timeoutMS },
+        });
+      }
+      this.safeEmit('component:message-failed', {
+        componentName,
+        from,
+        error: err,
+      });
+
+      return {
+        sent: true,
+        componentFound: true,
+        componentRunning: true,
+        handlerImplemented: true,
+        data: undefined,
+        error: err,
+        timedOut,
+      };
+    } finally {
+      if (timeoutHandle) {
+        clearTimeout(timeoutHandle);
+      }
+    }
+  }
+
+  /**
+   * Internal broadcast with explicit 'from' parameter
+   *
+   * @param payload - Message payload
+   * @param from - Sender component name (null if external)
+   * @param options - Filtering options
+   */
+  private async broadcastMessageInternal(
+    payload: unknown,
+    from: string | null,
+    options?: BroadcastOptions,
+  ): Promise<BroadcastResult[]> {
+    this.safeEmit('component:broadcast-started', { from, payload });
+
+    const results: BroadcastResult[] = [];
+
+    // Determine which components to broadcast to
+    let targetComponents = this.components;
+
+    // Filter by names if specified
+    if (options?.componentNames && options.componentNames.length > 0) {
+      const componentNames = options.componentNames;
+      targetComponents = targetComponents.filter((c) =>
+        componentNames.includes(c.getName()),
+      );
+    }
+
+    // Filter by running state unless includeNonRunning
+    if (!options?.includeNonRunning) {
+      targetComponents = targetComponents.filter((c) =>
+        this.isComponentRunning(c.getName()),
+      );
+    }
+
+    // Send to each component
+    for (const component of targetComponents) {
+      const name = component.getName();
+      const isRunning = this.isComponentRunning(name);
+
+      // Skip if not running (only happens when includeNonRunning is true)
+      if (!isRunning) {
+        results.push({
+          name,
+          sent: false,
+          running: false,
+          data: undefined,
+          error: null,
+          timedOut: false,
+        });
+        continue;
+      }
+
+      // Send message using internal method
+      const messageResult = await this.sendMessageInternal(
+        name,
+        payload,
+        from,
+        options,
+      );
+
+      results.push({
+        name,
+        sent: messageResult.sent,
+        running: messageResult.componentRunning,
+        data: messageResult.data,
+        error: messageResult.error,
+        timedOut: messageResult.timedOut,
+      });
+    }
+
+    this.safeEmit('component:broadcast-completed', {
+      from,
+      resultsCount: results.length,
+    });
+
+    return results;
+  }
+
+  /**
+   * Internal getValue with explicit 'from' parameter
+   *
+   * @param componentName - Target component name
+   * @param key - Value key
+   * @param from - Requester component name (null if external)
+   */
+  private getValueInternal<T = unknown>(
+    componentName: string,
+    key: string,
+    from: string | null,
+  ): ValueResult<T> {
+    this.safeEmit('component:value-requested', { componentName, key, from });
+
+    // Find component
+    const component = this.components.find(
+      (c) => c.getName() === componentName,
+    );
+
+    if (!component) {
+      this.safeEmit('component:value-returned', {
+        componentName,
+        key,
+        from,
+        found: false,
+      });
+      return {
+        found: false,
+        value: undefined,
+        componentFound: false,
+        componentRunning: false,
+        handlerImplemented: false,
+        requestedBy: from,
+      };
+    }
+
+    // Check if running
+    const isRunning = this.isComponentRunning(componentName);
+    if (!isRunning) {
+      this.safeEmit('component:value-returned', {
+        componentName,
+        key,
+        from,
+        found: false,
+      });
+      return {
+        found: false,
+        value: undefined,
+        componentFound: true,
+        componentRunning: false,
+        handlerImplemented: false,
+        requestedBy: from,
+      };
+    }
+
+    // Check if handler implemented
+    if (!component.getValue) {
+      this.safeEmit('component:value-returned', {
+        componentName,
+        key,
+        from,
+        found: false,
+      });
+      return {
+        found: false,
+        value: undefined,
+        componentFound: true,
+        componentRunning: true,
+        handlerImplemented: false,
+        requestedBy: from,
+      };
+    }
+
+    // Get value
+    try {
+      const value = component.getValue(key, from) as T | undefined;
+      const wasFound = value !== undefined;
+
+      this.safeEmit('component:value-returned', {
+        componentName,
+        key,
+        from,
+        found: wasFound,
+      });
+
+      return {
+        found: wasFound,
+        value,
+        componentFound: true,
+        componentRunning: true,
+        handlerImplemented: true,
+        requestedBy: from,
+      };
+    } catch (error) {
+      const err = error instanceof Error ? error : new Error(String(error));
+      this.logger.entity(componentName).error('getValue handler failed', {
+        params: { error: err, key, from },
+      });
+
+      this.safeEmit('component:value-returned', {
+        componentName,
+        key,
+        from,
+        found: false,
+      });
+
+      return {
+        found: false,
+        value: undefined,
+        componentFound: true,
+        componentRunning: true,
+        handlerImplemented: true,
+        requestedBy: from,
+      };
+    }
+  }
+
+  // ============================================================================
   // Private Helper Methods
   // ============================================================================
 
-  public async stopAllComponentsInternal(
+  /**
+   * Internal method that handles component registration logic.
+   * Used by both registerComponent and insertComponentAt.
+   */
+  private registerComponentInternal(
+    component: BaseComponent,
+    position: InsertPosition,
+    targetComponentName?: string,
+    isInsertAction = false,
+    options?: RegisterOptions,
+  ): InsertComponentAtResult {
+    const componentName = component.getName();
+    const registrationIndexBefore = this.getComponentIndex(componentName);
+
+    try {
+      if (!this.isInsertPosition(position)) {
+        this.logger.entity(componentName).warn('Invalid insertion position', {
+          params: { position },
+        });
+        this.safeEmit('component:registration-rejected', {
+          name: componentName,
+          reason: 'invalid_position',
+        });
+
+        return this.buildInsertResultFailure({
+          componentName,
+          position,
+          targetComponentName,
+          registrationIndexBefore,
+          code: 'invalid_position',
+          reason: `Invalid insert position: "${String(position)}". Expected one of: start, end, before, after.`,
+          targetFound: undefined,
+        });
+      }
+
+      // Block registration during shutdown
+      if (this.isShuttingDown) {
+        this.logger
+          .entity(componentName)
+          .warn('Cannot register component during shutdown');
+        this.safeEmit('component:registration-rejected', {
+          name: componentName,
+          reason: 'shutdown_in_progress',
+        });
+
+        return this.buildInsertResultFailure({
+          componentName,
+          position,
+          targetComponentName,
+          registrationIndexBefore,
+          code: 'shutdown_in_progress',
+          reason:
+            'Cannot register component while shutdown is in progress (isShuttingDown=true).',
+          targetFound: undefined,
+        });
+      }
+
+      // Block registration during startup if this component would be a dependency
+      // for any already-registered component (would break dependency ordering)
+      if (this.isRequiredDependencyDuringStartup(componentName)) {
+        this.logger
+          .entity(componentName)
+          .warn(
+            'Cannot register component during startup - it is a required dependency for other components',
+          );
+        this.safeEmit('component:registration-rejected', {
+          name: componentName,
+          reason: 'startup_in_progress',
+        });
+
+        return this.buildInsertResultFailure({
+          componentName,
+          position,
+          targetComponentName,
+          registrationIndexBefore,
+          code: 'startup_in_progress',
+          reason:
+            'Cannot register component during startup when it is a required dependency for other components.',
+          targetFound: undefined,
+        });
+      }
+
+      // Check if component instance is already registered
+      if (this.hasComponentInstance(component)) {
+        this.logger
+          .entity(componentName)
+          .warn('Component instance already registered');
+        this.safeEmit('component:registration-rejected', {
+          name: componentName,
+          reason: 'duplicate_instance',
+        });
+
+        return this.buildInsertResultFailure({
+          componentName,
+          position,
+          targetComponentName,
+          registrationIndexBefore,
+          code: 'duplicate_instance',
+          reason: 'Component instance is already registered.',
+          targetFound: undefined,
+        });
+      }
+
+      // Check if component name is already registered
+      if (registrationIndexBefore !== null) {
+        this.logger
+          .entity(componentName)
+          .warn('Component with this name already registered');
+        this.safeEmit('component:registration-rejected', {
+          name: componentName,
+          reason: 'duplicate_name',
+        });
+
+        return this.buildInsertResultFailure({
+          componentName,
+          position,
+          targetComponentName,
+          registrationIndexBefore,
+          code: 'duplicate_name',
+          reason: `Component "${componentName}" is already registered.`,
+          targetFound: undefined,
+        });
+      }
+
+      // Get the insertion index for the component
+      const insertIndex = this.getInsertIndex(position, targetComponentName);
+      if (insertIndex === null) {
+        this.logger.entity(componentName).warn('Target component not found', {
+          params: { target: targetComponentName },
+        });
+        this.safeEmit('component:registration-rejected', {
+          name: componentName,
+          reason: 'target_not_found',
+          target: targetComponentName,
+        });
+
+        // Block registration during startup if this component would be a dependency
+        // for any already-registered component (would break dependency ordering)
+        let startupOrder: string[];
+
+        try {
+          startupOrder = this.getStartupOrderInternal();
+        } catch (error) {
+          // Defensive: This should never happen in normal operation since we validate
+          // cycles before registration. However, if this.components somehow contains
+          // a cycle (e.g., due to internal bugs or direct mutations), we must not
+          // throw from an error handler. Return empty array to fail gracefully.
+          this.logger.warn('Failed to compute startup order in error handler', {
+            params: { error: error instanceof Error ? error.message : error },
+          });
+
+          startupOrder = [];
+        }
+
+        return {
+          action: 'insert',
+          success: false,
+          registered: false,
+          componentName,
+          reason: `Target component "${targetComponentName ?? ''}" not found in registry.`,
+          code: 'target_not_found',
+          registrationIndexBefore: null,
+          registrationIndexAfter: null,
+          startupOrder,
+          requestedPosition: { position, targetComponentName },
+          manualPositionRespected: false,
+          targetFound: false,
+        };
+      }
+
+      // Compute dependency order *before* committing registration mutations.
+      // This avoids leaving the registry/state maps inconsistent if a dependency
+      // cycle is detected.
+      const nextComponents = [...this.components];
+      nextComponents.splice(insertIndex, 0, component);
+
+      let startupOrder: string[];
+
+      try {
+        startupOrder = this.getStartupOrderInternal(nextComponents);
+      } catch (error) {
+        if (error instanceof DependencyCycleError) {
+          this.logger
+            .entity(componentName)
+            .warn('Registration rejected due to dependency cycle', {
+              params: { cycle: error.additionalInfo.cycle },
+            });
+          this.safeEmit('component:registration-rejected', {
+            name: componentName,
+            reason: 'dependency_cycle',
+            cycle: error.additionalInfo.cycle,
+          });
+
+          return this.buildInsertResultFailure({
+            componentName,
+            position,
+            targetComponentName,
+            registrationIndexBefore,
+            code: 'dependency_cycle',
+            reason: error.message,
+            error,
+            targetFound:
+              position === 'before' || position === 'after' ? true : undefined,
+          });
+        }
+        throw error;
+      }
+
+      // Commit registration
+      this.components.splice(insertIndex, 0, component);
+
+      // Create callbacks for component-scoped lifecycle
+      const internalCallbacks: LifecycleInternalCallbacks = {
+        sendMessageInternal: (
+          compName: string,
+          payload: unknown,
+          from: string | null,
+          options?: SendMessageOptions,
+        ) => this.sendMessageInternal(compName, payload, from, options),
+        broadcastMessageInternal: (
+          payload: unknown,
+          from: string | null,
+          opts?: BroadcastOptions,
+        ) => this.broadcastMessageInternal(payload, from, opts),
+        getValueInternal: <T = unknown>(
+          compName: string,
+          key: string,
+          from: string | null,
+        ) => this.getValueInternal<T>(compName, key, from),
+      };
+
+      // Assign lifecycle reference to component
+      (component as unknown as { lifecycle: ComponentLifecycleRef }).lifecycle =
+        new ComponentLifecycle(this, componentName, internalCallbacks);
+
+      // Initialize state
+      this.componentStates.set(componentName, 'registered');
+      this.componentTimestamps.set(componentName, {
+        startedAt: null,
+        stoppedAt: null,
+      });
+      this.componentErrors.set(componentName, null);
+
+      // Check if manual position was respected for logging
+      const isManualPositionRespected = this.isManualPositionRespected({
+        componentName,
+        position,
+        targetComponentName,
+        startupOrder,
+      });
+
+      // Get the final registration index after insertion
+      const registrationIndexAfter = this.getComponentIndex(componentName);
+
+      if (isInsertAction) {
+        this.logger.entity(componentName).info('Component inserted', {
+          params: { position, index: registrationIndexAfter },
+        });
+      } else {
+        this.logger.entity(componentName).info('Component registered', {
+          params: { index: registrationIndexAfter },
+        });
+      }
+
+      // Emit registration event
+      this.safeEmit('component:registered', {
+        name: componentName,
+        index: registrationIndexAfter,
+      });
+
+      return {
+        action: 'insert',
+        success: true,
+        registered: true,
+        componentName,
+        registrationIndexBefore: null,
+        registrationIndexAfter,
+        startupOrder,
+        requestedPosition: { position, targetComponentName },
+        manualPositionRespected: isManualPositionRespected,
+        targetFound:
+          position === 'before' || position === 'after'
+            ? this.getComponentIndex(targetComponentName ?? '') !== null
+            : undefined,
+      };
+    } catch (error) {
+      // Handle unexpected errors during registration
+      const err = error as Error;
+      const code: RegistrationFailureCode =
+        err instanceof DependencyCycleError
+          ? 'dependency_cycle'
+          : 'unknown_error';
+
+      this.logger
+        .entity(componentName)
+        .error('Registration failed with unexpected error', {
+          params: { error: err },
+        });
+      this.safeEmit('component:registration-rejected', {
+        name: componentName,
+        reason: code,
+        ...(err instanceof DependencyCycleError
+          ? { cycle: err.additionalInfo.cycle }
+          : {}),
+      });
+
+      return {
+        action: 'insert',
+        success: false,
+        registered: false,
+        componentName,
+        reason: err.message,
+        code,
+        error: err,
+        registrationIndexBefore,
+        registrationIndexAfter: registrationIndexBefore,
+        startupOrder: [],
+        requestedPosition: { position, targetComponentName },
+        manualPositionRespected: false,
+        targetFound:
+          position === 'before' || position === 'after' ? false : undefined,
+      };
+    }
+  }
+
+  private async stopAllComponentsInternal(
     method: ShutdownMethod,
   ): Promise<ShutdownResult> {
     const startTime = Date.now();

@@ -11,6 +11,7 @@ import {
   ComponentStartupError,
   StartupTimeoutError,
   ComponentNotFoundError,
+  MessageTimeoutError,
   lifecycleManagerErrPrefix,
   lifecycleManagerErrTypes,
   lifecycleManagerErrCodes,
@@ -401,6 +402,7 @@ describe('LifecycleManager - Phase 1: Foundation', () => {
       expect(lifecycleManagerErrTypes.Component).toBe('Component');
       expect(lifecycleManagerErrTypes.Dependency).toBe('Dependency');
       expect(lifecycleManagerErrTypes.Lifecycle).toBe('Lifecycle');
+      expect(lifecycleManagerErrTypes.Message).toBe('Message');
 
       expect(lifecycleManagerErrCodes.InvalidName).toBe('InvalidName');
       expect(lifecycleManagerErrCodes.RegistrationFailed).toBe(
@@ -412,6 +414,7 @@ describe('LifecycleManager - Phase 1: Foundation', () => {
       expect(lifecycleManagerErrCodes.NotFound).toBe('NotFound');
       expect(lifecycleManagerErrCodes.StartupFailed).toBe('StartupFailed');
       expect(lifecycleManagerErrCodes.StartupTimeout).toBe('StartupTimeout');
+      expect(lifecycleManagerErrCodes.MessageTimeout).toBe('MessageTimeout');
     });
   });
 
@@ -650,7 +653,14 @@ describe('LifecycleManager - Phase 2: Core Registration & Individual Lifecycle',
 
       lifecycle.registerComponent(component);
 
-      expect((component as any).lifecycle).toBe(lifecycle);
+      expect((component as any).lifecycle).toBeDefined();
+      expect((component as any).lifecycle).not.toBe(lifecycle); // It's a ComponentLifecycle, not the manager
+      expect(typeof (component as any).lifecycle.startAllComponents).toBe(
+        'function',
+      );
+      expect(typeof (component as any).lifecycle.sendMessageToComponent).toBe(
+        'function',
+      );
     });
 
     test('unregisterComponent should remove component from registry', async () => {
@@ -4864,6 +4874,1155 @@ describe('LifecycleManager - Phase 6: Signal Integration', () => {
       // Start again - should clear
       await lifecycle.startAllComponents();
       expect(lifecycle.getSignalStatus().shutdownMethod).toBeNull();
+    });
+  });
+});
+
+describe('LifecycleManager - Phase 7: Messaging, Health, Values', () => {
+  let logger: Logger;
+
+  beforeEach(() => {
+    logger = new Logger({
+      name: 'test-logger',
+      callProcessExit: false,
+    });
+  });
+
+  describe('Component Messaging - sendMessageToComponent()', () => {
+    test('should send message to running component with handler', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      class ComponentWithHandler extends BaseComponent {
+        public receivedMessages: Array<{
+          payload: unknown;
+          from: string | null;
+        }> = [];
+
+        constructor(logger: Logger) {
+          super(logger, { name: 'receiver', dependencies: [] });
+        }
+
+        async start() {}
+        async stop() {}
+
+        onMessage(payload: unknown, from: string | null) {
+          this.receivedMessages.push({ payload, from });
+          return { response: 'acknowledged' };
+        }
+      }
+
+      const component = new ComponentWithHandler(logger);
+      lifecycle.registerComponent(component);
+      await lifecycle.startAllComponents();
+
+      const result = await lifecycle.sendMessageToComponent('receiver', {
+        test: 'data',
+      });
+
+      expect(result.sent).toBe(true);
+      expect(result.componentFound).toBe(true);
+      expect(result.componentRunning).toBe(true);
+      expect(result.handlerImplemented).toBe(true);
+      expect(result.data).toEqual({ response: 'acknowledged' });
+      expect(result.error).toBeNull();
+      expect(result.timedOut).toBe(false);
+      expect(component.receivedMessages).toHaveLength(1);
+      expect(component.receivedMessages[0].payload).toEqual({ test: 'data' });
+      expect(component.receivedMessages[0].from).toBeNull(); // External call
+    });
+
+    test('should handle component not found', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      const result = await lifecycle.sendMessageToComponent('nonexistent', {
+        test: 'data',
+      });
+
+      expect(result.sent).toBe(false);
+      expect(result.componentFound).toBe(false);
+      expect(result.componentRunning).toBe(false);
+      expect(result.handlerImplemented).toBe(false);
+      expect(result.data).toBeUndefined();
+      expect(result.error).toBeNull();
+      expect(result.timedOut).toBe(false);
+    });
+
+    test('should handle component not running', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      class ComponentWithHandler extends BaseComponent {
+        constructor(logger: Logger) {
+          super(logger, { name: 'receiver', dependencies: [] });
+        }
+
+        async start() {}
+        async stop() {}
+
+        onMessage(payload: unknown, from: string | null) {
+          return { response: 'acknowledged' };
+        }
+      }
+
+      lifecycle.registerComponent(new ComponentWithHandler(logger));
+
+      const result = await lifecycle.sendMessageToComponent('receiver', {
+        test: 'data',
+      });
+
+      expect(result.sent).toBe(false);
+      expect(result.componentFound).toBe(true);
+      expect(result.componentRunning).toBe(false);
+      expect(result.handlerImplemented).toBe(false);
+      expect(result.data).toBeUndefined();
+      expect(result.error).toBeNull();
+      expect(result.timedOut).toBe(false);
+    });
+
+    test('should handle component without handler', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      class ComponentWithoutHandler extends BaseComponent {
+        constructor(logger: Logger) {
+          super(logger, { name: 'receiver', dependencies: [] });
+        }
+
+        async start() {}
+        async stop() {}
+      }
+
+      lifecycle.registerComponent(new ComponentWithoutHandler(logger));
+      await lifecycle.startAllComponents();
+
+      const result = await lifecycle.sendMessageToComponent('receiver', {
+        test: 'data',
+      });
+
+      expect(result.sent).toBe(false);
+      expect(result.componentFound).toBe(true);
+      expect(result.componentRunning).toBe(true);
+      expect(result.handlerImplemented).toBe(false);
+      expect(result.data).toBeUndefined();
+      expect(result.error).toBeNull();
+      expect(result.timedOut).toBe(false);
+    });
+
+    test('should handle handler throwing error', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      class ComponentWithFailingHandler extends BaseComponent {
+        constructor(logger: Logger) {
+          super(logger, { name: 'receiver', dependencies: [] });
+        }
+
+        async start() {}
+        async stop() {}
+
+        onMessage(payload: unknown, from: string | null) {
+          throw new Error('Handler failed');
+        }
+      }
+
+      lifecycle.registerComponent(new ComponentWithFailingHandler(logger));
+      await lifecycle.startAllComponents();
+
+      const result = await lifecycle.sendMessageToComponent('receiver', {
+        test: 'data',
+      });
+
+      expect(result.sent).toBe(true);
+      expect(result.componentFound).toBe(true);
+      expect(result.componentRunning).toBe(true);
+      expect(result.handlerImplemented).toBe(true);
+      expect(result.data).toBeUndefined();
+      expect(result.error).toBeInstanceOf(Error);
+      expect(result.error?.message).toBe('Handler failed');
+      expect(result.timedOut).toBe(false);
+    });
+
+    test('should timeout when handler takes too long', async () => {
+      const lifecycle = new LifecycleManager({
+        logger,
+        messageTimeoutMS: 20,
+      });
+
+      class SlowHandler extends BaseComponent {
+        constructor(logger: Logger) {
+          super(logger, { name: 'slow', dependencies: [] });
+        }
+
+        async start() {}
+        async stop() {}
+
+        async onMessage(payload: unknown, from: string | null) {
+          await sleep(50);
+          return { response: 'late' };
+        }
+      }
+
+      lifecycle.registerComponent(new SlowHandler(logger));
+      await lifecycle.startAllComponents();
+
+      const result = await lifecycle.sendMessageToComponent('slow', {
+        test: 'data',
+      });
+
+      expect(result.sent).toBe(true);
+      expect(result.componentFound).toBe(true);
+      expect(result.componentRunning).toBe(true);
+      expect(result.handlerImplemented).toBe(true);
+      expect(result.data).toBeUndefined();
+      expect(result.error).toBeInstanceOf(MessageTimeoutError);
+      expect(result.timedOut).toBe(true);
+    });
+
+    test('should allow per-call timeout override', async () => {
+      const lifecycle = new LifecycleManager({
+        logger,
+        messageTimeoutMS: 10,
+      });
+
+      class SlowHandler extends BaseComponent {
+        constructor(logger: Logger) {
+          super(logger, { name: 'slow', dependencies: [] });
+        }
+
+        async start() {}
+        async stop() {}
+
+        async onMessage(payload: unknown, from: string | null) {
+          await sleep(30);
+          return { response: 'ok' };
+        }
+      }
+
+      lifecycle.registerComponent(new SlowHandler(logger));
+      await lifecycle.startAllComponents();
+
+      const result = await lifecycle.sendMessageToComponent(
+        'slow',
+        { test: 'data' },
+        { timeout: 100 },
+      );
+
+      expect(result.sent).toBe(true);
+      expect(result.error).toBeNull();
+      expect(result.timedOut).toBe(false);
+      expect(result.data).toEqual({ response: 'ok' });
+    });
+
+    test('should reject messages during shutdown', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      class SlowComponent extends BaseComponent {
+        constructor(logger: Logger) {
+          super(logger, { name: 'slow', dependencies: [] });
+        }
+
+        async start() {}
+        async stop() {
+          await new Promise((resolve) => setTimeout(resolve, 100));
+        }
+
+        onMessage(payload: unknown, from: string | null) {
+          return { response: 'ok' };
+        }
+      }
+
+      lifecycle.registerComponent(new SlowComponent(logger));
+      await lifecycle.startAllComponents();
+
+      const shutdownPromise = lifecycle.stopAllComponents();
+
+      const result = await lifecycle.sendMessageToComponent('slow', {
+        test: 'data',
+      });
+
+      expect(result.sent).toBe(false);
+      expect(result.error?.message).toContain('shutdown in progress');
+      expect(result.timedOut).toBe(false);
+
+      await shutdownPromise;
+    });
+
+    test('should track sender when called from component', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      class SenderComponent extends BaseComponent {
+        constructor(logger: Logger) {
+          super(logger, { name: 'sender', dependencies: [] });
+        }
+
+        async start() {
+          await this.lifecycle.sendMessageToComponent('receiver', {
+            from: 'sender',
+          });
+        }
+
+        async stop() {}
+      }
+
+      class ReceiverComponent extends BaseComponent {
+        public receivedFrom: string | null = null;
+
+        constructor(logger: Logger) {
+          super(logger, { name: 'receiver', dependencies: [] });
+        }
+
+        async start() {}
+        async stop() {}
+
+        onMessage(payload: unknown, from: string | null) {
+          this.receivedFrom = from;
+        }
+      }
+
+      const sender = new SenderComponent(logger);
+      const receiver = new ReceiverComponent(logger);
+
+      lifecycle.registerComponent(receiver);
+      lifecycle.registerComponent(sender);
+
+      await lifecycle.startAllComponents();
+
+      expect(receiver.receivedFrom).toBe('sender');
+    });
+  });
+
+  describe('Broadcast Messaging - broadcastMessage()', () => {
+    test('should broadcast to all running components', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      class MessageReceiver extends BaseComponent {
+        public messages: unknown[] = [];
+
+        constructor(logger: Logger, name: string) {
+          super(logger, { name, dependencies: [] });
+        }
+
+        async start() {}
+        async stop() {}
+
+        onMessage(payload: unknown, from: string | null) {
+          this.messages.push(payload);
+          return { received: true };
+        }
+      }
+
+      const comp1 = new MessageReceiver(logger, 'comp1');
+      const comp2 = new MessageReceiver(logger, 'comp2');
+      const comp3 = new MessageReceiver(logger, 'comp3');
+
+      lifecycle.registerComponent(comp1);
+      lifecycle.registerComponent(comp2);
+      lifecycle.registerComponent(comp3);
+
+      await lifecycle.startAllComponents();
+
+      const results = await lifecycle.broadcastMessage({ broadcast: 'test' });
+
+      expect(results).toHaveLength(3);
+      expect(results.every((r) => r.sent)).toBe(true);
+      expect(results.every((r) => r.running)).toBe(true);
+      expect(results.every((r) => r.timedOut === false)).toBe(true);
+      expect(comp1.messages).toHaveLength(1);
+      expect(comp2.messages).toHaveLength(1);
+      expect(comp3.messages).toHaveLength(1);
+    });
+
+    test('should timeout broadcast when handler takes too long', async () => {
+      const lifecycle = new LifecycleManager({
+        logger,
+        messageTimeoutMS: 10,
+      });
+
+      class SlowReceiver extends BaseComponent {
+        constructor(logger: Logger, name: string) {
+          super(logger, { name, dependencies: [] });
+        }
+
+        async start() {}
+        async stop() {}
+
+        async onMessage(payload: unknown, from: string | null) {
+          await sleep(30);
+          return { received: true };
+        }
+      }
+
+      const comp1 = new SlowReceiver(logger, 'comp1');
+      lifecycle.registerComponent(comp1);
+      await lifecycle.startAllComponents();
+
+      const results = await lifecycle.broadcastMessage({ broadcast: 'test' });
+
+      expect(results).toHaveLength(1);
+      expect(results[0].sent).toBe(true);
+      expect(results[0].timedOut).toBe(true);
+      expect(results[0].error).toBeInstanceOf(MessageTimeoutError);
+    });
+
+    test('should skip non-running components by default', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      class MessageReceiver extends BaseComponent {
+        public messages: unknown[] = [];
+
+        constructor(logger: Logger, name: string) {
+          super(logger, { name, dependencies: [] });
+        }
+
+        async start() {}
+        async stop() {}
+
+        onMessage(payload: unknown, from: string | null) {
+          this.messages.push(payload);
+        }
+      }
+
+      const comp1 = new MessageReceiver(logger, 'comp1');
+      const comp2 = new MessageReceiver(logger, 'comp2');
+
+      lifecycle.registerComponent(comp1);
+      lifecycle.registerComponent(comp2);
+
+      await lifecycle.startComponent('comp1');
+
+      const results = await lifecycle.broadcastMessage({ broadcast: 'test' });
+
+      expect(results).toHaveLength(1);
+      expect(results[0].name).toBe('comp1');
+      expect(results[0].sent).toBe(true);
+      expect(comp1.messages).toHaveLength(1);
+      expect(comp2.messages).toHaveLength(0);
+    });
+
+    test('should include non-running components when requested', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      class MessageReceiver extends BaseComponent {
+        constructor(logger: Logger, name: string) {
+          super(logger, { name, dependencies: [] });
+        }
+
+        async start() {}
+        async stop() {}
+
+        onMessage(payload: unknown, from: string | null) {}
+      }
+
+      lifecycle.registerComponent(new MessageReceiver(logger, 'comp1'));
+      lifecycle.registerComponent(new MessageReceiver(logger, 'comp2'));
+
+      await lifecycle.startComponent('comp1');
+
+      const results = await lifecycle.broadcastMessage(
+        { broadcast: 'test' },
+        { includeNonRunning: true },
+      );
+
+      expect(results).toHaveLength(2);
+      expect(results.find((r) => r.name === 'comp1')?.sent).toBe(true);
+      expect(results.find((r) => r.name === 'comp2')?.sent).toBe(false);
+      expect(results.find((r) => r.name === 'comp2')?.running).toBe(false);
+    });
+
+    test('should filter by component names', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      class MessageReceiver extends BaseComponent {
+        public messages: unknown[] = [];
+
+        constructor(logger: Logger, name: string) {
+          super(logger, { name, dependencies: [] });
+        }
+
+        async start() {}
+        async stop() {}
+
+        onMessage(payload: unknown, from: string | null) {
+          this.messages.push(payload);
+        }
+      }
+
+      const comp1 = new MessageReceiver(logger, 'comp1');
+      const comp2 = new MessageReceiver(logger, 'comp2');
+      const comp3 = new MessageReceiver(logger, 'comp3');
+
+      lifecycle.registerComponent(comp1);
+      lifecycle.registerComponent(comp2);
+      lifecycle.registerComponent(comp3);
+
+      await lifecycle.startAllComponents();
+
+      const results = await lifecycle.broadcastMessage(
+        { broadcast: 'test' },
+        { componentNames: ['comp1', 'comp3'] },
+      );
+
+      expect(results).toHaveLength(2);
+      expect(results.find((r) => r.name === 'comp1')).toBeDefined();
+      expect(results.find((r) => r.name === 'comp3')).toBeDefined();
+      expect(comp1.messages).toHaveLength(1);
+      expect(comp2.messages).toHaveLength(0);
+      expect(comp3.messages).toHaveLength(1);
+    });
+
+    test('should handle broadcast with some handlers failing', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      class GoodReceiver extends BaseComponent {
+        constructor(logger: Logger) {
+          super(logger, { name: 'good', dependencies: [] });
+        }
+
+        async start() {}
+        async stop() {}
+
+        onMessage(payload: unknown, from: string | null) {
+          return { status: 'ok' };
+        }
+      }
+
+      class BadReceiver extends BaseComponent {
+        constructor(logger: Logger) {
+          super(logger, { name: 'bad', dependencies: [] });
+        }
+
+        async start() {}
+        async stop() {}
+
+        onMessage(payload: unknown, from: string | null) {
+          throw new Error('Handler failed');
+        }
+      }
+
+      lifecycle.registerComponent(new GoodReceiver(logger));
+      lifecycle.registerComponent(new BadReceiver(logger));
+
+      await lifecycle.startAllComponents();
+
+      const results = await lifecycle.broadcastMessage({ test: 'data' });
+
+      expect(results).toHaveLength(2);
+
+      const goodResult = results.find((r) => r.name === 'good');
+      expect(goodResult?.sent).toBe(true);
+      expect(goodResult?.error).toBeNull();
+      expect(goodResult?.data).toEqual({ status: 'ok' });
+
+      const badResult = results.find((r) => r.name === 'bad');
+      expect(badResult?.sent).toBe(true);
+      expect(badResult?.error).toBeInstanceOf(Error);
+      expect(badResult?.error?.message).toBe('Handler failed');
+    });
+
+    test('should track sender when called from component', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      class BroadcasterComponent extends BaseComponent {
+        constructor(logger: Logger) {
+          super(logger, { name: 'broadcaster', dependencies: [] });
+        }
+
+        async start() {
+          await this.lifecycle.broadcastMessage({ announcement: 'hello' });
+        }
+
+        async stop() {}
+      }
+
+      class ReceiverComponent extends BaseComponent {
+        public receivedFrom: string | null = null;
+
+        constructor(logger: Logger, name: string) {
+          super(logger, { name, dependencies: [] });
+        }
+
+        async start() {}
+        async stop() {}
+
+        onMessage(payload: unknown, from: string | null) {
+          this.receivedFrom = from;
+        }
+      }
+
+      const broadcaster = new BroadcasterComponent(logger);
+      const receiver1 = new ReceiverComponent(logger, 'receiver1');
+      const receiver2 = new ReceiverComponent(logger, 'receiver2');
+
+      lifecycle.registerComponent(receiver1);
+      lifecycle.registerComponent(receiver2);
+      lifecycle.registerComponent(broadcaster);
+
+      await lifecycle.startAllComponents();
+
+      expect(receiver1.receivedFrom).toBe('broadcaster');
+      expect(receiver2.receivedFrom).toBe('broadcaster');
+    });
+  });
+
+  describe('Health Checks - checkComponentHealth()', () => {
+    test('should check health of component with boolean result', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      class HealthyComponent extends BaseComponent {
+        constructor(logger: Logger) {
+          super(logger, { name: 'healthy', dependencies: [] });
+        }
+
+        async start() {}
+        async stop() {}
+
+        healthCheck() {
+          return true;
+        }
+      }
+
+      lifecycle.registerComponent(new HealthyComponent(logger));
+      await lifecycle.startAllComponents();
+
+      const result = await lifecycle.checkComponentHealth('healthy');
+
+      expect(result.name).toBe('healthy');
+      expect(result.healthy).toBe(true);
+      expect(result.checkedAt).toBeGreaterThan(0);
+      expect(result.durationMS).toBeGreaterThanOrEqual(0);
+      expect(result.error).toBeNull();
+    });
+
+    test('should check health of component with rich result', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      class ComponentWithDetails extends BaseComponent {
+        constructor(logger: Logger) {
+          super(logger, { name: 'detailed', dependencies: [] });
+        }
+
+        async start() {}
+        async stop() {}
+
+        healthCheck() {
+          return {
+            healthy: true,
+            message: 'All systems operational',
+            details: { connections: 5, uptime: 1000 },
+          };
+        }
+      }
+
+      lifecycle.registerComponent(new ComponentWithDetails(logger));
+      await lifecycle.startAllComponents();
+
+      const result = await lifecycle.checkComponentHealth('detailed');
+
+      expect(result.name).toBe('detailed');
+      expect(result.healthy).toBe(true);
+      expect(result.message).toBe('All systems operational');
+      expect(result.details).toEqual({ connections: 5, uptime: 1000 });
+    });
+
+    test('should handle component not found', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      const result = await lifecycle.checkComponentHealth('nonexistent');
+
+      expect(result.name).toBe('nonexistent');
+      expect(result.healthy).toBe(false);
+      expect(result.message).toBe('Component not found');
+      expect(result.error).toBeInstanceOf(Error);
+      expect(result.error?.message).toContain('not found');
+    });
+
+    test('should handle component not running', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      class HealthyComponent extends BaseComponent {
+        constructor(logger: Logger) {
+          super(logger, { name: 'healthy', dependencies: [] });
+        }
+
+        async start() {}
+        async stop() {}
+
+        healthCheck() {
+          return true;
+        }
+      }
+
+      lifecycle.registerComponent(new HealthyComponent(logger));
+
+      const result = await lifecycle.checkComponentHealth('healthy');
+
+      expect(result.name).toBe('healthy');
+      expect(result.healthy).toBe(false);
+      expect(result.message).toBe('Component not running');
+      expect(result.error).toBeInstanceOf(Error);
+      expect(result.error?.message).toContain('not running');
+    });
+
+    test('should handle component without healthCheck handler', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      class ComponentWithoutHealth extends BaseComponent {
+        constructor(logger: Logger) {
+          super(logger, { name: 'no-health', dependencies: [] });
+        }
+
+        async start() {}
+        async stop() {}
+      }
+
+      lifecycle.registerComponent(new ComponentWithoutHealth(logger));
+      await lifecycle.startAllComponents();
+
+      const result = await lifecycle.checkComponentHealth('no-health');
+
+      expect(result.name).toBe('no-health');
+      expect(result.healthy).toBe(true); // No health check = assume healthy
+      expect(result.message).toBe('No health check implemented');
+      expect(result.error).toBeNull();
+    });
+
+    test('should handle healthCheck throwing error', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      class UnhealthyComponent extends BaseComponent {
+        constructor(logger: Logger) {
+          super(logger, { name: 'unhealthy', dependencies: [] });
+        }
+
+        async start() {}
+        async stop() {}
+
+        healthCheck() {
+          throw new Error('Connection lost');
+        }
+      }
+
+      lifecycle.registerComponent(new UnhealthyComponent(logger));
+      await lifecycle.startAllComponents();
+
+      const result = await lifecycle.checkComponentHealth('unhealthy');
+
+      expect(result.name).toBe('unhealthy');
+      expect(result.healthy).toBe(false);
+      expect(result.error).toBeInstanceOf(Error);
+      expect(result.error?.message).toBe('Connection lost');
+    });
+
+    test('should handle healthCheck timeout', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      class SlowHealthCheck extends BaseComponent {
+        constructor(logger: Logger) {
+          super(logger, {
+            name: 'slow-health',
+            dependencies: [],
+            healthCheckTimeoutMS: 100,
+          });
+        }
+
+        async start() {}
+        async stop() {}
+
+        async healthCheck() {
+          await new Promise((resolve) => setTimeout(resolve, 500));
+          return true;
+        }
+      }
+
+      lifecycle.registerComponent(new SlowHealthCheck(logger));
+      await lifecycle.startAllComponents();
+
+      const result = await lifecycle.checkComponentHealth('slow-health');
+
+      expect(result.name).toBe('slow-health');
+      expect(result.healthy).toBe(false);
+      expect(result.message).toBe('Health check timed out');
+    });
+
+    test('should normalize boolean false to unhealthy', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      class UnhealthyComponent extends BaseComponent {
+        constructor(logger: Logger) {
+          super(logger, { name: 'unhealthy', dependencies: [] });
+        }
+
+        async start() {}
+        async stop() {}
+
+        healthCheck() {
+          return false;
+        }
+      }
+
+      lifecycle.registerComponent(new UnhealthyComponent(logger));
+      await lifecycle.startAllComponents();
+
+      const result = await lifecycle.checkComponentHealth('unhealthy');
+
+      expect(result.name).toBe('unhealthy');
+      expect(result.healthy).toBe(false);
+    });
+  });
+
+  describe('Health Checks - checkAllHealth()', () => {
+    test('should check health of all running components', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      class HealthyComponent extends BaseComponent {
+        constructor(logger: Logger, name: string) {
+          super(logger, { name, dependencies: [] });
+        }
+
+        async start() {}
+        async stop() {}
+
+        healthCheck() {
+          return true;
+        }
+      }
+
+      lifecycle.registerComponent(new HealthyComponent(logger, 'comp1'));
+      lifecycle.registerComponent(new HealthyComponent(logger, 'comp2'));
+      lifecycle.registerComponent(new HealthyComponent(logger, 'comp3'));
+
+      await lifecycle.startAllComponents();
+
+      const report = await lifecycle.checkAllHealth();
+
+      expect(report.components).toHaveLength(3);
+      expect(report.healthy).toBe(true);
+      expect(report.components).toHaveLength(3);
+      expect(report.components.every((r) => r.healthy)).toBe(true);
+    });
+
+    test('should report mixed health status', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      class HealthyComponent extends BaseComponent {
+        constructor(logger: Logger) {
+          super(logger, { name: 'healthy', dependencies: [] });
+        }
+
+        async start() {}
+        async stop() {}
+
+        healthCheck() {
+          return true;
+        }
+      }
+
+      class UnhealthyComponent extends BaseComponent {
+        constructor(logger: Logger) {
+          super(logger, { name: 'unhealthy', dependencies: [] });
+        }
+
+        async start() {}
+        async stop() {}
+
+        healthCheck() {
+          return false;
+        }
+      }
+
+      lifecycle.registerComponent(new HealthyComponent(logger));
+      lifecycle.registerComponent(new UnhealthyComponent(logger));
+
+      await lifecycle.startAllComponents();
+
+      const report = await lifecycle.checkAllHealth();
+
+      expect(report.components).toHaveLength(2);
+      expect(report.healthy).toBe(false);
+    });
+
+    test('should only check running components', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      class HealthyComponent extends BaseComponent {
+        constructor(logger: Logger, name: string) {
+          super(logger, { name, dependencies: [] });
+        }
+
+        async start() {}
+        async stop() {}
+
+        healthCheck() {
+          return true;
+        }
+      }
+
+      lifecycle.registerComponent(new HealthyComponent(logger, 'comp1'));
+      lifecycle.registerComponent(new HealthyComponent(logger, 'comp2'));
+
+      await lifecycle.startComponent('comp1');
+
+      const report = await lifecycle.checkAllHealth();
+
+      expect(report.components).toHaveLength(1);
+      expect(report.components).toHaveLength(1);
+      expect(report.components[0].name).toBe('comp1');
+    });
+
+    test('should handle components without health check', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      class ComponentWithHealth extends BaseComponent {
+        constructor(logger: Logger) {
+          super(logger, { name: 'with-health', dependencies: [] });
+        }
+
+        async start() {}
+        async stop() {}
+
+        healthCheck() {
+          return true;
+        }
+      }
+
+      class ComponentWithoutHealth extends BaseComponent {
+        constructor(logger: Logger) {
+          super(logger, { name: 'without-health', dependencies: [] });
+        }
+
+        async start() {}
+        async stop() {}
+      }
+
+      lifecycle.registerComponent(new ComponentWithHealth(logger));
+      lifecycle.registerComponent(new ComponentWithoutHealth(logger));
+
+      await lifecycle.startAllComponents();
+
+      const report = await lifecycle.checkAllHealth();
+
+      expect(report.components).toHaveLength(2);
+      expect(
+        report.components.find((r) => r.name === 'with-health')?.healthy,
+      ).toBe(true);
+      expect(
+        report.components.find((r) => r.name === 'without-health')?.healthy,
+      ).toBe(true); // Assumes healthy
+    });
+  });
+
+  describe('Shared Values - getValue()', () => {
+    test('should get value from component', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      class ComponentWithValues extends BaseComponent {
+        constructor(logger: Logger) {
+          super(logger, { name: 'provider', dependencies: [] });
+        }
+
+        async start() {}
+        async stop() {}
+
+        getValue(key: string, from: string | null) {
+          if (key === 'config') return { setting: 'value' };
+          if (key === 'status') return 'ready';
+          return undefined;
+        }
+      }
+
+      lifecycle.registerComponent(new ComponentWithValues(logger));
+      await lifecycle.startAllComponents();
+
+      const result1 = lifecycle.getValue('provider', 'config');
+      expect(result1.found).toBe(true);
+      expect(result1.value).toEqual({ setting: 'value' });
+      expect(result1.componentFound).toBe(true);
+      expect(result1.componentRunning).toBe(true);
+      expect(result1.handlerImplemented).toBe(true);
+
+      const result2 = lifecycle.getValue('provider', 'status');
+      expect(result2.found).toBe(true);
+      expect(result2.value).toBe('ready');
+
+      const result3 = lifecycle.getValue('provider', 'nonexistent');
+      expect(result3.found).toBe(false);
+      expect(result3.value).toBeUndefined();
+    });
+
+    test('should handle component not found', () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      const result = lifecycle.getValue('nonexistent', 'key');
+
+      expect(result.found).toBe(false);
+      expect(result.componentFound).toBe(false);
+      expect(result.handlerImplemented).toBe(false);
+      expect(result.value).toBeUndefined();
+    });
+
+    test('should handle component not running', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      class ComponentWithValues extends BaseComponent {
+        constructor(logger: Logger) {
+          super(logger, { name: 'provider', dependencies: [] });
+        }
+
+        async start() {}
+        async stop() {}
+
+        getValue(key: string, from: string | null) {
+          return { data: 'value' };
+        }
+      }
+
+      lifecycle.registerComponent(new ComponentWithValues(logger));
+
+      const result = lifecycle.getValue('provider', 'key');
+
+      expect(result.found).toBe(false);
+      expect(result.componentFound).toBe(true);
+      expect(result.componentRunning).toBe(false);
+      expect(result.handlerImplemented).toBe(false);
+      expect(result.value).toBeUndefined();
+    });
+
+    test('should handle component without getValue handler', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      class ComponentWithoutGetValue extends BaseComponent {
+        constructor(logger: Logger) {
+          super(logger, { name: 'provider', dependencies: [] });
+        }
+
+        async start() {}
+        async stop() {}
+      }
+
+      lifecycle.registerComponent(new ComponentWithoutGetValue(logger));
+      await lifecycle.startAllComponents();
+
+      const result = lifecycle.getValue('provider', 'key');
+
+      expect(result.found).toBe(false);
+      expect(result.componentFound).toBe(true);
+      expect(result.componentRunning).toBe(true);
+      expect(result.handlerImplemented).toBe(false);
+      expect(result.value).toBeUndefined();
+    });
+
+    test('should track requester when called from component', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      class ProviderComponent extends BaseComponent {
+        public lastRequester: string | null = null;
+
+        constructor(logger: Logger) {
+          super(logger, { name: 'provider', dependencies: [] });
+        }
+
+        async start() {}
+        async stop() {}
+
+        getValue(key: string, from: string | null) {
+          this.lastRequester = from;
+          return { data: 'value' };
+        }
+      }
+
+      class RequesterComponent extends BaseComponent {
+        public retrievedValue: unknown;
+
+        constructor(logger: Logger) {
+          super(logger, { name: 'requester', dependencies: [] });
+        }
+
+        async start() {
+          const result = this.lifecycle.getValue('provider', 'some-key');
+          this.retrievedValue = result.value;
+        }
+
+        async stop() {}
+      }
+
+      const provider = new ProviderComponent(logger);
+      const requester = new RequesterComponent(logger);
+
+      lifecycle.registerComponent(provider);
+      lifecycle.registerComponent(requester);
+
+      await lifecycle.startAllComponents();
+
+      expect(provider.lastRequester).toBe('requester');
+      expect(requester.retrievedValue).toEqual({ data: 'value' });
+    });
+
+    test('should handle getValue returning various types', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      class MultiTypeProvider extends BaseComponent {
+        constructor(logger: Logger) {
+          super(logger, { name: 'provider', dependencies: [] });
+        }
+
+        async start() {}
+        async stop() {}
+
+        getValue(key: string, from: string | null) {
+          if (key === 'string') return 'text';
+          if (key === 'number') return 42;
+          if (key === 'boolean') return true;
+          if (key === 'null') return null;
+          if (key === 'array') return [1, 2, 3];
+          if (key === 'object') return { nested: { value: 'deep' } };
+          return undefined;
+        }
+      }
+
+      lifecycle.registerComponent(new MultiTypeProvider(logger));
+      await lifecycle.startAllComponents();
+
+      expect(lifecycle.getValue('provider', 'string').value).toBe('text');
+      expect(lifecycle.getValue('provider', 'number').value).toBe(42);
+      expect(lifecycle.getValue('provider', 'boolean').value).toBe(true);
+      expect(lifecycle.getValue('provider', 'null').value).toBeNull();
+      expect(lifecycle.getValue('provider', 'array').value).toEqual([1, 2, 3]);
+      expect(lifecycle.getValue('provider', 'object').value).toEqual({
+        nested: { value: 'deep' },
+      });
+      expect(lifecycle.getValue('provider', 'undefined').found).toBe(false);
+    });
+  });
+
+  describe('Component-scoped lifecycle reference', () => {
+    test('should provide component-scoped lifecycle to components', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      class TestComponent extends BaseComponent {
+        public lifecycleRef: any;
+
+        constructor(logger: Logger) {
+          super(logger, { name: 'test-comp', dependencies: [] });
+        }
+
+        async start() {
+          this.lifecycleRef = this.lifecycle;
+        }
+
+        async stop() {}
+      }
+
+      const component = new TestComponent(logger);
+      lifecycle.registerComponent(component);
+      await lifecycle.startAllComponents();
+
+      expect(component.lifecycleRef).toBeDefined();
+      expect(component.lifecycleRef).not.toBe(lifecycle); // Different object
+      expect(typeof component.lifecycleRef.sendMessageToComponent).toBe(
+        'function',
+      );
+      expect(typeof component.lifecycleRef.broadcastMessage).toBe('function');
+      expect(typeof component.lifecycleRef.checkComponentHealth).toBe(
+        'function',
+      );
+      expect(typeof component.lifecycleRef.getValue).toBe('function');
     });
   });
 });

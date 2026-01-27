@@ -16,15 +16,29 @@ import type {
   StartupResult,
   StopComponentOptions,
   SystemState,
+  MessageResult,
+  BroadcastResult,
+  BroadcastOptions,
+  SendMessageOptions,
+  HealthCheckResult,
+  HealthReport,
+  ValueResult,
+  LifecycleInternalCallbacks,
 } from './types';
 
 export class ComponentLifecycle implements ComponentLifecycleRef {
   private readonly manager: LifecycleCommon;
   private readonly componentName: string;
+  private readonly internalCallbacks: LifecycleInternalCallbacks;
 
-  constructor(manager: LifecycleCommon, componentName: string) {
+  constructor(
+    manager: LifecycleCommon,
+    componentName: string,
+    internalCallbacks: LifecycleInternalCallbacks,
+  ) {
     this.manager = manager;
     this.componentName = componentName;
+    this.internalCallbacks = internalCallbacks;
   }
 
   public on<T = unknown>(
@@ -161,5 +175,108 @@ export class ComponentLifecycle implements ComponentLifecycleRef {
 
   public triggerDebug(): Promise<SignalBroadcastResult> {
     return this.manager.triggerDebug();
+  }
+
+  // ============================================================================
+  // Component Messaging (with automatic 'from' tracking)
+  // ============================================================================
+
+  /**
+   * Send a message to another component
+   *
+   * When called from within a component, automatically tracks the sender.
+   * The 'from' parameter will be set to this component's name.
+   *
+   * @param componentName - Target component name
+   * @param payload - Message payload
+   * @param options - Optional message options (timeout override)
+   * @returns Result with sent status, data, and any errors
+   */
+  public sendMessageToComponent(
+    componentName: string,
+    payload: unknown,
+    options?: SendMessageOptions,
+  ): Promise<MessageResult> {
+    // Call internal callback with automatic 'from' tracking
+    // Automatically passes this component's name as 'from'
+    return this.internalCallbacks.sendMessageInternal(
+      componentName,
+      payload,
+      this.componentName,
+      options,
+    );
+  }
+
+  /**
+   * Broadcast a message to multiple components
+   *
+   * When called from within a component, automatically tracks the sender.
+   * The 'from' parameter will be set to this component's name.
+   *
+   * @param payload - Message payload
+   * @param options - Filtering options and message timeout override
+   * @returns Array of results, one per component
+   */
+  public broadcastMessage(
+    payload: unknown,
+    options?: BroadcastOptions,
+  ): Promise<BroadcastResult[]> {
+    // Call internal callback with automatic 'from' tracking
+    // Automatically passes this component's name as 'from'
+    return this.internalCallbacks.broadcastMessageInternal(
+      payload,
+      this.componentName,
+      options,
+    );
+  }
+
+  // ============================================================================
+  // Health Checks
+  // ============================================================================
+
+  /**
+   * Check the health of a specific component
+   *
+   * @param name - Component name
+   * @returns Health check result
+   */
+  public checkComponentHealth(name: string): Promise<HealthCheckResult> {
+    return this.manager.checkComponentHealth(name);
+  }
+
+  /**
+   * Check the health of all running components
+   *
+   * @returns Aggregate health report
+   */
+  public checkAllHealth(): Promise<HealthReport> {
+    return this.manager.checkAllHealth();
+  }
+
+  // ============================================================================
+  // Shared Values (with automatic 'from' tracking)
+  // ============================================================================
+
+  /**
+   * Request a value from another component
+   *
+   * When called from within a component, automatically tracks the requester.
+   * The 'from' parameter will be set to this component's name.
+   *
+   * @param componentName - Target component name
+   * @param key - Value key
+   * @returns Result with found status, value, and metadata
+   */
+  public getValue<T = unknown>(
+    componentName: string,
+    key: string,
+  ): ValueResult<T> {
+    // Call internal callback with automatic 'from' tracking
+    // Automatically passes this component's name as 'from'
+    return this.internalCallbacks.getValueInternal<T>(
+      componentName,
+      key,
+      this.componentName,
+    );
   }
 }
