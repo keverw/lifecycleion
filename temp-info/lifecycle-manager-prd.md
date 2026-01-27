@@ -249,7 +249,7 @@ if (result.success) {
 
 ## Core Features
 
-### 1. Component Registration (Auto-Start Feature - Phase 8)
+### 1. Component Registration (Auto-Start Feature)
 
 **Registration During Startup/Runtime**:
 
@@ -1368,7 +1368,7 @@ The LifecycleManager has comprehensive test coverage with 229+ passing unit test
 
 See `src/lib/lifecycle-manager/lifecycle-manager.test.ts` for complete test implementation.
 
-Integration tests (Phase 10) will cover multi-component scenarios with real-world usage patterns.
+Integration tests will cover multi-component scenarios with real-world usage patterns.
 
 ## Known Limitations
 
@@ -1457,15 +1457,15 @@ See [Snapshot List Guarantee](#snapshot-list-guarantee) section for full specifi
 
 ### 5. Optional/Non-Critical Components
 
-**Status**: ✅ **RESOLVED for V1** - Components can be marked as `optional: true` so startup failures don't trigger rollback.
+**Status**: ✅ **RESOLVED for V1** - Components can be marked as `optional: true` so startup failures don't trigger rollback. Optional components that fail are marked as 'failed' and their dependents are skipped.
 
-See [Optional Components](#optional-components) section for full specification.
+See usage example in [Optional Components](#optional-components) example section.
 
 ### 6. Cooperative Cancellation
 
-**Status**: ✅ **RESOLVED for V1** - Components can implement abort callbacks (`onStartupAborted()`, `onStopAborted()`, etc.) for cooperative cancellation on timeouts. This keeps method signatures clean while still enabling cancellation.
+**Status**: ✅ **RESOLVED for V1** - Components can implement abort callbacks (`onStartupAborted()`, `onStopAborted()`, `onShutdownForceAborted()`) for cooperative cancellation on timeouts. This keeps method signatures clean while still enabling cancellation. These are optional methods on BaseComponent.
 
-See [Abort Callbacks](#abort-callbacks) section for full specification.
+See implementation examples in the [Usage Examples](#usage-examples) section.
 
 ### 7. Shared Values
 
