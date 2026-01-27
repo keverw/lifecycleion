@@ -382,14 +382,21 @@ src/lib/lifecycle-manager/
 
 - In `registerComponentInternal()`:
   - Use the `options?.autoStart` parameter (currently unused)
-  - If `autoStart: true` and `isStarted || isStarting`, start component after registration
-  - Handle failures appropriately
-  - Check if dependencies are met (validate dependencies exist and are running)
-  - Handle edge cases:
-    - During startup: append to startup queue if deps ready
-    - After startup: normal dependency validation applies
-    - During shutdown: already blocked by existing check
-    - Missing dependencies: return appropriate error
+  - If `autoStart: true` and manager state allows starting:
+    - **After startup (`isStarted`)**: Call `startComponent()` directly - it already handles all validation
+    - **During startup (`isStarting`)**: Two options:
+      - Option A: Call `startComponentInternal()` directly (bypass `isStarting` check) and handle manually
+      - Option B: Track in a pending queue, start after bulk startup completes
+      - **Recommendation: Option A** - simpler, immediate feedback
+    - **During shutdown**: Already blocked by registration check
+  
+- `startComponent()` already handles:
+  - ✅ Dependency validation (exists and running)
+  - ✅ Failure handling (timeouts, errors, state management)
+  - ✅ Appropriate error codes (missing_dependency, dependency_not_running, etc.)
+  - ✅ Shutdown blocking
+  
+- Only special case: `isStarting` check needs bypass for AutoStart during bulk startup
 
 **Dynamic removal during shutdown event**:
 
