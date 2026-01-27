@@ -366,89 +366,102 @@ src/lib/lifecycle-manager/
 
 ---
 
-## Phase 8: Optional Components & Final Polish (1 day)
+## Phase 8: AutoStart & Final Polish (0.5 day)
+
+### Status: NOT STARTED
+
+**What's already done (Phases 1-7):**
+- ✅ Optional components (failedOptionalComponents tracking, dependency skipping)
+- ✅ Stalled component restart blocking (ignoreStalledComponents option)
+- ✅ Status tracking (shutdownMethod, shutdownStartTime, shutdownDuration)
+- ✅ Most events (component:start-skipped, component:start-failed-optional)
 
 ### Implement
 
-**Optional components**:
+**AutoStart on registration** (main remaining feature):
 
-- Update `startAllComponents()`:
-  - On failure, check `component.isOptional()`
-  - If optional: log warning, set state 'failed', add to `failedOptionalComponents`, continue
-  - If required: rollback
-  - Track `skippedDueToDependency`
+- In `registerComponentInternal()`:
+  - Use the `options?.autoStart` parameter (currently unused)
+  - If `autoStart: true` and manager state allows starting:
+    - **After startup (`isStarted`)**: Call `startComponent()` directly - it already handles all validation
+    - **During startup (`isStarting`)**: Call `startComponentInternal()` with internal bypass flag
+    - **During shutdown**: Already blocked by registration check
+  
+- Modify `startComponentInternal()`:
+  - Add optional internal-only parameter (e.g., `_bypassBulkOperationCheck?: boolean`)
+  - When `true`, skip the `isStarting`/`isShuttingDown` checks in the caller (`startComponent()`)
+  - This keeps all validation logic in one place while allowing AutoStart during bulk operations
+  
+- `startComponent()` / `startComponentInternal()` already handles:
+  - ✅ Dependency validation (exists and running)
+  - ✅ Failure handling (timeouts, errors, state management)
+  - ✅ Appropriate error codes (missing_dependency, dependency_not_running, etc.)
+  - ✅ Shutdown blocking (when bypass not used)
+  
+- Implementation approach: Secondary private options pattern (not exposed in public API)
 
-**AutoStart on registration**:
-
-- In `registerComponent()` and `insertComponentAt()`:
-  - If `autoStart: true` and `isStarted || isStarting`, start component
-  - Handle failures
-
-**Implementation requirements**:
-
-- Check if `isStarting` or `isStarted` (manager state)
-- Only start if dependencies are met (validate dependencies exist and are running)
-- Handle edge cases gracefully:
-  - During startup: component should be started immediately if deps are ready
-  - After startup: normal dependency validation applies
-  - During shutdown: reject registration attempt
-  - Missing dependencies: return appropriate error
-
-**Stalled component restart blocking**:
-
-- In `startAllComponents()`:
-  - Check stalled components exist
-  - If yes and not `ignoreStalledComponents`, throw error
-
-**Dynamic removal during shutdown**:
+**Dynamic removal during shutdown event**:
 
 - In `unregisterComponent()`:
-  - Handle shutdown in progress
-  - Emit `component:unregistered-during-shutdown`
-
-**Final events**:
-
-- `component:start-failed-optional`
-- `component:start-skipped`
-- `component:unregistered-during-shutdown`
-
-**Status tracking**:
-
-- `shutdownMethod`, `shutdownStartTime`, `shutdownDuration`
+  - Add `component:unregistered-during-shutdown` event emission
+  - This event is defined in events.ts but never emitted
 
 ### Tests
 
-- Optional fails, app continues
-- Required fails, rollback
-- Dependency chains with optional
 - AutoStart before/during/after startup
-- AutoStart during shutdown rejected
-- Stalled blocks restart
-- `ignoreStalledComponents` works
-- Dynamic registration/unregistration
-- Multiple LifecycleManager instances
-- Empty component list
-- All optional, all fail
+- AutoStart during shutdown rejected (already works)
+- AutoStart with missing dependencies
+- AutoStart with dependencies not running
 
 ### Documentation
 
-- Optional component behavior
-- AutoStart nuances
-- Stalled recovery
-- Comprehensive examples
-
-### PRD Sections to Delete
-
-- "Optional Components" (lines 1747-1819)
-- "Abort Callbacks" (lines 1820-1932)
-- AutoStart portions
-- "Shutdown-to-Restart Cycle" (lines 1203-1302)
-- "Stalled Component Memory"
-- "Testing Strategy" (move tests to test files)
+- AutoStart nuances in PRD examples
+- Update any remaining references
 
 ---
 
-## Phase 9: Consolidation & Reorg (1 day)
+## Phase 9: API & Event Consistency Review (0.5 day)
+
+### Goals
+
+- Review API design for consistency and completeness
+- Validate event emitter patterns are consistent
+- Use AI feedback to identify potential critical flaws or design issues
+- Ensure no breaking changes needed before v1.0
+
+### Tasks
+
+**API Review**:
+
+- Review all public method signatures for consistency
+- Check return types follow the result object pattern
+- Validate error handling is consistent
+- Ensure naming conventions are uniform
+
+**Event Review**:
+
+- Review all event names and payloads for consistency
+- Validate events are emitted at appropriate times
+- Check event documentation matches implementation
+- Ensure no duplicate or redundant events
+
+**AI-Assisted Analysis**:
+
+- Use code analysis tools to identify potential issues
+- Review for common anti-patterns
+- Check for missing error handling
+- Validate async/await usage
+
+### Success Criteria
+
+- No critical API flaws identified
+- Event system is consistent and complete
+- All feedback items addressed or documented as known limitations
+- API ready for v1.0 stability
+
+---
+
+## Phase 10: Consolidation & Reorg (1 day)
 
 ### Goals
 
@@ -470,7 +483,7 @@ src/lib/lifecycle-manager/
 
 ---
 
-## Phase 10: Integration & Documentation (1.5 days)
+## Phase 11: Integration & Documentation (1.5 days)
 
 ### Implement
 
@@ -536,16 +549,18 @@ Based on exploration of existing codebase:
 
 ## Timeline Estimate
 
-- Phase 1: 1 day
-- Phase 2: 2 days
-- Phase 3: 1.5 days
-- Phase 4: 1 day
-- Phase 5: 1.5 days
-- Phase 6: 1 day
-- Phase 7: 1.5 days
-- Phase 8: 1 day
-- Phase 9: 1.5 days
-- **Total: ~12 days**
+- Phase 1: 1 day ✅
+- Phase 2: 2 days ✅
+- Phase 3: 1.5 days ✅
+- Phase 4: 1 day ✅
+- Phase 5: 1.5 days ✅
+- Phase 6: 1 day ✅
+- Phase 7: 1.5 days ✅
+- Phase 8: 0.5 day (reduced - most features already done)
+- Phase 9: 0.5 day (new - API review)
+- Phase 10: 1 day (was Phase 9)
+- Phase 11: 1.5 days (was Phase 10)
+- **Total: ~13 days** (was 12 days, +1 day for review phase)
 
 ---
 
@@ -560,7 +575,7 @@ After each phase:
 5. Comments above public methods when helpful for clarity
 6. Corresponding PRD sections deleted
 
-Final verification (Phase 9):
+Final verification (Phase 11):
 
 1. Integration tests pass
 2. Example app runs successfully
