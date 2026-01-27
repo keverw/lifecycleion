@@ -43,6 +43,11 @@ import type {
   LifecycleInternalCallbacks,
 } from './types';
 import {
+  LifecycleManagerEvents,
+  type LifecycleManagerEventMap,
+  type LifecycleManagerEventName,
+} from './events';
+import {
   ComponentStartTimeoutError,
   ComponentStopTimeoutError,
   DependencyCycleError,
@@ -106,6 +111,7 @@ export class LifecycleManager
   private readonly onDebugRequested?: (
     broadcastDebug: () => Promise<SignalBroadcastResult>,
   ) => void | Promise<void>;
+  private readonly lifecycleEvents: LifecycleManagerEvents;
 
   constructor(options: LifecycleManagerOptions & { logger: Logger }) {
     super();
@@ -124,6 +130,7 @@ export class LifecycleManager
     this.onReloadRequested = options.onReloadRequested;
     this.onInfoRequested = options.onInfoRequested;
     this.onDebugRequested = options.onDebugRequested;
+    this.lifecycleEvents = new LifecycleManagerEvents(this.safeEmit.bind(this));
   }
 
   // ============================================================================
@@ -327,7 +334,7 @@ export class LifecycleManager
     this.runningComponents.delete(name);
 
     this.logger.entity(name).info('Component unregistered');
-    this.safeEmit('component:unregistered', { name });
+    this.lifecycleEvents.componentUnregistered(name);
 
     return {
       success: true,
@@ -769,10 +776,7 @@ export class LifecycleManager
             .warn('Skipping component due to dependency', {
               params: { reason: skipReason },
             });
-          this.safeEmit('component:start-skipped', {
-            name,
-            reason: skipReason,
-          });
+          this.lifecycleEvents.componentStartSkipped(name, skipReason);
           skippedDueToDependency.add(name);
           continue;
         }
@@ -808,10 +812,7 @@ export class LifecycleManager
                 params: { error: result.error?.message },
               });
 
-            this.safeEmit('component:start-failed-optional', {
-              name,
-              error: result.error,
-            });
+            this.lifecycleEvents.componentStartFailedOptional(name, result.error);
 
             // Mark as failed state
             this.componentStates.set(name, 'failed');
@@ -859,11 +860,11 @@ export class LifecycleManager
         },
       });
 
-      this.safeEmit('lifecycle-manager:started', {
+      this.lifecycleEvents.lifecycleManagerStarted(
         startedComponents,
         failedOptionalComponents,
-        skippedComponents: skippedComponentsArray,
-      });
+        skippedComponentsArray,
+      );
 
       return {
         success: true,
@@ -1112,7 +1113,7 @@ export class LifecycleManager
     }
 
     this.processSignalManager.attach();
-    this.safeEmit('lifecycle-manager:signals-attached');
+    this.lifecycleEvents.lifecycleManagerSignalsAttached();
   }
 
   /**
@@ -1125,7 +1126,7 @@ export class LifecycleManager
     }
 
     this.processSignalManager.detach();
-    this.safeEmit('lifecycle-manager:signals-detached');
+    this.lifecycleEvents.lifecycleManagerSignalsDetached();
   }
 
   /**
@@ -1283,7 +1284,7 @@ export class LifecycleManager
       };
     }
 
-    this.safeEmit('component:health-check-started', { name });
+    this.lifecycleEvents.componentHealthCheckStarted(name);
 
     let timeoutHandle: NodeJS.Timeout | undefined;
     try {
@@ -1318,7 +1319,7 @@ export class LifecycleManager
         typeof result === 'boolean' ? { healthy: result } : result;
 
       const durationMS = Date.now() - startTime;
-      this.safeEmit('component:health-check-completed', {
+      this.lifecycleEvents.componentHealthCheckCompleted({
         name,
         healthy: healthResult.healthy,
         message: healthResult.message,
@@ -1345,7 +1346,7 @@ export class LifecycleManager
       this.logger
         .entity(name)
         .error('Health check failed', { params: { error: err.message } });
-      this.safeEmit('component:health-check-failed', { name, error: err });
+      this.lifecycleEvents.componentHealthCheckFailed(name, err);
 
       return {
         name,
@@ -1513,11 +1514,7 @@ export class LifecycleManager
     }
 
     // Send message
-    this.safeEmit('component:message-sent', {
-      componentName,
-      from,
-      payload,
-    });
+    this.lifecycleEvents.componentMessageSent({ componentName, from, payload });
 
     const timeoutMS = options?.timeout ?? this.messageTimeoutMS;
     let timeoutHandle: NodeJS.Timeout | undefined;
@@ -1532,10 +1529,13 @@ export class LifecycleManager
         this.logger
           .entity(componentName)
           .error('Message handler failed', { params: { error: err, from } });
-        this.safeEmit('component:message-failed', {
-          componentName,
-          from,
-          error: err,
+        this.lifecycleEvents.componentMessageFailed(componentName, from, err, {
+          timedOut: false,
+          code: 'error',
+          componentFound: true,
+          componentRunning: true,
+          handlerImplemented: true,
+          data: undefined,
         });
 
         return {
@@ -1601,10 +1601,13 @@ export class LifecycleManager
       this.logger.entity(componentName).error('Message handler failed', {
         params: { error: err, from, timeoutMS },
       });
-      this.safeEmit('component:message-failed', {
-        componentName,
-        from,
-        error: err,
+      this.lifecycleEvents.componentMessageFailed(componentName, from, err, {
+        timedOut: false,
+        code: 'error',
+        componentFound: true,
+        componentRunning: true,
+        handlerImplemented: true,
+        data: undefined,
       });
 
       return {
@@ -1636,7 +1639,7 @@ export class LifecycleManager
     from: string | null,
     options?: BroadcastOptions,
   ): Promise<BroadcastResult[]> {
-    this.safeEmit('component:broadcast-started', { from, payload });
+    this.lifecycleEvents.componentBroadcastStarted(from, payload);
 
     const results: BroadcastResult[] = [];
 
@@ -1696,10 +1699,7 @@ export class LifecycleManager
       });
     }
 
-    this.safeEmit('component:broadcast-completed', {
-      from,
-      resultsCount: results.length,
-    });
+    this.lifecycleEvents.componentBroadcastCompleted(from, results.length, results);
 
     return results;
   }
@@ -1716,7 +1716,7 @@ export class LifecycleManager
     key: string,
     from: string | null,
   ): ValueResult<T> {
-    this.safeEmit('component:value-requested', { componentName, key, from });
+    this.lifecycleEvents.componentValueRequested(componentName, key, from);
 
     // Find component
     const component = this.components.find(
@@ -1724,11 +1724,14 @@ export class LifecycleManager
     );
 
     if (!component) {
-      this.safeEmit('component:value-returned', {
-        componentName,
-        key,
-        from,
+      this.lifecycleEvents.componentValueReturned(componentName, key, from, {
         found: false,
+        value: undefined,
+        componentFound: false,
+        componentRunning: false,
+        handlerImplemented: false,
+        requestedBy: from,
+        code: 'not_found',
       });
       return {
         found: false,
@@ -1744,11 +1747,14 @@ export class LifecycleManager
     // Check if running
     const isRunning = this.isComponentRunning(componentName);
     if (!isRunning) {
-      this.safeEmit('component:value-returned', {
-        componentName,
-        key,
-        from,
+      this.lifecycleEvents.componentValueReturned(componentName, key, from, {
         found: false,
+        value: undefined,
+        componentFound: true,
+        componentRunning: false,
+        handlerImplemented: false,
+        requestedBy: from,
+        code: 'not_running',
       });
       return {
         found: false,
@@ -1763,11 +1769,14 @@ export class LifecycleManager
 
     // Check if handler implemented
     if (!component.getValue) {
-      this.safeEmit('component:value-returned', {
-        componentName,
-        key,
-        from,
+      this.lifecycleEvents.componentValueReturned(componentName, key, from, {
         found: false,
+        value: undefined,
+        componentFound: true,
+        componentRunning: true,
+        handlerImplemented: false,
+        requestedBy: from,
+        code: 'no_handler',
       });
       return {
         found: false,
@@ -1785,11 +1794,14 @@ export class LifecycleManager
       const value = component.getValue(key, from) as T | undefined;
       const wasFound = value !== undefined;
 
-      this.safeEmit('component:value-returned', {
-        componentName,
-        key,
-        from,
+      this.lifecycleEvents.componentValueReturned(componentName, key, from, {
         found: wasFound,
+        value,
+        componentFound: true,
+        componentRunning: true,
+        handlerImplemented: true,
+        requestedBy: from,
+        code: wasFound ? 'found' : 'not_found',
       });
 
       return {
@@ -1807,11 +1819,14 @@ export class LifecycleManager
         params: { error: err, key, from },
       });
 
-      this.safeEmit('component:value-returned', {
-        componentName,
-        key,
-        from,
+      this.lifecycleEvents.componentValueReturned(componentName, key, from, {
         found: false,
+        value: undefined,
+        componentFound: true,
+        componentRunning: true,
+        handlerImplemented: true,
+        requestedBy: from,
+        code: 'error',
       });
 
       return {
@@ -1849,9 +1864,16 @@ export class LifecycleManager
         this.logger.entity(componentName).warn('Invalid insertion position', {
           params: { position },
         });
-        this.safeEmit('component:registration-rejected', {
+        this.lifecycleEvents.componentRegistrationRejected({
           name: componentName,
           reason: 'invalid_position',
+          message: `Invalid insert position: "${String(position)}". Expected one of: start, end, before, after.`,
+          registrationIndexBefore,
+          registrationIndexAfter: registrationIndexBefore,
+          requestedPosition: isInsertAction
+            ? { position, targetComponentName }
+            : undefined,
+          manualPositionRespected: false,
         });
 
         return this.buildInsertResultFailure({
@@ -1870,9 +1892,17 @@ export class LifecycleManager
         this.logger
           .entity(componentName)
           .warn('Cannot register component during shutdown');
-        this.safeEmit('component:registration-rejected', {
+        this.lifecycleEvents.componentRegistrationRejected({
           name: componentName,
           reason: 'shutdown_in_progress',
+          message:
+            'Cannot register component while shutdown is in progress (isShuttingDown=true).',
+          registrationIndexBefore,
+          registrationIndexAfter: registrationIndexBefore,
+          requestedPosition: isInsertAction
+            ? { position, targetComponentName }
+            : undefined,
+          manualPositionRespected: false,
         });
 
         return this.buildInsertResultFailure({
@@ -1895,9 +1925,17 @@ export class LifecycleManager
           .warn(
             'Cannot register component during startup - it is a required dependency for other components',
           );
-        this.safeEmit('component:registration-rejected', {
+        this.lifecycleEvents.componentRegistrationRejected({
           name: componentName,
           reason: 'startup_in_progress',
+          message:
+            'Cannot register component during startup when it is a required dependency for other components.',
+          registrationIndexBefore,
+          registrationIndexAfter: registrationIndexBefore,
+          requestedPosition: isInsertAction
+            ? { position, targetComponentName }
+            : undefined,
+          manualPositionRespected: false,
         });
 
         return this.buildInsertResultFailure({
@@ -1917,9 +1955,16 @@ export class LifecycleManager
         this.logger
           .entity(componentName)
           .warn('Component instance already registered');
-        this.safeEmit('component:registration-rejected', {
+        this.lifecycleEvents.componentRegistrationRejected({
           name: componentName,
           reason: 'duplicate_instance',
+          message: 'Component instance is already registered.',
+          registrationIndexBefore,
+          registrationIndexAfter: registrationIndexBefore,
+          requestedPosition: isInsertAction
+            ? { position, targetComponentName }
+            : undefined,
+          manualPositionRespected: false,
         });
 
         return this.buildInsertResultFailure({
@@ -1938,9 +1983,16 @@ export class LifecycleManager
         this.logger
           .entity(componentName)
           .warn('Component with this name already registered');
-        this.safeEmit('component:registration-rejected', {
+        this.lifecycleEvents.componentRegistrationRejected({
           name: componentName,
           reason: 'duplicate_name',
+          message: `Component "${componentName}" is already registered.`,
+          registrationIndexBefore,
+          registrationIndexAfter: registrationIndexBefore,
+          requestedPosition: isInsertAction
+            ? { position, targetComponentName }
+            : undefined,
+          manualPositionRespected: false,
         });
 
         return this.buildInsertResultFailure({
@@ -1960,10 +2012,18 @@ export class LifecycleManager
         this.logger.entity(componentName).warn('Target component not found', {
           params: { target: targetComponentName },
         });
-        this.safeEmit('component:registration-rejected', {
+        this.lifecycleEvents.componentRegistrationRejected({
           name: componentName,
           reason: 'target_not_found',
           target: targetComponentName,
+          message: `Target component "${targetComponentName ?? ''}" not found in registry.`,
+          registrationIndexBefore,
+          registrationIndexAfter: null,
+          requestedPosition: isInsertAction
+            ? { position, targetComponentName }
+            : undefined,
+          manualPositionRespected: false,
+          targetFound: false,
         });
 
         // Block registration during startup if this component would be a dependency
@@ -2017,10 +2077,19 @@ export class LifecycleManager
             .warn('Registration rejected due to dependency cycle', {
               params: { cycle: error.additionalInfo.cycle },
             });
-          this.safeEmit('component:registration-rejected', {
+          this.lifecycleEvents.componentRegistrationRejected({
             name: componentName,
             reason: 'dependency_cycle',
             cycle: error.additionalInfo.cycle,
+            message: error.message,
+            registrationIndexBefore,
+            registrationIndexAfter: registrationIndexBefore,
+            requestedPosition: isInsertAction
+              ? { position, targetComponentName }
+              : undefined,
+            manualPositionRespected: false,
+            targetFound:
+              position === 'before' || position === 'after' ? true : undefined,
           });
 
           return this.buildInsertResultFailure({
@@ -2083,6 +2152,10 @@ export class LifecycleManager
 
       // Get the final registration index after insertion
       const registrationIndexAfter = this.getComponentIndex(componentName);
+      const targetFound =
+        position === 'before' || position === 'after'
+          ? this.getComponentIndex(targetComponentName ?? '') !== null
+          : undefined;
 
       if (isInsertAction) {
         this.logger.entity(componentName).info('Component inserted', {
@@ -2095,9 +2168,18 @@ export class LifecycleManager
       }
 
       // Emit registration event
-      this.safeEmit('component:registered', {
+      this.lifecycleEvents.componentRegistered({
         name: componentName,
         index: registrationIndexAfter,
+        action: isInsertAction ? 'insert' : 'register',
+        registrationIndexBefore,
+        registrationIndexAfter,
+        startupOrder,
+        requestedPosition: isInsertAction
+          ? { position, targetComponentName }
+          : undefined,
+        manualPositionRespected: isManualPositionRespected,
+        targetFound,
       });
 
       return {
@@ -2110,10 +2192,7 @@ export class LifecycleManager
         startupOrder,
         requestedPosition: { position, targetComponentName },
         manualPositionRespected: isManualPositionRespected,
-        targetFound:
-          position === 'before' || position === 'after'
-            ? this.getComponentIndex(targetComponentName ?? '') !== null
-            : undefined,
+        targetFound,
       };
     } catch (error) {
       // Handle unexpected errors during registration
@@ -2128,9 +2207,19 @@ export class LifecycleManager
         .error('Registration failed with unexpected error', {
           params: { error: err },
         });
-      this.safeEmit('component:registration-rejected', {
+      this.lifecycleEvents.componentRegistrationRejected({
         name: componentName,
         reason: code,
+        message: err.message,
+        registrationIndexBefore,
+        registrationIndexAfter: registrationIndexBefore,
+        startupOrder: [],
+        requestedPosition: isInsertAction
+          ? { position, targetComponentName }
+          : undefined,
+        manualPositionRespected: false,
+        targetFound:
+          position === 'before' || position === 'after' ? false : undefined,
         ...(err instanceof DependencyCycleError
           ? { cycle: err.additionalInfo.cycle }
           : {}),
@@ -2178,10 +2267,7 @@ export class LifecycleManager
     this.shutdownMethod = method;
     const isDuringStartup = this.isStarting;
     this.logger.info('Stopping all components', { params: { method } });
-    this.safeEmit('lifecycle-manager:shutdown-initiated', {
-      method,
-      duringStartup: isDuringStartup,
-    });
+    this.lifecycleEvents.lifecycleManagerShutdownInitiated(method, isDuringStartup);
 
     // Get shutdown order (reverse topological order)
     let shutdownOrder: string[];
@@ -2245,10 +2331,12 @@ export class LifecycleManager
         },
       });
 
-      this.safeEmit('lifecycle-manager:shutdown-completed', {
+      this.lifecycleEvents.lifecycleManagerShutdownCompleted({
         durationMS,
         stoppedComponents,
         stalledComponents,
+        method,
+        duringStartup: isDuringStartup,
       });
 
       return {
@@ -2356,7 +2444,7 @@ export class LifecycleManager
     // Set state to starting
     this.componentStates.set(name, 'starting');
     this.logger.entity(name).info('Starting component');
-    this.safeEmit('component:starting', { name });
+    this.lifecycleEvents.componentStarting(name);
 
     const timeoutMS = component.startupTimeoutMS;
     let timeoutHandle: NodeJS.Timeout | undefined;
@@ -2409,7 +2497,8 @@ export class LifecycleManager
       this.componentTimestamps.set(name, timestamps);
 
       this.logger.entity(name).success('Component started');
-      this.safeEmit('component:started', { name });
+      const status = this.getComponentStatus(name);
+      this.lifecycleEvents.componentStarted(name, status);
 
       return {
         success: true,
@@ -2431,13 +2520,18 @@ export class LifecycleManager
         this.logger.entity(name).error('Component startup timed out', {
           params: { error: err.message },
         });
-        this.safeEmit('component:start-timeout', { name, error: err });
+        this.lifecycleEvents.componentStartTimeout(name, err, {
+          timeoutMS,
+          reason: err.message,
+        });
       } else {
         this.componentStates.set(name, 'registered'); // Reset state
         this.logger.entity(name).error('Component failed to start', {
           params: { error: err.message },
         });
-        this.safeEmit('component:start-failed', { name, error: err });
+        this.lifecycleEvents.componentStartFailed(name, err, {
+          reason: err.message,
+        });
       }
 
       return {
@@ -2589,16 +2683,16 @@ export class LifecycleManager
     }
 
     this.logger.info('Shutdown warning phase');
-    this.safeEmit('lifecycle-manager:shutdown-warning', { timeoutMS });
+    this.lifecycleEvents.lifecycleManagerShutdownWarning(timeoutMS);
 
     if (timeoutMS === 0) {
       // Fire-and-forget: broadcast warnings without waiting for completion
       for (const { name, component } of warningTargets) {
-        this.safeEmit('component:shutdown-warning', { name });
+        this.lifecycleEvents.componentShutdownWarning(name);
         Promise.resolve()
           .then(() => component.onShutdownWarning?.())
           .then(() => {
-            this.safeEmit('component:shutdown-warning-completed', { name });
+            this.lifecycleEvents.componentShutdownWarningCompleted(name);
           })
           .catch((error) => {
             this.logger.entity(name).warn('Shutdown warning phase failed', {
@@ -2611,9 +2705,7 @@ export class LifecycleManager
       await Promise.resolve();
 
       // Now that warnings are executing, emit global completion event
-      this.safeEmit('lifecycle-manager:shutdown-warning-completed', {
-        timeoutMS,
-      });
+      this.lifecycleEvents.lifecycleManagerShutdownWarningCompleted(timeoutMS);
 
       return;
     }
@@ -2624,7 +2716,7 @@ export class LifecycleManager
 
     for (const { name, component } of warningTargets) {
       statuses.set(name, 'pending');
-      this.safeEmit('component:shutdown-warning', { name });
+      this.lifecycleEvents.componentShutdownWarning(name);
 
       const warningPromise = Promise.resolve().then(() =>
         component.onShutdownWarning?.(),
@@ -2634,7 +2726,7 @@ export class LifecycleManager
         warningPromise
           .then(() => {
             statuses.set(name, 'resolved');
-            this.safeEmit('component:shutdown-warning-completed', { name });
+            this.lifecycleEvents.componentShutdownWarningCompleted(name);
           })
           .catch((error) => {
             statuses.set(name, 'rejected');
@@ -2667,10 +2759,7 @@ export class LifecycleManager
             params: { timeoutMS },
           });
 
-          this.safeEmit('component:shutdown-warning-timeout', {
-            name,
-            timeoutMS,
-          });
+          this.lifecycleEvents.componentShutdownWarningTimeout(name, timeoutMS);
         }
 
         // Global timeout: proceed to graceful shutdown regardless of pending warnings.
@@ -2678,17 +2767,15 @@ export class LifecycleManager
           params: { timeoutMS, pending: pendingComponents.length },
         });
 
-        this.safeEmit('lifecycle-manager:shutdown-warning-timeout', {
+        this.lifecycleEvents.lifecycleManagerShutdownWarningTimeout(
           timeoutMS,
-          pending: pendingComponents.map(({ name }) => name),
-        });
+          pendingComponents.map(({ name }) => name),
+        );
 
         return;
       }
 
-      this.safeEmit('lifecycle-manager:shutdown-warning-completed', {
-        timeoutMS,
-      });
+      this.lifecycleEvents.lifecycleManagerShutdownWarningCompleted(timeoutMS);
     } finally {
       if (timeoutHandle) {
         clearTimeout(timeoutHandle);
@@ -2708,7 +2795,7 @@ export class LifecycleManager
     // Set state to stopping
     this.componentStates.set(name, 'stopping');
     this.logger.entity(name).info('Graceful shutdown started');
-    this.safeEmit('component:stopping', { name });
+    this.lifecycleEvents.componentStopping(name);
 
     // Use custom timeout if provided, otherwise use component's configured timeout
     const timeoutMS = options?.timeout ?? component.shutdownGracefulTimeoutMS;
@@ -2764,7 +2851,7 @@ export class LifecycleManager
       this.componentTimestamps.set(name, timestamps);
 
       this.logger.entity(name).success('Component stopped gracefully');
-      this.safeEmit('component:stopped', { name });
+      this.lifecycleEvents.componentStopped(name, this.getComponentStatus(name));
 
       return {
         success: true,
@@ -2783,7 +2870,10 @@ export class LifecycleManager
         err.additionalInfo.componentName === name
       ) {
         this.logger.entity(name).warn('Graceful shutdown timed out');
-        this.safeEmit('component:stop-timeout', { name, error: err });
+        this.lifecycleEvents.componentStopTimeout(name, err, {
+          timeoutMS,
+          reason: 'Graceful shutdown timed out',
+        });
 
         return {
           success: false,
@@ -2835,7 +2925,7 @@ export class LifecycleManager
       },
     });
 
-    this.safeEmit('component:shutdown-force', {
+    this.lifecycleEvents.componentShutdownForce({
       name,
       context: {
         gracefulPhaseRan: context.gracefulPhaseRan,
@@ -2870,7 +2960,10 @@ export class LifecycleManager
           },
         });
 
-      this.safeEmit('component:stalled', { name, stallInfo });
+      this.lifecycleEvents.componentStalled(name, stallInfo, {
+        reason: stallInfo.reason,
+        code: context.gracefulTimedOut ? 'stop_timeout' : 'unknown_error',
+      });
 
       // Return the original graceful phase error
       return {
@@ -2928,8 +3021,8 @@ export class LifecycleManager
       this.componentTimestamps.set(name, timestamps);
 
       this.logger.entity(name).success('Component force stopped');
-      this.safeEmit('component:shutdown-force-completed', { name });
-      this.safeEmit('component:stopped', { name });
+      this.lifecycleEvents.componentShutdownForceCompleted(name);
+      this.lifecycleEvents.componentStopped(name, this.getComponentStatus(name));
 
       return {
         success: true,
@@ -2964,17 +3057,17 @@ export class LifecycleManager
         this.logger.entity(name).error('Force shutdown timed out - stalled', {
           params: { timeoutMS },
         });
-        this.safeEmit('component:shutdown-force-timeout', {
-          name,
-          timeoutMS,
-        });
+        this.lifecycleEvents.componentShutdownForceTimeout(name, timeoutMS);
       } else {
         this.logger.entity(name).error('Force shutdown failed - stalled', {
           params: { error: err.message },
         });
       }
 
-      this.safeEmit('component:stalled', { name, stallInfo });
+      this.lifecycleEvents.componentStalled(name, stallInfo, {
+        reason: stallInfo.reason,
+        code: isTimeout ? 'stop_timeout' : 'unknown_error',
+      });
 
       return {
         success: false,
@@ -3065,7 +3158,7 @@ export class LifecycleManager
 
     for (const name of componentsToRollback) {
       this.logger.entity(name).info('Rolling back component');
-      this.safeEmit('component:startup-rollback', { name });
+      this.lifecycleEvents.componentStartupRollback(name);
 
       // Use internal method to bypass bulk operation checks
       const result = await this.stopComponentInternal(name);
@@ -3084,7 +3177,10 @@ export class LifecycleManager
   /**
    * Safe emit wrapper - prevents event handler errors from breaking lifecycle
    */
-  private safeEmit(event: string, data?: unknown): void {
+  private safeEmit<K extends LifecycleManagerEventName>(
+    event: K,
+    data: LifecycleManagerEventMap[K],
+  ): void {
     try {
       this.emit(event, data);
     } catch (error) {
@@ -3441,7 +3537,7 @@ export class LifecycleManager
     }
 
     this.logger.info('Shutdown signal received', { params: { method } });
-    this.safeEmit('signal:shutdown', { method });
+    this.lifecycleEvents.signalShutdown(method);
 
     // Initiate shutdown asynchronously (don't await in signal handler)
     void this.stopAllComponentsInternal(method);
@@ -3463,7 +3559,7 @@ export class LifecycleManager
     source: 'signal' | 'trigger' = 'trigger',
   ): Promise<SignalBroadcastResult> {
     this.logger.info('Reload request received', { params: { source } });
-    this.safeEmit('signal:reload');
+    this.lifecycleEvents.signalReload();
 
     if (this.onReloadRequested) {
       // Call custom callback with broadcast function
@@ -3499,7 +3595,7 @@ export class LifecycleManager
     source: 'signal' | 'trigger' = 'trigger',
   ): Promise<SignalBroadcastResult> {
     this.logger.info('Info request received', { params: { source } });
-    this.safeEmit('signal:info');
+    this.lifecycleEvents.signalInfo();
 
     if (this.onInfoRequested) {
       // Call custom callback with broadcast function
@@ -3534,7 +3630,7 @@ export class LifecycleManager
     source: 'signal' | 'trigger' = 'trigger',
   ): Promise<SignalBroadcastResult> {
     this.logger.info('Debug request received', { params: { source } });
-    this.safeEmit('signal:debug');
+    this.lifecycleEvents.signalDebug();
 
     if (this.onDebugRequested) {
       // Call custom callback with broadcast function
@@ -3591,7 +3687,7 @@ export class LifecycleManager
         continue;
       }
 
-      this.safeEmit('component:reload-started', { name });
+      this.lifecycleEvents.componentReloadStarted(name);
 
       const timeoutMS = component.signalTimeoutMS;
       let timeoutHandle: NodeJS.Timeout | undefined;
@@ -3631,7 +3727,7 @@ export class LifecycleManager
             code: 'timeout',
           });
         } else {
-          this.safeEmit('component:reload-completed', { name });
+          this.lifecycleEvents.componentReloadCompleted(name);
           results.push({
             name,
             called: true,
@@ -3645,7 +3741,7 @@ export class LifecycleManager
         this.logger
           .entity(name)
           .error('Reload failed', { params: { error: err } });
-        this.safeEmit('component:reload-failed', { name, error: err });
+        this.lifecycleEvents.componentReloadFailed(name, err);
         results.push({
           name,
           called: true,
@@ -3720,7 +3816,7 @@ export class LifecycleManager
         continue;
       }
 
-      this.safeEmit('component:info-started', { name });
+      this.lifecycleEvents.componentInfoStarted(name);
 
       const timeoutMS = component.signalTimeoutMS;
       let timeoutHandle: NodeJS.Timeout | undefined;
@@ -3760,7 +3856,7 @@ export class LifecycleManager
             code: 'timeout',
           });
         } else {
-          this.safeEmit('component:info-completed', { name });
+          this.lifecycleEvents.componentInfoCompleted(name);
           results.push({
             name,
             called: true,
@@ -3774,7 +3870,7 @@ export class LifecycleManager
         this.logger
           .entity(name)
           .error('Info handler failed', { params: { error: err } });
-        this.safeEmit('component:info-failed', { name, error: err });
+        this.lifecycleEvents.componentInfoFailed(name, err);
         results.push({
           name,
           called: true,
@@ -3849,7 +3945,7 @@ export class LifecycleManager
         continue;
       }
 
-      this.safeEmit('component:debug-started', { name });
+      this.lifecycleEvents.componentDebugStarted(name);
 
       const timeoutMS = component.signalTimeoutMS;
       let timeoutHandle: NodeJS.Timeout | undefined;
@@ -3889,7 +3985,7 @@ export class LifecycleManager
             code: 'timeout',
           });
         } else {
-          this.safeEmit('component:debug-completed', { name });
+          this.lifecycleEvents.componentDebugCompleted(name);
           results.push({
             name,
             called: true,
@@ -3903,7 +3999,7 @@ export class LifecycleManager
         this.logger
           .entity(name)
           .error('Debug handler failed', { params: { error: err } });
-        this.safeEmit('component:debug-failed', { name, error: err });
+        this.lifecycleEvents.componentDebugFailed(name, err);
         results.push({
           name,
           called: true,

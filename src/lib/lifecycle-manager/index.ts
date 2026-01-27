@@ -15,6 +15,12 @@
 // Core classes
 export { LifecycleManager } from './lifecycle-manager';
 export { BaseComponent } from './base-component';
+export {
+  LifecycleManagerEvents,
+  type LifecycleManagerEventMap,
+  type LifecycleManagerEventName,
+  type LifecycleManagerEmit,
+} from './events';
 
 // Types
 export type {

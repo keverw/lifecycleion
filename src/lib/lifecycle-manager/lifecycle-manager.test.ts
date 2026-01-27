@@ -437,6 +437,11 @@ describe('LifecycleManager - Phase 1: Foundation', () => {
       const lifecycle = new LifecycleManager({ logger });
       const component1 = new TestComponent(logger, { name: 'database' });
       const component2 = new TestComponent(logger, { name: 'database' });
+      let rejectedPayload: any;
+
+      lifecycle.on('component:registration-rejected', (data) => {
+        rejectedPayload = data;
+      });
 
       const result1 = lifecycle.registerComponent(component1);
       expect(result1.success).toBe(true);
@@ -449,6 +454,11 @@ describe('LifecycleManager - Phase 1: Foundation', () => {
       expect(result2.registrationIndexBefore).toBe(0);
       expect(result2.registrationIndexAfter).toBe(0);
       expect(result2.startupOrder).toEqual(['database']);
+      expect(rejectedPayload?.name).toBe('database');
+      expect(rejectedPayload?.reason).toBe('duplicate_name');
+      expect(rejectedPayload?.message).toContain('already registered');
+      expect(rejectedPayload?.registrationIndexBefore).toBe(0);
+      expect(rejectedPayload?.registrationIndexAfter).toBe(0);
     });
 
     test('registerComponent() should reject duplicate instance even if renamed', () => {
@@ -497,6 +507,11 @@ describe('LifecycleManager - Phase 1: Foundation', () => {
 
     test('registerComponent() should return dependency_cycle failure result and not register component', () => {
       const lifecycle = new LifecycleManager({ logger });
+      let rejectedPayload: any;
+
+      lifecycle.on('component:registration-rejected', (data) => {
+        rejectedPayload = data;
+      });
 
       const a = new TestComponent(logger, { name: 'a', dependencies: ['b'] });
       const b = new TestComponent(logger, { name: 'b', dependencies: ['a'] });
@@ -518,6 +533,9 @@ describe('LifecycleManager - Phase 1: Foundation', () => {
       expect(lifecycle.getComponentStatus('b')).toBe(undefined);
       expect(lifecycle.getComponentNames()).toEqual(['a']);
       expect(resultB.startupOrder).toEqual(['a']);
+      expect(rejectedPayload?.name).toBe('b');
+      expect(rejectedPayload?.reason).toBe('dependency_cycle');
+      expect(Array.isArray(rejectedPayload?.cycle)).toBe(true);
     });
 
     test('insertComponentAt() should return dependency_cycle failure result and not register component', () => {
@@ -548,6 +566,11 @@ describe('LifecycleManager - Phase 1: Foundation', () => {
     test('insertComponentAt() should return target_not_found failure result', () => {
       const lifecycle = new LifecycleManager({ logger });
       const component = new TestComponent(logger, { name: 'api' });
+      let rejectedPayload: any;
+
+      lifecycle.on('component:registration-rejected', (data) => {
+        rejectedPayload = data;
+      });
 
       const result = lifecycle.insertComponentAt(
         component,
@@ -561,11 +584,19 @@ describe('LifecycleManager - Phase 1: Foundation', () => {
       expect(result.componentName).toBe('api');
       expect(result.startupOrder).toEqual([]);
       expect(result.manualPositionRespected).toBe(false);
+      expect(rejectedPayload?.reason).toBe('target_not_found');
+      expect(rejectedPayload?.target).toBe('missing');
+      expect(rejectedPayload?.targetFound).toBe(false);
     });
 
     test('insertComponentAt() should return invalid_position failure result for untyped callers', () => {
       const lifecycle = new LifecycleManager({ logger });
       const component = new TestComponent(logger, { name: 'api' });
+      let rejectedPayload: any;
+
+      lifecycle.on('component:registration-rejected', (data) => {
+        rejectedPayload = data;
+      });
 
       const result = (lifecycle as any).insertComponentAt(component, 'weird');
       expect(result.success).toBe(false);
@@ -575,6 +606,8 @@ describe('LifecycleManager - Phase 1: Foundation', () => {
       expect(result.startupOrder).toEqual([]);
       expect(result.manualPositionRespected).toBe(false);
       expect(result.requestedPosition.position).toBe('weird');
+      expect(rejectedPayload?.reason).toBe('invalid_position');
+      expect(rejectedPayload?.requestedPosition?.position).toBe('weird');
     });
 
     test('insertComponentAt() should report manualPositionRespected=false when dependencies override requested order', () => {
@@ -1866,6 +1899,10 @@ describe('LifecycleManager - Phase 2: Core Registration & Individual Lifecycle',
 
       expect(emittedData).toBeDefined();
       expect(emittedData.name).toBe('test');
+      expect(emittedData.action).toBe('register');
+      expect(emittedData.registrationIndexBefore).toBeNull();
+      expect(emittedData.registrationIndexAfter).toBe(0);
+      expect(Array.isArray(emittedData.startupOrder)).toBe(true);
     });
 
     test('should emit component:starting and component:started events', async () => {
@@ -1878,13 +1915,17 @@ describe('LifecycleManager - Phase 2: Core Registration & Individual Lifecycle',
       lifecycle.on('component:starting', () => {
         events.push('starting');
       });
-      lifecycle.on('component:started', () => {
+      let startedPayload: any;
+      lifecycle.on('component:started', (data) => {
         events.push('started');
+        startedPayload = data;
       });
 
       await lifecycle.startComponent('test');
 
       expect(events).toEqual(['starting', 'started']);
+      expect(startedPayload?.status?.name).toBe('test');
+      expect(startedPayload?.status?.state).toBe('running');
     });
 
     test('should emit component:stopping and component:stopped events', async () => {
@@ -1898,13 +1939,17 @@ describe('LifecycleManager - Phase 2: Core Registration & Individual Lifecycle',
       lifecycle.on('component:stopping', () => {
         events.push('stopping');
       });
-      lifecycle.on('component:stopped', () => {
+      let stoppedPayload: any;
+      lifecycle.on('component:stopped', (data) => {
         events.push('stopped');
+        stoppedPayload = data;
       });
 
       await lifecycle.stopComponent('test');
 
       expect(events).toEqual(['stopping', 'stopped']);
+      expect(stoppedPayload?.status?.name).toBe('test');
+      expect(stoppedPayload?.status?.state).toBe('stopped');
     });
 
     test('should emit component:start-timeout event on startup timeout', async () => {
@@ -1927,13 +1972,18 @@ describe('LifecycleManager - Phase 2: Core Registration & Individual Lifecycle',
       lifecycle.registerComponent(component);
 
       let didTimeoutEmit = false;
-      lifecycle.on('component:start-timeout', () => {
+      let timeoutPayload: any;
+      lifecycle.on('component:start-timeout', (data) => {
         didTimeoutEmit = true;
+        timeoutPayload = data;
       });
 
       await lifecycle.startComponent('slow');
 
       expect(didTimeoutEmit).toBe(true);
+      expect(timeoutPayload?.name).toBe('slow');
+      expect(timeoutPayload?.code).toBe('start_timeout');
+      expect(timeoutPayload?.timeoutMS).toBe(50);
     });
 
     test('should emit component:stalled event on stop timeout', async () => {
@@ -1957,13 +2007,18 @@ describe('LifecycleManager - Phase 2: Core Registration & Individual Lifecycle',
       await lifecycle.startComponent('slow');
 
       let didStallEmit = false;
-      lifecycle.on('component:stalled', () => {
+      let stalledPayload: any;
+      lifecycle.on('component:stalled', (data) => {
         didStallEmit = true;
+        stalledPayload = data;
       });
 
       await lifecycle.stopComponent('slow');
 
       expect(didStallEmit).toBe(true);
+      expect(stalledPayload?.name).toBe('slow');
+      expect(stalledPayload?.stallInfo?.reason).toBe('timeout');
+      expect(stalledPayload?.code).toBe('stop_timeout');
     });
 
     test('event handler errors should not break lifecycle operations', async () => {
@@ -2310,8 +2365,10 @@ describe('LifecycleManager - Phase 3: Bulk Operations', () => {
         },
       );
 
-      lifecycle.on('lifecycle-manager:shutdown-completed', () => {
+      let shutdownCompletedPayload: any;
+      lifecycle.on('lifecycle-manager:shutdown-completed', (data) => {
         shutdownCompletedCount++;
+        shutdownCompletedPayload = data;
       });
 
       class SlowComponent extends BaseComponent {
@@ -2342,6 +2399,7 @@ describe('LifecycleManager - Phase 3: Bulk Operations', () => {
       expect(shutdownCompletedCount).toBe(1);
       // Verify duringStartup flag is correctly set to true
       expect(wasDuringStartup).toBe(true);
+      expect(shutdownCompletedPayload?.duringStartup).toBe(true);
     });
 
     test('should block startup if stalled components exist', async () => {
@@ -2417,13 +2475,17 @@ describe('LifecycleManager - Phase 3: Bulk Operations', () => {
       lifecycle.registerComponent(new TestComponent(logger, { name: 'comp1' }));
 
       let wasStartedEventEmitted = false;
-      lifecycle.on('lifecycle-manager:started', () => {
+      let startedPayload: any;
+      lifecycle.on('lifecycle-manager:started', (data) => {
         wasStartedEventEmitted = true;
+        startedPayload = data;
       });
 
       await lifecycle.startAllComponents();
 
       expect(wasStartedEventEmitted).toBe(true);
+      expect(Array.isArray(startedPayload?.startedComponents)).toBe(true);
+      expect(Array.isArray(startedPayload?.skippedComponents)).toBe(true);
     });
 
     test('should emit component:startup-rollback events', async () => {
@@ -2560,8 +2622,10 @@ describe('LifecycleManager - Phase 3: Bulk Operations', () => {
         wasShutdownInitiatedEmitted = true;
       });
 
-      lifecycle.on('lifecycle-manager:shutdown-completed', () => {
+      let shutdownCompletedPayload: any;
+      lifecycle.on('lifecycle-manager:shutdown-completed', (data) => {
         wasShutdownCompletedEmitted = true;
+        shutdownCompletedPayload = data;
       });
 
       await lifecycle.startAllComponents();
@@ -2569,6 +2633,8 @@ describe('LifecycleManager - Phase 3: Bulk Operations', () => {
 
       expect(wasShutdownInitiatedEmitted).toBe(true);
       expect(wasShutdownCompletedEmitted).toBe(true);
+      expect(shutdownCompletedPayload?.method).toBe('manual');
+      expect(shutdownCompletedPayload?.duringStartup).toBe(false);
     });
 
     test('should reset state flags after completion', async () => {
@@ -5099,6 +5165,7 @@ describe('LifecycleManager - Phase 7: Messaging, Health, Values', () => {
 
     test('should handle handler throwing error', async () => {
       const lifecycle = new LifecycleManager({ logger });
+      let failedPayload: any;
 
       class ComponentWithFailingHandler extends BaseComponent {
         constructor(logger: Logger) {
@@ -5116,6 +5183,10 @@ describe('LifecycleManager - Phase 7: Messaging, Health, Values', () => {
       lifecycle.registerComponent(new ComponentWithFailingHandler(logger));
       await lifecycle.startAllComponents();
 
+      lifecycle.on('component:message-failed', (data) => {
+        failedPayload = data;
+      });
+
       const result = await lifecycle.sendMessageToComponent('receiver', {
         test: 'data',
       });
@@ -5129,6 +5200,9 @@ describe('LifecycleManager - Phase 7: Messaging, Health, Values', () => {
       expect(result.error?.message).toBe('Handler failed');
       expect(result.timedOut).toBe(false);
       expect(result.code).toBe('error');
+      expect(failedPayload?.componentName).toBe('receiver');
+      expect(failedPayload?.code).toBe('error');
+      expect(failedPayload?.timedOut).toBe(false);
     });
 
     test('should timeout when handler takes too long', async () => {
@@ -5286,6 +5360,7 @@ describe('LifecycleManager - Phase 7: Messaging, Health, Values', () => {
   describe('Broadcast Messaging - broadcastMessage()', () => {
     test('should broadcast to all running components', async () => {
       const lifecycle = new LifecycleManager({ logger });
+      let broadcastPayload: any;
 
       class MessageReceiver extends BaseComponent {
         public messages: unknown[] = [];
@@ -5313,6 +5388,10 @@ describe('LifecycleManager - Phase 7: Messaging, Health, Values', () => {
 
       await lifecycle.startAllComponents();
 
+      lifecycle.on('component:broadcast-completed', (data) => {
+        broadcastPayload = data;
+      });
+
       const results = await lifecycle.broadcastMessage({ broadcast: 'test' });
 
       expect(results).toHaveLength(3);
@@ -5323,6 +5402,11 @@ describe('LifecycleManager - Phase 7: Messaging, Health, Values', () => {
       expect(comp1.messages).toHaveLength(1);
       expect(comp2.messages).toHaveLength(1);
       expect(comp3.messages).toHaveLength(1);
+      expect(broadcastPayload?.resultsCount).toBe(3);
+      expect(Array.isArray(broadcastPayload?.results)).toBe(true);
+      expect(broadcastPayload?.results?.every((r: any) => r.code === 'sent')).toBe(
+        true,
+      );
     });
 
     test('should timeout broadcast when handler takes too long', async () => {
@@ -5925,6 +6009,7 @@ describe('LifecycleManager - Phase 7: Messaging, Health, Values', () => {
   describe('Shared Values - getValue()', () => {
     test('should get value from component', async () => {
       const lifecycle = new LifecycleManager({ logger });
+      let valuePayload: any;
 
       class ComponentWithValues extends BaseComponent {
         constructor(logger: Logger) {
@@ -5944,6 +6029,10 @@ describe('LifecycleManager - Phase 7: Messaging, Health, Values', () => {
       lifecycle.registerComponent(new ComponentWithValues(logger));
       await lifecycle.startAllComponents();
 
+      lifecycle.on('component:value-returned', (data) => {
+        valuePayload = data;
+      });
+
       const result1 = lifecycle.getValue('provider', 'config');
       expect(result1.found).toBe(true);
       expect(result1.value).toEqual({ setting: 'value' });
@@ -5951,6 +6040,12 @@ describe('LifecycleManager - Phase 7: Messaging, Health, Values', () => {
       expect(result1.componentRunning).toBe(true);
       expect(result1.handlerImplemented).toBe(true);
       expect(result1.code).toBe('found');
+      expect(valuePayload?.componentName).toBe('provider');
+      expect(valuePayload?.key).toBe('config');
+      expect(valuePayload?.code).toBe('found');
+      expect(valuePayload?.componentFound).toBe(true);
+      expect(valuePayload?.componentRunning).toBe(true);
+      expect(valuePayload?.handlerImplemented).toBe(true);
 
       const result2 = lifecycle.getValue('provider', 'status');
       expect(result2.found).toBe(true);
