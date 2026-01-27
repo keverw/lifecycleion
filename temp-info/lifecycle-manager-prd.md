@@ -477,174 +477,9 @@ coreLifecycle.on('lifecycle-manager:shutdown-initiated', async () => {
 });
 ```
 
-### 8. Optional Components
 
-Components can be marked as optional so their startup failures don't trigger rollback.
 
-**Declaration**:
-
-```typescript
-export interface ComponentOptions {
-  name: string;
-  optional?: boolean; // If true, startup failure logs warning but continues (default: false)
-  // ... other options
-}
-
-new CacheComponent(logger, {
-  name: 'cache',
-  optional: true, // Redis down? App still starts
-});
-```
-
-**Behavior**:
-
-- **Startup failure**: Log warning, mark component as `'failed'`, continue with other components
-- **No rollback**: Other components keep running
-- **Dependency handling**: If an optional component fails, components that depend on it are skipped with a warning and `component:start-skipped` event (no rollback, even if they are also optional)
-- **State tracking**: Failed optional components have state `'failed'` (new state)
-
-**New Component State**:
-
-```typescript
-type ComponentState =
-  | 'registered'
-  | 'starting'
-  | 'running'
-  | 'failed' // NEW: Optional component failed to start
-  | 'stopping'
-  | 'force-stopping'
-  | 'stopped'
-  | 'stalled';
-```
-
-**Startup Result**:
-
-```typescript
-// startAllComponents() returns detailed result instead of void
-async startAllComponents(): Promise<StartupResult>
-
-interface StartupResult {
-  success: boolean; // True if all required components started
-  startedComponents: string[];
-  failedOptionalComponents: Array<{
-    name: string;
-    error: Error;
-  }>;
-  skippedDueToDependency: string[]; // Components skipped because their optional dependency failed
-}
-```
-
-**Example**:
-
-```typescript
-const result = await lifecycle.startAllComponents();
-if (!result.success) {
-  // Required component failed - app cannot run
-  process.exit(1);
-}
-if (result.failedOptionalComponents.length > 0) {
-  // Some optional components failed - app is degraded but functional
-  logger.warn('Running in degraded mode', {
-    failed: result.failedOptionalComponents.map((f) => f.name),
-  });
-}
-```
-
-### 9. Abort Callbacks
-
-Components can implement optional abort callbacks that are called when the manager times out an operation. This provides cooperative cancellation without cluttering method signatures.
-
-**Available Abort Callbacks**:
-
-```typescript
-abstract class BaseComponent {
-  // Called when start() times out
-  public onStartupAborted?(): void;
-
-  // Called when stop() times out (before force phase begins)
-  public onStopAborted?(): void;
-
-  // Called when onShutdownForce() times out
-  public onShutdownForceAborted?(): void;
-}
-```
-
-**Usage**:
-
-```typescript
-class DatabaseComponent extends BaseComponent {
-  private aborted = false;
-  private abortController = new AbortController();
-
-  async start() {
-    // Option 1: Check flag periodically for long operations
-    for (const migration of migrations) {
-      if (this.aborted) {
-        throw new Error('Startup aborted');
-      }
-      await this.runMigration(migration);
-    }
-
-    // Option 2: Use AbortController for APIs that support it
-    await this.pool.connect({ signal: this.abortController.signal });
-  }
-
-  onStartupAborted() {
-    // Called by manager when startup times out
-    this.aborted = true;
-    this.abortController.abort();
-    this.logger.warn('Startup aborted due to timeout');
-  }
-
-  async stop() {
-    await this.pool.drain();
-  }
-
-  onStopAborted() {
-    // Called when graceful stop times out, force phase is about to begin
-    this.pool.destroyAllNow(); // More aggressive cleanup
-  }
-}
-```
-
-**Behavior**:
-
-- Abort callbacks are called **synchronously** by the manager just before proceeding
-- The manager does NOT wait for the original operation to complete after calling abort
-- Abort callbacks should be fast and non-blocking (set flags, trigger cleanup)
-- If a component doesn't implement the callback, the manager proceeds without notification
-
-**Timeline Example**:
-
-```
-0ms    - manager calls component.start()
-25000ms - startup timeout reached
-25000ms - manager calls component.onStartupAborted() (if implemented)
-25000ms - manager proceeds with rollback (doesn't wait for start() to return)
-???ms  - component's start() eventually returns (ignored by manager)
-```
-
-**Components that need AbortSignal for native APIs**:
-
-```typescript
-class FetchComponent extends BaseComponent {
-  private abortController = new AbortController();
-
-  async start() {
-    // Pass signal to fetch, streams, timers, etc.
-    const response = await fetch(url, {
-      signal: this.abortController.signal,
-    });
-  }
-
-  onStartupAborted() {
-    // Abort the controller, which cancels the fetch
-    this.abortController.abort();
-  }
-}
-```
-
-### 11. Snapshot List Guarantee
+### 5. Snapshot List Guarantee
 
 Bulk operations (`startAllComponents()`, `stopAllComponents()`, `restartAllComponents()`) operate on a **snapshot** of the component list taken at invocation.
 
@@ -673,7 +508,7 @@ await lifecycle.unregisterComponent('api', { stopIfRunning: false });
 // Final start order: database -> cache -> (api skipped) -> metrics
 ```
 
-### 12. Shutdown Result and Stalled Component Handling
+### 6. Shutdown Result and Stalled Component Handling
 
 **Shutdown Result Persistence**:
 
@@ -1522,72 +1357,18 @@ for (const status of allStatuses) {
 
 ## Testing Strategy
 
-### Unit Tests
+The LifecycleManager has comprehensive test coverage with 229+ passing unit tests covering all features:
+- Component registration and lifecycle operations
+- Dependency management and topological ordering
+- Optional components and failure handling
+- Abort callbacks and timeout handling
+- Health checks and shared values
+- Signal integration and event emission
+- Bulk operations and stall detection
 
-1. **Component Registration**
-   - Test unique name enforcement (kebab-case validation)
-   - Test insertion positions (start, end, before, after)
-   - Test unregistration
-   - Test registration during shutdown (returns false)
+See `src/lib/lifecycle-manager/lifecycle-manager.test.ts` for complete test implementation.
 
-2. **Lifecycle Operations**
-   - Test start/stop individual components (result objects)
-   - Test start/stop all components (result objects)
-   - Test error handling (startup failures, shutdown failures)
-   - Test stall detection and recovery
-
-3. **Optional Components**
-   - Test optional component failure doesn't trigger rollback
-   - Test dependent components are skipped when optional dependency fails
-   - Test `'failed'` state tracking
-
-4. **Abort Callbacks**
-   - Test onStartupAborted() called on timeout
-   - Test onStopAborted() called before force phase
-   - Test abort callbacks are optional (no error if not implemented)
-
-5. **Health Checks**
-   - Test healthCheck() invocation
-   - Test health check timeout
-   - Test aggregate health report
-   - Test boolean return normalized to result object
-   - Test rich result with message and details
-
-6. **Shared Values**
-   - Test getValue() handler called with correct key and from
-   - Test lifecycle.getValue() returns result object
-   - Test result.found true when value returned
-   - Test result.found false when key not found
-   - Test result includes componentFound, componentRunning, handlerImplemented
-   - Test from parameter tracks requester (component name or null)
-
-7. **Signal Integration**
-   - Test attach/detach
-   - Test manual triggers
-   - Test signal-to-lifecycle mapping
-
-8. **Event Emission**
-   - Test all event types are emitted
-   - Test event data correctness
-   - Test event handler errors don't break lifecycle
-
-### Integration Tests
-
-1. **Multiple Components**
-   - Test ordering with dependencies
-   - Test mixed optional/required components
-   - Test complex dependency graphs
-
-2. **Shutdown Scenarios**
-   - Test graceful shutdown
-   - Test force phase on timeout
-   - Test force phase on error
-   - Test stalled component tracking and restart blocking
-
-3. **Signal Handling**
-   - Test Ctrl+C triggers shutdown
-   - Test reload signal calls onReload()
-   - Test signals during startup
+Integration tests (Phase 10) will cover multi-component scenarios with real-world usage patterns.
 
 ## Known Limitations
 
@@ -1643,6 +1424,8 @@ If a component stalls (times out during shutdown) and its promise never resolves
 1. Design components with reasonable timeouts that they can actually meet
 2. Use the force shutdown phase to abandon work rather than wait
 3. If a component truly cannot stop, accept that some memory may leak until process exit
+
+**Workaround**: Stalled components block future restart attempts by default. Use the `ignoreStalledComponents: true` option in `startAllComponents()` to bypass this check if you need to restart despite stalled components.
 
 ### 3. No Atomic Restart
 
