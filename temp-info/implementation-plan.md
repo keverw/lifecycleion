@@ -384,19 +384,21 @@ src/lib/lifecycle-manager/
   - Use the `options?.autoStart` parameter (currently unused)
   - If `autoStart: true` and manager state allows starting:
     - **After startup (`isStarted`)**: Call `startComponent()` directly - it already handles all validation
-    - **During startup (`isStarting`)**: Two options:
-      - Option A: Call `startComponentInternal()` directly (bypass `isStarting` check) and handle manually
-      - Option B: Track in a pending queue, start after bulk startup completes
-      - **Recommendation: Option A** - simpler, immediate feedback
+    - **During startup (`isStarting`)**: Call `startComponentInternal()` with internal bypass flag
     - **During shutdown**: Already blocked by registration check
   
-- `startComponent()` already handles:
+- Modify `startComponentInternal()`:
+  - Add optional internal-only parameter (e.g., `_bypassBulkOperationCheck?: boolean`)
+  - When `true`, skip the `isStarting`/`isShuttingDown` checks in the caller (`startComponent()`)
+  - This keeps all validation logic in one place while allowing AutoStart during bulk operations
+  
+- `startComponent()` / `startComponentInternal()` already handles:
   - ✅ Dependency validation (exists and running)
   - ✅ Failure handling (timeouts, errors, state management)
   - ✅ Appropriate error codes (missing_dependency, dependency_not_running, etc.)
-  - ✅ Shutdown blocking
+  - ✅ Shutdown blocking (when bypass not used)
   
-- Only special case: `isStarting` check needs bypass for AutoStart during bulk startup
+- Implementation approach: Secondary private options pattern (not exposed in public API)
 
 **Dynamic removal during shutdown event**:
 
