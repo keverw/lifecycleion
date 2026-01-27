@@ -2,6 +2,7 @@ import { EventEmitterProtected } from '../event-emitter';
 import type { Logger } from '../logger';
 import type { LoggerService } from '../logger/logger-service';
 import type { BaseComponent } from './base-component';
+import { ComponentLifecycle } from './component-lifecycle';
 import type {
   ComponentState,
   ComponentStatus,
@@ -29,6 +30,8 @@ import type {
   SignalBroadcastResult,
   ComponentSignalResult,
   LifecycleSignalStatus,
+  ComponentLifecycleRef,
+  LifecycleCommon,
 } from './types';
 import {
   ComponentStartTimeoutError,
@@ -53,7 +56,10 @@ import { isPromise } from '../is-promise';
  * - Health checks and monitoring
  * - Event-driven architecture
  */
-export class LifecycleManager extends EventEmitterProtected {
+export class LifecycleManager
+  extends EventEmitterProtected
+  implements LifecycleCommon
+{
   // Configuration
   private readonly name: string;
   private readonly logger: LoggerService;
@@ -235,7 +241,8 @@ export class LifecycleManager extends EventEmitterProtected {
 
       // Commit registration
       this.components.push(component);
-      (component as unknown as { lifecycle: unknown }).lifecycle = this;
+      (component as unknown as { lifecycle: ComponentLifecycleRef }).lifecycle =
+        new ComponentLifecycle(this, componentName);
 
       // Initialize state
       this.componentStates.set(componentName, 'registered');
@@ -507,7 +514,8 @@ export class LifecycleManager extends EventEmitterProtected {
 
       // Commit registration
       this.components.splice(insertIndex, 0, component);
-      (component as unknown as { lifecycle: unknown }).lifecycle = this;
+      (component as unknown as { lifecycle: ComponentLifecycleRef }).lifecycle =
+        new ComponentLifecycle(this, componentName);
 
       // Initialize state
       this.componentStates.set(componentName, 'registered');

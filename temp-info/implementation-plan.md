@@ -280,6 +280,12 @@ src/lib/lifecycle-manager/
 
 ### Implement
 
+**Prereq refactor (done earlier, Phase 6.x)**:
+
+- Component-scoped lifecycle proxy (`ComponentLifecycle`) injected into BaseComponent
+- Manager instance remains the external entry point
+- Messaging/value APIs will use the proxy to set `from` automatically (no runtime "caller tracking")
+
 **Component messaging**:
 
 - Private `getCallerComponentName(): string | null` - track caller via lifecycle reference

@@ -1,6 +1,10 @@
 import type { Logger } from '../logger';
 import type { LoggerService } from '../logger/logger-service';
-import type { ComponentOptions, ComponentHealthResult } from './types';
+import type {
+  ComponentOptions,
+  ComponentHealthResult,
+  ComponentLifecycleRef,
+} from './types';
 import { InvalidComponentNameError } from './errors';
 
 /**
@@ -87,8 +91,8 @@ export abstract class BaseComponent {
   /** Component name (kebab-case) */
   protected name: string;
 
-  /** Reference to lifecycle manager (set by manager when registered) */
-  protected lifecycle!: unknown; // Will be LifecycleManager type, but avoiding circular dependency
+  /** Reference to component-scoped lifecycle (set by manager when registered) */
+  protected lifecycle!: ComponentLifecycleRef;
 
   /**
    * Create a new component

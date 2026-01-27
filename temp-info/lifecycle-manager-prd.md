@@ -135,7 +135,7 @@ Messages are delivered with two parameters: `payload` (the message) and `from` (
 
 - When called via `this.lifecycle.sendMessageToComponent()` inside a component → `from` = that component's name
 - When called directly on the manager instance → `from` = null (external)
-- The manager determines this by tracking which component owns the lifecycle reference being called
+- The manager injects a component-scoped lifecycle proxy into each component; the proxy supplies the sender name
 
 This allows components to know who sent the message and respond accordingly:
 

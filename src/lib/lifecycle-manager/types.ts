@@ -1,4 +1,5 @@
 import type { Logger } from '../logger';
+import type { EventEmitterProtected } from '../event-emitter';
 import type { ProcessSignalManagerStatus } from '../process-signal-manager';
 
 /**
@@ -436,6 +437,62 @@ export interface ValueResult<T = unknown> {
   /** Who requested (for logging) */
   requestedBy: string | null;
 }
+
+type EventEmitterSurface = Pick<
+  EventEmitterProtected,
+  'on' | 'once' | 'hasListener' | 'hasListeners' | 'listenerCount'
+>;
+
+/**
+ * Common lifecycle interface shared by LifecycleManager and ComponentLifecycle
+ *
+ * Keep in sync with public LifecycleManager API and ComponentLifecycle proxy.
+ * Purpose: define the shared surface both expose to avoid drift across the two.
+ */
+export interface LifecycleCommon extends EventEmitterSurface {
+  hasComponent(name: string): boolean;
+  isComponentRunning(name: string): boolean;
+  getComponentNames(): string[];
+  getRunningComponentNames(): string[];
+  getComponentCount(): number;
+  getRunningComponentCount(): number;
+  getComponentStatus(name: string): ComponentStatus | undefined;
+  getAllComponentStatuses(): ComponentStatus[];
+  getSystemState(): SystemState;
+  getStalledComponents(): ComponentStallInfo[];
+  getStartupOrder(): StartupOrderResult;
+  validateDependencies(): DependencyValidationResult;
+
+  startAllComponents(options?: StartupOptions): Promise<StartupResult>;
+  stopAllComponents(): Promise<ShutdownResult>;
+  restartAllComponents(options?: StartupOptions): Promise<RestartResult>;
+
+  startComponent(
+    name: string,
+    options?: StartComponentOptions,
+  ): Promise<ComponentOperationResult>;
+  stopComponent(
+    name: string,
+    options?: StopComponentOptions,
+  ): Promise<ComponentOperationResult>;
+  restartComponent(
+    name: string,
+    options?: RestartComponentOptions,
+  ): Promise<ComponentOperationResult>;
+
+  attachSignals(): void;
+  detachSignals(): void;
+  getSignalStatus(): LifecycleSignalStatus;
+  triggerReload(): Promise<SignalBroadcastResult>;
+  triggerInfo(): Promise<SignalBroadcastResult>;
+  triggerDebug(): Promise<SignalBroadcastResult>;
+}
+
+/**
+ * Component-scoped lifecycle interface injected into BaseComponent
+ * This is a restricted view of LifecycleManager suitable for components.
+ */
+export interface ComponentLifecycleRef extends LifecycleCommon {}
 
 /**
  * Overall system state
