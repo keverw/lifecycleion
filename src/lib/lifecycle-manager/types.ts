@@ -599,7 +599,7 @@ export interface LifecycleInternalCallbacks {
  * Component-scoped lifecycle interface injected into BaseComponent
  * This is a restricted view of LifecycleManager suitable for components.
  */
-export interface ComponentLifecycleRef extends LifecycleCommon {}
+export type ComponentLifecycleRef = LifecycleCommon;
 
 /**
  * Overall system state

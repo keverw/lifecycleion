@@ -812,7 +812,10 @@ export class LifecycleManager
                 params: { error: result.error?.message },
               });
 
-            this.lifecycleEvents.componentStartFailedOptional(name, result.error);
+            this.lifecycleEvents.componentStartFailedOptional(
+              name,
+              result.error,
+            );
 
             // Mark as failed state
             this.componentStates.set(name, 'failed');
@@ -1699,7 +1702,11 @@ export class LifecycleManager
       });
     }
 
-    this.lifecycleEvents.componentBroadcastCompleted(from, results.length, results);
+    this.lifecycleEvents.componentBroadcastCompleted(
+      from,
+      results.length,
+      results,
+    );
 
     return results;
   }
@@ -2152,7 +2159,7 @@ export class LifecycleManager
 
       // Get the final registration index after insertion
       const registrationIndexAfter = this.getComponentIndex(componentName);
-      const targetFound =
+      const isTargetFound =
         position === 'before' || position === 'after'
           ? this.getComponentIndex(targetComponentName ?? '') !== null
           : undefined;
@@ -2179,7 +2186,7 @@ export class LifecycleManager
           ? { position, targetComponentName }
           : undefined,
         manualPositionRespected: isManualPositionRespected,
-        targetFound,
+        targetFound: isTargetFound,
       });
 
       return {
@@ -2192,7 +2199,7 @@ export class LifecycleManager
         startupOrder,
         requestedPosition: { position, targetComponentName },
         manualPositionRespected: isManualPositionRespected,
-        targetFound,
+        targetFound: isTargetFound,
       };
     } catch (error) {
       // Handle unexpected errors during registration
@@ -2267,7 +2274,10 @@ export class LifecycleManager
     this.shutdownMethod = method;
     const isDuringStartup = this.isStarting;
     this.logger.info('Stopping all components', { params: { method } });
-    this.lifecycleEvents.lifecycleManagerShutdownInitiated(method, isDuringStartup);
+    this.lifecycleEvents.lifecycleManagerShutdownInitiated(
+      method,
+      isDuringStartup,
+    );
 
     // Get shutdown order (reverse topological order)
     let shutdownOrder: string[];
@@ -2851,7 +2861,10 @@ export class LifecycleManager
       this.componentTimestamps.set(name, timestamps);
 
       this.logger.entity(name).success('Component stopped gracefully');
-      this.lifecycleEvents.componentStopped(name, this.getComponentStatus(name));
+      this.lifecycleEvents.componentStopped(
+        name,
+        this.getComponentStatus(name),
+      );
 
       return {
         success: true,
@@ -3022,7 +3035,10 @@ export class LifecycleManager
 
       this.logger.entity(name).success('Component force stopped');
       this.lifecycleEvents.componentShutdownForceCompleted(name);
-      this.lifecycleEvents.componentStopped(name, this.getComponentStatus(name));
+      this.lifecycleEvents.componentStopped(
+        name,
+        this.getComponentStatus(name),
+      );
 
       return {
         success: true,

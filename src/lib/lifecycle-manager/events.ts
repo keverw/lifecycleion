@@ -89,7 +89,9 @@ export interface LifecycleManagerEventMap {
   'component:registered': {
     name: string;
     index: number | null;
-    action: RegisterComponentResult['action'] | InsertComponentAtResult['action'];
+    action:
+      | RegisterComponentResult['action']
+      | InsertComponentAtResult['action'];
     registrationIndexBefore: number | null;
     registrationIndexAfter: number | null;
     startupOrder: string[];
@@ -328,7 +330,9 @@ export class LifecycleManagerEvents {
   public componentRegistered(input: {
     name: string;
     index: number | null;
-    action: RegisterComponentResult['action'] | InsertComponentAtResult['action'];
+    action:
+      | RegisterComponentResult['action']
+      | InsertComponentAtResult['action'];
     registrationIndexBefore: number | null;
     registrationIndexAfter: number | null;
     startupOrder: string[];
@@ -341,11 +345,11 @@ export class LifecycleManagerEvents {
 
   public lifecycleManagerShutdownInitiated(
     method: ShutdownMethod,
-    duringStartup: boolean,
+    isDuringStartup: boolean,
   ): void {
     this.emit('lifecycle-manager:shutdown-initiated', {
       method,
-      duringStartup,
+      duringStartup: isDuringStartup,
     });
   }
 

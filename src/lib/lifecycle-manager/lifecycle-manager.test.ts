@@ -5055,10 +5055,10 @@ describe('LifecycleManager - Phase 7: Messaging, Health, Values', () => {
           super(logger, { name: 'receiver', dependencies: [] });
         }
 
-        async start() {}
-        async stop() {}
+        public async start() {}
+        public async stop() {}
 
-        onMessage(payload: unknown, from: string | null) {
+        public onMessage(payload: unknown, from: string | null) {
           this.receivedMessages.push({ payload, from });
           return { response: 'acknowledged' };
         }
@@ -5110,10 +5110,10 @@ describe('LifecycleManager - Phase 7: Messaging, Health, Values', () => {
           super(logger, { name: 'receiver', dependencies: [] });
         }
 
-        async start() {}
-        async stop() {}
+        public async start() {}
+        public async stop() {}
 
-        onMessage(payload: unknown, from: string | null) {
+        public onMessage(_payload: unknown, _from: string | null) {
           return { response: 'acknowledged' };
         }
       }
@@ -5142,8 +5142,8 @@ describe('LifecycleManager - Phase 7: Messaging, Health, Values', () => {
           super(logger, { name: 'receiver', dependencies: [] });
         }
 
-        async start() {}
-        async stop() {}
+        public async start() {}
+        public async stop() {}
       }
 
       lifecycle.registerComponent(new ComponentWithoutHandler(logger));
@@ -5172,10 +5172,10 @@ describe('LifecycleManager - Phase 7: Messaging, Health, Values', () => {
           super(logger, { name: 'receiver', dependencies: [] });
         }
 
-        async start() {}
-        async stop() {}
+        public async start() {}
+        public async stop() {}
 
-        onMessage(payload: unknown, from: string | null) {
+        public onMessage(_payload: unknown, _from: string | null) {
           throw new Error('Handler failed');
         }
       }
@@ -5216,10 +5216,10 @@ describe('LifecycleManager - Phase 7: Messaging, Health, Values', () => {
           super(logger, { name: 'slow', dependencies: [] });
         }
 
-        async start() {}
-        async stop() {}
+        public async start() {}
+        public async stop() {}
 
-        async onMessage(payload: unknown, from: string | null) {
+        public async onMessage(_payload: unknown, _from: string | null) {
           await sleep(50);
           return { response: 'late' };
         }
@@ -5253,10 +5253,10 @@ describe('LifecycleManager - Phase 7: Messaging, Health, Values', () => {
           super(logger, { name: 'slow', dependencies: [] });
         }
 
-        async start() {}
-        async stop() {}
+        public async start() {}
+        public async stop() {}
 
-        async onMessage(payload: unknown, from: string | null) {
+        public async onMessage(_payload: unknown, _from: string | null) {
           await sleep(30);
           return { response: 'ok' };
         }
@@ -5286,12 +5286,12 @@ describe('LifecycleManager - Phase 7: Messaging, Health, Values', () => {
           super(logger, { name: 'slow', dependencies: [] });
         }
 
-        async start() {}
-        async stop() {
+        public async start() {}
+        public async stop() {
           await new Promise((resolve) => setTimeout(resolve, 100));
         }
 
-        onMessage(payload: unknown, from: string | null) {
+        public onMessage(_payload: unknown, _from: string | null) {
           return { response: 'ok' };
         }
       }
@@ -5321,13 +5321,13 @@ describe('LifecycleManager - Phase 7: Messaging, Health, Values', () => {
           super(logger, { name: 'sender', dependencies: [] });
         }
 
-        async start() {
+        public async start() {
           await this.lifecycle.sendMessageToComponent('receiver', {
             from: 'sender',
           });
         }
 
-        async stop() {}
+        public async stop() {}
       }
 
       class ReceiverComponent extends BaseComponent {
@@ -5337,10 +5337,10 @@ describe('LifecycleManager - Phase 7: Messaging, Health, Values', () => {
           super(logger, { name: 'receiver', dependencies: [] });
         }
 
-        async start() {}
-        async stop() {}
+        public async start() {}
+        public async stop() {}
 
-        onMessage(payload: unknown, from: string | null) {
+        public onMessage(_payload: unknown, from: string | null) {
           this.receivedFrom = from;
         }
       }
@@ -5369,10 +5369,10 @@ describe('LifecycleManager - Phase 7: Messaging, Health, Values', () => {
           super(logger, { name, dependencies: [] });
         }
 
-        async start() {}
-        async stop() {}
+        public async start() {}
+        public async stop() {}
 
-        onMessage(payload: unknown, from: string | null) {
+        public onMessage(payload: unknown, _from: string | null) {
           this.messages.push(payload);
           return { received: true };
         }
@@ -5404,9 +5404,9 @@ describe('LifecycleManager - Phase 7: Messaging, Health, Values', () => {
       expect(comp3.messages).toHaveLength(1);
       expect(broadcastPayload?.resultsCount).toBe(3);
       expect(Array.isArray(broadcastPayload?.results)).toBe(true);
-      expect(broadcastPayload?.results?.every((r: any) => r.code === 'sent')).toBe(
-        true,
-      );
+      expect(
+        broadcastPayload?.results?.every((r: any) => r.code === 'sent'),
+      ).toBe(true);
     });
 
     test('should timeout broadcast when handler takes too long', async () => {
@@ -5420,10 +5420,10 @@ describe('LifecycleManager - Phase 7: Messaging, Health, Values', () => {
           super(logger, { name, dependencies: [] });
         }
 
-        async start() {}
-        async stop() {}
+        public async start() {}
+        public async stop() {}
 
-        async onMessage(payload: unknown, from: string | null) {
+        public async onMessage(_payload: unknown, _from: string | null) {
           await sleep(30);
           return { received: true };
         }
@@ -5452,10 +5452,10 @@ describe('LifecycleManager - Phase 7: Messaging, Health, Values', () => {
           super(logger, { name, dependencies: [] });
         }
 
-        async start() {}
-        async stop() {}
+        public async start() {}
+        public async stop() {}
 
-        onMessage(payload: unknown, from: string | null) {
+        public onMessage(payload: unknown, _from: string | null) {
           this.messages.push(payload);
         }
       }
@@ -5486,10 +5486,10 @@ describe('LifecycleManager - Phase 7: Messaging, Health, Values', () => {
           super(logger, { name, dependencies: [] });
         }
 
-        async start() {}
-        async stop() {}
+        public async start() {}
+        public async stop() {}
 
-        onMessage(payload: unknown, from: string | null) {}
+        public onMessage(_payload: unknown, _from: string | null) {}
       }
 
       lifecycle.registerComponent(new MessageReceiver(logger, 'comp1'));
@@ -5520,10 +5520,10 @@ describe('LifecycleManager - Phase 7: Messaging, Health, Values', () => {
           super(logger, { name, dependencies: [] });
         }
 
-        async start() {}
-        async stop() {}
+        public async start() {}
+        public async stop() {}
 
-        onMessage(payload: unknown, from: string | null) {
+        public onMessage(payload: unknown, _from: string | null) {
           this.messages.push(payload);
         }
       }
@@ -5559,10 +5559,10 @@ describe('LifecycleManager - Phase 7: Messaging, Health, Values', () => {
           super(logger, { name: 'good', dependencies: [] });
         }
 
-        async start() {}
-        async stop() {}
+        public async start() {}
+        public async stop() {}
 
-        onMessage(payload: unknown, from: string | null) {
+        public onMessage(_payload: unknown, _from: string | null) {
           return { status: 'ok' };
         }
       }
@@ -5572,10 +5572,10 @@ describe('LifecycleManager - Phase 7: Messaging, Health, Values', () => {
           super(logger, { name: 'bad', dependencies: [] });
         }
 
-        async start() {}
-        async stop() {}
+        public async start() {}
+        public async stop() {}
 
-        onMessage(payload: unknown, from: string | null) {
+        public onMessage(_payload: unknown, _from: string | null) {
           throw new Error('Handler failed');
         }
       }
@@ -5610,11 +5610,11 @@ describe('LifecycleManager - Phase 7: Messaging, Health, Values', () => {
           super(logger, { name: 'broadcaster', dependencies: [] });
         }
 
-        async start() {
+        public async start() {
           await this.lifecycle.broadcastMessage({ announcement: 'hello' });
         }
 
-        async stop() {}
+        public async stop() {}
       }
 
       class ReceiverComponent extends BaseComponent {
@@ -5624,10 +5624,10 @@ describe('LifecycleManager - Phase 7: Messaging, Health, Values', () => {
           super(logger, { name, dependencies: [] });
         }
 
-        async start() {}
-        async stop() {}
+        public async start() {}
+        public async stop() {}
 
-        onMessage(payload: unknown, from: string | null) {
+        public onMessage(_payload: unknown, from: string | null) {
           this.receivedFrom = from;
         }
       }
@@ -5656,10 +5656,10 @@ describe('LifecycleManager - Phase 7: Messaging, Health, Values', () => {
           super(logger, { name: 'healthy', dependencies: [] });
         }
 
-        async start() {}
-        async stop() {}
+        public async start() {}
+        public async stop() {}
 
-        healthCheck() {
+        public healthCheck() {
           return true;
         }
       }
@@ -5684,10 +5684,10 @@ describe('LifecycleManager - Phase 7: Messaging, Health, Values', () => {
           super(logger, { name: 'detailed', dependencies: [] });
         }
 
-        async start() {}
-        async stop() {}
+        public async start() {}
+        public async stop() {}
 
-        healthCheck() {
+        public healthCheck() {
           return {
             healthy: true,
             message: 'All systems operational',
@@ -5727,10 +5727,10 @@ describe('LifecycleManager - Phase 7: Messaging, Health, Values', () => {
           super(logger, { name: 'healthy', dependencies: [] });
         }
 
-        async start() {}
-        async stop() {}
+        public async start() {}
+        public async stop() {}
 
-        healthCheck() {
+        public healthCheck() {
           return true;
         }
       }
@@ -5754,8 +5754,8 @@ describe('LifecycleManager - Phase 7: Messaging, Health, Values', () => {
           super(logger, { name: 'no-health', dependencies: [] });
         }
 
-        async start() {}
-        async stop() {}
+        public async start() {}
+        public async stop() {}
       }
 
       lifecycle.registerComponent(new ComponentWithoutHealth(logger));
@@ -5778,10 +5778,10 @@ describe('LifecycleManager - Phase 7: Messaging, Health, Values', () => {
           super(logger, { name: 'unhealthy', dependencies: [] });
         }
 
-        async start() {}
-        async stop() {}
+        public async start() {}
+        public async stop() {}
 
-        healthCheck() {
+        public healthCheck() {
           throw new Error('Connection lost');
         }
       }
@@ -5809,10 +5809,10 @@ describe('LifecycleManager - Phase 7: Messaging, Health, Values', () => {
           });
         }
 
-        async start() {}
-        async stop() {}
+        public async start() {}
+        public async stop() {}
 
-        async healthCheck() {
+        public async healthCheck() {
           await new Promise((resolve) => setTimeout(resolve, 500));
           return true;
         }
@@ -5839,10 +5839,10 @@ describe('LifecycleManager - Phase 7: Messaging, Health, Values', () => {
           super(logger, { name: 'unhealthy', dependencies: [] });
         }
 
-        async start() {}
-        async stop() {}
+        public async start() {}
+        public async stop() {}
 
-        healthCheck() {
+        public healthCheck() {
           return false;
         }
       }
@@ -5866,10 +5866,10 @@ describe('LifecycleManager - Phase 7: Messaging, Health, Values', () => {
           super(logger, { name, dependencies: [] });
         }
 
-        async start() {}
-        async stop() {}
+        public async start() {}
+        public async stop() {}
 
-        healthCheck() {
+        public healthCheck() {
           return true;
         }
       }
@@ -5898,10 +5898,10 @@ describe('LifecycleManager - Phase 7: Messaging, Health, Values', () => {
           super(logger, { name: 'healthy', dependencies: [] });
         }
 
-        async start() {}
-        async stop() {}
+        public async start() {}
+        public async stop() {}
 
-        healthCheck() {
+        public healthCheck() {
           return true;
         }
       }
@@ -5911,10 +5911,10 @@ describe('LifecycleManager - Phase 7: Messaging, Health, Values', () => {
           super(logger, { name: 'unhealthy', dependencies: [] });
         }
 
-        async start() {}
-        async stop() {}
+        public async start() {}
+        public async stop() {}
 
-        healthCheck() {
+        public healthCheck() {
           return false;
         }
       }
@@ -5940,10 +5940,10 @@ describe('LifecycleManager - Phase 7: Messaging, Health, Values', () => {
           super(logger, { name, dependencies: [] });
         }
 
-        async start() {}
-        async stop() {}
+        public async start() {}
+        public async stop() {}
 
-        healthCheck() {
+        public healthCheck() {
           return true;
         }
       }
@@ -5970,10 +5970,10 @@ describe('LifecycleManager - Phase 7: Messaging, Health, Values', () => {
           super(logger, { name: 'with-health', dependencies: [] });
         }
 
-        async start() {}
-        async stop() {}
+        public async start() {}
+        public async stop() {}
 
-        healthCheck() {
+        public healthCheck() {
           return true;
         }
       }
@@ -5983,8 +5983,8 @@ describe('LifecycleManager - Phase 7: Messaging, Health, Values', () => {
           super(logger, { name: 'without-health', dependencies: [] });
         }
 
-        async start() {}
-        async stop() {}
+        public async start() {}
+        public async stop() {}
       }
 
       lifecycle.registerComponent(new ComponentWithHealth(logger));
@@ -6016,12 +6016,16 @@ describe('LifecycleManager - Phase 7: Messaging, Health, Values', () => {
           super(logger, { name: 'provider', dependencies: [] });
         }
 
-        async start() {}
-        async stop() {}
+        public async start() {}
+        public async stop() {}
 
-        getValue(key: string, from: string | null) {
-          if (key === 'config') return { setting: 'value' };
-          if (key === 'status') return 'ready';
+        public getValue(key: string, _from: string | null) {
+          if (key === 'config') {
+            return { setting: 'value' };
+          }
+          if (key === 'status') {
+            return 'ready';
+          }
           return undefined;
         }
       }
@@ -6069,7 +6073,7 @@ describe('LifecycleManager - Phase 7: Messaging, Health, Values', () => {
       expect(result.code).toBe('not_found');
     });
 
-    test('should handle component not running', async () => {
+    test('should handle component not running', () => {
       const lifecycle = new LifecycleManager({ logger });
 
       class ComponentWithValues extends BaseComponent {
@@ -6077,10 +6081,10 @@ describe('LifecycleManager - Phase 7: Messaging, Health, Values', () => {
           super(logger, { name: 'provider', dependencies: [] });
         }
 
-        async start() {}
-        async stop() {}
+        public async start() {}
+        public async stop() {}
 
-        getValue(key: string, from: string | null) {
+        public getValue(_key: string, _from: string | null) {
           return { data: 'value' };
         }
       }
@@ -6105,8 +6109,8 @@ describe('LifecycleManager - Phase 7: Messaging, Health, Values', () => {
           super(logger, { name: 'provider', dependencies: [] });
         }
 
-        async start() {}
-        async stop() {}
+        public async start() {}
+        public async stop() {}
       }
 
       lifecycle.registerComponent(new ComponentWithoutGetValue(logger));
@@ -6132,10 +6136,10 @@ describe('LifecycleManager - Phase 7: Messaging, Health, Values', () => {
           super(logger, { name: 'provider', dependencies: [] });
         }
 
-        async start() {}
-        async stop() {}
+        public async start() {}
+        public async stop() {}
 
-        getValue(key: string, from: string | null) {
+        public getValue(_key: string, from: string | null) {
           this.lastRequester = from;
           return { data: 'value' };
         }
@@ -6148,12 +6152,12 @@ describe('LifecycleManager - Phase 7: Messaging, Health, Values', () => {
           super(logger, { name: 'requester', dependencies: [] });
         }
 
-        async start() {
+        public start() {
           const result = this.lifecycle.getValue('provider', 'some-key');
           this.retrievedValue = result.value;
         }
 
-        async stop() {}
+        public async stop() {}
       }
 
       const provider = new ProviderComponent(logger);
@@ -6176,16 +6180,28 @@ describe('LifecycleManager - Phase 7: Messaging, Health, Values', () => {
           super(logger, { name: 'provider', dependencies: [] });
         }
 
-        async start() {}
-        async stop() {}
+        public async start() {}
+        public async stop() {}
 
-        getValue(key: string, from: string | null) {
-          if (key === 'string') return 'text';
-          if (key === 'number') return 42;
-          if (key === 'boolean') return true;
-          if (key === 'null') return null;
-          if (key === 'array') return [1, 2, 3];
-          if (key === 'object') return { nested: { value: 'deep' } };
+        public getValue(key: string, _from: string | null) {
+          if (key === 'string') {
+            return 'text';
+          }
+          if (key === 'number') {
+            return 42;
+          }
+          if (key === 'boolean') {
+            return true;
+          }
+          if (key === 'null') {
+            return null;
+          }
+          if (key === 'array') {
+            return [1, 2, 3];
+          }
+          if (key === 'object') {
+            return { nested: { value: 'deep' } };
+          }
           return undefined;
         }
       }
@@ -6216,11 +6232,11 @@ describe('LifecycleManager - Phase 7: Messaging, Health, Values', () => {
           super(logger, { name: 'test-comp', dependencies: [] });
         }
 
-        async start() {
+        public start() {
           this.lifecycleRef = this.lifecycle;
         }
 
-        async stop() {}
+        public async stop() {}
       }
 
       const component = new TestComponent(logger);
