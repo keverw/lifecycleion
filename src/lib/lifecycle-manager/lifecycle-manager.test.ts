@@ -11,7 +11,6 @@ import {
   ComponentStartupError,
   StartupTimeoutError,
   ComponentNotFoundError,
-  MessageTimeoutError,
   lifecycleManagerErrPrefix,
   lifecycleManagerErrTypes,
   lifecycleManagerErrCodes,
@@ -119,6 +118,7 @@ describe('LifecycleManager - Phase 1: Foundation', () => {
       expect(component.shutdownGracefulTimeoutMS).toBe(5000);
       expect(component.shutdownForceTimeoutMS).toBe(2000);
       expect(component.healthCheckTimeoutMS).toBe(5000);
+      expect(component.signalTimeoutMS).toBe(5000);
     });
 
     test('should use custom timeout values when provided', () => {
@@ -128,12 +128,14 @@ describe('LifecycleManager - Phase 1: Foundation', () => {
         shutdownGracefulTimeoutMS: 8000,
         shutdownForceTimeoutMS: 3000,
         healthCheckTimeoutMS: 3000,
+        signalTimeoutMS: 4000,
       });
 
       expect(component.startupTimeoutMS).toBe(10000);
       expect(component.shutdownGracefulTimeoutMS).toBe(8000);
       expect(component.shutdownForceTimeoutMS).toBe(3000);
       expect(component.healthCheckTimeoutMS).toBe(3000);
+      expect(component.signalTimeoutMS).toBe(4000);
     });
 
     test('should allow disabling startup timeout with 0', () => {
@@ -402,7 +404,6 @@ describe('LifecycleManager - Phase 1: Foundation', () => {
       expect(lifecycleManagerErrTypes.Component).toBe('Component');
       expect(lifecycleManagerErrTypes.Dependency).toBe('Dependency');
       expect(lifecycleManagerErrTypes.Lifecycle).toBe('Lifecycle');
-      expect(lifecycleManagerErrTypes.Message).toBe('Message');
 
       expect(lifecycleManagerErrCodes.InvalidName).toBe('InvalidName');
       expect(lifecycleManagerErrCodes.RegistrationFailed).toBe(
@@ -414,7 +415,6 @@ describe('LifecycleManager - Phase 1: Foundation', () => {
       expect(lifecycleManagerErrCodes.NotFound).toBe('NotFound');
       expect(lifecycleManagerErrCodes.StartupFailed).toBe('StartupFailed');
       expect(lifecycleManagerErrCodes.StartupTimeout).toBe('StartupTimeout');
-      expect(lifecycleManagerErrCodes.MessageTimeout).toBe('MessageTimeout');
     });
   });
 
@@ -4451,6 +4451,35 @@ describe('LifecycleManager - Phase 6: Signal Integration', () => {
       expect(result.results[2].error).toBeNull();
     });
 
+    test('should timeout onReload when it takes too long', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      class SlowReloadComponent extends TestComponent {
+        public async onReload() {
+          await sleep(50);
+        }
+      }
+
+      lifecycle.registerComponent(
+        new SlowReloadComponent(logger, {
+          name: 'comp1',
+          signalTimeoutMS: 10,
+        }),
+      );
+
+      await lifecycle.startAllComponents();
+
+      const result = await lifecycle.triggerReload();
+
+      expect(result.results).toHaveLength(1);
+      expect(result.results[0].called).toBe(true);
+      expect(result.results[0].error).toBeNull();
+      expect(result.results[0].timedOut).toBe(true);
+      expect(result.results[0].code).toBe('timeout');
+      expect(result.timedOut).toBe(true);
+      expect(result.code).toBe('timeout');
+    });
+
     test('should emit component events for reload', async () => {
       const lifecycle = new LifecycleManager({ logger });
       const events: string[] = [];
@@ -4648,6 +4677,35 @@ describe('LifecycleManager - Phase 6: Signal Integration', () => {
       expect(notifiedComponents).toEqual(['comp1']);
     });
 
+    test('should timeout onInfo when it takes too long', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      class SlowInfoComponent extends TestComponent {
+        public async onInfo() {
+          await sleep(50);
+        }
+      }
+
+      lifecycle.registerComponent(
+        new SlowInfoComponent(logger, {
+          name: 'comp1',
+          signalTimeoutMS: 10,
+        }),
+      );
+
+      await lifecycle.startAllComponents();
+
+      const result = await lifecycle.triggerInfo();
+
+      expect(result.results).toHaveLength(1);
+      expect(result.results[0].called).toBe(true);
+      expect(result.results[0].error).toBeNull();
+      expect(result.results[0].timedOut).toBe(true);
+      expect(result.results[0].code).toBe('timeout');
+      expect(result.timedOut).toBe(true);
+      expect(result.code).toBe('timeout');
+    });
+
     test('should call custom debug callback instead of broadcasting', async () => {
       let wasCustomCallbackCalled = false;
       let wasBroadcastFnProvided = false;
@@ -4704,6 +4762,35 @@ describe('LifecycleManager - Phase 6: Signal Integration', () => {
 
       // Callback was called but it invoked broadcast, so components notified
       expect(notifiedComponents).toEqual(['comp1']);
+    });
+
+    test('should timeout onDebug when it takes too long', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      class SlowDebugComponent extends TestComponent {
+        public async onDebug() {
+          await sleep(50);
+        }
+      }
+
+      lifecycle.registerComponent(
+        new SlowDebugComponent(logger, {
+          name: 'comp1',
+          signalTimeoutMS: 10,
+        }),
+      );
+
+      await lifecycle.startAllComponents();
+
+      const result = await lifecycle.triggerDebug();
+
+      expect(result.results).toHaveLength(1);
+      expect(result.results[0].called).toBe(true);
+      expect(result.results[0].error).toBeNull();
+      expect(result.results[0].timedOut).toBe(true);
+      expect(result.results[0].code).toBe('timeout');
+      expect(result.timedOut).toBe(true);
+      expect(result.code).toBe('timeout');
     });
 
     test('should broadcast to components if no info handler configured', async () => {
@@ -4926,6 +5013,7 @@ describe('LifecycleManager - Phase 7: Messaging, Health, Values', () => {
       expect(result.data).toEqual({ response: 'acknowledged' });
       expect(result.error).toBeNull();
       expect(result.timedOut).toBe(false);
+      expect(result.code).toBe('sent');
       expect(component.receivedMessages).toHaveLength(1);
       expect(component.receivedMessages[0].payload).toEqual({ test: 'data' });
       expect(component.receivedMessages[0].from).toBeNull(); // External call
@@ -4945,6 +5033,7 @@ describe('LifecycleManager - Phase 7: Messaging, Health, Values', () => {
       expect(result.data).toBeUndefined();
       expect(result.error).toBeNull();
       expect(result.timedOut).toBe(false);
+      expect(result.code).toBe('not_found');
     });
 
     test('should handle component not running', async () => {
@@ -4976,6 +5065,7 @@ describe('LifecycleManager - Phase 7: Messaging, Health, Values', () => {
       expect(result.data).toBeUndefined();
       expect(result.error).toBeNull();
       expect(result.timedOut).toBe(false);
+      expect(result.code).toBe('not_running');
     });
 
     test('should handle component without handler', async () => {
@@ -5004,6 +5094,7 @@ describe('LifecycleManager - Phase 7: Messaging, Health, Values', () => {
       expect(result.data).toBeUndefined();
       expect(result.error).toBeNull();
       expect(result.timedOut).toBe(false);
+      expect(result.code).toBe('no_handler');
     });
 
     test('should handle handler throwing error', async () => {
@@ -5037,6 +5128,7 @@ describe('LifecycleManager - Phase 7: Messaging, Health, Values', () => {
       expect(result.error).toBeInstanceOf(Error);
       expect(result.error?.message).toBe('Handler failed');
       expect(result.timedOut).toBe(false);
+      expect(result.code).toBe('error');
     });
 
     test('should timeout when handler takes too long', async () => {
@@ -5071,8 +5163,9 @@ describe('LifecycleManager - Phase 7: Messaging, Health, Values', () => {
       expect(result.componentRunning).toBe(true);
       expect(result.handlerImplemented).toBe(true);
       expect(result.data).toBeUndefined();
-      expect(result.error).toBeInstanceOf(MessageTimeoutError);
+      expect(result.error).toBeNull();
       expect(result.timedOut).toBe(true);
+      expect(result.code).toBe('timeout');
     });
 
     test('should allow per-call timeout override', async () => {
@@ -5108,6 +5201,7 @@ describe('LifecycleManager - Phase 7: Messaging, Health, Values', () => {
       expect(result.error).toBeNull();
       expect(result.timedOut).toBe(false);
       expect(result.data).toEqual({ response: 'ok' });
+      expect(result.code).toBe('sent');
     });
 
     test('should reject messages during shutdown', async () => {
@@ -5140,6 +5234,7 @@ describe('LifecycleManager - Phase 7: Messaging, Health, Values', () => {
       expect(result.sent).toBe(false);
       expect(result.error?.message).toContain('shutdown in progress');
       expect(result.timedOut).toBe(false);
+      expect(result.code).toBe('error');
 
       await shutdownPromise;
     });
@@ -5224,6 +5319,7 @@ describe('LifecycleManager - Phase 7: Messaging, Health, Values', () => {
       expect(results.every((r) => r.sent)).toBe(true);
       expect(results.every((r) => r.running)).toBe(true);
       expect(results.every((r) => r.timedOut === false)).toBe(true);
+      expect(results.every((r) => r.code === 'sent')).toBe(true);
       expect(comp1.messages).toHaveLength(1);
       expect(comp2.messages).toHaveLength(1);
       expect(comp3.messages).toHaveLength(1);
@@ -5258,7 +5354,8 @@ describe('LifecycleManager - Phase 7: Messaging, Health, Values', () => {
       expect(results).toHaveLength(1);
       expect(results[0].sent).toBe(true);
       expect(results[0].timedOut).toBe(true);
-      expect(results[0].error).toBeInstanceOf(MessageTimeoutError);
+      expect(results[0].error).toBeNull();
+      expect(results[0].code).toBe('timeout');
     });
 
     test('should skip non-running components by default', async () => {
@@ -5292,6 +5389,7 @@ describe('LifecycleManager - Phase 7: Messaging, Health, Values', () => {
       expect(results).toHaveLength(1);
       expect(results[0].name).toBe('comp1');
       expect(results[0].sent).toBe(true);
+      expect(results[0].code).toBe('sent');
       expect(comp1.messages).toHaveLength(1);
       expect(comp2.messages).toHaveLength(0);
     });
@@ -5322,8 +5420,10 @@ describe('LifecycleManager - Phase 7: Messaging, Health, Values', () => {
 
       expect(results).toHaveLength(2);
       expect(results.find((r) => r.name === 'comp1')?.sent).toBe(true);
-      expect(results.find((r) => r.name === 'comp2')?.sent).toBe(false);
-      expect(results.find((r) => r.name === 'comp2')?.running).toBe(false);
+      const comp2Result = results.find((r) => r.name === 'comp2');
+      expect(comp2Result?.sent).toBe(false);
+      expect(comp2Result?.running).toBe(false);
+      expect(comp2Result?.code).toBe('not_running');
     });
 
     test('should filter by component names', async () => {
@@ -5409,11 +5509,13 @@ describe('LifecycleManager - Phase 7: Messaging, Health, Values', () => {
       expect(goodResult?.sent).toBe(true);
       expect(goodResult?.error).toBeNull();
       expect(goodResult?.data).toEqual({ status: 'ok' });
+      expect(goodResult?.code).toBe('sent');
 
       const badResult = results.find((r) => r.name === 'bad');
       expect(badResult?.sent).toBe(true);
       expect(badResult?.error).toBeInstanceOf(Error);
       expect(badResult?.error?.message).toBe('Handler failed');
+      expect(badResult?.code).toBe('error');
     });
 
     test('should track sender when called from component', async () => {
@@ -5529,8 +5631,8 @@ describe('LifecycleManager - Phase 7: Messaging, Health, Values', () => {
       expect(result.name).toBe('nonexistent');
       expect(result.healthy).toBe(false);
       expect(result.message).toBe('Component not found');
-      expect(result.error).toBeInstanceOf(Error);
-      expect(result.error?.message).toContain('not found');
+      expect(result.error).toBeNull();
+      expect(result.code).toBe('not_found');
     });
 
     test('should handle component not running', async () => {
@@ -5556,8 +5658,8 @@ describe('LifecycleManager - Phase 7: Messaging, Health, Values', () => {
       expect(result.name).toBe('healthy');
       expect(result.healthy).toBe(false);
       expect(result.message).toBe('Component not running');
-      expect(result.error).toBeInstanceOf(Error);
-      expect(result.error?.message).toContain('not running');
+      expect(result.error).toBeNull();
+      expect(result.code).toBe('not_running');
     });
 
     test('should handle component without healthCheck handler', async () => {
@@ -5581,6 +5683,7 @@ describe('LifecycleManager - Phase 7: Messaging, Health, Values', () => {
       expect(result.healthy).toBe(true); // No health check = assume healthy
       expect(result.message).toBe('No health check implemented');
       expect(result.error).toBeNull();
+      expect(result.code).toBe('no_handler');
     });
 
     test('should handle healthCheck throwing error', async () => {
@@ -5639,6 +5742,9 @@ describe('LifecycleManager - Phase 7: Messaging, Health, Values', () => {
       expect(result.name).toBe('slow-health');
       expect(result.healthy).toBe(false);
       expect(result.message).toBe('Health check timed out');
+      expect(result.timedOut).toBe(true);
+      expect(result.error).toBeNull();
+      expect(result.code).toBe('timeout');
     });
 
     test('should normalize boolean false to unhealthy', async () => {
@@ -5696,6 +5802,8 @@ describe('LifecycleManager - Phase 7: Messaging, Health, Values', () => {
       expect(report.healthy).toBe(true);
       expect(report.components).toHaveLength(3);
       expect(report.components.every((r) => r.healthy)).toBe(true);
+      expect(report.timedOut).toBe(false);
+      expect(report.code).toBe('ok');
     });
 
     test('should report mixed health status', async () => {
@@ -5736,6 +5844,8 @@ describe('LifecycleManager - Phase 7: Messaging, Health, Values', () => {
 
       expect(report.components).toHaveLength(2);
       expect(report.healthy).toBe(false);
+      expect(report.timedOut).toBe(false);
+      expect(report.code).toBe('degraded');
     });
 
     test('should only check running components', async () => {
@@ -5764,6 +5874,8 @@ describe('LifecycleManager - Phase 7: Messaging, Health, Values', () => {
       expect(report.components).toHaveLength(1);
       expect(report.components).toHaveLength(1);
       expect(report.components[0].name).toBe('comp1');
+      expect(report.timedOut).toBe(false);
+      expect(report.code).toBe('ok');
     });
 
     test('should handle components without health check', async () => {
@@ -5805,6 +5917,8 @@ describe('LifecycleManager - Phase 7: Messaging, Health, Values', () => {
       expect(
         report.components.find((r) => r.name === 'without-health')?.healthy,
       ).toBe(true); // Assumes healthy
+      expect(report.timedOut).toBe(false);
+      expect(report.code).toBe('ok');
     });
   });
 
@@ -5836,6 +5950,7 @@ describe('LifecycleManager - Phase 7: Messaging, Health, Values', () => {
       expect(result1.componentFound).toBe(true);
       expect(result1.componentRunning).toBe(true);
       expect(result1.handlerImplemented).toBe(true);
+      expect(result1.code).toBe('found');
 
       const result2 = lifecycle.getValue('provider', 'status');
       expect(result2.found).toBe(true);
@@ -5844,6 +5959,7 @@ describe('LifecycleManager - Phase 7: Messaging, Health, Values', () => {
       const result3 = lifecycle.getValue('provider', 'nonexistent');
       expect(result3.found).toBe(false);
       expect(result3.value).toBeUndefined();
+      expect(result3.code).toBe('not_found');
     });
 
     test('should handle component not found', () => {
@@ -5855,6 +5971,7 @@ describe('LifecycleManager - Phase 7: Messaging, Health, Values', () => {
       expect(result.componentFound).toBe(false);
       expect(result.handlerImplemented).toBe(false);
       expect(result.value).toBeUndefined();
+      expect(result.code).toBe('not_found');
     });
 
     test('should handle component not running', async () => {
@@ -5882,6 +5999,7 @@ describe('LifecycleManager - Phase 7: Messaging, Health, Values', () => {
       expect(result.componentRunning).toBe(false);
       expect(result.handlerImplemented).toBe(false);
       expect(result.value).toBeUndefined();
+      expect(result.code).toBe('not_running');
     });
 
     test('should handle component without getValue handler', async () => {
@@ -5906,6 +6024,7 @@ describe('LifecycleManager - Phase 7: Messaging, Health, Values', () => {
       expect(result.componentRunning).toBe(true);
       expect(result.handlerImplemented).toBe(false);
       expect(result.value).toBeUndefined();
+      expect(result.code).toBe('no_handler');
     });
 
     test('should track requester when called from component', async () => {

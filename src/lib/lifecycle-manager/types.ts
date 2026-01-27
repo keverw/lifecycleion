@@ -26,6 +26,9 @@ export interface ComponentOptions {
 
   /** Time to wait for healthCheck() in milliseconds (default: 5000) */
   healthCheckTimeoutMS?: number;
+
+  /** Time to wait for onReload/onInfo/onDebug in milliseconds (default: 5000, 0 = disabled) */
+  signalTimeoutMS?: number;
 }
 
 /**
@@ -314,6 +317,15 @@ export interface MessageResult {
 
   /** True if handler timed out before responding */
   timedOut: boolean;
+
+  /** Machine-readable outcome code */
+  code:
+    | 'sent'
+    | 'not_found'
+    | 'not_running'
+    | 'no_handler'
+    | 'timeout'
+    | 'error';
 }
 
 /**
@@ -359,6 +371,9 @@ export interface BroadcastResult {
 
   /** True if handler timed out before responding */
   timedOut: boolean;
+
+  /** Machine-readable outcome code */
+  code: 'sent' | 'not_running' | 'no_handler' | 'timeout' | 'error';
 }
 
 /**
@@ -399,6 +414,12 @@ export interface HealthCheckResult {
 
   /** Error if health check threw */
   error: Error | null;
+
+  /** True if health check timed out */
+  timedOut: boolean;
+
+  /** Machine-readable outcome code */
+  code: 'ok' | 'not_found' | 'not_running' | 'no_handler' | 'timeout' | 'error';
 }
 
 /**
@@ -416,6 +437,12 @@ export interface HealthReport {
 
   /** How long the check took */
   durationMS: number;
+
+  /** True if any component timed out */
+  timedOut: boolean;
+
+  /** Machine-readable outcome code */
+  code: 'ok' | 'degraded' | 'timeout' | 'error';
 }
 
 /**
@@ -427,6 +454,12 @@ export interface SignalBroadcastResult {
 
   /** Results for each component */
   results: ComponentSignalResult[];
+
+  /** True if any component timed out */
+  timedOut: boolean;
+
+  /** Machine-readable outcome code */
+  code: 'ok' | 'partial_timeout' | 'timeout' | 'partial_error' | 'error';
 }
 
 /**
@@ -441,6 +474,12 @@ export interface ComponentSignalResult {
 
   /** Error if handler threw */
   error: Error | null;
+
+  /** True if handler timed out before completing */
+  timedOut: boolean;
+
+  /** Machine-readable outcome code */
+  code: 'called' | 'no_handler' | 'timeout' | 'error';
 }
 
 /**
@@ -464,6 +503,9 @@ export interface ValueResult<T = unknown> {
 
   /** Who requested (for logging) */
   requestedBy: string | null;
+
+  /** Machine-readable outcome code */
+  code: 'found' | 'not_found' | 'not_running' | 'no_handler' | 'error';
 }
 
 type EventEmitterSurface = Pick<

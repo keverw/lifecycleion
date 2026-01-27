@@ -85,6 +85,9 @@ export abstract class BaseComponent {
   /** Time to wait for healthCheck() in milliseconds */
   public readonly healthCheckTimeoutMS: number;
 
+  /** Time to wait for onReload/onInfo/onDebug in milliseconds */
+  public readonly signalTimeoutMS: number;
+
   /** Component logger (scoped to component name) */
   protected logger: LoggerService;
 
@@ -120,6 +123,7 @@ export abstract class BaseComponent {
     // Timeout configuration with defaults
     this.startupTimeoutMS = options.startupTimeoutMS ?? 30000;
     this.healthCheckTimeoutMS = options.healthCheckTimeoutMS ?? 5000;
+    this.signalTimeoutMS = options.signalTimeoutMS ?? 5000;
 
     // Enforce minimums for shutdown timeouts
     this.shutdownGracefulTimeoutMS = Math.max(

@@ -201,12 +201,36 @@ export class FileSink implements LogSink {
 
     // Wait for initialization with timeout
     if (this.initPromise) {
-      await Promise.race([
-        this.initPromise,
-        new Promise<void>((resolve) =>
-          setTimeout(resolve, this.closeTimeoutMS),
-        ),
-      ]);
+      let timeoutHandle: NodeJS.Timeout | undefined;
+      const timeoutSentinel = { timedOut: true } as const;
+
+      try {
+        const timeoutPromise = new Promise<typeof timeoutSentinel>(
+          (resolve) => {
+            timeoutHandle = setTimeout(
+              () => resolve(timeoutSentinel),
+              this.closeTimeoutMS,
+            );
+          },
+        );
+
+        const result = await Promise.race([
+          this.initPromise.then(() => undefined),
+          timeoutPromise,
+        ]);
+
+        // Check if timeout fired
+        if (result === timeoutSentinel) {
+          // Timeout fired - prevent unhandled rejection if initPromise fails later
+          Promise.resolve(this.initPromise).catch(() => {
+            // Intentionally ignore errors after timeout
+          });
+        }
+      } finally {
+        if (timeoutHandle) {
+          clearTimeout(timeoutHandle);
+        }
+      }
     }
 
     // Wait for queue to finish processing with timeout

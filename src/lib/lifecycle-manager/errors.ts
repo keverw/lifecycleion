@@ -145,24 +145,6 @@ export class ComponentStopTimeoutError extends Error {
 }
 
 /**
- * Error thrown when a component message handler times out
- */
-export class MessageTimeoutError extends Error {
-  public errPrefix = 'LifecycleManagerErr';
-  public errType = 'Message';
-  public errCode = 'MessageTimeout';
-  public additionalInfo: { componentName: string; timeoutMS: number };
-
-  constructor(additionalInfo: { componentName: string; timeoutMS: number }) {
-    super(
-      `Component "${additionalInfo.componentName}" message timed out after ${additionalInfo.timeoutMS}ms`,
-    );
-    this.name = 'MessageTimeoutError';
-    this.additionalInfo = additionalInfo;
-  }
-}
-
-/**
  * Error thrown when the global startup timeout is exceeded
  */
 export class StartupTimeoutError extends Error {
@@ -208,7 +190,6 @@ export const lifecycleManagerErrTypes = {
   Component: 'Component',
   Dependency: 'Dependency',
   Lifecycle: 'Lifecycle',
-  Message: 'Message',
 } as const;
 
 /**
@@ -223,5 +204,4 @@ export const lifecycleManagerErrCodes = {
   StartupTimeout: 'StartupTimeout',
   StartTimeout: 'StartTimeout',
   StopTimeout: 'StopTimeout',
-  MessageTimeout: 'MessageTimeout',
 } as const;

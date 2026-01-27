@@ -46,7 +46,6 @@ import {
   ComponentStartTimeoutError,
   ComponentStopTimeoutError,
   DependencyCycleError,
-  MessageTimeoutError,
 } from './errors';
 import {
   ProcessSignalManager,
@@ -1249,7 +1248,9 @@ export class LifecycleManager
         message: 'Component not found',
         checkedAt: startTime,
         durationMS: 0,
-        error: new Error(`Component '${name}' not found`),
+        error: null,
+        timedOut: false,
+        code: 'not_found',
       };
     }
 
@@ -1261,7 +1262,9 @@ export class LifecycleManager
         message: 'Component not running',
         checkedAt: startTime,
         durationMS: Date.now() - startTime,
-        error: new Error(`Component '${name}' is not running`),
+        error: null,
+        timedOut: false,
+        code: 'not_running',
       };
     }
 
@@ -1275,41 +1278,53 @@ export class LifecycleManager
         checkedAt: startTime,
         durationMS: Date.now() - startTime,
         error: null,
+        timedOut: false,
+        code: 'no_handler',
       };
     }
 
     this.safeEmit('component:health-check-started', { name });
 
+    let timeoutHandle: NodeJS.Timeout | undefined;
     try {
       // Create timeout promise
       const timeoutMS = component.healthCheckTimeoutMS;
+      const timeoutResult: ComponentHealthResult = {
+        healthy: false,
+        message: 'Health check timed out',
+      };
       const timeoutPromise = new Promise<ComponentHealthResult>((resolve) => {
-        setTimeout(() => {
-          resolve({
-            healthy: false,
-            message: 'Health check timed out',
-          });
+        timeoutHandle = setTimeout(() => {
+          resolve(timeoutResult);
         }, timeoutMS);
       });
 
       // Race health check against timeout
-      const result = await Promise.race([
-        component.healthCheck(),
-        timeoutPromise,
-      ]);
+      const healthCheckPromise = component.healthCheck();
+      const result = await Promise.race([healthCheckPromise, timeoutPromise]);
 
       // Normalize boolean to ComponentHealthResult
+      const isTimedOut = result === timeoutResult;
+      if (isTimedOut) {
+        this.logger.entity(name).warn('Health check timed out', {
+          params: { timeoutMS },
+        });
+        // Prevent unhandled rejection if health check throws after timeout
+        Promise.resolve(healthCheckPromise).catch(() => {
+          // Intentionally ignore errors after timeout
+        });
+      }
       const healthResult: ComponentHealthResult =
         typeof result === 'boolean' ? { healthy: result } : result;
 
       const durationMS = Date.now() - startTime;
-
       this.safeEmit('component:health-check-completed', {
         name,
         healthy: healthResult.healthy,
         message: healthResult.message,
         details: healthResult.details,
         durationMS,
+        timedOut: isTimedOut,
       });
 
       return {
@@ -1320,6 +1335,8 @@ export class LifecycleManager
         checkedAt: startTime,
         durationMS,
         error: null,
+        timedOut: isTimedOut,
+        code: isTimedOut ? 'timeout' : 'ok',
       };
     } catch (error) {
       const durationMS = Date.now() - startTime;
@@ -1337,7 +1354,13 @@ export class LifecycleManager
         checkedAt: startTime,
         durationMS,
         error: err,
+        timedOut: false,
+        code: 'error',
       };
+    } finally {
+      if (timeoutHandle) {
+        clearTimeout(timeoutHandle);
+      }
     }
   }
 
@@ -1366,12 +1389,28 @@ export class LifecycleManager
 
     // Overall healthy only if all components are healthy
     const isOverallHealthy = results.every((r) => r.healthy);
+    const hasTimeout = results.some((r) => r.timedOut);
+    const hasError = results.some((r) => r.code === 'error');
+    // "no_handler" is treated as healthy by design (implicit OK).
+    const hasDegraded = results.some(
+      (r) =>
+        r.code === 'not_running' || (r.code !== 'no_handler' && !r.healthy),
+    );
+    const code = hasError
+      ? 'error'
+      : hasTimeout
+        ? 'timeout'
+        : hasDegraded
+          ? 'degraded'
+          : 'ok';
 
     return {
       healthy: isOverallHealthy,
       components: results,
       checkedAt: startTime,
       durationMS: Date.now() - startTime,
+      timedOut: hasTimeout,
+      code,
     };
   }
 
@@ -1423,6 +1462,7 @@ export class LifecycleManager
         data: undefined,
         error: new Error('Cannot send message: shutdown in progress'),
         timedOut: false,
+        code: 'error',
       };
     }
 
@@ -1440,6 +1480,7 @@ export class LifecycleManager
         data: undefined,
         error: null,
         timedOut: false,
+        code: 'not_found',
       };
     }
 
@@ -1453,6 +1494,7 @@ export class LifecycleManager
         data: undefined,
         error: null,
         timedOut: false,
+        code: 'not_running',
       };
     }
 
@@ -1466,6 +1508,7 @@ export class LifecycleManager
         data: undefined,
         error: null,
         timedOut: false,
+        code: 'no_handler',
       };
     }
 
@@ -1478,6 +1521,7 @@ export class LifecycleManager
 
     const timeoutMS = options?.timeout ?? this.messageTimeoutMS;
     let timeoutHandle: NodeJS.Timeout | undefined;
+    const timeoutResult = { timedOut: true } as const;
 
     try {
       let result: unknown;
@@ -1502,6 +1546,7 @@ export class LifecycleManager
           data: undefined,
           error: err,
           timedOut: false,
+          code: 'error',
         };
       }
 
@@ -1509,39 +1554,53 @@ export class LifecycleManager
         ? result
         : Promise.resolve(result);
 
-      const data =
+      const outcome =
         timeoutMS > 0
           ? await Promise.race([
               handlerPromise,
-              new Promise<never>((_, reject) => {
+              new Promise<typeof timeoutResult>((resolve) => {
                 timeoutHandle = setTimeout(() => {
-                  reject(new MessageTimeoutError({ componentName, timeoutMS }));
+                  resolve(timeoutResult);
                 }, timeoutMS);
               }),
             ])
           : await handlerPromise;
+
+      if (outcome === timeoutResult) {
+        this.logger.entity(componentName).warn('Message handler timed out', {
+          params: { from, timeoutMS },
+        });
+        // Prevent unhandled rejection if handler throws after timeout
+        Promise.resolve(handlerPromise).catch(() => {
+          // Intentionally ignore errors after timeout
+        });
+        return {
+          sent: true,
+          componentFound: true,
+          componentRunning: true,
+          handlerImplemented: true,
+          data: undefined,
+          error: null,
+          timedOut: true,
+          code: 'timeout',
+        };
+      }
 
       return {
         sent: true,
         componentFound: true,
         componentRunning: true,
         handlerImplemented: true,
-        data,
+        data: outcome,
         error: null,
         timedOut: false,
+        code: 'sent',
       };
     } catch (error) {
       const err = error instanceof Error ? error : new Error(String(error));
-      const timedOut = err instanceof MessageTimeoutError;
-      if (timedOut) {
-        this.logger.entity(componentName).warn('Message handler timed out', {
-          params: { error: err, from, timeoutMS },
-        });
-      } else {
-        this.logger.entity(componentName).error('Message handler failed', {
-          params: { error: err, from, timeoutMS },
-        });
-      }
+      this.logger.entity(componentName).error('Message handler failed', {
+        params: { error: err, from, timeoutMS },
+      });
       this.safeEmit('component:message-failed', {
         componentName,
         from,
@@ -1555,7 +1614,8 @@ export class LifecycleManager
         handlerImplemented: true,
         data: undefined,
         error: err,
-        timedOut,
+        timedOut: false,
+        code: 'error',
       };
     } finally {
       if (timeoutHandle) {
@@ -1612,6 +1672,7 @@ export class LifecycleManager
           data: undefined,
           error: null,
           timedOut: false,
+          code: 'not_running',
         });
         continue;
       }
@@ -1631,6 +1692,7 @@ export class LifecycleManager
         data: messageResult.data,
         error: messageResult.error,
         timedOut: messageResult.timedOut,
+        code: messageResult.code === 'not_found' ? 'error' : messageResult.code,
       });
     }
 
@@ -1675,6 +1737,7 @@ export class LifecycleManager
         componentRunning: false,
         handlerImplemented: false,
         requestedBy: from,
+        code: 'not_found',
       };
     }
 
@@ -1694,6 +1757,7 @@ export class LifecycleManager
         componentRunning: false,
         handlerImplemented: false,
         requestedBy: from,
+        code: 'not_running',
       };
     }
 
@@ -1712,6 +1776,7 @@ export class LifecycleManager
         componentRunning: true,
         handlerImplemented: false,
         requestedBy: from,
+        code: 'no_handler',
       };
     }
 
@@ -1734,6 +1799,7 @@ export class LifecycleManager
         componentRunning: true,
         handlerImplemented: true,
         requestedBy: from,
+        code: wasFound ? 'found' : 'not_found',
       };
     } catch (error) {
       const err = error instanceof Error ? error : new Error(String(error));
@@ -1755,6 +1821,7 @@ export class LifecycleManager
         componentRunning: true,
         handlerImplemented: true,
         requestedBy: from,
+        code: 'error',
       };
     }
   }
@@ -1772,7 +1839,7 @@ export class LifecycleManager
     position: InsertPosition,
     targetComponentName?: string,
     isInsertAction = false,
-    options?: RegisterOptions,
+    _options?: RegisterOptions,
   ): InsertComponentAtResult {
     const componentName = component.getName();
     const registrationIndexBefore = this.getComponentIndex(componentName);
@@ -2313,6 +2380,10 @@ export class LifecycleManager
                   });
               }
             }
+            // Prevent unhandled rejection if start() throws after timeout
+            Promise.resolve(startPromise).catch(() => {
+              // Intentionally ignore errors after timeout
+            });
             reject(
               new ComponentStartTimeoutError({
                 componentName: name,
@@ -2663,6 +2734,10 @@ export class LifecycleManager
               }
             }
 
+            // Prevent unhandled rejection if stop() throws after timeout
+            Promise.resolve(stopPromise).catch(() => {
+              // Intentionally ignore errors after timeout
+            });
             reject(
               new ComponentStopTimeoutError({
                 componentName: name,
@@ -2828,6 +2903,10 @@ export class LifecycleManager
               }
             }
 
+            // Prevent unhandled rejection if onShutdownForce() throws after timeout
+            Promise.resolve(forcePromise).catch(() => {
+              // Intentionally ignore errors after timeout
+            });
             reject(new Error('Force shutdown timed out'));
           }, timeoutMS);
         });
@@ -3399,6 +3478,8 @@ export class LifecycleManager
       return {
         signal: 'reload',
         results: [],
+        timedOut: false,
+        code: 'ok',
       };
     }
 
@@ -3432,6 +3513,8 @@ export class LifecycleManager
       return {
         signal: 'info',
         results: [],
+        timedOut: false,
+        code: 'ok',
       };
     }
 
@@ -3465,6 +3548,8 @@ export class LifecycleManager
       return {
         signal: 'debug',
         results: [],
+        timedOut: false,
+        code: 'ok',
       };
     }
 
@@ -3496,33 +3581,108 @@ export class LifecycleManager
 
       if (!component.onReload) {
         // Component doesn't implement onReload
-        results.push({ name, called: false, error: null });
+        results.push({
+          name,
+          called: false,
+          error: null,
+          timedOut: false,
+          code: 'no_handler',
+        });
         continue;
       }
 
       this.safeEmit('component:reload-started', { name });
 
+      const timeoutMS = component.signalTimeoutMS;
+      let timeoutHandle: NodeJS.Timeout | undefined;
+      const timeoutResult = { timedOut: true } as const;
+
       try {
         const result = component.onReload();
-        if (isPromise(result)) {
-          await result;
-        }
+        const handlerPromise: Promise<unknown> = isPromise(result)
+          ? (result as Promise<unknown>)
+          : Promise.resolve(result as unknown);
 
-        this.safeEmit('component:reload-completed', { name });
-        results.push({ name, called: true, error: null });
+        const outcome: unknown =
+          timeoutMS > 0
+            ? await Promise.race([
+                handlerPromise,
+                new Promise<typeof timeoutResult>((resolve) => {
+                  timeoutHandle = setTimeout(() => {
+                    resolve(timeoutResult);
+                  }, timeoutMS);
+                }),
+              ])
+            : await handlerPromise;
+
+        if (outcome === timeoutResult) {
+          this.logger.entity(name).warn('Reload handler timed out', {
+            params: { timeoutMS },
+          });
+          // Prevent unhandled rejection if handler throws after timeout
+          Promise.resolve(handlerPromise).catch(() => {
+            // Intentionally ignore errors after timeout
+          });
+          results.push({
+            name,
+            called: true,
+            error: null,
+            timedOut: true,
+            code: 'timeout',
+          });
+        } else {
+          this.safeEmit('component:reload-completed', { name });
+          results.push({
+            name,
+            called: true,
+            error: null,
+            timedOut: false,
+            code: 'called',
+          });
+        }
       } catch (error) {
         const err = error instanceof Error ? error : new Error(String(error));
         this.logger
           .entity(name)
           .error('Reload failed', { params: { error: err } });
         this.safeEmit('component:reload-failed', { name, error: err });
-        results.push({ name, called: true, error: err });
+        results.push({
+          name,
+          called: true,
+          error: err,
+          timedOut: false,
+          code: 'error',
+        });
+      } finally {
+        if (timeoutHandle) {
+          clearTimeout(timeoutHandle);
+        }
       }
     }
+
+    const calledResults = results.filter((result) => result.called);
+    const hasError = calledResults.some((result) => result.error);
+    const isAllError =
+      calledResults.length > 0 && calledResults.every((result) => result.error);
+    const hasTimeout = calledResults.some((result) => result.timedOut);
+    const isAllTimeout =
+      calledResults.length > 0 &&
+      calledResults.every((result) => result.timedOut);
+    const code = hasError
+      ? isAllError
+        ? 'error'
+        : 'partial_error'
+      : hasTimeout
+        ? isAllTimeout
+          ? 'timeout'
+          : 'partial_timeout'
+        : 'ok';
 
     return {
       signal: 'reload',
       results,
+      timedOut: hasTimeout,
+      code,
     };
   }
 
@@ -3550,33 +3710,108 @@ export class LifecycleManager
 
       if (!component.onInfo) {
         // Component doesn't implement onInfo
-        results.push({ name, called: false, error: null });
+        results.push({
+          name,
+          called: false,
+          error: null,
+          timedOut: false,
+          code: 'no_handler',
+        });
         continue;
       }
 
       this.safeEmit('component:info-started', { name });
 
+      const timeoutMS = component.signalTimeoutMS;
+      let timeoutHandle: NodeJS.Timeout | undefined;
+      const timeoutResult = { timedOut: true } as const;
+
       try {
         const result = component.onInfo();
-        if (isPromise(result)) {
-          await result;
-        }
+        const handlerPromise: Promise<unknown> = isPromise(result)
+          ? (result as Promise<unknown>)
+          : Promise.resolve(result as unknown);
 
-        this.safeEmit('component:info-completed', { name });
-        results.push({ name, called: true, error: null });
+        const outcome: unknown =
+          timeoutMS > 0
+            ? await Promise.race([
+                handlerPromise,
+                new Promise<typeof timeoutResult>((resolve) => {
+                  timeoutHandle = setTimeout(() => {
+                    resolve(timeoutResult);
+                  }, timeoutMS);
+                }),
+              ])
+            : await handlerPromise;
+
+        if (outcome === timeoutResult) {
+          this.logger.entity(name).warn('Info handler timed out', {
+            params: { timeoutMS },
+          });
+          // Prevent unhandled rejection if handler throws after timeout
+          Promise.resolve(handlerPromise).catch(() => {
+            // Intentionally ignore errors after timeout
+          });
+          results.push({
+            name,
+            called: true,
+            error: null,
+            timedOut: true,
+            code: 'timeout',
+          });
+        } else {
+          this.safeEmit('component:info-completed', { name });
+          results.push({
+            name,
+            called: true,
+            error: null,
+            timedOut: false,
+            code: 'called',
+          });
+        }
       } catch (error) {
         const err = error instanceof Error ? error : new Error(String(error));
         this.logger
           .entity(name)
           .error('Info handler failed', { params: { error: err } });
         this.safeEmit('component:info-failed', { name, error: err });
-        results.push({ name, called: true, error: err });
+        results.push({
+          name,
+          called: true,
+          error: err,
+          timedOut: false,
+          code: 'error',
+        });
+      } finally {
+        if (timeoutHandle) {
+          clearTimeout(timeoutHandle);
+        }
       }
     }
+
+    const calledResults = results.filter((result) => result.called);
+    const hasError = calledResults.some((result) => result.error);
+    const isAllError =
+      calledResults.length > 0 && calledResults.every((result) => result.error);
+    const hasTimeout = calledResults.some((result) => result.timedOut);
+    const isAllTimeout =
+      calledResults.length > 0 &&
+      calledResults.every((result) => result.timedOut);
+    const code = hasError
+      ? isAllError
+        ? 'error'
+        : 'partial_error'
+      : hasTimeout
+        ? isAllTimeout
+          ? 'timeout'
+          : 'partial_timeout'
+        : 'ok';
 
     return {
       signal: 'info',
       results,
+      timedOut: hasTimeout,
+      code,
     };
   }
 
@@ -3604,33 +3839,108 @@ export class LifecycleManager
 
       if (!component.onDebug) {
         // Component doesn't implement onDebug
-        results.push({ name, called: false, error: null });
+        results.push({
+          name,
+          called: false,
+          error: null,
+          timedOut: false,
+          code: 'no_handler',
+        });
         continue;
       }
 
       this.safeEmit('component:debug-started', { name });
 
+      const timeoutMS = component.signalTimeoutMS;
+      let timeoutHandle: NodeJS.Timeout | undefined;
+      const timeoutResult = { timedOut: true } as const;
+
       try {
         const result = component.onDebug();
-        if (isPromise(result)) {
-          await result;
-        }
+        const handlerPromise: Promise<unknown> = isPromise(result)
+          ? (result as Promise<unknown>)
+          : Promise.resolve(result as unknown);
 
-        this.safeEmit('component:debug-completed', { name });
-        results.push({ name, called: true, error: null });
+        const outcome: unknown =
+          timeoutMS > 0
+            ? await Promise.race([
+                handlerPromise,
+                new Promise<typeof timeoutResult>((resolve) => {
+                  timeoutHandle = setTimeout(() => {
+                    resolve(timeoutResult);
+                  }, timeoutMS);
+                }),
+              ])
+            : await handlerPromise;
+
+        if (outcome === timeoutResult) {
+          this.logger.entity(name).warn('Debug handler timed out', {
+            params: { timeoutMS },
+          });
+          // Prevent unhandled rejection if handler throws after timeout
+          Promise.resolve(handlerPromise).catch(() => {
+            // Intentionally ignore errors after timeout
+          });
+          results.push({
+            name,
+            called: true,
+            error: null,
+            timedOut: true,
+            code: 'timeout',
+          });
+        } else {
+          this.safeEmit('component:debug-completed', { name });
+          results.push({
+            name,
+            called: true,
+            error: null,
+            timedOut: false,
+            code: 'called',
+          });
+        }
       } catch (error) {
         const err = error instanceof Error ? error : new Error(String(error));
         this.logger
           .entity(name)
           .error('Debug handler failed', { params: { error: err } });
         this.safeEmit('component:debug-failed', { name, error: err });
-        results.push({ name, called: true, error: err });
+        results.push({
+          name,
+          called: true,
+          error: err,
+          timedOut: false,
+          code: 'error',
+        });
+      } finally {
+        if (timeoutHandle) {
+          clearTimeout(timeoutHandle);
+        }
       }
     }
+
+    const calledResults = results.filter((result) => result.called);
+    const hasError = calledResults.some((result) => result.error);
+    const isAllError =
+      calledResults.length > 0 && calledResults.every((result) => result.error);
+    const hasTimeout = calledResults.some((result) => result.timedOut);
+    const isAllTimeout =
+      calledResults.length > 0 &&
+      calledResults.every((result) => result.timedOut);
+    const code = hasError
+      ? isAllError
+        ? 'error'
+        : 'partial_error'
+      : hasTimeout
+        ? isAllTimeout
+          ? 'timeout'
+          : 'partial_timeout'
+        : 'ok';
 
     return {
       signal: 'debug',
       results,
+      timedOut: hasTimeout,
+      code,
     };
   }
 }
