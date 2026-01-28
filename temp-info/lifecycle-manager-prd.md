@@ -545,9 +545,183 @@ Best practices:
 
 `restartAllComponents()` is not atomic. There's a window where all components are stopped but none are started yet. For zero-downtime restarts, use rolling restarts with individual `restartComponent()` calls.
 
+## API Conventions
+
+This section describes the API design conventions used in the LifecycleManager. These conventions ensure consistent, predictable behavior across all operations.
+
+### Error Handling Strategy
+
+The LifecycleManager uses **result objects for all operations** with a consistent structure based on `BaseOperationResult`.
+
+#### Unified Base Result Interface
+
+All operations return result objects extending `BaseOperationResult`. This provides a consistent structure for both successful operations and expected failures.
+
+```typescript
+interface BaseOperationResult {
+  success: boolean;       // Whether the operation succeeded
+  reason?: string;        // Human-readable explanation if !success
+  code?: string;          // Machine-readable code for programmatic handling
+  error?: Error;          // Underlying error if applicable
+  status?: ComponentStatus; // Component state after operation (when applicable)
+}
+
+interface ComponentOperationResult extends BaseOperationResult {
+  componentName: string;
+  code?: ComponentOperationFailureCode;
+}
+```
+
+**When result objects are used:**
+- Component not found
+- Component already in desired state
+- Dependencies not met
+- Shutdown in progress
+- Dependency cycles
+- Timeout errors
+
+**Example usage:**
+
+```typescript
+const result = await lifecycle.startComponent('database');
+if (!result.success) {
+  console.error(`Failed to start: ${result.reason}`);
+  console.error(`Error code: ${result.code}`);
+  
+  // Handle specific failures
+  if (result.code === 'missing_dependency') {
+    // Handle missing dependency
+  }
+}
+
+// On success, status is included
+if (result.success && result.status) {
+  console.log(`Started at: ${result.status.startedAt}`);
+}
+```
+
+#### Constructor Validation (Exceptions)
+
+The only place that throws exceptions is `BaseComponent` constructor validation:
+
+- `InvalidComponentNameError` - Component name doesn't match kebab-case pattern
+
+**All other lifecycle-manager methods return result objects** - no exceptions are thrown to callers.
+
+#### Nullable Returns (Queries)
+
+Status and query methods return `undefined` when the requested entity doesn't exist:
+
+- `getComponentStatus(name)` - Returns `undefined` if component not found
+- `getComponentInstance(name)` - Returns `undefined` if component not found
+
+### Result Type Reference
+
+| Operation               | Result Type                 | Failure Codes                                                                       |
+| ----------------------- | --------------------------- | ----------------------------------------------------------------------------------- |
+| `startComponent()`      | `ComponentOperationResult`  | `component_not_found`, `component_already_running`, `missing_dependency`, etc.      |
+| `stopComponent()`       | `ComponentOperationResult`  | `component_not_found`, `component_not_running`, `stop_timeout`, `has_running_dependents` |
+| `restartComponent()`    | `ComponentOperationResult`  | `restart_stop_failed`, `restart_start_failed`                                       |
+| `registerComponent()`   | `RegisterComponentResult`   | `duplicate_name`, `shutdown_in_progress`, `dependency_cycle`                        |
+| `unregisterComponent()` | `UnregisterComponentResult` | `component_not_found`, `component_running`, `stop_failed`, `bulk_operation_in_progress` |
+| `getStartupOrder()`     | `StartupOrderResult`        | `dependency_cycle`, `unknown_error`                                                 |
+
+### Parameter Patterns
+
+All methods that accept options use **trailing options parameters**:
+
+```typescript
+startComponent(name: string, options?: StartComponentOptions)
+stopComponent(name: string, options?: StopComponentOptions)
+restartComponent(name: string, options?: RestartComponentOptions)
+registerComponent(component: BaseComponent, options?: RegisterOptions)
+unregisterComponent(name: string, options?: UnregisterOptions)
+```
+
+**Benefits:**
+- Easy to remember
+- Future-proof (can add new options without breaking changes)
+- IDE autocomplete works well
+
+### Query Method Naming
+
+Query methods follow consistent naming conventions:
+
+| Pattern       | Usage                       | Examples               |
+| ------------- | --------------------------- | ---------------------- |
+| `hasX()`      | Boolean check for existence | `hasComponent()`       |
+| `isX()`       | Boolean check for state     | `isComponentRunning()` |
+| `getX()`      | Retrieve object/value       | `getComponentStatus()` |
+| `getXs()`     | Retrieve collection         | `getComponentNames()`  |
+| `getXCount()` | Count items                 | `getComponentCount()`  |
+
+### Async/Sync Patterns
+
+The API clearly separates synchronous and asynchronous operations:
+
+**Synchronous (Immediate):**
+- All query methods: `hasComponent()`, `getComponentStatus()`, `getValue()`, etc.
+- Registration: `registerComponent()`, `insertComponentAt()` (but return promises for autoStart)
+
+**Asynchronous (Must await):**
+- All lifecycle operations: `startComponent()`, `stopComponent()`, `restartComponent()`
+- Unregistration (may stop component): `unregisterComponent()`
+- Bulk operations: `startAllComponents()`, `stopAllComponents()`
+- Messaging: `sendMessageToComponent()`, `broadcastMessage()`
+- Health checks: `checkComponentHealth()`, `checkAllHealth()`
+- Signal triggers: `triggerReload()`, `triggerInfo()`, `triggerDebug()`
+
+**Rule of thumb:** If it **changes component state** (starting/stopping) or **awaits external operations**, it's async.
+
+### Type Naming Conventions
+
+Types follow noun-first naming:
+
+```typescript
+// ✓ Good (noun-first)
+ComponentStatus
+HealthCheckResult
+MessageResult
+StartupResult
+ValueResult
+
+// ✗ Avoid (verb-first)
+GetValueResult  // Renamed to ValueResult
+```
+
+### Event System Conventions
+
+Events are emitted via the `LifecycleManagerEvents` class with typed payloads. The event naming follows these patterns:
+
+**Namespace patterns:**
+- `lifecycle-manager:*` - Manager-level events (startup, shutdown)
+- `component:*` - Component-level events (started, stopped, stalled)
+- `signal:*` - Signal events (shutdown, reload, info, debug)
+
+**Event payload consistency:**
+- All component events include `name: string`
+- Error events include `error: Error`
+- Timeout events include `timeoutMS: number`
+- Operation completion events include `durationMS: number` where applicable
+
+**Event handler execution:**
+Event handlers are **fire-and-forget** - they are NOT awaited. This ensures:
+- Event handlers cannot block lifecycle operations
+- Slow or failing handlers don't affect component startup/shutdown
+- Handlers can be async, but errors are their own responsibility
+
+### Future Extensibility
+
+The API is designed for backward-compatible evolution:
+
+1. **Options objects** allow adding new parameters without breaking changes
+2. **Result objects** can gain new fields without breaking existing code
+3. **Failure codes** are machine-readable strings (not enums) for easy extension
+4. **Reserved options types** signal future expansion points
+
 ## Implementation Status
 
-### ✅ Completed (Phases 1-8)
+### ✅ Completed (Phases 1-9)
 - Core LifecycleManager class with all lifecycle operations
 - BaseComponent abstract class
 - Component registration and dependency management
@@ -556,10 +730,8 @@ Best practices:
 - Signal integration with ProcessSignalManager
 - Component messaging and health checks
 - AutoStart feature and event consolidation
-- 246 unit tests, all passing
-
-### 🔄 In Progress
-- **Phase 9**: API & Event Consistency Review (current phase)
+- API & Event consistency review
+- 251 unit tests, all passing
 
 ### 📋 Remaining
 - **Phase 10**: Test consolidation and reorganization
