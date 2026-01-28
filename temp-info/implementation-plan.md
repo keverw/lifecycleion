@@ -498,6 +498,7 @@ src/lib/lifecycle-manager/
 - Migration guide from old implementations
 - Event reference
 - Remove phase language and any PRD remnants that leaked into docs
+- **Note**: Use the cleaned `lifecycle-manager-prd.md` as the reference specification when writing final documentation
 
 **Export**:
 
