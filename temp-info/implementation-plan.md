@@ -413,8 +413,9 @@ src/lib/lifecycle-manager/
 ### Goals
 
 - Review API design for consistency and completeness
+- The old `API_CONVENTIONS.md` file is a bit outdated, so use code as reference. The `API_CONVENTIONS.md` file could be deleted and add a section for future doc use in the `lifecycle-manager-prd.md`
 - Validate event emitter patterns are consistent
-- Use AI feedback to identify potential critical flaws or design issues
+- Using AI identify potential critical flaws or design issues
 - Ensure no breaking changes needed before v1.0
 
 ### Tasks
