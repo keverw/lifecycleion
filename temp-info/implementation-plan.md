@@ -462,16 +462,27 @@ src/lib/lifecycle-manager/
 
 ---
 
-## Phase 10: Consolidation & Reorg (1 day)
+## Phase 10: Integration Tests & Test Consolidation (1.5 days)
 
 ### Goals
 
-- Consolidate tests that were split by phase into a clearer, feature-based structure
+- Add integration tests with mock components simulating real-world scenarios
+- Consolidate unit tests that were split by phase into a clearer, feature-based structure
 - Prune redundant or legacy references created during phased delivery
 
 ### Tasks
 
-**Tests**:
+**Integration tests** (`lifecycle-manager.integration.test.ts`):
+
+- Multi-component with complex dependencies (mock DB, cache, web server, API)
+- Full signal handling
+- Shutdown during startup with real components
+- Optional/required mixes
+- Health monitoring workflows
+
+> **Tip**: Integration tests use mock components—classes extending `BaseComponent` that simulate services without real connections. No actual database or network calls needed.
+
+**Test consolidation**:
 
 - Merge or regroup phase-specific `describe()` blocks into feature-focused sections
 - Deduplicate overlapping assertions
@@ -479,22 +490,20 @@ src/lib/lifecycle-manager/
 
 ### Success Criteria
 
-- Tests read as a single, coherent suite without phase scaffolding
+- Integration tests pass
+- Unit tests read as a single, coherent suite without phase scaffolding
 - No leftover phase markers in tests or test file organization
 
 ---
 
-## Phase 11: Integration & Documentation (1.5 days)
+## Phase 11: Documentation & Export (1 day)
 
-### Implement
+### Goals
 
-**Integration tests** (`lifecycle-manager.integration.test.ts`):
+- Create final, production-ready documentation
+- Export LifecycleManager from the main package
 
-- Multi-component with complex dependencies
-- Full signal handling
-- Shutdown during startup with real components
-- Optional/required mixes
-- Health monitoring workflows
+### Tasks
 
 **Example app** (`examples/lifecycle-demo/`):
 
@@ -519,7 +528,6 @@ src/lib/lifecycle-manager/
 
 ### Success Criteria
 
-- Integration tests pass
 - Example app runs and demonstrates all features
 - Docs read as final product docs, not a phased work plan
 - Exported from main package
@@ -560,9 +568,9 @@ Based on exploration of existing codebase:
 - Phase 7: 1.5 days ✅
 - Phase 8: 0.5 day ✅
 - Phase 9: 0.5 day ✅ (API review)
-- Phase 10: 1 day (was Phase 9)
-- Phase 11: 1.5 days (was Phase 10)
-- **Total: ~13 days** (was 12 days, +1 day for review phase)
+- Phase 10: 1.5 days (Integration tests + test consolidation)
+- Phase 11: 1 day (Documentation + export)
+- **Total: ~13 days**
 
 ---
 
