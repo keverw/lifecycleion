@@ -408,7 +408,7 @@ src/lib/lifecycle-manager/
 
 ---
 
-## Phase 9: API & Event Consistency Review (0.5 day)
+## ~~Phase 9: API & Event Consistency Review (0.5 day)~~ ✅ **COMPLETED**
 
 ### Goals
 
@@ -418,48 +418,71 @@ src/lib/lifecycle-manager/
 - Using AI identify potential critical flaws or design issues
 - Ensure no breaking changes needed before v1.0
 
-### Tasks
+### Completed Tasks
 
 **API Review**:
 
-- Review all public method signatures for consistency
-- Check return types follow the result object pattern
-- Validate error handling is consistent
-- Ensure naming conventions are uniform
+- ✅ Reviewed all public method signatures for consistency
+- ✅ Verified return types follow the result object pattern (all extend `BaseOperationResult`)
+- ✅ Validated error handling is consistent (result objects for expected failures, exceptions only for constructor validation)
+- ✅ Confirmed naming conventions are uniform (noun-first types, consistent query method patterns)
 
 **Event Review**:
 
-- Review all event names and payloads for consistency
-- Validate events are emitted at appropriate times
-- Check event documentation matches implementation
-- Ensure no duplicate or redundant events
+- ✅ Reviewed all event names and payloads for consistency
+- ✅ Validated events are emitted at appropriate times via `LifecycleManagerEvents` class
+- ✅ Confirmed event naming follows namespace patterns (`lifecycle-manager:*`, `component:*`, `signal:*`)
+- ✅ No duplicate or redundant events found
 
 **AI-Assisted Analysis**:
 
-- Use code analysis tools to identify potential issues
-- Review for common anti-patterns
-- Check for missing error handling
-- Validate async/await usage
+- ✅ No critical API flaws identified
+- ✅ Async/await usage is consistent
+- ✅ Error handling patterns are well-established
+- ✅ No anti-patterns detected
 
-### Success Criteria
+**Documentation Updates**:
 
-- No critical API flaws identified
-- Event system is consistent and complete
-- All feedback items addressed or documented as known limitations
-- API ready for v1.0 stability
+- ✅ Deleted `temp-info/API_CONVENTIONS.md`
+- ✅ Added comprehensive "API Conventions" section to `lifecycle-manager-prd.md`
+- ✅ Updated implementation status in PRD
+
+### Key Findings (All Positive)
+
+1. **Result Object Pattern**: All operations consistently return result objects extending `BaseOperationResult`
+2. **Error Handling**: Only `BaseComponent` constructor throws exceptions (for name validation); all lifecycle operations return result objects
+3. **Query Methods**: Consistent naming (`hasX`, `isX`, `getX`, `getXCount`, `getAllX`)
+4. **Async/Sync Split**: Clear separation - lifecycle changes are async, queries are sync
+5. **Event System**: Well-structured with typed payloads via `LifecycleManagerEvents` class
+6. **Options Pattern**: All methods use trailing options parameters for extensibility
+
+**Test results:** ✅ All 251 tests passing (1063 assertions)
+**Build:** ✅ No TypeScript errors, clean build
+**Lint:** ✅ No linting errors
 
 ---
 
-## Phase 10: Consolidation & Reorg (1 day)
+## Phase 10: Integration Tests & Test Consolidation (1.5 days)
 
 ### Goals
 
-- Consolidate tests that were split by phase into a clearer, feature-based structure
+- Add integration tests with mock components simulating real-world scenarios
+- Consolidate unit tests that were split by phase into a clearer, feature-based structure
 - Prune redundant or legacy references created during phased delivery
 
 ### Tasks
 
-**Tests**:
+**Integration tests** (`lifecycle-manager.integration.test.ts`):
+
+- Multi-component with complex dependencies (mock DB, cache, web server, API)
+- Full signal handling
+- Shutdown during startup with real components
+- Optional/required mixes
+- Health monitoring workflows
+
+> **Tip**: Integration tests use mock components—classes extending `BaseComponent` that simulate services without real connections. No actual database or network calls needed.
+
+**Test consolidation**:
 
 - Merge or regroup phase-specific `describe()` blocks into feature-focused sections
 - Deduplicate overlapping assertions
@@ -467,22 +490,20 @@ src/lib/lifecycle-manager/
 
 ### Success Criteria
 
-- Tests read as a single, coherent suite without phase scaffolding
+- Integration tests pass
+- Unit tests read as a single, coherent suite without phase scaffolding
 - No leftover phase markers in tests or test file organization
 
 ---
 
-## Phase 11: Integration & Documentation (1.5 days)
+## Phase 11: Documentation & Export (1 day)
 
-### Implement
+### Goals
 
-**Integration tests** (`lifecycle-manager.integration.test.ts`):
+- Create final, production-ready documentation
+- Export LifecycleManager from the main package
 
-- Multi-component with complex dependencies
-- Full signal handling
-- Shutdown during startup with real components
-- Optional/required mixes
-- Health monitoring workflows
+### Tasks
 
 **Example app** (`examples/lifecycle-demo/`):
 
@@ -507,7 +528,6 @@ src/lib/lifecycle-manager/
 
 ### Success Criteria
 
-- Integration tests pass
 - Example app runs and demonstrates all features
 - Docs read as final product docs, not a phased work plan
 - Exported from main package
@@ -546,11 +566,11 @@ Based on exploration of existing codebase:
 - Phase 5: 1.5 days ✅
 - Phase 6: 1 day ✅
 - Phase 7: 1.5 days ✅
-- Phase 8: 0.5 day (reduced - most features already done)
-- Phase 9: 0.5 day (new - API review)
-- Phase 10: 1 day (was Phase 9)
-- Phase 11: 1.5 days (was Phase 10)
-- **Total: ~13 days** (was 12 days, +1 day for review phase)
+- Phase 8: 0.5 day ✅
+- Phase 9: 0.5 day ✅ (API review)
+- Phase 10: 1.5 days (Integration tests + test consolidation)
+- Phase 11: 1 day (Documentation + export)
+- **Total: ~13 days**
 
 ---
 
