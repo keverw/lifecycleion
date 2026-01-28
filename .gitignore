@@ -9,6 +9,9 @@ dist/
 # Bun
 bun.lockb
 
+# npm
+package-lock.json
+
 # Logs
 logs/
 *.log
