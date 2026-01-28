@@ -17,6 +17,8 @@ import {
 } from './errors';
 import { sleep } from '../sleep';
 
+// cspell:ignore Renamable Reloadable Unregistration unregistration
+
 // Test component implementation
 class TestComponent extends BaseComponent {
   public startCalled = false;
@@ -419,11 +421,11 @@ describe('LifecycleManager - Phase 1: Foundation', () => {
   });
 
   describe('LifecycleManager - Registration Results', () => {
-    test('registerComponent() should return rich success result with startupOrder', () => {
+    test('registerComponent() should return rich success result with startupOrder', async () => {
       const lifecycle = new LifecycleManager({ logger });
       const component = new TestComponent(logger, { name: 'database' });
 
-      const result = lifecycle.registerComponent(component);
+      const result = await lifecycle.registerComponent(component);
       expect(result.success).toBe(true);
       expect(result.registered).toBe(true);
       expect(result.componentName).toBe('database');
@@ -433,7 +435,7 @@ describe('LifecycleManager - Phase 1: Foundation', () => {
       expect(result.registrationIndexAfter).toBe(0);
     });
 
-    test('registerComponent() should return duplicate_name failure result', () => {
+    test('registerComponent() should return duplicate_name failure result', async () => {
       const lifecycle = new LifecycleManager({ logger });
       const component1 = new TestComponent(logger, { name: 'database' });
       const component2 = new TestComponent(logger, { name: 'database' });
@@ -443,10 +445,10 @@ describe('LifecycleManager - Phase 1: Foundation', () => {
         rejectedPayload = data;
       });
 
-      const result1 = lifecycle.registerComponent(component1);
+      const result1 = await lifecycle.registerComponent(component1);
       expect(result1.success).toBe(true);
 
-      const result2 = lifecycle.registerComponent(component2);
+      const result2 = await lifecycle.registerComponent(component2);
       expect(result2.success).toBe(false);
       expect(result2.registered).toBe(false);
       expect(result2.code).toBe('duplicate_name');
@@ -461,7 +463,7 @@ describe('LifecycleManager - Phase 1: Foundation', () => {
       expect(rejectedPayload?.registrationIndexAfter).toBe(0);
     });
 
-    test('registerComponent() should reject duplicate instance even if renamed', () => {
+    test('registerComponent() should reject duplicate instance even if renamed', async () => {
       class RenamableComponent extends TestComponent {
         public rename(newName: string): void {
           this.name = newName;
@@ -471,19 +473,19 @@ describe('LifecycleManager - Phase 1: Foundation', () => {
       const lifecycle = new LifecycleManager({ logger });
       const component = new RenamableComponent(logger, { name: 'database' });
 
-      const result1 = lifecycle.registerComponent(component);
+      const result1 = await lifecycle.registerComponent(component);
       expect(result1.success).toBe(true);
 
       component.rename('database-copy');
 
-      const result2 = lifecycle.registerComponent(component);
+      const result2 = await lifecycle.registerComponent(component);
       expect(result2.success).toBe(false);
       expect(result2.registered).toBe(false);
       expect(result2.code).toBe('duplicate_instance');
       expect(result2.componentName).toBe('database-copy');
     });
 
-    test('insertComponentAt() should reject duplicate instance even if renamed', () => {
+    test('insertComponentAt() should reject duplicate instance even if renamed', async () => {
       class RenamableComponent extends TestComponent {
         public rename(newName: string): void {
           this.name = newName;
@@ -493,19 +495,19 @@ describe('LifecycleManager - Phase 1: Foundation', () => {
       const lifecycle = new LifecycleManager({ logger });
       const component = new RenamableComponent(logger, { name: 'database' });
 
-      const result1 = lifecycle.registerComponent(component);
+      const result1 = await lifecycle.registerComponent(component);
       expect(result1.success).toBe(true);
 
       component.rename('database-copy');
 
-      const result2 = lifecycle.insertComponentAt(component, 'end');
+      const result2 = await lifecycle.insertComponentAt(component, 'end');
       expect(result2.success).toBe(false);
       expect(result2.registered).toBe(false);
       expect(result2.code).toBe('duplicate_instance');
       expect(result2.componentName).toBe('database-copy');
     });
 
-    test('registerComponent() should return dependency_cycle failure result and not register component', () => {
+    test('registerComponent() should return dependency_cycle failure result and not register component', async () => {
       const lifecycle = new LifecycleManager({ logger });
       let rejectedPayload: any;
 
@@ -516,11 +518,11 @@ describe('LifecycleManager - Phase 1: Foundation', () => {
       const a = new TestComponent(logger, { name: 'a', dependencies: ['b'] });
       const b = new TestComponent(logger, { name: 'b', dependencies: ['a'] });
 
-      const resultA = lifecycle.registerComponent(a);
+      const resultA = await lifecycle.registerComponent(a);
       expect(resultA.success).toBe(true);
       expect(lifecycle.hasComponent('a')).toBe(true);
 
-      const resultB = lifecycle.registerComponent(b);
+      const resultB = await lifecycle.registerComponent(b);
       expect(resultB.success).toBe(false);
       expect(resultB.registered).toBe(false);
       expect(resultB.code).toBe('dependency_cycle');
@@ -538,17 +540,17 @@ describe('LifecycleManager - Phase 1: Foundation', () => {
       expect(Array.isArray(rejectedPayload?.cycle)).toBe(true);
     });
 
-    test('insertComponentAt() should return dependency_cycle failure result and not register component', () => {
+    test('insertComponentAt() should return dependency_cycle failure result and not register component', async () => {
       const lifecycle = new LifecycleManager({ logger });
 
       const a = new TestComponent(logger, { name: 'a', dependencies: ['b'] });
       const b = new TestComponent(logger, { name: 'b', dependencies: ['a'] });
 
-      const resultA = lifecycle.registerComponent(a);
+      const resultA = await lifecycle.registerComponent(a);
       expect(resultA.success).toBe(true);
       expect(lifecycle.hasComponent('a')).toBe(true);
 
-      const resultB = lifecycle.insertComponentAt(b, 'end');
+      const resultB = await lifecycle.insertComponentAt(b, 'end');
       expect(resultB.success).toBe(false);
       expect(resultB.registered).toBe(false);
       expect(resultB.code).toBe('dependency_cycle');
@@ -563,7 +565,7 @@ describe('LifecycleManager - Phase 1: Foundation', () => {
       expect(resultB.startupOrder).toEqual(['a']);
     });
 
-    test('insertComponentAt() should return target_not_found failure result', () => {
+    test('insertComponentAt() should return target_not_found failure result', async () => {
       const lifecycle = new LifecycleManager({ logger });
       const component = new TestComponent(logger, { name: 'api' });
       let rejectedPayload: any;
@@ -572,7 +574,7 @@ describe('LifecycleManager - Phase 1: Foundation', () => {
         rejectedPayload = data;
       });
 
-      const result = lifecycle.insertComponentAt(
+      const result = await lifecycle.insertComponentAt(
         component,
         'before',
         'missing',
@@ -589,7 +591,7 @@ describe('LifecycleManager - Phase 1: Foundation', () => {
       expect(rejectedPayload?.targetFound).toBe(false);
     });
 
-    test('insertComponentAt() should return invalid_position failure result for untyped callers', () => {
+    test('insertComponentAt() should return invalid_position failure result for untyped callers', async () => {
       const lifecycle = new LifecycleManager({ logger });
       const component = new TestComponent(logger, { name: 'api' });
       let rejectedPayload: any;
@@ -598,7 +600,10 @@ describe('LifecycleManager - Phase 1: Foundation', () => {
         rejectedPayload = data;
       });
 
-      const result = (lifecycle as any).insertComponentAt(component, 'weird');
+      const result = await (lifecycle as any).insertComponentAt(
+        component,
+        'weird',
+      );
       expect(result.success).toBe(false);
       expect(result.registered).toBe(false);
       expect(result.code).toBe('invalid_position');
@@ -610,7 +615,7 @@ describe('LifecycleManager - Phase 1: Foundation', () => {
       expect(rejectedPayload?.requestedPosition?.position).toBe('weird');
     });
 
-    test('insertComponentAt() should report manualPositionRespected=false when dependencies override requested order', () => {
+    test('insertComponentAt() should report manualPositionRespected=false when dependencies override requested order', async () => {
       const lifecycle = new LifecycleManager({ logger });
 
       const database = new TestComponent(logger, { name: 'database' });
@@ -619,10 +624,10 @@ describe('LifecycleManager - Phase 1: Foundation', () => {
         dependencies: ['database'],
       });
 
-      const dbResult = lifecycle.registerComponent(database);
+      const dbResult = await lifecycle.registerComponent(database);
       expect(dbResult.success).toBe(true);
 
-      const apiResult = lifecycle.insertComponentAt(api, 'start');
+      const apiResult = await lifecycle.insertComponentAt(api, 'start');
       expect(apiResult.success).toBe(true);
       expect(apiResult.registered).toBe(true);
 
@@ -632,7 +637,7 @@ describe('LifecycleManager - Phase 1: Foundation', () => {
       expect(apiResult.manualPositionRespected).toBe(false);
     });
 
-    test('getStartupOrder() should return success result with startupOrder', () => {
+    test('getStartupOrder() should return success result with startupOrder', async () => {
       const lifecycle = new LifecycleManager({ logger });
       const database = new TestComponent(logger, { name: 'database' });
       const api = new TestComponent(logger, {
@@ -640,10 +645,10 @@ describe('LifecycleManager - Phase 1: Foundation', () => {
         dependencies: ['database'],
       });
 
-      const dbResult = lifecycle.registerComponent(database);
+      const dbResult = await lifecycle.registerComponent(database);
       expect(dbResult.success).toBe(true);
 
-      const apiResult = lifecycle.registerComponent(api);
+      const apiResult = await lifecycle.registerComponent(api);
       expect(apiResult.success).toBe(true);
 
       const orderResult = lifecycle.getStartupOrder();
@@ -680,11 +685,11 @@ describe('LifecycleManager - Phase 2: Core Registration & Individual Lifecycle',
   });
 
   describe('Registration Methods', () => {
-    test('registerComponent should set lifecycle reference', () => {
+    test('registerComponent should set lifecycle reference', async () => {
       const lifecycle = new LifecycleManager({ logger });
       const component = new TestComponent(logger, { name: 'test' });
 
-      lifecycle.registerComponent(component);
+      await lifecycle.registerComponent(component);
 
       expect((component as any).lifecycle).toBeDefined();
       expect((component as any).lifecycle).not.toBe(lifecycle); // It's a ComponentLifecycle, not the manager
@@ -700,7 +705,7 @@ describe('LifecycleManager - Phase 2: Core Registration & Individual Lifecycle',
       const lifecycle = new LifecycleManager({ logger });
       const component = new TestComponent(logger, { name: 'test' });
 
-      lifecycle.registerComponent(component);
+      await lifecycle.registerComponent(component);
       expect(lifecycle.hasComponent('test')).toBe(true);
 
       const result = await lifecycle.unregisterComponent('test');
@@ -726,7 +731,7 @@ describe('LifecycleManager - Phase 2: Core Registration & Individual Lifecycle',
       const lifecycle = new LifecycleManager({ logger });
       const component = new TestComponent(logger, { name: 'test' });
 
-      lifecycle.registerComponent(component);
+      await lifecycle.registerComponent(component);
       await lifecycle.startComponent('test');
 
       const result = await lifecycle.unregisterComponent('test', {
@@ -746,7 +751,7 @@ describe('LifecycleManager - Phase 2: Core Registration & Individual Lifecycle',
       const lifecycle = new LifecycleManager({ logger });
       const component = new TestComponent(logger, { name: 'test' });
 
-      lifecycle.registerComponent(component);
+      await lifecycle.registerComponent(component);
       await lifecycle.startComponent('test');
       expect(lifecycle.isComponentRunning('test')).toBe(true);
 
@@ -765,7 +770,7 @@ describe('LifecycleManager - Phase 2: Core Registration & Individual Lifecycle',
       const lifecycle = new LifecycleManager({ logger });
       const component = new TestComponent(logger, { name: 'test' });
 
-      lifecycle.registerComponent(component);
+      await lifecycle.registerComponent(component);
       await lifecycle.startComponent('test');
       expect(lifecycle.isComponentRunning('test')).toBe(true);
 
@@ -793,7 +798,7 @@ describe('LifecycleManager - Phase 2: Core Registration & Individual Lifecycle',
 
       const component = new FailingStopComponent(logger, { name: 'failing' });
 
-      lifecycle.registerComponent(component);
+      await lifecycle.registerComponent(component);
       await lifecycle.startComponent('failing');
       expect(lifecycle.isComponentRunning('failing')).toBe(true);
 
@@ -833,7 +838,7 @@ describe('LifecycleManager - Phase 2: Core Registration & Individual Lifecycle',
         shutdownGracefulTimeoutMS: 1000, // Minimum enforced
       });
 
-      lifecycle.registerComponent(component);
+      await lifecycle.registerComponent(component);
       await lifecycle.startComponent('slow-stop');
       expect(lifecycle.isComponentRunning('slow-stop')).toBe(true);
 
@@ -875,7 +880,7 @@ describe('LifecycleManager - Phase 2: Core Registration & Individual Lifecycle',
         shutdownGracefulTimeoutMS: 1000, // Minimum enforced
       });
 
-      lifecycle.registerComponent(component);
+      await lifecycle.registerComponent(component);
       await lifecycle.startComponent('slow-stop');
 
       await lifecycle.stopComponent('slow-stop', { timeout: 10 });
@@ -907,8 +912,8 @@ describe('LifecycleManager - Phase 2: Core Registration & Individual Lifecycle',
         dependencies: ['database'],
       });
 
-      lifecycle.registerComponent(database);
-      lifecycle.registerComponent(api);
+      await lifecycle.registerComponent(database);
+      await lifecycle.registerComponent(api);
 
       await lifecycle.startComponent('database');
       await lifecycle.startComponent('api');
@@ -932,8 +937,8 @@ describe('LifecycleManager - Phase 2: Core Registration & Individual Lifecycle',
         dependencies: ['database'],
       });
 
-      lifecycle.registerComponent(database);
-      lifecycle.registerComponent(api);
+      await lifecycle.registerComponent(database);
+      await lifecycle.registerComponent(api);
 
       await lifecycle.startComponent('database');
       await lifecycle.startComponent('api');
@@ -956,8 +961,8 @@ describe('LifecycleManager - Phase 2: Core Registration & Individual Lifecycle',
         dependencies: ['database'],
       });
 
-      lifecycle.registerComponent(database);
-      lifecycle.registerComponent(api);
+      await lifecycle.registerComponent(database);
+      await lifecycle.registerComponent(api);
 
       await lifecycle.startComponent('database');
       await lifecycle.startComponent('api');
@@ -982,14 +987,14 @@ describe('LifecycleManager - Phase 2: Core Registration & Individual Lifecycle',
         dependencies: ['database'],
       });
 
-      lifecycle.registerComponent(api);
+      await lifecycle.registerComponent(api);
 
       // Start async startup
       const startupPromise = lifecycle.startAllComponents();
 
       // Try to register database while startup is in progress
       // This should be blocked because api depends on database
-      const result = lifecycle.registerComponent(database);
+      const result = await lifecycle.registerComponent(database);
 
       expect(result.success).toBe(false);
       expect(result.code).toBe('startup_in_progress');
@@ -1005,7 +1010,7 @@ describe('LifecycleManager - Phase 2: Core Registration & Individual Lifecycle',
       const database = new TestComponent(logger, { name: 'database' });
       const cache = new TestComponent(logger, { name: 'cache' });
 
-      lifecycle.registerComponent(database);
+      await lifecycle.registerComponent(database);
 
       // Start async startup
       const startupPromise = lifecycle.startAllComponents();
@@ -1015,7 +1020,7 @@ describe('LifecycleManager - Phase 2: Core Registration & Individual Lifecycle',
 
       // Try to register cache (not a dependency of anything)
       // This should succeed
-      const result = lifecycle.registerComponent(cache);
+      const result = await lifecycle.registerComponent(cache);
 
       expect(result.success).toBe(true);
       expect(lifecycle.hasComponent('cache')).toBe(true);
@@ -1031,13 +1036,13 @@ describe('LifecycleManager - Phase 2: Core Registration & Individual Lifecycle',
         dependencies: ['database'],
       });
 
-      lifecycle.registerComponent(api);
+      await lifecycle.registerComponent(api);
 
       // Start async startup
       const startupPromise = lifecycle.startAllComponents();
 
       // Try to insert database while startup is in progress
-      const result = lifecycle.insertComponentAt(database, 'start');
+      const result = await lifecycle.insertComponentAt(database, 'start');
 
       expect(result.success).toBe(false);
       expect(result.code).toBe('startup_in_progress');
@@ -1050,11 +1055,11 @@ describe('LifecycleManager - Phase 2: Core Registration & Individual Lifecycle',
   });
 
   describe('Status Tracking', () => {
-    test('hasComponent should return true for registered components', () => {
+    test('hasComponent should return true for registered components', async () => {
       const lifecycle = new LifecycleManager({ logger });
       const component = new TestComponent(logger, { name: 'test' });
 
-      lifecycle.registerComponent(component);
+      await lifecycle.registerComponent(component);
 
       expect(lifecycle.hasComponent('test')).toBe(true);
       expect(lifecycle.hasComponent('other')).toBe(false);
@@ -1064,7 +1069,7 @@ describe('LifecycleManager - Phase 2: Core Registration & Individual Lifecycle',
       const lifecycle = new LifecycleManager({ logger });
       const component = new TestComponent(logger, { name: 'test' });
 
-      lifecycle.registerComponent(component);
+      await lifecycle.registerComponent(component);
 
       expect(lifecycle.isComponentRunning('test')).toBe(false);
 
@@ -1075,13 +1080,13 @@ describe('LifecycleManager - Phase 2: Core Registration & Individual Lifecycle',
       expect(lifecycle.isComponentRunning('test')).toBe(false);
     });
 
-    test('getComponentNames should return all registered names', () => {
+    test('getComponentNames should return all registered names', async () => {
       const lifecycle = new LifecycleManager({ logger });
       const comp1 = new TestComponent(logger, { name: 'database' });
       const comp2 = new TestComponent(logger, { name: 'web-server' });
 
-      lifecycle.registerComponent(comp1);
-      lifecycle.registerComponent(comp2);
+      await lifecycle.registerComponent(comp1);
+      await lifecycle.registerComponent(comp2);
 
       const names = lifecycle.getComponentNames();
       expect(names).toEqual(['database', 'web-server']);
@@ -1092,8 +1097,8 @@ describe('LifecycleManager - Phase 2: Core Registration & Individual Lifecycle',
       const comp1 = new TestComponent(logger, { name: 'database' });
       const comp2 = new TestComponent(logger, { name: 'web-server' });
 
-      lifecycle.registerComponent(comp1);
-      lifecycle.registerComponent(comp2);
+      await lifecycle.registerComponent(comp1);
+      await lifecycle.registerComponent(comp2);
 
       expect(lifecycle.getRunningComponentNames()).toEqual([]);
 
@@ -1107,29 +1112,29 @@ describe('LifecycleManager - Phase 2: Core Registration & Individual Lifecycle',
       ]);
     });
 
-    test('getComponentInstance should return the registered instance', () => {
+    test('getComponentInstance should return the registered instance', async () => {
       const lifecycle = new LifecycleManager({ logger });
       const component = new TestComponent(logger, { name: 'database' });
 
       expect(lifecycle.getComponentInstance('database')).toBe(undefined);
 
-      lifecycle.registerComponent(component);
+      await lifecycle.registerComponent(component);
 
       expect(lifecycle.getComponentInstance('database')).toBe(component);
       expect(lifecycle.getComponentInstance('missing')).toBe(undefined);
     });
 
-    test('getComponentCount should return total registered count', () => {
+    test('getComponentCount should return total registered count', async () => {
       const lifecycle = new LifecycleManager({ logger });
       const comp1 = new TestComponent(logger, { name: 'database' });
       const comp2 = new TestComponent(logger, { name: 'web-server' });
 
       expect(lifecycle.getComponentCount()).toBe(0);
 
-      lifecycle.registerComponent(comp1);
+      await lifecycle.registerComponent(comp1);
       expect(lifecycle.getComponentCount()).toBe(1);
 
-      lifecycle.registerComponent(comp2);
+      await lifecycle.registerComponent(comp2);
       expect(lifecycle.getComponentCount()).toBe(2);
     });
 
@@ -1138,8 +1143,8 @@ describe('LifecycleManager - Phase 2: Core Registration & Individual Lifecycle',
       const comp1 = new TestComponent(logger, { name: 'database' });
       const comp2 = new TestComponent(logger, { name: 'web-server' });
 
-      lifecycle.registerComponent(comp1);
-      lifecycle.registerComponent(comp2);
+      await lifecycle.registerComponent(comp1);
+      await lifecycle.registerComponent(comp2);
 
       expect(lifecycle.getRunningComponentCount()).toBe(0);
 
@@ -1154,7 +1159,7 @@ describe('LifecycleManager - Phase 2: Core Registration & Individual Lifecycle',
       const lifecycle = new LifecycleManager({ logger });
       const component = new TestComponent(logger, { name: 'test' });
 
-      lifecycle.registerComponent(component);
+      await lifecycle.registerComponent(component);
 
       const status1 = lifecycle.getComponentStatus('test');
       const definedStatus1 = requireDefined(status1, 'status1');
@@ -1178,13 +1183,13 @@ describe('LifecycleManager - Phase 2: Core Registration & Individual Lifecycle',
       expect(status).toBeUndefined();
     });
 
-    test('getAllComponentStatuses should return statuses for all components', () => {
+    test('getAllComponentStatuses should return statuses for all components', async () => {
       const lifecycle = new LifecycleManager({ logger });
       const comp1 = new TestComponent(logger, { name: 'database' });
       const comp2 = new TestComponent(logger, { name: 'web-server' });
 
-      lifecycle.registerComponent(comp1);
-      lifecycle.registerComponent(comp2);
+      await lifecycle.registerComponent(comp1);
+      await lifecycle.registerComponent(comp2);
 
       const statuses = lifecycle.getAllComponentStatuses();
       expect(statuses).toHaveLength(2);
@@ -1198,14 +1203,14 @@ describe('LifecycleManager - Phase 2: Core Registration & Individual Lifecycle',
       expect(lifecycle.getSystemState()).toBe('idle');
 
       const comp1 = new TestComponent(logger, { name: 'database' });
-      lifecycle.registerComponent(comp1);
+      await lifecycle.registerComponent(comp1);
       expect(lifecycle.getSystemState()).toBe('ready');
 
       await lifecycle.startComponent('database');
       expect(lifecycle.getSystemState()).toBe('running');
 
       const comp2 = new TestComponent(logger, { name: 'web-server' });
-      lifecycle.registerComponent(comp2);
+      await lifecycle.registerComponent(comp2);
       expect(lifecycle.getSystemState()).toBe('partial');
 
       await lifecycle.startComponent('web-server');
@@ -1218,7 +1223,7 @@ describe('LifecycleManager - Phase 2: Core Registration & Individual Lifecycle',
       const lifecycle = new LifecycleManager({ logger });
       const component = new TestComponent(logger, { name: 'test' });
 
-      lifecycle.registerComponent(component);
+      await lifecycle.registerComponent(component);
 
       const result = await lifecycle.startComponent('test');
 
@@ -1249,7 +1254,7 @@ describe('LifecycleManager - Phase 2: Core Registration & Individual Lifecycle',
       }
 
       const component = new SyncComponent(logger, { name: 'sync' });
-      lifecycle.registerComponent(component);
+      await lifecycle.registerComponent(component);
 
       const startResult = await lifecycle.startComponent('sync');
       expect(startResult.success).toBe(true);
@@ -1279,7 +1284,7 @@ describe('LifecycleManager - Phase 2: Core Registration & Individual Lifecycle',
         dependencies: ['database'],
       });
 
-      lifecycle.registerComponent(component);
+      await lifecycle.registerComponent(component);
 
       const result = await lifecycle.startComponent('api');
 
@@ -1297,8 +1302,8 @@ describe('LifecycleManager - Phase 2: Core Registration & Individual Lifecycle',
         dependencies: ['database'],
       });
 
-      lifecycle.registerComponent(database);
-      lifecycle.registerComponent(api);
+      await lifecycle.registerComponent(database);
+      await lifecycle.registerComponent(api);
 
       const result = await lifecycle.startComponent('api');
 
@@ -1319,8 +1324,8 @@ describe('LifecycleManager - Phase 2: Core Registration & Individual Lifecycle',
         dependencies: ['database'],
       });
 
-      lifecycle.registerComponent(database);
-      lifecycle.registerComponent(api);
+      await lifecycle.registerComponent(database);
+      await lifecycle.registerComponent(api);
 
       const result = await lifecycle.startComponent('api', {
         allowOptionalDependencies: true,
@@ -1338,8 +1343,8 @@ describe('LifecycleManager - Phase 2: Core Registration & Individual Lifecycle',
         dependencies: ['database'],
       });
 
-      lifecycle.registerComponent(database);
-      lifecycle.registerComponent(api);
+      await lifecycle.registerComponent(database);
+      await lifecycle.registerComponent(api);
 
       await lifecycle.startComponent('database');
       const result = await lifecycle.startComponent('api');
@@ -1352,7 +1357,7 @@ describe('LifecycleManager - Phase 2: Core Registration & Individual Lifecycle',
       const lifecycle = new LifecycleManager({ logger });
       const component = new TestComponent(logger, { name: 'test' });
 
-      lifecycle.registerComponent(component);
+      await lifecycle.registerComponent(component);
       await lifecycle.startComponent('test');
 
       const result = await lifecycle.startComponent('test');
@@ -1381,7 +1386,7 @@ describe('LifecycleManager - Phase 2: Core Registration & Individual Lifecycle',
       }
 
       const component = new SlowStartComponent(logger, { name: 'test' });
-      lifecycle.registerComponent(component);
+      await lifecycle.registerComponent(component);
 
       const firstStartPromise = lifecycle.startComponent('test');
       const secondResult = await lifecycle.startComponent('test');
@@ -1417,7 +1422,7 @@ describe('LifecycleManager - Phase 2: Core Registration & Individual Lifecycle',
       }
 
       const component = new SlowStopComponent(logger, { name: 'test' });
-      lifecycle.registerComponent(component);
+      await lifecycle.registerComponent(component);
       await lifecycle.startComponent('test');
 
       const firstStopPromise = lifecycle.stopComponent('test');
@@ -1439,7 +1444,7 @@ describe('LifecycleManager - Phase 2: Core Registration & Individual Lifecycle',
       const lifecycle = new LifecycleManager({ logger });
       const component = new TestComponent(logger, { name: 'test' });
 
-      lifecycle.registerComponent(component);
+      await lifecycle.registerComponent(component);
       await lifecycle.startComponent('test');
 
       const result = await lifecycle.stopComponent('test');
@@ -1469,7 +1474,7 @@ describe('LifecycleManager - Phase 2: Core Registration & Individual Lifecycle',
       const lifecycle = new LifecycleManager({ logger });
       const component = new TestComponent(logger, { name: 'test' });
 
-      lifecycle.registerComponent(component);
+      await lifecycle.registerComponent(component);
 
       const result = await lifecycle.stopComponent('test');
 
@@ -1482,7 +1487,7 @@ describe('LifecycleManager - Phase 2: Core Registration & Individual Lifecycle',
       const lifecycle = new LifecycleManager({ logger });
       const component = new TestComponent(logger, { name: 'test' });
 
-      lifecycle.registerComponent(component);
+      await lifecycle.registerComponent(component);
       await lifecycle.startComponent('test');
 
       component.startCalled = false;
@@ -1510,7 +1515,7 @@ describe('LifecycleManager - Phase 2: Core Registration & Individual Lifecycle',
 
       const component = new FailingStopComponent(logger, { name: 'test' });
 
-      lifecycle.registerComponent(component);
+      await lifecycle.registerComponent(component);
       await lifecycle.startComponent('test');
 
       const result = await lifecycle.restartComponent('test');
@@ -1539,7 +1544,7 @@ describe('LifecycleManager - Phase 2: Core Registration & Individual Lifecycle',
         startupTimeoutMS: 50,
       });
 
-      lifecycle.registerComponent(component);
+      await lifecycle.registerComponent(component);
 
       const result = await lifecycle.startComponent('slow');
 
@@ -1570,7 +1575,7 @@ describe('LifecycleManager - Phase 2: Core Registration & Individual Lifecycle',
         shutdownGracefulTimeoutMS: 1000, // Minimum enforced
       });
 
-      lifecycle.registerComponent(component);
+      await lifecycle.registerComponent(component);
       await lifecycle.startComponent('slow');
 
       const opResult = await lifecycle.stopComponent('slow');
@@ -1601,7 +1606,7 @@ describe('LifecycleManager - Phase 2: Core Registration & Individual Lifecycle',
 
       const component = new FailingStopComponent(logger, { name: 'failing' });
 
-      lifecycle.registerComponent(component);
+      await lifecycle.registerComponent(component);
       await lifecycle.startComponent('failing');
 
       const result = await lifecycle.stopComponent('failing');
@@ -1636,7 +1641,7 @@ describe('LifecycleManager - Phase 2: Core Registration & Individual Lifecycle',
         name: 'failing-force',
       });
 
-      lifecycle.registerComponent(component);
+      await lifecycle.registerComponent(component);
       await lifecycle.startComponent('failing-force');
 
       const result = await lifecycle.stopComponent('failing-force', {
@@ -1663,8 +1668,8 @@ describe('LifecycleManager - Phase 2: Core Registration & Individual Lifecycle',
         dependencies: ['database'],
       });
 
-      lifecycle.registerComponent(database);
-      lifecycle.registerComponent(api);
+      await lifecycle.registerComponent(database);
+      await lifecycle.registerComponent(api);
 
       await lifecycle.startComponent('database');
       await lifecycle.startComponent('api');
@@ -1686,8 +1691,8 @@ describe('LifecycleManager - Phase 2: Core Registration & Individual Lifecycle',
         dependencies: ['database'],
       });
 
-      lifecycle.registerComponent(database);
-      lifecycle.registerComponent(api);
+      await lifecycle.registerComponent(database);
+      await lifecycle.registerComponent(api);
 
       await lifecycle.startComponent('database');
       await lifecycle.startComponent('api');
@@ -1707,8 +1712,8 @@ describe('LifecycleManager - Phase 2: Core Registration & Individual Lifecycle',
         dependencies: ['database'],
       });
 
-      lifecycle.registerComponent(database);
-      lifecycle.registerComponent(api);
+      await lifecycle.registerComponent(database);
+      await lifecycle.registerComponent(api);
 
       await lifecycle.startComponent('database');
       await lifecycle.startComponent('api');
@@ -1735,9 +1740,9 @@ describe('LifecycleManager - Phase 2: Core Registration & Individual Lifecycle',
         dependencies: ['database'],
       });
 
-      lifecycle.registerComponent(database);
-      lifecycle.registerComponent(api1);
-      lifecycle.registerComponent(api2);
+      await lifecycle.registerComponent(database);
+      await lifecycle.registerComponent(api1);
+      await lifecycle.registerComponent(api2);
 
       await lifecycle.startComponent('database');
       await lifecycle.startComponent('api1');
@@ -1778,7 +1783,7 @@ describe('LifecycleManager - Phase 2: Core Registration & Individual Lifecycle',
         startupTimeoutMS: 50,
       });
 
-      lifecycle.registerComponent(component);
+      await lifecycle.registerComponent(component);
       await lifecycle.startComponent('test');
 
       expect(component.abortCalled).toBe(true);
@@ -1808,7 +1813,7 @@ describe('LifecycleManager - Phase 2: Core Registration & Individual Lifecycle',
         startupTimeoutMS: 50,
       });
 
-      lifecycle.registerComponent(component);
+      await lifecycle.registerComponent(component);
       const result = await lifecycle.startComponent('test');
 
       expect(result.success).toBe(false);
@@ -1842,7 +1847,7 @@ describe('LifecycleManager - Phase 2: Core Registration & Individual Lifecycle',
         shutdownGracefulTimeoutMS: 1000,
       });
 
-      lifecycle.registerComponent(component);
+      await lifecycle.registerComponent(component);
       await lifecycle.startComponent('test');
       await lifecycle.stopComponent('test');
 
@@ -1873,7 +1878,7 @@ describe('LifecycleManager - Phase 2: Core Registration & Individual Lifecycle',
         shutdownGracefulTimeoutMS: 50,
       });
 
-      lifecycle.registerComponent(component);
+      await lifecycle.registerComponent(component);
       await lifecycle.startComponent('test');
       const result = await lifecycle.stopComponent('test');
 
@@ -1886,7 +1891,7 @@ describe('LifecycleManager - Phase 2: Core Registration & Individual Lifecycle',
   });
 
   describe('Event Emission', () => {
-    test('should emit component:registered event', () => {
+    test('should emit component:registered event', async () => {
       const lifecycle = new LifecycleManager({ logger });
       const component = new TestComponent(logger, { name: 'test' });
 
@@ -1895,7 +1900,7 @@ describe('LifecycleManager - Phase 2: Core Registration & Individual Lifecycle',
         emittedData = data;
       });
 
-      lifecycle.registerComponent(component);
+      await lifecycle.registerComponent(component);
 
       expect(emittedData).toBeDefined();
       expect(emittedData.name).toBe('test');
@@ -1909,7 +1914,7 @@ describe('LifecycleManager - Phase 2: Core Registration & Individual Lifecycle',
       const lifecycle = new LifecycleManager({ logger });
       const component = new TestComponent(logger, { name: 'test' });
 
-      lifecycle.registerComponent(component);
+      await lifecycle.registerComponent(component);
 
       const events: string[] = [];
       lifecycle.on('component:starting', () => {
@@ -1932,7 +1937,7 @@ describe('LifecycleManager - Phase 2: Core Registration & Individual Lifecycle',
       const lifecycle = new LifecycleManager({ logger });
       const component = new TestComponent(logger, { name: 'test' });
 
-      lifecycle.registerComponent(component);
+      await lifecycle.registerComponent(component);
       await lifecycle.startComponent('test');
 
       const events: string[] = [];
@@ -1969,7 +1974,7 @@ describe('LifecycleManager - Phase 2: Core Registration & Individual Lifecycle',
         startupTimeoutMS: 50,
       });
 
-      lifecycle.registerComponent(component);
+      await lifecycle.registerComponent(component);
 
       let didTimeoutEmit = false;
       let timeoutPayload: any;
@@ -2003,7 +2008,7 @@ describe('LifecycleManager - Phase 2: Core Registration & Individual Lifecycle',
         shutdownGracefulTimeoutMS: 1000,
       });
 
-      lifecycle.registerComponent(component);
+      await lifecycle.registerComponent(component);
       await lifecycle.startComponent('slow');
 
       let didStallEmit = false;
@@ -2025,7 +2030,7 @@ describe('LifecycleManager - Phase 2: Core Registration & Individual Lifecycle',
       const lifecycle = new LifecycleManager({ logger });
       const component = new TestComponent(logger, { name: 'test' });
 
-      lifecycle.registerComponent(component);
+      await lifecycle.registerComponent(component);
 
       lifecycle.on('component:starting', () => {
         throw new Error('Handler error');
@@ -2042,7 +2047,7 @@ describe('LifecycleManager - Phase 2: Core Registration & Individual Lifecycle',
       const lifecycle = new LifecycleManager({ logger });
       const component = new TestComponent(logger, { name: 'test' });
 
-      lifecycle.registerComponent(component);
+      await lifecycle.registerComponent(component);
       const registeredStatus = requireDefined(
         lifecycle.getComponentStatus('test'),
         'registeredStatus',
@@ -2081,7 +2086,7 @@ describe('LifecycleManager - Phase 2: Core Registration & Individual Lifecycle',
 
       const component = new FailingComponent(logger, { name: 'failing' });
 
-      lifecycle.registerComponent(component);
+      await lifecycle.registerComponent(component);
       await lifecycle.startComponent('failing');
 
       const failedStartStatus = requireDefined(
@@ -2105,7 +2110,7 @@ describe('LifecycleManager - Phase 2: Core Registration & Individual Lifecycle',
 
       const component = new FailingStopComponent(logger, { name: 'failing' });
 
-      lifecycle.registerComponent(component);
+      await lifecycle.registerComponent(component);
       await lifecycle.startComponent('failing');
       await lifecycle.stopComponent('failing');
 
@@ -2146,13 +2151,13 @@ describe('LifecycleManager - Phase 3: Bulk Operations', () => {
         }
       }
 
-      lifecycle.registerComponent(
+      await lifecycle.registerComponent(
         new OrderedComponent(logger, { name: 'first' }),
       );
-      lifecycle.registerComponent(
+      await lifecycle.registerComponent(
         new OrderedComponent(logger, { name: 'second' }),
       );
-      lifecycle.registerComponent(
+      await lifecycle.registerComponent(
         new OrderedComponent(logger, { name: 'third' }),
       );
 
@@ -2166,8 +2171,12 @@ describe('LifecycleManager - Phase 3: Bulk Operations', () => {
     test('should reject if partial state (some already running)', async () => {
       const lifecycle = new LifecycleManager({ logger });
 
-      lifecycle.registerComponent(new TestComponent(logger, { name: 'comp1' }));
-      lifecycle.registerComponent(new TestComponent(logger, { name: 'comp2' }));
+      await lifecycle.registerComponent(
+        new TestComponent(logger, { name: 'comp1' }),
+      );
+      await lifecycle.registerComponent(
+        new TestComponent(logger, { name: 'comp2' }),
+      );
 
       // Start one component manually
       await lifecycle.startComponent('comp1');
@@ -2182,8 +2191,12 @@ describe('LifecycleManager - Phase 3: Bulk Operations', () => {
     test('should return success if all components already running', async () => {
       const lifecycle = new LifecycleManager({ logger });
 
-      lifecycle.registerComponent(new TestComponent(logger, { name: 'comp1' }));
-      lifecycle.registerComponent(new TestComponent(logger, { name: 'comp2' }));
+      await lifecycle.registerComponent(
+        new TestComponent(logger, { name: 'comp1' }),
+      );
+      await lifecycle.registerComponent(
+        new TestComponent(logger, { name: 'comp2' }),
+      );
 
       // Start all components
       await lifecycle.startAllComponents();
@@ -2220,16 +2233,16 @@ describe('LifecycleManager - Phase 3: Bulk Operations', () => {
         }
       }
 
-      lifecycle.registerComponent(
+      await lifecycle.registerComponent(
         new TrackingComponent(logger, { name: 'comp1' }),
       );
-      lifecycle.registerComponent(
+      await lifecycle.registerComponent(
         new TrackingComponent(logger, { name: 'comp2' }),
       );
-      lifecycle.registerComponent(
+      await lifecycle.registerComponent(
         new FailingComponent(logger, { name: 'failing' }),
       );
-      lifecycle.registerComponent(
+      await lifecycle.registerComponent(
         new TrackingComponent(logger, { name: 'comp4' }),
       );
 
@@ -2267,10 +2280,16 @@ describe('LifecycleManager - Phase 3: Bulk Operations', () => {
         }
       }
 
-      lifecycle.registerComponent(new TrackingComponent(logger, { name: 'a' }));
-      lifecycle.registerComponent(new TrackingComponent(logger, { name: 'b' }));
-      lifecycle.registerComponent(new TrackingComponent(logger, { name: 'c' }));
-      lifecycle.registerComponent(
+      await lifecycle.registerComponent(
+        new TrackingComponent(logger, { name: 'a' }),
+      );
+      await lifecycle.registerComponent(
+        new TrackingComponent(logger, { name: 'b' }),
+      );
+      await lifecycle.registerComponent(
+        new TrackingComponent(logger, { name: 'c' }),
+      );
+      await lifecycle.registerComponent(
         new FailingComponent(logger, { name: 'fail' }),
       );
 
@@ -2292,11 +2311,15 @@ describe('LifecycleManager - Phase 3: Bulk Operations', () => {
         }
       }
 
-      lifecycle.registerComponent(new TestComponent(logger, { name: 'comp1' }));
-      lifecycle.registerComponent(
+      await lifecycle.registerComponent(
+        new TestComponent(logger, { name: 'comp1' }),
+      );
+      await lifecycle.registerComponent(
         new FailingComponent(logger, { name: 'optional', optional: true }),
       );
-      lifecycle.registerComponent(new TestComponent(logger, { name: 'comp2' }));
+      await lifecycle.registerComponent(
+        new TestComponent(logger, { name: 'comp2' }),
+      );
 
       const result = await lifecycle.startAllComponents();
 
@@ -2325,10 +2348,18 @@ describe('LifecycleManager - Phase 3: Bulk Operations', () => {
         }
       }
 
-      lifecycle.registerComponent(new SlowComponent(logger, { name: 'comp1' }));
-      lifecycle.registerComponent(new SlowComponent(logger, { name: 'comp2' }));
-      lifecycle.registerComponent(new SlowComponent(logger, { name: 'comp3' }));
-      lifecycle.registerComponent(new SlowComponent(logger, { name: 'comp4' }));
+      await lifecycle.registerComponent(
+        new SlowComponent(logger, { name: 'comp1' }),
+      );
+      await lifecycle.registerComponent(
+        new SlowComponent(logger, { name: 'comp2' }),
+      );
+      await lifecycle.registerComponent(
+        new SlowComponent(logger, { name: 'comp3' }),
+      );
+      await lifecycle.registerComponent(
+        new SlowComponent(logger, { name: 'comp4' }),
+      );
 
       // Start all components
       const startPromise = lifecycle.startAllComponents();
@@ -2380,8 +2411,12 @@ describe('LifecycleManager - Phase 3: Bulk Operations', () => {
         }
       }
 
-      lifecycle.registerComponent(new SlowComponent(logger, { name: 'comp1' }));
-      lifecycle.registerComponent(new SlowComponent(logger, { name: 'comp2' }));
+      await lifecycle.registerComponent(
+        new SlowComponent(logger, { name: 'comp1' }),
+      );
+      await lifecycle.registerComponent(
+        new SlowComponent(logger, { name: 'comp2' }),
+      );
 
       // Start all components
       const startPromise = lifecycle.startAllComponents();
@@ -2415,7 +2450,7 @@ describe('LifecycleManager - Phase 3: Bulk Operations', () => {
       }
 
       const component = new FailingStopComponent(logger, { name: 'stalled' });
-      lifecycle.registerComponent(component);
+      await lifecycle.registerComponent(component);
 
       // Start and fail to stop (creates stalled component)
       await lifecycle.startComponent('stalled');
@@ -2426,7 +2461,7 @@ describe('LifecycleManager - Phase 3: Bulk Operations', () => {
       expect(status?.state).toBe('stalled');
 
       // Register a new component
-      lifecycle.registerComponent(
+      await lifecycle.registerComponent(
         new TestComponent(logger, { name: 'new-comp' }),
       );
 
@@ -2449,10 +2484,10 @@ describe('LifecycleManager - Phase 3: Bulk Operations', () => {
         }
       }
 
-      lifecycle.registerComponent(
+      await lifecycle.registerComponent(
         new FailingStopComponent(logger, { name: 'stalled' }),
       );
-      lifecycle.registerComponent(
+      await lifecycle.registerComponent(
         new TestComponent(logger, { name: 'new-comp' }),
       );
 
@@ -2472,7 +2507,9 @@ describe('LifecycleManager - Phase 3: Bulk Operations', () => {
     test('should emit lifecycle-manager:started event on success', async () => {
       const lifecycle = new LifecycleManager({ logger });
 
-      lifecycle.registerComponent(new TestComponent(logger, { name: 'comp1' }));
+      await lifecycle.registerComponent(
+        new TestComponent(logger, { name: 'comp1' }),
+      );
 
       let wasStartedEventEmitted = false;
       let startedPayload: any;
@@ -2502,9 +2539,13 @@ describe('LifecycleManager - Phase 3: Bulk Operations', () => {
         }
       }
 
-      lifecycle.registerComponent(new TestComponent(logger, { name: 'comp1' }));
-      lifecycle.registerComponent(new TestComponent(logger, { name: 'comp2' }));
-      lifecycle.registerComponent(
+      await lifecycle.registerComponent(
+        new TestComponent(logger, { name: 'comp1' }),
+      );
+      await lifecycle.registerComponent(
+        new TestComponent(logger, { name: 'comp2' }),
+      );
+      await lifecycle.registerComponent(
         new FailingComponent(logger, { name: 'failing' }),
       );
 
@@ -2521,9 +2562,15 @@ describe('LifecycleManager - Phase 3: Bulk Operations', () => {
       const lifecycle = new LifecycleManager({ logger });
 
       // Register components in specific order
-      lifecycle.registerComponent(new TestComponent(logger, { name: 'alpha' }));
-      lifecycle.registerComponent(new TestComponent(logger, { name: 'beta' }));
-      lifecycle.registerComponent(new TestComponent(logger, { name: 'gamma' }));
+      await lifecycle.registerComponent(
+        new TestComponent(logger, { name: 'alpha' }),
+      );
+      await lifecycle.registerComponent(
+        new TestComponent(logger, { name: 'beta' }),
+      );
+      await lifecycle.registerComponent(
+        new TestComponent(logger, { name: 'gamma' }),
+      );
 
       // Scenario 1: Start all and verify order
       const startResult = await lifecycle.startAllComponents();
@@ -2563,13 +2610,13 @@ describe('LifecycleManager - Phase 3: Bulk Operations', () => {
         }
       }
 
-      lifecycle.registerComponent(
+      await lifecycle.registerComponent(
         new OrderedComponent(logger, { name: 'first' }),
       );
-      lifecycle.registerComponent(
+      await lifecycle.registerComponent(
         new OrderedComponent(logger, { name: 'second' }),
       );
-      lifecycle.registerComponent(
+      await lifecycle.registerComponent(
         new OrderedComponent(logger, { name: 'third' }),
       );
 
@@ -2594,11 +2641,15 @@ describe('LifecycleManager - Phase 3: Bulk Operations', () => {
         }
       }
 
-      lifecycle.registerComponent(new TestComponent(logger, { name: 'comp1' }));
-      lifecycle.registerComponent(
+      await lifecycle.registerComponent(
+        new TestComponent(logger, { name: 'comp1' }),
+      );
+      await lifecycle.registerComponent(
         new FailingStopComponent(logger, { name: 'failing' }),
       );
-      lifecycle.registerComponent(new TestComponent(logger, { name: 'comp2' }));
+      await lifecycle.registerComponent(
+        new TestComponent(logger, { name: 'comp2' }),
+      );
 
       await lifecycle.startAllComponents();
 
@@ -2613,7 +2664,9 @@ describe('LifecycleManager - Phase 3: Bulk Operations', () => {
     test('should emit shutdown-initiated and shutdown-completed events', async () => {
       const lifecycle = new LifecycleManager({ logger });
 
-      lifecycle.registerComponent(new TestComponent(logger, { name: 'comp1' }));
+      await lifecycle.registerComponent(
+        new TestComponent(logger, { name: 'comp1' }),
+      );
 
       let wasShutdownInitiatedEmitted = false;
       let wasShutdownCompletedEmitted = false;
@@ -2640,7 +2693,9 @@ describe('LifecycleManager - Phase 3: Bulk Operations', () => {
     test('should reset state flags after completion', async () => {
       const lifecycle = new LifecycleManager({ logger });
 
-      lifecycle.registerComponent(new TestComponent(logger, { name: 'comp1' }));
+      await lifecycle.registerComponent(
+        new TestComponent(logger, { name: 'comp1' }),
+      );
 
       await lifecycle.startAllComponents();
       await lifecycle.stopAllComponents();
@@ -2662,7 +2717,7 @@ describe('LifecycleManager - Phase 3: Bulk Operations', () => {
         }
       }
 
-      lifecycle.registerComponent(
+      await lifecycle.registerComponent(
         new SlowStopComponent(logger, { name: 'slow' }),
       );
 
@@ -2691,10 +2746,10 @@ describe('LifecycleManager - Phase 3: Bulk Operations', () => {
         }
       }
 
-      lifecycle.registerComponent(
+      await lifecycle.registerComponent(
         new TrackingComponent(logger, { name: 'comp1' }),
       );
-      lifecycle.registerComponent(
+      await lifecycle.registerComponent(
         new TrackingComponent(logger, { name: 'comp2' }),
       );
 
@@ -2720,7 +2775,9 @@ describe('LifecycleManager - Phase 3: Bulk Operations', () => {
     test('should return combined result', async () => {
       const lifecycle = new LifecycleManager({ logger });
 
-      lifecycle.registerComponent(new TestComponent(logger, { name: 'comp1' }));
+      await lifecycle.registerComponent(
+        new TestComponent(logger, { name: 'comp1' }),
+      );
 
       await lifecycle.startAllComponents();
 
@@ -2746,7 +2803,7 @@ describe('LifecycleManager - Phase 3: Bulk Operations', () => {
         }
       }
 
-      lifecycle.registerComponent(
+      await lifecycle.registerComponent(
         new FailingStopComponent(logger, { name: 'failing' }),
       );
 
@@ -2776,9 +2833,15 @@ describe('LifecycleManager - Phase 3: Bulk Operations', () => {
         }
       }
 
-      lifecycle.registerComponent(new SlowComponent(logger, { name: 'comp1' }));
-      lifecycle.registerComponent(new SlowComponent(logger, { name: 'comp2' }));
-      lifecycle.registerComponent(new TestComponent(logger, { name: 'comp3' }));
+      await lifecycle.registerComponent(
+        new SlowComponent(logger, { name: 'comp1' }),
+      );
+      await lifecycle.registerComponent(
+        new SlowComponent(logger, { name: 'comp2' }),
+      );
+      await lifecycle.registerComponent(
+        new TestComponent(logger, { name: 'comp3' }),
+      );
 
       // Start all components (will take a while)
       const startAllPromise = lifecycle.startAllComponents();
@@ -2807,14 +2870,20 @@ describe('LifecycleManager - Phase 3: Bulk Operations', () => {
         }
       }
 
-      lifecycle.registerComponent(new SlowComponent(logger, { name: 'comp1' }));
-      lifecycle.registerComponent(new TestComponent(logger, { name: 'comp2' }));
+      await lifecycle.registerComponent(
+        new SlowComponent(logger, { name: 'comp1' }),
+      );
+      await lifecycle.registerComponent(
+        new TestComponent(logger, { name: 'comp2' }),
+      );
 
       // Pre-start comp2
       await lifecycle.startComponent('comp2');
       await lifecycle.stopComponent('comp2');
 
-      lifecycle.registerComponent(new SlowComponent(logger, { name: 'comp3' }));
+      await lifecycle.registerComponent(
+        new SlowComponent(logger, { name: 'comp3' }),
+      );
 
       // Start all components
       const startAllPromise = lifecycle.startAllComponents();
@@ -2843,10 +2912,10 @@ describe('LifecycleManager - Phase 3: Bulk Operations', () => {
         }
       }
 
-      lifecycle.registerComponent(
+      await lifecycle.registerComponent(
         new SlowStopComponent(logger, { name: 'comp1' }),
       );
-      lifecycle.registerComponent(
+      await lifecycle.registerComponent(
         new SlowStopComponent(logger, { name: 'comp2' }),
       );
 
@@ -2879,9 +2948,15 @@ describe('LifecycleManager - Phase 3: Bulk Operations', () => {
         }
       }
 
-      lifecycle.registerComponent(new SlowComponent(logger, { name: 'comp1' }));
-      lifecycle.registerComponent(new SlowComponent(logger, { name: 'comp2' }));
-      lifecycle.registerComponent(new SlowComponent(logger, { name: 'comp3' }));
+      await lifecycle.registerComponent(
+        new SlowComponent(logger, { name: 'comp1' }),
+      );
+      await lifecycle.registerComponent(
+        new SlowComponent(logger, { name: 'comp2' }),
+      );
+      await lifecycle.registerComponent(
+        new SlowComponent(logger, { name: 'comp3' }),
+      );
 
       // Start all components (will take a while)
       const startAllPromise = lifecycle.startAllComponents();
@@ -2910,10 +2985,12 @@ describe('LifecycleManager - Phase 3: Bulk Operations', () => {
         }
       }
 
-      lifecycle.registerComponent(
+      await lifecycle.registerComponent(
         new SlowStopComponent(logger, { name: 'comp1' }),
       );
-      lifecycle.registerComponent(new TestComponent(logger, { name: 'comp2' }));
+      await lifecycle.registerComponent(
+        new TestComponent(logger, { name: 'comp2' }),
+      );
 
       await lifecycle.startAllComponents();
 
@@ -2944,10 +3021,12 @@ describe('LifecycleManager - Phase 3: Bulk Operations', () => {
         }
       }
 
-      lifecycle.registerComponent(
+      await lifecycle.registerComponent(
         new SlowStopComponent(logger, { name: 'comp1' }),
       );
-      lifecycle.registerComponent(new TestComponent(logger, { name: 'comp2' }));
+      await lifecycle.registerComponent(
+        new TestComponent(logger, { name: 'comp2' }),
+      );
 
       await lifecycle.startAllComponents();
 
@@ -2980,8 +3059,12 @@ describe('LifecycleManager - Phase 3: Bulk Operations', () => {
         }
       }
 
-      lifecycle.registerComponent(new SlowComponent(logger, { name: 'comp1' }));
-      lifecycle.registerComponent(new SlowComponent(logger, { name: 'comp2' }));
+      await lifecycle.registerComponent(
+        new SlowComponent(logger, { name: 'comp1' }),
+      );
+      await lifecycle.registerComponent(
+        new SlowComponent(logger, { name: 'comp2' }),
+      );
 
       // Start first bulk startup
       const firstStartPromise = lifecycle.startAllComponents();
@@ -3010,10 +3093,10 @@ describe('LifecycleManager - Phase 3: Bulk Operations', () => {
         }
       }
 
-      lifecycle.registerComponent(
+      await lifecycle.registerComponent(
         new SlowStopComponent(logger, { name: 'comp1' }),
       );
-      lifecycle.registerComponent(
+      await lifecycle.registerComponent(
         new SlowStopComponent(logger, { name: 'comp2' }),
       );
 
@@ -3047,9 +3130,15 @@ describe('LifecycleManager - Phase 3: Bulk Operations', () => {
         }
       }
 
-      lifecycle.registerComponent(new SlowComponent(logger, { name: 'comp1' }));
-      lifecycle.registerComponent(new SlowComponent(logger, { name: 'comp2' }));
-      lifecycle.registerComponent(new TestComponent(logger, { name: 'comp3' }));
+      await lifecycle.registerComponent(
+        new SlowComponent(logger, { name: 'comp1' }),
+      );
+      await lifecycle.registerComponent(
+        new SlowComponent(logger, { name: 'comp2' }),
+      );
+      await lifecycle.registerComponent(
+        new TestComponent(logger, { name: 'comp3' }),
+      );
 
       // Test during startup
       const startAllPromise = lifecycle.startAllComponents();
@@ -3101,19 +3190,19 @@ describe('LifecycleManager - Phase 3: Bulk Operations', () => {
       }
 
       // A depends on B, B depends on C (C → B → A)
-      lifecycle.registerComponent(
+      await lifecycle.registerComponent(
         new TrackedComponent(logger, {
           name: 'comp-a',
           dependencies: ['comp-b'],
         }),
       );
-      lifecycle.registerComponent(
+      await lifecycle.registerComponent(
         new TrackedComponent(logger, {
           name: 'comp-b',
           dependencies: ['comp-c'],
         }),
       );
-      lifecycle.registerComponent(
+      await lifecycle.registerComponent(
         new TrackedComponent(logger, { name: 'comp-c' }),
       );
 
@@ -3138,22 +3227,22 @@ describe('LifecycleManager - Phase 3: Bulk Operations', () => {
       }
 
       // Diamond: D depends on B and C, both B and C depend on A
-      lifecycle.registerComponent(
+      await lifecycle.registerComponent(
         new TrackedComponent(logger, { name: 'comp-a' }),
       );
-      lifecycle.registerComponent(
+      await lifecycle.registerComponent(
         new TrackedComponent(logger, {
           name: 'comp-b',
           dependencies: ['comp-a'],
         }),
       );
-      lifecycle.registerComponent(
+      await lifecycle.registerComponent(
         new TrackedComponent(logger, {
           name: 'comp-c',
           dependencies: ['comp-a'],
         }),
       );
-      lifecycle.registerComponent(
+      await lifecycle.registerComponent(
         new TrackedComponent(logger, {
           name: 'comp-d',
           dependencies: ['comp-b', 'comp-c'],
@@ -3184,10 +3273,10 @@ describe('LifecycleManager - Phase 3: Bulk Operations', () => {
       }
 
       // Chain 1: B depends on A
-      lifecycle.registerComponent(
+      await lifecycle.registerComponent(
         new TrackedComponent(logger, { name: 'comp-a' }),
       );
-      lifecycle.registerComponent(
+      await lifecycle.registerComponent(
         new TrackedComponent(logger, {
           name: 'comp-b',
           dependencies: ['comp-a'],
@@ -3195,10 +3284,10 @@ describe('LifecycleManager - Phase 3: Bulk Operations', () => {
       );
 
       // Chain 2: D depends on C
-      lifecycle.registerComponent(
+      await lifecycle.registerComponent(
         new TrackedComponent(logger, { name: 'comp-c' }),
       );
-      lifecycle.registerComponent(
+      await lifecycle.registerComponent(
         new TrackedComponent(logger, {
           name: 'comp-d',
           dependencies: ['comp-c'],
@@ -3230,13 +3319,13 @@ describe('LifecycleManager - Phase 3: Bulk Operations', () => {
         }
       }
 
-      lifecycle.registerComponent(
+      await lifecycle.registerComponent(
         new TrackedComponent(logger, { name: 'comp-a' }),
       );
-      lifecycle.registerComponent(
+      await lifecycle.registerComponent(
         new TrackedComponent(logger, { name: 'comp-b' }),
       );
-      lifecycle.registerComponent(
+      await lifecycle.registerComponent(
         new TrackedComponent(logger, { name: 'comp-c' }),
       );
 
@@ -3261,19 +3350,19 @@ describe('LifecycleManager - Phase 3: Bulk Operations', () => {
       }
 
       // A depends on B, B depends on C (C → B → A for start, A → B → C for stop)
-      lifecycle.registerComponent(
+      await lifecycle.registerComponent(
         new TrackedComponent(logger, {
           name: 'comp-a',
           dependencies: ['comp-b'],
         }),
       );
-      lifecycle.registerComponent(
+      await lifecycle.registerComponent(
         new TrackedComponent(logger, {
           name: 'comp-b',
           dependencies: ['comp-c'],
         }),
       );
-      lifecycle.registerComponent(
+      await lifecycle.registerComponent(
         new TrackedComponent(logger, { name: 'comp-c' }),
       );
 
@@ -3283,15 +3372,15 @@ describe('LifecycleManager - Phase 3: Bulk Operations', () => {
       expect(stopOrder).toEqual(['comp-a', 'comp-b', 'comp-c']);
     });
 
-    test('should detect simple dependency cycle', () => {
+    test('should detect simple dependency cycle', async () => {
       const lifecycle = new LifecycleManager({ logger });
 
-      lifecycle.registerComponent(
+      await lifecycle.registerComponent(
         new TestComponent(logger, { name: 'comp-a', dependencies: ['comp-b'] }),
       );
 
       // This creates a cycle: A → B → A
-      const result = lifecycle.registerComponent(
+      const result = await lifecycle.registerComponent(
         new TestComponent(logger, { name: 'comp-b', dependencies: ['comp-a'] }),
       );
 
@@ -3300,18 +3389,18 @@ describe('LifecycleManager - Phase 3: Bulk Operations', () => {
       expect(result.error).toBeInstanceOf(DependencyCycleError);
     });
 
-    test('should detect complex dependency cycle', () => {
+    test('should detect complex dependency cycle', async () => {
       const lifecycle = new LifecycleManager({ logger });
 
-      lifecycle.registerComponent(
+      await lifecycle.registerComponent(
         new TestComponent(logger, { name: 'comp-a', dependencies: ['comp-b'] }),
       );
-      lifecycle.registerComponent(
+      await lifecycle.registerComponent(
         new TestComponent(logger, { name: 'comp-b', dependencies: ['comp-c'] }),
       );
 
       // This creates a cycle: A → B → C → A
-      const result = lifecycle.registerComponent(
+      const result = await lifecycle.registerComponent(
         new TestComponent(logger, { name: 'comp-c', dependencies: ['comp-a'] }),
       );
 
@@ -3320,11 +3409,11 @@ describe('LifecycleManager - Phase 3: Bulk Operations', () => {
       expect(result.error).toBeInstanceOf(DependencyCycleError);
     });
 
-    test('should detect self-dependency cycle', () => {
+    test('should detect self-dependency cycle', async () => {
       const lifecycle = new LifecycleManager({ logger });
 
       // Component depends on itself
-      const result = lifecycle.registerComponent(
+      const result = await lifecycle.registerComponent(
         new TestComponent(logger, { name: 'comp-a', dependencies: ['comp-a'] }),
       );
 
@@ -3335,7 +3424,7 @@ describe('LifecycleManager - Phase 3: Bulk Operations', () => {
     test('should detect missing dependencies during manual start', async () => {
       const lifecycle = new LifecycleManager({ logger });
 
-      lifecycle.registerComponent(
+      await lifecycle.registerComponent(
         new TestComponent(logger, {
           name: 'comp-a',
           dependencies: ['comp-missing'],
@@ -3352,10 +3441,10 @@ describe('LifecycleManager - Phase 3: Bulk Operations', () => {
     test('should detect dependency not running during manual start', async () => {
       const lifecycle = new LifecycleManager({ logger });
 
-      lifecycle.registerComponent(
+      await lifecycle.registerComponent(
         new TestComponent(logger, { name: 'comp-a' }),
       );
-      lifecycle.registerComponent(
+      await lifecycle.registerComponent(
         new TestComponent(logger, { name: 'comp-b', dependencies: ['comp-a'] }),
       );
 
@@ -3370,10 +3459,10 @@ describe('LifecycleManager - Phase 3: Bulk Operations', () => {
     test('should allow manual start with allowOptionalDependencies for optional deps', async () => {
       const lifecycle = new LifecycleManager({ logger });
 
-      lifecycle.registerComponent(
+      await lifecycle.registerComponent(
         new TestComponent(logger, { name: 'comp-a', optional: true }),
       );
-      lifecycle.registerComponent(
+      await lifecycle.registerComponent(
         new TestComponent(logger, { name: 'comp-b', dependencies: ['comp-a'] }),
       );
 
@@ -3388,10 +3477,10 @@ describe('LifecycleManager - Phase 3: Bulk Operations', () => {
     test('should allow manual start with allowRequiredDependencies', async () => {
       const lifecycle = new LifecycleManager({ logger });
 
-      lifecycle.registerComponent(
+      await lifecycle.registerComponent(
         new TestComponent(logger, { name: 'comp-a' }),
       );
-      lifecycle.registerComponent(
+      await lifecycle.registerComponent(
         new TestComponent(logger, { name: 'comp-b', dependencies: ['comp-a'] }),
       );
 
@@ -3416,11 +3505,11 @@ describe('LifecycleManager - Phase 3: Bulk Operations', () => {
       }
 
       // comp-a is optional and will fail
-      lifecycle.registerComponent(
+      await lifecycle.registerComponent(
         new FailingComponent(logger, { name: 'comp-a', optional: true }),
       );
       // comp-b depends on comp-a
-      lifecycle.registerComponent(
+      await lifecycle.registerComponent(
         new TestComponent(logger, { name: 'comp-b', dependencies: ['comp-a'] }),
       );
 
@@ -3432,13 +3521,13 @@ describe('LifecycleManager - Phase 3: Bulk Operations', () => {
       expect(result.skippedDueToDependency).toContain('comp-b');
     });
 
-    test('validateDependencies() should return valid when no issues', () => {
+    test('validateDependencies() should return valid when no issues', async () => {
       const lifecycle = new LifecycleManager({ logger });
 
-      lifecycle.registerComponent(
+      await lifecycle.registerComponent(
         new TestComponent(logger, { name: 'comp-a' }),
       );
-      lifecycle.registerComponent(
+      await lifecycle.registerComponent(
         new TestComponent(logger, { name: 'comp-b', dependencies: ['comp-a'] }),
       );
 
@@ -3451,10 +3540,10 @@ describe('LifecycleManager - Phase 3: Bulk Operations', () => {
       expect(result.summary.totalCircularCycles).toBe(0);
     });
 
-    test('validateDependencies() should report missing dependencies', () => {
+    test('validateDependencies() should report missing dependencies', async () => {
       const lifecycle = new LifecycleManager({ logger });
 
-      lifecycle.registerComponent(
+      await lifecycle.registerComponent(
         new TestComponent(logger, {
           name: 'comp-a',
           dependencies: ['comp-missing'],
@@ -3475,16 +3564,16 @@ describe('LifecycleManager - Phase 3: Bulk Operations', () => {
       expect(result.summary.optionalMissingDependencies).toBe(0);
     });
 
-    test('validateDependencies() should report cycles during registration', () => {
+    test('validateDependencies() should report cycles during registration', async () => {
       const lifecycle = new LifecycleManager({ logger });
 
-      const result1 = lifecycle.registerComponent(
+      const result1 = await lifecycle.registerComponent(
         new TestComponent(logger, { name: 'comp-a', dependencies: ['comp-b'] }),
       );
       expect(result1.success).toBe(true);
 
       // This should fail due to cycle
-      const result2 = lifecycle.registerComponent(
+      const result2 = await lifecycle.registerComponent(
         new TestComponent(logger, { name: 'comp-b', dependencies: ['comp-a'] }),
       );
 
@@ -3496,18 +3585,18 @@ describe('LifecycleManager - Phase 3: Bulk Operations', () => {
       expect(validation.missingDependencies).toHaveLength(1); // comp-a depends on non-existent comp-b
     });
 
-    test('validateDependencies() should report multiple missing dependencies', () => {
+    test('validateDependencies() should report multiple missing dependencies', async () => {
       const lifecycle = new LifecycleManager({ logger });
 
       // Multiple missing dependencies
-      lifecycle.registerComponent(
+      await lifecycle.registerComponent(
         new TestComponent(logger, {
           name: 'comp-a',
           dependencies: ['comp-missing1'],
           optional: true,
         }),
       );
-      lifecycle.registerComponent(
+      await lifecycle.registerComponent(
         new TestComponent(logger, {
           name: 'comp-b',
           dependencies: ['comp-missing2'],
@@ -3589,16 +3678,16 @@ describe('LifecycleManager - Phase 3: Bulk Operations', () => {
       expect(hasCycle1 || hasCycle2).toBe(true);
     });
 
-    test('getStartupOrder() should return resolved order', () => {
+    test('getStartupOrder() should return resolved order', async () => {
       const lifecycle = new LifecycleManager({ logger });
 
-      lifecycle.registerComponent(
+      await lifecycle.registerComponent(
         new TestComponent(logger, { name: 'comp-a', dependencies: ['comp-b'] }),
       );
-      lifecycle.registerComponent(
+      await lifecycle.registerComponent(
         new TestComponent(logger, { name: 'comp-b', dependencies: ['comp-c'] }),
       );
-      lifecycle.registerComponent(
+      await lifecycle.registerComponent(
         new TestComponent(logger, { name: 'comp-c' }),
       );
 
@@ -3608,13 +3697,13 @@ describe('LifecycleManager - Phase 3: Bulk Operations', () => {
       expect(result.startupOrder).toEqual(['comp-c', 'comp-b', 'comp-a']);
     });
 
-    test('getStartupOrder() should succeed when components are registered validly', () => {
+    test('getStartupOrder() should succeed when components are registered validly', async () => {
       const lifecycle = new LifecycleManager({ logger });
 
-      lifecycle.registerComponent(
+      await lifecycle.registerComponent(
         new TestComponent(logger, { name: 'comp-a', dependencies: ['comp-b'] }),
       );
-      lifecycle.registerComponent(
+      await lifecycle.registerComponent(
         new TestComponent(logger, { name: 'comp-b' }),
       );
 
@@ -3656,7 +3745,7 @@ describe('LifecycleManager - Phase 5: Multi-Phase Shutdown', () => {
         }
       }
 
-      lifecycle.registerComponent(
+      await lifecycle.registerComponent(
         new WarningComponent(logger, {
           name: 'warning-comp',
         }),
@@ -3686,7 +3775,7 @@ describe('LifecycleManager - Phase 5: Multi-Phase Shutdown', () => {
         }
       }
 
-      lifecycle.registerComponent(
+      await lifecycle.registerComponent(
         new WarningComponent(logger, {
           name: 'warning-comp',
         }),
@@ -3725,7 +3814,7 @@ describe('LifecycleManager - Phase 5: Multi-Phase Shutdown', () => {
         }
       }
 
-      lifecycle.registerComponent(
+      await lifecycle.registerComponent(
         new WarningComponent(logger, {
           name: 'warning-comp',
         }),
@@ -3756,7 +3845,7 @@ describe('LifecycleManager - Phase 5: Multi-Phase Shutdown', () => {
         }
       }
 
-      lifecycle.registerComponent(
+      await lifecycle.registerComponent(
         new SlowWarningComponent(logger, {
           name: 'slow-warning',
         }),
@@ -3795,7 +3884,7 @@ describe('LifecycleManager - Phase 5: Multi-Phase Shutdown', () => {
         events.push('global-warning-completed');
       });
 
-      lifecycle.registerComponent(
+      await lifecycle.registerComponent(
         new WarningComponent(logger, {
           name: 'warning-comp',
         }),
@@ -3827,7 +3916,7 @@ describe('LifecycleManager - Phase 5: Multi-Phase Shutdown', () => {
         wasTimeoutEmitted = true;
       });
 
-      lifecycle.registerComponent(
+      await lifecycle.registerComponent(
         new SlowWarningComponent(logger, {
           name: 'slow-warning',
         }),
@@ -3855,7 +3944,7 @@ describe('LifecycleManager - Phase 5: Multi-Phase Shutdown', () => {
         }
       }
 
-      lifecycle.registerComponent(
+      await lifecycle.registerComponent(
         new SlowStopComponent(logger, {
           name: 'slow-stop',
           shutdownGracefulTimeoutMS: 100, // Very short timeout
@@ -3883,7 +3972,7 @@ describe('LifecycleManager - Phase 5: Multi-Phase Shutdown', () => {
         }
       }
 
-      lifecycle.registerComponent(
+      await lifecycle.registerComponent(
         new FailingStopComponent(logger, {
           name: 'failing-stop',
         }),
@@ -3913,7 +4002,7 @@ describe('LifecycleManager - Phase 5: Multi-Phase Shutdown', () => {
         eventContext = data.context;
       });
 
-      lifecycle.registerComponent(
+      await lifecycle.registerComponent(
         new SlowStopComponent(logger, {
           name: 'slow-stop',
           shutdownGracefulTimeoutMS: 100,
@@ -3945,7 +4034,7 @@ describe('LifecycleManager - Phase 5: Multi-Phase Shutdown', () => {
         }
       }
 
-      lifecycle.registerComponent(
+      await lifecycle.registerComponent(
         new ForceComponent(logger, { name: 'force-comp' }),
       );
 
@@ -3970,7 +4059,7 @@ describe('LifecycleManager - Phase 5: Multi-Phase Shutdown', () => {
         }
       }
 
-      lifecycle.registerComponent(
+      await lifecycle.registerComponent(
         new SlowForceComponent(logger, {
           name: 'slow-force',
           shutdownForceTimeoutMS: 100, // Very short timeout
@@ -4000,7 +4089,7 @@ describe('LifecycleManager - Phase 5: Multi-Phase Shutdown', () => {
         }
       }
 
-      lifecycle.registerComponent(
+      await lifecycle.registerComponent(
         new FailingForceComponent(logger, {
           name: 'failing-force',
         }),
@@ -4036,7 +4125,7 @@ describe('LifecycleManager - Phase 5: Multi-Phase Shutdown', () => {
         events.push('force-completed');
       });
 
-      lifecycle.registerComponent(
+      await lifecycle.registerComponent(
         new ForceComponent(logger, { name: 'force-comp' }),
       );
 
@@ -4065,7 +4154,7 @@ describe('LifecycleManager - Phase 5: Multi-Phase Shutdown', () => {
         wasTimeoutEmitted = true;
       });
 
-      lifecycle.registerComponent(
+      await lifecycle.registerComponent(
         new SlowForceComponent(logger, {
           name: 'slow-force',
           shutdownForceTimeoutMS: 100,
@@ -4089,7 +4178,7 @@ describe('LifecycleManager - Phase 5: Multi-Phase Shutdown', () => {
         }
       }
 
-      lifecycle.registerComponent(
+      await lifecycle.registerComponent(
         new StalledComponent(logger, { name: 'stalled-comp' }),
       );
 
@@ -4120,7 +4209,7 @@ describe('LifecycleManager - Phase 5: Multi-Phase Shutdown', () => {
         }
       }
 
-      lifecycle.registerComponent(
+      await lifecycle.registerComponent(
         new DoubleFailComponent(logger, {
           name: 'double-fail',
           shutdownGracefulTimeoutMS: 100,
@@ -4145,7 +4234,7 @@ describe('LifecycleManager - Phase 5: Multi-Phase Shutdown', () => {
         }
       }
 
-      lifecycle.registerComponent(
+      await lifecycle.registerComponent(
         new StalledComponent(logger, { name: 'stalled-comp' }),
       );
 
@@ -4185,7 +4274,7 @@ describe('LifecycleManager - Phase 5: Multi-Phase Shutdown', () => {
         }
       }
 
-      lifecycle.registerComponent(
+      await lifecycle.registerComponent(
         new ThreePhaseComponent(logger, {
           name: 'three-phase',
         }),
@@ -4220,7 +4309,7 @@ describe('LifecycleManager - Phase 5: Multi-Phase Shutdown', () => {
         }
       }
 
-      lifecycle.registerComponent(
+      await lifecycle.registerComponent(
         new ThreePhaseComponent(logger, {
           name: 'three-phase',
         }),
@@ -4248,7 +4337,7 @@ describe('LifecycleManager - Phase 5: Multi-Phase Shutdown', () => {
         }
       }
 
-      lifecycle.registerComponent(
+      await lifecycle.registerComponent(
         new TwoPhaseComponent(logger, {
           name: 'two-phase',
           shutdownGracefulTimeoutMS: 100,
@@ -4282,7 +4371,7 @@ describe('LifecycleManager - Phase 5: Multi-Phase Shutdown', () => {
         }
       }
 
-      lifecycle.registerComponent(
+      await lifecycle.registerComponent(
         new AbortComponent(logger, {
           name: 'abort-comp',
           shutdownGracefulTimeoutMS: 100,
@@ -4313,7 +4402,7 @@ describe('LifecycleManager - Phase 5: Multi-Phase Shutdown', () => {
         }
       }
 
-      lifecycle.registerComponent(
+      await lifecycle.registerComponent(
         new AbortComponent(logger, {
           name: 'abort-comp',
           shutdownForceTimeoutMS: 100,
@@ -4416,10 +4505,10 @@ describe('LifecycleManager - Phase 6: Signal Integration', () => {
         }
       }
 
-      lifecycle.registerComponent(
+      await lifecycle.registerComponent(
         new ReloadableComponent(logger, { name: 'comp1' }),
       );
-      lifecycle.registerComponent(
+      await lifecycle.registerComponent(
         new ReloadableComponent(logger, { name: 'comp2' }),
       );
 
@@ -4446,10 +4535,10 @@ describe('LifecycleManager - Phase 6: Signal Integration', () => {
         }
       }
 
-      lifecycle.registerComponent(
+      await lifecycle.registerComponent(
         new ReloadableComponent(logger, { name: 'comp1' }),
       );
-      lifecycle.registerComponent(
+      await lifecycle.registerComponent(
         new ReloadableComponent(logger, { name: 'comp2' }),
       );
 
@@ -4470,7 +4559,7 @@ describe('LifecycleManager - Phase 6: Signal Integration', () => {
         // No onReload method
       }
 
-      lifecycle.registerComponent(
+      await lifecycle.registerComponent(
         new NoReloadComponent(logger, { name: 'comp1' }),
       );
 
@@ -4494,13 +4583,13 @@ describe('LifecycleManager - Phase 6: Signal Integration', () => {
         }
       }
 
-      lifecycle.registerComponent(
+      await lifecycle.registerComponent(
         new FailingReloadComponent(logger, { name: 'comp1' }),
       );
-      lifecycle.registerComponent(
+      await lifecycle.registerComponent(
         new FailingReloadComponent(logger, { name: 'comp2' }),
       );
-      lifecycle.registerComponent(
+      await lifecycle.registerComponent(
         new FailingReloadComponent(logger, { name: 'comp3' }),
       );
 
@@ -4526,7 +4615,7 @@ describe('LifecycleManager - Phase 6: Signal Integration', () => {
         }
       }
 
-      lifecycle.registerComponent(
+      await lifecycle.registerComponent(
         new SlowReloadComponent(logger, {
           name: 'comp1',
           signalTimeoutMS: 10,
@@ -4565,7 +4654,7 @@ describe('LifecycleManager - Phase 6: Signal Integration', () => {
         }
       }
 
-      lifecycle.registerComponent(
+      await lifecycle.registerComponent(
         new ReloadableComponent(logger, { name: 'comp1' }),
       );
 
@@ -4590,7 +4679,7 @@ describe('LifecycleManager - Phase 6: Signal Integration', () => {
         }
       }
 
-      lifecycle.registerComponent(
+      await lifecycle.registerComponent(
         new FailingReloadComponent(logger, { name: 'comp1' }),
       );
 
@@ -4630,7 +4719,7 @@ describe('LifecycleManager - Phase 6: Signal Integration', () => {
         }
       }
 
-      lifecycle.registerComponent(
+      await lifecycle.registerComponent(
         new ReloadableComponent(logger, { name: 'comp1' }),
       );
 
@@ -4659,7 +4748,7 @@ describe('LifecycleManager - Phase 6: Signal Integration', () => {
         }
       }
 
-      lifecycle.registerComponent(
+      await lifecycle.registerComponent(
         new ReloadableComponent(logger, { name: 'comp1' }),
       );
 
@@ -4707,7 +4796,9 @@ describe('LifecycleManager - Phase 6: Signal Integration', () => {
         }
       }
 
-      lifecycle.registerComponent(new InfoComponent(logger, { name: 'comp1' }));
+      await lifecycle.registerComponent(
+        new InfoComponent(logger, { name: 'comp1' }),
+      );
 
       await lifecycle.startAllComponents();
       const result = await lifecycle.triggerInfo();
@@ -4734,7 +4825,9 @@ describe('LifecycleManager - Phase 6: Signal Integration', () => {
         }
       }
 
-      lifecycle.registerComponent(new InfoComponent(logger, { name: 'comp1' }));
+      await lifecycle.registerComponent(
+        new InfoComponent(logger, { name: 'comp1' }),
+      );
 
       await lifecycle.startAllComponents();
       await lifecycle.triggerInfo();
@@ -4752,7 +4845,7 @@ describe('LifecycleManager - Phase 6: Signal Integration', () => {
         }
       }
 
-      lifecycle.registerComponent(
+      await lifecycle.registerComponent(
         new SlowInfoComponent(logger, {
           name: 'comp1',
           signalTimeoutMS: 10,
@@ -4790,7 +4883,7 @@ describe('LifecycleManager - Phase 6: Signal Integration', () => {
         }
       }
 
-      lifecycle.registerComponent(
+      await lifecycle.registerComponent(
         new DebugComponent(logger, { name: 'comp1' }),
       );
 
@@ -4819,7 +4912,7 @@ describe('LifecycleManager - Phase 6: Signal Integration', () => {
         }
       }
 
-      lifecycle.registerComponent(
+      await lifecycle.registerComponent(
         new DebugComponent(logger, { name: 'comp1' }),
       );
 
@@ -4839,7 +4932,7 @@ describe('LifecycleManager - Phase 6: Signal Integration', () => {
         }
       }
 
-      lifecycle.registerComponent(
+      await lifecycle.registerComponent(
         new SlowDebugComponent(logger, {
           name: 'comp1',
           signalTimeoutMS: 10,
@@ -4869,7 +4962,9 @@ describe('LifecycleManager - Phase 6: Signal Integration', () => {
         }
       }
 
-      lifecycle.registerComponent(new InfoComponent(logger, { name: 'comp1' }));
+      await lifecycle.registerComponent(
+        new InfoComponent(logger, { name: 'comp1' }),
+      );
 
       await lifecycle.startAllComponents();
       const result = await lifecycle.triggerInfo();
@@ -4889,7 +4984,7 @@ describe('LifecycleManager - Phase 6: Signal Integration', () => {
         }
       }
 
-      lifecycle.registerComponent(
+      await lifecycle.registerComponent(
         new DebugComponent(logger, { name: 'comp1' }),
       );
 
@@ -4930,10 +5025,10 @@ describe('LifecycleManager - Phase 6: Signal Integration', () => {
         }
       }
 
-      lifecycle.registerComponent(
+      await lifecycle.registerComponent(
         new FastStartComponent(logger, { name: 'fast' }),
       );
-      lifecycle.registerComponent(
+      await lifecycle.registerComponent(
         new SlowStartComponent(logger, { name: 'slow' }),
       );
 
@@ -5005,7 +5100,9 @@ describe('LifecycleManager - Phase 6: Signal Integration', () => {
       expect(lifecycle.getSignalStatus().shutdownMethod).toBeNull();
 
       // Start components
-      lifecycle.registerComponent(new TestComponent(logger, { name: 'comp1' }));
+      await lifecycle.registerComponent(
+        new TestComponent(logger, { name: 'comp1' }),
+      );
       await lifecycle.startAllComponents();
 
       // Manual shutdown (default method is 'manual')
@@ -5035,10 +5132,7 @@ describe('LifecycleManager - Phase 7: Messaging, Health, Values', () => {
   let logger: Logger;
 
   beforeEach(() => {
-    logger = new Logger({
-      name: 'test-logger',
-      callProcessExit: false,
-    });
+    logger = new Logger({ callProcessExit: false });
   });
 
   describe('Component Messaging - sendMessageToComponent()', () => {
@@ -5058,14 +5152,17 @@ describe('LifecycleManager - Phase 7: Messaging, Health, Values', () => {
         public async start() {}
         public async stop() {}
 
-        public onMessage(payload: unknown, from: string | null) {
+        public onMessage<TData = { response: string }>(
+          payload: unknown,
+          from: string | null,
+        ): TData | Promise<TData> {
           this.receivedMessages.push({ payload, from });
-          return { response: 'acknowledged' };
+          return { response: 'acknowledged' } as unknown as TData;
         }
       }
 
       const component = new ComponentWithHandler(logger);
-      lifecycle.registerComponent(component);
+      await lifecycle.registerComponent(component);
       await lifecycle.startAllComponents();
 
       const result = await lifecycle.sendMessageToComponent('receiver', {
@@ -5113,12 +5210,15 @@ describe('LifecycleManager - Phase 7: Messaging, Health, Values', () => {
         public async start() {}
         public async stop() {}
 
-        public onMessage(_payload: unknown, _from: string | null) {
-          return { response: 'acknowledged' };
+        public onMessage<TData = { response: string }>(
+          _payload: unknown,
+          _from: string | null,
+        ): TData | Promise<TData> {
+          return { response: 'acknowledged' } as unknown as TData;
         }
       }
 
-      lifecycle.registerComponent(new ComponentWithHandler(logger));
+      await lifecycle.registerComponent(new ComponentWithHandler(logger));
 
       const result = await lifecycle.sendMessageToComponent('receiver', {
         test: 'data',
@@ -5146,7 +5246,7 @@ describe('LifecycleManager - Phase 7: Messaging, Health, Values', () => {
         public async stop() {}
       }
 
-      lifecycle.registerComponent(new ComponentWithoutHandler(logger));
+      await lifecycle.registerComponent(new ComponentWithoutHandler(logger));
       await lifecycle.startAllComponents();
 
       const result = await lifecycle.sendMessageToComponent('receiver', {
@@ -5175,12 +5275,17 @@ describe('LifecycleManager - Phase 7: Messaging, Health, Values', () => {
         public async start() {}
         public async stop() {}
 
-        public onMessage(_payload: unknown, _from: string | null) {
+        public onMessage<TData = unknown>(
+          _payload: unknown,
+          _from: string | null,
+        ): TData | Promise<TData> {
           throw new Error('Handler failed');
         }
       }
 
-      lifecycle.registerComponent(new ComponentWithFailingHandler(logger));
+      await lifecycle.registerComponent(
+        new ComponentWithFailingHandler(logger),
+      );
       await lifecycle.startAllComponents();
 
       lifecycle.on('component:message-failed', (data) => {
@@ -5219,13 +5324,16 @@ describe('LifecycleManager - Phase 7: Messaging, Health, Values', () => {
         public async start() {}
         public async stop() {}
 
-        public async onMessage(_payload: unknown, _from: string | null) {
+        public async onMessage<TData = { response: string }>(
+          _payload: unknown,
+          _from: string | null,
+        ): Promise<TData> {
           await sleep(50);
-          return { response: 'late' };
+          return { response: 'late' } as unknown as TData;
         }
       }
 
-      lifecycle.registerComponent(new SlowHandler(logger));
+      await lifecycle.registerComponent(new SlowHandler(logger));
       await lifecycle.startAllComponents();
 
       const result = await lifecycle.sendMessageToComponent('slow', {
@@ -5256,13 +5364,16 @@ describe('LifecycleManager - Phase 7: Messaging, Health, Values', () => {
         public async start() {}
         public async stop() {}
 
-        public async onMessage(_payload: unknown, _from: string | null) {
+        public async onMessage<TData = { response: string }>(
+          _payload: unknown,
+          _from: string | null,
+        ): Promise<TData> {
           await sleep(30);
-          return { response: 'ok' };
+          return { response: 'ok' } as unknown as TData;
         }
       }
 
-      lifecycle.registerComponent(new SlowHandler(logger));
+      await lifecycle.registerComponent(new SlowHandler(logger));
       await lifecycle.startAllComponents();
 
       const result = await lifecycle.sendMessageToComponent(
@@ -5291,12 +5402,15 @@ describe('LifecycleManager - Phase 7: Messaging, Health, Values', () => {
           await new Promise((resolve) => setTimeout(resolve, 100));
         }
 
-        public onMessage(_payload: unknown, _from: string | null) {
-          return { response: 'ok' };
+        public onMessage<TData = { response: string }>(
+          _payload: unknown,
+          _from: string | null,
+        ): TData | Promise<TData> {
+          return { response: 'ok' } as unknown as TData;
         }
       }
 
-      lifecycle.registerComponent(new SlowComponent(logger));
+      await lifecycle.registerComponent(new SlowComponent(logger));
       await lifecycle.startAllComponents();
 
       const shutdownPromise = lifecycle.stopAllComponents();
@@ -5340,16 +5454,20 @@ describe('LifecycleManager - Phase 7: Messaging, Health, Values', () => {
         public async start() {}
         public async stop() {}
 
-        public onMessage(_payload: unknown, from: string | null) {
+        public onMessage<TData = unknown>(
+          _payload: unknown,
+          from: string | null,
+        ): TData | Promise<TData> {
           this.receivedFrom = from;
+          return undefined as TData;
         }
       }
 
       const sender = new SenderComponent(logger);
       const receiver = new ReceiverComponent(logger);
 
-      lifecycle.registerComponent(receiver);
-      lifecycle.registerComponent(sender);
+      await lifecycle.registerComponent(receiver);
+      await lifecycle.registerComponent(sender);
 
       await lifecycle.startAllComponents();
 
@@ -5372,9 +5490,12 @@ describe('LifecycleManager - Phase 7: Messaging, Health, Values', () => {
         public async start() {}
         public async stop() {}
 
-        public onMessage(payload: unknown, _from: string | null) {
+        public onMessage<TData = { received: boolean }>(
+          payload: unknown,
+          _from: string | null,
+        ): TData | Promise<TData> {
           this.messages.push(payload);
-          return { received: true };
+          return { received: true } as unknown as TData;
         }
       }
 
@@ -5382,9 +5503,9 @@ describe('LifecycleManager - Phase 7: Messaging, Health, Values', () => {
       const comp2 = new MessageReceiver(logger, 'comp2');
       const comp3 = new MessageReceiver(logger, 'comp3');
 
-      lifecycle.registerComponent(comp1);
-      lifecycle.registerComponent(comp2);
-      lifecycle.registerComponent(comp3);
+      await lifecycle.registerComponent(comp1);
+      await lifecycle.registerComponent(comp2);
+      await lifecycle.registerComponent(comp3);
 
       await lifecycle.startAllComponents();
 
@@ -5423,14 +5544,17 @@ describe('LifecycleManager - Phase 7: Messaging, Health, Values', () => {
         public async start() {}
         public async stop() {}
 
-        public async onMessage(_payload: unknown, _from: string | null) {
+        public async onMessage<TData = { received: boolean }>(
+          _payload: unknown,
+          _from: string | null,
+        ): Promise<TData> {
           await sleep(30);
-          return { received: true };
+          return { received: true } as unknown as TData;
         }
       }
 
       const comp1 = new SlowReceiver(logger, 'comp1');
-      lifecycle.registerComponent(comp1);
+      await lifecycle.registerComponent(comp1);
       await lifecycle.startAllComponents();
 
       const results = await lifecycle.broadcastMessage({ broadcast: 'test' });
@@ -5455,16 +5579,20 @@ describe('LifecycleManager - Phase 7: Messaging, Health, Values', () => {
         public async start() {}
         public async stop() {}
 
-        public onMessage(payload: unknown, _from: string | null) {
+        public onMessage<TData = unknown>(
+          payload: unknown,
+          _from: string | null,
+        ): TData | Promise<TData> {
           this.messages.push(payload);
+          return undefined as TData;
         }
       }
 
       const comp1 = new MessageReceiver(logger, 'comp1');
       const comp2 = new MessageReceiver(logger, 'comp2');
 
-      lifecycle.registerComponent(comp1);
-      lifecycle.registerComponent(comp2);
+      await lifecycle.registerComponent(comp1);
+      await lifecycle.registerComponent(comp2);
 
       await lifecycle.startComponent('comp1');
 
@@ -5489,11 +5617,16 @@ describe('LifecycleManager - Phase 7: Messaging, Health, Values', () => {
         public async start() {}
         public async stop() {}
 
-        public onMessage(_payload: unknown, _from: string | null) {}
+        public onMessage<TData = unknown>(
+          _payload: unknown,
+          _from: string | null,
+        ): TData | Promise<TData> {
+          return undefined as TData;
+        }
       }
 
-      lifecycle.registerComponent(new MessageReceiver(logger, 'comp1'));
-      lifecycle.registerComponent(new MessageReceiver(logger, 'comp2'));
+      await lifecycle.registerComponent(new MessageReceiver(logger, 'comp1'));
+      await lifecycle.registerComponent(new MessageReceiver(logger, 'comp2'));
 
       await lifecycle.startComponent('comp1');
 
@@ -5523,8 +5656,12 @@ describe('LifecycleManager - Phase 7: Messaging, Health, Values', () => {
         public async start() {}
         public async stop() {}
 
-        public onMessage(payload: unknown, _from: string | null) {
+        public onMessage<TData = unknown>(
+          payload: unknown,
+          _from: string | null,
+        ): TData | Promise<TData> {
           this.messages.push(payload);
+          return undefined as TData;
         }
       }
 
@@ -5532,9 +5669,9 @@ describe('LifecycleManager - Phase 7: Messaging, Health, Values', () => {
       const comp2 = new MessageReceiver(logger, 'comp2');
       const comp3 = new MessageReceiver(logger, 'comp3');
 
-      lifecycle.registerComponent(comp1);
-      lifecycle.registerComponent(comp2);
-      lifecycle.registerComponent(comp3);
+      await lifecycle.registerComponent(comp1);
+      await lifecycle.registerComponent(comp2);
+      await lifecycle.registerComponent(comp3);
 
       await lifecycle.startAllComponents();
 
@@ -5562,8 +5699,11 @@ describe('LifecycleManager - Phase 7: Messaging, Health, Values', () => {
         public async start() {}
         public async stop() {}
 
-        public onMessage(_payload: unknown, _from: string | null) {
-          return { status: 'ok' };
+        public onMessage<TData = { status: string }>(
+          _payload: unknown,
+          _from: string | null,
+        ): TData | Promise<TData> {
+          return { status: 'ok' } as unknown as TData;
         }
       }
 
@@ -5575,13 +5715,16 @@ describe('LifecycleManager - Phase 7: Messaging, Health, Values', () => {
         public async start() {}
         public async stop() {}
 
-        public onMessage(_payload: unknown, _from: string | null) {
+        public onMessage<TData = unknown>(
+          _payload: unknown,
+          _from: string | null,
+        ): TData | Promise<TData> {
           throw new Error('Handler failed');
         }
       }
 
-      lifecycle.registerComponent(new GoodReceiver(logger));
-      lifecycle.registerComponent(new BadReceiver(logger));
+      await lifecycle.registerComponent(new GoodReceiver(logger));
+      await lifecycle.registerComponent(new BadReceiver(logger));
 
       await lifecycle.startAllComponents();
 
@@ -5627,8 +5770,12 @@ describe('LifecycleManager - Phase 7: Messaging, Health, Values', () => {
         public async start() {}
         public async stop() {}
 
-        public onMessage(_payload: unknown, from: string | null) {
+        public onMessage<TData = unknown>(
+          _payload: unknown,
+          from: string | null,
+        ): TData | Promise<TData> {
           this.receivedFrom = from;
+          return undefined as TData;
         }
       }
 
@@ -5636,9 +5783,9 @@ describe('LifecycleManager - Phase 7: Messaging, Health, Values', () => {
       const receiver1 = new ReceiverComponent(logger, 'receiver1');
       const receiver2 = new ReceiverComponent(logger, 'receiver2');
 
-      lifecycle.registerComponent(receiver1);
-      lifecycle.registerComponent(receiver2);
-      lifecycle.registerComponent(broadcaster);
+      await lifecycle.registerComponent(receiver1);
+      await lifecycle.registerComponent(receiver2);
+      await lifecycle.registerComponent(broadcaster);
 
       await lifecycle.startAllComponents();
 
@@ -5664,7 +5811,7 @@ describe('LifecycleManager - Phase 7: Messaging, Health, Values', () => {
         }
       }
 
-      lifecycle.registerComponent(new HealthyComponent(logger));
+      await lifecycle.registerComponent(new HealthyComponent(logger));
       await lifecycle.startAllComponents();
 
       const result = await lifecycle.checkComponentHealth('healthy');
@@ -5696,7 +5843,7 @@ describe('LifecycleManager - Phase 7: Messaging, Health, Values', () => {
         }
       }
 
-      lifecycle.registerComponent(new ComponentWithDetails(logger));
+      await lifecycle.registerComponent(new ComponentWithDetails(logger));
       await lifecycle.startAllComponents();
 
       const result = await lifecycle.checkComponentHealth('detailed');
@@ -5735,7 +5882,7 @@ describe('LifecycleManager - Phase 7: Messaging, Health, Values', () => {
         }
       }
 
-      lifecycle.registerComponent(new HealthyComponent(logger));
+      await lifecycle.registerComponent(new HealthyComponent(logger));
 
       const result = await lifecycle.checkComponentHealth('healthy');
 
@@ -5758,7 +5905,7 @@ describe('LifecycleManager - Phase 7: Messaging, Health, Values', () => {
         public async stop() {}
       }
 
-      lifecycle.registerComponent(new ComponentWithoutHealth(logger));
+      await lifecycle.registerComponent(new ComponentWithoutHealth(logger));
       await lifecycle.startAllComponents();
 
       const result = await lifecycle.checkComponentHealth('no-health');
@@ -5781,12 +5928,12 @@ describe('LifecycleManager - Phase 7: Messaging, Health, Values', () => {
         public async start() {}
         public async stop() {}
 
-        public healthCheck() {
+        public healthCheck(): boolean {
           throw new Error('Connection lost');
         }
       }
 
-      lifecycle.registerComponent(new UnhealthyComponent(logger));
+      await lifecycle.registerComponent(new UnhealthyComponent(logger));
       await lifecycle.startAllComponents();
 
       const result = await lifecycle.checkComponentHealth('unhealthy');
@@ -5818,7 +5965,7 @@ describe('LifecycleManager - Phase 7: Messaging, Health, Values', () => {
         }
       }
 
-      lifecycle.registerComponent(new SlowHealthCheck(logger));
+      await lifecycle.registerComponent(new SlowHealthCheck(logger));
       await lifecycle.startAllComponents();
 
       const result = await lifecycle.checkComponentHealth('slow-health');
@@ -5847,7 +5994,7 @@ describe('LifecycleManager - Phase 7: Messaging, Health, Values', () => {
         }
       }
 
-      lifecycle.registerComponent(new UnhealthyComponent(logger));
+      await lifecycle.registerComponent(new UnhealthyComponent(logger));
       await lifecycle.startAllComponents();
 
       const result = await lifecycle.checkComponentHealth('unhealthy');
@@ -5874,9 +6021,9 @@ describe('LifecycleManager - Phase 7: Messaging, Health, Values', () => {
         }
       }
 
-      lifecycle.registerComponent(new HealthyComponent(logger, 'comp1'));
-      lifecycle.registerComponent(new HealthyComponent(logger, 'comp2'));
-      lifecycle.registerComponent(new HealthyComponent(logger, 'comp3'));
+      await lifecycle.registerComponent(new HealthyComponent(logger, 'comp1'));
+      await lifecycle.registerComponent(new HealthyComponent(logger, 'comp2'));
+      await lifecycle.registerComponent(new HealthyComponent(logger, 'comp3'));
 
       await lifecycle.startAllComponents();
 
@@ -5919,8 +6066,8 @@ describe('LifecycleManager - Phase 7: Messaging, Health, Values', () => {
         }
       }
 
-      lifecycle.registerComponent(new HealthyComponent(logger));
-      lifecycle.registerComponent(new UnhealthyComponent(logger));
+      await lifecycle.registerComponent(new HealthyComponent(logger));
+      await lifecycle.registerComponent(new UnhealthyComponent(logger));
 
       await lifecycle.startAllComponents();
 
@@ -5948,8 +6095,8 @@ describe('LifecycleManager - Phase 7: Messaging, Health, Values', () => {
         }
       }
 
-      lifecycle.registerComponent(new HealthyComponent(logger, 'comp1'));
-      lifecycle.registerComponent(new HealthyComponent(logger, 'comp2'));
+      await lifecycle.registerComponent(new HealthyComponent(logger, 'comp1'));
+      await lifecycle.registerComponent(new HealthyComponent(logger, 'comp2'));
 
       await lifecycle.startComponent('comp1');
 
@@ -5987,8 +6134,8 @@ describe('LifecycleManager - Phase 7: Messaging, Health, Values', () => {
         public async stop() {}
       }
 
-      lifecycle.registerComponent(new ComponentWithHealth(logger));
-      lifecycle.registerComponent(new ComponentWithoutHealth(logger));
+      await lifecycle.registerComponent(new ComponentWithHealth(logger));
+      await lifecycle.registerComponent(new ComponentWithoutHealth(logger));
 
       await lifecycle.startAllComponents();
 
@@ -6030,7 +6177,7 @@ describe('LifecycleManager - Phase 7: Messaging, Health, Values', () => {
         }
       }
 
-      lifecycle.registerComponent(new ComponentWithValues(logger));
+      await lifecycle.registerComponent(new ComponentWithValues(logger));
       await lifecycle.startAllComponents();
 
       lifecycle.on('component:value-returned', (data) => {
@@ -6073,7 +6220,7 @@ describe('LifecycleManager - Phase 7: Messaging, Health, Values', () => {
       expect(result.code).toBe('not_found');
     });
 
-    test('should handle component not running', () => {
+    test('should handle component not running', async () => {
       const lifecycle = new LifecycleManager({ logger });
 
       class ComponentWithValues extends BaseComponent {
@@ -6089,7 +6236,7 @@ describe('LifecycleManager - Phase 7: Messaging, Health, Values', () => {
         }
       }
 
-      lifecycle.registerComponent(new ComponentWithValues(logger));
+      await lifecycle.registerComponent(new ComponentWithValues(logger));
 
       const result = lifecycle.getValue('provider', 'key');
 
@@ -6113,7 +6260,7 @@ describe('LifecycleManager - Phase 7: Messaging, Health, Values', () => {
         public async stop() {}
       }
 
-      lifecycle.registerComponent(new ComponentWithoutGetValue(logger));
+      await lifecycle.registerComponent(new ComponentWithoutGetValue(logger));
       await lifecycle.startAllComponents();
 
       const result = lifecycle.getValue('provider', 'key');
@@ -6163,8 +6310,8 @@ describe('LifecycleManager - Phase 7: Messaging, Health, Values', () => {
       const provider = new ProviderComponent(logger);
       const requester = new RequesterComponent(logger);
 
-      lifecycle.registerComponent(provider);
-      lifecycle.registerComponent(requester);
+      await lifecycle.registerComponent(provider);
+      await lifecycle.registerComponent(requester);
 
       await lifecycle.startAllComponents();
 
@@ -6206,7 +6353,7 @@ describe('LifecycleManager - Phase 7: Messaging, Health, Values', () => {
         }
       }
 
-      lifecycle.registerComponent(new MultiTypeProvider(logger));
+      await lifecycle.registerComponent(new MultiTypeProvider(logger));
       await lifecycle.startAllComponents();
 
       expect(lifecycle.getValue('provider', 'string').value).toBe('text');
@@ -6240,7 +6387,7 @@ describe('LifecycleManager - Phase 7: Messaging, Health, Values', () => {
       }
 
       const component = new TestComponent(logger);
-      lifecycle.registerComponent(component);
+      await lifecycle.registerComponent(component);
       await lifecycle.startAllComponents();
 
       expect(component.lifecycleRef).toBeDefined();
@@ -6253,6 +6400,536 @@ describe('LifecycleManager - Phase 7: Messaging, Health, Values', () => {
         'function',
       );
       expect(typeof component.lifecycleRef.getValue).toBe('function');
+    });
+  });
+});
+
+describe('LifecycleManager - Phase 8: AutoStart', () => {
+  let logger: Logger;
+  let arraySink: ArraySink;
+
+  beforeEach(() => {
+    arraySink = new ArraySink();
+    logger = new Logger({ sinks: [arraySink] });
+  });
+
+  describe('AutoStart on registration', () => {
+    test('should not auto-start when autoStart is false (default)', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      class TestComponent extends BaseComponent {
+        public startCount = 0;
+
+        constructor(logger: Logger) {
+          super(logger, { name: 'test-comp', dependencies: [] });
+        }
+
+        public start() {
+          this.startCount++;
+        }
+
+        public async stop() {}
+      }
+
+      const component = new TestComponent(logger);
+      const result = await lifecycle.registerComponent(component);
+
+      expect(result.success).toBe(true);
+      expect(result.autoStarted).toBe(false);
+      expect(result.startResult).toBeUndefined();
+      expect(component.startCount).toBe(0);
+      expect(lifecycle.isComponentRunning('test-comp')).toBe(false);
+    });
+
+    test('should not auto-start when manager is idle', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      class TestComponent extends BaseComponent {
+        public startCount = 0;
+
+        constructor(logger: Logger) {
+          super(logger, { name: 'test-comp', dependencies: [] });
+        }
+
+        public start() {
+          this.startCount++;
+        }
+
+        public async stop() {}
+      }
+
+      const component = new TestComponent(logger);
+      const result = await lifecycle.registerComponent(component, {
+        autoStart: true,
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.autoStarted).toBe(false);
+      expect(result.startResult).toBeUndefined();
+      expect(component.startCount).toBe(0);
+      expect(lifecycle.isComponentRunning('test-comp')).toBe(false);
+
+      // Component should start when startAllComponents() is called
+      await lifecycle.startAllComponents();
+      expect(component.startCount).toBe(1);
+      expect(lifecycle.isComponentRunning('test-comp')).toBe(true);
+    });
+
+    test('should auto-start when manager is running', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      class TestComponent extends BaseComponent {
+        public startCount = 0;
+
+        constructor(logger: Logger, name: string) {
+          super(logger, { name, dependencies: [] });
+        }
+
+        public start() {
+          this.startCount++;
+        }
+
+        public async stop() {}
+      }
+
+      // Register and start a dummy component to get manager into running state
+      await lifecycle.registerComponent(new TestComponent(logger, 'dummy'));
+      await lifecycle.startAllComponents();
+      expect(lifecycle.getSystemState()).toBe('running');
+
+      // Register with autoStart
+      const component = new TestComponent(logger, 'test-comp');
+      const result = await lifecycle.registerComponent(component, {
+        autoStart: true,
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.autoStarted).toBe(true);
+      expect(result.duringStartup).toBe(false);
+      expect(result.startResult?.success).toBe(true);
+      expect(result.startResult?.componentName).toBe('test-comp');
+
+      // Wait for auto-start to complete (it's fire-and-forget)
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      expect(component.startCount).toBe(1);
+      expect(lifecycle.isComponentRunning('test-comp')).toBe(true);
+    });
+
+    test('should auto-start during bulk startup', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+      let autoStartResult:
+        | Awaited<ReturnType<LifecycleManager['registerComponent']>>
+        | undefined;
+
+      class Component1 extends BaseComponent {
+        constructor(logger: Logger) {
+          super(logger, { name: 'comp1', dependencies: [] });
+        }
+
+        public async start() {
+          // During this start, register another component with autoStart
+          const comp2 = new Component2(logger);
+          autoStartResult = await lifecycle.registerComponent(comp2, {
+            autoStart: true,
+          });
+        }
+
+        public async stop() {}
+      }
+
+      class Component2 extends BaseComponent {
+        public startCount = 0;
+
+        constructor(logger: Logger) {
+          super(logger, { name: 'comp2', dependencies: [] });
+        }
+
+        public start() {
+          this.startCount++;
+        }
+
+        public async stop() {}
+      }
+
+      await lifecycle.registerComponent(new Component1(logger));
+
+      // Start all components (during comp1 start, comp2 will be registered with autoStart)
+      await lifecycle.startAllComponents();
+
+      expect(autoStartResult?.autoStarted).toBe(true);
+      expect(autoStartResult?.duringStartup).toBe(true);
+      expect(autoStartResult?.startResult?.success).toBe(true);
+      expect(autoStartResult?.startResult?.componentName).toBe('comp2');
+
+      // Wait for auto-start to complete (it's fire-and-forget)
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      expect(lifecycle.isComponentRunning('comp2')).toBe(true);
+    });
+
+    test('should emit registration event with autoStarted metadata', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+      const events: any[] = [];
+
+      lifecycle.on('component:registered', (data) => {
+        events.push(data);
+      });
+
+      class TestComponent extends BaseComponent {
+        constructor(logger: Logger, name: string) {
+          super(logger, { name, dependencies: [] });
+        }
+
+        public async start() {}
+        public async stop() {}
+      }
+
+      // Register without autoStart (before startup)
+      await lifecycle.registerComponent(new TestComponent(logger, 'comp1'));
+      expect(events[0].autoStarted).toBe(false);
+      expect(events[0].duringStartup).toBe(false);
+
+      // Register with autoStart (before startup - won't actually auto-start)
+      await lifecycle.registerComponent(new TestComponent(logger, 'comp2'), {
+        autoStart: true,
+      });
+      expect(events[1].autoStarted).toBe(false);
+      expect(events[1].duringStartup).toBe(false);
+
+      // Start manager
+      await lifecycle.startAllComponents();
+
+      // Register with autoStart (after startup - will auto-start)
+      await lifecycle.registerComponent(new TestComponent(logger, 'comp3'), {
+        autoStart: true,
+      });
+      expect(events[2].autoStarted).toBe(true);
+      expect(events[2].duringStartup).toBe(false);
+    });
+
+    test('should handle auto-start failures gracefully', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      class FailingComponent extends BaseComponent {
+        constructor(logger: Logger) {
+          super(logger, { name: 'failing', dependencies: [] });
+        }
+
+        public start() {
+          throw new Error('Start failed');
+        }
+
+        public async stop() {}
+      }
+
+      // Start the manager first
+      await lifecycle.startAllComponents();
+
+      // Register with autoStart - should not throw, just log error
+      const result = await lifecycle.registerComponent(
+        new FailingComponent(logger),
+        {
+          autoStart: true,
+        },
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.autoStarted).toBe(true);
+      expect(result.startResult?.success).toBe(false);
+
+      // Wait for auto-start to fail
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      // Component should not be running
+      expect(lifecycle.isComponentRunning('failing')).toBe(false);
+    });
+
+    test('should handle missing dependencies during auto-start', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      class DependentComponent extends BaseComponent {
+        constructor(logger: Logger) {
+          super(logger, {
+            name: 'dependent',
+            dependencies: ['missing-dep'],
+          });
+        }
+
+        public async start() {}
+        public async stop() {}
+      }
+
+      // Start the manager first
+      await lifecycle.startAllComponents();
+
+      // Register with autoStart - should fail due to missing dependency
+      const result = await lifecycle.registerComponent(
+        new DependentComponent(logger),
+        { autoStart: true },
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.autoStarted).toBe(true);
+      expect(result.startResult?.success).toBe(false);
+
+      // Wait for auto-start to fail
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      // Component should not be running
+      expect(lifecycle.isComponentRunning('dependent')).toBe(false);
+    });
+  });
+
+  describe('Unregistration during shutdown event', () => {
+    test('should emit duringShutdown flag when unregistering during shutdown', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+      const events: any[] = [];
+
+      lifecycle.on('component:unregistered', (data) => {
+        events.push(data);
+      });
+
+      class TestComponent extends BaseComponent {
+        constructor(logger: Logger) {
+          super(logger, { name: 'test-comp', dependencies: [] });
+        }
+
+        public async start() {}
+        public async stop() {}
+      }
+
+      await lifecycle.registerComponent(new TestComponent(logger));
+      await lifecycle.startAllComponents();
+
+      // Normal unregistration
+      await lifecycle.unregisterComponent('test-comp');
+      expect(events[0].name).toBe('test-comp');
+      expect(events[0].duringShutdown).toBe(false);
+    });
+
+    test('should not allow unregistration during shutdown', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      class SlowComponent extends BaseComponent {
+        constructor(logger: Logger) {
+          super(logger, { name: 'slow', dependencies: [] });
+        }
+
+        public async start() {}
+
+        public async stop() {
+          // Try to unregister during stop (which happens during shutdown)
+          const result = await lifecycle.unregisterComponent('slow');
+          expect(result.success).toBe(false);
+          expect(result.code).toBe('bulk_operation_in_progress');
+        }
+      }
+
+      await lifecycle.registerComponent(new SlowComponent(logger));
+      await lifecycle.startAllComponents();
+
+      // Trigger shutdown
+      await lifecycle.stopAllComponents();
+    });
+  });
+
+  describe('Registration metadata', () => {
+    test('should include duringStartup flag in registration events', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+      const events: any[] = [];
+
+      lifecycle.on('component:registered', (data) => {
+        events.push(data);
+      });
+
+      class TestComponent extends BaseComponent {
+        constructor(logger: Logger, name: string) {
+          super(logger, { name, dependencies: [] });
+        }
+
+        public async start() {
+          // Register during startup
+          await lifecycle.registerComponent(new TestComponent(logger, 'comp2'));
+        }
+        public async stop() {}
+      }
+
+      // Register before startup
+      await lifecycle.registerComponent(new TestComponent(logger, 'comp1'));
+      expect(events[0].duringStartup).toBe(false);
+
+      // Start (comp1 will register comp2 during its start)
+      await lifecycle.startAllComponents();
+
+      // comp2 was registered during startup
+      expect(events[1].name).toBe('comp2');
+      expect(events[1].duringStartup).toBe(true);
+    });
+
+    test('should include metadata in result objects', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      class TestComponent extends BaseComponent {
+        constructor(logger: Logger) {
+          super(logger, { name: 'test-comp', dependencies: [] });
+        }
+
+        public async start() {}
+        public async stop() {}
+      }
+
+      const result = await lifecycle.registerComponent(
+        new TestComponent(logger),
+      );
+
+      expect(result.duringStartup).toBe(false);
+      expect(result.autoStarted).toBe(false);
+    });
+  });
+
+  describe('allowDuringBulkStartup option', () => {
+    test('should block startComponent during bulk startup by default', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      class TestComponent extends BaseComponent {
+        constructor(logger: Logger, name: string) {
+          super(logger, { name, dependencies: [] });
+        }
+
+        public async start() {
+          if (this.getName() === 'comp1') {
+            // Try to start comp2 during bulk startup (without option)
+            const result = await lifecycle.startComponent('comp2');
+            expect(result.success).toBe(false);
+            expect(result.code).toBe('shutdown_in_progress');
+            expect(result.reason).toBe('Bulk startup in progress');
+          }
+        }
+        public async stop() {}
+      }
+
+      await lifecycle.registerComponent(new TestComponent(logger, 'comp1'));
+      await lifecycle.registerComponent(new TestComponent(logger, 'comp2'));
+
+      await lifecycle.startAllComponents();
+    });
+
+    test('should allow startComponent during bulk startup with allowDuringBulkStartup', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      class TestComponent extends BaseComponent {
+        constructor(logger: Logger, name: string) {
+          super(logger, { name, dependencies: [] });
+        }
+
+        public async start() {
+          if (this.getName() === 'comp1') {
+            // Start comp2 during bulk startup with option
+            const result = await lifecycle.startComponent('comp2', {
+              allowDuringBulkStartup: true,
+            });
+            expect(result.success).toBe(true);
+            expect(lifecycle.isComponentRunning('comp2')).toBe(true);
+          }
+        }
+        public async stop() {}
+      }
+
+      await lifecycle.registerComponent(new TestComponent(logger, 'comp1'));
+      await lifecycle.registerComponent(new TestComponent(logger, 'comp2'));
+
+      await lifecycle.startAllComponents();
+
+      // Both should be running
+      expect(lifecycle.isComponentRunning('comp1')).toBe(true);
+      expect(lifecycle.isComponentRunning('comp2')).toBe(true);
+    });
+
+    test('should fail if dependencies are not running even with allowDuringBulkStartup', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      class TestComponent extends BaseComponent {
+        constructor(logger: Logger, name: string, deps: string[] = []) {
+          super(logger, { name, dependencies: deps });
+        }
+
+        public async start() {
+          if (this.getName() === 'comp1') {
+            // Try to start comp3 which depends on comp2 (not running yet)
+            const result = await lifecycle.startComponent('comp3', {
+              allowDuringBulkStartup: true,
+            });
+            expect(result.success).toBe(false);
+            expect(result.code).toBe('dependency_not_running');
+          }
+        }
+        public async stop() {}
+      }
+
+      await lifecycle.registerComponent(new TestComponent(logger, 'comp1'));
+      await lifecycle.registerComponent(new TestComponent(logger, 'comp2'));
+      await lifecycle.registerComponent(
+        new TestComponent(logger, 'comp3', ['comp2']),
+      );
+
+      await lifecycle.startAllComponents();
+    });
+
+    test('should NEVER allow starting during shutdown even with allowDuringBulkStartup', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      class TestComponent extends BaseComponent {
+        constructor(logger: Logger, name: string) {
+          super(logger, { name, dependencies: [] });
+        }
+
+        public async start() {}
+
+        public async stop() {
+          if (this.getName() === 'comp1') {
+            // Try to start comp2 during shutdown (should always fail)
+            const result = await lifecycle.startComponent('comp2', {
+              allowDuringBulkStartup: true,
+            });
+            expect(result.success).toBe(false);
+            expect(result.code).toBe('shutdown_in_progress');
+            expect(result.reason).toBe('Shutdown in progress');
+          }
+        }
+      }
+
+      await lifecycle.registerComponent(new TestComponent(logger, 'comp1'));
+      await lifecycle.registerComponent(new TestComponent(logger, 'comp2'));
+      await lifecycle.startAllComponents();
+
+      // Trigger shutdown
+      await lifecycle.stopAllComponents();
+    });
+
+    test('should work normally when not in bulk mode', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      class TestComponent extends BaseComponent {
+        constructor(logger: Logger, name: string) {
+          super(logger, { name, dependencies: [] });
+        }
+
+        public async start() {}
+        public async stop() {}
+      }
+
+      await lifecycle.registerComponent(new TestComponent(logger, 'comp1'));
+      await lifecycle.registerComponent(new TestComponent(logger, 'comp2'));
+
+      // Not in bulk mode - option should have no effect
+      const result1 = await lifecycle.startComponent('comp1', {
+        allowDuringBulkStartup: true,
+      });
+      expect(result1.success).toBe(true);
+
+      const result2 = await lifecycle.startComponent('comp2');
+      expect(result2.success).toBe(true);
     });
   });
 });

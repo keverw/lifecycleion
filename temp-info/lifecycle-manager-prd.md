@@ -203,10 +203,9 @@ if (result.success) {
 'lifecycle-manager:signals-detached'; // Signal handlers detached
 
 // Component registration events
-'component:registered'; // Component added
+'component:registered'; // Component added (includes duringStartup/autoStarted metadata)
 'component:registration-rejected'; // Registration failed (duplicate name, during shutdown, etc.)
-'component:unregistered'; // Component removed
-'component:unregistered-during-shutdown'; // Component removed during shutdown
+'component:unregistered'; // Component removed (includes duringShutdown metadata)
 
 // Component startup events
 'component:starting'; // Component.start() called
@@ -261,26 +260,42 @@ interface RegisterOptions {
 }
 
 // Default: register but don't auto-start
-lifecycle.registerComponent(new CacheComponent(logger, { name: 'cache' }));
+const result = await lifecycle.registerComponent(
+  new CacheComponent(logger, { name: 'cache' }),
+);
 // Component is registered but NOT running
+// result.autoStarted === false
+// result.startResult === undefined
 // Must call: await lifecycle.startComponent('cache');
 
 // With autoStart: starts immediately if manager is running
-lifecycle.registerComponent(new CacheComponent(logger, { name: 'cache' }), {
-  autoStart: true,
-});
+const result = await lifecycle.registerComponent(
+  new CacheComponent(logger, { name: 'cache' }),
+  {
+    autoStart: true,
+  },
+);
+// result.autoStarted === true (if manager is running/starting)
+// result.startResult contains the start operation result
 ```
 
 **Auto-start behavior by manager state**:
 
-| Manager State                 | `autoStart: false` (default) | `autoStart: true`                                          |
-| ----------------------------- | ---------------------------- | ---------------------------------------------------------- |
-| Not started yet               | Register only                | Register only (starts with `startAllComponents()`)         |
-| Starting (`isStarting: true`) | Register only                | Register and start immediately (appended to startup queue) |
-| Running (`isStarted: true`)   | Register only                | Register and start immediately                             |
-| Shutting down                 | Rejected                     | Rejected                                                   |
+| Manager State                 | `autoStart: false` (default)          | `autoStart: true`                                                             |
+| ----------------------------- | ------------------------------------- | ----------------------------------------------------------------------------- |
+| Not started yet               | Register only (deferred start)        | Register only (deferred start with `startAllComponents()`)                    |
+| Starting (`isStarting: true`) | Register only (component NOT started) | Register and await start (appended to startup queue, `startResult` available) |
+| Running (`isStarted: true`)   | Register only (component NOT started) | Register and await start (`startResult` available)                            |
+| Shutting down                 | Rejected                              | Rejected                                                                      |
 
 **New state flag**: `isStarting: boolean` - true while `startAllComponents()` is in progress.
+
+**Result fields**:
+
+- `autoStarted`: boolean - true if auto-start was requested AND manager is running/starting
+- `startResult`: ComponentOperationResult | undefined - result of start operation when `autoStarted: true`
+
+**Important**: `registerComponent()` and `insertComponentAt()` are async methods that return a Promise. When `autoStart: true`, the method awaits the start operation and includes the result in `startResult` field.
 
 **Note**: Auto-started components are started at the end of the current component list. If component order matters (dependencies), register before calling `startAllComponents()` or manage order manually.
 
@@ -416,6 +431,37 @@ await lifecycle.startComponent('database');
 await lifecycle.startComponent('web-server');
 ```
 
+**Starting Components During Bulk Startup**:
+
+By default, `startComponent()` is blocked during `startAllComponents()` to prevent interference with dependency ordering. However, you can explicitly allow it:
+
+```typescript
+class DatabaseComponent extends BaseComponent {
+  async start() {
+    // Register and start a helper component dynamically
+    await this.lifecycle.registerComponent(new MetricsCollector(this.logger));
+
+    // Start it immediately (bypasses bulk operation block)
+    await this.lifecycle.startComponent('metrics-collector', {
+      allowDuringBulkStartup: true,
+    });
+  }
+}
+```
+
+**Safety guarantees:**
+
+- ✅ **Dependencies checked**: The component must have all dependencies running
+- ✅ **State checked**: Component must not already be starting/running
+- ✅ **Shutdown blocked**: Starting during shutdown is NEVER allowed, even with this option
+- ✅ **Idempotent**: If the component is already running, no error (treated as success)
+
+**When to use:**
+
+- Dynamic component registration during startup (with `autoStart`)
+- Manual component initialization from within other component's `start()` methods
+- Advanced use cases where you understand the implications
+
 **Registration Persists Across Restarts**:
 
 Components remain registered after shutdown. To fully reset:
@@ -476,8 +522,6 @@ coreLifecycle.on('lifecycle-manager:shutdown-initiated', async () => {
   await pluginLifecycle.stopAllComponents();
 });
 ```
-
-
 
 ### 5. Snapshot List Guarantee
 
@@ -588,6 +632,13 @@ interface UnregisterOptions {
   stopIfRunning?: boolean; // Stop the component first if it's running (default: false)
 }
 
+// Options for manually starting a component
+interface StartComponentOptions {
+  allowOptionalDependencies?: boolean; // Allow starting even if optional dependencies aren't running
+  allowRequiredDependencies?: boolean; // Allow starting even if required dependencies aren't running (explicit override)
+  allowDuringBulkStartup?: boolean; // Allow starting during startAllComponents() (default: false)
+}
+
 // Signal broadcast result (for reload/info/debug)
 interface SignalBroadcastResult {
   signal: 'reload' | 'info' | 'debug';
@@ -673,8 +724,8 @@ The LifecycleManager uses a consistent pattern for error handling:
 | `startAllComponents()`     | `Promise<StartupResult>`             | Optional component failed, stalled components exist |
 | `stopAllComponents()`      | `Promise<ShutdownResult>`            | Components stalled                                  |
 | `sendMessageToComponent()` | `Promise<MessageResult>`             | Component not found, not running, handler error     |
-| `registerComponent()`      | `RegisterComponentResult`            | Duplicate name, during shutdown                     |
-| `insertComponentAt()`      | `InsertComponentAtResult`            | Target not found, duplicate name, during shutdown   |
+| `registerComponent()`      | `Promise<RegisterComponentResult>`   | Duplicate name, during shutdown                     |
+| `insertComponentAt()`      | `Promise<InsertComponentAtResult>`   | Target not found, duplicate name, during shutdown   |
 | `unregisterComponent()`    | `Promise<UnregisterComponentResult>` | Not found, running without stopIfRunning            |
 
 **Throw errors** only for programmer mistakes (bugs in calling code) outside lifecycle operations:
@@ -842,24 +893,30 @@ export class LifecycleManager extends EventEmitter {
   constructor(options: LifecycleManagerOptions);
 
   // Component registration
-  public registerComponent(
+  public async registerComponent(
     component: BaseComponent,
     options?: RegisterOptions,
-  ): boolean;
-  public insertComponentAt(
+  ): Promise<RegisterComponentResult>;
+  public async insertComponentAt(
     component: BaseComponent,
     position: InsertPosition,
     target?: string,
     options?: RegisterOptions,
-  ): boolean;
+  ): Promise<InsertComponentAtResult>;
   public unregisterComponent(
     name: string,
     options?: UnregisterOptions,
   ): Promise<boolean>;
 
   // Component lifecycle (all return result objects)
-  public async startComponent(name: string): Promise<ComponentOperationResult>;
-  public async stopComponent(name: string): Promise<ComponentOperationResult>;
+  public async startComponent(
+    name: string,
+    options?: StartComponentOptions,
+  ): Promise<ComponentOperationResult>;
+  public async stopComponent(
+    name: string,
+    options?: StopComponentOptions,
+  ): Promise<ComponentOperationResult>;
   public async restartComponent(
     name: string,
   ): Promise<ComponentOperationResult>;
@@ -1358,6 +1415,7 @@ for (const status of allStatuses) {
 ## Testing Strategy
 
 The LifecycleManager has comprehensive test coverage with 229+ passing unit tests covering all features:
+
 - Component registration and lifecycle operations
 - Dependency management and topological ordering
 - Optional components and failure handling

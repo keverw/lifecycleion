@@ -366,57 +366,45 @@ src/lib/lifecycle-manager/
 
 ---
 
-## Phase 8: AutoStart & Final Polish (0.5 day)
+## ~~Phase 8: AutoStart & Final Polish~~ ✅ **COMPLETED**
 
-### Status: NOT STARTED
+**Implemented functionality:**
 
-**What's already done (Phases 1-7):**
-- ✅ Optional components (failedOptionalComponents tracking, dependency skipping)
-- ✅ Stalled component restart blocking (ignoreStalledComponents option)
-- ✅ Status tracking (shutdownMethod, shutdownStartTime, shutdownDuration)
-- ✅ Most events (component:start-skipped, component:start-failed-optional)
+- ✅ AutoStart on registration with `options.autoStart`
+  - Fire-and-forget when manager is running (`isStarted: true`)
+  - Fire-and-forget with bypass during bulk startup (`isStarting: true`)
+  - Deferred to `startAllComponents()` when manager is idle
+  - Graceful error handling (logs but doesn't throw)
+- ✅ Bypass parameter for `startComponent()` (`_bypassBulkOperationCheck`)
+  - Allows AutoStart to work during bulk operations
+  - Private parameter, not exposed in public API
+- ✅ Event consolidation and metadata enrichment:
+  - Removed separate `component:unregistered-during-shutdown` event
+  - Added `duringShutdown?: boolean` to `component:unregistered` event
+  - Added `duringStartup?: boolean` and `autoStarted?: boolean` to `component:registered` event
+  - Added same metadata fields to all registration result objects
+- ✅ Event emission when unregistration is attempted during shutdown (blocked but event includes flag)
 
-### Implement
+**Test results:** ✅ All 246 tests passing (1039 assertions) - includes 11 new Phase 8 tests
+**Build:** ✅ No TypeScript errors, clean build
 
-**AutoStart on registration** (main remaining feature):
+**Phase 8 Tests Added (11 tests):**
 
-- In `registerComponentInternal()`:
-  - Use the `options?.autoStart` parameter (currently unused)
-  - If `autoStart: true` and manager state allows starting:
-    - **After startup (`isStarted`)**: Call `startComponent()` directly - it already handles all validation
-    - **During startup (`isStarting`)**: Call `startComponentInternal()` with internal bypass flag
-    - **During shutdown**: Already blocked by registration check
-  
-- Modify `startComponentInternal()`:
-  - Add optional internal-only parameter (e.g., `_bypassBulkOperationCheck?: boolean`)
-  - When `true`, skip the `isStarting`/`isShuttingDown` checks in the caller (`startComponent()`)
-  - This keeps all validation logic in one place while allowing AutoStart during bulk operations
-  
-- `startComponent()` / `startComponentInternal()` already handles:
-  - ✅ Dependency validation (exists and running)
-  - ✅ Failure handling (timeouts, errors, state management)
-  - ✅ Appropriate error codes (missing_dependency, dependency_not_running, etc.)
-  - ✅ Shutdown blocking (when bypass not used)
-  
-- Implementation approach: Secondary private options pattern (not exposed in public API)
+- ✅ AutoStart disabled by default
+- ✅ AutoStart behavior when manager is idle (deferred)
+- ✅ AutoStart when manager is running (immediate fire-and-forget)
+- ✅ AutoStart during bulk startup (immediate with bypass)
+- ✅ Registration events include autoStarted metadata
+- ✅ AutoStart failure handling (graceful, doesn't throw)
+- ✅ AutoStart with missing dependencies (graceful failure)
+- ✅ Unregistration during shutdown (blocked, event flag set)
+- ✅ Registration during startup includes duringStartup flag
+- ✅ Result objects include metadata fields
 
-**Dynamic removal during shutdown event**:
+**API improvements:**
 
-- In `unregisterComponent()`:
-  - Add `component:unregistered-during-shutdown` event emission
-  - This event is defined in events.ts but never emitted
-
-### Tests
-
-- AutoStart before/during/after startup
-- AutoStart during shutdown rejected (already works)
-- AutoStart with missing dependencies
-- AutoStart with dependencies not running
-
-### Documentation
-
-- AutoStart nuances in PRD examples
-- Update any remaining references
+- Consolidated events with metadata flags instead of separate event types
+- Better observability with duringStartup and autoStarted metadata
 
 ---
 

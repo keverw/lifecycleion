@@ -140,11 +140,11 @@ export class LifecycleManager
   /**
    * Register a component at the end of the registry list.
    */
-  public registerComponent(
+  public async registerComponent(
     component: BaseComponent,
     options?: RegisterOptions,
-  ): RegisterComponentResult {
-    const result = this.registerComponentInternal(
+  ): Promise<RegisterComponentResult> {
+    const result = await this.registerComponentInternal(
       component,
       'end',
       undefined,
@@ -163,6 +163,9 @@ export class LifecycleManager
       registrationIndexBefore: result.registrationIndexBefore,
       registrationIndexAfter: result.registrationIndexAfter,
       startupOrder: result.startupOrder,
+      duringStartup: result.duringStartup,
+      autoStarted: result.autoStarted,
+      startResult: result.startResult,
     };
   }
 
@@ -174,13 +177,13 @@ export class LifecycleManager
    * - Dependencies may override this preference; the result object includes `startupOrder`
    *   and `manualPositionRespected` so callers can see if the request was achievable.
    */
-  public insertComponentAt(
+  public async insertComponentAt(
     component: BaseComponent,
     position: InsertPosition,
     targetComponentName?: string,
     options?: RegisterOptions,
-  ): InsertComponentAtResult {
-    return this.registerComponentInternal(
+  ): Promise<InsertComponentAtResult> {
+    return await this.registerComponentInternal(
       component,
       position,
       targetComponentName,
@@ -334,7 +337,7 @@ export class LifecycleManager
     this.runningComponents.delete(name);
 
     this.logger.entity(name).info('Component unregistered');
-    this.lifecycleEvents.componentUnregistered(name);
+    this.lifecycleEvents.componentUnregistered(name, false);
 
     return {
       success: true,
@@ -798,10 +801,16 @@ export class LifecycleManager
           };
         }
 
-        // Start the component (using internal method to bypass bulk operation check)
-        const result = await this.startComponentInternal(name);
+        // Start the component (allow during bulk startup since we ARE the bulk operation)
+        const result = await this.startComponentInternal(name, {
+          allowDuringBulkStartup: true,
+        });
 
         if (result.success) {
+          startedComponents.push(name);
+        } else if (result.code === 'component_already_running') {
+          // Component is already running - this is fine (might have been started manually)
+          // Add to startedComponents so it's tracked as part of this bulk operation
           startedComponents.push(name);
         } else {
           // Check if component is optional
@@ -932,35 +941,6 @@ export class LifecycleManager
     name: string,
     options?: StartComponentOptions,
   ): Promise<ComponentOperationResult> {
-    // Reject during bulk operations
-    if (this.isStarting) {
-      this.logger
-        .entity(name)
-        .warn('Cannot start component during bulk startup', {
-          params: { isStarting: this.isStarting },
-        });
-
-      return {
-        success: false,
-        componentName: name,
-        reason: 'Bulk startup in progress',
-        code: 'shutdown_in_progress', // Reuse this code for any bulk operation
-      };
-    }
-
-    if (this.isShuttingDown) {
-      this.logger.entity(name).warn('Cannot start component during shutdown', {
-        params: { isShuttingDown: this.isShuttingDown },
-      });
-
-      return {
-        success: false,
-        componentName: name,
-        reason: 'Shutdown in progress',
-        code: 'shutdown_in_progress',
-      };
-    }
-
     return this.startComponentInternal(name, options);
   }
 
@@ -1856,13 +1836,13 @@ export class LifecycleManager
    * Internal method that handles component registration logic.
    * Used by both registerComponent and insertComponentAt.
    */
-  private registerComponentInternal(
+  private async registerComponentInternal(
     component: BaseComponent,
     position: InsertPosition,
     targetComponentName?: string,
     isInsertAction = false,
     _options?: RegisterOptions,
-  ): InsertComponentAtResult {
+  ): Promise<InsertComponentAtResult> {
     const componentName = component.getName();
     const registrationIndexBefore = this.getComponentIndex(componentName);
 
@@ -2064,6 +2044,9 @@ export class LifecycleManager
           requestedPosition: { position, targetComponentName },
           manualPositionRespected: false,
           targetFound: false,
+          duringStartup: this.isStarting,
+          autoStarted: false,
+          startResult: undefined,
         };
       }
 
@@ -2174,6 +2157,32 @@ export class LifecycleManager
         });
       }
 
+      // Determine if auto-start will be attempted
+      const willAutoStart =
+        _options?.autoStart === true && (this.isStarted || this.isStarting);
+
+      // Handle AutoStart if requested and capture result
+      let startResult: ComponentOperationResult | undefined;
+
+      if (_options?.autoStart === true) {
+        if (this.isStarted) {
+          // Manager is already running - start the component directly
+          this.logger
+            .entity(componentName)
+            .info('AutoStart: starting component (manager is running)');
+          startResult = await this.startComponentInternal(componentName);
+        } else if (this.isStarting) {
+          // Manager is currently starting - allow during bulk startup
+          this.logger
+            .entity(componentName)
+            .info('AutoStart: starting component (during bulk startup)');
+          startResult = await this.startComponentInternal(componentName, {
+            allowDuringBulkStartup: true,
+          });
+        }
+        // If not started or starting, component will be started when startAllComponents() is called
+      }
+
       // Emit registration event
       this.lifecycleEvents.componentRegistered({
         name: componentName,
@@ -2187,6 +2196,8 @@ export class LifecycleManager
           : undefined,
         manualPositionRespected: isManualPositionRespected,
         targetFound: isTargetFound,
+        duringStartup: this.isStarting,
+        autoStarted: willAutoStart,
       });
 
       return {
@@ -2200,6 +2211,9 @@ export class LifecycleManager
         requestedPosition: { position, targetComponentName },
         manualPositionRespected: isManualPositionRespected,
         targetFound: isTargetFound,
+        duringStartup: this.isStarting,
+        autoStarted: willAutoStart,
+        startResult,
       };
     } catch (error) {
       // Handle unexpected errors during registration
@@ -2247,6 +2261,9 @@ export class LifecycleManager
         manualPositionRespected: false,
         targetFound:
           position === 'before' || position === 'after' ? false : undefined,
+        duringStartup: this.isStarting,
+        autoStarted: false,
+        startResult: undefined,
       };
     }
   }
@@ -2370,6 +2387,37 @@ export class LifecycleManager
     name: string,
     options?: StartComponentOptions,
   ): Promise<ComponentOperationResult> {
+    // ALWAYS reject during shutdown (never bypass this check)
+    if (this.isShuttingDown) {
+      this.logger.entity(name).warn('Cannot start component during shutdown', {
+        params: { isShuttingDown: this.isShuttingDown },
+      });
+
+      return {
+        success: false,
+        componentName: name,
+        reason: 'Shutdown in progress',
+        code: 'shutdown_in_progress',
+      };
+    }
+
+    // Reject during bulk startup (unless allowDuringBulkStartup is enabled)
+    const allowDuringBulkStartup = options?.allowDuringBulkStartup === true;
+    if (!allowDuringBulkStartup && this.isStarting) {
+      this.logger
+        .entity(name)
+        .warn('Cannot start component during bulk startup', {
+          params: { isStarting: this.isStarting },
+        });
+
+      return {
+        success: false,
+        componentName: name,
+        reason: 'Bulk startup in progress',
+        code: 'shutdown_in_progress', // Reuse this code for any bulk operation
+      };
+    }
+
     const allowOptionalDependencies =
       options?.allowOptionalDependencies === true;
     const allowRequiredDependencies =
@@ -3283,6 +3331,9 @@ export class LifecycleManager
       },
       manualPositionRespected: false,
       targetFound: input.targetFound,
+      duringStartup: this.isStarting,
+      autoStarted: false,
+      startResult: undefined,
     };
   }
 

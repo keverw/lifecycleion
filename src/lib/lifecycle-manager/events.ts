@@ -14,7 +14,7 @@ import type {
 import type { ShutdownSignal } from '../process-signal-manager';
 
 export interface LifecycleManagerEventMap {
-  'component:unregistered': { name: string };
+  'component:unregistered': { name: string; duringShutdown?: boolean };
   'component:start-skipped': { name: string; reason: string };
   'component:start-failed-optional': { name: string; error?: Error };
   'lifecycle-manager:started': {
@@ -98,6 +98,8 @@ export interface LifecycleManagerEventMap {
     requestedPosition?: InsertComponentAtResult['requestedPosition'];
     manualPositionRespected?: boolean;
     targetFound?: boolean;
+    duringStartup?: boolean;
+    autoStarted?: boolean;
   };
   'lifecycle-manager:shutdown-initiated': {
     method: ShutdownMethod;
@@ -181,8 +183,14 @@ export type LifecycleManagerEmit = <K extends LifecycleManagerEventName>(
 export class LifecycleManagerEvents {
   constructor(private readonly emit: LifecycleManagerEmit) {}
 
-  public componentUnregistered(name: string): void {
-    this.emit('component:unregistered', { name });
+  public componentUnregistered(
+    name: string,
+    wasDuringShutdown?: boolean,
+  ): void {
+    this.emit('component:unregistered', {
+      name,
+      duringShutdown: wasDuringShutdown,
+    });
   }
 
   public componentStartSkipped(name: string, reason: string): void {
@@ -339,6 +347,8 @@ export class LifecycleManagerEvents {
     requestedPosition?: InsertComponentAtResult['requestedPosition'];
     manualPositionRespected?: boolean;
     targetFound?: boolean;
+    duringStartup?: boolean;
+    autoStarted?: boolean;
   }): void {
     this.emit('component:registered', input);
   }

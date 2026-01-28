@@ -145,6 +145,18 @@ export interface StartComponentOptions {
    * This is an explicit override that bypasses normal dependency checks.
    */
   allowRequiredDependencies?: boolean;
+
+  /**
+   * If true, allow starting a component during bulk startup (startAllComponents).
+   * By default, startComponent() is blocked during bulk operations to prevent
+   * interference with dependency ordering. However, if the component's dependencies
+   * are already running, this option allows you to start it dynamically.
+   *
+   * Note: Starting during shutdown is NEVER allowed, regardless of this option.
+   *
+   * Default: false
+   */
+  allowDuringBulkStartup?: boolean;
 }
 
 /**
@@ -687,6 +699,15 @@ export interface RegistrationResultBase extends BaseOperationResult {
 
   /** Resolved startup order after applying dependency constraints */
   startupOrder: string[];
+
+  /** Whether registration occurred during startup */
+  duringStartup?: boolean;
+
+  /** Whether the component was auto-started after registration */
+  autoStarted?: boolean;
+
+  /** Result of auto-start operation (only present when autoStarted is true) */
+  startResult?: ComponentOperationResult;
 }
 
 /**
