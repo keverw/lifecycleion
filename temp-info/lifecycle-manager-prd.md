@@ -647,13 +647,14 @@ unregisterComponent(name: string, options?: UnregisterOptions)
 
 Query methods follow consistent naming conventions:
 
-| Pattern       | Usage                       | Examples               |
-| ------------- | --------------------------- | ---------------------- |
-| `hasX()`      | Boolean check for existence | `hasComponent()`       |
-| `isX()`       | Boolean check for state     | `isComponentRunning()` |
-| `getX()`      | Retrieve object/value       | `getComponentStatus()` |
-| `getXs()`     | Retrieve collection         | `getComponentNames()`  |
-| `getXCount()` | Count items                 | `getComponentCount()`  |
+| Pattern          | Usage                       | Examples                    |
+| ---------------- | --------------------------- | --------------------------- |
+| `hasX()`         | Boolean check for existence | `hasComponent()`            |
+| `isX()`          | Boolean check for state     | `isComponentRunning()`      |
+| `getX()`         | Retrieve single object      | `getComponentStatus()`      |
+| `getAllX()`      | Retrieve all items          | `getAllComponentStatuses()` |
+| `getXNames()`    | Retrieve name collection    | `getComponentNames()`       |
+| `getXCount()`    | Count items                 | `getComponentCount()`       |
 
 ### Async/Sync Patterns
 
@@ -661,9 +662,9 @@ The API clearly separates synchronous and asynchronous operations:
 
 **Synchronous (Immediate):**
 - All query methods: `hasComponent()`, `getComponentStatus()`, `getValue()`, etc.
-- Registration: `registerComponent()`, `insertComponentAt()` (but return promises for autoStart)
 
 **Asynchronous (Must await):**
+- Registration: `registerComponent()`, `insertComponentAt()` (async for autoStart support)
 - All lifecycle operations: `startComponent()`, `stopComponent()`, `restartComponent()`
 - Unregistration (may stop component): `unregisterComponent()`
 - Bulk operations: `startAllComponents()`, `stopAllComponents()`
@@ -671,7 +672,7 @@ The API clearly separates synchronous and asynchronous operations:
 - Health checks: `checkComponentHealth()`, `checkAllHealth()`
 - Signal triggers: `triggerReload()`, `triggerInfo()`, `triggerDebug()`
 
-**Rule of thumb:** If it **changes component state** (starting/stopping) or **awaits external operations**, it's async.
+**Rule of thumb:** If it **changes component state** (starting/stopping), **awaits external operations**, or **may trigger async side effects**, it's async.
 
 ### Type Naming Conventions
 

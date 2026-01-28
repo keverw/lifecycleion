@@ -450,8 +450,8 @@ src/lib/lifecycle-manager/
 ### Key Findings (All Positive)
 
 1. **Result Object Pattern**: All operations consistently return result objects extending `BaseOperationResult`
-2. **Error Handling**: Only `BaseComponent` constructor throws exceptions; all other methods return results
-3. **Query Methods**: Consistent naming (`hasX`, `isX`, `getX`, `getXCount`)
+2. **Error Handling**: Only `BaseComponent` constructor throws exceptions (for name validation); all lifecycle operations return result objects
+3. **Query Methods**: Consistent naming (`hasX`, `isX`, `getX`, `getXCount`, `getAllX`)
 4. **Async/Sync Split**: Clear separation - lifecycle changes are async, queries are sync
 5. **Event System**: Well-structured with typed payloads via `LifecycleManagerEvents` class
 6. **Options Pattern**: All methods use trailing options parameters for extensibility
