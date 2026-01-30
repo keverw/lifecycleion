@@ -1,16 +1,5 @@
-# Dependencies
-node_modules/
-.pnp/
-.pnp.js
-
-# Build outputs
-dist/
-
-# Bun
-bun.lockb
-
 # Logs
-logs/
+logs
 *.log
 npm-debug.log*
 yarn-debug.log*
@@ -18,8 +7,20 @@ yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
 
+# Dependencies
+node_modules
+
+# Package manager lockfiles
+# This project uses Bun - ignore npm/yarn/pnpm lockfiles to avoid confusion
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+# Ignore Bun's binary lockfile (bun.lock JSON format is preferred and should be committed)
+bun.lockb
+
 # Environment variables
 # Keep secrets out of source control! Document required variables in README or create .env.example
+*.local
 .env
 .env.local
 .env.*.local
@@ -30,17 +31,23 @@ lerna-debug.log*
 
 # Build outputs
 dist/
+coverage/
+.nyc_output/
+*.tsbuildinfo
+.eslintcache
 
 # Editor directories and files
-.idea/
 .vscode/*
 !.vscode/extensions.json
 !.vscode/settings.json
-*.swp
-*.swo
-*.sw?
+.idea
+.DS_Store
+Thumbs.db
 *.suo
 *.ntvs*
 *.njsproj
 *.sln
-.DS_Store
+*.sw?
+
+# Temporary files
+tmp/
