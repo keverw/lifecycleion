@@ -462,7 +462,7 @@ src/lib/lifecycle-manager/
 
 ---
 
-## Phase 10: Integration Tests & Test Consolidation (1.5 days)
+## ~~Phase 10: Integration Tests & Test Consolidation (1.5 days)~~ ✅ **COMPLETED**
 
 ### Goals
 
@@ -470,29 +470,55 @@ src/lib/lifecycle-manager/
 - Consolidate unit tests that were split by phase into a clearer, feature-based structure
 - Prune redundant or legacy references created during phased delivery
 
-### Tasks
+### Completed Tasks
 
 **Integration tests** (`lifecycle-manager.integration.test.ts`):
 
-- Multi-component with complex dependencies (mock DB, cache, web server, API)
-- Full signal handling
-- Shutdown during startup with real components
-- Optional/required mixes
-- Health monitoring workflows
+- ✅ Multi-component application stack with complex dependencies (mock DB, cache, web server, API)
+- ✅ Diamond dependency pattern handling
+- ✅ Optional component failure handling
+- ✅ Full signal handling (reload, info, debug)
+- ✅ Custom signal callbacks
+- ✅ Shutdown during startup scenarios
+- ✅ Stalled component tracking and restart blocking
+- ✅ Graceful and force shutdown phases
+- ✅ Health monitoring workflows (individual and aggregate)
+- ✅ Component messaging (send, broadcast, error handling)
+- ✅ Value sharing between components
+- ✅ Dynamic component management (runtime add/remove/restart)
+- ✅ Full application lifecycle test (startup → health → reload → restart → shutdown)
 
-> **Tip**: Integration tests use mock components—classes extending `BaseComponent` that simulate services without real connections. No actual database or network calls needed.
+**Mock components** (`test-components.ts`):
+
+- ✅ `TestComponent` - Basic test component
+- ✅ `MockDatabaseComponent` - Simulated database with connection pool
+- ✅ `MockCacheComponent` - Simulated cache (optional dependency support)
+- ✅ `MockWebServerComponent` - Simulated web server with shutdown warning
+- ✅ `MockApiComponent` - Simulated API with signal handlers
+- ✅ `MockWorkerComponent` - Background worker with abort support
+- ✅ `SlowStartComponent` - For timeout testing
+- ✅ `SlowStopComponent` - For shutdown testing
+- ✅ `FailingStartComponent` - For startup failure testing
+- ✅ `FailingStopComponent` - For stop failure testing
+- ✅ `ReloadableComponent` - For reload signal testing
+- ✅ `ConfigurableHealthComponent` - For health check testing
+- ✅ `MessagingComponent` - For message handling testing
 
 **Test consolidation**:
 
-- Merge or regroup phase-specific `describe()` blocks into feature-focused sections
-- Deduplicate overlapping assertions
-- Add a short "test map" comment at the top of `lifecycle-manager.test.ts` if needed
+- ✅ Renamed phase-specific `describe()` blocks to feature-focused names:
+  - `Phase 1: Foundation` → `BaseComponent`
+  - `Phase 2: Core Registration & Individual Lifecycle` → `Registration & Individual Lifecycle`
+  - `Phase 3: Bulk Operations` → `Bulk Operations`
+  - `Phase 4: Dependency Management` → `Dependency Management`
+  - `Phase 5: Multi-Phase Shutdown` → `Multi-Phase Shutdown`
+  - `Phase 6: Signal Integration` → `Signal Integration`
+  - `Phase 7: Messaging, Health, Values` → `Messaging, Health & Values`
+  - `Phase 8: AutoStart` → `AutoStart & Registration Metadata`
+- ✅ No leftover phase markers in test file organization
 
-### Success Criteria
-
-- Integration tests pass
-- Unit tests read as a single, coherent suite without phase scaffolding
-- No leftover phase markers in tests or test file organization
+**Test results:** ✅ All 277 tests passing (251 unit tests + 26 integration tests, 1208 assertions)
+**Build:** ✅ No TypeScript errors
 
 ---
 

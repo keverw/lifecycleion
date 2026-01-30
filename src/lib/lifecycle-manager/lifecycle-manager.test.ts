@@ -44,7 +44,7 @@ const requireDefined = <T>(value: T | null | undefined, label: string): T => {
   return value;
 };
 
-describe('LifecycleManager - Phase 1: Foundation', () => {
+describe('LifecycleManager - BaseComponent', () => {
   let logger: Logger;
   let arraySink: ArraySink;
 
@@ -672,7 +672,7 @@ describe('LifecycleManager - Phase 1: Foundation', () => {
   });
 });
 
-describe('LifecycleManager - Phase 2: Core Registration & Individual Lifecycle', () => {
+describe('LifecycleManager - Registration & Individual Lifecycle', () => {
   let logger: Logger;
   let arraySink: ArraySink;
 
@@ -2123,7 +2123,7 @@ describe('LifecycleManager - Phase 2: Core Registration & Individual Lifecycle',
   });
 });
 
-describe('LifecycleManager - Phase 3: Bulk Operations', () => {
+describe('LifecycleManager - Bulk Operations', () => {
   let logger: Logger;
   let arraySink: ArraySink;
 
@@ -3174,7 +3174,7 @@ describe('LifecycleManager - Phase 3: Bulk Operations', () => {
     });
   });
 
-  describe('Phase 4: Dependency Management', () => {
+  describe('Dependency Management', () => {
     test('should start components in topological order (linear dependencies)', async () => {
       const lifecycle = new LifecycleManager({ logger });
       const startOrder: string[] = [];
@@ -3719,7 +3719,7 @@ describe('LifecycleManager - Phase 3: Bulk Operations', () => {
 // Phase 5: Multi-Phase Shutdown
 // ============================================================================
 
-describe('LifecycleManager - Phase 5: Multi-Phase Shutdown', () => {
+describe('LifecycleManager - Multi-Phase Shutdown', () => {
   let logger: Logger;
   let arraySink: ArraySink;
 
@@ -4417,7 +4417,7 @@ describe('LifecycleManager - Phase 5: Multi-Phase Shutdown', () => {
   });
 });
 
-describe('LifecycleManager - Phase 6: Signal Integration', () => {
+describe('LifecycleManager - Signal Integration', () => {
   let logger: Logger;
 
   beforeEach(() => {
@@ -5128,7 +5128,7 @@ describe('LifecycleManager - Phase 6: Signal Integration', () => {
   });
 });
 
-describe('LifecycleManager - Phase 7: Messaging, Health, Values', () => {
+describe('LifecycleManager - Messaging, Health & Values', () => {
   let logger: Logger;
 
   beforeEach(() => {
@@ -6404,7 +6404,7 @@ describe('LifecycleManager - Phase 7: Messaging, Health, Values', () => {
   });
 });
 
-describe('LifecycleManager - Phase 8: AutoStart', () => {
+describe('LifecycleManager - AutoStart & Registration Metadata', () => {
   let logger: Logger;
   let arraySink: ArraySink;
 
