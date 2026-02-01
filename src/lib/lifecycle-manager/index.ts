@@ -34,6 +34,7 @@ export type {
   ComponentOperationFailureCode,
   StartComponentOptions,
   StopComponentOptions,
+  StopAllOptions,
   RestartComponentOptions,
   UnregisterComponentResult,
   UnregisterFailureCode,

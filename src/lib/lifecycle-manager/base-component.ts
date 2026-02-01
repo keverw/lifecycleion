@@ -4,6 +4,7 @@ import type {
   ComponentOptions,
   ComponentHealthResult,
   ComponentLifecycleRef,
+  ComponentValueResult,
 } from './types';
 import { InvalidComponentNameError } from './errors';
 
@@ -308,22 +309,25 @@ export abstract class BaseComponent {
    * Optional value provider - return values on-demand for other components
    *
    * Called when other components or external code request a value by key.
-   * Return undefined if key not found.
+   * Return a structured result indicating if the value was found.
    *
    * @param key - The value key being requested
    * @param from - Component name if another component requested, null if external
-   * @returns The value, or undefined if key not found
+   * @returns Structured result with found status and value
    *
    * @example
    * ```typescript
-   * getValue(key: string, from: string | null): unknown {
-   *   if (key === 'pool') return this.pool;
-   *   if (key === 'config') return this.config;
-   *   return undefined; // Key not found
+   * getValue(key: string, from: string | null): ComponentValueResult {
+   *   if (key === 'pool') return { found: true, value: this.pool };
+   *   else if (key === 'config') return { found: true, value: this.config };
+   *   return { found: false, value: undefined }; // Key not found
    * }
    * ```
    */
-  public getValue?(key: string, from: string | null): unknown;
+  public getValue?<T = unknown>(
+    key: string,
+    from: string | null,
+  ): ComponentValueResult<T>;
 
   /**
    * Get component name

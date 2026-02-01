@@ -8,6 +8,7 @@ import type {
   LifecycleSignalStatus,
   RestartComponentOptions,
   RestartResult,
+  RestartAllOptions,
   ShutdownResult,
   SignalBroadcastResult,
   StartComponentOptions,
@@ -15,6 +16,7 @@ import type {
   StartupOrderResult,
   StartupResult,
   StopComponentOptions,
+  StopAllOptions,
   SystemState,
   MessageResult,
   BroadcastResult,
@@ -122,12 +124,12 @@ export class ComponentLifecycle implements ComponentLifecycleRef {
     return this.manager.startAllComponents(options);
   }
 
-  public stopAllComponents(): Promise<ShutdownResult> {
-    return this.manager.stopAllComponents();
+  public stopAllComponents(options?: StopAllOptions): Promise<ShutdownResult> {
+    return this.manager.stopAllComponents(options);
   }
 
   public restartAllComponents(
-    options?: StartupOptions,
+    options?: RestartAllOptions,
   ): Promise<RestartResult> {
     return this.manager.restartAllComponents(options);
   }

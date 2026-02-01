@@ -6,9 +6,10 @@
  * health checks, messaging, and signal handling.
  */
 
-import type { Logger } from '../logger';
-import { ArraySink } from '../logger/sinks/array';
-import type { ComponentHealthResult } from './types';
+import { Logger } from '../logger';
+import { ArraySink } from '../logger/sinks';
+import { sleep } from '../sleep';
+import type { ComponentHealthResult, ComponentValueResult } from './types';
 import { BaseComponent } from './base-component';
 
 // cspell:ignore Reloadable
@@ -49,7 +50,7 @@ export class MockDatabaseComponent extends BaseComponent {
 
   public async start(): Promise<void> {
     // Simulate connection delay
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    await sleep(10);
     this.connected = true;
     this.connectionCount = 5;
     this.logger.info('Database connected');
@@ -57,7 +58,7 @@ export class MockDatabaseComponent extends BaseComponent {
 
   public async stop(): Promise<void> {
     // Simulate graceful shutdown
-    await new Promise((resolve) => setTimeout(resolve, 5));
+    await sleep(5);
     this.connected = false;
     this.connectionCount = 0;
     this.logger.info('Database disconnected');
@@ -66,19 +67,24 @@ export class MockDatabaseComponent extends BaseComponent {
   public healthCheck(): ComponentHealthResult {
     return {
       healthy: this.connected,
-      message: this.connected ? 'Database is connected' : 'Database is disconnected',
+      message: this.connected
+        ? 'Database is connected'
+        : 'Database is disconnected',
       details: { connectionCount: this.connectionCount },
     };
   }
 
-  public getValue(key: string): unknown {
+  public getValue<T = unknown>(
+    key: string,
+    _from: string | null,
+  ): ComponentValueResult<T> {
     if (key === 'connectionCount') {
-      return this.connectionCount;
+      return { found: true, value: this.connectionCount as T };
     }
     if (key === 'connected') {
-      return this.connected;
+      return { found: true, value: this.connected as T };
     }
-    return undefined;
+    return { found: false, value: undefined };
   }
 
   public query(sql: string): void {
@@ -103,7 +109,7 @@ export class MockCacheComponent extends BaseComponent {
   }
 
   public async start(): Promise<void> {
-    await new Promise((resolve) => setTimeout(resolve, 5));
+    await sleep(5);
     this.connected = true;
     this.logger.info('Cache connected');
   }
@@ -118,14 +124,20 @@ export class MockCacheComponent extends BaseComponent {
     return this.connected;
   }
 
-  public getValue(key: string): unknown {
+  public getValue<T = unknown>(
+    key: string,
+    _from: string | null,
+  ): ComponentValueResult<T> {
     if (key === 'connected') {
-      return this.connected;
+      return { found: true, value: this.connected as T };
     }
     if (key === 'size') {
-      return this.cache.size;
+      return { found: true, value: this.cache.size as T };
     }
-    return this.cache.get(key);
+    const value = this.cache.get(key);
+    return value !== undefined
+      ? { found: true, value: value as T }
+      : { found: false, value: undefined };
   }
 
   public set(key: string, value: unknown): void {
@@ -155,7 +167,7 @@ export class MockWebServerComponent extends BaseComponent {
   }
 
   public async start(): Promise<void> {
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    await sleep(10);
     this.listening = true;
     this.port = 3000;
     this.logger.info('Web server listening on port 3000');
@@ -163,14 +175,16 @@ export class MockWebServerComponent extends BaseComponent {
 
   public async stop(): Promise<void> {
     // Simulate draining connections
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    await sleep(10);
     this.listening = false;
     this.port = 0;
     this.logger.info('Web server stopped');
   }
 
   public onShutdownWarning(): void {
-    this.logger.info('Web server received shutdown warning - stopping new connections');
+    this.logger.info(
+      'Web server received shutdown warning - stopping new connections',
+    );
   }
 
   public onReload(): void {
@@ -180,22 +194,27 @@ export class MockWebServerComponent extends BaseComponent {
   public healthCheck(): ComponentHealthResult {
     return {
       healthy: this.listening,
-      message: this.listening ? `Listening on port ${this.port}` : 'Not listening',
+      message: this.listening
+        ? `Listening on port ${this.port}`
+        : 'Not listening',
       details: { port: this.port, requestCount: this.requestCount },
     };
   }
 
-  public getValue(key: string): unknown {
+  public getValue<T = unknown>(
+    key: string,
+    _from: string | null,
+  ): ComponentValueResult<T> {
     if (key === 'port') {
-      return this.port;
+      return { found: true, value: this.port as T };
     }
     if (key === 'listening') {
-      return this.listening;
+      return { found: true, value: this.listening as T };
     }
     if (key === 'requestCount') {
-      return this.requestCount;
+      return { found: true, value: this.requestCount as T };
     }
-    return undefined;
+    return { found: false, value: undefined };
   }
 }
 
@@ -209,7 +228,10 @@ export class MockAPIComponent extends BaseComponent {
   public debugCallCount = 0;
   public messages: Array<{ payload: unknown; from: string | null }> = [];
 
-  constructor(logger: Logger, dependencies: string[] = ['web-server', 'cache']) {
+  constructor(
+    logger: Logger,
+    dependencies: string[] = ['web-server', 'cache'],
+  ) {
     super(logger, {
       name: 'api',
       dependencies,
@@ -218,7 +240,7 @@ export class MockAPIComponent extends BaseComponent {
   }
 
   public async start(): Promise<void> {
-    await new Promise((resolve) => setTimeout(resolve, 5));
+    await sleep(5);
     this.ready = true;
     this.logger.info('API service ready');
   }
@@ -243,23 +265,30 @@ export class MockAPIComponent extends BaseComponent {
     this.logger.info('API debug requested');
   }
 
-  public onMessage(payload: unknown, from: string | null): { received: true } {
+  public onMessage<TData = unknown>(
+    payload: unknown,
+    from: string | null,
+  ): TData {
+    const result = { received: true } as TData;
     this.messages.push({ payload, from });
-    return { received: true };
+    return result;
   }
 
   public healthCheck(): boolean {
     return this.ready;
   }
 
-  public getValue(key: string): unknown {
+  public getValue<T = unknown>(
+    key: string,
+    _from: string | null,
+  ): ComponentValueResult<T> {
     if (key === 'ready') {
-      return this.ready;
+      return { found: true, value: this.ready as T };
     }
     if (key === 'reloadCount') {
-      return this.reloadCount;
+      return { found: true, value: this.reloadCount as T };
     }
-    return undefined;
+    return { found: false, value: undefined };
   }
 }
 
@@ -271,7 +300,11 @@ export class MockWorkerComponent extends BaseComponent {
   public processedJobs = 0;
   private aborted = false;
 
-  constructor(logger: Logger, name = 'worker', dependencies: string[] = ['database']) {
+  constructor(
+    logger: Logger,
+    name = 'worker',
+    dependencies: string[] = ['database'],
+  ) {
     super(logger, {
       name,
       dependencies,
@@ -281,7 +314,7 @@ export class MockWorkerComponent extends BaseComponent {
 
   public async start(): Promise<void> {
     this.aborted = false;
-    await new Promise((resolve) => setTimeout(resolve, 5));
+    await sleep(5);
     this.running = true;
     this.logger.info('Worker started');
   }
@@ -326,7 +359,7 @@ export class SlowStartComponent extends BaseComponent {
   }
 
   public async start(): Promise<void> {
-    await new Promise((resolve) => setTimeout(resolve, this.startDuration));
+    await sleep(this.startDuration);
     this.started = true;
   }
 
@@ -356,7 +389,7 @@ export class SlowStopComponent extends BaseComponent {
   }
 
   public async stop(): Promise<void> {
-    await new Promise((resolve) => setTimeout(resolve, this.stopDuration));
+    await sleep(this.stopDuration);
     this.stopped = true;
   }
 }
@@ -367,7 +400,11 @@ export class SlowStopComponent extends BaseComponent {
 export class FailingStartComponent extends BaseComponent {
   public errorMessage: string;
 
-  constructor(logger: Logger, name = 'failing-start', errorMessage = 'Start failed') {
+  constructor(
+    logger: Logger,
+    name = 'failing-start',
+    errorMessage = 'Start failed',
+  ) {
     super(logger, { name });
     this.errorMessage = errorMessage;
   }
@@ -388,7 +425,11 @@ export class FailingStopComponent extends BaseComponent {
   public started = false;
   public errorMessage: string;
 
-  constructor(logger: Logger, name = 'failing-stop', errorMessage = 'Stop failed') {
+  constructor(
+    logger: Logger,
+    name = 'failing-stop',
+    errorMessage = 'Stop failed',
+  ) {
     super(logger, { name });
     this.errorMessage = errorMessage;
   }
@@ -456,7 +497,7 @@ export class ConfigurableHealthComponent extends BaseComponent {
 
   public async healthCheck(): Promise<ComponentHealthResult> {
     if (this.healthCheckDelay > 0) {
-      await new Promise((resolve) => setTimeout(resolve, this.healthCheckDelay));
+      await sleep(this.healthCheckDelay);
     }
     if (this.healthCheckError) {
       throw this.healthCheckError;
@@ -489,12 +530,15 @@ export class MessagingComponent extends BaseComponent {
     this.running = false;
   }
 
-  public onMessage(payload: unknown, from: string | null): unknown {
+  public onMessage<TData = unknown>(
+    payload: unknown,
+    from: string | null,
+  ): TData {
     if (this.messageError) {
       throw this.messageError;
     }
     this.messages.push({ payload, from });
-    return this.responseData;
+    return this.responseData as TData;
   }
 }
 
@@ -523,7 +567,7 @@ export async function waitFor(
     if (condition()) {
       return true;
     }
-    await new Promise((resolve) => setTimeout(resolve, interval));
+    await sleep(interval);
   }
   return condition();
 }

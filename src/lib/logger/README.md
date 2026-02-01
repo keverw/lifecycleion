@@ -1001,12 +1001,19 @@ interface LoggerOptions {
   sinks?: LogSink[]; // Output destinations
   redactFunction?: (keyName, value) => unknown; // Custom redaction (default: masks with asterisks using datamask)
   callProcessExit?: boolean; // Actually call process.exit() (default: true, disable for tests/browser)
-  beforeExitCallback?: (code, isFirst) => void | Promise<void>; // Hook called before exit (runs even if callProcessExit is false)
+  beforeExitCallback?: (
+    code,
+    isFirst,
+  ) => BeforeExitResult | Promise<BeforeExitResult>; // Hook called before exit, returns { action: 'proceed' | 'wait' }
   onSinkError?: (
     error: Error,
     context: 'write' | 'close',
     sink: LogSink,
   ) => void; // Handle sink errors (default: console.error)
+}
+
+interface BeforeExitResult {
+  action: 'proceed' | 'wait'; // 'proceed' to continue exit, 'wait' to prevent exit (e.g., shutdown in progress)
 }
 ```
 
@@ -1046,6 +1053,10 @@ This allows you to:
 When a log includes an `exitCode`, the logger will:
 
 1. Call `beforeExitCallback` (if provided) with the exit code
+   - Callback must return `{ action: 'proceed' }` to continue with exit
+   - Or return `{ action: 'wait' }` to prevent exit (e.g., shutdown already in progress)
+   - **If callback throws an error**, exit proceeds automatically to prevent hanging
+   - Errors are reported via the global `reportError` event
 2. Set `logger.didExit = true` and `logger.exitCode = <code>`
 3. Close all sinks
 4. Call `process.exit(code)` **only if** `callProcessExit: true` (default)

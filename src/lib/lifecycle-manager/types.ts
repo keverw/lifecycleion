@@ -135,12 +135,6 @@ export interface ComponentOperationResult extends BaseOperationResult {
 export interface StartComponentOptions {
   /**
    * If true, allow dependencies that are registered but not running
-   * when those dependencies are optional components.
-   */
-  allowOptionalDependencies?: boolean;
-
-  /**
-   * If true, allow dependencies that are registered but not running
    * even when those dependencies are required components (not optional).
    * This is an explicit override that bypasses normal dependency checks.
    */
@@ -207,9 +201,11 @@ export type ComponentOperationFailureCode =
   | 'component_already_starting'
   | 'component_already_stopping'
   | 'component_not_running'
+  | 'component_stalled'
   | 'missing_dependency'
   | 'dependency_not_running'
   | 'has_running_dependents'
+  | 'startup_in_progress'
   | 'shutdown_in_progress'
   | 'start_timeout'
   | 'stop_timeout'
@@ -272,6 +268,27 @@ export interface StartupResult {
 
   /** Present if stalled components blocked startup */
   blockedByStalledComponents?: string[];
+
+  /** Reason for failure (when success is false) */
+  reason?: string;
+
+  /** Error code (when success is false) */
+  code?:
+    | 'already_in_progress'
+    | 'shutdown_in_progress'
+    | 'dependency_cycle'
+    | 'stalled_components_exist'
+    | 'startup_timeout'
+    | 'unknown_error';
+
+  /** Error object (when success is false due to dependency cycle or unknown error) */
+  error?: Error;
+
+  /** Total startup duration in milliseconds */
+  durationMS?: number;
+
+  /** Present if startup timed out */
+  timedOut?: boolean;
 }
 
 /**
@@ -289,6 +306,27 @@ export interface ShutdownResult {
 
   /** How long shutdown took */
   durationMS: number;
+
+  /** True if shutdown exceeded the timeout and returned partial results */
+  timedOut?: boolean;
+
+  /** Reason for failure (when success is false) */
+  reason?: string;
+
+  /** Error code (when success is false) */
+  code?: 'already_in_progress';
+}
+
+/**
+ * Options for stopping all components
+ */
+export interface StopAllOptions {
+  /** Global timeout for entire shutdown process in milliseconds (default: 30000, 0 = disabled) */
+  timeoutMS?: number;
+  /** Retry stalled components during stopAllComponents (default: true) */
+  retryStalled?: boolean;
+  /** Stop processing further components after a stall (default: true) */
+  haltOnStall?: boolean;
 }
 
 /**
@@ -495,6 +533,18 @@ export interface ComponentSignalResult {
 }
 
 /**
+ * Simple result type for component getValue() methods
+ * Components return this, and LifecycleManager wraps it with additional metadata
+ */
+export interface ComponentValueResult<T = unknown> {
+  /** True if component has a value for the requested key */
+  found: boolean;
+
+  /** The value (undefined when not found) */
+  value: T | undefined;
+}
+
+/**
  * Result of requesting a value from a component
  */
 export interface ValueResult<T = unknown> {
@@ -546,8 +596,8 @@ export interface LifecycleCommon extends EventEmitterSurface {
   validateDependencies(): DependencyValidationResult;
 
   startAllComponents(options?: StartupOptions): Promise<StartupResult>;
-  stopAllComponents(): Promise<ShutdownResult>;
-  restartAllComponents(options?: StartupOptions): Promise<RestartResult>;
+  stopAllComponents(options?: StopAllOptions): Promise<ShutdownResult>;
+  restartAllComponents(options?: RestartAllOptions): Promise<RestartResult>;
 
   startComponent(
     name: string,
@@ -621,7 +671,7 @@ export type SystemState =
   | 'ready' // Components registered, not started
   | 'starting' // startAllComponents() in progress
   | 'running' // All components running
-  | 'partial' // Some components running (after individual start/stop)
+  | 'stalled' // Some components failed to stop (stuck running)
   | 'shutting-down' // stopAllComponents() in progress
   | 'stopped' // All components stopped (can restart)
   | 'error'; // Startup failed with rollback
@@ -658,6 +708,19 @@ export interface UnregisterOptions {
 export interface StartupOptions {
   /** Allow start even if stalled components exist (default: false) */
   ignoreStalledComponents?: boolean;
+  /** Global timeout for entire startup process in milliseconds (default: constructor's startupTimeoutMS) */
+  timeoutMS?: number;
+}
+
+/**
+ * Options for restarting all components (stop + start)
+ */
+export interface RestartAllOptions {
+  /** Startup options for the start phase */
+  startupOptions?: StartupOptions;
+
+  /** Timeout for the shutdown phase in milliseconds (default: shutdownOptions.timeoutMS) */
+  shutdownTimeoutMS?: number;
 }
 
 /**
@@ -818,8 +881,8 @@ export interface LifecycleManagerOptions {
   /** Global timeout for startup in ms (default: 60000, 0 = disabled) */
   startupTimeoutMS?: number;
 
-  /** Global timeout for shutdown in ms (default: 30000, 0 = disabled) */
-  shutdownTimeoutMS?: number;
+  /** Default stopAllComponents options used by signal and logger hooks */
+  shutdownOptions?: StopAllOptions;
 
   /** Global warning phase timeout in ms (default: 500, 0 = fire-and-forget, <0 = skip) */
   shutdownWarningTimeoutMS?: number;
@@ -832,6 +895,9 @@ export interface LifecycleManagerOptions {
 
   /** Auto-detach signals when last component stops (default: false) */
   detachSignalsOnStop?: boolean;
+
+  /** Enable Logger exit hook integration (default: false). When enabled, logger.exit() triggers graceful component shutdown before process exit. */
+  enableLoggerExitHook?: boolean;
 
   /** Custom reload signal handler (called instead of default broadcast, receives broadcast function you can optionally call) */
   onReloadRequested?: (

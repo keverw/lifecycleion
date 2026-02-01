@@ -533,6 +533,108 @@ describe('Logger', () => {
     });
   });
 
+  describe('setBeforeExitCallback', () => {
+    test('should set beforeExit callback after construction', async () => {
+      const callbackCalls: Array<{ exitCode: number; isFirstExit: boolean }> =
+        [];
+
+      logger.setBeforeExitCallback((exitCode, isFirstExit) => {
+        callbackCalls.push({ exitCode, isFirstExit });
+        return { action: 'proceed' };
+      });
+
+      logger.exit(0);
+
+      // Wait for async callback
+      await sleep(10);
+
+      expect(callbackCalls.length).toBe(1);
+      expect(callbackCalls[0].exitCode).toBe(0);
+      expect(callbackCalls[0].isFirstExit).toBe(true);
+    });
+
+    test('should overwrite existing beforeExit callback', async () => {
+      const firstCalls: number[] = [];
+      const secondCalls: number[] = [];
+
+      const firstLogger = new Logger({
+        callProcessExit: false,
+        beforeExitCallback: (exitCode) => {
+          firstCalls.push(exitCode);
+          return { action: 'proceed' };
+        },
+      });
+
+      // Overwrite with new callback
+      firstLogger.setBeforeExitCallback((exitCode) => {
+        secondCalls.push(exitCode);
+        return { action: 'proceed' };
+      });
+
+      firstLogger.exit(1);
+
+      await sleep(10);
+
+      expect(firstCalls.length).toBe(0); // Original callback should not be called
+      expect(secondCalls.length).toBe(1); // New callback should be called
+      expect(secondCalls[0]).toBe(1);
+    });
+
+    test('should remove callback when passed undefined', async () => {
+      const callbackCalls: number[] = [];
+
+      const testLogger = new Logger({
+        callProcessExit: false,
+        beforeExitCallback: (exitCode) => {
+          callbackCalls.push(exitCode);
+          return { action: 'proceed' };
+        },
+      });
+
+      // Remove callback
+      testLogger.setBeforeExitCallback(undefined);
+
+      testLogger.exit(0);
+
+      await sleep(10);
+
+      expect(callbackCalls.length).toBe(0); // Callback should not be called
+      expect(testLogger.didExit).toBe(true); // Exit should still happen
+    });
+
+    test('should work with async callback', async () => {
+      const callbackCalls: number[] = [];
+
+      logger.setBeforeExitCallback(async (exitCode) => {
+        await sleep(5);
+        callbackCalls.push(exitCode);
+        return { action: 'proceed' };
+      });
+
+      logger.exit(2);
+
+      await sleep(20);
+
+      expect(callbackCalls.length).toBe(1);
+      expect(callbackCalls[0]).toBe(2);
+      expect(logger.didExit).toBe(true);
+    });
+
+    test('should handle callback errors gracefully', async () => {
+      logger.setBeforeExitCallback(() => {
+        throw new Error('Callback error');
+      });
+
+      logger.exit(1);
+
+      await sleep(10);
+
+      // Should still exit despite callback error
+      expect(logger.didExit).toBe(true);
+      expect(logger.exitCode).toBe(1);
+    });
+  });
+
   describe('reportError Listener', () => {
     test('should register reportError listener', () => {
       const result = logger.registerReportErrorListener();
@@ -742,7 +844,7 @@ describe('Logger', () => {
       loggerWithErrorHandler.info('Test message');
 
       // Wait for promise rejection to be handled
-      await new Promise((resolve) => setTimeout(resolve, 10));
+      await sleep(10);
 
       expect(errors.length).toBe(1);
       expect(errors[0].error.message).toBe('Async write error');
@@ -775,7 +877,7 @@ describe('Logger', () => {
       loggerWithErrorHandler.info('Test message');
 
       // Wait for async promise rejection to be handled
-      await new Promise((resolve) => setTimeout(resolve, 10));
+      await sleep(10);
 
       // Should have caught both errors
       expect(errors.length).toBe(2);
@@ -804,7 +906,7 @@ describe('Logger', () => {
       loggerWithoutErrorHandler.info('Test message');
 
       // Wait for promise rejection to be handled
-      await new Promise((resolve) => setTimeout(resolve, 10));
+      await sleep(10);
 
       expect(consoleErrorSpy).toHaveBeenCalled();
       expect(consoleErrorSpy.mock.calls[0][0]).toContain(

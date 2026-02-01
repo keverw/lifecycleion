@@ -85,6 +85,18 @@ export interface LogSink {
 }
 
 /**
+ * Result from beforeExit callback indicating whether to proceed with exit
+ */
+export interface BeforeExitResult {
+  /**
+   * Whether to proceed with the exit
+   * - 'proceed': Continue with process exit
+   * - 'wait': Shutdown is already in progress, wait for it to complete
+   */
+  action: 'proceed' | 'wait';
+}
+
+/**
  * Redaction function type
  */
 export type RedactFunction = (keyName: string, value: unknown) => unknown;
@@ -110,7 +122,7 @@ export interface LoggerOptions {
   beforeExitCallback?: (
     exitCode: number,
     isFirstExit: boolean,
-  ) => void | Promise<void>;
+  ) => BeforeExitResult | Promise<BeforeExitResult>;
   onSinkError?: (
     error: Error,
     context: 'write' | 'close',

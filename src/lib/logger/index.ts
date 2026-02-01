@@ -10,6 +10,7 @@ import type {
   LogType,
   LoggerOptions,
   LogOptions,
+  BeforeExitResult,
 } from './types';
 import type { HandleLogOptions } from './internal-types';
 import { ArraySink } from './sinks/array';
@@ -30,7 +31,7 @@ export class Logger extends EventEmitter {
   private beforeExitCallback?: (
     exitCode: number,
     isFirstExit: boolean,
-  ) => void | Promise<void>;
+  ) => BeforeExitResult | Promise<BeforeExitResult>;
   private onSinkError?: (
     error: Error,
     context: 'write' | 'close',
@@ -90,23 +91,80 @@ export class Logger extends EventEmitter {
     this.emit('logger', { eventType: 'exit-called', code, isFirstExit });
 
     if (this.beforeExitCallback) {
-      safeHandleCallbackAndWait(
+      safeHandleCallbackAndWait<BeforeExitResult>(
         'beforeExit',
         this.beforeExitCallback,
         code,
         isFirstExit,
       )
-        // If the callback fails, we still want to exit either way,
-        // but want to give it a chance to finish if it doesn't throw an error
-        .then(() => {
+        .then((result) => {
+          // Check if callback returned a result indicating we should wait
+          if (result.success && result.value?.action === 'wait') {
+            // Shutdown is already in progress, don't proceed with exit
+            // The ongoing shutdown will handle the exit when it completes
+            return;
+          }
+
+          // Proceed with exit (either callback returned 'proceed' or failed)
           this.processExit(code);
         })
         .catch(() => {
+          // If callback throws an error, proceed with exit anyway
+          // This ensures the process doesn't hang on callback failures
           this.processExit(code);
         });
     } else {
       this.processExit(code);
     }
+  }
+
+  /**
+   * Set or update the beforeExit callback
+   *
+   * This allows setting the callback after Logger construction, which is useful
+   * when the callback needs to reference objects that depend on the Logger instance.
+   *
+   * **Note:** This method overwrites any existing beforeExit callback (including
+   * one set in the Logger constructor). Pass `undefined` to remove the callback.
+   *
+   * **Error Handling:** If the callback throws an error or rejects, the logger will
+   * proceed with exit anyway to prevent the process from hanging. The error will be
+   * reported via the global `reportError` event.
+   *
+   * @param callback - Function to call before process exit (receives exitCode and isFirstExit).
+   *                   Must return BeforeExitResult indicating whether to proceed with exit or wait.
+   *                   Return `{ action: 'proceed' }` to continue with exit.
+   *                   Return `{ action: 'wait' }` to prevent exit (e.g., shutdown already in progress).
+   *                   If the callback throws, exit proceeds automatically.
+   *
+   *                   Pass undefined to remove the callback.
+   *
+   * @example
+   * ```typescript
+   * const logger = new Logger();
+   * const lifecycle = new LifecycleManager({ logger });
+   *
+   * // Set callback after both are constructed
+   * logger.setBeforeExitCallback(async (exitCode, isFirstExit) => {
+   *   if (isFirstExit) {
+   *     await lifecycle.stopAllComponents();
+   *   }
+   *   return { action: 'proceed' };
+   * });
+   *
+   * // Later, remove the callback
+   * logger.setBeforeExitCallback(undefined);
+   * ```
+   */
+  public setBeforeExitCallback(
+    callback:
+      | ((
+          exitCode: number,
+          isFirstExit: boolean,
+        ) => BeforeExitResult | Promise<BeforeExitResult>)
+      | undefined,
+  ): void {
+    this.beforeExitCallback = callback;
   }
 
   /**

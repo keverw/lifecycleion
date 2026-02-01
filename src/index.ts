@@ -1,5 +1,9 @@
 // module entry point
-export { LifecycleManager } from './lib/lifecycle-manager/index';
+
+// LifecycleManager - Full export from lifecycle-manager module
+export * from './lib/lifecycle-manager/index';
+
+// Process Signal Manager
 export { ProcessSignalManager } from './lib/process-signal-manager';
 
 // ID Helpers

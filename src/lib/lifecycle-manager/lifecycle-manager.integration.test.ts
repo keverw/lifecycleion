@@ -68,7 +68,9 @@ describe('LifecycleManager Integration Tests', () => {
       // Database must be first (no deps), api must be last (depends on web-server and cache)
       // Cache and web-server order may vary based on registration order
       expect(startupOrder.startupOrder[0]).toBe('database');
-      expect(startupOrder.startupOrder[startupOrder.startupOrder.length - 1]).toBe('api');
+      expect(
+        startupOrder.startupOrder[startupOrder.startupOrder.length - 1],
+      ).toBe('api');
       expect(startupOrder.startupOrder).toContain('cache');
       expect(startupOrder.startupOrder).toContain('web-server');
 
@@ -77,7 +79,9 @@ describe('LifecycleManager Integration Tests', () => {
       expect(startResult.success).toBe(true);
       // Database first, api last - middle order may vary based on registration
       expect(startResult.startedComponents[0]).toBe('database');
-      expect(startResult.startedComponents[startResult.startedComponents.length - 1]).toBe('api');
+      expect(
+        startResult.startedComponents[startResult.startedComponents.length - 1],
+      ).toBe('api');
       expect(startResult.startedComponents).toContain('cache');
       expect(startResult.startedComponents).toContain('web-server');
 
@@ -95,7 +99,9 @@ describe('LifecycleManager Integration Tests', () => {
       expect(stopResult.success).toBe(true);
       // Should stop in reverse dependency order: api first, database last
       expect(stopResult.stoppedComponents[0]).toBe('api');
-      expect(stopResult.stoppedComponents[stopResult.stoppedComponents.length - 1]).toBe('database');
+      expect(
+        stopResult.stoppedComponents[stopResult.stoppedComponents.length - 1],
+      ).toBe('database');
       expect(stopResult.stoppedComponents).toContain('cache');
       expect(stopResult.stoppedComponents).toContain('web-server');
 
@@ -123,7 +129,10 @@ describe('LifecycleManager Integration Tests', () => {
       class DiamondAPIComponent extends BaseComponent {
         public ready = false;
         constructor(log: Logger) {
-          super(log, { name: 'diamond-api', dependencies: ['web-server', 'worker'] });
+          super(log, {
+            name: 'diamond-api',
+            dependencies: ['web-server', 'worker'],
+          });
         }
         public start(): void {
           this.ready = true;
@@ -226,7 +235,9 @@ describe('LifecycleManager Integration Tests', () => {
       expect(reloadable2.reloadCount).toBe(1);
 
       // Components without onReload are in results but not called
-      const noReloadResult = reloadResult.results.find((r) => r.name === 'no-reload');
+      const noReloadResult = reloadResult.results.find(
+        (r) => r.name === 'no-reload',
+      );
       expect(noReloadResult?.code).toBe('no_handler');
     });
 
@@ -246,12 +257,16 @@ describe('LifecycleManager Integration Tests', () => {
       expect(reloadResult.code).toBe('partial_error');
 
       // First component failed
-      const result1 = reloadResult.results.find((r) => r.name === 'reloadable-1');
+      const result1 = reloadResult.results.find(
+        (r) => r.name === 'reloadable-1',
+      );
       expect(result1?.code).toBe('error');
       expect(result1?.error).not.toBeNull();
 
       // Second component succeeded
-      const result2 = reloadResult.results.find((r) => r.name === 'reloadable-2');
+      const result2 = reloadResult.results.find(
+        (r) => r.name === 'reloadable-2',
+      );
       expect(result2?.code).toBe('called');
       expect(reloadable2.reloadCount).toBe(1);
     });
@@ -318,7 +333,10 @@ describe('LifecycleManager Integration Tests', () => {
       const stopPromise = lifecycle.stopAllComponents();
 
       // Both should resolve
-      const [_startResult, stopResult] = await Promise.all([startPromise, stopPromise]);
+      const [_startResult, stopResult] = await Promise.all([
+        startPromise,
+        stopPromise,
+      ]);
 
       // Startup may have succeeded or been interrupted
       // Either way, shutdown should complete
@@ -468,10 +486,14 @@ describe('LifecycleManager Integration Tests', () => {
       expect(healthReport.healthy).toBe(false);
       expect(healthReport.code).toBe('degraded');
 
-      const healthyResult = healthReport.components.find((c) => c.name === 'healthy');
+      const healthyResult = healthReport.components.find(
+        (c) => c.name === 'healthy',
+      );
       expect(healthyResult?.healthy).toBe(true);
 
-      const unhealthyResult = healthReport.components.find((c) => c.name === 'unhealthy');
+      const unhealthyResult = healthReport.components.find(
+        (c) => c.name === 'unhealthy',
+      );
       expect(unhealthyResult?.healthy).toBe(false);
     });
 
@@ -488,7 +510,10 @@ describe('LifecycleManager Integration Tests', () => {
     });
 
     test('should handle health check errors', async () => {
-      const errorComponent = new ConfigurableHealthComponent(logger, 'error-health');
+      const errorComponent = new ConfigurableHealthComponent(
+        logger,
+        'error-health',
+      );
       errorComponent.healthCheckError = new Error('Health check failed');
 
       await lifecycle.registerComponent(errorComponent);
@@ -532,7 +557,9 @@ describe('LifecycleManager Integration Tests', () => {
 
       await lifecycle.startAllComponents();
 
-      const broadcastResults = await lifecycle.broadcastMessage({ type: 'broadcast' });
+      const broadcastResults = await lifecycle.broadcastMessage({
+        type: 'broadcast',
+      });
 
       expect(broadcastResults.length).toBe(3);
 
@@ -544,7 +571,9 @@ describe('LifecycleManager Integration Tests', () => {
       expect(result2?.sent).toBe(true);
       expect(receiver2.messages.length).toBe(1);
 
-      const noHandlerResult = broadcastResults.find((r) => r.name === 'no-handler');
+      const noHandlerResult = broadcastResults.find(
+        (r) => r.name === 'no-handler',
+      );
       expect(noHandlerResult?.code).toBe('no_handler');
     });
 
@@ -555,7 +584,10 @@ describe('LifecycleManager Integration Tests', () => {
       await lifecycle.registerComponent(errorReceiver);
       await lifecycle.startAllComponents();
 
-      const messageResult = await lifecycle.sendMessageToComponent('error-receiver', {});
+      const messageResult = await lifecycle.sendMessageToComponent(
+        'error-receiver',
+        {},
+      );
 
       // Message was "sent" (delivered to handler), but handler threw an error
       expect(messageResult.sent).toBe(true);
@@ -570,11 +602,17 @@ describe('LifecycleManager Integration Tests', () => {
       await lifecycle.registerComponent(database);
       await lifecycle.startAllComponents();
 
-      const connectedResult = lifecycle.getValue<boolean>('database', 'connected');
+      const connectedResult = lifecycle.getValue<boolean>(
+        'database',
+        'connected',
+      );
       expect(connectedResult.found).toBe(true);
       expect(connectedResult.value).toBe(true);
 
-      const countResult = lifecycle.getValue<number>('database', 'connectionCount');
+      const countResult = lifecycle.getValue<number>(
+        'database',
+        'connectionCount',
+      );
       expect(countResult.found).toBe(true);
       expect(countResult.value).toBe(5);
 

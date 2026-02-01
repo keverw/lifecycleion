@@ -24,7 +24,9 @@ import type {
   StartupOptions,
   StartupResult,
   ShutdownResult,
+  StopAllOptions,
   RestartResult,
+  RestartAllOptions,
   DependencyValidationResult,
   ShutdownMethod,
   SignalBroadcastResult,
@@ -80,6 +82,10 @@ export class LifecycleManager
   private readonly rootLogger: Logger;
   private readonly shutdownWarningTimeoutMS: number;
   private readonly messageTimeoutMS: number;
+  private readonly startupTimeoutMS: number;
+  private readonly shutdownOptions?: StopAllOptions;
+  private readonly attachSignalsOnStart: boolean;
+  private readonly detachSignalsOnStop: boolean;
 
   // Component management
   private components: BaseComponent[] = [];
@@ -125,12 +131,26 @@ export class LifecycleManager
     this.logger = this.rootLogger.service(this.name);
     this.shutdownWarningTimeoutMS = options.shutdownWarningTimeoutMS ?? 500;
     this.messageTimeoutMS = options.messageTimeoutMS ?? 5000;
+    this.startupTimeoutMS = options.startupTimeoutMS ?? 60000;
+    this.shutdownOptions = {
+      timeoutMS: 30000,
+      retryStalled: true,
+      haltOnStall: true,
+      ...options.shutdownOptions,
+    };
+    this.attachSignalsOnStart = options.attachSignalsOnStart ?? false;
+    this.detachSignalsOnStop = options.detachSignalsOnStop ?? false;
 
     // Store custom signal callbacks
     this.onReloadRequested = options.onReloadRequested;
     this.onInfoRequested = options.onInfoRequested;
     this.onDebugRequested = options.onDebugRequested;
     this.lifecycleEvents = new LifecycleManagerEvents(this.safeEmit.bind(this));
+
+    // Enable logger exit hook if requested
+    if (options.enableLoggerExitHook) {
+      this.enableLoggerExitHook();
+    }
   }
 
   // ============================================================================
@@ -247,6 +267,7 @@ export class LifecycleManager
     const shouldStopIfRunning = options?.stopIfRunning !== false;
 
     const isStalled = this.stalledComponents.has(name);
+
     if (isStalled && shouldStopIfRunning) {
       this.logger
         .entity(name)
@@ -336,6 +357,18 @@ export class LifecycleManager
     this.stalledComponents.delete(name);
     this.runningComponents.delete(name);
 
+    // Auto-detach signals if this was the last component and option is enabled
+    if (
+      this.detachSignalsOnStop &&
+      this.runningComponents.size === 0 &&
+      this.processSignalManager
+    ) {
+      this.logger.info(
+        'Auto-detaching process signals on last component unregistered',
+      );
+      this.detachSignals();
+    }
+
     this.logger.entity(name).info('Component unregistered');
     this.lifecycleEvents.componentUnregistered(name, false);
 
@@ -401,6 +434,7 @@ export class LifecycleManager
    * Get running component count
    */
   public getRunningComponentCount(): number {
+    // Stalled components are not counted as running.
     return this.runningComponents.size;
   }
 
@@ -459,19 +493,22 @@ export class LifecycleManager
       return 'starting';
     }
 
+    // Check for stalled components (failed to stop)
+    if (this.stalledComponents.size > 0) {
+      return 'stalled';
+    }
+
     if (runningCount === 0) {
       return totalCount > 0 ? 'ready' : 'idle';
     }
 
-    if (runningCount === totalCount && this.isStarted) {
+    if (runningCount === totalCount) {
       return 'running';
     }
 
-    if (runningCount > 0 && runningCount < totalCount) {
-      return 'partial';
-    }
-
-    if (runningCount === totalCount) {
+    // Some components running, some not - this is valid for individual start/stop
+    // Just report as 'running' since something is running
+    if (runningCount > 0) {
       return 'running';
     }
 
@@ -613,12 +650,14 @@ export class LifecycleManager
    * - Sets isStarting flag during operation
    * - On failure: triggers rollback (stops all started components)
    * - Optional components don't trigger rollback on failure
-   * - If optional component fails, its dependents are skipped
+   * - Dependents still attempt to start if an optional dependency fails
    * - Handles shutdown signal during startup (aborts and rolls back)
    */
   public async startAllComponents(
     options?: StartupOptions,
   ): Promise<StartupResult> {
+    const startTime = Date.now();
+
     // Reject if already starting
     if (this.isStarting) {
       this.logger.warn(
@@ -630,6 +669,9 @@ export class LifecycleManager
         startedComponents: [],
         failedOptionalComponents: [],
         skippedDueToDependency: [],
+        reason: 'Startup already in progress',
+        code: 'already_in_progress',
+        durationMS: Date.now() - startTime,
       };
     }
 
@@ -641,6 +683,9 @@ export class LifecycleManager
         startedComponents: [],
         failedOptionalComponents: [],
         skippedDueToDependency: [],
+        reason: 'Shutdown in progress',
+        code: 'shutdown_in_progress',
+        durationMS: Date.now() - startTime,
       };
     }
 
@@ -660,6 +705,9 @@ export class LifecycleManager
         failedOptionalComponents: [],
         skippedDueToDependency: [],
         blockedByStalledComponents: stalledNames,
+        reason: 'Stalled components exist',
+        code: 'stalled_components_exist',
+        durationMS: Date.now() - startTime,
       };
     }
 
@@ -673,6 +721,7 @@ export class LifecycleManager
           .map((c) => c.getName()),
         failedOptionalComponents: [],
         skippedDueToDependency: [],
+        durationMS: Date.now() - startTime,
       };
     }
 
@@ -690,6 +739,7 @@ export class LifecycleManager
           .map((c) => c.getName()),
         failedOptionalComponents: [],
         skippedDueToDependency: [],
+        durationMS: Date.now() - startTime,
       };
     }
 
@@ -698,34 +748,69 @@ export class LifecycleManager
     this.shutdownMethod = null; // Clear previous shutdown method on fresh start
     this.logger.info('Starting all components');
 
-    // Get startup order (topological sort)
-    let startupOrder: string[];
+    const effectiveTimeout = options?.timeoutMS ?? this.startupTimeoutMS;
+    let hasTimedOut = false;
+    let timeoutHandle: NodeJS.Timeout | undefined;
 
-    try {
-      startupOrder = this.getStartupOrderInternal();
-    } catch (error) {
-      this.isStarting = false;
-      const err = error as Error;
-      this.logger.error('Failed to resolve startup order', {
-        params: { error: err.message },
-      });
+    // Race startup against timeout if specified
+    if (effectiveTimeout > 0) {
+      timeoutHandle = setTimeout(() => {
+        hasTimedOut = true;
 
-      return {
-        success: false,
-        startedComponents: [],
-        failedOptionalComponents: [],
-        skippedDueToDependency: [],
-      };
+        this.logger.warn(
+          'Startup timeout exceeded, returning partial results',
+          {
+            params: { timeoutMS: effectiveTimeout },
+          },
+        );
+      }, effectiveTimeout);
     }
 
-    const startedComponents: string[] = [];
-    const failedOptionalComponents: Array<{ name: string; error: Error }> = [];
-    const skippedDueToDependency = new Set<string>();
-    const skippedDueToStall = new Set<string>();
-
     try {
+      // Get startup order (topological sort)
+      let startupOrder: string[];
+
+      try {
+        startupOrder = this.getStartupOrderInternal();
+      } catch (error) {
+        const err = error as Error;
+        const code =
+          err instanceof DependencyCycleError
+            ? 'dependency_cycle'
+            : 'unknown_error';
+
+        this.logger.error('Failed to resolve startup order', {
+          params: { error: err.message },
+        });
+
+        return {
+          success: false,
+          startedComponents: [],
+          failedOptionalComponents: [],
+          skippedDueToDependency: [],
+          reason: err.message,
+          code,
+          error: err,
+          durationMS: Date.now() - startTime,
+        };
+      }
+
+      const startedComponents: string[] = [];
+      const failedOptionalComponents: Array<{ name: string; error: Error }> =
+        [];
+      const skippedDueToDependency = new Set<string>();
+      const skippedDueToStall = new Set<string>();
+
       // Start each component in dependency order
       for (const name of startupOrder) {
+        // Check if startup has timed out
+        if (hasTimedOut) {
+          this.logger.warn(
+            'Startup timeout reached, stopping component initiation',
+          );
+          break;
+        }
+
         const component = this.getComponent(name);
         if (!component) {
           // Should not happen since unregisterComponent() is blocked during startup
@@ -756,18 +841,23 @@ export class LifecycleManager
             break;
           }
 
+          const depComponent = this.getComponent(depName);
+          const depIsOptional = depComponent?.isOptional() ?? false;
+
           if (skippedDueToDependency.has(depName)) {
-            shouldSkip = true;
-            skipReason = `Dependency "${depName}" was skipped`;
-            break;
+            if (!depIsOptional) {
+              shouldSkip = true;
+              skipReason = `Dependency "${depName}" was skipped`;
+              break;
+            }
+            continue;
           }
 
-          const depComponent = this.getComponent(depName);
           if (depComponent) {
             const depState = this.componentStates.get(depName);
-            if (depState === 'failed') {
+            if (depState === 'failed' && !depIsOptional) {
               shouldSkip = true;
-              skipReason = `Optional dependency "${depName}" failed to start`;
+              skipReason = `Dependency "${depName}" failed to start`;
               break;
             }
           }
@@ -798,6 +888,7 @@ export class LifecycleManager
             startedComponents: [],
             failedOptionalComponents: [],
             skippedDueToDependency: [],
+            durationMS: Date.now() - startTime,
           };
         }
 
@@ -852,23 +943,53 @@ export class LifecycleManager
               startedComponents: [],
               failedOptionalComponents,
               skippedDueToDependency: Array.from(skippedDueToDependency),
+              durationMS: Date.now() - startTime,
             };
           }
         }
       }
 
+      // Check if startup timed out during the process
+      if (hasTimedOut) {
+        const durationMS = Date.now() - startTime;
+
+        this.logger.warn('Startup completed with timeout', {
+          params: {
+            started: startedComponents.length,
+            failed: failedOptionalComponents.length,
+            skipped: skippedDueToDependency.size + skippedDueToStall.size,
+            durationMS,
+            timeoutMS: effectiveTimeout,
+          },
+        });
+
+        return {
+          success: false,
+          startedComponents,
+          failedOptionalComponents,
+          skippedDueToDependency: Array.from(skippedDueToDependency),
+          durationMS,
+          timedOut: true,
+          reason: `Startup timeout exceeded (${effectiveTimeout}ms)`,
+          code: 'startup_timeout',
+        };
+      }
+
       // Success - all components started (or optional ones failed gracefully)
       this.isStarted = true;
       const skippedComponentsArray = [
-        ...skippedDueToDependency,
-        ...skippedDueToStall,
+        ...Array.from(skippedDueToDependency),
+        ...Array.from(skippedDueToStall),
       ];
+
+      const durationMS = Date.now() - startTime;
 
       this.logger.success('All components started', {
         params: {
           started: startedComponents.length,
           failed: failedOptionalComponents.length,
           skipped: skippedComponentsArray.length,
+          durationMS,
         },
       });
 
@@ -883,8 +1004,14 @@ export class LifecycleManager
         startedComponents,
         failedOptionalComponents,
         skippedDueToDependency: Array.from(skippedDueToDependency),
+        durationMS,
+        timedOut: hasTimedOut,
       };
     } finally {
+      // Clear timeout if still running
+      if (timeoutHandle) {
+        clearTimeout(timeoutHandle);
+      }
       this.isStarting = false;
     }
   }
@@ -893,26 +1020,42 @@ export class LifecycleManager
    * Stop all running components in reverse dependency order
    *
    * Components stop in reverse topological order (dependents before dependencies).
+   *
+   * @param options - Optional shutdown options
    */
 
-  public async stopAllComponents(): Promise<ShutdownResult> {
+  public async stopAllComponents(
+    options?: StopAllOptions,
+  ): Promise<ShutdownResult> {
     // always use manual method for external public API as not from a signal
-    return this.stopAllComponentsInternal('manual');
+    return this.stopAllComponentsInternal('manual', {
+      ...this.shutdownOptions,
+      ...options,
+    });
   }
 
   /**
    * Restart all components (stop then start)
    */
   public async restartAllComponents(
-    options?: StartupOptions,
+    options?: RestartAllOptions,
   ): Promise<RestartResult> {
     this.logger.info('Restarting all components');
 
-    // Phase 1: Stop all components
-    const shutdownResult = await this.stopAllComponentsInternal('manual');
+    // Phase 1: Stop all components (explicit defaults for restart semantics)
+    const shutdownResult = await this.stopAllComponentsInternal('manual', {
+      ...this.shutdownOptions,
+      timeoutMS:
+        options?.shutdownTimeoutMS ?? this.shutdownOptions?.timeoutMS ?? 30000,
+      // Always retry/halt during restart for deterministic shutdown behavior.
+      retryStalled: true,
+      haltOnStall: true,
+    });
 
     // Phase 2: Start all components
-    const startupResult = await this.startAllComponents(options);
+    const startupResult = await this.startAllComponents(
+      options?.startupOptions,
+    );
 
     const isSuccess = shutdownResult.success && startupResult.success;
 
@@ -963,7 +1106,7 @@ export class LifecycleManager
         success: false,
         componentName: name,
         reason: 'Bulk startup in progress',
-        code: 'shutdown_in_progress',
+        code: 'startup_in_progress',
       };
     }
 
@@ -1026,7 +1169,7 @@ export class LifecycleManager
         reason: this.isStarting
           ? 'Bulk startup in progress'
           : 'Shutdown in progress',
-        code: 'shutdown_in_progress',
+        code: this.isStarting ? 'startup_in_progress' : 'shutdown_in_progress',
       };
     }
 
@@ -1140,6 +1283,71 @@ export class LifecycleManager
       ...this.processSignalManager.getStatus(),
       shutdownMethod: this.shutdownMethod,
     };
+  }
+
+  /**
+   * Enable Logger exit hook integration
+   *
+   * Sets up the logger's beforeExit callback to trigger graceful component shutdown.
+   * When `logger.exit(code)` is called (or `logger.error('msg', { exitCode: 1 })`),
+   * the LifecycleManager will stop all components before the process exits.
+   *
+   * The shutdown is subject to the configured shutdown timeout (default: 30000ms).
+   * If shutdown exceeds this timeout, the process will exit anyway to prevent hanging.
+   *
+   * This method is idempotent and can be called multiple times safely.
+   *
+   * **Note:** This overwrites any existing beforeExit callback on the logger.
+   * If you need custom exit logic, set it up manually with `logger.setBeforeExitCallback()`.
+   *
+   * @example
+   * ```typescript
+   * const logger = new Logger();
+   * const lifecycle = new LifecycleManager({
+   *   logger,
+   *   enableLoggerExitHook: true, // Auto-enable
+   *   shutdownOptions: { timeoutMS: 30000 },   // Max 30s for shutdown
+   * });
+   *
+   * // Or enable manually later
+   * lifecycle.enableLoggerExitHook();
+   *
+   * // Now logger.exit() will trigger graceful shutdown
+   * logger.error('Fatal error', { exitCode: 1 });
+   * // Components stop gracefully (up to shutdown timeout) before process exits
+   * ```
+   */
+  public enableLoggerExitHook(): void {
+    this.rootLogger.setBeforeExitCallback(
+      async (exitCode: number, isFirstExit: boolean) => {
+        // If shutdown is already in progress, tell logger to wait
+        if (this.isShuttingDown) {
+          this.logger.debug('Logger exit called during shutdown, waiting...', {
+            params: { exitCode },
+          });
+
+          return { action: 'wait' as const };
+        }
+
+        if (isFirstExit) {
+          this.logger.info('Logger exit triggered, stopping components...', {
+            params: { exitCode, timeoutMS: this.shutdownOptions?.timeoutMS },
+          });
+
+          // Stop all components with global timeout
+          await this.stopAllComponents({
+            ...this.shutdownOptions,
+          });
+        }
+
+        // Proceed with exit
+        return { action: 'proceed' as const };
+      },
+    );
+
+    this.logger.debug('Logger exit hook enabled', {
+      params: { timeoutMS: this.shutdownOptions?.timeoutMS },
+    });
   }
 
   /**
@@ -1778,8 +1986,9 @@ export class LifecycleManager
 
     // Get value
     try {
-      const value = component.getValue(key, from) as T | undefined;
-      const wasFound = value !== undefined;
+      const componentResult = component.getValue(key, from);
+      const wasFound = componentResult.found;
+      const value = componentResult.value;
 
       this.lifecycleEvents.componentValueReturned(componentName, key, from, {
         found: wasFound,
@@ -1793,7 +2002,7 @@ export class LifecycleManager
 
       return {
         found: wasFound,
-        value,
+        value: value as T | undefined,
         componentFound: true,
         componentRunning: true,
         handlerImplemented: true,
@@ -2270,19 +2479,27 @@ export class LifecycleManager
 
   private async stopAllComponentsInternal(
     method: ShutdownMethod,
+    options?: StopAllOptions,
   ): Promise<ShutdownResult> {
     const startTime = Date.now();
+    const effectiveTimeout =
+      options?.timeoutMS ?? this.shutdownOptions?.timeoutMS ?? 30000;
+    const retryStalled = options?.retryStalled ?? true;
+    const haltOnStall = options?.haltOnStall ?? true;
 
     // Reject if already shutting down
     if (this.isShuttingDown) {
       this.logger.warn(
         'Cannot stop all components: shutdown already in progress',
       );
+
       return {
-        success: true,
+        success: false,
         stoppedComponents: [],
         stalledComponents: [],
         durationMS: 0,
+        reason: 'Shutdown already in progress',
+        code: 'already_in_progress',
       };
     }
 
@@ -2313,38 +2530,103 @@ export class LifecycleManager
       shutdownOrder = this.components.map((c) => c.getName()).reverse();
     }
 
-    // Filter to only running components
-    const runningComponentsToStop = shutdownOrder.filter((name) =>
-      this.isComponentRunning(name),
+    const stalledComponentNames = new Set(this.stalledComponents.keys());
+
+    // Filter to running components, plus stalled ones if retrying
+    const runningComponentsToStop = shutdownOrder.filter(
+      (name) =>
+        this.isComponentRunning(name) ||
+        (retryStalled && stalledComponentNames.has(name)),
     );
 
     const stoppedComponents: string[] = [];
     const stalledComponents: ComponentStallInfo[] = [];
+    let hasTimedOut = false;
+    let timeoutHandle: NodeJS.Timeout | undefined;
 
     try {
-      await this.runShutdownWarningPhase(runningComponentsToStop);
+      // Create shutdown operation promise
+      const shutdownOperation = async () => {
+        await this.runShutdownWarningPhase(runningComponentsToStop);
 
-      // Stop each component in reverse dependency order
-      for (const name of runningComponentsToStop) {
-        this.logger.entity(name).info('Stopping component');
-        // Use internal method to bypass bulk operation checks
-        const result = await this.stopComponentInternal(name);
+        // Stop each component in reverse dependency order
+        for (const name of runningComponentsToStop) {
+          this.logger.entity(name).info('Stopping component');
 
-        if (result.success) {
-          stoppedComponents.push(name);
-        } else {
-          // Component failed to stop - track as stalled but continue
-          this.logger
-            .entity(name)
-            .error('Component failed to stop, continuing with others', {
-              params: { error: result.error?.message },
-            });
+          // Use internal method to bypass bulk operation checks.
+          // - If running: normal stop flow
+          // - If stalled and retryStalled: force-phase retry
+          // - If stalled and no retry: report component_stalled
+          // - Otherwise: component_not_running
+          const isRunning = this.isComponentRunning(name);
+          const isStalled = stalledComponentNames.has(name);
 
-          const stallInfo = this.stalledComponents.get(name);
-          if (stallInfo) {
-            stalledComponents.push(stallInfo);
+          const result = isRunning
+            ? await this.stopComponentInternal(name)
+            : retryStalled && isStalled
+              ? await this.retryStalledComponent(name)
+              : isStalled
+                ? {
+                    success: false,
+                    componentName: name,
+                    reason: 'Component is stalled',
+                    code: 'component_stalled',
+                    status: this.getComponentStatus(name),
+                  }
+                : {
+                    success: false,
+                    componentName: name,
+                    reason: 'Component not running',
+                    code: 'component_not_running',
+                    status: this.getComponentStatus(name),
+                  };
+
+          if (result.success) {
+            stoppedComponents.push(name);
+          } else {
+            // Component failed to stop - track as stalled but continue
+            this.logger
+              .entity(name)
+              .error('Component failed to stop, continuing with others', {
+                params: { error: result.error?.message },
+              });
+
+            const stallInfo = this.stalledComponents.get(name);
+            if (stallInfo) {
+              stalledComponents.push(stallInfo);
+            }
+
+            if (haltOnStall) {
+              this.logger.warn(
+                'Halting shutdown after stall (haltOnStall=true)',
+                { params: { stalledComponent: name } },
+              );
+              break;
+            }
           }
         }
+      };
+
+      // Race shutdown against timeout if specified
+      if (effectiveTimeout > 0) {
+        const timeoutPromise = new Promise<void>((resolve) => {
+          timeoutHandle = setTimeout(() => {
+            hasTimedOut = true;
+
+            this.logger.warn(
+              'Shutdown timeout exceeded, returning partial results',
+              {
+                params: { timeoutMS: effectiveTimeout },
+              },
+            );
+
+            resolve();
+          }, effectiveTimeout);
+        });
+
+        await Promise.race([shutdownOperation(), timeoutPromise]);
+      } else {
+        await shutdownOperation();
       }
 
       const durationMS = Date.now() - startTime;
@@ -2371,12 +2653,61 @@ export class LifecycleManager
         stoppedComponents,
         stalledComponents,
         durationMS,
+        timedOut: hasTimedOut || undefined,
       };
     } finally {
+      if (timeoutHandle) {
+        clearTimeout(timeoutHandle);
+      }
+
       // Reset state
       this.isShuttingDown = false;
       this.isStarted = false;
     }
+  }
+
+  /**
+   * Retry shutdown for a stalled component.
+   * Attempts the force phase directly to avoid re-running a failing stop().
+   */
+  private async retryStalledComponent(
+    name: string,
+  ): Promise<ComponentOperationResult> {
+    const component = this.getComponent(name);
+
+    if (!component) {
+      return {
+        success: false,
+        componentName: name,
+        reason: 'Component not found',
+        code: 'component_not_found',
+      };
+    }
+
+    if (!this.stalledComponents.has(name)) {
+      if (this.isComponentRunning(name)) {
+        return this.stopComponentInternal(name);
+      }
+
+      return {
+        success: false,
+        componentName: name,
+        reason: 'Component not running',
+        code: 'component_not_running',
+        status: this.getComponentStatus(name),
+      };
+    }
+
+    this.logger
+      .entity(name)
+      .warn('Retrying stalled component shutdown (force phase)');
+
+    return this.shutdownComponentForce(name, component, {
+      gracefulPhaseRan: false,
+      gracefulTimedOut: false,
+      gracefulError: undefined,
+      startedAt: Date.now(),
+    });
   }
 
   /**
@@ -2414,12 +2745,10 @@ export class LifecycleManager
         success: false,
         componentName: name,
         reason: 'Bulk startup in progress',
-        code: 'shutdown_in_progress', // Reuse this code for any bulk operation
+        code: 'startup_in_progress',
       };
     }
 
-    const allowOptionalDependencies =
-      options?.allowOptionalDependencies === true;
     const allowRequiredDependencies =
       options?.allowRequiredDependencies === true;
 
@@ -2443,6 +2772,7 @@ export class LifecycleManager
           componentName: name,
           reason: `Missing dependency "${dependencyName}"`,
           code: 'missing_dependency',
+          status: this.getComponentStatus(name),
         };
       }
 
@@ -2460,8 +2790,8 @@ export class LifecycleManager
           continue;
         }
 
-        if (allowOptionalDependencies && isDependencyOptional) {
-          // Allow skipping optional dependencies only
+        if (isDependencyOptional) {
+          // Optional dependencies never block startup
           this.logger
             .entity(name)
             .warn(
@@ -2475,6 +2805,7 @@ export class LifecycleManager
           componentName: name,
           reason: `Dependency "${dependencyName}" is not running`,
           code: 'dependency_not_running',
+          status: this.getComponentStatus(name),
         };
       }
     }
@@ -2486,6 +2817,7 @@ export class LifecycleManager
         componentName: name,
         reason: 'Component already starting',
         code: 'component_already_starting',
+        status: this.getComponentStatus(name),
       };
     }
 
@@ -2496,6 +2828,7 @@ export class LifecycleManager
         componentName: name,
         reason: 'Component already running',
         code: 'component_already_running',
+        status: this.getComponentStatus(name),
       };
     }
 
@@ -2547,6 +2880,19 @@ export class LifecycleManager
       // Update state
       this.componentStates.set(name, 'running');
       this.runningComponents.add(name);
+
+      // Auto-attach signals if this is the first component and option is enabled
+      if (
+        this.attachSignalsOnStart &&
+        this.runningComponents.size === 1 &&
+        !this.processSignalManager
+      ) {
+        this.logger.info(
+          'Auto-attaching process signals on first component start',
+        );
+        this.attachSignals();
+      }
+
       const timestamps = this.componentTimestamps.get(name) ?? {
         startedAt: null,
         stoppedAt: null,
@@ -2601,6 +2947,7 @@ export class LifecycleManager
             ? 'start_timeout'
             : 'unknown_error',
         error: err,
+        status: this.getComponentStatus(name),
       };
     } finally {
       // Ensure we always clean up the timeout handle, even if component.start()
@@ -2631,6 +2978,17 @@ export class LifecycleManager
       };
     }
 
+    // Check if stalled
+    if (this.stalledComponents.has(name)) {
+      return {
+        success: false,
+        componentName: name,
+        reason: 'Component is stalled',
+        code: 'component_stalled',
+        status: this.getComponentStatus(name),
+      };
+    }
+
     // Check if not running
     if (!this.isComponentRunning(name)) {
       return {
@@ -2638,6 +2996,7 @@ export class LifecycleManager
         componentName: name,
         reason: 'Component not running',
         code: 'component_not_running',
+        status: this.getComponentStatus(name),
       };
     }
 
@@ -2649,6 +3008,7 @@ export class LifecycleManager
         componentName: name,
         reason: `Component is already ${currentState}`,
         code: 'component_already_stopping',
+        status: this.getComponentStatus(name),
       };
     }
 
@@ -2901,6 +3261,19 @@ export class LifecycleManager
       this.componentStates.set(name, 'stopped');
       this.runningComponents.delete(name);
       this.stalledComponents.delete(name); // Clear stalled status on successful stop
+
+      // Auto-detach signals if this was the last component and option is enabled
+      if (
+        this.detachSignalsOnStop &&
+        this.runningComponents.size === 0 &&
+        this.processSignalManager
+      ) {
+        this.logger.info(
+          'Auto-detaching process signals on last component stop',
+        );
+        this.detachSignals();
+      }
+
       const timestamps = this.componentTimestamps.get(name) ?? {
         startedAt: null,
         stoppedAt: null,
@@ -2942,6 +3315,7 @@ export class LifecycleManager
           reason: 'Graceful shutdown timed out',
           code: 'stop_timeout',
           error: err,
+          status: this.getComponentStatus(name),
         };
       } else {
         // Error during graceful stop
@@ -2955,6 +3329,7 @@ export class LifecycleManager
           reason: err.message,
           code: 'unknown_error',
           error: err,
+          status: this.getComponentStatus(name),
         };
       }
     } finally {
@@ -3035,6 +3410,7 @@ export class LifecycleManager
           : (context.gracefulError?.message ?? 'Graceful shutdown failed'),
         code: context.gracefulTimedOut ? 'stop_timeout' : 'unknown_error',
         error: context.gracefulError,
+        status: this.getComponentStatus(name),
       };
     }
 
@@ -3074,6 +3450,19 @@ export class LifecycleManager
       this.componentStates.set(name, 'stopped');
       this.runningComponents.delete(name);
       this.stalledComponents.delete(name); // Clear stalled status on successful force stop
+
+      // Auto-detach signals if this was the last component and option is enabled
+      if (
+        this.detachSignalsOnStop &&
+        this.runningComponents.size === 0 &&
+        this.processSignalManager
+      ) {
+        this.logger.info(
+          'Auto-detaching process signals on last component stop',
+        );
+        this.detachSignals();
+      }
+
       const timestamps = this.componentTimestamps.get(name) ?? {
         startedAt: null,
         stoppedAt: null,
@@ -3137,8 +3526,9 @@ export class LifecycleManager
         success: false,
         componentName: name,
         reason: isTimeout ? 'Force shutdown timed out' : err.message,
-        code: 'unknown_error',
+        code: isTimeout ? 'stop_timeout' : 'unknown_error',
         error: err,
+        status: this.getComponentStatus(name),
       };
     } finally {
       if (timeoutHandle) {
@@ -3607,7 +3997,9 @@ export class LifecycleManager
     this.lifecycleEvents.signalShutdown(method);
 
     // Initiate shutdown asynchronously (don't await in signal handler)
-    void this.stopAllComponentsInternal(method);
+    void this.stopAllComponentsInternal(method, {
+      ...this.shutdownOptions,
+    });
   }
 
   /**
