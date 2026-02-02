@@ -277,6 +277,7 @@ export interface StartupResult {
     | 'already_in_progress'
     | 'shutdown_in_progress'
     | 'dependency_cycle'
+    | 'no_components_registered'
     | 'stalled_components_exist'
     | 'startup_timeout'
     | 'unknown_error';
@@ -372,7 +373,8 @@ export interface MessageResult {
   code:
     | 'sent'
     | 'not_found'
-    | 'not_running'
+    | 'stopped'
+    | 'stalled'
     | 'no_handler'
     | 'timeout'
     | 'error';
@@ -387,15 +389,37 @@ export interface SendMessageOptions {
    * (default: manager messageTimeoutMS, 0 = disabled)
    */
   timeout?: number;
+
+  /**
+   * Include stopped (not running, not stalled) components (default: false)
+   */
+  includeStopped?: boolean;
+
+  /**
+   * Include stalled components (default: false)
+   */
+  includeStalled?: boolean;
+}
+
+/**
+ * Options for requesting a value from a component
+ */
+export interface GetValueOptions {
+  /**
+   * Include stopped (not running, not stalled) components (default: false)
+   */
+  includeStopped?: boolean;
+
+  /**
+   * Include stalled components (default: false)
+   */
+  includeStalled?: boolean;
 }
 
 /**
  * Options for broadcasting messages to components
  */
 export interface BroadcastOptions extends SendMessageOptions {
-  /** Include non-running components (default: false) */
-  includeNonRunning?: boolean;
-
   /** Filter to specific component names (default: all components) */
   componentNames?: string[];
 }
@@ -423,7 +447,7 @@ export interface BroadcastResult {
   timedOut: boolean;
 
   /** Machine-readable outcome code */
-  code: 'sent' | 'not_running' | 'no_handler' | 'timeout' | 'error';
+  code: 'sent' | 'stopped' | 'stalled' | 'no_handler' | 'timeout' | 'error';
 }
 
 /**
@@ -469,7 +493,14 @@ export interface HealthCheckResult {
   timedOut: boolean;
 
   /** Machine-readable outcome code */
-  code: 'ok' | 'not_found' | 'not_running' | 'no_handler' | 'timeout' | 'error';
+  code:
+    | 'ok'
+    | 'not_found'
+    | 'stopped'
+    | 'stalled'
+    | 'no_handler'
+    | 'timeout'
+    | 'error';
 }
 
 /**
@@ -567,7 +598,7 @@ export interface ValueResult<T = unknown> {
   requestedBy: string | null;
 
   /** Machine-readable outcome code */
-  code: 'found' | 'not_found' | 'not_running' | 'no_handler' | 'error';
+  code: 'found' | 'not_found' | 'stopped' | 'stalled' | 'no_handler' | 'error';
 }
 
 type EventEmitterSurface = Pick<
@@ -588,10 +619,15 @@ export interface LifecycleCommon extends EventEmitterSurface {
   getRunningComponentNames(): string[];
   getComponentCount(): number;
   getRunningComponentCount(): number;
+  getStalledComponentCount(): number;
+  getStoppedComponentCount(): number;
   getComponentStatus(name: string): ComponentStatus | undefined;
   getAllComponentStatuses(): ComponentStatus[];
   getSystemState(): SystemState;
+  getStatus(): LifecycleManagerStatus;
   getStalledComponents(): ComponentStallInfo[];
+  getStalledComponentNames(): string[];
+  getStoppedComponentNames(): string[];
   getStartupOrder(): StartupOrderResult;
   validateDependencies(): DependencyValidationResult;
 
@@ -631,7 +667,11 @@ export interface LifecycleCommon extends EventEmitterSurface {
   ): Promise<BroadcastResult[]>;
   checkComponentHealth(name: string): Promise<HealthCheckResult>;
   checkAllHealth(): Promise<HealthReport>;
-  getValue<T = unknown>(componentName: string, key: string): ValueResult<T>;
+  getValue<T = unknown>(
+    componentName: string,
+    key: string,
+    options?: GetValueOptions,
+  ): ValueResult<T>;
 }
 
 /**
@@ -654,6 +694,7 @@ export interface LifecycleInternalCallbacks {
     componentName: string,
     key: string,
     from: string | null,
+    options?: GetValueOptions,
   ) => ValueResult<T>;
 }
 
@@ -667,7 +708,7 @@ export type ComponentLifecycleRef = LifecycleCommon;
  * Overall system state
  */
 export type SystemState =
-  | 'idle' // No components, nothing happening
+  | 'no-components' // No components registered
   | 'ready' // Components registered, not started
   | 'starting' // startAllComponents() in progress
   | 'running' // All components running
@@ -675,6 +716,39 @@ export type SystemState =
   | 'shutting-down' // stopAllComponents() in progress
   | 'stopped' // All components stopped (can restart)
   | 'error'; // Startup failed with rollback
+
+/**
+ * Aggregated status snapshot for the lifecycle manager.
+ */
+export interface LifecycleManagerStatus {
+  /** Overall system state derived from manager flags and component state */
+  systemState: SystemState;
+
+  /** True if any component is running (or stalled) */
+  isStarted: boolean;
+
+  /** True while startAllComponents() is running */
+  isStarting: boolean;
+
+  /** True while stopAllComponents() is running */
+  isShuttingDown: boolean;
+
+  /** Counts of registered, running, and stalled components */
+  counts: {
+    total: number;
+    running: number;
+    stopped: number;
+    stalled: number;
+  };
+
+  /** Component name lists for quick inspection */
+  components: {
+    registered: string[];
+    running: string[];
+    stopped: string[];
+    stalled: string[];
+  };
+}
 
 /**
  * Options for registering a component
@@ -766,10 +840,13 @@ export interface RegistrationResultBase extends BaseOperationResult {
   /** Whether registration occurred during startup */
   duringStartup?: boolean;
 
-  /** Whether the component was auto-started after registration */
-  autoStarted?: boolean;
+  /** Whether auto-start was attempted after registration */
+  autoStartAttempted?: boolean;
 
-  /** Result of auto-start operation (only present when autoStarted is true) */
+  /** Whether auto-start succeeded (only present when autoStartAttempted is true) */
+  autoStartSucceeded?: boolean;
+
+  /** Result of auto-start operation (only present when autoStartAttempted is true) */
   startResult?: ComponentOperationResult;
 }
 

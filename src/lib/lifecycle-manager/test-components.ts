@@ -328,7 +328,7 @@ export class MockWorkerComponent extends BaseComponent {
     this.aborted = true;
   }
 
-  public onStopAborted(): void {
+  public onGracefulStopTimeout(): void {
     this.logger.warn('Worker stop aborted');
   }
 

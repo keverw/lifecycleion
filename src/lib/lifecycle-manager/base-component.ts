@@ -179,7 +179,7 @@ export abstract class BaseComponent {
    * Use this to set flags or prepare for more aggressive cleanup in onShutdownForce().
    * Must be synchronous and fast - manager won't wait for it to complete.
    */
-  public onStopAborted?(): void;
+  public onGracefulStopTimeout?(): void;
 
   /**
    * Called before graceful shutdown to warn component

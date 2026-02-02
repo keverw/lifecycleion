@@ -190,7 +190,7 @@ describe('LifecycleManager Integration Tests', () => {
       expect(lifecycle.isComponentRunning('cache')).toBe(false);
     });
 
-    test('should skip components that depend on failed optional component', async () => {
+    test('should allow components that depend on failed optional component to start', async () => {
       const database = new MockDatabaseComponent(logger);
       const cache = new MockCacheComponent(logger, true); // Optional
       const api = new MockAPIComponent(logger, ['cache']); // Depends on optional cache
@@ -207,11 +207,11 @@ describe('LifecycleManager Integration Tests', () => {
       const startResult = await lifecycle.startAllComponents();
       expect(startResult.success).toBe(true);
       expect(startResult.failedOptionalComponents[0].name).toBe('cache');
-      expect(startResult.skippedDueToDependency).toContain('api');
+      expect(startResult.skippedDueToDependency).not.toContain('api');
 
       expect(database.connected).toBe(true);
       expect(lifecycle.isComponentRunning('cache')).toBe(false);
-      expect(lifecycle.isComponentRunning('api')).toBe(false);
+      expect(lifecycle.isComponentRunning('api')).toBe(true);
     });
   });
 
@@ -635,7 +635,7 @@ describe('LifecycleManager Integration Tests', () => {
       const result = lifecycle.getValue('database', 'connected');
       expect(result.found).toBe(false);
       expect(result.componentRunning).toBe(false);
-      expect(result.code).toBe('not_running');
+      expect(result.code).toBe('stopped');
     });
   });
 

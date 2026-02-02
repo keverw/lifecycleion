@@ -7,6 +7,7 @@ import type {
   ComponentState,
   ComponentStatus,
   ComponentStallInfo,
+  LifecycleManagerStatus,
   ComponentOperationResult,
   StartComponentOptions,
   StopComponentOptions,
@@ -38,6 +39,7 @@ import type {
   BroadcastResult,
   BroadcastOptions,
   SendMessageOptions,
+  GetValueOptions,
   HealthCheckResult,
   HealthReport,
   ValueResult,
@@ -184,7 +186,8 @@ export class LifecycleManager
       registrationIndexAfter: result.registrationIndexAfter,
       startupOrder: result.startupOrder,
       duringStartup: result.duringStartup,
-      autoStarted: result.autoStarted,
+      autoStartAttempted: result.autoStartAttempted,
+      autoStartSucceeded: result.autoStartSucceeded,
       startResult: result.startResult,
     };
   }
@@ -312,7 +315,7 @@ export class LifecycleManager
       });
 
       // If stop fails and leaves the component stalled, do NOT unregister.
-      // Caller expectation: success with stopIfRunning implies the component is stopped.
+      // Caller expectation: success with stopIfRunning implies the component is stopped and unregistered.
       const stateAfterStopAttempt = this.componentStates.get(name);
       const isRunningAfterStopAttempt = this.isComponentRunning(name);
 
@@ -356,6 +359,7 @@ export class LifecycleManager
     this.componentErrors.delete(name);
     this.stalledComponents.delete(name);
     this.runningComponents.delete(name);
+    this.updateStartedFlag();
 
     // Auto-detach signals if this was the last component and option is enabled
     if (
@@ -439,6 +443,20 @@ export class LifecycleManager
   }
 
   /**
+   * Get stalled component count
+   */
+  public getStalledComponentCount(): number {
+    return this.stalledComponents.size;
+  }
+
+  /**
+   * Get stopped (not running, not stalled) component count
+   */
+  public getStoppedComponentCount(): number {
+    return this.getStoppedComponentNames().length;
+  }
+
+  /**
    * Get detailed status for a specific component
    */
   public getComponentStatus(name: string): ComponentStatus | undefined {
@@ -481,10 +499,6 @@ export class LifecycleManager
     const totalCount = this.getComponentCount();
     const runningCount = this.getRunningComponentCount();
 
-    if (totalCount === 0) {
-      return 'idle';
-    }
-
     if (this.isShuttingDown) {
       return 'shutting-down';
     }
@@ -493,13 +507,17 @@ export class LifecycleManager
       return 'starting';
     }
 
+    if (totalCount === 0) {
+      return 'no-components';
+    }
+
     // Check for stalled components (failed to stop)
     if (this.stalledComponents.size > 0) {
       return 'stalled';
     }
 
     if (runningCount === 0) {
-      return totalCount > 0 ? 'ready' : 'idle';
+      return 'ready';
     }
 
     if (runningCount === totalCount) {
@@ -516,10 +534,62 @@ export class LifecycleManager
   }
 
   /**
+   * Get aggregated status snapshot for the manager.
+   */
+  public getStatus(): LifecycleManagerStatus {
+    const running = this.getRunningComponentCount();
+    const stalled = this.getStalledComponentCount();
+    const stopped = this.getStoppedComponentCount();
+    const registeredNames = this.getComponentNames();
+    const runningNames = this.getRunningComponentNames();
+    const stalledNames = this.getStalledComponentNames();
+    const stoppedNames = this.getStoppedComponentNames();
+
+    return {
+      systemState: this.getSystemState(),
+      isStarted: this.isStarted,
+      isStarting: this.isStarting,
+      isShuttingDown: this.isShuttingDown,
+      counts: {
+        total: this.getComponentCount(),
+        running,
+        stopped,
+        stalled,
+      },
+      components: {
+        registered: registeredNames,
+        running: runningNames,
+        stopped: stoppedNames,
+        stalled: stalledNames,
+      },
+    };
+  }
+
+  /**
    * Get information about components that are stalled (failed to stop)
    */
   public getStalledComponents(): ComponentStallInfo[] {
     return Array.from(this.stalledComponents.values());
+  }
+
+  /**
+   * Get stalled component names
+   */
+  public getStalledComponentNames(): string[] {
+    return Array.from(this.stalledComponents.keys());
+  }
+
+  /**
+   * Get stopped (not running, not stalled) component names
+   */
+  public getStoppedComponentNames(): string[] {
+    const registeredNames = this.getComponentNames();
+    const runningNameSet = new Set(this.getRunningComponentNames());
+    const stalledNameSet = new Set(this.getStalledComponentNames());
+
+    return registeredNames.filter(
+      (name) => !runningNameSet.has(name) && !stalledNameSet.has(name),
+    );
   }
 
   /**
@@ -692,6 +762,20 @@ export class LifecycleManager
     const totalCount = this.getComponentCount();
     const runningCount = this.getRunningComponentCount();
 
+    if (totalCount === 0) {
+      this.logger.warn('Cannot start all components: none registered');
+
+      return {
+        success: false,
+        startedComponents: [],
+        failedOptionalComponents: [],
+        skippedDueToDependency: [],
+        reason: 'No components registered',
+        code: 'no_components_registered',
+        durationMS: Date.now() - startTime,
+      };
+    }
+
     // Check for stalled components
     if (this.stalledComponents.size > 0 && !options?.ignoreStalledComponents) {
       const stalledNames = Array.from(this.stalledComponents.keys());
@@ -842,10 +926,10 @@ export class LifecycleManager
           }
 
           const depComponent = this.getComponent(depName);
-          const depIsOptional = depComponent?.isOptional() ?? false;
+          const isDependencyOptional = depComponent?.isOptional() ?? false;
 
           if (skippedDueToDependency.has(depName)) {
-            if (!depIsOptional) {
+            if (!isDependencyOptional) {
               shouldSkip = true;
               skipReason = `Dependency "${depName}" was skipped`;
               break;
@@ -855,7 +939,7 @@ export class LifecycleManager
 
           if (depComponent) {
             const depState = this.componentStates.get(depName);
-            if (depState === 'failed' && !depIsOptional) {
+            if (depState === 'failed' && !isDependencyOptional) {
               shouldSkip = true;
               skipReason = `Dependency "${depName}" failed to start`;
               break;
@@ -976,7 +1060,7 @@ export class LifecycleManager
       }
 
       // Success - all components started (or optional ones failed gracefully)
-      this.isStarted = true;
+      this.updateStartedFlag();
       const skippedComponentsArray = [
         ...Array.from(skippedDueToDependency),
         ...Array.from(skippedDueToStall),
@@ -1448,15 +1532,16 @@ export class LifecycleManager
 
     // Check if component is running
     if (!this.isComponentRunning(name)) {
+      const isStalled = this.stalledComponents.has(name);
       return {
         name,
         healthy: false,
-        message: 'Component not running',
+        message: isStalled ? 'Component is stalled' : 'Component not running',
         checkedAt: startTime,
         durationMS: Date.now() - startTime,
         error: null,
         timedOut: false,
-        code: 'not_running',
+        code: isStalled ? 'stalled' : 'stopped',
       };
     }
 
@@ -1586,7 +1671,9 @@ export class LifecycleManager
     // "no_handler" is treated as healthy by design (implicit OK).
     const hasDegraded = results.some(
       (r) =>
-        r.code === 'not_running' || (r.code !== 'no_handler' && !r.healthy),
+        r.code === 'stopped' ||
+        r.code === 'stalled' ||
+        (r.code !== 'no_handler' && !r.healthy),
     );
     const code = hasError
       ? 'error'
@@ -1623,8 +1710,9 @@ export class LifecycleManager
   public getValue<T = unknown>(
     componentName: string,
     key: string,
+    options?: GetValueOptions,
   ): ValueResult<T> {
-    return this.getValueInternal<T>(componentName, key, null);
+    return this.getValueInternal<T>(componentName, key, null, options);
   }
 
   // ============================================================================
@@ -1676,18 +1764,28 @@ export class LifecycleManager
       };
     }
 
-    // Check if running
-    if (!this.isComponentRunning(componentName)) {
-      return {
-        sent: false,
-        componentFound: true,
-        componentRunning: false,
-        handlerImplemented: false,
-        data: undefined,
-        error: null,
-        timedOut: false,
-        code: 'not_running',
-      };
+    const isRunning = this.isComponentRunning(componentName);
+    const isStalled = this.stalledComponents.has(componentName);
+    const allowStopped = options?.includeStopped === true;
+    const allowStalled = options?.includeStalled === true;
+    const isStopped = !isRunning && !isStalled;
+
+    // Check if running or explicitly allowed
+    if (!isRunning) {
+      if ((isStalled && allowStalled) || (isStopped && allowStopped)) {
+        // Allowed to send to non-running component
+      } else {
+        return {
+          sent: false,
+          componentFound: true,
+          componentRunning: false,
+          handlerImplemented: false,
+          data: undefined,
+          error: null,
+          timedOut: false,
+          code: isStalled ? 'stalled' : 'stopped',
+        };
+      }
     }
 
     // Check if handler implemented
@@ -1695,7 +1793,7 @@ export class LifecycleManager
       return {
         sent: false,
         componentFound: true,
-        componentRunning: true,
+        componentRunning: isRunning,
         handlerImplemented: false,
         data: undefined,
         error: null,
@@ -1724,7 +1822,7 @@ export class LifecycleManager
           timedOut: false,
           code: 'error',
           componentFound: true,
-          componentRunning: true,
+          componentRunning: isRunning,
           handlerImplemented: true,
           data: undefined,
         });
@@ -1732,7 +1830,7 @@ export class LifecycleManager
         return {
           sent: true,
           componentFound: true,
-          componentRunning: true,
+          componentRunning: isRunning,
           handlerImplemented: true,
           data: undefined,
           error: err,
@@ -1768,7 +1866,7 @@ export class LifecycleManager
         return {
           sent: true,
           componentFound: true,
-          componentRunning: true,
+          componentRunning: isRunning,
           handlerImplemented: true,
           data: undefined,
           error: null,
@@ -1780,7 +1878,7 @@ export class LifecycleManager
       return {
         sent: true,
         componentFound: true,
-        componentRunning: true,
+        componentRunning: isRunning,
         handlerImplemented: true,
         data: outcome,
         error: null,
@@ -1796,7 +1894,7 @@ export class LifecycleManager
         timedOut: false,
         code: 'error',
         componentFound: true,
-        componentRunning: true,
+        componentRunning: isRunning,
         handlerImplemented: true,
         data: undefined,
       });
@@ -1804,7 +1902,7 @@ export class LifecycleManager
       return {
         sent: true,
         componentFound: true,
-        componentRunning: true,
+        componentRunning: isRunning,
         handlerImplemented: true,
         data: undefined,
         error: err,
@@ -1837,28 +1935,56 @@ export class LifecycleManager
     // Determine which components to broadcast to
     let targetComponents = this.components;
 
+    const hasExplicitTargets =
+      options?.componentNames !== undefined &&
+      options.componentNames.length > 0;
+
     // Filter by names if specified
-    if (options?.componentNames && options.componentNames.length > 0) {
+    if (hasExplicitTargets) {
       const componentNames = options.componentNames;
       targetComponents = targetComponents.filter((c) =>
         componentNames.includes(c.getName()),
       );
     }
 
-    // Filter by running state unless includeNonRunning
-    if (!options?.includeNonRunning) {
+    const allowStopped = options?.includeStopped === true;
+    const allowStalled = options?.includeStalled === true;
+
+    // Filter by running/stalled/stopped state unless explicitly included
+    if (!allowStopped && !allowStalled && !hasExplicitTargets) {
       targetComponents = targetComponents.filter((c) =>
         this.isComponentRunning(c.getName()),
       );
+    } else if (!hasExplicitTargets) {
+      targetComponents = targetComponents.filter((c) => {
+        const name = c.getName();
+        const isRunning = this.isComponentRunning(name);
+
+        if (isRunning) {
+          return true;
+        }
+
+        const isStalled = this.stalledComponents.has(name);
+
+        if (isStalled) {
+          return allowStalled;
+        }
+
+        return allowStopped;
+      });
     }
 
     // Send to each component
     for (const component of targetComponents) {
       const name = component.getName();
       const isRunning = this.isComponentRunning(name);
+      const isStalled = this.stalledComponents.has(name);
+      const isStopped = !isRunning && !isStalled;
+      const allowNonRunning =
+        (isStalled && allowStalled) || (isStopped && allowStopped);
 
-      // Skip if not running (only happens when includeNonRunning is true)
-      if (!isRunning) {
+      // Skip if not running and not explicitly allowed
+      if (!isRunning && !allowNonRunning) {
         results.push({
           name,
           sent: false,
@@ -1866,7 +1992,7 @@ export class LifecycleManager
           data: undefined,
           error: null,
           timedOut: false,
-          code: 'not_running',
+          code: isStalled ? 'stalled' : 'stopped',
         });
         continue;
       }
@@ -1910,6 +2036,7 @@ export class LifecycleManager
     componentName: string,
     key: string,
     from: string | null,
+    options?: GetValueOptions,
   ): ValueResult<T> {
     this.lifecycleEvents.componentValueRequested(componentName, key, from);
 
@@ -1941,7 +2068,16 @@ export class LifecycleManager
 
     // Check if running
     const isRunning = this.isComponentRunning(componentName);
-    if (!isRunning) {
+    const isStalled = this.stalledComponents.has(componentName);
+    const allowStopped = options?.includeStopped === true;
+    const allowStalled = options?.includeStalled === true;
+    const isStopped = !isRunning && !isStalled;
+
+    if (
+      !isRunning &&
+      !((isStopped && allowStopped) || (isStalled && allowStalled))
+    ) {
+      const code = isStalled ? 'stalled' : 'stopped';
       this.lifecycleEvents.componentValueReturned(componentName, key, from, {
         found: false,
         value: undefined,
@@ -1949,7 +2085,7 @@ export class LifecycleManager
         componentRunning: false,
         handlerImplemented: false,
         requestedBy: from,
-        code: 'not_running',
+        code,
       });
       return {
         found: false,
@@ -1958,7 +2094,7 @@ export class LifecycleManager
         componentRunning: false,
         handlerImplemented: false,
         requestedBy: from,
-        code: 'not_running',
+        code,
       };
     }
 
@@ -1968,7 +2104,7 @@ export class LifecycleManager
         found: false,
         value: undefined,
         componentFound: true,
-        componentRunning: true,
+        componentRunning: isRunning,
         handlerImplemented: false,
         requestedBy: from,
         code: 'no_handler',
@@ -1977,7 +2113,7 @@ export class LifecycleManager
         found: false,
         value: undefined,
         componentFound: true,
-        componentRunning: true,
+        componentRunning: isRunning,
         handlerImplemented: false,
         requestedBy: from,
         code: 'no_handler',
@@ -1994,7 +2130,7 @@ export class LifecycleManager
         found: wasFound,
         value,
         componentFound: true,
-        componentRunning: true,
+        componentRunning: isRunning,
         handlerImplemented: true,
         requestedBy: from,
         code: wasFound ? 'found' : 'not_found',
@@ -2004,7 +2140,7 @@ export class LifecycleManager
         found: wasFound,
         value: value as T | undefined,
         componentFound: true,
-        componentRunning: true,
+        componentRunning: isRunning,
         handlerImplemented: true,
         requestedBy: from,
         code: wasFound ? 'found' : 'not_found',
@@ -2019,7 +2155,7 @@ export class LifecycleManager
         found: false,
         value: undefined,
         componentFound: true,
-        componentRunning: true,
+        componentRunning: isRunning,
         handlerImplemented: true,
         requestedBy: from,
         code: 'error',
@@ -2029,7 +2165,7 @@ export class LifecycleManager
         found: false,
         value: undefined,
         componentFound: true,
-        componentRunning: true,
+        componentRunning: isRunning,
         handlerImplemented: true,
         requestedBy: from,
         code: 'error',
@@ -2040,6 +2176,11 @@ export class LifecycleManager
   // ============================================================================
   // Private Helper Methods
   // ============================================================================
+
+  private updateStartedFlag(): void {
+    this.isStarted =
+      this.runningComponents.size > 0 || this.stalledComponents.size > 0;
+  }
 
   /**
    * Internal method that handles component registration logic.
@@ -2254,7 +2395,7 @@ export class LifecycleManager
           manualPositionRespected: false,
           targetFound: false,
           duringStartup: this.isStarting,
-          autoStarted: false,
+          autoStartAttempted: false,
           startResult: undefined,
         };
       }
@@ -2367,19 +2508,20 @@ export class LifecycleManager
       }
 
       // Determine if auto-start will be attempted
-      const willAutoStart =
-        _options?.autoStart === true && (this.isStarted || this.isStarting);
+      const shouldAutoStart = _options?.autoStart === true;
+      let didAutoStartAttempt = false;
 
       // Handle AutoStart if requested and capture result
       let startResult: ComponentOperationResult | undefined;
 
-      if (_options?.autoStart === true) {
+      if (shouldAutoStart) {
         if (this.isStarted) {
           // Manager is already running - start the component directly
           this.logger
             .entity(componentName)
             .info('AutoStart: starting component (manager is running)');
           startResult = await this.startComponentInternal(componentName);
+          didAutoStartAttempt = true;
         } else if (this.isStarting) {
           // Manager is currently starting - allow during bulk startup
           this.logger
@@ -2388,9 +2530,20 @@ export class LifecycleManager
           startResult = await this.startComponentInternal(componentName, {
             allowDuringBulkStartup: true,
           });
+          didAutoStartAttempt = true;
+        } else {
+          // Manager is not running - attempt to start just this component
+          this.logger
+            .entity(componentName)
+            .info('AutoStart: starting component (manager not running)');
+          startResult = await this.startComponentInternal(componentName);
+          didAutoStartAttempt = true;
         }
-        // If not started or starting, component will be started when startAllComponents() is called
       }
+
+      const didAutoStartSucceed = didAutoStartAttempt
+        ? startResult?.success === true
+        : undefined;
 
       // Emit registration event
       this.lifecycleEvents.componentRegistered({
@@ -2406,7 +2559,8 @@ export class LifecycleManager
         manualPositionRespected: isManualPositionRespected,
         targetFound: isTargetFound,
         duringStartup: this.isStarting,
-        autoStarted: willAutoStart,
+        autoStartAttempted: didAutoStartAttempt,
+        autoStartSucceeded: didAutoStartSucceed,
       });
 
       return {
@@ -2421,7 +2575,8 @@ export class LifecycleManager
         manualPositionRespected: isManualPositionRespected,
         targetFound: isTargetFound,
         duringStartup: this.isStarting,
-        autoStarted: willAutoStart,
+        autoStartAttempted: didAutoStartAttempt,
+        autoStartSucceeded: didAutoStartSucceed,
         startResult,
       };
     } catch (error) {
@@ -2471,7 +2626,7 @@ export class LifecycleManager
         targetFound:
           position === 'before' || position === 'after' ? false : undefined,
         duringStartup: this.isStarting,
-        autoStarted: false,
+        autoStartAttempted: false,
         startResult: undefined,
       };
     }
@@ -2484,8 +2639,8 @@ export class LifecycleManager
     const startTime = Date.now();
     const effectiveTimeout =
       options?.timeoutMS ?? this.shutdownOptions?.timeoutMS ?? 30000;
-    const retryStalled = options?.retryStalled ?? true;
-    const haltOnStall = options?.haltOnStall ?? true;
+    const shouldRetryStalled = options?.retryStalled ?? true;
+    const shouldHaltOnStall = options?.haltOnStall ?? true;
 
     // Reject if already shutting down
     if (this.isShuttingDown) {
@@ -2536,7 +2691,7 @@ export class LifecycleManager
     const runningComponentsToStop = shutdownOrder.filter(
       (name) =>
         this.isComponentRunning(name) ||
-        (retryStalled && stalledComponentNames.has(name)),
+        (shouldRetryStalled && stalledComponentNames.has(name)),
     );
 
     const stoppedComponents: string[] = [];
@@ -2561,9 +2716,9 @@ export class LifecycleManager
           const isRunning = this.isComponentRunning(name);
           const isStalled = stalledComponentNames.has(name);
 
-          const result = isRunning
+          const result: ComponentOperationResult = isRunning
             ? await this.stopComponentInternal(name)
-            : retryStalled && isStalled
+            : shouldRetryStalled && isStalled
               ? await this.retryStalledComponent(name)
               : isStalled
                 ? {
@@ -2596,7 +2751,7 @@ export class LifecycleManager
               stalledComponents.push(stallInfo);
             }
 
-            if (haltOnStall) {
+            if (shouldHaltOnStall) {
               this.logger.warn(
                 'Halting shutdown after stall (haltOnStall=true)',
                 { params: { stalledComponent: name } },
@@ -2662,7 +2817,7 @@ export class LifecycleManager
 
       // Reset state
       this.isShuttingDown = false;
-      this.isStarted = false;
+      this.updateStartedFlag();
     }
   }
 
@@ -2880,6 +3035,7 @@ export class LifecycleManager
       // Update state
       this.componentStates.set(name, 'running');
       this.runningComponents.add(name);
+      this.updateStartedFlag();
 
       // Auto-attach signals if this is the first component and option is enabled
       if (
@@ -3227,13 +3383,13 @@ export class LifecycleManager
         const timeoutPromise = new Promise<never>((_, reject) => {
           timeoutHandle = setTimeout(() => {
             // Call abort callback if implemented
-            if (component.onStopAborted) {
+            if (component.onGracefulStopTimeout) {
               try {
-                component.onStopAborted();
+                component.onGracefulStopTimeout();
               } catch (error) {
                 this.logger
                   .entity(name)
-                  .warn('Error in onStopAborted callback', {
+                  .warn('Error in onGracefulStopTimeout callback', {
                     params: { error },
                   });
               }
@@ -3261,6 +3417,7 @@ export class LifecycleManager
       this.componentStates.set(name, 'stopped');
       this.runningComponents.delete(name);
       this.stalledComponents.delete(name); // Clear stalled status on successful stop
+      this.updateStartedFlag();
 
       // Auto-detach signals if this was the last component and option is enabled
       if (
@@ -3386,6 +3543,7 @@ export class LifecycleManager
       this.stalledComponents.set(name, stallInfo);
       this.componentStates.set(name, 'stalled');
       this.runningComponents.delete(name);
+      this.updateStartedFlag();
 
       this.logger
         .entity(name)
@@ -3450,6 +3608,7 @@ export class LifecycleManager
       this.componentStates.set(name, 'stopped');
       this.runningComponents.delete(name);
       this.stalledComponents.delete(name); // Clear stalled status on successful force stop
+      this.updateStartedFlag();
 
       // Auto-detach signals if this was the last component and option is enabled
       if (
@@ -3505,6 +3664,7 @@ export class LifecycleManager
       this.componentStates.set(name, 'stalled');
       this.runningComponents.delete(name);
       this.componentErrors.set(name, err);
+      this.updateStartedFlag();
 
       if (isTimeout) {
         this.logger.entity(name).error('Force shutdown timed out - stalled', {
@@ -3722,7 +3882,7 @@ export class LifecycleManager
       manualPositionRespected: false,
       targetFound: input.targetFound,
       duringStartup: this.isStarting,
-      autoStarted: false,
+      autoStartAttempted: false,
       startResult: undefined,
     };
   }

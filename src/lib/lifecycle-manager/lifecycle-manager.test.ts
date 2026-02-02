@@ -1200,7 +1200,7 @@ describe('LifecycleManager - Registration & Individual Lifecycle', () => {
     test('getSystemState should return correct system state', async () => {
       const lifecycle = new LifecycleManager({ logger });
 
-      expect(lifecycle.getSystemState()).toBe('idle');
+      expect(lifecycle.getSystemState()).toBe('no-components');
 
       const comp1 = new TestComponent(logger, { name: 'database' });
       await lifecycle.registerComponent(comp1);
@@ -1849,7 +1849,7 @@ describe('LifecycleManager - Registration & Individual Lifecycle', () => {
       expect(component.abortCalled).toBe(false);
     });
 
-    test('onStopAborted should be called on stop timeout', async () => {
+    test('onGracefulStopTimeout should be called on stop timeout', async () => {
       const lifecycle = new LifecycleManager({ logger });
 
       class AbortableStopComponent extends BaseComponent {
@@ -1863,7 +1863,7 @@ describe('LifecycleManager - Registration & Individual Lifecycle', () => {
           await sleep(2000);
         }
 
-        public onStopAborted() {
+        public onGracefulStopTimeout() {
           this.abortCalled = true;
         }
       }
@@ -1880,7 +1880,7 @@ describe('LifecycleManager - Registration & Individual Lifecycle', () => {
       expect(component.abortCalled).toBe(true);
     });
 
-    test('onStopAborted should NOT be called when stop() fails (non-timeout)', async () => {
+    test('onGracefulStopTimeout should NOT be called when stop() fails (non-timeout)', async () => {
       const lifecycle = new LifecycleManager({ logger });
 
       class FailingStopComponent extends BaseComponent {
@@ -1894,7 +1894,7 @@ describe('LifecycleManager - Registration & Individual Lifecycle', () => {
           return Promise.reject(new Error('Stop error'));
         }
 
-        public onStopAborted() {
+        public onGracefulStopTimeout() {
           this.abortCalled = true;
         }
       }
@@ -2162,6 +2162,15 @@ describe('LifecycleManager - Bulk Operations', () => {
   });
 
   describe('startAllComponents()', () => {
+    test('should reject when no components are registered', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      const result = await lifecycle.startAllComponents();
+
+      expect(result.success).toBe(false);
+      expect(result.code).toBe('no_components_registered');
+    });
+
     test('should start all components in registration order', async () => {
       const lifecycle = new LifecycleManager({ logger });
 
@@ -4539,7 +4548,7 @@ describe('LifecycleManager - Multi-Phase Shutdown', () => {
   });
 
   describe('Abort Callbacks', () => {
-    test('should call onStopAborted on graceful timeout', async () => {
+    test('should call onGracefulStopTimeout on graceful timeout', async () => {
       const lifecycle = new LifecycleManager({ logger });
       let wasAbortCalled = false;
 
@@ -4548,7 +4557,7 @@ describe('LifecycleManager - Multi-Phase Shutdown', () => {
           await sleep(2000);
         }
 
-        public onStopAborted() {
+        public onGracefulStopTimeout() {
           wasAbortCalled = true;
         }
 
@@ -5646,7 +5655,115 @@ describe('LifecycleManager - Messaging, Health & Values', () => {
       expect(result.data).toBeUndefined();
       expect(result.error).toBeNull();
       expect(result.timedOut).toBe(false);
-      expect(result.code).toBe('not_running');
+      expect(result.code).toBe('stopped');
+    });
+
+    test('should allow message to stopped component when includeStopped is true', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      class ComponentWithHandler extends BaseComponent {
+        public receivedMessages: unknown[] = [];
+
+        constructor(logger: Logger) {
+          super(logger, { name: 'receiver', dependencies: [] });
+        }
+
+        public async start() {}
+        public async stop() {}
+
+        public onMessage<TData = { response: string }>(
+          payload: unknown,
+          _from: string | null,
+        ): TData | Promise<TData> {
+          this.receivedMessages.push(payload);
+          return { response: 'acknowledged' } as unknown as TData;
+        }
+      }
+
+      const component = new ComponentWithHandler(logger);
+      await lifecycle.registerComponent(component);
+
+      const result = await lifecycle.sendMessageToComponent(
+        'receiver',
+        { test: 'data' },
+        { includeStopped: true },
+      );
+
+      expect(result.sent).toBe(true);
+      expect(result.componentFound).toBe(true);
+      expect(result.componentRunning).toBe(false);
+      expect(result.handlerImplemented).toBe(true);
+      expect(result.data).toEqual({ response: 'acknowledged' });
+      expect(result.error).toBeNull();
+      expect(result.timedOut).toBe(false);
+      expect(result.code).toBe('sent');
+      expect(component.receivedMessages).toHaveLength(1);
+    });
+
+    test('should allow message to stalled component when includeStalled is true', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      class StallingComponent extends BaseComponent {
+        public receivedMessages: unknown[] = [];
+
+        constructor(logger: Logger) {
+          super(logger, {
+            name: 'stalled',
+            dependencies: [],
+            shutdownGracefulTimeoutMS: 10,
+            shutdownForceTimeoutMS: 10,
+          });
+        }
+
+        public async start() {}
+        public async stop() {
+          await new Promise(() => {});
+        }
+
+        public onMessage<TData = { response: string }>(
+          payload: unknown,
+          _from: string | null,
+        ): TData | Promise<TData> {
+          this.receivedMessages.push(payload);
+          return { response: 'acknowledged' } as unknown as TData;
+        }
+      }
+
+      const component = new StallingComponent(logger);
+      await lifecycle.registerComponent(component);
+      await lifecycle.startAllComponents();
+
+      await lifecycle.stopComponent('stalled');
+      expect(lifecycle.getStalledComponentNames()).toContain('stalled');
+
+      const blockedResult = await lifecycle.sendMessageToComponent('stalled', {
+        test: 'data',
+      });
+
+      expect(blockedResult.sent).toBe(false);
+      expect(blockedResult.componentFound).toBe(true);
+      expect(blockedResult.componentRunning).toBe(false);
+      expect(blockedResult.handlerImplemented).toBe(false);
+      expect(blockedResult.data).toBeUndefined();
+      expect(blockedResult.error).toBeNull();
+      expect(blockedResult.timedOut).toBe(false);
+      expect(blockedResult.code).toBe('stalled');
+
+      const result = await lifecycle.sendMessageToComponent(
+        'stalled',
+        { test: 'data' },
+        { includeStalled: true },
+      );
+
+      expect(result.sent).toBe(true);
+      expect(result.componentFound).toBe(true);
+      expect(result.componentRunning).toBe(false);
+      expect(result.handlerImplemented).toBe(true);
+      expect(result.data).toEqual({ response: 'acknowledged' });
+      expect(result.error).toBeNull();
+      expect(result.timedOut).toBe(false);
+      expect(result.code).toBe('sent');
+      expect(component.receivedMessages).toHaveLength(1);
     });
 
     test('should handle component without handler', async () => {
@@ -6025,6 +6142,8 @@ describe('LifecycleManager - Messaging, Health & Values', () => {
       const lifecycle = new LifecycleManager({ logger });
 
       class MessageReceiver extends BaseComponent {
+        public messages: unknown[] = [];
+
         constructor(logger: Logger, name: string) {
           super(logger, { name, dependencies: [] });
         }
@@ -6033,29 +6152,69 @@ describe('LifecycleManager - Messaging, Health & Values', () => {
         public async stop() {}
 
         public onMessage<TData = unknown>(
-          _payload: unknown,
+          payload: unknown,
           _from: string | null,
         ): TData | Promise<TData> {
+          this.messages.push(payload);
           return undefined as TData;
         }
       }
 
-      await lifecycle.registerComponent(new MessageReceiver(logger, 'comp1'));
-      await lifecycle.registerComponent(new MessageReceiver(logger, 'comp2'));
+      const comp1 = new MessageReceiver(logger, 'comp1');
+      const comp2 = new MessageReceiver(logger, 'comp2');
+      const comp3 = new (class StallingReceiver extends BaseComponent {
+        public messages: unknown[] = [];
+
+        constructor(logger: Logger) {
+          super(logger, {
+            name: 'comp3',
+            dependencies: [],
+            shutdownGracefulTimeoutMS: 10,
+            shutdownForceTimeoutMS: 10,
+          });
+        }
+
+        public async start() {}
+        public async stop() {
+          await new Promise(() => {});
+        }
+
+        public onMessage<TData = unknown>(
+          payload: unknown,
+          _from: string | null,
+        ): TData | Promise<TData> {
+          this.messages.push(payload);
+          return undefined as TData;
+        }
+      })(logger);
+
+      await lifecycle.registerComponent(comp1);
+      await lifecycle.registerComponent(comp2);
+      await lifecycle.registerComponent(comp3);
 
       await lifecycle.startComponent('comp1');
+      await lifecycle.startComponent('comp3');
+      await lifecycle.stopComponent('comp3');
+      expect(lifecycle.getStalledComponentNames()).toContain('comp3');
 
       const results = await lifecycle.broadcastMessage(
         { broadcast: 'test' },
-        { includeNonRunning: true },
+        { includeStopped: true, includeStalled: true },
       );
 
-      expect(results).toHaveLength(2);
+      expect(results).toHaveLength(3);
       expect(results.find((r) => r.name === 'comp1')?.sent).toBe(true);
       const comp2Result = results.find((r) => r.name === 'comp2');
-      expect(comp2Result?.sent).toBe(false);
+      expect(comp2Result?.sent).toBe(true);
       expect(comp2Result?.running).toBe(false);
-      expect(comp2Result?.code).toBe('not_running');
+      expect(comp2Result?.code).toBe('sent');
+      const comp3Result = results.find((r) => r.name === 'comp3');
+      expect(comp3Result?.sent).toBe(true);
+      expect(comp3Result?.running).toBe(false);
+      expect(comp3Result?.code).toBe('sent');
+      expect(comp1.messages).toHaveLength(1);
+      expect(comp2.messages).toHaveLength(1);
+      expect(comp3.messages).toHaveLength(1);
     });
 
     test('should filter by component names', async () => {
@@ -6101,6 +6260,91 @@ describe('LifecycleManager - Messaging, Health & Values', () => {
       expect(comp1.messages).toHaveLength(1);
       expect(comp2.messages).toHaveLength(0);
       expect(comp3.messages).toHaveLength(1);
+    });
+
+    test('should report stopped/stalled codes for explicit targets when not allowed', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      class MessageReceiver extends BaseComponent {
+        public messages: unknown[] = [];
+
+        constructor(logger: Logger, name: string) {
+          super(logger, { name, dependencies: [] });
+        }
+
+        public async start() {}
+        public async stop() {}
+
+        public onMessage<TData = unknown>(
+          payload: unknown,
+          _from: string | null,
+        ): TData | Promise<TData> {
+          this.messages.push(payload);
+          return undefined as TData;
+        }
+      }
+
+      class StallingReceiver extends BaseComponent {
+        public messages: unknown[] = [];
+
+        constructor(logger: Logger, name: string) {
+          super(logger, {
+            name,
+            dependencies: [],
+            shutdownGracefulTimeoutMS: 10,
+            shutdownForceTimeoutMS: 10,
+          });
+        }
+
+        public async start() {}
+        public async stop() {
+          await new Promise(() => {});
+        }
+
+        public onMessage<TData = unknown>(
+          payload: unknown,
+          _from: string | null,
+        ): TData | Promise<TData> {
+          this.messages.push(payload);
+          return undefined as TData;
+        }
+      }
+
+      const running = new MessageReceiver(logger, 'running');
+      const stopped = new MessageReceiver(logger, 'stopped');
+      const stalled = new StallingReceiver(logger, 'stalled');
+
+      await lifecycle.registerComponent(running);
+      await lifecycle.registerComponent(stopped);
+      await lifecycle.registerComponent(stalled);
+
+      await lifecycle.startComponent('running');
+      await lifecycle.startComponent('stalled');
+      await lifecycle.stopComponent('stalled');
+
+      const results = await lifecycle.broadcastMessage(
+        { broadcast: 'test' },
+        { componentNames: ['running', 'stopped', 'stalled'] },
+      );
+
+      const runningResult = results.find((r) => r.name === 'running');
+      const stoppedResult = results.find((r) => r.name === 'stopped');
+      const stalledResult = results.find((r) => r.name === 'stalled');
+
+      expect(runningResult?.sent).toBe(true);
+      expect(runningResult?.code).toBe('sent');
+
+      expect(stoppedResult?.sent).toBe(false);
+      expect(stoppedResult?.running).toBe(false);
+      expect(stoppedResult?.code).toBe('stopped');
+
+      expect(stalledResult?.sent).toBe(false);
+      expect(stalledResult?.running).toBe(false);
+      expect(stalledResult?.code).toBe('stalled');
+
+      expect(running.messages).toHaveLength(1);
+      expect(stopped.messages).toHaveLength(0);
+      expect(stalled.messages).toHaveLength(0);
     });
 
     test('should handle broadcast with some handlers failing', async () => {
@@ -6305,7 +6549,39 @@ describe('LifecycleManager - Messaging, Health & Values', () => {
       expect(result.healthy).toBe(false);
       expect(result.message).toBe('Component not running');
       expect(result.error).toBeNull();
-      expect(result.code).toBe('not_running');
+      expect(result.code).toBe('stopped');
+    });
+
+    test('should handle component stalled', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      class StallingComponent extends BaseComponent {
+        constructor(logger: Logger) {
+          super(logger, {
+            name: 'stalled',
+            dependencies: [],
+            shutdownGracefulTimeoutMS: 10,
+            shutdownForceTimeoutMS: 10,
+          });
+        }
+
+        public async start() {}
+        public async stop() {
+          await new Promise(() => {});
+        }
+      }
+
+      await lifecycle.registerComponent(new StallingComponent(logger));
+      await lifecycle.startAllComponents();
+      await lifecycle.stopComponent('stalled');
+
+      const result = await lifecycle.checkComponentHealth('stalled');
+
+      expect(result.name).toBe('stalled');
+      expect(result.healthy).toBe(false);
+      expect(result.message).toBe('Component is stalled');
+      expect(result.error).toBeNull();
+      expect(result.code).toBe('stalled');
     });
 
     test('should handle component without healthCheck handler', async () => {
@@ -6660,7 +6936,113 @@ describe('LifecycleManager - Messaging, Health & Values', () => {
       expect(result.componentRunning).toBe(false);
       expect(result.handlerImplemented).toBe(false);
       expect(result.value).toBeUndefined();
-      expect(result.code).toBe('not_running');
+      expect(result.code).toBe('stopped');
+    });
+
+    test('should handle component stalled', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      class StallingComponent extends BaseComponent {
+        constructor(logger: Logger) {
+          super(logger, {
+            name: 'provider',
+            dependencies: [],
+            shutdownGracefulTimeoutMS: 10,
+            shutdownForceTimeoutMS: 10,
+          });
+        }
+
+        public async start() {}
+        public async stop() {
+          await new Promise(() => {});
+        }
+
+        public getValue<T = unknown>(_key: string, _from: string | null) {
+          return { found: true, value: { data: 'value' } as T };
+        }
+      }
+
+      await lifecycle.registerComponent(new StallingComponent(logger));
+      await lifecycle.startAllComponents();
+      await lifecycle.stopComponent('provider');
+
+      const result = lifecycle.getValue('provider', 'key');
+
+      expect(result.found).toBe(false);
+      expect(result.componentFound).toBe(true);
+      expect(result.componentRunning).toBe(false);
+      expect(result.handlerImplemented).toBe(false);
+      expect(result.value).toBeUndefined();
+      expect(result.code).toBe('stalled');
+    });
+
+    test('should allow getValue from stopped component when includeStopped is true', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      class ComponentWithValues extends BaseComponent {
+        constructor(logger: Logger) {
+          super(logger, { name: 'provider', dependencies: [] });
+        }
+
+        public async start() {}
+        public async stop() {}
+
+        public getValue<T = unknown>(_key: string, _from: string | null) {
+          return { found: true, value: { data: 'value' } as T };
+        }
+      }
+
+      await lifecycle.registerComponent(new ComponentWithValues(logger));
+
+      const result = lifecycle.getValue('provider', 'key', {
+        includeStopped: true,
+      });
+
+      expect(result.found).toBe(true);
+      expect(result.componentFound).toBe(true);
+      expect(result.componentRunning).toBe(false);
+      expect(result.handlerImplemented).toBe(true);
+      expect(result.value).toEqual({ data: 'value' });
+      expect(result.code).toBe('found');
+    });
+
+    test('should allow getValue from stalled component when includeStalled is true', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      class StallingComponent extends BaseComponent {
+        constructor(logger: Logger) {
+          super(logger, {
+            name: 'provider',
+            dependencies: [],
+            shutdownGracefulTimeoutMS: 10,
+            shutdownForceTimeoutMS: 10,
+          });
+        }
+
+        public async start() {}
+        public async stop() {
+          await new Promise(() => {});
+        }
+
+        public getValue<T = unknown>(_key: string, _from: string | null) {
+          return { found: true, value: { data: 'value' } as T };
+        }
+      }
+
+      await lifecycle.registerComponent(new StallingComponent(logger));
+      await lifecycle.startAllComponents();
+      await lifecycle.stopComponent('provider');
+
+      const result = lifecycle.getValue('provider', 'key', {
+        includeStalled: true,
+      });
+
+      expect(result.found).toBe(true);
+      expect(result.componentFound).toBe(true);
+      expect(result.componentRunning).toBe(false);
+      expect(result.handlerImplemented).toBe(true);
+      expect(result.value).toEqual({ data: 'value' });
+      expect(result.code).toBe('found');
     });
 
     test('should handle component without getValue handler', async () => {
@@ -6850,13 +7232,14 @@ describe('LifecycleManager - AutoStart & Registration Metadata', () => {
       const result = await lifecycle.registerComponent(component);
 
       expect(result.success).toBe(true);
-      expect(result.autoStarted).toBe(false);
+      expect(result.autoStartAttempted).toBe(false);
+      expect(result.autoStartSucceeded).toBeUndefined();
       expect(result.startResult).toBeUndefined();
       expect(component.startCount).toBe(0);
       expect(lifecycle.isComponentRunning('test-comp')).toBe(false);
     });
 
-    test('should not auto-start when manager is idle', async () => {
+    test('should auto-start when manager has no components', async () => {
       const lifecycle = new LifecycleManager({ logger });
 
       class TestComponent extends BaseComponent {
@@ -6879,15 +7262,43 @@ describe('LifecycleManager - AutoStart & Registration Metadata', () => {
       });
 
       expect(result.success).toBe(true);
-      expect(result.autoStarted).toBe(false);
-      expect(result.startResult).toBeUndefined();
-      expect(component.startCount).toBe(0);
-      expect(lifecycle.isComponentRunning('test-comp')).toBe(false);
-
-      // Component should start when startAllComponents() is called
-      await lifecycle.startAllComponents();
+      expect(result.autoStartAttempted).toBe(true);
+      expect(result.autoStartSucceeded).toBe(true);
+      expect(result.startResult?.success).toBe(true);
       expect(component.startCount).toBe(1);
       expect(lifecycle.isComponentRunning('test-comp')).toBe(true);
+    });
+
+    test('should auto-start when manager is not running', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      class TestComponent extends BaseComponent {
+        public startCount = 0;
+
+        constructor(logger: Logger, name: string) {
+          super(logger, { name, dependencies: [] });
+        }
+
+        public start() {
+          this.startCount++;
+        }
+
+        public async stop() {}
+      }
+
+      await lifecycle.registerComponent(new TestComponent(logger, 'base'));
+
+      const component = new TestComponent(logger, 'late-comp');
+      const result = await lifecycle.registerComponent(component, {
+        autoStart: true,
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.autoStartAttempted).toBe(true);
+      expect(result.autoStartSucceeded).toBe(true);
+      expect(result.startResult?.success).toBe(true);
+      expect(component.startCount).toBe(1);
+      expect(lifecycle.isComponentRunning('late-comp')).toBe(true);
     });
 
     test('should auto-start when manager is running', async () => {
@@ -6919,7 +7330,8 @@ describe('LifecycleManager - AutoStart & Registration Metadata', () => {
       });
 
       expect(result.success).toBe(true);
-      expect(result.autoStarted).toBe(true);
+      expect(result.autoStartAttempted).toBe(true);
+      expect(result.autoStartSucceeded).toBe(true);
       expect(result.duringStartup).toBe(false);
       expect(result.startResult?.success).toBe(true);
       expect(result.startResult?.componentName).toBe('test-comp');
@@ -6972,7 +7384,8 @@ describe('LifecycleManager - AutoStart & Registration Metadata', () => {
       // Start all components (during comp1 start, comp2 will be registered with autoStart)
       await lifecycle.startAllComponents();
 
-      expect(autoStartResult?.autoStarted).toBe(true);
+      expect(autoStartResult?.autoStartAttempted).toBe(true);
+      expect(autoStartResult?.autoStartSucceeded).toBe(true);
       expect(autoStartResult?.duringStartup).toBe(true);
       expect(autoStartResult?.startResult?.success).toBe(true);
       expect(autoStartResult?.startResult?.componentName).toBe('comp2');
@@ -6983,7 +7396,7 @@ describe('LifecycleManager - AutoStart & Registration Metadata', () => {
       expect(lifecycle.isComponentRunning('comp2')).toBe(true);
     });
 
-    test('should emit registration event with autoStarted metadata', async () => {
+    test('should emit registration event with autoStartAttempted metadata', async () => {
       const lifecycle = new LifecycleManager({ logger });
       const events: any[] = [];
 
@@ -7002,24 +7415,24 @@ describe('LifecycleManager - AutoStart & Registration Metadata', () => {
 
       // Register without autoStart (before startup)
       await lifecycle.registerComponent(new TestComponent(logger, 'comp1'));
-      expect(events[0].autoStarted).toBe(false);
+      expect(events[0].autoStartAttempted).toBe(false);
+      expect(events[0].autoStartSucceeded).toBeUndefined();
       expect(events[0].duringStartup).toBe(false);
 
-      // Register with autoStart (before startup - won't actually auto-start)
+      // Register with autoStart (before startup - should auto-start)
       await lifecycle.registerComponent(new TestComponent(logger, 'comp2'), {
         autoStart: true,
       });
-      expect(events[1].autoStarted).toBe(false);
+      expect(events[1].autoStartAttempted).toBe(true);
+      expect(events[1].autoStartSucceeded).toBe(true);
       expect(events[1].duringStartup).toBe(false);
 
-      // Start manager
-      await lifecycle.startAllComponents();
-
-      // Register with autoStart (after startup - will auto-start)
+      // Register with autoStart while running
       await lifecycle.registerComponent(new TestComponent(logger, 'comp3'), {
         autoStart: true,
       });
-      expect(events[2].autoStarted).toBe(true);
+      expect(events[2].autoStartAttempted).toBe(true);
+      expect(events[2].autoStartSucceeded).toBe(true);
       expect(events[2].duringStartup).toBe(false);
     });
 
@@ -7038,8 +7451,11 @@ describe('LifecycleManager - AutoStart & Registration Metadata', () => {
         public async stop() {}
       }
 
-      // Start the manager first
-      await lifecycle.startAllComponents();
+      // Start the manager first (needs at least one component)
+      await lifecycle.registerComponent(
+        new TestComponent(logger, { name: 'base' }),
+      );
+      await lifecycle.startComponent('base');
 
       // Register with autoStart - should not throw, just log error
       const result = await lifecycle.registerComponent(
@@ -7050,7 +7466,8 @@ describe('LifecycleManager - AutoStart & Registration Metadata', () => {
       );
 
       expect(result.success).toBe(true);
-      expect(result.autoStarted).toBe(true);
+      expect(result.autoStartAttempted).toBe(true);
+      expect(result.autoStartSucceeded).toBe(false);
       expect(result.startResult?.success).toBe(false);
 
       // Wait for auto-start to fail
@@ -7075,8 +7492,11 @@ describe('LifecycleManager - AutoStart & Registration Metadata', () => {
         public async stop() {}
       }
 
-      // Start the manager first
-      await lifecycle.startAllComponents();
+      // Start the manager first (needs at least one component)
+      await lifecycle.registerComponent(
+        new TestComponent(logger, { name: 'base' }),
+      );
+      await lifecycle.startComponent('base');
 
       // Register with autoStart - should fail due to missing dependency
       const result = await lifecycle.registerComponent(
@@ -7085,7 +7505,8 @@ describe('LifecycleManager - AutoStart & Registration Metadata', () => {
       );
 
       expect(result.success).toBe(true);
-      expect(result.autoStarted).toBe(true);
+      expect(result.autoStartAttempted).toBe(true);
+      expect(result.autoStartSucceeded).toBe(false);
       expect(result.startResult?.success).toBe(false);
 
       // Wait for auto-start to fail
@@ -7199,7 +7620,7 @@ describe('LifecycleManager - AutoStart & Registration Metadata', () => {
       );
 
       expect(result.duringStartup).toBe(false);
-      expect(result.autoStarted).toBe(false);
+      expect(result.autoStartAttempted).toBe(false);
     });
   });
 

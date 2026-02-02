@@ -4,6 +4,7 @@ import type {
   ComponentOperationResult,
   ComponentStatus,
   ComponentStallInfo,
+  LifecycleManagerStatus,
   DependencyValidationResult,
   LifecycleSignalStatus,
   RestartComponentOptions,
@@ -22,6 +23,7 @@ import type {
   BroadcastResult,
   BroadcastOptions,
   SendMessageOptions,
+  GetValueOptions,
   HealthCheckResult,
   HealthReport,
   ValueResult,
@@ -96,6 +98,14 @@ export class ComponentLifecycle implements ComponentLifecycleRef {
     return this.manager.getRunningComponentCount();
   }
 
+  public getStalledComponentCount(): number {
+    return this.manager.getStalledComponentCount();
+  }
+
+  public getStoppedComponentCount(): number {
+    return this.manager.getStoppedComponentCount();
+  }
+
   public getComponentStatus(name: string): ComponentStatus | undefined {
     return this.manager.getComponentStatus(name);
   }
@@ -108,8 +118,20 @@ export class ComponentLifecycle implements ComponentLifecycleRef {
     return this.manager.getSystemState();
   }
 
+  public getStatus(): LifecycleManagerStatus {
+    return this.manager.getStatus();
+  }
+
   public getStalledComponents(): ComponentStallInfo[] {
     return this.manager.getStalledComponents();
+  }
+
+  public getStalledComponentNames(): string[] {
+    return this.manager.getStalledComponentNames();
+  }
+
+  public getStoppedComponentNames(): string[] {
+    return this.manager.getStoppedComponentNames();
   }
 
   public getStartupOrder(): StartupOrderResult {
@@ -272,6 +294,7 @@ export class ComponentLifecycle implements ComponentLifecycleRef {
   public getValue<T = unknown>(
     componentName: string,
     key: string,
+    options?: GetValueOptions,
   ): ValueResult<T> {
     // Call internal callback with automatic 'from' tracking
     // Automatically passes this component's name as 'from'
@@ -279,6 +302,7 @@ export class ComponentLifecycle implements ComponentLifecycleRef {
       componentName,
       key,
       this.componentName,
+      options,
     );
   }
 }

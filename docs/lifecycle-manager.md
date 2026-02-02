@@ -62,8 +62,6 @@ A comprehensive lifecycle orchestration system that manages startup, shutdown, a
   - [Dynamic Component Management](#dynamic-component-management)
   - [Dependency Validation](#dependency-validation)
   - [Stalled Component Recovery](#stalled-component-recovery)
-  - [Monitoring with Events](#monitoring-with-events)
-  - [Testing Components](#testing-components)
 - [Best Practices](#best-practices)
   - [1. Design Components for Graceful Shutdown](#1-design-components-for-graceful-shutdown)
   - [2. Use Appropriate Timeouts](#2-use-appropriate-timeouts)
@@ -285,8 +283,9 @@ The shutdown process has three phases:
 
 1. **Global Warning Phase** (manager-level timeout)
    - Calls `onShutdownWarning()` on all running components
-   - Components can save state, flush buffers, etc.
-   - Non-blocking - components continue running
+   - Best for quick, non-blocking prep (stop accepting new work)
+   - Avoid long-running persistence here, treat it as best-effort and minimal
+   - Non-blocking - components continue running and there is no cancellation signal
 
 2. **Graceful Phase** (per-component timeout)
    - Calls `stop()` on each component in reverse dependency order
@@ -369,7 +368,7 @@ registerComponent(
 
 ```typescript
 interface RegisterOptions {
-  autoStart?: boolean; // Auto-start if manager is running (default: false)
+  autoStart?: boolean; // Auto-start component if possible (default: false)
 }
 ```
 
@@ -382,7 +381,8 @@ interface RegisterComponentResult {
   code?: RegistrationFailureCode;
   componentName?: string;
   duringStartup?: boolean; // true if registered during bulk startup
-  autoStarted?: boolean; // true if auto-started
+  autoStartAttempted?: boolean; // true if auto-start was attempted
+  autoStartSucceeded?: boolean; // true if auto-start succeeded
 }
 ```
 
@@ -481,12 +481,7 @@ interface UnregisterComponentResult {
 }
 ```
 
-**Failure codes:**
-
-- `'component_not_found'` - Component not found in registry
-- `'component_running'` - Component is running (when stopIfRunning is false)
-- `'stop_failed'` - Failed to stop component before unregistering
-- `'bulk_operation_in_progress'` - Cannot unregister during bulk operations
+**Failure codes:** See the centralized list in [Failure Codes](#failure-codes).
 
 **Stop failure reasons:**
 
@@ -528,6 +523,7 @@ interface StartupResult {
     | 'already_in_progress'
     | 'shutdown_in_progress'
     | 'dependency_cycle'
+    | 'no_components_registered'
     | 'stalled_components_exist'
     | 'startup_timeout'
     | 'unknown_error';
@@ -686,33 +682,14 @@ interface ComponentOperationResult {
 }
 ```
 
-**Failure codes:**
-
-- `'component_not_found'` - Component not registered
-- `'component_already_running'` - Component was already running
-- `'component_already_starting'` - Component is currently starting
-- `'component_already_stopping'` - Component is currently stopping
-- `'component_not_running'` - Component not running (for stop operations)
-- `'component_stalled'` - Component is stalled (for stop operations)
-- `'missing_dependency'` - Required dependency not found
-- `'dependency_not_running'` - Required dependency not running
-- `'has_running_dependents'` - Other components depend on this one
-- `'startup_in_progress'` - Bulk startup operation in progress
-- `'shutdown_in_progress'` - Bulk shutdown operation in progress
-- `'start_timeout'` - Component start timed out
-- `'stop_timeout'` - Component stop timed out
-- `'restart_stop_failed'` - Restart failed during stop phase
-- `'restart_start_failed'` - Restart failed during start phase
-- `'unknown_error'` - Unclassified failure
-- `'restart_stop_failed'` - Restart failed during stop phase
-- `'restart_start_failed'` - Restart failed during start phase
-- `'unknown_error'` - Unexpected error
+**Failure codes:** See the centralized list in [Failure Codes](#failure-codes).
 
 ### Component Messaging
 
 #### `sendMessageToComponent(name, payload, options?)`
 
 Send a message to a specific component.
+By default, only running components receive messages; use `includeStopped`/`includeStalled` to override.
 
 ```typescript
 sendMessageToComponent<T = unknown>(
@@ -720,6 +697,38 @@ sendMessageToComponent<T = unknown>(
   payload: T,
   options?: SendMessageOptions
 ): Promise<MessageResult>
+```
+
+**Options:**
+
+```typescript
+interface SendMessageOptions {
+  timeout?: number; // Response timeout in milliseconds (default: manager messageTimeoutMS, 0 = disabled)
+  includeStopped?: boolean; // Allow stopped components (default: false)
+  includeStalled?: boolean; // Allow stalled components (default: false)
+}
+```
+
+**Returns:**
+
+```typescript
+interface MessageResult {
+  sent: boolean;
+  componentFound: boolean;
+  componentRunning: boolean;
+  handlerImplemented: boolean;
+  data: unknown;
+  error: Error | null;
+  timedOut: boolean;
+  code:
+    | 'sent'
+    | 'not_found'
+    | 'stopped'
+    | 'stalled'
+    | 'no_handler'
+    | 'timeout'
+    | 'error';
+}
 ```
 
 **Example:**
@@ -746,6 +755,8 @@ console.log('Cache cleared:', result.data);
 #### `broadcastMessage(payload, options?)`
 
 Broadcast a message to multiple components.
+By default, only running components receive messages; use `includeStopped`/`includeStalled` to override.
+When `componentNames` is provided, only those targets are considered; stopped/stalled targets are reported but not sent unless explicitly included.
 
 ```typescript
 broadcastMessage<T = unknown>(
@@ -758,8 +769,24 @@ broadcastMessage<T = unknown>(
 
 ```typescript
 interface BroadcastOptions {
-  includeNonRunning?: boolean; // Include stopped components (default: false)
+  timeout?: number; // Response timeout in milliseconds (default: manager messageTimeoutMS, 0 = disabled)
+  includeStopped?: boolean; // Include stopped components (default: false)
+  includeStalled?: boolean; // Include stalled components (default: false)
   componentNames?: string[]; // Filter by specific components
+}
+```
+
+**Returns:**
+
+```typescript
+interface BroadcastResult {
+  name: string;
+  sent: boolean;
+  running: boolean;
+  data: unknown;
+  error: Error | null;
+  timedOut: boolean;
+  code: 'sent' | 'stopped' | 'stalled' | 'no_handler' | 'timeout' | 'error';
 }
 ```
 
@@ -794,13 +821,32 @@ checkAllHealth(): Promise<HealthReport>
 **Returns:**
 
 ```typescript
+interface HealthCheckResult {
+  name: string;
+  healthy: boolean;
+  message?: string;
+  details?: Record<string, unknown>;
+  checkedAt: number;
+  durationMS: number;
+  error: Error | null;
+  timedOut: boolean;
+  code:
+    | 'ok'
+    | 'not_found'
+    | 'stopped'
+    | 'stalled'
+    | 'no_handler'
+    | 'timeout'
+    | 'error';
+}
+
 interface HealthReport {
-  overallHealthy: boolean; // true only if ALL components healthy
-  totalChecked: number;
-  healthyCount: number;
-  unhealthyCount: number;
-  checkDurationMS: number;
+  healthy: boolean; // true only if ALL components healthy
   components: HealthCheckResult[];
+  checkedAt: number;
+  durationMS: number;
+  timedOut: boolean;
+  code: 'ok' | 'degraded' | 'timeout' | 'error';
 }
 ```
 
@@ -823,6 +869,21 @@ class ConfigComponent extends BaseComponent {
 const result = lifecycle.getValue('config', 'database-url');
 if (result.found) {
   console.log('Database URL:', result.value);
+}
+
+// Request from a stopped or stalled component (explicitly)
+const fallback = lifecycle.getValue('config', 'database-url', {
+  includeStopped: true,
+  includeStalled: true,
+});
+```
+
+**Options:**
+
+```typescript
+interface GetValueOptions {
+  includeStopped?: boolean; // Allow stopped components (default: false)
+  includeStalled?: boolean; // Allow stalled components (default: false)
 }
 ```
 
@@ -988,11 +1049,16 @@ getComponentNames(): string[]
 getRunningComponentNames(): string[]
 getComponentCount(): number
 getRunningComponentCount(): number
+getStalledComponentCount(): number
+getStoppedComponentCount(): number
 getAllComponentStatuses(): ComponentStatus[]
 
 // System state
 getSystemState(): SystemState
+getStatus(): LifecycleManagerStatus
 getStalledComponents(): ComponentStallInfo[]
+getStalledComponentNames(): string[]
+getStoppedComponentNames(): string[]
 getLastShutdownResult(): ShutdownResult | null
 
 // Dependencies
@@ -1024,7 +1090,7 @@ interface DependencyValidationResult {
 
 `getSystemState()` returns one of the following states:
 
-- `'idle'` - No components registered
+- `'no-components'` - No components registered
 - `'ready'` - Components registered, none running
 - `'starting'` - `startAllComponents()` in progress
 - `'running'` - Components are running (all or some)
@@ -1036,6 +1102,33 @@ interface DependencyValidationResult {
 **Note:** The `'running'` state is returned whenever any components are running, regardless of whether all components are running. Use `getRunningComponentCount()` and `getComponentCount()` to determine if all components are running.
 
 `getRunningComponentCount()` excludes stalled components. Use `getStalledComponents()` if you need to include stalled ones.
+
+**LifecycleManagerStatus:**
+
+```typescript
+interface LifecycleManagerStatus {
+  systemState: SystemState;
+  isStarted: boolean; // Any component is running (or stalled)
+  isStarting: boolean;
+  isShuttingDown: boolean;
+  counts: {
+    total: number;
+    running: number;
+    stopped: number;
+    stalled: number;
+  };
+  components: {
+    registered: string[];
+    running: string[];
+    stopped: string[];
+    stalled: string[];
+  };
+}
+```
+
+**Note:** `components.running` excludes stalled components. `components.stopped` excludes both running and stalled (use `components.stalled` or `getStalledComponents()` for those).
+
+**Definition:** `stopped` = registered − running − stalled.
 
 ## BaseComponent API
 
@@ -1074,8 +1167,8 @@ abstract stop(): Promise<void> | void;
 // Optional: Called if start() times out
 onStartupAborted?(): void;
 
-// Optional: Called if stop() times out
-onStopAborted?(): void;
+// Optional: Called if graceful stop() times out
+onGracefulStopTimeout?(): void;
 
 // Optional: Called during global shutdown warning
 onShutdownWarning?(): Promise<void> | void;
@@ -1086,6 +1179,8 @@ onShutdownForce?(): Promise<void> | void;
 // Optional: Called if onShutdownForce() times out
 onShutdownForceAborted?(): void;
 ```
+
+**Note:** `onShutdownWarning()` is only fired during `stopAllComponents()`/`restartAllComponents()` shutdowns. There is no built-in "warning cleared" event; if shutdown is canceled or stalls, reset any warning state on the next successful `start()` or via an app-specific signal.
 
 ### Signal Handlers
 
@@ -1258,11 +1353,122 @@ lifecycle.on('component:started', async (data) => {
 });
 ```
 
+## Error Handling
+
+### Result Objects vs Exceptions
+
+The LifecycleManager uses **result objects** for expected failures and reserves **exceptions** for programmer errors or invalid construction.
+
+#### Operations Return Result Objects
+
+All lifecycle operations return result objects, for example:
+
+```typescript
+const result = await lifecycle.startComponent('database');
+
+if (!result.success) {
+  console.error('Start failed:', result.reason);
+  console.error('Error code:', result.code);
+
+  // Handle specific failures
+  if (result.code === 'missing_dependency') {
+    console.error('Missing dependencies');
+  }
+}
+
+// Access component state immediately
+if (result.success && result.status) {
+  console.log('Started at:', result.status.startedAt);
+}
+```
+
+#### Exceptions (Programmer Errors)
+
+Exceptions are limited to invalid construction or unexpected internal bugs. In normal use of the public API, failures are returned as result objects.
+
+Explicit exceptions you may see:
+
+- `BaseComponent` constructor validation:
+
+```typescript
+// ❌ Throws InvalidComponentNameError
+new MyComponent(logger, { name: 'Invalid Name' }); // Must be kebab-case
+
+// ✅ Valid name
+new MyComponent(logger, { name: 'my-component' });
+```
+
+- `LifecycleManager` constructor requires a root logger:
+
+```typescript
+// ❌ Throws Error
+new LifecycleManager({} as any);
+```
+
+Dependency cycle detection throws `DependencyCycleError` internally, but public methods catch it and return a result with `code: 'dependency_cycle'`.
+
+### Failure Codes
+
+Result objects include machine-readable failure codes:
+
+```typescript
+// Component operation failure codes
+type ComponentOperationFailureCode =
+  | 'component_not_found'
+  | 'component_already_running'
+  | 'component_already_starting'
+  | 'component_already_stopping'
+  | 'component_not_running'
+  | 'component_stalled'
+  | 'missing_dependency'
+  | 'dependency_not_running'
+  | 'has_running_dependents'
+  | 'startup_in_progress'
+  | 'shutdown_in_progress'
+  | 'start_timeout'
+  | 'stop_timeout'
+  | 'restart_stop_failed'
+  | 'restart_start_failed'
+  | 'unknown_error';
+
+// Registration failure codes
+type RegistrationFailureCode =
+  | 'duplicate_name'
+  | 'duplicate_instance'
+  | 'shutdown_in_progress'
+  | 'startup_in_progress'
+  | 'target_not_found'
+  | 'invalid_position'
+  | 'dependency_cycle'
+  | 'unknown_error';
+
+// Unregister failure codes
+type UnregisterFailureCode =
+  | 'component_not_found'
+  | 'component_running'
+  | 'stop_failed'
+  | 'bulk_operation_in_progress';
+
+// Startup order failure codes
+type StartupOrderFailureCode = 'dependency_cycle' | 'unknown_error';
+```
+
 ## Advanced Usage
 
 ### Dynamic Component Management
 
 Add and remove components at runtime:
+
+```typescript
+// Add component during runtime with autoStart
+const result = await lifecycle.registerComponent(
+  new CacheComponent(logger),
+  { autoStart: true }, // Automatically starts when possible
+);
+
+// Remove component (stops it first if running)
+await lifecycle.unregisterComponent('cache');
+```
 
 ### Dependency Validation
 
@@ -1298,6 +1504,9 @@ const shutdownResult = await lifecycle.stopAllComponents();
 if (shutdownResult.stalledComponents.length > 0) {
   console.error('Stalled components:', shutdownResult.stalledComponents);
 
+  // Option 0: Retry stalled components in another shutdown pass
+  await lifecycle.stopAllComponents({ retryStalled: true });
+
   // Option 1: Unregister stalled components
   for (const stalled of shutdownResult.stalledComponents) {
     await lifecycle.unregisterComponent(stalled.name);
@@ -1307,7 +1516,153 @@ if (shutdownResult.stalledComponents.length > 0) {
   await lifecycle.startAllComponents({ ignoreStalledComponents: true });
 }
 ```
-1. Design components with reasonable timeouts they can meet
-2. Use the force shutdown phase to abandon work
-3. Accept that some memory may leak until process exit
 
+## Best Practices
+
+### 1. Design Components for Graceful Shutdown
+
+Implement cooperative cancellation:
+
+```typescript
+class WorkerComponent extends BaseComponent {
+  private aborted = false;
+  private abortController = new AbortController();
+
+  async start() {
+    // Check abort flag during long operations
+    for (const task of tasks) {
+      if (this.aborted) throw new Error('Startup aborted');
+      await processTask(task);
+    }
+
+    // Use AbortController for APIs that support signals
+    await fetch(url, { signal: this.abortController.signal });
+  }
+
+  onStartupAborted() {
+    this.aborted = true;
+    this.abortController.abort();
+  }
+
+  async stop() {
+    // Graceful shutdown - wait for current work
+    await this.waitForCurrentWork();
+  }
+}
+```
+
+### 2. Use Appropriate Timeouts
+
+Configure timeouts based on your component's needs:
+
+```typescript
+const lifecycle = new LifecycleManager({
+  logger,
+  componentStartTimeoutMS: 60000, // Long-running migrations
+  componentStopTimeoutMS: 10000, // Most components stop quickly
+  shutdownWarningTimeoutMS: 5000, // Time to flush buffers
+});
+```
+
+### 3. Handle Optional Dependencies
+
+Mark non-critical components as optional:
+
+```typescript
+class CacheComponent extends BaseComponent {
+  constructor(logger: Logger) {
+    super(logger, {
+      name: 'cache',
+      optional: true, // App works without cache
+    });
+  }
+}
+
+// Check for degraded mode
+const result = await lifecycle.startAllComponents();
+
+if (result.failedOptionalComponents.some((item) => item.name === 'cache')) {
+  logger.warn('Running without cache - performance may be degraded');
+}
+```
+
+### 4. Leverage Events for Monitoring
+
+Use events for observability, not control flow:
+
+```typescript
+// ✅ Good - monitoring and observability
+lifecycle.on('component:started', ({ name }) => {
+  metrics.increment('component.started', { component: name });
+});
+
+// ❌ Bad - don't use events for control flow
+lifecycle.on('component:started', async ({ name }) => {
+  // Don't start other components here - use dependencies instead
+  await lifecycle.startComponent('other-component');
+});
+```
+
+### 5. Validate Before Production
+
+Always validate dependencies before production:
+
+```typescript
+// Validate dependency graph
+const validation = lifecycle.validateDependencies();
+
+if (!validation.valid) {
+  throw new Error(
+    'Invalid dependencies: ' +
+      JSON.stringify({
+        missingDependencies: validation.missingDependencies,
+        circularCycles: validation.circularCycles,
+      }),
+  );
+}
+```
+
+### 6. Use Single LifecycleManager Instance
+
+Only create one instance per application:
+
+```typescript
+// ✅ Good - single instance
+const lifecycle = new LifecycleManager({ logger });
+lifecycle.attachSignals();
+
+// ❌ Bad - multiple instances cause signal conflicts
+const lifecycle1 = new LifecycleManager({ logger });
+const lifecycle2 = new LifecycleManager({ logger });
+lifecycle1.attachSignals(); // Conflicts with lifecycle2
+```
+
+## Known Limitations
+
+### 1. Timeouts Do Not Force-Cancel Work
+
+JavaScript cannot force-cancel a running promise. When `start()` or `stop()` times out:
+
+- The manager calls `onStartupAborted()` or `onGracefulStopTimeout()` (if implemented)
+- The manager proceeds (rollback for startup, force phase for shutdown)
+- **Non-cooperative code keeps running** in the background
+
+How to avoid surprises:
+
+1. Implement cooperative cancellation (AbortController, flags, or library timeouts).
+2. Wire cancellation into long-running work and close resources in `onStartupAborted()`/`onGracefulStopTimeout()`.
+3. Favor libraries that support AbortSignal or configurable timeouts.
+
+### 2. Stalled Promises Can Retain Memory
+
+If a component stalls and its promise never resolves, the promise and any captured state remain in memory until process exit. This is a risk whenever async work never settles.
+
+How to reduce the risk:
+
+1. Ensure `start()`/`stop()` always settle (resolve or reject) on all paths.
+2. Use timeouts and cancellation so work can terminate deterministically.
+3. Keep long-lived closures small; avoid capturing large buffers in stalled tasks.
+
+### 3. No Atomic Restart
+
+`restartAllComponents()` is not atomic. There is a window where all components are stopped but none are started yet. For zero-downtime restarts, use rolling restarts with individual `restartComponent()` calls.

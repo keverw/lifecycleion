@@ -99,7 +99,8 @@ export interface LifecycleManagerEventMap {
     manualPositionRespected?: boolean;
     targetFound?: boolean;
     duringStartup?: boolean;
-    autoStarted?: boolean;
+    autoStartAttempted?: boolean;
+    autoStartSucceeded?: boolean;
   };
   'lifecycle-manager:shutdown-initiated': {
     method: ShutdownMethod;
@@ -348,7 +349,7 @@ export class LifecycleManagerEvents {
     manualPositionRespected?: boolean;
     targetFound?: boolean;
     duringStartup?: boolean;
-    autoStarted?: boolean;
+    autoStartAttempted?: boolean;
   }): void {
     this.emit('component:registered', input);
   }

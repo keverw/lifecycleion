@@ -62,6 +62,7 @@ export type {
   RegisterComponentResult,
   InsertComponentAtResult,
   LifecycleManagerOptions,
+  LifecycleManagerStatus,
 } from './types';
 
 // Errors
