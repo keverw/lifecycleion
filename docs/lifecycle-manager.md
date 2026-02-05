@@ -70,8 +70,8 @@ A comprehensive lifecycle orchestration system that manages startup, shutdown, a
   - [5. Validate Before Production](#5-validate-before-production)
   - [6. Use Single LifecycleManager Instance](#6-use-single-lifecyclemanager-instance)
 - [Known Limitations](#known-limitations)
-  - [1. Timeout Does Not Force-Cancel Operations](#1-timeout-does-not-force-cancel-operations)
-  - [2. Stalled Component Memory](#2-stalled-component-memory)
+  - [1. Timeouts Do Not Force-Cancel Work](#1-timeouts-do-not-force-cancel-work)
+  - [2. Stalled Promises Can Retain Memory](#2-stalled-promises-can-retain-memory)
   - [3. No Atomic Restart](#3-no-atomic-restart)
 
 <!-- tocstop -->
@@ -231,6 +231,19 @@ registered → starting → running → stopping → stopped
                 stalled (if stop times out)
 ```
 
+**Stalled State Definition:**
+A component becomes "stalled" when:
+
+1. The graceful `stop()` method exceeds `shutdownGracefulTimeoutMS` timeout, AND
+2. Either `onShutdownForce()` is not implemented, OR `onShutdownForce()` also exceeds `shutdownForceTimeoutMS` timeout
+
+Once stalled, a component remains registered but:
+
+- `startAllComponents()` will fail unless you pass `ignoreStalledComponents: true` (which skips stalled components during bulk startup)
+- `startComponent(name)` will fail unless you pass `forceStalled: true` (which calls `start()` regardless of stalled state)
+
+To recover: unregister the component, retry stopping it via `stopAllComponents({ retryStalled: true })`, or force start with the appropriate option (`ignoreStalledComponents` for bulk, `forceStalled` for individual).
+
 ### Dependency Management
 
 Components declare dependencies in their constructor options:
@@ -276,6 +289,49 @@ if (result.failedOptionalComponents.length > 0) {
 ```
 
 Dependents still attempt to start if an optional component fails or isn't running, so they should handle missing optional dependencies gracefully. Optional dependencies are primarily for ordering and visibility, not hard requirements.
+
+**Handling Optional Dependencies:**
+
+Dependents of optional components should gracefully handle the missing dependency:
+
+```typescript
+class ApiComponent extends BaseComponent {
+  constructor(logger: Logger) {
+    super(logger, {
+      name: 'api',
+      dependencies: ['database', 'cache'], // cache is optional, database is required
+    });
+  }
+
+  async start() {
+    // Database is required - assume it's available
+    this.db = await getComponentValue('database', 'connection');
+
+    // Cache is optional - check if available
+    const cacheResult = lifecycle.getValue('cache', 'instance');
+    this.cache = cacheResult.found ? cacheResult.value : null;
+
+    if (!this.cache) {
+      this.logger.warn('Cache unavailable, using fallback');
+    }
+  }
+}
+
+class CacheComponent extends BaseComponent {
+  constructor(logger: Logger) {
+    super(logger, {
+      name: 'cache',
+      optional: true, // Mark as optional so API can still start
+    });
+  }
+}
+```
+
+When `cache` fails to start:
+
+- It's recorded in `failedOptionalComponents`
+- The `api` component still attempts to start
+- The `api` component handles the missing cache gracefully
 
 ### Multi-Phase Shutdown
 
@@ -438,8 +494,15 @@ interface InsertComponentAtResult {
     position: InsertPosition;
     index: number;
   };
+  manualPositionRespected?: boolean; // Whether explicit position was honored (vs dependency-based reordering)
+  targetFound?: boolean; // Whether 'before'/'after' reference component was found
 }
 ```
+
+**Position Debugging Fields:**
+
+- `manualPositionRespected` - `true` if the explicit position was honored, `false` if dependency ordering forced a different position
+- `targetFound` - For 'before'/'after' positions, indicates if the reference component was found (always `undefined` for 'start'/'end')
 
 #### `unregisterComponent(name, options?)`
 
@@ -504,7 +567,7 @@ startAllComponents(options?: StartupOptions): Promise<StartupResult>
 ```typescript
 interface StartupOptions {
   ignoreStalledComponents?: boolean; // Allow startup despite stalled components
-  timeoutMS?: number; // Global timeout for entire startup process (default: constructor's startupTimeoutMS)
+  timeoutMS?: number; // Total time budget for startup process (default: constructor's startupTimeoutMS)
 }
 ```
 
@@ -533,12 +596,13 @@ interface StartupResult {
 
 **Timeout Behavior:**
 
-The timeout applies to the **entire startup process**, not per-component:
+The `startupTimeoutMS` option sets a **total time budget** for the entire startup process:
 
+- All component starts combined must complete within this budget
 - Constructor option sets the default: `new LifecycleManager({ startupTimeoutMS: 60000 })`
 - Method parameter overrides the default: `await lifecycle.startAllComponents({ timeoutMS: 30000 })`
-- If startup exceeds the timeout, component initiation stops and returns partial results
-- The timeout prevents hanging indefinitely when components fail to start
+- If the timeout is exceeded, startup stops initiating new components
+- Returns partial results with `timedOut: true`
 
 **Examples:**
 
@@ -636,7 +700,7 @@ interface RestartAllOptions {
 }
 ```
 
-**Note:** `restartAllComponents` always uses `retryStalled: true` and `haltOnStall: true` during the shutdown phase; only the timeout is configurable.
+**Note:** `restartAllComponents` hardcodes `retryStalled: true` and `haltOnStall: true` during shutdown — only the timeout is configurable via `shutdownTimeoutMS`.
 
 #### Individual Component Operations
 
@@ -656,6 +720,7 @@ restartComponent(name: string, options?: RestartComponentOptions): Promise<Compo
 ```typescript
 interface StartComponentOptions {
   allowRequiredDependencies?: boolean; // Force start despite missing required deps
+  forceStalled?: boolean; // Force starting a stalled component
 }
 
 interface StopComponentOptions {
@@ -734,12 +799,33 @@ interface MessageResult {
 **Example:**
 
 ```typescript
+import { isPlainObject } from 'lifecycleion';
+
 // Component with message handler
 class CacheComponent extends BaseComponent {
-  async onMessage<T>(payload: T, from: string | null) {
-    if (payload.action === 'clear') {
-      await this.cache.clear();
-      return { success: true, cleared: true };
+  async onMessage<TData = unknown>(
+    payload: unknown,
+    from: string | null,
+  ): Promise<TData> {
+    // Validate payload is a plain object (not null, not array)
+    if (!isPlainObject(payload)) {
+      return { success: false, error: 'Expected object' } as TData;
+    }
+
+    const data = payload as { action: string; key?: string };
+
+    switch (data.action) {
+      case 'clear':
+        await this.cache.clear();
+        return { success: true } as TData;
+      case 'get':
+        if (!data.key) {
+          return { success: false, error: 'Missing key' } as TData;
+        }
+
+        return { success: true, value: this.cache.get(data.key) } as TData;
+      default:
+        return { success: false, error: 'Unknown action' } as TData;
     }
   }
 }
@@ -749,8 +835,12 @@ const result = await lifecycle.sendMessageToComponent('cache', {
   action: 'clear',
 });
 
-console.log('Cache cleared:', result.data);
+if (result.sent) {
+  console.log('Cache cleared:', result.data);
+}
 ```
+
+**Note:** Payloads support any type (strings, numbers, objects). Validate as needed using type checks, type guards, or validation libraries
 
 #### `broadcastMessage(payload, options?)`
 
@@ -852,7 +942,7 @@ interface HealthReport {
 
 ### Value Sharing
 
-Components can share values with each other:
+Components can share values with each other. **By default, only running components can provide values.** Use the `includeStopped` or `includeStalled` options to retrieve values from components in other states.
 
 ```typescript
 class ConfigComponent extends BaseComponent {
@@ -915,11 +1005,12 @@ detachSignals(): void
 #### Manual Signal Triggers
 
 ```typescript
-triggerShutdown(method?: 'SIGINT' | 'SIGTERM' | 'SIGTRAP'): void
 triggerReload(): Promise<SignalBroadcastResult>
 triggerInfo(): Promise<SignalBroadcastResult>
 triggerDebug(): Promise<SignalBroadcastResult>
 ```
+
+**Note:** For programmatic shutdown, use [`stopAllComponents()`](#stopallcomponentsoptions) which returns a `ShutdownResult`.
 
 #### Custom Signal Handlers
 
@@ -1199,7 +1290,7 @@ onDebug?(): Promise<void> | void;
 
 ```typescript
 // Optional: Handle messages from other components or external callers
-onMessage?<T>(payload: T, from: string | null): Promise<unknown> | unknown;
+onMessage?<TData = unknown>(payload: unknown, from: string | null): TData | Promise<TData>;
 
 // Send message to another component
 sendMessage<T>(to: string, payload: T): Promise<MessageResult>;
@@ -1641,11 +1732,13 @@ lifecycle1.attachSignals(); // Conflicts with lifecycle2
 
 ### 1. Timeouts Do Not Force-Cancel Work
 
-JavaScript cannot force-cancel a running promise. When `start()` or `stop()` times out:
+The LifecycleManager does not forcibly terminate work when timeouts are exceeded. JavaScript promises cannot be externally canceled without cooperation from the executing code.
+
+When `start()` or `stop()` times out:
 
 - The manager calls `onStartupAborted()` or `onGracefulStopTimeout()` (if implemented)
-- The manager proceeds (rollback for startup, force phase for shutdown)
-- **Non-cooperative code keeps running** in the background
+- The manager proceeds with next steps (rollback for startup, force phase for shutdown)
+- **Non-cooperative code continues running in the background** until completion or process exit
 
 How to avoid surprises:
 

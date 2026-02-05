@@ -151,6 +151,14 @@ export interface StartComponentOptions {
    * Default: false
    */
   allowDuringBulkStartup?: boolean;
+
+  /**
+   * If true, force starting this component even if it's stalled without requiring
+   * it to be unregistered or retried via stopAllComponents({ retryStalled: true }) first.
+   *
+   * Default: false
+   */
+  forceStalled?: boolean;
 }
 
 /**

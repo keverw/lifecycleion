@@ -2539,6 +2539,72 @@ describe('LifecycleManager - Bulk Operations', () => {
       expect(result.startedComponents).toEqual(['new-comp']);
     });
 
+    test('should block individual startComponent on stalled component by default', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      class FailingStopComponent extends BaseComponent {
+        public start(): Promise<void> {
+          return Promise.resolve();
+        }
+        public stop(): Promise<void> {
+          return Promise.reject(new Error('Stop failed'));
+        }
+      }
+
+      await lifecycle.registerComponent(
+        new FailingStopComponent(logger, { name: 'stalled' }),
+      );
+
+      // Create stalled component
+      await lifecycle.startComponent('stalled');
+      await lifecycle.stopComponent('stalled');
+
+      // Try to start stalled component without option - should fail
+      const result = await lifecycle.startComponent('stalled');
+
+      expect(result.success).toBe(false);
+      expect(result.code).toBe('component_stalled');
+      expect(result.reason).toBe('Component is stalled');
+    });
+
+    test('should allow individual startComponent with forceStalled option', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      class FailingStopComponent extends BaseComponent {
+        public start(): Promise<void> {
+          return Promise.resolve();
+        }
+        public stop(): Promise<void> {
+          return Promise.reject(new Error('Stop failed'));
+        }
+      }
+
+      await lifecycle.registerComponent(
+        new FailingStopComponent(logger, { name: 'stalled' }),
+      );
+
+      // Create stalled component
+      await lifecycle.startComponent('stalled');
+      await lifecycle.stopComponent('stalled');
+
+      // Verify component is stalled
+      expect(lifecycle.getStalledComponentCount()).toBe(1);
+      expect(lifecycle.getComponentStatus('stalled')?.state).toBe('stalled');
+
+      // Try to start stalled component with forceStalled option
+      const result = await lifecycle.startComponent('stalled', {
+        forceStalled: true,
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.status?.state).toBe('running');
+
+      // Verify component is no longer stalled
+      expect(lifecycle.getStalledComponentCount()).toBe(0);
+      expect(lifecycle.getComponentStatus('stalled')?.state).toBe('running');
+      expect(lifecycle.isComponentRunning('stalled')).toBe(true);
+    });
+
     test('should emit lifecycle-manager:started event on success', async () => {
       const lifecycle = new LifecycleManager({ logger });
 

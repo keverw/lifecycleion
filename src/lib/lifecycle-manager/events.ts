@@ -350,6 +350,7 @@ export class LifecycleManagerEvents {
     targetFound?: boolean;
     duringStartup?: boolean;
     autoStartAttempted?: boolean;
+    autoStartSucceeded?: boolean;
   }): void {
     this.emit('component:registered', input);
   }

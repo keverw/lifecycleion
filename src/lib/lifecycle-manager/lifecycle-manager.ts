@@ -107,6 +107,7 @@ export class LifecycleManager
   private isStarted = false;
   private isShuttingDown = false;
   private shutdownMethod: ShutdownMethod | null = null;
+  private lastShutdownResult: ShutdownResult | null = null;
 
   // Signal management
   private processSignalManager: ProcessSignalManager | null = null;
@@ -705,6 +706,17 @@ export class LifecycleManager
     };
   }
 
+  /**
+   * Get the result of the last shutdown operation.
+   * Useful for debugging stalled components or tracking shutdown metrics.
+   * Returns null if no shutdown has occurred yet or after a successful restart.
+   *
+   * @returns The last shutdown result or null
+   */
+  public getLastShutdownResult(): ShutdownResult | null {
+    return this.lastShutdownResult;
+  }
+
   // ============================================================================
   // Bulk Operations
   // ============================================================================
@@ -830,6 +842,7 @@ export class LifecycleManager
     // Set starting flag and clear previous shutdown state
     this.isStarting = true;
     this.shutdownMethod = null; // Clear previous shutdown method on fresh start
+    this.lastShutdownResult = null; // Clear last shutdown result on fresh start
     this.logger.info('Starting all components');
 
     const effectiveTimeout = options?.timeoutMS ?? this.startupTimeoutMS;
@@ -904,7 +917,7 @@ export class LifecycleManager
           continue;
         }
 
-        // Skip stalled components (even with ignoreStalledComponents:true)
+        // Skip stalled components during bulk startup (even with ignoreStalledComponents:true bulk option)
         if (this.stalledComponents.has(name)) {
           this.logger
             .entity(name)
@@ -1940,10 +1953,10 @@ export class LifecycleManager
       options.componentNames.length > 0;
 
     // Filter by names if specified
-    if (hasExplicitTargets) {
-      const componentNames = options.componentNames;
+    if (hasExplicitTargets && options.componentNames) {
+      const names = options.componentNames;
       targetComponents = targetComponents.filter((c) =>
-        componentNames.includes(c.getName()),
+        names.includes(c.getName()),
       );
     }
 
@@ -2803,13 +2816,18 @@ export class LifecycleManager
         duringStartup: isDuringStartup,
       });
 
-      return {
+      const result: ShutdownResult = {
         success: isSuccess,
         stoppedComponents,
         stalledComponents,
         durationMS,
         timedOut: hasTimedOut || undefined,
       };
+
+      // Store for getLastShutdownResult() - useful for debugging and metrics
+      this.lastShutdownResult = result;
+
+      return result;
     } finally {
       if (timeoutHandle) {
         clearTimeout(timeoutHandle);
@@ -2915,6 +2933,18 @@ export class LifecycleManager
         componentName: name,
         reason: 'Component not found',
         code: 'component_not_found',
+      };
+    }
+
+    // Check if component is stalled (unless explicitly forced)
+    const shouldForceStalled = options?.forceStalled === true;
+    if (!shouldForceStalled && this.stalledComponents.has(name)) {
+      return {
+        success: false,
+        componentName: name,
+        reason: 'Component is stalled',
+        code: 'component_stalled',
+        status: this.getComponentStatus(name),
       };
     }
 
@@ -3035,6 +3065,7 @@ export class LifecycleManager
       // Update state
       this.componentStates.set(name, 'running');
       this.runningComponents.add(name);
+      this.stalledComponents.delete(name); // Clear stalled state if component was previously stalled
       this.updateStartedFlag();
 
       // Auto-attach signals if this is the first component and option is enabled
