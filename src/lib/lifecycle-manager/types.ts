@@ -185,7 +185,7 @@ export interface StopComponentOptions {
    * Without this flag, stopping a component with running dependents will fail
    * (default: false)
    */
-  ignoreRunningDependents?: boolean;
+  allowStopWithRunningDependents?: boolean;
 }
 
 /**
@@ -720,7 +720,7 @@ export type SystemState =
   | 'no-components' // No components registered
   | 'ready' // Components registered, not started
   | 'starting' // startAllComponents() in progress
-  | 'running' // All components running
+  | 'running' // Any components running (use getRunningComponentCount() to check if all are running)
   | 'stalled' // Some components failed to stop (stuck running)
   | 'shutting-down' // stopAllComponents() in progress
   | 'stopped' // All components stopped (can restart)

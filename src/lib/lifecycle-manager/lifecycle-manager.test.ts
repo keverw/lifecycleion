@@ -1740,7 +1740,7 @@ describe('LifecycleManager - Registration & Individual Lifecycle', () => {
       expect(lifecycle.isComponentRunning('api')).toBe(true);
     });
 
-    test('stopComponent should succeed with ignoreRunningDependents option when component has running dependents', async () => {
+    test('stopComponent should succeed with allowStopWithRunningDependents option when component has running dependents', async () => {
       const lifecycle = new LifecycleManager({ logger });
       const database = new TestComponent(logger, { name: 'database' });
       const api = new TestComponent(logger, {
@@ -1755,7 +1755,7 @@ describe('LifecycleManager - Registration & Individual Lifecycle', () => {
       await lifecycle.startComponent('api');
 
       const result = await lifecycle.stopComponent('database', {
-        ignoreRunningDependents: true,
+        allowStopWithRunningDependents: true,
       });
 
       expect(result.success).toBe(true);

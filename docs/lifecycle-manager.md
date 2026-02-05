@@ -19,7 +19,7 @@ A comprehensive lifecycle orchestration system that manages startup, shutdown, a
   - [LifecycleManager Constructor](#lifecyclemanager-constructor)
   - [Component Registration](#component-registration)
     - [`registerComponent(component, options?)`](#registercomponentcomponent-options)
-    - [`insertComponentAt(component, position, reference?, options?)`](#insertcomponentatcomponent-position-reference-options)
+    - [`insertComponentAt(component, position, targetComponentName?, options?)`](#insertcomponentatcomponent-position-targetcomponentname-options)
     - [`unregisterComponent(name, options?)`](#unregistercomponentname-options)
   - [Lifecycle Operations](#lifecycle-operations)
     - [`startAllComponents(options?)`](#startallcomponentsoptions)
@@ -27,7 +27,7 @@ A comprehensive lifecycle orchestration system that manages startup, shutdown, a
     - [`restartAllComponents(options?)`](#restartallcomponentsoptions)
     - [Individual Component Operations](#individual-component-operations)
   - [Component Messaging](#component-messaging)
-    - [`sendMessageToComponent(name, payload, options?)`](#sendmessagetocomponentname-payload-options)
+    - [`sendMessageToComponent(componentName, payload, options?)`](#sendmessagetocomponentcomponentname-payload-options)
     - [`broadcastMessage(payload, options?)`](#broadcastmessagepayload-options)
   - [Health Monitoring](#health-monitoring)
     - [`checkComponentHealth(name)`](#checkcomponenthealthname)
@@ -36,6 +36,7 @@ A comprehensive lifecycle orchestration system that manages startup, shutdown, a
   - [Signal Integration](#signal-integration)
     - [`attachSignals()`](#attachsignals)
     - [`detachSignals()`](#detachsignals)
+    - [`getSignalStatus()`](#getsignalstatus)
     - [Manual Signal Triggers](#manual-signal-triggers)
     - [Custom Signal Handlers](#custom-signal-handlers)
   - [Logger Integration](#logger-integration)
@@ -297,6 +298,8 @@ class ApiComponent extends BaseComponent {
 
 Optional components can fail during startup without breaking the entire application:
 
+**Important:** When you mark a component as `optional: true`, it's the **component itself** that's optional (can fail without triggering rollback), NOT the dependency relationship. Other components that list it as a dependency will still attempt to start even if it fails, so those dependents must handle the missing component gracefully.
+
 ```typescript
 class CacheComponent extends BaseComponent {
   constructor(logger: Logger) {
@@ -458,13 +461,20 @@ interface RegisterOptions {
 
 ```typescript
 interface RegisterComponentResult {
+  action: 'register';
   success: boolean;
+  registered: boolean;
+  componentName: string;
   reason?: string;
   code?: RegistrationFailureCode;
-  componentName?: string;
+  error?: Error;
+  registrationIndexBefore: number | null;
+  registrationIndexAfter: number | null;
+  startupOrder: string[];
   duringStartup?: boolean; // true if registered during bulk startup
   autoStartAttempted?: boolean; // true if auto-start was attempted
   autoStartSucceeded?: boolean; // true if auto-start succeeded
+  startResult?: ComponentOperationResult; // result of auto-start (if attempted)
 }
 ```
 
@@ -478,7 +488,7 @@ if (!result.success) {
 }
 ```
 
-#### `insertComponentAt(component, position, reference?, options?)`
+#### `insertComponentAt(component, position, targetComponentName?, options?)`
 
 Insert a component at a specific position.
 
@@ -486,7 +496,7 @@ Insert a component at a specific position.
 insertComponentAt(
   component: BaseComponent,
   position: 'start' | 'end' | 'before' | 'after',
-  reference?: string,
+  targetComponentName?: string,
   options?: RegisterOptions
 ): Promise<InsertComponentAtResult>
 ```
@@ -552,7 +562,7 @@ interface UnregisterOptions {
 
 **Notes:**
 
-- `forceStop` only applies when `stopIfRunning` is true (passes through to `stopComponent` as `ignoreRunningDependents`).
+- `forceStop` only applies when `stopIfRunning` is true (passes through to `stopComponent` as `allowStopWithRunningDependents`).
 - If a component is stalled and `stopIfRunning` is true, unregister is blocked.
 
 **Returns:**
@@ -623,15 +633,57 @@ interface StartupResult {
 
 **Timeout Behavior:**
 
-The `startupTimeoutMS` option sets a **total time budget** for the entire startup process:
+Timeouts operate at **two independent levels** - they don't compete, they're layered:
 
-- All component starts combined must complete within this budget
+**1. Global Timeout (Bulk Operation)**
+
+- `startAllComponents({ timeoutMS })` sets a total time budget for the entire operation
+- If exceeded: manager stops initiating new components and returns partial results with `timedOut: true`
 - Constructor option sets the default: `new LifecycleManager({ startupTimeoutMS: 60000 })`
-- Method parameter overrides the default: `await lifecycle.startAllComponents({ timeoutMS: 30000 })`
-- If the timeout is exceeded, startup stops initiating new components
-- Returns partial results with `timedOut: true`
+- Method parameter overrides: `await lifecycle.startAllComponents({ timeoutMS: 30000 })`
 
-**Examples:**
+**2. Per-Component Timeout (Individual Component)**
+
+- Each component's `startupTimeoutMS` (default 30s) controls only that component's `start()` method
+- If exceeded on **required component** (default): enters `starting-timed-out` state and triggers **rollback**
+- If exceeded on **optional component**: enters `failed` state and startup **continues**
+
+**Example:**
+
+```typescript
+// Global: 60s for entire startup operation
+await lifecycle.startAllComponents({ timeoutMS: 60000 });
+
+// Required component with 5s timeout (default behavior)
+class ComponentA extends BaseComponent {
+  constructor() {
+    super(logger, { name: 'A', startupTimeoutMS: 5000 });
+  }
+}
+
+// Optional component with 5s timeout
+class ComponentB extends BaseComponent {
+  constructor() {
+    super(logger, { name: 'B', startupTimeoutMS: 5000, optional: true });
+  }
+}
+
+// If required Component A's start() takes 6 seconds:
+// - Component A enters 'starting-timed-out' state (exceeded its 5s timeout)
+// - Startup STOPS and rolls back all started components
+// - Returns { success: false, code: 'start_timeout' }
+//
+// If optional Component B's start() takes 6 seconds:
+// - Component B enters 'failed' state (exceeded its 5s timeout)
+// - Startup CONTINUES with Component C (global 60s timer still has 54s left)
+// - Returns { success: true, failedOptionalComponents: [{ name: 'B', ... }] }
+//
+// If global 60s expires while Component C is starting:
+// - Bulk operation stops
+// - Returns { timedOut: true, startedComponents: [...], ... }
+```
+
+**More Examples:**
 
 ```typescript
 // Use constructor's default timeout (60s)
@@ -640,7 +692,7 @@ await lifecycle.startAllComponents();
 // Override with custom timeout (30s)
 await lifecycle.startAllComponents({ timeoutMS: 30000 });
 
-// Disable timeout (wait indefinitely)
+// Disable global timeout (wait indefinitely)
 await lifecycle.startAllComponents({ timeoutMS: 0 });
 ```
 
@@ -668,14 +720,43 @@ interface StopAllOptions {
 
 **Timeout Behavior:**
 
-The timeout applies to the **entire shutdown process**, not per-component:
+Timeouts operate at **two independent levels** - they don't compete, they're layered:
 
+**1. Global Timeout (Bulk Operation)**
+
+- `stopAllComponents({ timeoutMS })` sets a total time budget for the entire shutdown operation
+- If exceeded: components that haven't stopped yet are left in their current state
 - Constructor option sets the default: `new LifecycleManager({ shutdownOptions: { timeoutMS: 30000 } })`
-- Method parameter overrides the default: `await lifecycle.stopAllComponents({ timeoutMS: 5000 })`
-- If shutdown exceeds the timeout, components that haven't stopped yet will be left in their current state
-- The timeout prevents hanging indefinitely when components fail to stop gracefully
+- Method parameter overrides: `await lifecycle.stopAllComponents({ timeoutMS: 5000 })`
 
-**Examples:**
+**2. Per-Component Timeouts (Individual Component)**
+
+- Each component's `shutdownGracefulTimeoutMS` (default 5s) and `shutdownForceTimeoutMS` (default 2s) control its individual shutdown phases
+- If exceeded: that component becomes stalled, but shutdown continues with next component (unless `haltOnStall: true`)
+
+**Example:**
+
+```typescript
+// Global: 30s for entire shutdown operation
+await lifecycle.stopAllComponents({ timeoutMS: 30000 });
+
+// Component A has 3s graceful timeout
+class ComponentA extends BaseComponent {
+  constructor() {
+    super(logger, { name: 'A', shutdownGracefulTimeoutMS: 3000 });
+  }
+}
+
+// If Component A's stop() takes 4 seconds:
+// - Component A becomes stalled (exceeded its 3s graceful timeout)
+// - Bulk operation continues with Component B (global 30s timer still has 26s left)
+//
+// If global 30s expires while Component C is stopping:
+// - Bulk operation stops
+// - Returns { success: false, timedOut: true, stoppedComponents: ['B'], stalledComponents: [...] }
+```
+
+**More Examples:**
 
 ```typescript
 // Use constructor's default timeout (30s)
@@ -684,7 +765,7 @@ await lifecycle.stopAllComponents();
 // Override with custom timeout (5s)
 await lifecycle.stopAllComponents({ timeoutMS: 5000 });
 
-// Disable timeout (wait indefinitely)
+// Disable global timeout (wait indefinitely)
 await lifecycle.stopAllComponents({ timeoutMS: 0 });
 
 // Retry stalled components in this shutdown pass
@@ -754,7 +835,7 @@ interface StartComponentOptions {
 interface StopComponentOptions {
   forceImmediate?: boolean; // Skip graceful phase, go straight to force
   timeout?: number; // Override default timeout
-  ignoreRunningDependents?: boolean; // Allow stopping despite running dependents (default: false)
+  allowStopWithRunningDependents?: boolean; // Allow stopping despite running dependents (default: false)
 }
 
 interface RestartComponentOptions {
@@ -780,14 +861,14 @@ interface ComponentOperationResult {
 
 ### Component Messaging
 
-#### `sendMessageToComponent(name, payload, options?)`
+#### `sendMessageToComponent(componentName, payload, options?)`
 
 Send a message to a specific component.
 By default, only running components receive messages; use `includeStopped`/`includeStalled` to override.
 
 ```typescript
 sendMessageToComponent<T = unknown>(
-  name: string,
+  componentName: string,
   payload: T,
   options?: SendMessageOptions
 ): Promise<MessageResult>

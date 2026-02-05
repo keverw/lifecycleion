@@ -312,7 +312,7 @@ export class LifecycleManager
     if (isRunning && shouldStopIfRunning) {
       this.logger.entity(name).info('Stopping component before unregistering');
       const stopResult = await this.stopComponent(name, {
-        ignoreRunningDependents: options?.forceStop,
+        allowStopWithRunningDependents: options?.forceStop,
       });
 
       // If stop fails and leaves the component stalled, do NOT unregister.
@@ -1240,8 +1240,8 @@ export class LifecycleManager
       };
     }
 
-    // Check for running dependents unless ignoreRunningDependents option is true
-    if (!options?.ignoreRunningDependents) {
+    // Check for running dependents unless allowStopWithRunningDependents option is true
+    if (!options?.allowStopWithRunningDependents) {
       const runningDependents = this.getRunningDependents(name);
       if (runningDependents.length > 0) {
         this.logger
@@ -1253,7 +1253,7 @@ export class LifecycleManager
         return {
           success: false,
           componentName: name,
-          reason: `Component has running dependents: ${runningDependents.join(', ')}. Use { ignoreRunningDependents: true } option to bypass.`,
+          reason: `Component has running dependents: ${runningDependents.join(', ')}. Use { allowStopWithRunningDependents: true } option to bypass.`,
           code: 'has_running_dependents',
         };
       }
