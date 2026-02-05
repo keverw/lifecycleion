@@ -181,11 +181,11 @@ export interface StopComponentOptions {
   timeout?: number;
 
   /**
-   * If true, allows stopping a component even if other components depend on it
+   * If true, allows stopping a component even if other running components depend on it
    * Without this flag, stopping a component with running dependents will fail
    * (default: false)
    */
-  force?: boolean;
+  ignoreRunningDependents?: boolean;
 }
 
 /**

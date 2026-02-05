@@ -546,13 +546,13 @@ unregisterComponent(
 ```typescript
 interface UnregisterOptions {
   stopIfRunning?: boolean; // Stop the component first if it's running (default: true)
-  forceStop?: boolean; // Allow stopping even if other components depend on it (default: false)
+  forceStop?: boolean; // Allow stopping even if running dependents exist (default: false)
 }
 ```
 
 **Notes:**
 
-- `forceStop` only applies when `stopIfRunning` is true.
+- `forceStop` only applies when `stopIfRunning` is true (passes through to `stopComponent` as `ignoreRunningDependents`).
 - If a component is stalled and `stopIfRunning` is true, unregister is blocked.
 
 **Returns:**
@@ -605,6 +605,7 @@ interface StartupResult {
   startedComponents: string[];
   failedOptionalComponents: Array<{ name: string; error: Error }>;
   skippedDueToDependency: string[];
+  blockedByStalledComponents?: string[]; // Present when stalled components blocked startup
   durationMS?: number; // Total startup duration in milliseconds
   timedOut?: boolean; // True if startup timed out
   reason?: string; // Reason for failure (when success is false)
@@ -747,11 +748,13 @@ restartComponent(name: string, options?: RestartComponentOptions): Promise<Compo
 interface StartComponentOptions {
   allowRequiredDependencies?: boolean; // Force start despite missing required deps
   forceStalled?: boolean; // Force starting a stalled component
+  allowDuringBulkStartup?: boolean; // Advanced: Allow starting during startAllComponents() (default: false)
 }
 
 interface StopComponentOptions {
   forceImmediate?: boolean; // Skip graceful phase, go straight to force
   timeout?: number; // Override default timeout
+  ignoreRunningDependents?: boolean; // Allow stopping despite running dependents (default: false)
 }
 
 interface RestartComponentOptions {
@@ -1026,6 +1029,51 @@ Detach all signal handlers.
 
 ```typescript
 detachSignals(): void
+```
+
+#### `getSignalStatus()`
+
+Get detailed status information about signal handling configuration.
+
+```typescript
+getSignalStatus(): LifecycleSignalStatus
+```
+
+**Returns:**
+
+```typescript
+interface LifecycleSignalStatus {
+  isAttached: boolean;
+  handlers: {
+    shutdown: boolean;
+    reload: boolean;
+    info: boolean;
+    debug: boolean;
+  };
+  listeningFor: {
+    shutdownSignals: boolean;
+    reloadSignal: boolean;
+    infoSignal: boolean;
+    debugSignal: boolean;
+    keypresses: boolean;
+  };
+  shutdownMethod: ShutdownMethod | null;
+}
+```
+
+**Example:**
+
+```typescript
+const status = lifecycle.getSignalStatus();
+
+if (status.isAttached) {
+  console.log('Signal handlers attached');
+  console.log(
+    'Listening for shutdown signals:',
+    status.listeningFor.shutdownSignals,
+  );
+  console.log('Listening for reload signal:', status.listeningFor.reloadSignal);
+}
 ```
 
 #### Manual Signal Triggers
@@ -1681,8 +1729,8 @@ Configure timeouts based on your component's needs:
 ```typescript
 const lifecycle = new LifecycleManager({
   logger,
-  componentStartTimeoutMS: 60000, // Long-running migrations
-  componentStopTimeoutMS: 10000, // Most components stop quickly
+  startupTimeoutMS: 60000, // Long-running migrations (global timeout for all components)
+  shutdownOptions: { timeoutMS: 10000 }, // Most components stop quickly (global timeout)
   shutdownWarningTimeoutMS: 5000, // Time to flush buffers
 });
 ```
