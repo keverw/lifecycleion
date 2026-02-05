@@ -1581,7 +1581,38 @@ describe('LifecycleManager - Registration & Individual Lifecycle', () => {
 
       const status = lifecycle.getComponentStatus('slow');
       const definedStatus = requireDefined(status, 'status');
-      expect(definedStatus.state).toBe('registered');
+      expect(definedStatus.state).toBe('starting-timed-out');
+    });
+
+    test('getStatus should account for start-timed-out components', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      class SlowStartComponent extends BaseComponent {
+        public async start() {
+          await sleep(200);
+        }
+        public stop(): Promise<void> {
+          return Promise.resolve();
+        }
+      }
+
+      const component = new SlowStartComponent(logger, {
+        name: 'slow',
+        startupTimeoutMS: 50,
+      });
+
+      await lifecycle.registerComponent(component);
+      await lifecycle.startComponent('slow');
+
+      const status = lifecycle.getStatus();
+
+      expect(status.counts.total).toBe(1);
+      expect(status.counts.running).toBe(0);
+      expect(status.counts.stalled).toBe(0);
+      expect(status.counts.stopped).toBe(1);
+      expect(status.counts.startTimedOut).toBe(1);
+      expect(status.components.startTimedOut).toEqual(['slow']);
+      expect(status.components.stopped).toEqual(['slow']);
     });
 
     test('stopComponent should timeout and mark as stalled if stop() takes too long', async () => {

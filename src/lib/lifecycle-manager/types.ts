@@ -37,6 +37,7 @@ export interface ComponentOptions {
 export type ComponentState =
   | 'registered' // Registered but never started
   | 'starting' // start() in progress
+  | 'starting-timed-out' // start() timed out (observability only)
   | 'running' // start() completed successfully
   | 'failed' // Optional component failed to start
   | 'stopping' // stop() in progress (graceful phase)
@@ -741,12 +742,13 @@ export interface LifecycleManagerStatus {
   /** True while stopAllComponents() is running */
   isShuttingDown: boolean;
 
-  /** Counts of registered, running, and stalled components */
+  /** Counts of registered, running, stopped, and stalled components */
   counts: {
     total: number;
     running: number;
     stopped: number;
     stalled: number;
+    startTimedOut: number;
   };
 
   /** Component name lists for quick inspection */
@@ -755,6 +757,7 @@ export interface LifecycleManagerStatus {
     running: string[];
     stopped: string[];
     stalled: string[];
+    startTimedOut: string[];
   };
 }
 

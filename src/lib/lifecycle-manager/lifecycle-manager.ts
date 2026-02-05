@@ -458,6 +458,13 @@ export class LifecycleManager
   }
 
   /**
+   * Get components whose last start attempt timed out
+   */
+  public getStartTimedOutComponentCount(): number {
+    return this.getStartTimedOutComponentNames().length;
+  }
+
+  /**
    * Get detailed status for a specific component
    */
   public getComponentStatus(name: string): ComponentStatus | undefined {
@@ -541,10 +548,12 @@ export class LifecycleManager
     const running = this.getRunningComponentCount();
     const stalled = this.getStalledComponentCount();
     const stopped = this.getStoppedComponentCount();
+    const startTimedOut = this.getStartTimedOutComponentCount();
     const registeredNames = this.getComponentNames();
     const runningNames = this.getRunningComponentNames();
     const stalledNames = this.getStalledComponentNames();
     const stoppedNames = this.getStoppedComponentNames();
+    const startTimedOutNames = this.getStartTimedOutComponentNames();
 
     return {
       systemState: this.getSystemState(),
@@ -556,12 +565,14 @@ export class LifecycleManager
         running,
         stopped,
         stalled,
+        startTimedOut,
       },
       components: {
         registered: registeredNames,
         running: runningNames,
         stopped: stoppedNames,
         stalled: stalledNames,
+        startTimedOut: startTimedOutNames,
       },
     };
   }
@@ -578,6 +589,15 @@ export class LifecycleManager
    */
   public getStalledComponentNames(): string[] {
     return Array.from(this.stalledComponents.keys());
+  }
+
+  /**
+   * Get components whose last start attempt timed out
+   */
+  public getStartTimedOutComponentNames(): string[] {
+    return this.getComponentNames().filter(
+      (name) => this.componentStates.get(name) === 'starting-timed-out',
+    );
   }
 
   /**
@@ -3107,7 +3127,7 @@ export class LifecycleManager
         err instanceof ComponentStartTimeoutError &&
         err.additionalInfo.componentName === name
       ) {
-        this.componentStates.set(name, 'registered'); // Reset state
+        this.componentStates.set(name, 'starting-timed-out'); // Timeout state (observability)
         this.logger.entity(name).error('Component startup timed out', {
           params: { error: err.message },
         });

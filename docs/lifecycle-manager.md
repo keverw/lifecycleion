@@ -227,9 +227,35 @@ Components transition through these states:
 
 ```
 registered → starting → running → stopping → stopped
-                   ↓
-                stalled (if stop times out)
+                  ↘                 ↓
+            starting-timed-out      stalled (if stop times out)
 ```
+
+**Starting-Timed-Out State Definition:**
+A component enters "starting-timed-out" when:
+
+1. `start()` exceeds `startupTimeoutMS`, AND
+2. The manager calls `onStartupAborted()` (if implemented) and treats the component as not running
+
+This state is for observability only. It behaves like `registered`: the component can be started again, unregistered normally, and will not be stopped during shutdown because it's not running. The state is cleared automatically on a successful start.
+
+Use `getStartTimedOutComponentNames()` to inspect components currently in this state.
+For accounting purposes, `getStoppedComponentNames()` and `getStoppedComponentCount()` include
+components in this state so that `running + stopped + stalled = total`.
+
+When a component `start()` exceeds its `startupTimeoutMS`, the manager:
+
+1. Marks the component state as `starting-timed-out` (for observability)
+2. Treats the component as not running
+3. Calls `onStartupAborted()` if the component implements it
+
+If `onStartupAborted()` is not implemented, the timeout still applies and the
+state remains `starting-timed-out`; there is simply no abort callback to run.
+
+Any in-flight startup work may continue in the background, so components should
+either keep startup side effects idempotent or implement their own cancellation
+mechanism (e.g., track an abort flag, or stop/short-circuit once `stop()` is
+called).
 
 **Stalled State Definition:**
 A component becomes "stalled" when:
@@ -1142,6 +1168,7 @@ getComponentCount(): number
 getRunningComponentCount(): number
 getStalledComponentCount(): number
 getStoppedComponentCount(): number
+getStartTimedOutComponentCount(): number
 getAllComponentStatuses(): ComponentStatus[]
 
 // System state
@@ -1150,6 +1177,7 @@ getStatus(): LifecycleManagerStatus
 getStalledComponents(): ComponentStallInfo[]
 getStalledComponentNames(): string[]
 getStoppedComponentNames(): string[]
+getStartTimedOutComponentNames(): string[]
 getLastShutdownResult(): ShutdownResult | null
 
 // Dependencies
@@ -1207,15 +1235,19 @@ interface LifecycleManagerStatus {
     running: number;
     stopped: number;
     stalled: number;
+    startTimedOut: number;
   };
   components: {
     registered: string[];
     running: string[];
     stopped: string[];
     stalled: string[];
+    startTimedOut: string[];
   };
 }
 ```
+
+**Note:** `counts.stopped` and `components.stopped` include `startTimedOut` components.
 
 **Note:** `components.running` excludes stalled components. `components.stopped` excludes both running and stalled (use `components.stalled` or `getStalledComponents()` for those).
 
