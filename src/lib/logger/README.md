@@ -200,7 +200,10 @@ logger.error('Configuration error', { exitCode: 2 });
 logger.error('Non-fatal error'); // Process continues
 ```
 
-**Note:** The exit code is included in the `LogEntry` that sinks receive, so custom sinks can see when a log will trigger an exit.
+**Notes:**
+
+- The exit code is included in the `LogEntry` that sinks receive, so custom sinks can see when a log will trigger an exit
+- The `exitCode` must be a valid number; non-numeric values are ignored and won't trigger exit
 
 ### Template Strings with Parameters
 
@@ -559,6 +562,53 @@ worker2.error('Task failed', { tags: ['error', 'retry'] });
 - Entity loggers support all the same methods as service loggers (error, info, warn, etc.)
 - The entity name appears in log output: `[service-name] [entity-name] message`
 - Entity names are included in the `LogEntry` structure for filtering and analysis
+
+### Setting Exit Callback After Construction
+
+When you have circular dependencies between Logger and other components, use `setBeforeExitCallback()` to set the callback after construction.
+
+**LifecycleManager Integration:** If you're using LifecycleManager, it provides a built-in `enableLoggerExitHook()` method that automatically sets up graceful shutdown on logger exit:
+
+```typescript
+import { LifecycleManager } from 'lifecycleion';
+
+const logger = new Logger({ sinks: [new ConsoleSink()] });
+const lifecycle = new LifecycleManager({ logger });
+
+// Option 1: Use the built-in helper (recommended)
+lifecycle.enableLoggerExitHook();
+
+// Now logger.exit() automatically triggers graceful component shutdown
+logger.error('Fatal error', { exitCode: 1 });
+// Automatically calls lifecycle.stopAllComponents() before exit
+```
+
+**Manual Integration:** For custom exit logic or when not using LifecycleManager, use `setBeforeExitCallback()` directly:
+
+```typescript
+const logger = new Logger();
+const lifecycle = new LifecycleManager({ logger });
+
+// Set custom callback after both are constructed
+logger.setBeforeExitCallback(async (exitCode, isFirstExit) => {
+  if (isFirstExit) {
+    // Custom logic before shutdown
+    await saveState();
+
+    // Graceful shutdown
+    await lifecycle.stopAllComponents();
+  }
+
+  return { action: 'proceed' };
+});
+
+// Later, remove the callback if needed
+logger.setBeforeExitCallback(undefined);
+```
+
+This approach avoids constructor ordering issues and allows components to reference each other without creating circular dependency problems.
+
+**Note:** This method overwrites any existing `beforeExitCallback` (including one set in the Logger constructor).
 
 ## Built-in Sinks
 
@@ -981,6 +1031,11 @@ logger.hasExitedOrPending: boolean
 // Report error listener
 logger.registerReportErrorListener(prefix?)
 logger.unregisterReportErrorListener()
+logger.isReportErrorListenerRegistered(): boolean
+logger.isReportErrorAvailable(): boolean
+
+// Set/update exit callback (useful for circular dependencies)
+logger.setBeforeExitCallback(callback?)
 ```
 
 ### Options for Log Methods
@@ -1055,11 +1110,14 @@ When a log includes an `exitCode`, the logger will:
 1. Call `beforeExitCallback` (if provided) with the exit code
    - Callback must return `{ action: 'proceed' }` to continue with exit
    - Or return `{ action: 'wait' }` to prevent exit (e.g., shutdown already in progress)
-   - **If callback throws an error**, exit proceeds automatically to prevent hanging
-   - Errors are reported via the global `reportError` event
+   - **IMPORTANT:** If the callback throws an error or rejects, the exit process proceeds automatically to prevent the application from hanging
+   - Errors from the callback are reported via the global `reportError` event
+   - Design your callback to handle errors internally if you need guaranteed cleanup
 2. Set `logger.didExit = true` and `logger.exitCode = <code>`
 3. Close all sinks
 4. Call `process.exit(code)` **only if** `callProcessExit: true` (default)
+
+**Exit Code Validation:** The `exitCode` must be a valid number. Non-numeric values are silently ignored and will not trigger process exit.
 
 This means `callProcessExit: false` creates a "simulated exit" - the logger goes through the exit process (callbacks, state changes, closing sinks) but doesn't actually terminate the process. This is useful for:
 
