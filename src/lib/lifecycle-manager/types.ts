@@ -216,8 +216,8 @@ export type ComponentOperationFailureCode =
   | 'has_running_dependents'
   | 'startup_in_progress'
   | 'shutdown_in_progress'
-  | 'start_timeout'
-  | 'stop_timeout'
+  | 'component_startup_timeout'
+  | 'component_shutdown_timeout'
   | 'restart_stop_failed'
   | 'restart_start_failed'
   | 'unknown_error';
@@ -288,6 +288,8 @@ export interface StartupResult {
     | 'dependency_cycle'
     | 'no_components_registered'
     | 'stalled_components_exist'
+    | 'partial_state'
+    | 'required_component_failed'
     | 'startup_timeout'
     | 'unknown_error';
 
@@ -324,7 +326,7 @@ export interface ShutdownResult {
   reason?: string;
 
   /** Error code (when success is false) */
-  code?: 'already_in_progress';
+  code?: 'already_in_progress' | 'shutdown_timeout';
 }
 
 /**

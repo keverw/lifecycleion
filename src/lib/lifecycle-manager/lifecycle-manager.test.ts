@@ -1576,7 +1576,7 @@ describe('LifecycleManager - Registration & Individual Lifecycle', () => {
 
       expect(result.success).toBe(false);
       expect(result.error?.message).toContain('timed out');
-      expect(result.code).toBe('start_timeout');
+      expect(result.code).toBe('component_startup_timeout');
       expect(lifecycle.isComponentRunning('slow')).toBe(false);
 
       const status = lifecycle.getComponentStatus('slow');
@@ -1639,7 +1639,7 @@ describe('LifecycleManager - Registration & Individual Lifecycle', () => {
 
       expect(opResult.success).toBe(false);
       expect(opResult.error?.message).toContain('timed out');
-      expect(opResult.code).toBe('stop_timeout');
+      expect(opResult.code).toBe('component_shutdown_timeout');
       expect(lifecycle.isComponentRunning('slow')).toBe(false);
 
       const status = lifecycle.getComponentStatus('slow');
@@ -2046,7 +2046,6 @@ describe('LifecycleManager - Registration & Individual Lifecycle', () => {
 
       expect(didTimeoutEmit).toBe(true);
       expect(timeoutPayload?.name).toBe('slow');
-      expect(timeoutPayload?.code).toBe('start_timeout');
       expect(timeoutPayload?.timeoutMS).toBe(50);
     });
 
@@ -2082,7 +2081,7 @@ describe('LifecycleManager - Registration & Individual Lifecycle', () => {
       expect(didStallEmit).toBe(true);
       expect(stalledPayload?.name).toBe('slow');
       expect(stalledPayload?.stallInfo?.reason).toBe('timeout');
-      expect(stalledPayload?.code).toBe('stop_timeout');
+      expect(stalledPayload?.code).toBe('component_shutdown_timeout');
     });
 
     test('event handler errors should not break lifecycle operations', async () => {
@@ -5647,6 +5646,40 @@ describe('LifecycleManager - Signal Integration', () => {
 
       // Component should have stopped successfully
       expect(lifecycle.getRunningComponentCount()).toBe(0);
+    });
+
+    test('should return shutdown_timeout code when bulk shutdown times out', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      class SlowStopComponent extends BaseComponent {
+        public async start() {
+          // Quick start
+        }
+
+        public async stop() {
+          // Simulate very slow shutdown that will timeout in graceful phase
+          await sleep(5000);
+        }
+      }
+
+      await lifecycle.registerComponent(
+        new SlowStopComponent(logger, {
+          name: 'slow',
+          shutdownGracefulTimeoutMS: 100, // Short individual timeout
+        }),
+      );
+      await lifecycle.startAllComponents();
+
+      // Call with timeout that will expire during shutdown
+      const result = await lifecycle.stopAllComponents({ timeoutMS: 50 });
+
+      // Should return shutdown_timeout code and timedOut flag
+      // Note: success can be true if timeout expires before components stall
+      expect(result.code).toBe('shutdown_timeout');
+      expect(result.timedOut).toBe(true);
+      expect(result.reason).toContain('Shutdown timeout exceeded');
+      expect(result.durationMS).toBeGreaterThanOrEqual(50);
+      expect(result.durationMS).toBeLessThan(200);
     });
   });
 });

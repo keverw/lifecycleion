@@ -42,6 +42,10 @@ A comprehensive lifecycle orchestration system that manages startup, shutdown, a
   - [Logger Integration](#logger-integration)
     - [`enableLoggerExitHook()`](#enableloggerexithook)
   - [Status and Query Methods](#status-and-query-methods)
+    - [Component Existence and State](#component-existence-and-state)
+    - [Lists and Counts](#lists-and-counts)
+    - [System State](#system-state)
+    - [Dependencies](#dependencies)
 - [BaseComponent API](#basecomponent-api)
   - [Constructor](#constructor)
   - [Lifecycle Methods](#lifecycle-methods)
@@ -228,9 +232,15 @@ Components transition through these states:
 
 ```
 registered → starting → running → stopping → stopped
-                  ↘                 ↓
-            starting-timed-out      stalled (if stop times out)
+                  ↓                   ↓
+                  ↓ (timeout)         stalled (if stop times out)
+                  ↓
+            starting-timed-out (required component timeout)
+                  ↓
+            failed (optional component timeout/error)
 ```
+
+**Note:** Required components that timeout enter `starting-timed-out` and trigger rollback. Optional components that fail enter `failed` state and startup continues.
 
 **Starting-Timed-Out State Definition:**
 A component enters "starting-timed-out" when:
@@ -257,6 +267,40 @@ Any in-flight startup work may continue in the background, so components should
 either keep startup side effects idempotent or implement their own cancellation
 mechanism (e.g., track an abort flag, or stop/short-circuit once `stop()` is
 called).
+
+**Failed State Definition:**
+
+A component enters "failed" when:
+
+1. It's marked as `optional: true`, AND
+2. Its `start()` method throws an error or exceeds `startupTimeoutMS`
+
+When an optional component fails:
+
+- The component state becomes `failed`
+- It's recorded in `StartupResult.failedOptionalComponents`
+- Startup **continues** with remaining components (dependents still attempt to start)
+- The component can be restarted later with `startComponent(name)`
+
+```typescript
+class CacheComponent extends BaseComponent {
+  constructor(logger: Logger) {
+    super(logger, {
+      name: 'cache',
+      optional: true, // Failure enters 'failed' state, doesn't stop startup
+    });
+  }
+}
+
+const result = await lifecycle.startAllComponents();
+if (result.failedOptionalComponents.length > 0) {
+  logger.warn(
+    'Some optional components failed:',
+    result.failedOptionalComponents.map((c) => c.name),
+  );
+  // Application continues running in degraded mode
+}
+```
 
 **Stalled State Definition:**
 A component becomes "stalled" when:
@@ -625,6 +669,8 @@ interface StartupResult {
     | 'dependency_cycle'
     | 'no_components_registered'
     | 'stalled_components_exist'
+    | 'partial_state' // Some components already running
+    | 'required_component_failed' // Required component failed to start
     | 'startup_timeout'
     | 'unknown_error';
   error?: Error; // Error object (when success is false due to dependency cycle or unknown error)
@@ -671,7 +717,7 @@ class ComponentB extends BaseComponent {
 // If required Component A's start() takes 6 seconds:
 // - Component A enters 'starting-timed-out' state (exceeded its 5s timeout)
 // - Startup STOPS and rolls back all started components
-// - Returns { success: false, code: 'start_timeout' }
+// - Returns { success: false, code: 'required_component_failed', reason: '...', error: ... }
 //
 // If optional Component B's start() takes 6 seconds:
 // - Component B enters 'failed' state (exceeded its 5s timeout)
@@ -713,10 +759,15 @@ stopAllComponents(options?: StopAllOptions): Promise<ShutdownResult>
 ```typescript
 interface StopAllOptions {
   timeoutMS?: number; // Global shutdown timeout (default: 30000, 0 = disabled)
-  retryStalled?: boolean; // Retry stalled components (default: true)
-  haltOnStall?: boolean; // Stop processing after a stall (default: true)
+  retryStalled?: boolean; // Retry components that were previously stalled (default: true)
+  haltOnStall?: boolean; // Stop processing after a component becomes stalled (default: true)
 }
 ```
+
+**Option Details:**
+
+- `retryStalled`: If `true`, attempts to stop components that are currently in the `stalled` state from previous shutdown attempts. If `false`, skips components already marked as stalled.
+- `haltOnStall`: If `true`, stops processing remaining components as soon as any component becomes stalled during _this_ shutdown. If `false`, continues attempting to stop remaining components even after a stall occurs.
 
 **Timeout Behavior:**
 
@@ -791,7 +842,7 @@ interface ShutdownResult {
   durationMS: number;
   timedOut?: boolean;
   reason?: string;
-  code?: 'already_in_progress';
+  code?: 'already_in_progress' | 'shutdown_timeout';
 }
 ```
 
@@ -805,10 +856,11 @@ restartAllComponents(options?: RestartAllOptions): Promise<RestartResult>
 interface RestartAllOptions {
   startupOptions?: StartupOptions;     // Options for the start phase
   shutdownTimeoutMS?: number;         // Timeout for the shutdown phase
+  // Note: retryStalled and haltOnStall are hardcoded to true during restart shutdown
 }
 ```
 
-**Note:** `restartAllComponents` hardcodes `retryStalled: true` and `haltOnStall: true` during shutdown — only the timeout is configurable via `shutdownTimeoutMS`.
+**Important:** `restartAllComponents` hardcodes `retryStalled: true` and `haltOnStall: true` for the shutdown phase to ensure clean restart. Only `shutdownTimeoutMS` can be customized.
 
 #### Individual Component Operations
 
@@ -829,7 +881,9 @@ restartComponent(name: string, options?: RestartComponentOptions): Promise<Compo
 interface StartComponentOptions {
   allowRequiredDependencies?: boolean; // Force start despite missing required deps
   forceStalled?: boolean; // Force starting a stalled component
-  allowDuringBulkStartup?: boolean; // Advanced: Allow starting during startAllComponents() (default: false)
+  allowDuringBulkStartup?: boolean; // Allow starting during startAllComponents() (default: false)
+  // Normally blocked to prevent race conditions with dependency ordering.
+  // Only needed for dynamic mid-startup registration. Most users never need this option.
 }
 
 interface StopComponentOptions {
@@ -837,6 +891,9 @@ interface StopComponentOptions {
   timeout?: number; // Override default timeout
   allowStopWithRunningDependents?: boolean; // Allow stopping despite running dependents (default: false)
 }
+
+// Note: Individual component stops skip the global warning phase. Only bulk shutdown operations
+// include the onShutdownWarning() callback.
 
 interface RestartComponentOptions {
   stopOptions?: StopComponentOptions; // Options for stop phase
@@ -1283,55 +1340,117 @@ logger.exit(0);
 
 ### Status and Query Methods
 
+#### Component Existence and State
+
+**`hasComponent(name: string): boolean`**
+
+Check if a component is registered.
+
 ```typescript
-// Component existence and state
-hasComponent(name: string): boolean
-isComponentRunning(name: string): boolean
-getComponentStatus(name: string): ComponentStatus | undefined
-getComponentInstance(name: string): BaseComponent | undefined
-
-// Lists and counts
-getComponentNames(): string[]
-getRunningComponentNames(): string[]
-getComponentCount(): number
-getRunningComponentCount(): number
-getStalledComponentCount(): number
-getStoppedComponentCount(): number
-getStartTimedOutComponentCount(): number
-getAllComponentStatuses(): ComponentStatus[]
-
-// System state
-getSystemState(): SystemState
-getStatus(): LifecycleManagerStatus
-getStalledComponents(): ComponentStallInfo[]
-getStalledComponentNames(): string[]
-getStoppedComponentNames(): string[]
-getStartTimedOutComponentNames(): string[]
-getLastShutdownResult(): ShutdownResult | null
-
-// Dependencies
-getStartupOrder(): StartupOrderResult
-validateDependencies(): DependencyValidationResult
+if (lifecycle.hasComponent('database')) {
+  console.log('Database component is registered');
+}
 ```
 
-**DependencyValidationResult:**
+**`isComponentRunning(name: string): boolean`**
+
+Check if a component is currently running.
 
 ```typescript
-interface DependencyValidationResult {
-  valid: boolean;
-  missingDependencies: Array<{
-    componentName: string;
-    componentIsOptional: boolean;
-    missingDependency: string;
-  }>;
-  circularCycles: string[][];
-  summary: {
-    totalMissingDependencies: number;
-    requiredMissingDependencies: number;
-    optionalMissingDependencies: number;
-    totalCircularCycles: number;
-  };
+if (lifecycle.isComponentRunning('cache')) {
+  // Use cache
+} else {
+  // Fallback behavior
 }
+```
+
+**`getComponentStatus(name: string): ComponentStatus | undefined`**
+
+Get detailed status for a specific component. Returns `undefined` if component not found.
+
+```typescript
+const status = lifecycle.getComponentStatus('web-server');
+if (status) {
+  console.log('State:', status.state); // 'running', 'stopped', etc.
+  console.log('Started at:', status.startedAt);
+  console.log('Dependencies:', status.dependencies);
+}
+```
+
+**`getComponentInstance(name: string): BaseComponent | undefined`**
+
+Get the raw component instance. Returns `undefined` if component not found.
+
+```typescript
+const dbComponent = lifecycle.getComponentInstance('database');
+if (dbComponent) {
+  // Access component directly - use with caution
+  console.log('Component name:', dbComponent.getName());
+}
+```
+
+**Warning:** Direct access to component instances should be used carefully. Prefer using the manager's API methods for lifecycle operations to maintain proper state management.
+
+#### Lists and Counts
+
+**`getComponentNames(): string[]`**
+
+Get names of all registered components.
+
+**`getRunningComponentNames(): string[]`**
+
+Get names of all currently running components (excludes stalled).
+
+**`getComponentCount(): number`**
+
+Get total number of registered components.
+
+**`getRunningComponentCount(): number`**
+
+Get number of currently running components (excludes stalled).
+
+**`getStalledComponentCount(): number`**
+
+Get number of stalled components (failed to stop during shutdown).
+
+**`getStoppedComponentCount(): number`**
+
+Get number of stopped components. Includes components in `starting-timed-out` state for accounting purposes (since they're not running).
+
+**`getStartTimedOutComponentCount(): number`**
+
+Get number of components in `starting-timed-out` state (exceeded startup timeout).
+
+**`getAllComponentStatuses(): ComponentStatus[]`**
+
+Get detailed status for all registered components.
+
+```typescript
+const statuses = lifecycle.getAllComponentStatuses();
+for (const status of statuses) {
+  console.log(`${status.name}: ${status.state}`);
+
+  if (status.error) {
+    console.error(`  Error: ${status.error.message}`);
+  }
+}
+```
+
+#### System State
+
+**`getSystemState(): SystemState`**
+
+Get the current system state (see SystemState Values below).
+
+**`getStatus(): LifecycleManagerStatus`**
+
+Get comprehensive manager status including counts and component lists (see LifecycleManagerStatus below).
+
+```typescript
+const status = lifecycle.getStatus();
+console.log('System state:', status.systemState);
+console.log('Running:', status.counts.running);
+console.log('Stalled:', status.counts.stalled);
 ```
 
 **SystemState Values:**
@@ -1382,6 +1501,135 @@ interface LifecycleManagerStatus {
 
 **Definition:** `stopped` = registered − running − stalled.
 
+**`getStalledComponents(): ComponentStallInfo[]`**
+
+Get detailed information about stalled components.
+
+```typescript
+const stalled = lifecycle.getStalledComponents();
+for (const info of stalled) {
+  console.error(`Stalled: ${info.name}`);
+  console.error(`  Reason: ${info.reason}`);
+  console.error(`  At: ${new Date(info.stalledAt)}`);
+}
+```
+
+**`getStalledComponentNames(): string[]`**
+
+Get names of stalled components.
+
+**`getStoppedComponentNames(): string[]`**
+
+Get names of stopped components (includes `starting-timed-out` state).
+
+**`getStartTimedOutComponentNames(): string[]`**
+
+Get names of components in `starting-timed-out` state.
+
+**`getLastShutdownResult(): ShutdownResult | null`**
+
+Get the result of the last `stopAllComponents()` call. Returns `null` if no shutdown has occurred yet or after a successful `restartAllComponents()`.
+
+```typescript
+const lastShutdown = lifecycle.getLastShutdownResult();
+if (lastShutdown && lastShutdown.stalledComponents.length > 0) {
+  console.error('Previous shutdown had stalled components:');
+  for (const stalled of lastShutdown.stalledComponents) {
+    console.error(`  - ${stalled.name}: ${stalled.reason}`);
+  }
+}
+```
+
+**Use cases:**
+
+- Debugging shutdown issues
+- Tracking stalled components across restarts
+- Collecting shutdown metrics
+- Recovery decision-making
+
+#### Dependencies
+
+**`getStartupOrder(): StartupOrderResult`**
+
+Get the computed startup order based on dependencies.
+
+```typescript
+interface StartupOrderResult {
+  success: boolean;
+  startupOrder: string[]; // Resolved dependency order (empty array if !success)
+  reason?: string; // Human-readable explanation when !success
+  code?: StartupOrderFailureCode; // 'dependency_cycle' | 'unknown_error'
+  error?: Error; // Error object (present for dependency_cycle and unknown_error)
+}
+```
+
+**Example:**
+
+```typescript
+const order = lifecycle.getStartupOrder();
+
+if (order.success) {
+  console.log('Startup order:', order.startupOrder);
+} else {
+  console.error('Cannot compute order:', order.reason);
+
+  if (order.code === 'dependency_cycle') {
+    console.error('Cycle detected:', order.error);
+  }
+}
+```
+
+**`validateDependencies(): DependencyValidationResult`**
+
+Validate the dependency graph for missing dependencies and circular cycles
+
+**DependencyValidationResult:**
+
+```typescript
+interface DependencyValidationResult {
+  valid: boolean;
+  missingDependencies: Array<{
+    componentName: string;
+    componentIsOptional: boolean;
+    missingDependency: string;
+  }>;
+  circularCycles: string[][];
+  summary: {
+    totalMissingDependencies: number; // Total number of missing dependencies across all components
+    requiredMissingDependencies: number; // Missing dependencies on required components (blocks startup)
+    optionalMissingDependencies: number; // Missing dependencies on optional components (degrades functionality)
+    totalCircularCycles: number; // Number of circular dependency cycles detected
+  };
+}
+```
+
+**Summary Fields Explained:**
+
+- `totalMissingDependencies`: Count of all missing dependency declarations (sum of required + optional)
+- `requiredMissingDependencies`: Missing dependencies that will prevent startup (required components depending on non-existent components)
+- `optionalMissingDependencies`: Missing dependencies that won't block startup but indicate configuration issues
+- `totalCircularCycles`: Number of dependency cycles detected (each cycle prevents startup)
+
+**Example:**
+
+```typescript
+const validation = lifecycle.validateDependencies();
+
+console.log(`Valid: ${validation.valid}`);
+console.log(`Missing: ${validation.summary.totalMissingDependencies} total`);
+console.log(
+  `  - ${validation.summary.requiredMissingDependencies} blocking startup`,
+);
+console.log(
+  `  - ${validation.summary.optionalMissingDependencies} non-blocking`,
+);
+console.log(`Circular cycles: ${validation.summary.totalCircularCycles}`);
+
+if (!validation.valid) {
+  // Detailed breakdown available in missingDependencies and circularCycles arrays
+}
+```
+
 ## BaseComponent API
 
 Components extend `BaseComponent` and can implement these methods:
@@ -1400,8 +1648,10 @@ interface ComponentOptions {
   dependencies?: string[]; // Component dependencies
   optional?: boolean; // If true, failure doesn't stop startup
   startupTimeoutMS?: number; // Start timeout in milliseconds (default: 30000, 0 = disabled)
-  shutdownGracefulTimeoutMS?: number; // Graceful shutdown timeout in milliseconds (default: 5000, min: 1000)
-  shutdownForceTimeoutMS?: number; // Force shutdown timeout in milliseconds (default: 2000, min: 500)
+  shutdownGracefulTimeoutMS?: number; // Graceful shutdown timeout in ms (default: 5000, minimum: 1000)
+  // Values below 1000ms are silently raised to 1000ms to ensure reasonable cleanup time
+  shutdownForceTimeoutMS?: number; // Force shutdown timeout in ms (default: 2000, minimum: 500)
+  // Values below 500ms are silently raised to 500ms to prevent abrupt termination
   healthCheckTimeoutMS?: number; // Health check timeout in milliseconds (default: 5000)
   signalTimeoutMS?: number; // Signal handler timeout in milliseconds (default: 5000, 0 = disabled)
 }
@@ -1432,7 +1682,7 @@ onShutdownForce?(): Promise<void> | void;
 onShutdownForceAborted?(): void;
 ```
 
-**Note:** `onShutdownWarning()` is only fired during `stopAllComponents()`/`restartAllComponents()` shutdowns. There is no built-in "warning cleared" event; if shutdown is canceled or stalls, reset any warning state on the next successful `start()` or via an app-specific signal.
+**Important:** `onShutdownWarning()` is only fired during bulk shutdowns via `stopAllComponents()` or `restartAllComponents()`. Individual `stopComponent()` calls do NOT trigger the warning phase. There is no built-in "warning cleared" event; if shutdown is canceled or stalls, reset any warning state on the next successful `start()` or via an app-specific signal.
 
 ### Signal Handlers
 
@@ -1452,6 +1702,7 @@ onDebug?(): Promise<void> | void;
 ```typescript
 // Optional: Handle messages from other components or external callers
 onMessage?<TData = unknown>(payload: unknown, from: string | null): TData | Promise<TData>;
+// from: component name when sent from another component, null when sent from manager/external
 
 // Send message to another component
 sendMessage<T>(to: string, payload: T): Promise<MessageResult>;
@@ -1477,9 +1728,12 @@ return {
   details: { connections: 10, queueSize: 5 },
 };
 
-// Simple boolean
-return true; // healthy
+// Simple boolean (automatically wrapped by manager)
+return true; // Automatically wrapped to { healthy: true, message: undefined, details: undefined }
+return false; // Wrapped to { healthy: false, message: undefined, details: undefined }
 ```
+
+**Note:** Boolean returns are automatically normalized to `ComponentHealthResult` format by the manager. Return result rich objects directly for more detailed health information.
 
 ### Value Sharing
 
@@ -1498,7 +1752,51 @@ isOptional(): boolean
 
 // Logger (pre-configured with component name)
 protected logger: LoggerService
+
+// Lifecycle manager reference (for advanced usage)
+protected lifecycle: ComponentLifecycleRef
 ```
+
+**Component Lifecycle Reference:**
+
+Components have access to a `lifecycle` property that provides a restricted view of the LifecycleManager. This allows components to interact with other components at runtime:
+
+```typescript
+class ApiComponent extends BaseComponent {
+  async start() {
+    // Check if optional dependency is running
+    if (this.lifecycle.isComponentRunning('cache')) {
+      // Get value from cache component
+      const result = this.lifecycle.getValue('cache', 'instance');
+
+      if (result.found) {
+        this.cache = result.value;
+      }
+    }
+
+    // Send message to another component
+    await this.lifecycle.sendMessageToComponent('metrics', {
+      event: 'api-started',
+      timestamp: Date.now(),
+    });
+  }
+}
+```
+
+**Available methods through `lifecycle`:**
+
+- **Event listeners**: `on()`, `once()`, `hasListener()`, `hasListeners()`, `listenerCount()`
+- **Component queries**: `hasComponent()`, `isComponentRunning()`, `getComponentStatus()`, `getComponentNames()`, `getRunningComponentNames()`, `getComponentCount()`, `getRunningComponentCount()`, `getStalledComponentCount()`, `getStoppedComponentCount()`, `getAllComponentStatuses()`
+- **System state**: `getSystemState()`, `getStatus()`
+- **Stalled/stopped components**: `getStalledComponents()`, `getStalledComponentNames()`, `getStoppedComponentNames()`
+- **Dependency validation**: `validateDependencies()`, `getStartupOrder()`
+- **Lifecycle control**: `startAllComponents()`, `stopAllComponents()`, `restartAllComponents()`, `startComponent()`, `stopComponent()`, `restartComponent()`
+- **Messaging**: `sendMessageToComponent()`, `broadcastMessage()`
+- **Value sharing**: `getValue()`
+- **Health checks**: `checkComponentHealth()`, `checkAllHealth()`
+- **Signal management**: `attachSignals()`, `detachSignals()`, `getSignalStatus()`, `triggerReload()`, `triggerInfo()`, `triggerDebug()`
+
+**Note:** While lifecycle control methods are available through the lifecycle reference, use them with caution. For startup/shutdown ordering, prefer declaring dependencies in your component's configuration rather than manually controlling other components' lifecycles.
 
 ## Events
 
@@ -1587,21 +1885,44 @@ lifecycle.on('lifecycle-manager:shutdown-completed', (data) => {
 
 ### Event Handler Best Practices
 
-Event handlers are **fire-and-forget** - they do not block lifecycle operations:
+Event handlers are **fire-and-forget** - they do not block lifecycle operations.
+
+**Event Handler Error Handling:** The LifecycleManager automatically catches errors thrown by event handlers via `safeHandleCallback`, preventing them from breaking lifecycle operations. Errors are dispatched as ErrorEvent objects using the standard `reportError` event API:
 
 ```typescript
-// ✅ Good - handle errors in async handlers
+// Listen for event handler errors
+globalThis.addEventListener('reportError', (event) => {
+  if (event instanceof ErrorEvent) {
+    console.error('Event handler error:', event.error.message);
+    // error.message includes context: "Error in a callback event handler for component:started"
+  }
+});
+```
+
+Available in Node.js 15+, Bun, Deno, and modern browsers. **Note:** Errors are NOT logged to the LifecycleManager's logger - use the `reportError` listener for custom logging/monitoring.
+
+However, it's still best practice to handle errors explicitly in your handlers for better control over error logging and recovery.
+
+```typescript
+// ✅ Best - handle errors explicitly for better control
 lifecycle.on('component:started', async (data) => {
   try {
     await logToDatabase(data);
   } catch (error) {
     logger.error('Failed to log component start:', error);
+    // Can add custom recovery logic here
   }
 });
 
-// ❌ Bad - errors in handlers are caught and logged by manager
+// ✅ Safe but less control - manager catches and logs errors
 lifecycle.on('component:started', async (data) => {
-  await logToDatabase(data); // Uncaught errors won't break lifecycle
+  await logToDatabase(data); // Errors are caught by manager
+});
+
+// ❌ Bad - blocking or long-running work
+lifecycle.on('component:started', async (data) => {
+  // Don't perform expensive operations here - events are for notifications only
+  await performExpensiveMigration(); // This blocks the event loop
 });
 ```
 
@@ -1661,7 +1982,14 @@ Dependency cycle detection throws `DependencyCycleError` internally, but public 
 
 ### Failure Codes
 
-Result objects include machine-readable failure codes:
+Result objects include machine-readable failure codes.
+
+**Timeout Code Naming Convention:**
+
+- Bulk operations (e.g., `startAllComponents()`, `stopAllComponents()`) use `startup_timeout` / `shutdown_timeout`
+- Individual component operations (e.g., `startComponent()`, `stopComponent()`) use `component_startup_timeout` / `component_shutdown_timeout`
+
+This distinction makes it clear whether the timeout occurred at the bulk operation level or the individual component level.
 
 ```typescript
 // Component operation failure codes
@@ -1677,8 +2005,8 @@ type ComponentOperationFailureCode =
   | 'has_running_dependents'
   | 'startup_in_progress'
   | 'shutdown_in_progress'
-  | 'start_timeout'
-  | 'stop_timeout'
+  | 'component_startup_timeout'
+  | 'component_shutdown_timeout'
   | 'restart_stop_failed'
   | 'restart_start_failed'
   | 'unknown_error';

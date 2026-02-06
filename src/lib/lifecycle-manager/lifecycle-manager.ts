@@ -341,7 +341,9 @@ export class LifecycleManager
           reason: stopResult.reason ?? 'Failed to stop component',
           code: 'stop_failed',
           stopFailureReason:
-            stopResult.code === 'stop_timeout' ? 'timeout' : 'error',
+            stopResult.code === 'component_shutdown_timeout'
+              ? 'timeout'
+              : 'error',
           error: stopResult.error,
           wasStopped: false,
           wasRegistered: true,
@@ -855,6 +857,8 @@ export class LifecycleManager
           .map((c) => c.getName()),
         failedOptionalComponents: [],
         skippedDueToDependency: [],
+        reason: `${runningCount} of ${totalCount} components already running`,
+        code: 'partial_state',
         durationMS: Date.now() - startTime,
       };
     }
@@ -1005,6 +1009,8 @@ export class LifecycleManager
             startedComponents: [],
             failedOptionalComponents: [],
             skippedDueToDependency: [],
+            reason: 'Shutdown triggered during startup',
+            code: 'shutdown_in_progress',
             durationMS: Date.now() - startTime,
           };
         }
@@ -1060,6 +1066,11 @@ export class LifecycleManager
               startedComponents: [],
               failedOptionalComponents,
               skippedDueToDependency: Array.from(skippedDueToDependency),
+              reason:
+                result.reason ||
+                `Required component "${name}" failed: ${result.code || 'unknown'}`,
+              code: 'required_component_failed',
+              error: result.error,
               durationMS: Date.now() - startTime,
             };
           }
@@ -2842,6 +2853,12 @@ export class LifecycleManager
         stalledComponents,
         durationMS,
         timedOut: hasTimedOut || undefined,
+        ...(hasTimedOut
+          ? {
+              code: 'shutdown_timeout' as const,
+              reason: `Shutdown timeout exceeded (${effectiveTimeout}ms)`,
+            }
+          : {}),
       };
 
       // Store for getLastShutdownResult() - useful for debugging and metrics
@@ -3151,7 +3168,7 @@ export class LifecycleManager
         reason: err.message,
         code:
           err instanceof ComponentStartTimeoutError
-            ? 'start_timeout'
+            ? 'component_startup_timeout'
             : 'unknown_error',
         error: err,
         status: this.getComponentStatus(name),
@@ -3273,7 +3290,7 @@ export class LifecycleManager
 
     return this.shutdownComponentForce(name, component, {
       gracefulPhaseRan: true,
-      gracefulTimedOut: gracefulResult.code === 'stop_timeout',
+      gracefulTimedOut: gracefulResult.code === 'component_shutdown_timeout',
       gracefulError: gracefulResult.error,
       startedAt: shutdownStartedAt,
     });
@@ -3521,7 +3538,7 @@ export class LifecycleManager
           success: false,
           componentName: name,
           reason: 'Graceful shutdown timed out',
-          code: 'stop_timeout',
+          code: 'component_shutdown_timeout',
           error: err,
           status: this.getComponentStatus(name),
         };
@@ -3607,7 +3624,9 @@ export class LifecycleManager
 
       this.lifecycleEvents.componentStalled(name, stallInfo, {
         reason: stallInfo.reason,
-        code: context.gracefulTimedOut ? 'stop_timeout' : 'unknown_error',
+        code: context.gracefulTimedOut
+          ? 'component_shutdown_timeout'
+          : 'unknown_error',
       });
 
       // Return the original graceful phase error
@@ -3617,7 +3636,9 @@ export class LifecycleManager
         reason: context.gracefulTimedOut
           ? 'Component stop timed out'
           : (context.gracefulError?.message ?? 'Graceful shutdown failed'),
-        code: context.gracefulTimedOut ? 'stop_timeout' : 'unknown_error',
+        code: context.gracefulTimedOut
+          ? 'component_shutdown_timeout'
+          : 'unknown_error',
         error: context.gracefulError,
         status: this.getComponentStatus(name),
       };
@@ -3730,14 +3751,14 @@ export class LifecycleManager
 
       this.lifecycleEvents.componentStalled(name, stallInfo, {
         reason: stallInfo.reason,
-        code: isTimeout ? 'stop_timeout' : 'unknown_error',
+        code: isTimeout ? 'component_shutdown_timeout' : 'unknown_error',
       });
 
       return {
         success: false,
         componentName: name,
         reason: isTimeout ? 'Force shutdown timed out' : err.message,
-        code: isTimeout ? 'stop_timeout' : 'unknown_error',
+        code: isTimeout ? 'component_shutdown_timeout' : 'unknown_error',
         error: err,
         status: this.getComponentStatus(name),
       };

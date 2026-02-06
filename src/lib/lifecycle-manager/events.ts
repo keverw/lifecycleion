@@ -120,13 +120,11 @@ export interface LifecycleManagerEventMap {
     error: Error;
     timeoutMS?: number;
     reason?: string;
-    code: 'start_timeout';
   };
   'component:start-failed': {
     name: string;
     error: Error;
     reason?: string;
-    code: 'unknown_error';
   };
   'lifecycle-manager:shutdown-warning': { timeoutMS: number };
   'component:shutdown-warning': { name: string };
@@ -144,7 +142,6 @@ export interface LifecycleManagerEventMap {
     error: Error;
     timeoutMS?: number;
     reason?: string;
-    code: 'stop_timeout';
   };
   'component:shutdown-force': {
     name: string;
@@ -393,7 +390,6 @@ export class LifecycleManagerEvents {
       error,
       timeoutMS: info?.timeoutMS,
       reason: info?.reason,
-      code: 'start_timeout',
     });
   }
 
@@ -406,7 +402,6 @@ export class LifecycleManagerEvents {
       name,
       error,
       reason: info?.reason,
-      code: 'unknown_error',
     });
   }
 
@@ -461,7 +456,6 @@ export class LifecycleManagerEvents {
       error,
       timeoutMS: info?.timeoutMS,
       reason: info?.reason,
-      code: 'stop_timeout',
     });
   }
 

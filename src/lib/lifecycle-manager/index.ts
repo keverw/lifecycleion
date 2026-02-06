@@ -51,6 +51,8 @@ export type {
   SignalBroadcastResult,
   ComponentSignalResult,
   ValueResult,
+  ComponentValueResult,
+  GetValueOptions,
   SystemState,
   RegisterOptions,
   UnregisterOptions,
@@ -63,6 +65,7 @@ export type {
   InsertComponentAtResult,
   LifecycleManagerOptions,
   LifecycleManagerStatus,
+  DependencyValidationResult,
 } from './types';
 
 // Errors
