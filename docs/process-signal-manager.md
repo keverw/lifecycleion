@@ -444,14 +444,14 @@ Creates a new ProcessSignalManager instance.
   - `onShutdownRequested?`: `(method: ShutdownSignal) => void | Promise<void>` **(optional)**
     - Callback invoked when a shutdown signal is received
     - `method` will be one of: `'SIGINT'`, `'SIGTERM'`, or `'SIGTRAP'`
-  - `onReloadRequested?`: `() => void | Promise<void>` **(optional)**
+  - `onReloadRequested?`: `() => void | Promise<unknown>` **(optional)**
     - Callback invoked when reload is requested
     - Triggered by: SIGHUP signal or R key press (case-insensitive)
-  - `onInfoRequested?`: `() => void | Promise<void>` **(optional)**
+  - `onInfoRequested?`: `() => void | Promise<unknown>` **(optional)**
     - Callback invoked when info/stats are requested
     - Triggered by: SIGUSR1 signal or I key press (case-insensitive)
     - Common uses: Print stats, health checks, show metrics
-  - `onDebugRequested?`: `() => void | Promise<void>` **(optional)**
+  - `onDebugRequested?`: `() => void | Promise<unknown>` **(optional)**
     - Callback invoked when debug mode toggle is requested
     - Triggered by: SIGUSR2 signal or D key press (case-insensitive)
     - Common uses: Toggle debug mode, dump full state, enable verbose logging
@@ -664,6 +664,20 @@ The manager responds to the following events:
   - Example: Pressing `I` calls `onInfoRequested()` directly (no `process.emit('SIGUSR1')`)
   - Keyboard shortcuts work the same across all runtimes (Node.js, Bun, Deno)
   - The default behavior tables in the signal descriptions only apply to actual process signals (e.g., `kill -USR1 <pid>`), not keyboard shortcuts
+
+**Windows Compatibility:**
+
+| Signal/Event | Windows Support                                                         |
+| ------------ | ----------------------------------------------------------------------- |
+| `SIGINT`     | ✅ Works (process signal when sent externally)                          |
+| `SIGTERM`    | ⚠️ Limited (signal exists but no graceful handling on Windows)          |
+| `SIGTRAP`    | ❌ Not available on Windows                                             |
+| `SIGHUP`     | ❌ Not available on Windows (Unix-specific)                             |
+| `SIGUSR1`    | ❌ Not available on Windows (Unix-specific)                             |
+| `SIGUSR2`    | ❌ Not available on Windows (Unix-specific)                             |
+| Keyboard     | ✅ All keyboard shortcuts (Ctrl+C, Escape, R, I, D) work cross-platform |
+
+On Windows, rely on keyboard shortcuts for full functionality. Process signals are primarily a Unix/Linux feature.
 
 ## Stdin Raw Mode Behavior
 
