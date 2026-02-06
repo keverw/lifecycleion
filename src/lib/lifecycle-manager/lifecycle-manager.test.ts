@@ -16,24 +16,16 @@ import {
   lifecycleManagerErrCodes,
 } from './errors';
 import { sleep } from '../sleep';
+import {
+  TestComponent,
+  SlowStartComponent,
+  SlowStopComponent,
+  SlowStartAndStopComponent,
+  FailingStartComponent,
+  FailingStopComponent,
+} from './test-components';
 
 // cspell:ignore Renamable Reloadable Unregistration unregistration
-
-// Test component implementation
-class TestComponent extends BaseComponent {
-  public startCalled = false;
-  public stopCalled = false;
-
-  public start(): Promise<void> | void {
-    this.startCalled = true;
-    return Promise.resolve();
-  }
-
-  public stop(): Promise<void> | void {
-    this.stopCalled = true;
-    return Promise.resolve();
-  }
-}
 
 const requireDefined = <T>(value: T | null | undefined, label: string): T => {
   expect(value).toBeDefined();
@@ -787,16 +779,11 @@ describe('LifecycleManager - Registration & Individual Lifecycle', () => {
     test('unregisterComponent should fail (and keep registered) if stopIfRunning stop errors', async () => {
       const lifecycle = new LifecycleManager({ logger });
 
-      class FailingStopComponent extends BaseComponent {
-        public start(): Promise<void> {
-          return Promise.resolve();
-        }
-        public stop(): Promise<void> {
-          return Promise.reject(new Error('Stop failed'));
-        }
-      }
-
-      const component = new FailingStopComponent(logger, { name: 'failing' });
+      const component = new FailingStopComponent(
+        logger,
+        'failing',
+        'Stop failed',
+      );
 
       await lifecycle.registerComponent(component);
       await lifecycle.startComponent('failing');
@@ -824,19 +811,7 @@ describe('LifecycleManager - Registration & Individual Lifecycle', () => {
     test('unregisterComponent should fail (and keep registered) if stopIfRunning stop times out (stalled)', async () => {
       const lifecycle = new LifecycleManager({ logger });
 
-      class SlowStopComponent extends BaseComponent {
-        public start(): Promise<void> {
-          return Promise.resolve();
-        }
-        public async stop() {
-          await sleep(1500);
-        }
-      }
-
-      const component = new SlowStopComponent(logger, {
-        name: 'slow-stop',
-        shutdownGracefulTimeoutMS: 1000, // Minimum enforced
-      });
+      const component = new SlowStopComponent(logger, 'slow-stop', 1500);
 
       await lifecycle.registerComponent(component);
       await lifecycle.startComponent('slow-stop');
@@ -866,19 +841,7 @@ describe('LifecycleManager - Registration & Individual Lifecycle', () => {
     test('unregisterComponent should fail if stopIfRunning is set on a stalled component', async () => {
       const lifecycle = new LifecycleManager({ logger });
 
-      class SlowStopComponent extends BaseComponent {
-        public start(): Promise<void> {
-          return Promise.resolve();
-        }
-        public async stop() {
-          await sleep(1500);
-        }
-      }
-
-      const component = new SlowStopComponent(logger, {
-        name: 'slow-stop',
-        shutdownGracefulTimeoutMS: 1000, // Minimum enforced
-      });
+      const component = new SlowStopComponent(logger, 'slow-stop', 1500);
 
       await lifecycle.registerComponent(component);
       await lifecycle.startComponent('slow-stop');
@@ -1484,17 +1447,8 @@ describe('LifecycleManager - Registration & Individual Lifecycle', () => {
     test('stopComponent should return component_stalled for stalled component', async () => {
       const lifecycle = new LifecycleManager({ logger });
 
-      class FailingStopComponent extends BaseComponent {
-        public start(): Promise<void> {
-          return Promise.resolve();
-        }
-        public stop(): Promise<void> {
-          return Promise.reject(new Error('Stop failed'));
-        }
-      }
-
       await lifecycle.registerComponent(
-        new FailingStopComponent(logger, { name: 'stalled' }),
+        new FailingStopComponent(logger, 'stalled', 'Stop failed'),
       );
       await lifecycle.startComponent('stalled');
 
@@ -1530,16 +1484,7 @@ describe('LifecycleManager - Registration & Individual Lifecycle', () => {
     test('restartComponent should fail if stop fails', async () => {
       const lifecycle = new LifecycleManager({ logger });
 
-      class FailingStopComponent extends BaseComponent {
-        public start(): Promise<void> {
-          return Promise.resolve();
-        }
-        public stop(): Promise<void> {
-          return Promise.reject(new Error('Stop failed'));
-        }
-      }
-
-      const component = new FailingStopComponent(logger, { name: 'test' });
+      const component = new FailingStopComponent(logger, 'test', 'Stop failed');
 
       await lifecycle.registerComponent(component);
       await lifecycle.startComponent('test');
@@ -1556,19 +1501,7 @@ describe('LifecycleManager - Registration & Individual Lifecycle', () => {
     test('startComponent should timeout if start() takes too long', async () => {
       const lifecycle = new LifecycleManager({ logger });
 
-      class SlowStartComponent extends BaseComponent {
-        public async start() {
-          await sleep(200);
-        }
-        public stop(): Promise<void> {
-          return Promise.resolve();
-        }
-      }
-
-      const component = new SlowStartComponent(logger, {
-        name: 'slow',
-        startupTimeoutMS: 50,
-      });
+      const component = new SlowStartComponent(logger, 'slow', 200);
 
       await lifecycle.registerComponent(component);
 
@@ -1587,19 +1520,7 @@ describe('LifecycleManager - Registration & Individual Lifecycle', () => {
     test('getStatus should account for start-timed-out components', async () => {
       const lifecycle = new LifecycleManager({ logger });
 
-      class SlowStartComponent extends BaseComponent {
-        public async start() {
-          await sleep(200);
-        }
-        public stop(): Promise<void> {
-          return Promise.resolve();
-        }
-      }
-
-      const component = new SlowStartComponent(logger, {
-        name: 'slow',
-        startupTimeoutMS: 50,
-      });
+      const component = new SlowStartComponent(logger, 'slow', 200);
 
       await lifecycle.registerComponent(component);
       await lifecycle.startComponent('slow');
@@ -1618,19 +1539,7 @@ describe('LifecycleManager - Registration & Individual Lifecycle', () => {
     test('stopComponent should timeout and mark as stalled if stop() takes too long', async () => {
       const lifecycle = new LifecycleManager({ logger });
 
-      class SlowStopComponent extends BaseComponent {
-        public start(): Promise<void> {
-          return Promise.resolve();
-        }
-        public async stop() {
-          await sleep(1500);
-        }
-      }
-
-      const component = new SlowStopComponent(logger, {
-        name: 'slow',
-        shutdownGracefulTimeoutMS: 1000, // Minimum enforced
-      });
+      const component = new SlowStopComponent(logger, 'slow', 1500);
 
       await lifecycle.registerComponent(component);
       await lifecycle.startComponent('slow');
@@ -1652,16 +1561,11 @@ describe('LifecycleManager - Registration & Individual Lifecycle', () => {
     test('stopComponent should mark as stalled on error', async () => {
       const lifecycle = new LifecycleManager({ logger });
 
-      class FailingStopComponent extends BaseComponent {
-        public start(): Promise<void> {
-          return Promise.resolve();
-        }
-        public stop(): Promise<void> {
-          return Promise.reject(new Error('Stop error'));
-        }
-      }
-
-      const component = new FailingStopComponent(logger, { name: 'failing' });
+      const component = new FailingStopComponent(
+        logger,
+        'failing',
+        'Stop error',
+      );
 
       await lifecycle.registerComponent(component);
       await lifecycle.startComponent('failing');
@@ -2019,19 +1923,7 @@ describe('LifecycleManager - Registration & Individual Lifecycle', () => {
     test('should emit component:start-timeout event on startup timeout', async () => {
       const lifecycle = new LifecycleManager({ logger });
 
-      class SlowComponent extends BaseComponent {
-        public async start() {
-          await sleep(200);
-        }
-        public stop(): Promise<void> {
-          return Promise.resolve();
-        }
-      }
-
-      const component = new SlowComponent(logger, {
-        name: 'slow',
-        startupTimeoutMS: 50,
-      });
+      const component = new SlowStartComponent(logger, 'slow', 200);
 
       await lifecycle.registerComponent(component);
 
@@ -2052,19 +1944,7 @@ describe('LifecycleManager - Registration & Individual Lifecycle', () => {
     test('should emit component:stalled event on stop timeout', async () => {
       const lifecycle = new LifecycleManager({ logger });
 
-      class SlowStopComponent extends BaseComponent {
-        public start(): Promise<void> {
-          return Promise.resolve();
-        }
-        public async stop() {
-          await sleep(2000);
-        }
-      }
-
-      const component = new SlowStopComponent(logger, {
-        name: 'slow',
-        shutdownGracefulTimeoutMS: 1000,
-      });
+      const component = new SlowStopComponent(logger, 'slow', 2000);
 
       await lifecycle.registerComponent(component);
       await lifecycle.startComponent('slow');
@@ -2133,16 +2013,11 @@ describe('LifecycleManager - Registration & Individual Lifecycle', () => {
     test('failed start should reset state to registered', async () => {
       const lifecycle = new LifecycleManager({ logger });
 
-      class FailingComponent extends BaseComponent {
-        public start(): Promise<void> {
-          return Promise.reject(new Error('Start failed'));
-        }
-        public stop(): Promise<void> {
-          return Promise.resolve();
-        }
-      }
-
-      const component = new FailingComponent(logger, { name: 'failing' });
+      const component = new FailingStartComponent(
+        logger,
+        'failing',
+        'Start failed',
+      );
 
       await lifecycle.registerComponent(component);
       await lifecycle.startComponent('failing');
@@ -2157,16 +2032,11 @@ describe('LifecycleManager - Registration & Individual Lifecycle', () => {
     test('failed/timed-out stop should set state to stalled', async () => {
       const lifecycle = new LifecycleManager({ logger });
 
-      class FailingStopComponent extends BaseComponent {
-        public start(): Promise<void> {
-          return Promise.resolve();
-        }
-        public stop(): Promise<void> {
-          return Promise.reject(new Error('Stop failed'));
-        }
-      }
-
-      const component = new FailingStopComponent(logger, { name: 'failing' });
+      const component = new FailingStopComponent(
+        logger,
+        'failing',
+        'Stop failed',
+      );
 
       await lifecycle.registerComponent(component);
       await lifecycle.startComponent('failing');
@@ -2357,7 +2227,7 @@ describe('LifecycleManager - Bulk Operations', () => {
         new TrackingComponent(logger, { name: 'c' }),
       );
       await lifecycle.registerComponent(
-        new FailingComponent(logger, { name: 'fail' }),
+        new FailingStartComponent(logger, 'fail', 'Startup failed'),
       );
 
       await lifecycle.startAllComponents();
@@ -2469,20 +2339,11 @@ describe('LifecycleManager - Bulk Operations', () => {
         shutdownCompletedPayload = data;
       });
 
-      class SlowComponent extends BaseComponent {
-        public async start(): Promise<void> {
-          await sleep(50);
-        }
-        public stop(): Promise<void> {
-          return Promise.resolve();
-        }
-      }
-
       await lifecycle.registerComponent(
-        new SlowComponent(logger, { name: 'comp1' }),
+        new SlowStartComponent(logger, 'comp1', 50),
       );
       await lifecycle.registerComponent(
-        new SlowComponent(logger, { name: 'comp2' }),
+        new SlowStartComponent(logger, 'comp2', 50),
       );
 
       // Start all components
@@ -2507,16 +2368,11 @@ describe('LifecycleManager - Bulk Operations', () => {
     test('should block startup if stalled components exist', async () => {
       const lifecycle = new LifecycleManager({ logger });
 
-      class FailingStopComponent extends BaseComponent {
-        public start(): Promise<void> {
-          return Promise.resolve();
-        }
-        public stop(): Promise<void> {
-          return Promise.reject(new Error('Stop failed'));
-        }
-      }
-
-      const component = new FailingStopComponent(logger, { name: 'stalled' });
+      const component = new FailingStopComponent(
+        logger,
+        'stalled',
+        'Stop failed',
+      );
       await lifecycle.registerComponent(component);
 
       // Start and fail to stop (creates stalled component)
@@ -2542,17 +2398,8 @@ describe('LifecycleManager - Bulk Operations', () => {
     test('should allow startup if ignoreStalledComponents option is true', async () => {
       const lifecycle = new LifecycleManager({ logger });
 
-      class FailingStopComponent extends BaseComponent {
-        public start(): Promise<void> {
-          return Promise.resolve();
-        }
-        public stop(): Promise<void> {
-          return Promise.reject(new Error('Stop failed'));
-        }
-      }
-
       await lifecycle.registerComponent(
-        new FailingStopComponent(logger, { name: 'stalled' }),
+        new FailingStopComponent(logger, 'stalled', 'Stop failed'),
       );
       await lifecycle.registerComponent(
         new TestComponent(logger, { name: 'new-comp' }),
@@ -2574,17 +2421,8 @@ describe('LifecycleManager - Bulk Operations', () => {
     test('should block individual startComponent on stalled component by default', async () => {
       const lifecycle = new LifecycleManager({ logger });
 
-      class FailingStopComponent extends BaseComponent {
-        public start(): Promise<void> {
-          return Promise.resolve();
-        }
-        public stop(): Promise<void> {
-          return Promise.reject(new Error('Stop failed'));
-        }
-      }
-
       await lifecycle.registerComponent(
-        new FailingStopComponent(logger, { name: 'stalled' }),
+        new FailingStopComponent(logger, 'stalled', 'Stop failed'),
       );
 
       // Create stalled component
@@ -2602,17 +2440,8 @@ describe('LifecycleManager - Bulk Operations', () => {
     test('should allow individual startComponent with forceStalled option', async () => {
       const lifecycle = new LifecycleManager({ logger });
 
-      class FailingStopComponent extends BaseComponent {
-        public start(): Promise<void> {
-          return Promise.resolve();
-        }
-        public stop(): Promise<void> {
-          return Promise.reject(new Error('Stop failed'));
-        }
-      }
-
       await lifecycle.registerComponent(
-        new FailingStopComponent(logger, { name: 'stalled' }),
+        new FailingStopComponent(logger, 'stalled', 'Stop failed'),
       );
 
       // Create stalled component
@@ -2663,15 +2492,6 @@ describe('LifecycleManager - Bulk Operations', () => {
 
       const rollbackEvents: string[] = [];
 
-      class FailingComponent extends BaseComponent {
-        public start(): Promise<void> {
-          return Promise.reject(new Error('Startup failed'));
-        }
-        public stop(): Promise<void> {
-          return Promise.resolve();
-        }
-      }
-
       await lifecycle.registerComponent(
         new TestComponent(logger, { name: 'comp1' }),
       );
@@ -2679,7 +2499,7 @@ describe('LifecycleManager - Bulk Operations', () => {
         new TestComponent(logger, { name: 'comp2' }),
       );
       await lifecycle.registerComponent(
-        new FailingComponent(logger, { name: 'failing' }),
+        new FailingStartComponent(logger, 'failing', 'Startup failed'),
       );
 
       lifecycle.on('component:startup-rollback', (data: { name: string }) => {
@@ -2767,20 +2587,11 @@ describe('LifecycleManager - Bulk Operations', () => {
     test('should continue on errors and track stalled components', async () => {
       const lifecycle = new LifecycleManager({ logger });
 
-      class FailingStopComponent extends BaseComponent {
-        public start(): Promise<void> {
-          return Promise.resolve();
-        }
-        public stop(): Promise<void> {
-          return Promise.reject(new Error('Stop failed'));
-        }
-      }
-
       await lifecycle.registerComponent(
         new TestComponent(logger, { name: 'comp1' }),
       );
       await lifecycle.registerComponent(
-        new FailingStopComponent(logger, { name: 'failing' }),
+        new FailingStopComponent(logger, 'failing', 'Stop failed'),
       );
       await lifecycle.registerComponent(
         new TestComponent(logger, { name: 'comp2' }),
@@ -2801,15 +2612,6 @@ describe('LifecycleManager - Bulk Operations', () => {
     test('should halt after first stall when haltOnStall is true', async () => {
       const lifecycle = new LifecycleManager({ logger });
 
-      class FailingStopComponent extends BaseComponent {
-        public start(): Promise<void> {
-          return Promise.resolve();
-        }
-        public stop(): Promise<void> {
-          return Promise.reject(new Error('Stop failed'));
-        }
-      }
-
       await lifecycle.registerComponent(
         new TestComponent(logger, { name: 'comp1' }),
       );
@@ -2817,7 +2619,7 @@ describe('LifecycleManager - Bulk Operations', () => {
         new TestComponent(logger, { name: 'comp2' }),
       );
       await lifecycle.registerComponent(
-        new FailingStopComponent(logger, { name: 'failing' }),
+        new FailingStopComponent(logger, 'failing', 'Stop failed'),
       );
 
       await lifecycle.startAllComponents();
@@ -3000,17 +2802,8 @@ describe('LifecycleManager - Bulk Operations', () => {
     test('should calculate shutdown duration', async () => {
       const lifecycle = new LifecycleManager({ logger });
 
-      class SlowStopComponent extends BaseComponent {
-        public start(): Promise<void> {
-          return Promise.resolve();
-        }
-        public async stop(): Promise<void> {
-          await sleep(50);
-        }
-      }
-
       await lifecycle.registerComponent(
-        new SlowStopComponent(logger, { name: 'slow' }),
+        new SlowStopComponent(logger, 'slow', 50),
       );
 
       await lifecycle.startAllComponents();
@@ -3086,17 +2879,8 @@ describe('LifecycleManager - Bulk Operations', () => {
     test('should handle stalled components in shutdown phase', async () => {
       const lifecycle = new LifecycleManager({ logger });
 
-      class FailingStopComponent extends BaseComponent {
-        public start(): Promise<void> {
-          return Promise.resolve();
-        }
-        public stop(): Promise<void> {
-          return Promise.reject(new Error('Stop failed'));
-        }
-      }
-
       await lifecycle.registerComponent(
-        new FailingStopComponent(logger, { name: 'failing' }),
+        new FailingStopComponent(logger, 'failing', 'Stop failed'),
       );
 
       await lifecycle.startAllComponents();
@@ -3153,17 +2937,8 @@ describe('LifecycleManager - Bulk Operations', () => {
     test('should prevent individual stop during bulk startup', async () => {
       const lifecycle = new LifecycleManager({ logger });
 
-      class SlowComponent extends BaseComponent {
-        public async start(): Promise<void> {
-          await sleep(50);
-        }
-        public stop(): Promise<void> {
-          return Promise.resolve();
-        }
-      }
-
       await lifecycle.registerComponent(
-        new SlowComponent(logger, { name: 'comp1' }),
+        new SlowStartComponent(logger, 'comp1', 50),
       );
       await lifecycle.registerComponent(
         new TestComponent(logger, { name: 'comp2' }),
@@ -3174,7 +2949,7 @@ describe('LifecycleManager - Bulk Operations', () => {
       await lifecycle.stopComponent('comp2');
 
       await lifecycle.registerComponent(
-        new SlowComponent(logger, { name: 'comp3' }),
+        new SlowStartComponent(logger, 'comp3', 50),
       );
 
       // Start all components
@@ -3195,20 +2970,11 @@ describe('LifecycleManager - Bulk Operations', () => {
     test('should prevent individual stop during bulk shutdown', async () => {
       const lifecycle = new LifecycleManager({ logger });
 
-      class SlowStopComponent extends BaseComponent {
-        public start(): Promise<void> {
-          return Promise.resolve();
-        }
-        public async stop(): Promise<void> {
-          await sleep(50);
-        }
-      }
-
       await lifecycle.registerComponent(
-        new SlowStopComponent(logger, { name: 'comp1' }),
+        new SlowStopComponent(logger, 'comp1', 50),
       );
       await lifecycle.registerComponent(
-        new SlowStopComponent(logger, { name: 'comp2' }),
+        new SlowStopComponent(logger, 'comp2', 50),
       );
 
       await lifecycle.startAllComponents();
@@ -3268,17 +3034,8 @@ describe('LifecycleManager - Bulk Operations', () => {
     test('should prevent start during shutdown', async () => {
       const lifecycle = new LifecycleManager({ logger });
 
-      class SlowStopComponent extends BaseComponent {
-        public start(): Promise<void> {
-          return Promise.resolve();
-        }
-        public async stop(): Promise<void> {
-          await sleep(50);
-        }
-      }
-
       await lifecycle.registerComponent(
-        new SlowStopComponent(logger, { name: 'comp1' }),
+        new SlowStopComponent(logger, 'comp1', 50),
       );
       await lifecycle.registerComponent(
         new TestComponent(logger, { name: 'comp2' }),
@@ -3304,17 +3061,8 @@ describe('LifecycleManager - Bulk Operations', () => {
     test('should prevent bulk startup during shutdown', async () => {
       const lifecycle = new LifecycleManager({ logger });
 
-      class SlowStopComponent extends BaseComponent {
-        public start(): Promise<void> {
-          return Promise.resolve();
-        }
-        public async stop(): Promise<void> {
-          await sleep(50);
-        }
-      }
-
       await lifecycle.registerComponent(
-        new SlowStopComponent(logger, { name: 'comp1' }),
+        new SlowStopComponent(logger, 'comp1', 50),
       );
       await lifecycle.registerComponent(
         new TestComponent(logger, { name: 'comp2' }),
@@ -3342,20 +3090,11 @@ describe('LifecycleManager - Bulk Operations', () => {
     test('should prevent concurrent startAllComponents() calls', async () => {
       const lifecycle = new LifecycleManager({ logger });
 
-      class SlowComponent extends BaseComponent {
-        public async start(): Promise<void> {
-          await sleep(50);
-        }
-        public stop(): Promise<void> {
-          return Promise.resolve();
-        }
-      }
-
       await lifecycle.registerComponent(
-        new SlowComponent(logger, { name: 'comp1' }),
+        new SlowStartComponent(logger, 'comp1', 50),
       );
       await lifecycle.registerComponent(
-        new SlowComponent(logger, { name: 'comp2' }),
+        new SlowStartComponent(logger, 'comp2', 50),
       );
 
       // Start first bulk startup
@@ -3376,20 +3115,11 @@ describe('LifecycleManager - Bulk Operations', () => {
     test('should prevent concurrent stopAllComponents() calls', async () => {
       const lifecycle = new LifecycleManager({ logger });
 
-      class SlowStopComponent extends BaseComponent {
-        public start(): Promise<void> {
-          return Promise.resolve();
-        }
-        public async stop(): Promise<void> {
-          await sleep(50);
-        }
-      }
-
       await lifecycle.registerComponent(
-        new SlowStopComponent(logger, { name: 'comp1' }),
+        new SlowStopComponent(logger, 'comp1', 50),
       );
       await lifecycle.registerComponent(
-        new SlowStopComponent(logger, { name: 'comp2' }),
+        new SlowStopComponent(logger, 'comp2', 50),
       );
 
       await lifecycle.startAllComponents();
@@ -5550,20 +5280,8 @@ describe('LifecycleManager - Signal Integration', () => {
         shutdownOptions: { timeoutMS: 30000 }, // Constructor default
       });
 
-      // Create a slow-stopping component
-      class SlowStopComponent extends BaseComponent {
-        public async start() {
-          // Quick start
-        }
-
-        public async stop() {
-          // Simulate slow shutdown (longer than timeout)
-          await sleep(2000);
-        }
-      }
-
       await lifecycle.registerComponent(
-        new SlowStopComponent(logger, { name: 'slow' }),
+        new SlowStopComponent(logger, 'slow', 2000),
       );
       await lifecycle.startAllComponents();
 
@@ -5585,18 +5303,8 @@ describe('LifecycleManager - Signal Integration', () => {
         shutdownOptions: { timeoutMS: 500 }, // Short default
       });
 
-      class SlowStopComponent extends BaseComponent {
-        public async start() {
-          // Quick start
-        }
-
-        public async stop() {
-          await sleep(2000);
-        }
-      }
-
       await lifecycle.registerComponent(
-        new SlowStopComponent(logger, { name: 'slow' }),
+        new SlowStopComponent(logger, 'slow', 2000),
       );
       await lifecycle.startAllComponents();
 
@@ -5618,18 +5326,8 @@ describe('LifecycleManager - Signal Integration', () => {
         shutdownOptions: { timeoutMS: 100 }, // Short constructor default
       });
 
-      class SlowStopComponent extends BaseComponent {
-        public async start() {
-          // Quick start
-        }
-
-        public async stop() {
-          await sleep(300);
-        }
-      }
-
       await lifecycle.registerComponent(
-        new SlowStopComponent(logger, { name: 'slow' }),
+        new SlowStopComponent(logger, 'slow', 300),
       );
       await lifecycle.startAllComponents();
 
@@ -5651,22 +5349,8 @@ describe('LifecycleManager - Signal Integration', () => {
     test('should return shutdown_timeout code when bulk shutdown times out', async () => {
       const lifecycle = new LifecycleManager({ logger });
 
-      class SlowStopComponent extends BaseComponent {
-        public async start() {
-          // Quick start
-        }
-
-        public async stop() {
-          // Simulate very slow shutdown that will timeout in graceful phase
-          await sleep(5000);
-        }
-      }
-
       await lifecycle.registerComponent(
-        new SlowStopComponent(logger, {
-          name: 'slow',
-          shutdownGracefulTimeoutMS: 100, // Short individual timeout
-        }),
+        new SlowStopComponent(logger, 'slow', 5000),
       );
       await lifecycle.startAllComponents();
 

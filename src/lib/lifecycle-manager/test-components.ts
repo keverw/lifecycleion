@@ -543,6 +543,41 @@ export class MessagingComponent extends BaseComponent {
 }
 
 /**
+ * Slow start and stop component for testing
+ */
+export class SlowStartAndStopComponent extends BaseComponent {
+  public started = false;
+  public stopped = false;
+  public startDuration: number;
+  public stopDuration: number;
+
+  constructor(
+    logger: Logger,
+    name = 'slow-start-and-stop',
+    startDuration = 100,
+    stopDuration = 100,
+  ) {
+    super(logger, {
+      name,
+      startupTimeoutMS: 5000,
+      shutdownGracefulTimeoutMS: 5000,
+    });
+    this.startDuration = startDuration;
+    this.stopDuration = stopDuration;
+  }
+
+  public async start(): Promise<void> {
+    await sleep(this.startDuration);
+    this.started = true;
+  }
+
+  public async stop(): Promise<void> {
+    await sleep(this.stopDuration);
+    this.stopped = true;
+  }
+}
+
+/**
  * Helper to create a logger for testing
  */
 export function createTestLogger(): { logger: Logger; sink: ArraySink } {

@@ -9,20 +9,7 @@ import { describe, expect, test, beforeEach } from 'bun:test';
 import { Logger } from '../logger';
 import { ArraySink } from '../logger/sinks/array';
 import { LifecycleManager } from './lifecycle-manager';
-import { BaseComponent } from './base-component';
-
-class TestComponent extends BaseComponent {
-  public startCalled = false;
-  public stopCalled = false;
-
-  public start(): void {
-    this.startCalled = true;
-  }
-
-  public stop(): void {
-    this.stopCalled = true;
-  }
-}
+import { TestComponent } from './test-components';
 
 describe('LifecycleManager - Event Handler Error Handling', () => {
   let logger: Logger;
