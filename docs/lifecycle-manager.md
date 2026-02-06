@@ -41,6 +41,7 @@ A comprehensive lifecycle orchestration system that manages startup, shutdown, a
     - [Custom Signal Handlers](#custom-signal-handlers)
   - [Logger Integration](#logger-integration)
     - [`enableLoggerExitHook()`](#enableloggerexithook)
+    - [Logger Requirements](#logger-requirements)
   - [Status and Query Methods](#status-and-query-methods)
     - [Component Existence and State](#component-existence-and-state)
     - [Lists and Counts](#lists-and-counts)
@@ -103,6 +104,8 @@ npm install lifecycleion
 bun add lifecycleion
 ```
 
+**Note on Logger:** The LifecycleManager requires a Logger instance from the lifecycleion logger. The Logger provides structured logging with sinks, service scoping, and lifecycle integration. The exact import path will be provided in a future release, but the Logger is part of the lifecycleion package.
+
 ## Quick Start
 
 ### 1. Create Your Components
@@ -111,7 +114,7 @@ Components extend `BaseComponent` and implement lifecycle methods:
 
 ```typescript
 import { BaseComponent } from 'lifecycleion';
-import type { Logger } from 'lifecycleion';
+import type { Logger } from 'lifecycleion'; // Logger from lifecycleion logger (import path TBD)
 
 class DatabaseComponent extends BaseComponent {
   private pool!: Pool;
@@ -571,18 +574,35 @@ interface InsertComponentAtResult {
     targetComponentName?: string;
   };
   actualPosition?: {
-    position: InsertPosition;
-    index: number;
+    index: number; // The actual registry index where the component was inserted
+    description?: string; // Human-readable position description (e.g., "after database, before api")
   };
-  manualPositionRespected?: boolean; // Whether explicit position was honored (vs dependency-based reordering)
-  targetFound?: boolean; // Whether 'before'/'after' reference component was found
+  manualPositionRespected: boolean; // Whether explicit position was honored (vs dependency-based reordering)
+  targetFound?: boolean; // Whether 'before'/'after' reference component was found (always `undefined` for 'start'/'end')
 }
 ```
 
 **Position Debugging Fields:**
 
+- `requestedPosition` - What you asked for (position type and optional target component)
+- `actualPosition` - Where it actually ended up after dependency resolution. Only present when `registered: true`
+  - `index` - The registry array index (0-based)
+  - `description` - Human-readable position like `"at start"`, `"at end"`, `"after database, before api"`, or `"only component"`
 - `manualPositionRespected` - `true` if the explicit position was honored, `false` if dependency ordering forced a different position
 - `targetFound` - For 'before'/'after' positions, indicates if the reference component was found (always `undefined` for 'start'/'end')
+
+**Example:**
+
+```typescript
+const result = await lifecycle.insertComponentAt(
+  new CacheComponent(logger),
+  'before',
+  'database',
+);
+
+console.log(result.actualPosition);
+// { index: 2, description: "after config, before database" }
+```
 
 #### `unregisterComponent(name, options?)`
 
@@ -725,7 +745,8 @@ class ComponentB extends BaseComponent {
 // - Returns { success: true, failedOptionalComponents: [{ name: 'B', ... }] }
 //
 // If global 60s expires while Component C is starting:
-// - Bulk operation stops
+// - Manager stops initiating new starts after timeout; current start may still run
+//   until its per-component timeout (if any) elapses
 // - Returns { timedOut: true, startedComponents: [...], ... }
 ```
 
@@ -776,7 +797,8 @@ Timeouts operate at **two independent levels** - they don't compete, they're lay
 **1. Global Timeout (Bulk Operation)**
 
 - `stopAllComponents({ timeoutMS })` sets a total time budget for the entire shutdown operation
-- If exceeded: components that haven't stopped yet are left in their current state
+- If exceeded: the manager **halts further stop attempts** after the current component completes and returns partial results
+- Components not yet processed are left in their current state
 - Constructor option sets the default: `new LifecycleManager({ shutdownOptions: { timeoutMS: 30000 } })`
 - Method parameter overrides: `await lifecycle.stopAllComponents({ timeoutMS: 5000 })`
 
@@ -803,7 +825,8 @@ class ComponentA extends BaseComponent {
 // - Bulk operation continues with Component B (global 30s timer still has 26s left)
 //
 // If global 30s expires while Component C is stopping:
-// - Bulk operation stops
+// - Manager stops initiating new stops after timeout; current stop may still run
+//   until its per-component timeout (if any) elapses
 // - Returns { success: false, timedOut: true, stoppedComponents: ['B'], stalledComponents: [...] }
 ```
 
@@ -846,6 +869,8 @@ interface ShutdownResult {
 }
 ```
 
+**Note:** If `timedOut` is `true`, `success` will be `false` even if no components stalled.
+
 #### `restartAllComponents(options?)`
 
 Stop all components, then start them again.
@@ -879,7 +904,7 @@ restartComponent(name: string, options?: RestartComponentOptions): Promise<Compo
 
 ```typescript
 interface StartComponentOptions {
-  allowRequiredDependencies?: boolean; // Force start despite missing required deps
+  allowNonRunningDependencies?: boolean; // Allow start with non-running registered deps (missing deps still fail)
   forceStalled?: boolean; // Force starting a stalled component
   allowDuringBulkStartup?: boolean; // Allow starting during startAllComponents() (default: false)
   // Normally blocked to prevent race conditions with dependency ordering.
@@ -1270,6 +1295,7 @@ enableLoggerExitHook(): void
 - When `logger.error('message', { exitCode: 1 })` is called, components shut down before exit
 - Uses the constructor's `shutdownOptions.timeoutMS` (default: 30000ms) to prevent hanging
 - Overwrites any existing `beforeExit` callback on the logger
+- **Exit behavior depends on logger configuration:** `logger.exit()` only calls `process.exit()` when the logger is created with `callProcessExit: true` (default). Test-optimized and frontend-optimized loggers disable process exit.
 
 **Constructor Options:**
 
@@ -1337,6 +1363,47 @@ logger.exit(0);
 - This method is idempotent (can be called multiple times safely)
 - Overwrites any existing `beforeExit` callback on the logger
 - If you need custom exit logic, set it up manually with `logger.setBeforeExitCallback()`
+- The `beforeExit` callback installed by `enableLoggerExitHook()` can return `{ action: 'wait' }` to prevent exit when a shutdown is already in progress. In that case, the initial `logger.exit()` will not proceed; exit is expected to be completed by the in-flight shutdown logic.
+
+#### Logger Requirements
+
+The LifecycleManager requires a Logger instance that implements the Lifecycleion logger interface. This Logger provides:
+
+- **Structured logging** with message templates and parameters
+- **Service scoping** via `logger.service(name)` for component-specific logs
+- **Entity scoping** for logging with entity context
+- **Process exit integration** via `logger.exit()` and `beforeExit` callbacks
+- **Multiple log levels**: error, warn, info, success, notice, debug, raw
+
+**Creating a Logger:**
+
+The Logger class is part of the Lifecycleion package. Basic usage:
+
+```typescript
+import { Logger } from 'lifecycleion'; // Import path will be finalized in future release
+
+// Create logger (exact constructor options to be documented with logger export)
+const logger = new Logger({
+  // Logger configuration options
+});
+
+// Create LifecycleManager with the logger
+const lifecycle = new LifecycleManager({
+  logger,
+  name: 'my-app',
+});
+```
+
+**Logger Interface Used by Components:**
+
+Components receive a scoped logger service via `logger.service(componentName)` which provides:
+
+- `logger.info(message, options?)` - Informational messages
+- `logger.error(message, options?)` - Error messages
+- `logger.warn(message, options?)` - Warning messages
+- `logger.success(message, options?)` - Success messages
+- `logger.debug(message, options?)` - Debug messages
+- `logger.entity(name)` - Create entity-scoped logger
 
 ### Status and Query Methods
 
@@ -1373,7 +1440,9 @@ const status = lifecycle.getComponentStatus('web-server');
 if (status) {
   console.log('State:', status.state); // 'running', 'stopped', etc.
   console.log('Started at:', status.startedAt);
-  console.log('Dependencies:', status.dependencies);
+  console.log('Stopped at:', status.stoppedAt);
+  console.log('Last error:', status.lastError);
+  console.log('Stall info:', status.stallInfo);
 }
 ```
 
@@ -1383,13 +1452,16 @@ Get the raw component instance. Returns `undefined` if component not found.
 
 ```typescript
 const dbComponent = lifecycle.getComponentInstance('database');
+
 if (dbComponent) {
-  // Access component directly - use with caution
+  // Access component metadata
   console.log('Component name:', dbComponent.getName());
+  console.log('Dependencies:', dbComponent.getDependencies());
+  console.log('Is optional:', dbComponent.isOptional());
 }
 ```
 
-**Warning:** Direct access to component instances should be used carefully. Prefer using the manager's API methods for lifecycle operations to maintain proper state management.
+**Warning:** Direct access to component instances should be used carefully. Prefer using the manager's API methods for lifecycle operations (start, stop, messaging, etc.) to maintain proper state management. This method is primarily useful for reading component metadata (name, dependencies, optional flag).
 
 #### Lists and Counts
 
@@ -1463,8 +1535,6 @@ console.log('Stalled:', status.counts.stalled);
 - `'running'` - Components are running (all or some)
 - `'stalled'` - Some components failed to stop (stuck running)
 - `'shutting-down'` - `stopAllComponents()` in progress
-- `'stopped'` - All components stopped (can restart)
-- `'error'` - Startup failed with rollback
 
 **Note:** The `'running'` state is returned whenever any components are running, regardless of whether all components are running. Use `getRunningComponentCount()` and `getComponentCount()` to determine if all components are running.
 
@@ -1843,8 +1913,6 @@ lifecycle.on('lifecycle-manager:shutdown-completed', (data) => {
 - `component:stopped` - Component stopped successfully
 - `component:stop-failed` - Component stop failed
 - `component:stalled` - Component failed to stop (timeout)
-- `component:restart-initiated` - Component restart started
-- `component:restarted` - Component restarted successfully
 
 **Signal Events:**
 

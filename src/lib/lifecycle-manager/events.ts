@@ -96,6 +96,7 @@ export interface LifecycleManagerEventMap {
     registrationIndexAfter: number | null;
     startupOrder: string[];
     requestedPosition?: InsertComponentAtResult['requestedPosition'];
+    actualPosition?: InsertComponentAtResult['actualPosition'];
     manualPositionRespected?: boolean;
     targetFound?: boolean;
     duringStartup?: boolean;
@@ -343,6 +344,7 @@ export class LifecycleManagerEvents {
     registrationIndexAfter: number | null;
     startupOrder: string[];
     requestedPosition?: InsertComponentAtResult['requestedPosition'];
+    actualPosition?: InsertComponentAtResult['actualPosition'];
     manualPositionRespected?: boolean;
     targetFound?: boolean;
     duringStartup?: boolean;

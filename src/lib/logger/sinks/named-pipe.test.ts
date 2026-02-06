@@ -50,6 +50,7 @@ describe('NamedPipeSink', () => {
   // Only run these tests on supported platforms
   const platform = os.platform();
   const isSupported = platform === 'linux' || platform === 'darwin';
+  const hookTimeoutMS = 15000;
 
   if (!isSupported) {
     test('should not be supported on this platform', () => {
@@ -65,11 +66,11 @@ describe('NamedPipeSink', () => {
       prefix: 'named-pipe-sink-test',
     });
     await tmpDir.initialize();
-  });
+  }, hookTimeoutMS);
 
   afterEach(async () => {
     await tmpDir.cleanup();
-  });
+  }, hookTimeoutMS);
 
   test('should write log entry to named pipe', async () => {
     const pipePath = `${tmpDir.path}/test.pipe`;

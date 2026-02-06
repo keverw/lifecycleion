@@ -135,11 +135,11 @@ export interface ComponentOperationResult extends BaseOperationResult {
  */
 export interface StartComponentOptions {
   /**
-   * If true, allow dependencies that are registered but not running
-   * even when those dependencies are required components (not optional).
+   * If true, allow starting even when required dependencies are registered
+   * but not running. Missing dependencies still cause failure.
    * This is an explicit override that bypasses normal dependency checks.
    */
-  allowRequiredDependencies?: boolean;
+  allowNonRunningDependencies?: boolean;
 
   /**
    * If true, allow starting a component during bulk startup (startAllComponents).
@@ -724,9 +724,7 @@ export type SystemState =
   | 'starting' // startAllComponents() in progress
   | 'running' // Any components running (use getRunningComponentCount() to check if all are running)
   | 'stalled' // Some components failed to stop (stuck running)
-  | 'shutting-down' // stopAllComponents() in progress
-  | 'stopped' // All components stopped (can restart)
-  | 'error'; // Startup failed with rollback
+  | 'shutting-down'; // stopAllComponents() in progress
 
 /**
  * Aggregated status snapshot for the lifecycle manager.
@@ -903,6 +901,14 @@ export interface InsertComponentAtResult extends RegistrationResultBase {
      */
     position: InsertPosition | (string & {});
     targetComponentName?: string;
+  };
+
+  /** Actual position where component was inserted (after dependency resolution) */
+  actualPosition?: {
+    /** The actual registry index where the component was inserted */
+    index: number;
+    /** Human-readable description of position (e.g., "at start", "after database, before api") */
+    description?: string;
   };
 
   /** True if requested relative positioning was achievable under dependency constraints */

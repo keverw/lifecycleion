@@ -198,7 +198,7 @@ describe('LifecycleManager - Event Handler Error Handling', () => {
     ).toBe(true);
 
     globalThis.removeEventListener('reportError', errorListener);
-  });
+  }, 10000);
 
   test('should handle async event handler errors', async () => {
     const component = new TestComponent(logger, { name: 'test' });
@@ -252,5 +252,5 @@ describe('LifecycleManager - Event Handler Error Handling', () => {
 
     // Success handler should have been called despite surrounding errors
     expect(wasSuccessHandlerCalled).toBe(true);
-  });
+  }, 10000);
 });

@@ -2589,6 +2589,44 @@ export class LifecycleManager
         ? startResult?.success === true
         : undefined;
 
+      // Generate position description
+      let positionDescription: string | undefined;
+
+      if (registrationIndexAfter !== null) {
+        const totalComponents = this.components.length;
+
+        if (totalComponents === 1) {
+          positionDescription = 'only component';
+        } else if (registrationIndexAfter === 0) {
+          const nextComponent = this.components[1]?.getName();
+          positionDescription = nextComponent
+            ? `at start, before ${nextComponent}`
+            : 'at start';
+        } else if (registrationIndexAfter === totalComponents - 1) {
+          const prevComponent = this.components[totalComponents - 2]?.getName();
+          positionDescription = prevComponent
+            ? `at end, after ${prevComponent}`
+            : 'at end';
+        } else {
+          const prevComponent =
+            this.components[registrationIndexAfter - 1]?.getName();
+          const nextComponent =
+            this.components[registrationIndexAfter + 1]?.getName();
+          if (prevComponent && nextComponent) {
+            positionDescription = `after ${prevComponent}, before ${nextComponent}`;
+          } else if (prevComponent) {
+            positionDescription = `after ${prevComponent}`;
+          } else if (nextComponent) {
+            positionDescription = `before ${nextComponent}`;
+          }
+        }
+      }
+
+      const actualPosition =
+        registrationIndexAfter !== null
+          ? { index: registrationIndexAfter, description: positionDescription }
+          : undefined;
+
       // Emit registration event
       this.lifecycleEvents.componentRegistered({
         name: componentName,
@@ -2600,6 +2638,7 @@ export class LifecycleManager
         requestedPosition: isInsertAction
           ? { position, targetComponentName }
           : undefined,
+        actualPosition,
         manualPositionRespected: isManualPositionRespected,
         targetFound: isTargetFound,
         duringStartup: this.isStarting,
@@ -2616,6 +2655,7 @@ export class LifecycleManager
         registrationIndexAfter,
         startupOrder,
         requestedPosition: { position, targetComponentName },
+        actualPosition,
         manualPositionRespected: isManualPositionRespected,
         targetFound: isTargetFound,
         duringStartup: this.isStarting,
@@ -2744,12 +2784,41 @@ export class LifecycleManager
     let timeoutHandle: NodeJS.Timeout | undefined;
 
     try {
-      // Create shutdown operation promise
+      // Start global timeout clock (halts further stop attempts after it fires)
+      const timeoutPromise =
+        effectiveTimeout > 0
+          ? new Promise<'timeout'>((resolve) => {
+              timeoutHandle = setTimeout(() => {
+                hasTimedOut = true;
+
+                this.logger.warn(
+                  'Shutdown timeout exceeded, halting further stop attempts',
+                  {
+                    params: { timeoutMS: effectiveTimeout },
+                  },
+                );
+
+                resolve('timeout');
+              }, effectiveTimeout);
+            })
+          : null;
+
+      // Create shutdown operation
       const shutdownOperation = async () => {
         await this.runShutdownWarningPhase(runningComponentsToStop);
 
         // Stop each component in reverse dependency order
         for (const name of runningComponentsToStop) {
+          if (hasTimedOut) {
+            this.logger.warn(
+              'Shutdown timeout reached, stopping further component shutdown',
+              {
+                params: { timeoutMS: effectiveTimeout },
+              },
+            );
+            break;
+          }
+
           this.logger.entity(name).info('Stopping component');
 
           // Use internal method to bypass bulk operation checks.
@@ -2806,30 +2875,14 @@ export class LifecycleManager
         }
       };
 
-      // Race shutdown against timeout if specified
-      if (effectiveTimeout > 0) {
-        const timeoutPromise = new Promise<void>((resolve) => {
-          timeoutHandle = setTimeout(() => {
-            hasTimedOut = true;
-
-            this.logger.warn(
-              'Shutdown timeout exceeded, returning partial results',
-              {
-                params: { timeoutMS: effectiveTimeout },
-              },
-            );
-
-            resolve();
-          }, effectiveTimeout);
-        });
-
+      if (timeoutPromise) {
         await Promise.race([shutdownOperation(), timeoutPromise]);
       } else {
         await shutdownOperation();
       }
 
       const durationMS = Date.now() - startTime;
-      const isSuccess = stalledComponents.length === 0;
+      const isSuccess = !hasTimedOut && stalledComponents.length === 0;
 
       this.logger[isSuccess ? 'success' : 'warn']('Shutdown completed', {
         params: {
@@ -2959,8 +3012,8 @@ export class LifecycleManager
       };
     }
 
-    const allowRequiredDependencies =
-      options?.allowRequiredDependencies === true;
+    const allowNonRunningDependencies =
+      options?.allowNonRunningDependencies === true;
 
     const component = this.getComponent(name);
 
@@ -3002,12 +3055,12 @@ export class LifecycleManager
         const isDependencyOptional = dependency.isOptional();
 
         // Check if we can skip this dependency
-        if (allowRequiredDependencies) {
+        if (allowNonRunningDependencies) {
           // Explicit override - allow skipping both optional and required dependencies
           this.logger
             .entity(name)
             .warn(
-              `Starting with non-running dependency "${dependencyName}" (allowRequiredDependencies=true)`,
+              `Starting with non-running dependency "${dependencyName}" (allowNonRunningDependencies=true)`,
             );
           continue;
         }

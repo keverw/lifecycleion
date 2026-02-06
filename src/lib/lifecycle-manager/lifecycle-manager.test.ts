@@ -3766,7 +3766,7 @@ describe('LifecycleManager - Bulk Operations', () => {
       expect(result.success).toBe(true);
     });
 
-    test('should allow manual start with allowRequiredDependencies', async () => {
+    test('should allow manual start with allowNonRunningDependencies', async () => {
       const lifecycle = new LifecycleManager({ logger });
 
       await lifecycle.registerComponent(
@@ -3778,7 +3778,7 @@ describe('LifecycleManager - Bulk Operations', () => {
 
       // comp-a is not running and is required, but we explicitly override
       const result = await lifecycle.startComponent('comp-b', {
-        allowRequiredDependencies: true,
+        allowNonRunningDependencies: true,
       });
 
       expect(result.success).toBe(true);
