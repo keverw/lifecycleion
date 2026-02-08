@@ -7,6 +7,7 @@ import type {
   ComponentValueResult,
 } from './types';
 import { InvalidComponentNameError } from './errors';
+import { finiteClampMin } from '../clamp';
 
 /**
  * Abstract base class for all lifecycle-managed components
@@ -126,14 +127,17 @@ export abstract class BaseComponent {
     this.healthCheckTimeoutMS = options.healthCheckTimeoutMS ?? 5000;
     this.signalTimeoutMS = options.signalTimeoutMS ?? 5000;
 
-    // Enforce minimums for shutdown timeouts
-    this.shutdownGracefulTimeoutMS = Math.max(
-      options.shutdownGracefulTimeoutMS ?? 5000,
+    // Enforce minimums for shutdown timeouts (using finiteClampMin to handle edge cases)
+    this.shutdownGracefulTimeoutMS = finiteClampMin(
+      options.shutdownGracefulTimeoutMS,
       1000, // Minimum 1 second
+      5000, // Default if undefined/null/non-finite
     );
-    this.shutdownForceTimeoutMS = Math.max(
-      options.shutdownForceTimeoutMS ?? 2000,
+
+    this.shutdownForceTimeoutMS = finiteClampMin(
+      options.shutdownForceTimeoutMS,
       500, // Minimum 500ms
+      2000, // Default if undefined/null/non-finite
     );
   }
 

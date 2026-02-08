@@ -315,6 +315,26 @@ describe('LifecycleManager Integration Tests', () => {
   });
 
   describe('Shutdown Scenarios', () => {
+    /** Component that hangs forever during both graceful and force shutdown phases */
+    class HangingStopComponent extends BaseComponent {
+      constructor(log: Logger, name = 'hanging-stop') {
+        super(log, {
+          name,
+          shutdownGracefulTimeoutMS: 1000,
+          shutdownForceTimeoutMS: 500,
+        });
+      }
+      public start(): void {
+        // No-op
+      }
+      public async stop(): Promise<void> {
+        await new Promise(() => {});
+      }
+      public async onShutdownForce(): Promise<void> {
+        await new Promise(() => {});
+      }
+    }
+
     test('should handle shutdown during startup gracefully', async () => {
       const database = new MockDatabaseComponent(logger);
       const slowStart = new SlowStartComponent(logger, 'slow-component', 100);
@@ -344,28 +364,6 @@ describe('LifecycleManager Integration Tests', () => {
     });
 
     test('should track stalled components during shutdown', async () => {
-      // Create a component that hangs during stop
-      class HangingStopComponent extends BaseComponent {
-        constructor(log: Logger) {
-          super(log, {
-            name: 'hanging-stop',
-            shutdownGracefulTimeoutMS: 1000, // Minimum
-            shutdownForceTimeoutMS: 500, // Minimum
-          });
-        }
-        public start(): void {
-          // No-op
-        }
-        public async stop(): Promise<void> {
-          // Hang forever (until force timeout)
-          await new Promise(() => {});
-        }
-        public async onShutdownForce(): Promise<void> {
-          // Also hang
-          await new Promise(() => {});
-        }
-      }
-
       const hanging = new HangingStopComponent(logger);
       await lifecycle.registerComponent(hanging);
       await lifecycle.startAllComponents();
@@ -379,27 +377,7 @@ describe('LifecycleManager Integration Tests', () => {
     });
 
     test('should block restart when stalled components exist', async () => {
-      // Create a stall scenario
-      class StallingComponent extends BaseComponent {
-        constructor(log: Logger) {
-          super(log, {
-            name: 'stalling',
-            shutdownGracefulTimeoutMS: 1000,
-            shutdownForceTimeoutMS: 500,
-          });
-        }
-        public start(): void {
-          // No-op
-        }
-        public async stop(): Promise<void> {
-          await new Promise(() => {});
-        }
-        public async onShutdownForce(): Promise<void> {
-          await new Promise(() => {});
-        }
-      }
-
-      const stalling = new StallingComponent(logger);
+      const stalling = new HangingStopComponent(logger, 'stalling');
       await lifecycle.registerComponent(stalling);
       await lifecycle.startAllComponents();
       await lifecycle.stopAllComponents();

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test';
-import { clamp } from './clamp';
+import { clamp, finiteClampMin } from './clamp';
 
 describe('clamp', () => {
   it('returns the value when within the range', () => {
@@ -54,5 +54,57 @@ describe('clamp with Infinity', () => {
     expect(clamp(5, -Infinity, 10)).toBe(5);
     expect(clamp(5, 0, Infinity)).toBe(5);
     expect(clamp(5, 0, -Infinity)).toBe(0); // Edge case; logically, max should never be -Infinity
+  });
+});
+
+describe('finiteClampMin', () => {
+  it('returns the value when above minimum', () => {
+    expect(finiteClampMin(5000, 1000, 3000)).toBe(5000);
+    expect(finiteClampMin(2000, 1000, 3000)).toBe(2000);
+  });
+
+  it('enforces the minimum when value is below it', () => {
+    expect(finiteClampMin(500, 1000, 3000)).toBe(1000);
+    expect(finiteClampMin(0, 1000, 3000)).toBe(1000);
+    expect(finiteClampMin(-100, 1000, 3000)).toBe(1000);
+  });
+
+  it('returns default when value is Infinity', () => {
+    expect(finiteClampMin(Infinity, 1000, 3000)).toBe(3000);
+  });
+
+  it('returns default when value is -Infinity', () => {
+    expect(finiteClampMin(-Infinity, 1000, 3000)).toBe(3000);
+  });
+
+  it('returns default when value is NaN', () => {
+    expect(finiteClampMin(NaN, 1000, 3000)).toBe(3000);
+  });
+
+  it('handles negative minimums', () => {
+    expect(finiteClampMin(-5, -10, -3)).toBe(-5); // -5 > -10, so return -5
+    expect(finiteClampMin(-15, -10, -3)).toBe(-10); // -15 < -10, so enforce min of -10
+  });
+
+  it('handles zero values correctly', () => {
+    expect(finiteClampMin(0, -10, 5)).toBe(0);
+    expect(finiteClampMin(0, 10, 5)).toBe(10);
+  });
+
+  it('handles when value equals minimum exactly', () => {
+    expect(finiteClampMin(1000, 1000, 3000)).toBe(1000);
+  });
+
+  it('handles large finite numbers', () => {
+    const largeNumber = Number.MAX_SAFE_INTEGER;
+    expect(finiteClampMin(largeNumber, 1000, 3000)).toBe(largeNumber);
+  });
+
+  it('returns default when value is undefined', () => {
+    expect(finiteClampMin(undefined, 1000, 3000)).toBe(3000);
+  });
+
+  it('returns default when value is null', () => {
+    expect(finiteClampMin(null, 1000, 3000)).toBe(3000);
   });
 });

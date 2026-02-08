@@ -543,37 +543,36 @@ export class MessagingComponent extends BaseComponent {
 }
 
 /**
- * Slow start and stop component for testing
+ * Simple healthy component for health check testing.
+ * Has a healthCheck that returns true.
  */
-export class SlowStartAndStopComponent extends BaseComponent {
-  public started = false;
-  public stopped = false;
-  public startDuration: number;
-  public stopDuration: number;
-
-  constructor(
-    logger: Logger,
-    name = 'slow-start-and-stop',
-    startDuration = 100,
-    stopDuration = 100,
-  ) {
-    super(logger, {
-      name,
-      startupTimeoutMS: 5000,
-      shutdownGracefulTimeoutMS: 5000,
-    });
-    this.startDuration = startDuration;
-    this.stopDuration = stopDuration;
+export class HealthyComponent extends BaseComponent {
+  constructor(logger: Logger, name = 'healthy') {
+    super(logger, { name, dependencies: [] });
   }
 
-  public async start(): Promise<void> {
-    await sleep(this.startDuration);
-    this.started = true;
+  public async start() {}
+  public async stop() {}
+
+  public healthCheck() {
+    return true;
+  }
+}
+
+/**
+ * Simple unhealthy component for health check testing.
+ * Has a healthCheck that returns false.
+ */
+export class UnhealthyComponent extends BaseComponent {
+  constructor(logger: Logger, name = 'unhealthy') {
+    super(logger, { name, dependencies: [] });
   }
 
-  public async stop(): Promise<void> {
-    await sleep(this.stopDuration);
-    this.stopped = true;
+  public async start() {}
+  public async stop() {}
+
+  public healthCheck() {
+    return false;
   }
 }
 

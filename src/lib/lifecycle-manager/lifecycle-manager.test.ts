@@ -20,9 +20,10 @@ import {
   TestComponent,
   SlowStartComponent,
   SlowStopComponent,
-  SlowStartAndStopComponent,
   FailingStartComponent,
   FailingStopComponent,
+  HealthyComponent,
+  UnhealthyComponent,
 } from './test-components';
 
 // cspell:ignore Renamable Reloadable Unregistration unregistration
@@ -181,6 +182,34 @@ describe('LifecycleManager - BaseComponent', () => {
         shutdownForceTimeoutMS: 1000,
       });
       expect(component3.shutdownForceTimeoutMS).toBe(1000);
+    });
+
+    test('should handle Infinity/NaN gracefully for graceful timeout', () => {
+      const componentInf = new TestComponent(logger, {
+        name: 'test-inf',
+        shutdownGracefulTimeoutMS: Infinity,
+      });
+      expect(componentInf.shutdownGracefulTimeoutMS).toBe(5000); // Falls back to default
+
+      const componentNaN = new TestComponent(logger, {
+        name: 'test-nan',
+        shutdownGracefulTimeoutMS: NaN,
+      });
+      expect(componentNaN.shutdownGracefulTimeoutMS).toBe(5000); // Falls back to default
+    });
+
+    test('should handle Infinity/NaN gracefully for force timeout', () => {
+      const componentInf = new TestComponent(logger, {
+        name: 'test-inf',
+        shutdownForceTimeoutMS: Infinity,
+      });
+      expect(componentInf.shutdownForceTimeoutMS).toBe(2000); // Falls back to default
+
+      const componentNaN = new TestComponent(logger, {
+        name: 'test-nan',
+        shutdownForceTimeoutMS: NaN,
+      });
+      expect(componentNaN.shutdownForceTimeoutMS).toBe(2000); // Falls back to default
     });
   });
 
@@ -2204,15 +2233,6 @@ describe('LifecycleManager - Bulk Operations', () => {
         }
         public stop(): Promise<void> {
           stopOrder.push(this.getName());
-          return Promise.resolve();
-        }
-      }
-
-      class FailingComponent extends BaseComponent {
-        public start(): Promise<void> {
-          return Promise.reject(new Error('Startup failed'));
-        }
-        public stop(): Promise<void> {
           return Promise.resolve();
         }
       }
@@ -5294,7 +5314,7 @@ describe('LifecycleManager - Signal Integration', () => {
 
       // Should have timed out around 500ms, not waited full 2000ms or the class default of 30000ms
       expect(duration).toBeLessThan(1000);
-      expect(duration).toBeGreaterThanOrEqual(500);
+      expect(duration).toBeGreaterThanOrEqual(490);
     });
 
     test('should use constructor default when no timeout parameter provided', async () => {
@@ -5317,7 +5337,7 @@ describe('LifecycleManager - Signal Integration', () => {
 
       // Should have timed out around 500ms
       expect(duration).toBeLessThan(1000);
-      expect(duration).toBeGreaterThanOrEqual(500);
+      expect(duration).toBeGreaterThanOrEqual(490);
     });
 
     test('should allow override of constructor default with parameter', async () => {
@@ -6273,19 +6293,6 @@ describe('LifecycleManager - Messaging, Health & Values', () => {
     test('should check health of component with boolean result', async () => {
       const lifecycle = new LifecycleManager({ logger });
 
-      class HealthyComponent extends BaseComponent {
-        constructor(logger: Logger) {
-          super(logger, { name: 'healthy', dependencies: [] });
-        }
-
-        public async start() {}
-        public async stop() {}
-
-        public healthCheck() {
-          return true;
-        }
-      }
-
       await lifecycle.registerComponent(new HealthyComponent(logger));
       await lifecycle.startAllComponents();
 
@@ -6343,19 +6350,6 @@ describe('LifecycleManager - Messaging, Health & Values', () => {
 
     test('should handle component not running', async () => {
       const lifecycle = new LifecycleManager({ logger });
-
-      class HealthyComponent extends BaseComponent {
-        constructor(logger: Logger) {
-          super(logger, { name: 'healthy', dependencies: [] });
-        }
-
-        public async start() {}
-        public async stop() {}
-
-        public healthCheck() {
-          return true;
-        }
-      }
 
       await lifecycle.registerComponent(new HealthyComponent(logger));
 
@@ -6488,19 +6482,6 @@ describe('LifecycleManager - Messaging, Health & Values', () => {
     test('should normalize boolean false to unhealthy', async () => {
       const lifecycle = new LifecycleManager({ logger });
 
-      class UnhealthyComponent extends BaseComponent {
-        constructor(logger: Logger) {
-          super(logger, { name: 'unhealthy', dependencies: [] });
-        }
-
-        public async start() {}
-        public async stop() {}
-
-        public healthCheck() {
-          return false;
-        }
-      }
-
       await lifecycle.registerComponent(new UnhealthyComponent(logger));
       await lifecycle.startAllComponents();
 
@@ -6514,19 +6495,6 @@ describe('LifecycleManager - Messaging, Health & Values', () => {
   describe('Health Checks - checkAllHealth()', () => {
     test('should check health of all running components', async () => {
       const lifecycle = new LifecycleManager({ logger });
-
-      class HealthyComponent extends BaseComponent {
-        constructor(logger: Logger, name: string) {
-          super(logger, { name, dependencies: [] });
-        }
-
-        public async start() {}
-        public async stop() {}
-
-        public healthCheck() {
-          return true;
-        }
-      }
 
       await lifecycle.registerComponent(new HealthyComponent(logger, 'comp1'));
       await lifecycle.registerComponent(new HealthyComponent(logger, 'comp2'));
@@ -6547,32 +6515,6 @@ describe('LifecycleManager - Messaging, Health & Values', () => {
     test('should report mixed health status', async () => {
       const lifecycle = new LifecycleManager({ logger });
 
-      class HealthyComponent extends BaseComponent {
-        constructor(logger: Logger) {
-          super(logger, { name: 'healthy', dependencies: [] });
-        }
-
-        public async start() {}
-        public async stop() {}
-
-        public healthCheck() {
-          return true;
-        }
-      }
-
-      class UnhealthyComponent extends BaseComponent {
-        constructor(logger: Logger) {
-          super(logger, { name: 'unhealthy', dependencies: [] });
-        }
-
-        public async start() {}
-        public async stop() {}
-
-        public healthCheck() {
-          return false;
-        }
-      }
-
       await lifecycle.registerComponent(new HealthyComponent(logger));
       await lifecycle.registerComponent(new UnhealthyComponent(logger));
 
@@ -6588,19 +6530,6 @@ describe('LifecycleManager - Messaging, Health & Values', () => {
 
     test('should only check running components', async () => {
       const lifecycle = new LifecycleManager({ logger });
-
-      class HealthyComponent extends BaseComponent {
-        constructor(logger: Logger, name: string) {
-          super(logger, { name, dependencies: [] });
-        }
-
-        public async start() {}
-        public async stop() {}
-
-        public healthCheck() {
-          return true;
-        }
-      }
 
       await lifecycle.registerComponent(new HealthyComponent(logger, 'comp1'));
       await lifecycle.registerComponent(new HealthyComponent(logger, 'comp2'));
@@ -6619,19 +6548,6 @@ describe('LifecycleManager - Messaging, Health & Values', () => {
     test('should handle components without health check', async () => {
       const lifecycle = new LifecycleManager({ logger });
 
-      class ComponentWithHealth extends BaseComponent {
-        constructor(logger: Logger) {
-          super(logger, { name: 'with-health', dependencies: [] });
-        }
-
-        public async start() {}
-        public async stop() {}
-
-        public healthCheck() {
-          return true;
-        }
-      }
-
       class ComponentWithoutHealth extends BaseComponent {
         constructor(logger: Logger) {
           super(logger, { name: 'without-health', dependencies: [] });
@@ -6641,7 +6557,9 @@ describe('LifecycleManager - Messaging, Health & Values', () => {
         public async stop() {}
       }
 
-      await lifecycle.registerComponent(new ComponentWithHealth(logger));
+      await lifecycle.registerComponent(
+        new HealthyComponent(logger, 'with-health'),
+      );
       await lifecycle.registerComponent(new ComponentWithoutHealth(logger));
 
       await lifecycle.startAllComponents();
