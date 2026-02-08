@@ -35,6 +35,7 @@ describe('RetryRunner', () => {
     expect(runner.runnerState).toBe('not-started');
     expect(runner.canForceTry).toBe(true);
     expect(runner.wasLastAttemptForced).toBe(false);
+    expect(runner.operationLabel).toBe('Unnamed Operation');
     expect(runner.errors).toEqual([]);
     expect(runner.wasInitialAttemptTaken).toBe(false);
     expect(runner.areAttemptsExhausted).toBe(false);
@@ -42,11 +43,34 @@ describe('RetryRunner', () => {
     expect(runner.mostCommonError).toBeNull();
     expect(runner.lastError).toBeNull();
     expect(runner.maxRetryAttempts).toBe(3);
+    expect(runner.policyInfo).toEqual({
+      strategy: 'fixed',
+      maxRetryAttempts: 3,
+      delayMS: 10,
+    });
     expect(runner.retryCount).toBe(0);
     expect(runner.wasSuccessful).toBe(false);
     expect(runner.isRetryPending).toBe(false);
     expect(runner.isOperationRunning).toBe(false);
     expect(runner.isAttemptRunning).toBe(false);
+    expect(runner.graceCancelPeriodMS).toBe(1000);
+    expect(runner.timeTakenMS).toBe(-1);
+    expect(runner.attemptTimeTakenMS).toBe(-1);
+  });
+
+  test('should honor operation label and grace period overrides', () => {
+    const operation = (): void => {};
+    const runner = new RetryRunner(policy, operation, {
+      operationLabel: 'My Operation',
+    });
+
+    expect(runner.operationLabel).toBe('My Operation');
+
+    runner.overrideGraceCancelPeriodMS(500);
+    expect(runner.graceCancelPeriodMS).toBe(500);
+
+    runner.overrideGraceCancelPeriodMS(-1);
+    expect(runner.graceCancelPeriodMS).toBe(1000);
   });
 
   describe('run', () => {
@@ -300,6 +324,34 @@ describe('RetryRunner', () => {
       const cancelResult = await runner.cancel();
 
       expect(cancelResult).toBe('not-running');
+    });
+
+    test('should force cancel after grace period when attempt does not respond', async () => {
+      let handledInfo: { wasCanceled?: boolean; status?: string } = {};
+
+      const operation = async (): Promise<void> => {
+        await sleep(50);
+        // Intentionally do not call reportResult to simulate a hung attempt.
+      };
+
+      const runner = new RetryRunner(policy, operation);
+      runner.overrideGraceCancelPeriodMS(0);
+      runner.on(ATTEMPT_HANDLED, (data) => {
+        handledInfo = {
+          wasCanceled: (data as { wasCanceled: boolean }).wasCanceled,
+          status: (data as { status: string }).status,
+        };
+      });
+
+      void runner.run(false);
+      await sleep(1);
+
+      const cancelResult = await runner.cancel();
+
+      expect(cancelResult).toBe('forced');
+      expect(runner.runnerState).toBe('stopped');
+      expect(handledInfo.wasCanceled).toBe(true);
+      expect(handledInfo.status).toBe('skip');
     });
   });
 
