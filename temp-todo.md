@@ -1,0 +1,34 @@
+- Write a actual package.json desc, keywords and readme file
+- write a better readme, I plan to put stuff in docs folder, make sure everything is exported
+- Probably best to just list all the files and make sure it's covered by both docs and exports. Temped to allow separate exports
+- Make sure import statements are right... and somewhat considering isoslated seperate imports for each lib since this is a mega repo....
+- Might force to use named imports and no default one if you import the package itself, also maybe be consistaint on installing the PKG about npm, bun, etc or should people already know? thinking outloud
+- isPlainObject is mentioned in the lifecycle-manager.md, so will want to update that code sample
+- libs to export, ensure readme in docs file, etc.
+  - unix-time-helpers.ts
+  - arrays.ts
+  - ascii-tables
+  - clamp.ts
+  - constants.ts
+  - curly-brackets.ts
+  - deep-clone.ts
+  - error-to-string.ts
+  - event-emitter.ts
+  - id-helpers.ts
+  - is-function.ts
+  - is-number.ts
+  - is-promise.ts
+  - json-helpers.ts
+  - lifecycle-manager
+  - logger
+  - padding-utils.ts
+  - process-signal-manager.ts
+  - promise-protected-resolver.ts
+  - retry-utils
+  - safe-handle-callback.ts
+  - serialize-error
+  - single-event-observer.ts
+  - sleep.ts
+  - strings.ts
+  - tmp-dir.ts
+  - type-utils.ts
