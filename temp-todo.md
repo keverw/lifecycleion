@@ -40,11 +40,11 @@ For each lib, complete:
   - [x] docs/ascii-tables.md
   - [x] README mention
 
-- [ ] **3. clamp.ts**
-  - [ ] package.json export
-  - [ ] tsup entry
-  - [ ] docs/clamp.md
-  - [ ] README mention
+- [x] **3. clamp.ts**
+  - [x] package.json export
+  - [x] tsup entry
+  - [x] docs/clamp.md
+  - [x] README mention
 
 - [ ] **4. constants.ts**
   - [ ] package.json export

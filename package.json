@@ -18,6 +18,11 @@
       "types": "./dist/lib/ascii-tables/index.d.ts",
       "import": "./dist/lib/ascii-tables/index.js",
       "require": "./dist/lib/ascii-tables/index.cjs"
+    },
+    "./clamp": {
+      "types": "./dist/lib/clamp.d.ts",
+      "import": "./dist/lib/clamp.js",
+      "require": "./dist/lib/clamp.cjs"
     }
   },
   "files": [
