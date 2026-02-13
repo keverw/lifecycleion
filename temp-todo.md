@@ -20,6 +20,7 @@
 ## Libs to Export (27 total)
 
 For each lib, complete:
+
 1. Add subpath export to package.json
 2. Add entry point to tsup.config.ts
 3. Create/move doc to docs/ folder
@@ -33,11 +34,11 @@ For each lib, complete:
   - [x] docs/arrays.md
   - [x] README mention
 
-- [ ] **2. ascii-tables**
-  - [ ] package.json export
-  - [ ] tsup entry
-  - [ ] docs/ascii-tables.md
-  - [ ] README mention
+- [x] **2. ascii-tables**
+  - [x] package.json export
+  - [x] tsup entry
+  - [x] docs/ascii-tables.md
+  - [x] README mention
 
 - [ ] **3. clamp.ts**
   - [ ] package.json export

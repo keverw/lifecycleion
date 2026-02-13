@@ -13,6 +13,11 @@
       "types": "./dist/lib/arrays.d.ts",
       "import": "./dist/lib/arrays.js",
       "require": "./dist/lib/arrays.cjs"
+    },
+    "./ascii-tables": {
+      "types": "./dist/lib/ascii-tables/index.d.ts",
+      "import": "./dist/lib/ascii-tables/index.js",
+      "require": "./dist/lib/ascii-tables/index.cjs"
     }
   },
   "files": [
