@@ -58,11 +58,11 @@ For each lib, complete:
   - [x] docs/curly-brackets.md
   - [x] README mention
 
-- [ ] **6. deep-clone.ts**
-  - [ ] package.json export
-  - [ ] tsup entry
-  - [ ] docs/deep-clone.md
-  - [ ] README mention
+- [x] **6. deep-clone.ts**
+  - [x] package.json export
+  - [x] tsup entry
+  - [x] docs/deep-clone.md
+  - [x] README mention
 
 - [ ] **7. error-to-string.ts**
   - [ ] package.json export

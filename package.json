@@ -33,6 +33,11 @@
       "types": "./dist/lib/curly-brackets.d.ts",
       "import": "./dist/lib/curly-brackets.js",
       "require": "./dist/lib/curly-brackets.cjs"
+    },
+    "./deep-clone": {
+      "types": "./dist/lib/deep-clone.d.ts",
+      "import": "./dist/lib/deep-clone.js",
+      "require": "./dist/lib/deep-clone.cjs"
     }
   },
   "files": [

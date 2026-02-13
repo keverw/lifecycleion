@@ -57,6 +57,7 @@ export default defineConfig({
     'src/lib/clamp.ts',
     'src/lib/constants.ts',
     'src/lib/curly-brackets.ts',
+    'src/lib/deep-clone.ts',
   ],
   outDir: 'dist',
   format: ['cjs', 'esm'],

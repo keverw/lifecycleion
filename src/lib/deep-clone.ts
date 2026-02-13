@@ -13,10 +13,13 @@
  * Deep clone an object or value
  *
  * @param obj - The value to clone
- * @param seen - Internal WeakMap for tracking circular references (do not pass manually)
  * @returns A deep clone of the input value
  */
-export function deepClone<T>(obj: T, seen = new WeakMap()): T {
+export function deepClone<T>(obj: T): T {
+  return cloneInternal(obj, new WeakMap());
+}
+
+function cloneInternal<T>(obj: T, seen: WeakMap<object, unknown>): T {
   // Primitives and null/undefined return as-is
   if (obj === null || typeof obj !== 'object') {
     return obj;
@@ -46,7 +49,7 @@ export function deepClone<T>(obj: T, seen = new WeakMap()): T {
     seen.set(obj as object, cloned);
 
     for (const [key, value] of obj) {
-      cloned.set(deepClone(key, seen), deepClone(value, seen));
+      cloned.set(cloneInternal(key, seen), cloneInternal(value, seen));
     }
 
     return cloned as T;
@@ -58,7 +61,7 @@ export function deepClone<T>(obj: T, seen = new WeakMap()): T {
     seen.set(obj as object, cloned);
 
     for (const value of obj) {
-      cloned.add(deepClone(value, seen));
+      cloned.add(cloneInternal(value, seen));
     }
 
     return cloned as T;
@@ -88,7 +91,7 @@ export function deepClone<T>(obj: T, seen = new WeakMap()): T {
     seen.set(obj as object, cloned);
 
     for (const item of obj) {
-      cloned.push(deepClone(item, seen));
+      cloned.push(cloneInternal(item, seen));
     }
 
     return cloned as T;
@@ -100,7 +103,7 @@ export function deepClone<T>(obj: T, seen = new WeakMap()): T {
 
   for (const key in obj) {
     if (Object.prototype.hasOwnProperty.call(obj, key)) {
-      cloned[key] = deepClone((obj as Record<string, unknown>)[key], seen);
+      cloned[key] = cloneInternal((obj as Record<string, unknown>)[key], seen);
     }
   }
 
