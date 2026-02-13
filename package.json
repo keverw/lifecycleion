@@ -23,6 +23,11 @@
       "types": "./dist/lib/clamp.d.ts",
       "import": "./dist/lib/clamp.js",
       "require": "./dist/lib/clamp.cjs"
+    },
+    "./constants": {
+      "types": "./dist/lib/constants.d.ts",
+      "import": "./dist/lib/constants.js",
+      "require": "./dist/lib/constants.cjs"
     }
   },
   "files": [

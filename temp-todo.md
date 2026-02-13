@@ -46,11 +46,11 @@ For each lib, complete:
   - [x] docs/clamp.md
   - [x] README mention
 
-- [ ] **4. constants.ts**
-  - [ ] package.json export
-  - [ ] tsup entry
-  - [ ] docs/constants.md
-  - [ ] README mention
+- [x] **4. constants.ts**
+  - [x] package.json export
+  - [x] tsup entry
+  - [x] docs/constants.md
+  - [x] README mention
 
 - [ ] **5. curly-brackets.ts**
   - [ ] package.json export

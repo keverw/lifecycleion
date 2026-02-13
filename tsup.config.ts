@@ -50,7 +50,13 @@ const allExternals = getAllDependencies();
 // This approach automatically stays in sync with package.json changes
 
 export default defineConfig({
-  entry: ['src/index.ts', 'src/lib/arrays.ts', 'src/lib/ascii-tables/index.ts', 'src/lib/clamp.ts'],
+  entry: [
+    'src/index.ts',
+    'src/lib/arrays.ts',
+    'src/lib/ascii-tables/index.ts',
+    'src/lib/clamp.ts',
+    'src/lib/constants.ts',
+  ],
   outDir: 'dist',
   format: ['cjs', 'esm'],
   dts: true,
