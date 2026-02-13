@@ -38,6 +38,11 @@
       "types": "./dist/lib/deep-clone.d.ts",
       "import": "./dist/lib/deep-clone.js",
       "require": "./dist/lib/deep-clone.cjs"
+    },
+    "./error-to-string": {
+      "types": "./dist/lib/error-to-string.d.ts",
+      "import": "./dist/lib/error-to-string.js",
+      "require": "./dist/lib/error-to-string.cjs"
     }
   },
   "files": [

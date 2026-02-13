@@ -64,11 +64,11 @@ For each lib, complete:
   - [x] docs/deep-clone.md
   - [x] README mention
 
-- [ ] **7. error-to-string.ts**
-  - [ ] package.json export
-  - [ ] tsup entry
-  - [ ] docs/error-to-string.md
-  - [ ] README mention
+- [x] **7. error-to-string.ts**
+  - [x] package.json export
+  - [x] tsup entry
+  - [x] docs/error-to-string.md
+  - [x] README mention
 
 - [ ] **8. event-emitter.ts**
   - [ ] package.json export

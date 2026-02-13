@@ -58,6 +58,7 @@ export default defineConfig({
     'src/lib/constants.ts',
     'src/lib/curly-brackets.ts',
     'src/lib/deep-clone.ts',
+    'src/lib/error-to-string.ts',
   ],
   outDir: 'dist',
   format: ['cjs', 'esm'],
