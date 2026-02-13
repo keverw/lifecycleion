@@ -28,6 +28,11 @@
       "types": "./dist/lib/constants.d.ts",
       "import": "./dist/lib/constants.js",
       "require": "./dist/lib/constants.cjs"
+    },
+    "./curly-brackets": {
+      "types": "./dist/lib/curly-brackets.d.ts",
+      "import": "./dist/lib/curly-brackets.js",
+      "require": "./dist/lib/curly-brackets.cjs"
     }
   },
   "files": [

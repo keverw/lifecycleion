@@ -28,7 +28,7 @@
 Import `CurlyBrackets` into your project:
 
 ```typescript
-import { CurlyBrackets } from '@libs/curly-brackets';
+import { CurlyBrackets } from 'lifecycleion/curly-brackets';
 ```
 
 ### Basic Usage

@@ -56,6 +56,7 @@ export default defineConfig({
     'src/lib/ascii-tables/index.ts',
     'src/lib/clamp.ts',
     'src/lib/constants.ts',
+    'src/lib/curly-brackets.ts',
   ],
   outDir: 'dist',
   format: ['cjs', 'esm'],
