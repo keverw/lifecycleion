@@ -70,11 +70,11 @@ For each lib, complete:
   - [x] docs/error-to-string.md
   - [x] README mention
 
-- [ ] **8. event-emitter.ts**
-  - [ ] package.json export
-  - [ ] tsup entry
-  - [ ] docs/event-emitter.md
-  - [ ] README mention
+- [x] **8. event-emitter.ts**
+  - [x] package.json export
+  - [x] tsup entry
+  - [x] docs/event-emitter.md
+  - [x] README mention
 
 - [ ] **9. id-helpers.ts**
   - [ ] package.json export

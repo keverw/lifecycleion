@@ -43,6 +43,11 @@
       "types": "./dist/lib/error-to-string.d.ts",
       "import": "./dist/lib/error-to-string.js",
       "require": "./dist/lib/error-to-string.cjs"
+    },
+    "./event-emitter": {
+      "types": "./dist/lib/event-emitter.d.ts",
+      "import": "./dist/lib/event-emitter.js",
+      "require": "./dist/lib/event-emitter.cjs"
     }
   },
   "files": [

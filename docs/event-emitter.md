@@ -60,7 +60,7 @@ service.on('dataProcessed', (data) => console.log(data));
 ## Usage
 
 ```typescript
-import { EventEmitter } from './event-emitter';
+import { EventEmitter } from 'lifecycleion/event-emitter';
 
 // Create a new emitter
 const emitter = new EventEmitter();

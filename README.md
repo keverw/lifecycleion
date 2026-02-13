@@ -19,3 +19,4 @@ A collection of foundational helpers to manage your application lifecycle
 | [curly-brackets](./docs/curly-brackets.md)   | `lifecycleion/curly-brackets`  | String templating with `{{placeholders}}`, fallbacks, escaping, and compiled templates            |
 | [deep-clone](./docs/deep-clone.md)           | `lifecycleion/deep-clone`      | Deep clone utility with circular reference detection for objects, arrays, Maps, Sets, and more    |
 | [error-to-string](./docs/error-to-string.md) | `lifecycleion/error-to-string` | Format errors into readable ASCII tables with support for nested info and sensitive field masking |
+| [event-emitter](./docs/event-emitter.md)     | `lifecycleion/event-emitter`   | Lightweight event emitter with protected and public variants, type safety, and memory management  |
