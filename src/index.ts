@@ -1,39 +1,25 @@
-// module entry point
+/**
+ * Lifecycleion is a collection of utility libraries.
+ *
+ * Import from specific subpaths instead of the package root:
+ *
+ * @example
+ * ```typescript
+ * // ✅ Correct - Import from subpaths
+ * import { chunk } from "lifecycleion/arrays"
+ * import { Logger } from "lifecycleion/logger"
+ * import { sleep } from "lifecycleion/sleep"
+ *
+ * // ❌ Wrong - Don't import from package root
+ * import { something } from "lifecycleion"
+ * ```
+ *
+ * See the README for a complete list of available imports:
+ * https://github.com/keverw/lifecycleion#readme
+ */
 
-// LifecycleManager - Full export from lifecycle-manager module
-export * from './lib/lifecycle-manager/index';
-
-// Process Signal Manager
-export { ProcessSignalManager } from './lib/process-signal-manager';
-
-// ID Helpers
-export {
-  generateID,
-  validateID,
-  emptyID,
-  isEmptyID,
-  IDHelpers,
-  type IdentifierType,
-  IDENTIFIER_TYPES,
-} from './lib/id-helpers';
-
-// Event handling
-export { EventEmitter, EventEmitterProtected } from './lib/event-emitter';
-export {
-  SingleEventObserver,
-  SingleEventObserverProtected,
-} from './lib/single-event-observer';
-
-// Callback handling
-export {
-  safeHandleCallback,
-  safeHandleCallbackAndWait,
-} from './lib/safe-handle-callback';
-
-// Utility functions
-export { isNumber } from './lib/is-number';
-export { isFunction } from './lib/is-function';
-export { isPromise } from './lib/is-promise';
-export { formatJSON } from './lib/json-helpers';
-
-// todo: export is function and is promise
+throw new Error(
+  'Lifecycleion does not support default imports. ' +
+    'Import from specific subpaths like "lifecycleion/arrays", "lifecycleion/logger", etc. ' +
+    'See README for all available imports: https://github.com/keverw/lifecycleion#readme',
+);
