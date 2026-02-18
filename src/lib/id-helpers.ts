@@ -7,7 +7,6 @@ import {
 } from 'uuid';
 import { ulid } from 'ulid';
 import { convertMSToUnix } from './unix-time-helpers';
-import { isNumber } from './is-number';
 
 /**
  * Supported identifier types:
@@ -43,6 +42,14 @@ export type IdentifierType = 'objectID' | 'uuid4' | 'uuid7' | 'ulid';
  */
 export const IDENTIFIER_TYPES = ['objectID', 'uuid4', 'uuid7', 'ulid'] as const;
 
+function assertIdentifierType(type: unknown): asserts type is IdentifierType {
+  if (!IDENTIFIER_TYPES.includes(type as IdentifierType)) {
+    throw new TypeError(
+      `Invalid ID type given: "${type as string}". Expected one of: ${IDENTIFIER_TYPES.join(', ')}`,
+    );
+  }
+}
+
 /**
  * Generates a unique identifier of the specified type.
  *
@@ -57,6 +64,7 @@ export const IDENTIFIER_TYPES = ['objectID', 'uuid4', 'uuid7', 'ulid'] as const;
  *   - Use this for testing or when you need IDs to have a specific timestamp
  * @returns A unique identifier string
  * @throws {TypeError} If an invalid type is provided
+ * @throws {TypeError} If `seedTime` is provided but is not a non-negative finite number
  *
  * @example
  * ```typescript
@@ -72,8 +80,16 @@ export const IDENTIFIER_TYPES = ['objectID', 'uuid4', 'uuid7', 'ulid'] as const;
  * ```
  */
 export function generateID(type: IdentifierType, seedTime?: number): string {
+  assertIdentifierType(type);
+
+  if (seedTime !== undefined && (!Number.isFinite(seedTime) || seedTime < 0)) {
+    throw new TypeError(
+      `seedTime must be a non-negative finite number (milliseconds), got: ${seedTime}`,
+    );
+  }
+
   if (type === 'objectID') {
-    if (isNumber(seedTime)) {
+    if (seedTime !== undefined) {
       // expects as unix time
       const unixTime = convertMSToUnix(seedTime);
 
@@ -84,23 +100,19 @@ export function generateID(type: IdentifierType, seedTime?: number): string {
   } else if (type === 'uuid4') {
     return UUIDv4();
   } else if (type === 'uuid7') {
-    if (isNumber(seedTime)) {
+    if (seedTime !== undefined) {
       // expect in milliseconds
       return UUIDv7({ msecs: seedTime });
     } else {
       return UUIDv7();
     }
   } else if (type === 'ulid') {
-    if (isNumber(seedTime)) {
+    if (seedTime !== undefined) {
       // expect in milliseconds
       return ulid(seedTime);
     } else {
       return ulid();
     }
-  } else {
-    throw new TypeError(
-      `Invalid ID type given: "${type as string}". Expected one of: ${IDENTIFIER_TYPES.join(', ')}`,
-    );
   }
 }
 
@@ -114,6 +126,7 @@ export function generateID(type: IdentifierType, seedTime?: number): string {
  * - `ulid`: Must be 26 characters from the ULID character set
  *
  * Empty IDs (from `emptyID()`) are considered valid.
+ * Non-string `id` values return `false`.
  *
  * @param type - The expected identifier type
  * @param id - The identifier string to validate
@@ -129,6 +142,12 @@ export function generateID(type: IdentifierType, seedTime?: number): string {
  * ```
  */
 export function validateID(type: IdentifierType, id: string): boolean {
+  assertIdentifierType(type);
+
+  if (typeof id !== 'string') {
+    return false;
+  }
+
   if (type === 'objectID') {
     if (id.match(/^[0-9a-fA-F]{24}$/)) {
       return true;
@@ -156,15 +175,11 @@ export function validateID(type: IdentifierType, id: string): boolean {
       return false;
     }
   } else if (type === 'ulid') {
-    if (id.match(/^[0-9A-HJKMNP-TV-Z]{26}$/)) {
+    if (id.match(/^[0-7][0-9A-HJKMNP-TV-Z]{25}$/i)) {
       return true;
     } else {
       return false;
     }
-  } else {
-    throw new TypeError(
-      `Invalid ID type given: "${type as string}". Expected one of: ${IDENTIFIER_TYPES.join(', ')}`,
-    );
   }
 }
 
@@ -192,16 +207,14 @@ export function validateID(type: IdentifierType, id: string): boolean {
  * ```
  */
 export function emptyID(type: IdentifierType): string {
+  assertIdentifierType(type);
+
   if (type === 'objectID') {
     return '0'.repeat(24);
   } else if (type === 'uuid4' || type === 'uuid7') {
     return '00000000-0000-0000-0000-000000000000';
   } else if (type === 'ulid') {
     return '0'.repeat(26);
-  } else {
-    throw new TypeError(
-      `Invalid ID type given: "${type as string}". Expected one of: ${IDENTIFIER_TYPES.join(', ')}`,
-    );
   }
 }
 
@@ -213,7 +226,8 @@ export function emptyID(type: IdentifierType): string {
  *
  * @param type - The identifier type to check against
  * @param id - The identifier string to check
- * @returns `true` if the ID is empty for the specified type, `false` otherwise
+ * @returns `true` if the ID is empty for the specified type, `false` otherwise.
+ * Non-string `id` values return `false`.
  * @throws {TypeError} If an invalid type is provided
  *
  * @example
@@ -226,18 +240,13 @@ export function emptyID(type: IdentifierType): string {
  * ```
  */
 export function isEmptyID(type: IdentifierType, id: string): boolean {
-  if (
-    type === 'objectID' ||
-    type === 'uuid4' ||
-    type === 'uuid7' ||
-    type === 'ulid'
-  ) {
-    return emptyID(type) === id;
-  } else {
-    throw new TypeError(
-      `Invalid ID type given: "${type as string}". Expected one of: ${IDENTIFIER_TYPES.join(', ')}`,
-    );
+  assertIdentifierType(type);
+
+  if (typeof id !== 'string') {
+    return false;
   }
+
+  return emptyID(type) === id;
 }
 
 /**
@@ -272,15 +281,17 @@ export class IDHelpers {
   /**
    * Gets the identifier type this helper is configured for.
    */
-  public get type(): string {
+  public get type(): IdentifierType {
     return this._type;
   }
 
   /**
    * Creates a new ID helper for the specified type.
    * @param type - The identifier type to use for all operations
+   * @throws {TypeError} If an invalid type is provided
    */
   constructor(type: IdentifierType) {
+    assertIdentifierType(type);
     this._type = type;
   }
 

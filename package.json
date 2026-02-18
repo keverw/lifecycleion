@@ -48,6 +48,11 @@
       "types": "./dist/lib/event-emitter.d.ts",
       "import": "./dist/lib/event-emitter.js",
       "require": "./dist/lib/event-emitter.cjs"
+    },
+    "./id-helpers": {
+      "types": "./dist/lib/id-helpers.d.ts",
+      "import": "./dist/lib/id-helpers.js",
+      "require": "./dist/lib/id-helpers.cjs"
     }
   },
   "files": [

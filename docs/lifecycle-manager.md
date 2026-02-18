@@ -264,7 +264,7 @@ When a component `start()` exceeds its `startupTimeoutMS`, the manager:
 3. Calls `onStartupAborted()` if the component implements it
 
 If `onStartupAborted()` is not implemented, the timeout still applies and the
-state remains `starting-timed-out`; there is simply no abort callback to run.
+state remains `starting-timed-out`, and there is simply no abort callback to run.
 
 Any in-flight startup work may continue in the background, so components should
 either keep startup side effects idempotent or implement their own cancellation
@@ -946,7 +946,7 @@ interface ComponentOperationResult {
 #### `sendMessageToComponent(componentName, payload, options?)`
 
 Send a message to a specific component.
-By default, only running components receive messages; use `includeStopped`/`includeStalled` to override.
+By default, only running components receive messages, so use `includeStopped`/`includeStalled` to override.
 
 ```typescript
 sendMessageToComponent<T = unknown>(
@@ -1037,8 +1037,8 @@ if (result.sent) {
 #### `broadcastMessage(payload, options?)`
 
 Broadcast a message to multiple components.
-By default, only running components receive messages; use `includeStopped`/`includeStalled` to override.
-When `componentNames` is provided, only those targets are considered; stopped/stalled targets are reported but not sent unless explicitly included.
+By default, only running components receive messages, so use `includeStopped`/`includeStalled` to override.
+When `componentNames` is provided, only those targets are considered, and stopped/stalled targets are reported but not sent unless explicitly included.
 
 ```typescript
 broadcastMessage<T = unknown>(
@@ -1363,7 +1363,7 @@ logger.exit(0);
 - This method is idempotent (can be called multiple times safely)
 - Overwrites any existing `beforeExit` callback on the logger
 - If you need custom exit logic, set it up manually with `logger.setBeforeExitCallback()`
-- The `beforeExit` callback installed by `enableLoggerExitHook()` can return `{ action: 'wait' }` to prevent exit when a shutdown is already in progress. In that case, the initial `logger.exit()` will not proceed; exit is expected to be completed by the in-flight shutdown logic.
+- The `beforeExit` callback installed by `enableLoggerExitHook()` can return `{ action: 'wait' }` to prevent exit when a shutdown is already in progress. In that case, the initial `logger.exit()` will not proceed, and exit is expected to be completed by the in-flight shutdown logic.
 
 #### Logger Requirements
 
@@ -1752,7 +1752,7 @@ onShutdownForce?(): Promise<void> | void;
 onShutdownForceAborted?(): void;
 ```
 
-**Important:** `onShutdownWarning()` is only fired during bulk shutdowns via `stopAllComponents()` or `restartAllComponents()`. Individual `stopComponent()` calls do NOT trigger the warning phase. There is no built-in "warning cleared" event; if shutdown is canceled or stalls, reset any warning state on the next successful `start()` or via an app-specific signal.
+**Important:** `onShutdownWarning()` is only fired during bulk shutdowns via `stopAllComponents()` or `restartAllComponents()`. Individual `stopComponent()` calls do NOT trigger the warning phase. There is no built-in "warning cleared" event, so if shutdown is canceled or stalls, reset any warning state on the next successful `start()` or via an app-specific signal.
 
 ### Signal Handlers
 
@@ -2311,7 +2311,7 @@ How to reduce the risk:
 
 1. Ensure `start()`/`stop()` always settle (resolve or reject) on all paths.
 2. Use timeouts and cancellation so work can terminate deterministically.
-3. Keep long-lived closures small; avoid capturing large buffers in stalled tasks.
+3. Keep long-lived closures small, and avoid capturing large buffers in stalled tasks.
 
 ### 3. No Atomic Restart
 

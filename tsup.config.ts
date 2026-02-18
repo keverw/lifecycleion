@@ -60,6 +60,7 @@ export default defineConfig({
     'src/lib/deep-clone.ts',
     'src/lib/error-to-string.ts',
     'src/lib/event-emitter.ts',
+    'src/lib/id-helpers.ts',
   ],
   outDir: 'dist',
   format: ['cjs', 'esm'],

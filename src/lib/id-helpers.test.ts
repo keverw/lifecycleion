@@ -280,6 +280,47 @@ describe('Identifier Helpers', () => {
       ).toBeFalsy();
 
       expect(validateID('ulid', identifiersGenerated.uuid4.a)).toBeFalsy();
+
+      // First character > '7' sets bits 49 or 48 of the timestamp, causing overflow
+      expect(validateID('ulid', '8ZZZZZZZZZZZZZZZZZZZZZZZZZ')).toBeFalsy();
+    });
+  });
+
+  describe('case handling and canonical output', () => {
+    test('validateID accepts mixed/lower/upper case across all types', () => {
+      const objectID = generateID('objectID');
+      const uuid4 = generateID('uuid4');
+      const uuid7 = generateID('uuid7');
+      const ulidID = generateID('ulid');
+
+      expect(validateID('objectID', objectID.toUpperCase())).toBeTruthy();
+      expect(validateID('uuid4', uuid4.toUpperCase())).toBeTruthy();
+      expect(validateID('uuid7', uuid7.toUpperCase())).toBeTruthy();
+      expect(validateID('ulid', ulidID.toLowerCase())).toBeTruthy();
+    });
+
+    test('generateID returns canonical case by type', () => {
+      const objectID = generateID('objectID');
+      const uuid4 = generateID('uuid4');
+      const uuid7 = generateID('uuid7');
+      const ulidID = generateID('ulid');
+
+      expect(objectID).toEqual(objectID.toLowerCase());
+      expect(uuid4).toEqual(uuid4.toLowerCase());
+      expect(uuid7).toEqual(uuid7.toLowerCase());
+      expect(ulidID).toEqual(ulidID.toUpperCase());
+    });
+  });
+
+  describe('seedTime behavior details', () => {
+    test('objectID truncates seedTime to seconds', () => {
+      const secondBoundary = 1700000000000;
+      const sameSecondA = generateID('objectID', secondBoundary + 100);
+      const sameSecondB = generateID('objectID', secondBoundary + 900);
+      const nextSecond = generateID('objectID', secondBoundary + 1000);
+
+      expect(sameSecondA.slice(0, 8)).toEqual(sameSecondB.slice(0, 8));
+      expect(nextSecond.slice(0, 8)).not.toEqual(sameSecondA.slice(0, 8));
     });
   });
 
@@ -344,6 +385,19 @@ describe('Identifier Helpers', () => {
       expect(
         isEmptyID('uuid7', identifiersGenerated.uuid7.withoutTimeSeed.a),
       ).toBeFalsy();
+    });
+  });
+
+  describe('uuid4/uuid7 shared nil UUID', () => {
+    test('empty IDs are interchangeable across uuid4 and uuid7', () => {
+      const uuid4Empty = emptyID('uuid4');
+      const uuid7Empty = emptyID('uuid7');
+
+      expect(uuid4Empty).toEqual(uuid7Empty);
+      expect(isEmptyID('uuid4', uuid7Empty)).toBeTruthy();
+      expect(isEmptyID('uuid7', uuid4Empty)).toBeTruthy();
+      expect(validateID('uuid4', uuid7Empty)).toBeTruthy();
+      expect(validateID('uuid7', uuid4Empty)).toBeTruthy();
     });
   });
 
@@ -427,6 +481,86 @@ describe('Identifier Helpers', () => {
     });
   });
 
+  describe('Invalid seedTime given', () => {
+    const expectedMessage = (value: unknown) =>
+      `seedTime must be a non-negative finite number (milliseconds), got: ${String(value)}`;
+
+    test('NaN throws TypeError', () => {
+      expect(() => generateID('objectID', NaN)).toThrow(TypeError);
+      expect(() => generateID('objectID', NaN)).toThrow(expectedMessage(NaN));
+    });
+
+    test('Infinity throws TypeError', () => {
+      expect(() => generateID('uuid7', Infinity)).toThrow(TypeError);
+      expect(() => generateID('uuid7', Infinity)).toThrow(
+        expectedMessage(Infinity),
+      );
+    });
+
+    test('-Infinity throws TypeError', () => {
+      expect(() => generateID('ulid', -Infinity)).toThrow(TypeError);
+      expect(() => generateID('ulid', -Infinity)).toThrow(
+        expectedMessage(-Infinity),
+      );
+    });
+
+    test('negative number throws TypeError', () => {
+      expect(() => generateID('objectID', -1)).toThrow(TypeError);
+      expect(() => generateID('objectID', -1)).toThrow(expectedMessage(-1));
+    });
+
+    test('0 is valid (epoch timestamp)', () => {
+      expect(() => generateID('uuid7', 0)).not.toThrow();
+      expect(() => generateID('ulid', 0)).not.toThrow();
+      expect(() => generateID('objectID', 0)).not.toThrow();
+    });
+
+    test('uuid4 accepts but ignores valid seedTime', () => {
+      const id = generateID('uuid4', Date.now());
+      expect(validateID('uuid4', id)).toBeTruthy();
+    });
+
+    test('uuid4 ignores seedTime - different seeds still produce random v4 IDs', () => {
+      const id1 = generateID('uuid4', 0);
+      const id2 = generateID('uuid4', 9999999999999);
+      expect(validateID('uuid4', id1)).toBeTruthy();
+      expect(validateID('uuid4', id2)).toBeTruthy();
+      expect(id1).not.toEqual(id2);
+    });
+
+    test('uuid4 still throws on invalid seedTime', () => {
+      expect(() => generateID('uuid4', NaN)).toThrow(TypeError);
+      expect(() => generateID('uuid4', -1)).toThrow(TypeError);
+      expect(() => generateID('uuid4', Infinity)).toThrow(TypeError);
+    });
+  });
+
+  describe('validateID id input type safety', () => {
+    test('non-string id input returns false for every type', () => {
+      // @ts-expect-error: Unit testing non-string input
+      expect(validateID('objectID', 123)).toBeFalsy();
+      // @ts-expect-error: Unit testing non-string input
+      expect(validateID('uuid4', 123)).toBeFalsy();
+      // @ts-expect-error: Unit testing non-string input
+      expect(validateID('uuid7', 123)).toBeFalsy();
+      // @ts-expect-error: Unit testing non-string input
+      expect(validateID('ulid', 123)).toBeFalsy();
+    });
+  });
+
+  describe('isEmptyID id input type safety', () => {
+    test('non-string id input returns false for every type', () => {
+      // @ts-expect-error: Unit testing non-string input
+      expect(isEmptyID('objectID', 123)).toBeFalsy();
+      // @ts-expect-error: Unit testing non-string input
+      expect(isEmptyID('uuid4', 123)).toBeFalsy();
+      // @ts-expect-error: Unit testing non-string input
+      expect(isEmptyID('uuid7', 123)).toBeFalsy();
+      // @ts-expect-error: Unit testing non-string input
+      expect(isEmptyID('ulid', 123)).toBeFalsy();
+    });
+  });
+
   describe('IDHelpers helper class', () => {
     let classInstance: IDHelpers;
     let id: string;
@@ -447,6 +581,20 @@ describe('Identifier Helpers', () => {
       emptyID = classInstance.emptyID();
       expect(classInstance.validateID(emptyID)).toBeTruthy();
       expect(classInstance.isEmptyID(emptyID)).toBeTruthy();
+    });
+
+    it('should throw for invalid type at construction time', () => {
+      expect(() => {
+        // @ts-expect-error: Unit testing runtime guard
+        new IDHelpers('foo');
+      }).toThrow(TypeError);
+
+      expect(() => {
+        // @ts-expect-error: Unit testing runtime guard
+        new IDHelpers('foo');
+      }).toThrow(
+        'Invalid ID type given: "foo". Expected one of: objectID, uuid4, uuid7, ulid',
+      );
     });
   });
 });

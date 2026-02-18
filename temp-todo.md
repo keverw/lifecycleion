@@ -76,11 +76,11 @@ For each lib, complete:
   - [x] docs/event-emitter.md
   - [x] README mention
 
-- [ ] **9. id-helpers.ts**
-  - [ ] package.json export
-  - [ ] tsup entry
-  - [ ] docs/id-helpers.md
-  - [ ] README mention
+- [x] **9. id-helpers.ts**
+  - [x] package.json export
+  - [x] tsup entry
+  - [x] docs/id-helpers.md
+  - [x] README mention
 
 - [ ] **10. is-function.ts**
   - [ ] package.json export
