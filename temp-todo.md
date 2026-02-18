@@ -14,7 +14,7 @@
 - [x] Create error-throwing default export
 - [ ] Complete all 28 libs (see checklist below)
 - [ ] Write actual package.json description and keywords
-- [ ] Update isPlainObject reference in lifecycle-manager.md
+- [x] Update isPlainObject reference in lifecycle-manager.md
 - [ ] Final verification: test all imports work correctly
 
 ## Libs to Export (28 total)
@@ -106,17 +106,17 @@ For each lib, complete:
   - [x] docs/json-helpers.md
   - [x] README mention
 
-- [ ] **14. lifecycle-manager**
-  - [ ] package.json export
-  - [ ] tsup entry
-  - [ ] docs/lifecycle-manager.md
-  - [ ] README mention
+- [x] **14. lifecycle-manager**
+  - [x] package.json export
+  - [x] tsup entry
+  - [x] docs/lifecycle-manager.md
+  - [x] README mention
 
-- [ ] **15. logger**
-  - [ ] package.json export
-  - [ ] tsup entry
-  - [ ] docs/logger.md
-  - [ ] README mention
+- [x] **15. logger**
+  - [x] package.json export
+  - [x] tsup entry
+  - [x] docs/logger.md
+  - [x] README mention
 
 - [ ] **16. padding-utils.ts**
   - [ ] package.json export

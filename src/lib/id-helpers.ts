@@ -113,6 +113,8 @@ export function generateID(type: IdentifierType, seedTime?: number): string {
     } else {
       return ulid();
     }
+  } else {
+    throw new TypeError(`Unhandled identifier type: "${type as string}"`);
   }
 }
 
@@ -180,6 +182,8 @@ export function validateID(type: IdentifierType, id: string): boolean {
     } else {
       return false;
     }
+  } else {
+    throw new TypeError(`Unhandled identifier type: "${type as string}"`);
   }
 }
 
@@ -215,6 +219,8 @@ export function emptyID(type: IdentifierType): string {
     return '00000000-0000-0000-0000-000000000000';
   } else if (type === 'ulid') {
     return '0'.repeat(26);
+  } else {
+    throw new TypeError(`Unhandled identifier type: "${type as string}"`);
   }
 }
 

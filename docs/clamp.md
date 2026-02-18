@@ -6,7 +6,7 @@ Utility functions for clamping numbers to a range, with safe handling for non-fi
 
 - [Usage](#usage)
 - [API](#api)
-  - [clamp](#clamp-1)
+  - [clamp](#clamp)
   - [finiteClampMin](#finiteclampmin)
 
 <!-- tocstop -->

@@ -2,6 +2,75 @@
 
 A modern, flexible logging library with sink-based architecture, template string support, and built-in redaction.
 
+<!-- toc -->
+
+- [Features](#features)
+- [Installation](#installation)
+- [Quick Start](#quick-start)
+  - [Simple Logging](#simple-logging)
+  - [Log Level Filtering](#log-level-filtering)
+    - [Log Levels](#log-levels)
+    - [Log Level Use Cases](#log-level-use-cases)
+    - [Per-Sink Filtering](#per-sink-filtering)
+  - [Exit Codes](#exit-codes)
+  - [Template Strings with Parameters](#template-strings-with-parameters)
+    - [Nested Object Support](#nested-object-support)
+  - [Redaction of Sensitive Data](#redaction-of-sensitive-data)
+    - [Nested Object Redaction](#nested-object-redaction)
+    - [Custom Redaction Function](#custom-redaction-function)
+  - [Tags for Categorization and Filtering](#tags-for-categorization-and-filtering)
+    - [Use Cases](#use-cases)
+    - [Notes](#notes)
+  - [Multiple Sinks](#multiple-sinks)
+  - [Dynamic Sink Management](#dynamic-sink-management)
+    - [Important Notes](#important-notes)
+  - [Service Loggers](#service-loggers)
+  - [Entity Loggers](#entity-loggers)
+    - [Game Engine Example](#game-engine-example)
+    - [Session Management with UUIDs](#session-management-with-uuids)
+    - [Worker Pool Example](#worker-pool-example)
+    - [Key Points](#key-points)
+  - [Setting Exit Callback After Construction](#setting-exit-callback-after-construction)
+- [Built-in Sinks](#built-in-sinks)
+  - [ConsoleSink](#consolesink)
+    - [Log Level Control](#log-level-control)
+    - [Mute/Unmute Control](#muteunmute-control)
+  - [ArraySink](#arraysink)
+    - [With Transformer](#with-transformer)
+  - [FileSink](#filesink)
+    - [Log Level Control for Files](#log-level-control-for-files)
+    - [File Naming](#file-naming)
+    - [Features](#features-1)
+    - [Error Handling & Retry](#error-handling--retry)
+    - [Health Monitoring](#health-monitoring)
+    - [Flush Pending Writes](#flush-pending-writes)
+  - [NamedPipeSink](#namedpipesink)
+    - [Error Types](#error-types)
+    - [Error Handling & Reconnection](#error-handling--reconnection)
+    - [Custom Formatter](#custom-formatter)
+    - [Setup](#setup)
+- [API Reference](#api-reference)
+  - [Logger Methods](#logger-methods)
+  - [Options for Log Methods](#options-for-log-methods)
+  - [Logger Configuration](#logger-configuration)
+    - [Sink Error Handling](#sink-error-handling)
+    - [Exit Behavior](#exit-behavior)
+- [EventEmitter Integration](#eventemitter-integration)
+- [Custom Sinks](#custom-sinks)
+- [LogEntry Structure](#logentry-structure)
+  - [Important Notes](#important-notes-1)
+  - [Security Note](#security-note)
+- [Testing](#testing)
+  - [With Transformer for Consistent Test Snapshots](#with-transformer-for-consistent-test-snapshots)
+  - [With Console Sink for Debugging Tests](#with-console-sink-for-debugging-tests)
+- [Frontend/Browser Usage](#frontendbrowser-usage)
+  - [Features](#features-2)
+  - [With Additional Sinks and Redaction](#with-additional-sinks-and-redaction)
+- [Architecture Overview](#architecture-overview)
+  - [Sink-Based Design](#sink-based-design)
+
+<!-- tocstop -->
+
 ## Features
 
 - **Sink-Based Architecture**: Write logs to multiple destinations simultaneously (console, files, named pipes, custom sinks)
@@ -30,7 +99,7 @@ import {
   ArraySink,
   FileSink,
   NamedPipeSink,
-} from '@/lib/logger';
+} from 'lifecycleion/logger';
 ```
 
 ## Quick Start
@@ -38,7 +107,7 @@ import {
 ### Simple Logging
 
 ```typescript
-import { Logger, ConsoleSink } from '@/lib/logger';
+import { Logger, ConsoleSink } from 'lifecycleion/logger';
 
 const logger = new Logger({
   sinks: [new ConsoleSink({ colors: true, timestamps: true })],
@@ -57,7 +126,7 @@ logger.debug('Debug information'); // Filtered by default
 Control which log levels are output on a per-sink basis using the `LogLevel` enum:
 
 ```typescript
-import { Logger, ConsoleSink, LogLevel } from '@/lib/logger';
+import { Logger, ConsoleSink, LogLevel } from 'lifecycleion/logger';
 
 // Default behavior: INFO level (shows ERROR, WARN, NOTICE, SUCCESS, INFO)
 const consoleSink = new ConsoleSink();
@@ -153,7 +222,7 @@ logger.debug('Request headers: {...}');
 Different sinks can have different log levels:
 
 ```typescript
-import { FileSink, ConsoleSink, LogLevel } from '@/lib/logger';
+import { FileSink, ConsoleSink, LogLevel } from 'lifecycleion/logger';
 
 const consoleSink = new ConsoleSink({
   minLevel: LogLevel.INFO, // Console shows INFO and above
@@ -570,7 +639,7 @@ When you have circular dependencies between Logger and other components, use `se
 **LifecycleManager Integration:** If you're using LifecycleManager, it provides a built-in `enableLoggerExitHook()` method that automatically sets up graceful shutdown on logger exit:
 
 ```typescript
-import { LifecycleManager } from 'lifecycleion';
+import { LifecycleManager } from 'lifecycleion/lifecycle-manager';
 
 const logger = new Logger({ sinks: [new ConsoleSink()] });
 const lifecycle = new LifecycleManager({ logger });
@@ -617,7 +686,7 @@ This approach avoids constructor ordering issues and allows components to refere
 Writes logs to the console with optional colors, timestamps, type labels, and log level filtering.
 
 ```typescript
-import { ConsoleSink, LogLevel } from '@/lib/logger';
+import { ConsoleSink, LogLevel } from 'lifecycleion/logger';
 
 new ConsoleSink({
   colors: true, // Enable colors (default: true)
@@ -734,7 +803,7 @@ service.error('Login failed');
 Writes logs to files with automatic rotation based on size and date, and log level filtering.
 
 ```typescript
-import { FileSink, LogLevel } from '@/lib/logger';
+import { FileSink, LogLevel } from 'lifecycleion/logger';
 
 new FileSink({
   logDir: './logs', // Directory for log files
@@ -804,7 +873,7 @@ console.log(debugSink.getMinLevel()); // LogLevel.WARN
 FileSink automatically retries failed writes up to `maxRetries` times (default: 3). The `onError` callback is invoked for each failure:
 
 ```typescript
-import { FileSink, type LogEntry } from '@/lib/logger';
+import { FileSink, type LogEntry } from 'lifecycleion/logger';
 
 const fileSink = new FileSink({
   logDir: './logs',
@@ -872,7 +941,7 @@ if (result.timedOut) {
 Writes logs to a named pipe (FIFO) for log aggregation. Linux/macOS only.
 
 ```typescript
-import { NamedPipeSink, PipeErrorType } from '@/lib/logger';
+import { NamedPipeSink, PipeErrorType } from 'lifecycleion/logger';
 
 const pipeSink = new NamedPipeSink({
   pipePath: '/tmp/app_logs',
@@ -909,7 +978,11 @@ enum PipeErrorType {
 When a pipe error occurs (e.g., reader disconnects), the `onError` callback is invoked with the error type, error object, and pipe path. You can use the `reconnect()` method to attempt to reestablish the connection:
 
 ```typescript
-import { NamedPipeSink, PipeErrorType, ReconnectStatus } from '@/lib/logger';
+import {
+  NamedPipeSink,
+  PipeErrorType,
+  ReconnectStatus,
+} from 'lifecycleion/logger';
 
 const pipeSink = new NamedPipeSink({
   pipePath: '/tmp/app_logs',
@@ -1160,7 +1233,7 @@ logger.error('Error event will be emitted');
 Create your own sink by implementing the `LogSink` interface:
 
 ```typescript
-import { LogSink, LogEntry } from '@/lib/logger';
+import { LogSink, LogEntry } from 'lifecycleion/logger';
 
 class DatabaseSink implements LogSink {
   async write(entry: LogEntry): Promise<void> {

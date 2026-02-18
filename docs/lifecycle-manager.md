@@ -113,8 +113,8 @@ bun add lifecycleion
 Components extend `BaseComponent` and implement lifecycle methods:
 
 ```typescript
-import { BaseComponent } from 'lifecycleion';
-import type { Logger } from 'lifecycleion'; // Logger from lifecycleion logger (import path TBD)
+import { BaseComponent } from 'lifecycleion/lifecycle-manager';
+import type { Logger } from 'lifecycleion/logger';
 
 class DatabaseComponent extends BaseComponent {
   private pool!: Pool;
@@ -191,7 +191,7 @@ class WebServerComponent extends BaseComponent {
 ### 2. Create and Configure LifecycleManager
 
 ```typescript
-import { LifecycleManager } from 'lifecycleion';
+import { LifecycleManager } from 'lifecycleion/lifecycle-manager';
 
 const lifecycle = new LifecycleManager({
   name: 'my-app',
@@ -991,7 +991,7 @@ interface MessageResult {
 **Example:**
 
 ```typescript
-import { isPlainObject } from 'lifecycleion';
+import { isPlainObject } from 'lifecycleion/is-plain-object';
 
 // Component with message handler
 class CacheComponent extends BaseComponent {
@@ -1380,7 +1380,7 @@ The LifecycleManager requires a Logger instance that implements the Lifecycleion
 The Logger class is part of the Lifecycleion package. Basic usage:
 
 ```typescript
-import { Logger } from 'lifecycleion'; // Import path will be finalized in future release
+import { Logger } from 'lifecycleion/logger';
 
 // Create logger (exact constructor options to be documented with logger export)
 const logger = new Logger({
@@ -1875,7 +1875,7 @@ The LifecycleManager emits events for monitoring and observability. All events a
 ### Subscribing to Events
 
 ```typescript
-import type { LifecycleManagerEventMap } from 'lifecycleion';
+import type { LifecycleManagerEventMap } from 'lifecycleion/lifecycle-manager';
 
 // Type-safe event subscription
 lifecycle.on('component:started', (data) => {
