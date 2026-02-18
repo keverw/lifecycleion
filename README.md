@@ -21,7 +21,9 @@ A collection of foundational helpers to manage your application lifecycle
 | [error-to-string](./docs/error-to-string.md) | `lifecycleion/error-to-string` | Format errors into readable ASCII tables with support for nested info and sensitive field masking |
 | [event-emitter](./docs/event-emitter.md)     | `lifecycleion/event-emitter`   | Lightweight event emitter with protected and public variants, type safety, and memory management  |
 | [id-helpers](./docs/id-helpers.md)           | `lifecycleion/id-helpers`      | Unified ID generation and validation for ObjectID, UUID v4, UUID v7, and ULID                     |
+| [is-boolean](./docs/is-boolean.md)           | `lifecycleion/is-boolean`      | Type guard to check if a value is a boolean                                                       |
 | [is-function](./docs/is-function.md)         | `lifecycleion/is-function`     | Check whether a value is a function                                                               |
 | [is-number](./docs/is-number.md)             | `lifecycleion/is-number`       | Type guards to check whether a value is a valid number, with and without finite enforcement       |
+| [is-plain-object](./docs/is-plain-object.md) | `lifecycleion/is-plain-object` | Type guard to check if a value is a plain object (not null, not an array)                         |
 | [is-promise](./docs/is-promise.md)           | `lifecycleion/is-promise`      | Thenable/promise detection following the Promises/A+ specification                                |
 | [json-helpers](./docs/json-helpers.md)       | `lifecycleion/json-helpers`    | JSON formatting utilities                                                                         |

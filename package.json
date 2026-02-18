@@ -73,6 +73,16 @@
       "types": "./dist/lib/json-helpers.d.ts",
       "import": "./dist/lib/json-helpers.js",
       "require": "./dist/lib/json-helpers.cjs"
+    },
+    "./is-boolean": {
+      "types": "./dist/lib/is-boolean.d.ts",
+      "import": "./dist/lib/is-boolean.js",
+      "require": "./dist/lib/is-boolean.cjs"
+    },
+    "./is-plain-object": {
+      "types": "./dist/lib/is-plain-object.d.ts",
+      "import": "./dist/lib/is-plain-object.js",
+      "require": "./dist/lib/is-plain-object.cjs"
     }
   },
   "files": [

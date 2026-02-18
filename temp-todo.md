@@ -10,14 +10,14 @@
 
 **TODO:**
 
-- [x] Inventory all libs (27 total)
+- [x] Inventory all libs (28 total, after splitting type-utils into is-boolean and is-plain-object)
 - [x] Create error-throwing default export
-- [ ] Complete all 27 libs (see checklist below)
+- [ ] Complete all 28 libs (see checklist below)
 - [ ] Write actual package.json description and keywords
 - [ ] Update isPlainObject reference in lifecycle-manager.md
 - [ ] Final verification: test all imports work correctly
 
-## Libs to Export (27 total)
+## Libs to Export (28 total)
 
 For each lib, complete:
 
@@ -178,13 +178,19 @@ For each lib, complete:
   - [ ] docs/tmp-dir.md
   - [ ] README mention
 
-- [ ] **26. type-utils.ts**
-  - [ ] package.json export
-  - [ ] tsup entry
-  - [ ] docs/type-utils.md
-  - [ ] README mention
+- [x] **26. is-boolean.ts** _(split from type-utils)_
+  - [x] package.json export
+  - [x] tsup entry
+  - [x] docs/is-boolean.md
+  - [x] README mention
 
-- [ ] **27. unix-time-helpers.ts**
+- [x] **27. is-plain-object.ts** _(split from type-utils)_
+  - [x] package.json export
+  - [x] tsup entry
+  - [x] docs/is-plain-object.md
+  - [x] README mention
+
+- [ ] **28. unix-time-helpers.ts**
   - [ ] package.json export
   - [ ] tsup entry
   - [ ] docs/unix-time-helpers.md

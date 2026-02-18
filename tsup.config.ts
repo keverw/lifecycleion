@@ -65,6 +65,8 @@ export default defineConfig({
     'src/lib/is-number.ts',
     'src/lib/is-promise.ts',
     'src/lib/json-helpers.ts',
+    'src/lib/is-boolean.ts',
+    'src/lib/is-plain-object.ts',
   ],
   outDir: 'dist',
   format: ['cjs', 'esm'],
