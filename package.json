@@ -68,6 +68,11 @@
       "types": "./dist/lib/is-promise.d.ts",
       "import": "./dist/lib/is-promise.js",
       "require": "./dist/lib/is-promise.cjs"
+    },
+    "./json-helpers": {
+      "types": "./dist/lib/json-helpers.d.ts",
+      "import": "./dist/lib/json-helpers.js",
+      "require": "./dist/lib/json-helpers.cjs"
     }
   },
   "files": [

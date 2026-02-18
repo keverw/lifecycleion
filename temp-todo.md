@@ -100,11 +100,11 @@ For each lib, complete:
   - [x] docs/is-promise.md
   - [x] README mention
 
-- [ ] **13. json-helpers.ts**
-  - [ ] package.json export
-  - [ ] tsup entry
-  - [ ] docs/json-helpers.md
-  - [ ] README mention
+- [x] **13. json-helpers.ts**
+  - [x] package.json export
+  - [x] tsup entry
+  - [x] docs/json-helpers.md
+  - [x] README mention
 
 - [ ] **14. lifecycle-manager**
   - [ ] package.json export

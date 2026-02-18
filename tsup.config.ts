@@ -64,6 +64,7 @@ export default defineConfig({
     'src/lib/is-function.ts',
     'src/lib/is-number.ts',
     'src/lib/is-promise.ts',
+    'src/lib/json-helpers.ts',
   ],
   outDir: 'dist',
   format: ['cjs', 'esm'],

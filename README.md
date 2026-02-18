@@ -24,3 +24,4 @@ A collection of foundational helpers to manage your application lifecycle
 | [is-function](./docs/is-function.md)         | `lifecycleion/is-function`     | Check whether a value is a function                                                               |
 | [is-number](./docs/is-number.md)             | `lifecycleion/is-number`       | Type guards to check whether a value is a valid number, with and without finite enforcement       |
 | [is-promise](./docs/is-promise.md)           | `lifecycleion/is-promise`      | Thenable/promise detection following the Promises/A+ specification                                |
+| [json-helpers](./docs/json-helpers.md)       | `lifecycleion/json-helpers`    | JSON formatting utilities                                                                         |
