@@ -190,8 +190,8 @@ For each lib, complete:
   - [x] docs/is-plain-object.md
   - [x] README mention
 
-- [ ] **28. unix-time-helpers.ts**
-  - [ ] package.json export
-  - [ ] tsup entry
-  - [ ] docs/unix-time-helpers.md
-  - [ ] README mention
+- [x] **28. unix-time-helpers.ts**
+  - [x] package.json export
+  - [x] tsup entry
+  - [x] docs/unix-time-helpers.md
+  - [x] README mention

@@ -113,6 +113,11 @@
       "types": "./dist/lib/retry-utils/index.d.ts",
       "import": "./dist/lib/retry-utils/index.js",
       "require": "./dist/lib/retry-utils/index.cjs"
+    },
+    "./unix-time-helpers": {
+      "types": "./dist/lib/unix-time-helpers.d.ts",
+      "import": "./dist/lib/unix-time-helpers.js",
+      "require": "./dist/lib/unix-time-helpers.cjs"
     }
   },
   "files": [

@@ -73,6 +73,7 @@ export default defineConfig({
     'src/lib/process-signal-manager.ts',
     'src/lib/promise-protected-resolver.ts',
     'src/lib/retry-utils/index.ts',
+    'src/lib/unix-time-helpers.ts',
   ],
   outDir: 'dist',
   format: ['cjs', 'esm'],
