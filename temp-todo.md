@@ -82,23 +82,23 @@ For each lib, complete:
   - [x] docs/id-helpers.md
   - [x] README mention
 
-- [ ] **10. is-function.ts**
-  - [ ] package.json export
-  - [ ] tsup entry
-  - [ ] docs/is-function.md
-  - [ ] README mention
+- [x] **10. is-function.ts**
+  - [x] package.json export
+  - [x] tsup entry
+  - [x] docs/is-function.md
+  - [x] README mention
 
-- [ ] **11. is-number.ts**
-  - [ ] package.json export
-  - [ ] tsup entry
-  - [ ] docs/is-number.md
-  - [ ] README mention
+- [x] **11. is-number.ts**
+  - [x] package.json export
+  - [x] tsup entry
+  - [x] docs/is-number.md
+  - [x] README mention
 
-- [ ] **12. is-promise.ts**
-  - [ ] package.json export
-  - [ ] tsup entry
-  - [ ] docs/is-promise.md
-  - [ ] README mention
+- [x] **12. is-promise.ts**
+  - [x] package.json export
+  - [x] tsup entry
+  - [x] docs/is-promise.md
+  - [x] README mention
 
 - [ ] **13. json-helpers.ts**
   - [ ] package.json export

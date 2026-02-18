@@ -53,6 +53,21 @@
       "types": "./dist/lib/id-helpers.d.ts",
       "import": "./dist/lib/id-helpers.js",
       "require": "./dist/lib/id-helpers.cjs"
+    },
+    "./is-function": {
+      "types": "./dist/lib/is-function.d.ts",
+      "import": "./dist/lib/is-function.js",
+      "require": "./dist/lib/is-function.cjs"
+    },
+    "./is-number": {
+      "types": "./dist/lib/is-number.d.ts",
+      "import": "./dist/lib/is-number.js",
+      "require": "./dist/lib/is-number.cjs"
+    },
+    "./is-promise": {
+      "types": "./dist/lib/is-promise.d.ts",
+      "import": "./dist/lib/is-promise.js",
+      "require": "./dist/lib/is-promise.cjs"
     }
   },
   "files": [
