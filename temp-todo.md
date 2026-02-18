@@ -118,29 +118,29 @@ For each lib, complete:
   - [x] docs/logger.md
   - [x] README mention
 
-- [ ] **16. padding-utils.ts**
-  - [ ] package.json export
-  - [ ] tsup entry
-  - [ ] docs/padding-utils.md
-  - [ ] README mention
+- [x] **16. padding-utils.ts**
+  - [x] package.json export
+  - [x] tsup entry
+  - [x] docs/padding-utils.md
+  - [x] README mention
 
-- [ ] **17. process-signal-manager.ts**
-  - [ ] package.json export
-  - [ ] tsup entry
-  - [ ] docs/process-signal-manager.md
-  - [ ] README mention
+- [x] **17. process-signal-manager.ts**
+  - [x] package.json export
+  - [x] tsup entry
+  - [x] docs/process-signal-manager.md
+  - [x] README mention
 
-- [ ] **18. promise-protected-resolver.ts**
-  - [ ] package.json export
-  - [ ] tsup entry
-  - [ ] docs/promise-protected-resolver.md
-  - [ ] README mention
+- [x] **18. promise-protected-resolver.ts**
+  - [x] package.json export
+  - [x] tsup entry
+  - [x] docs/promise-protected-resolver.md
+  - [x] README mention
 
-- [ ] **19. retry-utils**
-  - [ ] package.json export
-  - [ ] tsup entry
-  - [ ] docs/retry-utils.md
-  - [ ] README mention
+- [x] **19. retry-utils**
+  - [x] package.json export
+  - [x] tsup entry
+  - [x] docs/retry-utils.md
+  - [x] README mention
 
 - [ ] **20. safe-handle-callback.ts**
   - [ ] package.json export

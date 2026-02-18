@@ -93,6 +93,26 @@
       "types": "./dist/lib/logger/index.d.ts",
       "import": "./dist/lib/logger/index.js",
       "require": "./dist/lib/logger/index.cjs"
+    },
+    "./padding-utils": {
+      "types": "./dist/lib/padding-utils.d.ts",
+      "import": "./dist/lib/padding-utils.js",
+      "require": "./dist/lib/padding-utils.cjs"
+    },
+    "./process-signal-manager": {
+      "types": "./dist/lib/process-signal-manager.d.ts",
+      "import": "./dist/lib/process-signal-manager.js",
+      "require": "./dist/lib/process-signal-manager.cjs"
+    },
+    "./promise-protected-resolver": {
+      "types": "./dist/lib/promise-protected-resolver.d.ts",
+      "import": "./dist/lib/promise-protected-resolver.js",
+      "require": "./dist/lib/promise-protected-resolver.cjs"
+    },
+    "./retry-utils": {
+      "types": "./dist/lib/retry-utils/index.d.ts",
+      "import": "./dist/lib/retry-utils/index.js",
+      "require": "./dist/lib/retry-utils/index.cjs"
     }
   },
   "files": [

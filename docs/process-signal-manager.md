@@ -252,7 +252,7 @@ You can use both together for a complete debugging experience!
 ### Basic Setup
 
 ```typescript
-import { ProcessSignalManager } from './process-signal-manager';
+import { ProcessSignalManager } from 'lifecycleion/process-signal-manager';
 
 const manager = new ProcessSignalManager({
   onShutdownRequested: (method) => {

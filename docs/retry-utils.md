@@ -5,6 +5,22 @@ Simple utilities to handle retry logic with two main classes:
 - **`RetryPolicy`** - Low-level class for fine-grained control over retry behavior
 - **`RetryRunner`** - High-level class that executes your code with automatic retries
 
+<!-- toc -->
+<!-- tocstop -->
+
+## Usage
+
+```typescript
+import {
+  RetryPolicy,
+  RetryRunner,
+  OPERATION_STARTED,
+  OPERATION_ENDED,
+  ATTEMPT_STARTED,
+  ATTEMPT_HANDLED,
+} from 'lifecycleion/retry-utils';
+```
+
 ## Terminology
 
 - **Attempt** - Any execution of the operation, including the initial try
