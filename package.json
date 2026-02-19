@@ -124,6 +124,16 @@
       "import": "./dist/lib/single-event-observer.js",
       "require": "./dist/lib/single-event-observer.cjs"
     },
+    "./sleep": {
+      "types": "./dist/lib/sleep.d.ts",
+      "import": "./dist/lib/sleep.js",
+      "require": "./dist/lib/sleep.cjs"
+    },
+    "./strings": {
+      "types": "./dist/lib/strings.d.ts",
+      "import": "./dist/lib/strings.js",
+      "require": "./dist/lib/strings.cjs"
+    },
     "./serialize-error": {
       "types": "./dist/lib/serialize-error/index.d.ts",
       "import": "./dist/lib/serialize-error/index.js",

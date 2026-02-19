@@ -160,17 +160,17 @@ For each lib, complete:
   - [x] docs/single-event-observer.md
   - [x] README mention
 
-- [ ] **23. sleep.ts**
-  - [ ] package.json export
-  - [ ] tsup entry
-  - [ ] docs/sleep.md
-  - [ ] README mention
+- [x] **23. sleep.ts**
+  - [x] package.json export
+  - [x] tsup entry
+  - [x] docs/sleep.md
+  - [x] README mention
 
-- [ ] **24. strings.ts**
-  - [ ] package.json export
-  - [ ] tsup entry
-  - [ ] docs/strings.md
-  - [ ] README mention
+- [x] **24. strings.ts**
+  - [x] package.json export
+  - [x] tsup entry
+  - [x] docs/strings.md
+  - [x] README mention
 
 - [ ] **25. tmp-dir.ts**
   - [ ] package.json export
