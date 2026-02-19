@@ -114,6 +114,11 @@
       "import": "./dist/lib/retry-utils/index.js",
       "require": "./dist/lib/retry-utils/index.cjs"
     },
+    "./safe-handle-callback": {
+      "types": "./dist/lib/safe-handle-callback.d.ts",
+      "import": "./dist/lib/safe-handle-callback.js",
+      "require": "./dist/lib/safe-handle-callback.cjs"
+    },
     "./unix-time-helpers": {
       "types": "./dist/lib/unix-time-helpers.d.ts",
       "import": "./dist/lib/unix-time-helpers.js",

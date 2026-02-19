@@ -142,11 +142,11 @@ For each lib, complete:
   - [x] docs/retry-utils.md
   - [x] README mention
 
-- [ ] **20. safe-handle-callback.ts**
-  - [ ] package.json export
-  - [ ] tsup entry
-  - [ ] docs/safe-handle-callback.md
-  - [ ] README mention
+- [x] **20. safe-handle-callback.ts**
+  - [x] package.json export
+  - [x] tsup entry
+  - [x] docs/safe-handle-callback.md
+  - [x] README mention
 
 - [ ] **21. serialize-error**
   - [ ] package.json export
