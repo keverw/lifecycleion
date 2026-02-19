@@ -148,11 +148,11 @@ For each lib, complete:
   - [x] docs/safe-handle-callback.md
   - [x] README mention
 
-- [ ] **21. serialize-error**
-  - [ ] package.json export
-  - [ ] tsup entry
-  - [ ] docs/serialize-error.md
-  - [ ] README mention
+- [x] **21. serialize-error**
+  - [x] package.json export
+  - [x] tsup entry
+  - [x] docs/serialize-error.md
+  - [x] README mention
 
 - [ ] **22. single-event-observer.ts**
   - [ ] package.json export

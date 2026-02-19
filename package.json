@@ -119,6 +119,11 @@
       "import": "./dist/lib/safe-handle-callback.js",
       "require": "./dist/lib/safe-handle-callback.cjs"
     },
+    "./serialize-error": {
+      "types": "./dist/lib/serialize-error/index.d.ts",
+      "import": "./dist/lib/serialize-error/index.js",
+      "require": "./dist/lib/serialize-error/index.cjs"
+    },
     "./unix-time-helpers": {
       "types": "./dist/lib/unix-time-helpers.d.ts",
       "import": "./dist/lib/unix-time-helpers.js",

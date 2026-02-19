@@ -4,14 +4,25 @@ Simple utilities to convert any `Error` into a plain, JSON-serializable object â
 
 Useful for IPC, internal RPCs, and storing errors in a database (e.g. logging failed jobs, audit trails, error reports). For external RESTful APIs, don't use these as they can expose sensitive information (like the stack trace) to the client.
 
+<!-- toc -->
+
+- [Usage](#usage)
+- [What it captures](#what-it-captures)
+- [API](#api)
+  - [isErrorLike](#iserrorlike)
+- [RESTful API Error Guidelines](#restful-api-error-guidelines)
+- [Security Note](#security-note)
+
+<!-- tocstop -->
+
 ## Usage
 
-```ts
+```typescript
 import {
   serializeError,
   deserializeError,
   isErrorLike,
-} from '@day-mover/serialize-error';
+} from 'lifecycleion/serialize-error';
 
 // Serialize any error into a plain object.
 const serialized = serializeError(error);
@@ -22,15 +33,21 @@ const restored = deserializeError(JSON.parse(json));
 throw restored;
 ```
 
-### What it captures
+## What it captures
 
 - `name`, `message`, `stack` (the non-enumerable ones Error hides)
 - All own properties from Error subclasses (`errCode`, `statusCode`, whatever)
 - Nested errors are recursively serialized
 
-### `isErrorLike(value)`
+## API
+
+### isErrorLike
 
 Type guard that checks if a value looks like an Error (has `name`, `message`, and `stack`).
+
+```typescript
+isErrorLike(value); // true | false
+```
 
 ## RESTful API Error Guidelines
 
@@ -46,7 +63,7 @@ For RESTful APIs, don't use `serializeError` â€” it exposes internals like stack
 
 ```json
 {
-  "error:": {
+  "error": {
     "code": "invalid_input",
     "message": "The request parameters did not pass validation",
     "details": [
