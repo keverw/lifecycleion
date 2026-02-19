@@ -154,11 +154,11 @@ For each lib, complete:
   - [x] docs/serialize-error.md
   - [x] README mention
 
-- [ ] **22. single-event-observer.ts**
-  - [ ] package.json export
-  - [ ] tsup entry
-  - [ ] docs/single-event-observer.md
-  - [ ] README mention
+- [x] **22. single-event-observer.ts**
+  - [x] package.json export
+  - [x] tsup entry
+  - [x] docs/single-event-observer.md
+  - [x] README mention
 
 - [ ] **23. sleep.ts**
   - [ ] package.json export

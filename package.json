@@ -119,6 +119,11 @@
       "import": "./dist/lib/safe-handle-callback.js",
       "require": "./dist/lib/safe-handle-callback.cjs"
     },
+    "./single-event-observer": {
+      "types": "./dist/lib/single-event-observer.d.ts",
+      "import": "./dist/lib/single-event-observer.js",
+      "require": "./dist/lib/single-event-observer.cjs"
+    },
     "./serialize-error": {
       "types": "./dist/lib/serialize-error/index.d.ts",
       "import": "./dist/lib/serialize-error/index.js",

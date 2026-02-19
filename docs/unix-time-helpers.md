@@ -10,7 +10,7 @@ Unix timestamp and high-resolution time utilities.
   - [ms](#ms)
   - [performance](#performance)
   - [convertMSToUnix](#convertmstounix)
-  - [convertUnixToMS](#convertunixto ms)
+  - [convertUnixToMS](#convertunixtoms)
 
 <!-- tocstop -->
 

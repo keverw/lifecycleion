@@ -1,40 +1,50 @@
 # single-event-observer
 
-A lightweight, type-safe implementation of the Observer pattern in TypeScript.
+A lightweight, type-safe observer for a single event payload type.
+
+Subscriber errors are safely handled through `safeHandleCallback` and reported via the standard `reportError` event API.
 
 <!-- toc -->
 
-- [Overview](#overview)
-- [Installation](#installation)
 - [Usage](#usage)
-  - [Basic Usage](#basic-usage)
-  - [Protected Notify](#protected-notify)
+- [Choosing a class](#choosing-a-class)
+- [Behavior](#behavior)
 - [API](#api)
-  - [`SingleEventObserver<T>`](#singleeventobservert)
-    - [Methods](#methods)
-  - [`SingleEventObserverProtected<T>`](#singleeventobserverprotectedt)
-- [Why use single-event-observer?](#why-use-single-event-observer)
-- [Comparison to other libraries](#comparison-to-other-libraries)
+  - [SingleEventObserver](#singleeventobserver)
+  - [SingleEventObserverProtected](#singleeventobserverprotected)
 
 <!-- tocstop -->
 
-## Overview
-
-`single-event-observer` provides a simple and efficient way to implement the Observer pattern for a single event type. It's designed to be a lightweight alternative to more complex event emitters when you only need to handle one type of event.
-
-## Installation
-
-```bash
-npm install @day-mover/single-event-observer
-```
-
 ## Usage
 
-### Basic Usage
+```typescript
+import {
+  SingleEventObserver,
+  SingleEventObserverProtected,
+} from 'lifecycleion/single-event-observer';
+```
+
+## Choosing a class
+
+- Use `SingleEventObserver<T>` when callers should be able to both subscribe and emit (`notify` is public).
+- Use `SingleEventObserverProtected<T>` when only your class should emit events (`notify` is protected).
+
+## Behavior
+
+- Subscribers are stored in a `Set`, so the same function cannot be added twice.
+- Subscribers are called in subscription order.
+- `notify` is fire-and-forget:
+  - Sync subscribers run immediately.
+  - Async subscribers are started, but `notify` does not wait for completion.
+- Errors thrown (or promise rejections) in subscribers are reported via `reportError` instead of breaking other subscribers.
+
+## API
+
+### SingleEventObserver
+
+Public observer: anyone with a reference can subscribe and call `notify`.
 
 ```typescript
-import { SingleEventObserver } from '@day-mover/single-event-observer';
-
 // Create an observer for string events
 const observer = new SingleEventObserver<string>();
 
@@ -49,50 +59,32 @@ observer.notify('Hello, world!');
 observer.unsubscribe(callback);
 ```
 
-### Protected Notify
+**Methods:**
 
-If you want to restrict the ability to emit events to only your class, you can extend `SingleEventObserverProtected`:
+- `subscribe(fn)` — Add a subscriber.
+- `unsubscribe(fn)` — Remove a subscriber.
+- `hasSubscriber(fn)` — Check whether a subscriber is currently registered.
+- `notify(data)` — Notify all subscribers with the provided event payload.
+
+### SingleEventObserverProtected
+
+Same API as `SingleEventObserver`, but `notify` is protected so only the class (or subclass) can emit events.
 
 ```typescript
-import { SingleEventObserverProtected } from '@day-mover/single-event-observer';
-
 class MyEventEmitter extends SingleEventObserverProtected<string> {
-  public emitEvent(data: string) {
+  public emit(data: string): void {
     this.notify(data); // Only this class can call notify
   }
 }
+
+const emitter = new MyEventEmitter();
+emitter.subscribe((value) => console.log(value));
+emitter.emit('hello');
 ```
 
-## API
+**Methods:**
 
-### `SingleEventObserver<T>`
-
-#### Methods
-
-- `subscribe(fn: (data: T) => void): void`
-  Subscribes a function to the observer.
-
-- `unsubscribe(fn: (data: T) => void): void`
-  Unsubscribes a function from the observer.
-
-- `hasSubscriber(fn: (data: T) => void): boolean`
-  Checks if a specific function is subscribed to the observer.
-
-- `notify(data: T): void`
-  Notifies all subscribers with the provided data.
-
-### `SingleEventObserverProtected<T>`
-
-Identical to `SingleEventObserver<T>`, except `notify` is a protected method.
-
-## Why use single-event-observer?
-
-- **Lightweight**: Perfect for scenarios where you only need to handle a single event type.
-- **Type-safe**: Leverages TypeScript generics to ensure type safety.
-- **Simple API**: Easy to understand and use with just a few methods.
-- **Protected notify option**: Allows for more controlled event emission when needed.
-
-## Comparison to other libraries
-
-- **universal-event-emitter**: Use `single-event-observer` when you don't need support for multiple event types or wildcard events.
-- **user-and-builtin-event-emitter**: Choose `single-event-observer` when you don't need to distinguish between user and built-in events.
+- `subscribe(fn)` — Add a subscriber.
+- `unsubscribe(fn)` — Remove a subscriber.
+- `hasSubscriber(fn)` — Check whether a subscriber is currently registered.
+- `notify(data)` _(protected)_ — Notify all subscribers. Only accessible inside the class or subclasses.

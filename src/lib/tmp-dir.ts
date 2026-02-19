@@ -3,7 +3,8 @@ import os from 'os';
 import { promises as fs } from 'fs';
 import { isNumber } from './is-number';
 import { isString } from './strings';
-import { isBoolean, isPlainObject } from './type-utils';
+import { isBoolean } from './is-boolean';
+import { isPlainObject } from './is-plain-object';
 
 // Helper functions
 function randomString(length: number): string {

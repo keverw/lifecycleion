@@ -2,7 +2,7 @@ import { PromiseProtectedResolver } from '../../promise-protected-resolver';
 import { generateID } from '../../id-helpers';
 import { isPromise } from '../../is-promise';
 import { isString } from '../../strings';
-import { isPlainObject } from '../../type-utils';
+import { isPlainObject } from '../../is-plain-object';
 import { isFunction } from '../../is-function';
 import { RetryPolicy } from './retry-policy';
 import type {

@@ -11,6 +11,7 @@ A wrapper around a `Promise` that exposes `resolveOnce` and `rejectOnce` methods
   - [hasResolved](#hasresolved)
   - [resolveOnce](#resolveonce)
   - [rejectOnce](#rejectonce)
+  - [Example: Race between success and timeout](#example-race-between-success-and-timeout)
 
 <!-- tocstop -->
 

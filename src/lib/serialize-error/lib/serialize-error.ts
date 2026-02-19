@@ -34,7 +34,7 @@ export function serializeError(error: unknown): SerializedError {
 
     for (const key of Object.getOwnPropertyNames(error)) {
       if (!(key in result)) {
-        result[key] = (error as Record<string, unknown>)[key];
+        result[key] = (error as unknown as Record<string, unknown>)[key];
       }
     }
 

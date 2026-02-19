@@ -6,6 +6,41 @@ Simple utilities to handle retry logic with two main classes:
 - **`RetryRunner`** - High-level class that executes your code with automatic retries
 
 <!-- toc -->
+
+- [Usage](#usage)
+- [Terminology](#terminology)
+- [Retry Policy Options](#retry-policy-options)
+  - [Fixed Strategy](#fixed-strategy)
+  - [Exponential Strategy](#exponential-strategy)
+- [RetryPolicy](#retrypolicy)
+  - [Constructor](#constructor)
+  - [Methods](#methods)
+    - [`shouldDoFirstTry()`](#shoulddofirsttry)
+    - [`shouldRetry(error?, isQueryOnly?)`](#shouldretryerror-isqueryonly)
+    - [`markAsSuccessful()`](#markassuccessful)
+    - [`reportError(error)`](#reporterrorerror)
+    - [`reset()`](#reset)
+  - [Properties](#properties)
+  - [Example](#example)
+- [RetryRunner](#retryrunner)
+  - [Constructor](#constructor-1)
+  - [Runner States](#runner-states)
+  - [reportResult Function](#reportresult-function)
+  - [Properties](#properties-1)
+  - [Methods](#methods-1)
+    - [`run(shouldWaitForCompletion?: boolean)`](#runshouldwaitforcompletion-boolean)
+    - [`waitForCompletion()`](#waitforcompletion)
+    - [`cancel()`](#cancel)
+    - [`reset()`](#reset-1)
+    - [`resume(shouldWaitForCompletion?: boolean)`](#resumeshouldwaitforcompletion-boolean)
+    - [`forceTry(options?)`](#forcetryoptions)
+    - [`overrideGraceCancelPeriodMS(ms)`](#overridegracecancelperiodmsms)
+  - [Events](#events)
+  - [Custom Types](#custom-types)
+  - [Complete Example](#complete-example)
+- [Error Classes](#error-classes)
+- [Exported Types](#exported-types)
+
 <!-- tocstop -->
 
 ## Usage

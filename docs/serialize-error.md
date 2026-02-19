@@ -11,6 +11,7 @@ Useful for IPC, internal RPCs, and storing errors in a database (e.g. logging fa
 - [API](#api)
   - [isErrorLike](#iserrorlike)
 - [RESTful API Error Guidelines](#restful-api-error-guidelines)
+  - [Example RESTful API Error Response](#example-restful-api-error-response)
 - [Security Note](#security-note)
 
 <!-- tocstop -->

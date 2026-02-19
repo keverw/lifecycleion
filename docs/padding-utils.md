@@ -9,8 +9,8 @@ String padding utilities for left, right, and center alignment with a configurab
   - [padLeft](#padleft)
   - [padRight](#padright)
   - [padCenter](#padcenter)
-  - [padCenterPreferLeft](#padcenterpreferLeft)
-  - [padCenterPreferRight](#padcenterpreferRight)
+  - [padCenterPreferLeft](#padcenterpreferleft)
+  - [padCenterPreferRight](#padcenterpreferright)
 
 <!-- tocstop -->
 
