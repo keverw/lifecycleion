@@ -26,60 +26,60 @@ function randomString(length: number): string {
 }
 
 // Error classes
-export class FSUtilsErrTmpDirNotInitialized extends Error {
+export class ErrTmpDirNotInitialized extends Error {
   constructor() {
     super('The temporary directory has not been initialized yet.');
-    this.name = 'FSUtilsErrTmpDirNotInitialized';
+    this.name = 'ErrTmpDirNotInitialized';
   }
 }
 
-export class FSUtilsErrTmpDirWasCleanedUp extends Error {
+export class ErrTmpDirWasCleanedUp extends Error {
   constructor() {
     super('The temporary directory was already cleaned up.');
-    this.name = 'FSUtilsErrTmpDirWasCleanedUp';
+    this.name = 'ErrTmpDirWasCleanedUp';
   }
 }
 
-export class FSUtilsErrTmpDirConfigErrorBaseDirectory extends Error {
+export class ErrTmpDirConfigErrorBaseDirectory extends Error {
   constructor() {
     super(
       'An error occurred with the configuration. `baseDirectory` must be an absolute path.',
     );
-    this.name = 'FSUtilsErrTmpDirConfigErrorBaseDirectory';
+    this.name = 'ErrTmpDirConfigErrorBaseDirectory';
   }
 }
 
-export class FSUtilsErrTmpDirConfigErrorMaxTries extends Error {
+export class ErrTmpDirConfigErrorMaxTries extends Error {
   constructor() {
     super(
-      'An error occurred with the configuration. `maxTries` must be a positive number.',
+      'An error occurred with the configuration. `maxTries` must be a positive integer.',
     );
-    this.name = 'FSUtilsErrTmpDirConfigErrorMaxTries';
+    this.name = 'ErrTmpDirConfigErrorMaxTries';
   }
 }
 
-export class FSUtilsErrTmpDirInitializeMaxTriesExceeded extends Error {
+export class ErrTmpDirInitializeMaxTriesExceeded extends Error {
   constructor() {
     super('Could not create a unique temporary directory, maxTries exceeded.');
-    this.name = 'FSUtilsErrTmpDirInitializeMaxTriesExceeded';
+    this.name = 'ErrTmpDirInitializeMaxTriesExceeded';
   }
 }
 
-export class FSUtilsErrTmpDirCleanupFailedNotEmpty extends Error {
+export class ErrTmpDirCleanupFailedNotEmpty extends Error {
   constructor() {
     super(
       'Cleanup failed. The temporary directory is not empty and `unsafeCleanup` is false.',
     );
-    this.name = 'FSUtilsErrTmpDirCleanupFailedNotEmpty';
+    this.name = 'ErrTmpDirCleanupFailedNotEmpty';
   }
 }
 
-export class FSUtilsErrTmpDirCleanupUnexpectedError extends Error {
+export class ErrTmpDirCleanupUnexpectedError extends Error {
   public additionalInfo: { originalError: Error };
 
   constructor(additionalInfo: { originalError: Error }) {
     super('Cleanup failed due to an unexpected error.');
-    this.name = 'FSUtilsErrTmpDirCleanupUnexpectedError';
+    this.name = 'ErrTmpDirCleanupUnexpectedError';
     this.additionalInfo = additionalInfo;
   }
 }
@@ -120,11 +120,11 @@ export class TmpDir {
 
   public get path(): string {
     if (this.wasCleanedUp) {
-      throw new FSUtilsErrTmpDirWasCleanedUp();
+      throw new ErrTmpDirWasCleanedUp();
     } else if (this.isInitialized) {
       return this.fullTempDirPath;
     } else {
-      throw new FSUtilsErrTmpDirNotInitialized();
+      throw new ErrTmpDirNotInitialized();
     }
   }
 
@@ -142,18 +142,17 @@ export class TmpDir {
         if (path.isAbsolute(baseDirectory)) {
           this.baseDirectory = baseDirectory;
         } else {
-          throw new FSUtilsErrTmpDirConfigErrorBaseDirectory();
+          throw new ErrTmpDirConfigErrorBaseDirectory();
         }
       }
 
       if (isNumber(options.maxTries)) {
-        const isAllowedNumber =
-          isFinite(options.maxTries) && options.maxTries > 0;
+        const floored = Math.floor(options.maxTries);
 
-        if (isAllowedNumber) {
-          this.maxTries = options.maxTries;
+        if (isFinite(floored) && floored > 0) {
+          this.maxTries = floored;
         } else {
-          throw new FSUtilsErrTmpDirConfigErrorMaxTries();
+          throw new ErrTmpDirConfigErrorMaxTries();
         }
       }
 
@@ -209,7 +208,7 @@ export class TmpDir {
       }
 
       // if the loop completes without finding a unique directory, throw an error
-      throw new FSUtilsErrTmpDirInitializeMaxTriesExceeded();
+      throw new ErrTmpDirInitializeMaxTriesExceeded();
     }
   }
 
@@ -231,11 +230,11 @@ export class TmpDir {
         if (error instanceof Error) {
           const code = (error as NodeJS.ErrnoException).code;
           if (code === 'ENOTEMPTY' || code === 'EFAULT') {
-            throw new FSUtilsErrTmpDirCleanupFailedNotEmpty();
+            throw new ErrTmpDirCleanupFailedNotEmpty();
           }
         }
 
-        throw new FSUtilsErrTmpDirCleanupUnexpectedError({
+        throw new ErrTmpDirCleanupUnexpectedError({
           originalError: error as Error,
         });
       }

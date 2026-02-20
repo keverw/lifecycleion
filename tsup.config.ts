@@ -77,6 +77,7 @@ export default defineConfig({
     'src/lib/single-event-observer.ts',
     'src/lib/sleep.ts',
     'src/lib/strings.ts',
+    'src/lib/tmp-dir.ts',
     'src/lib/serialize-error/index.ts',
     'src/lib/unix-time-helpers.ts',
   ],

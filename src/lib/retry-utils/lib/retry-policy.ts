@@ -162,10 +162,12 @@ export class RetryPolicy {
     if (policy.strategy === 'fixed') {
       this.policy = {
         strategy: 'fixed',
-        maxRetryAttempts: clamp(
-          policy.maxRetryAttempts ?? DEFAULT_MAX_RETRY_ATTEMPTS,
-          1,
-          Infinity,
+        maxRetryAttempts: Math.floor(
+          clamp(
+            policy.maxRetryAttempts ?? DEFAULT_MAX_RETRY_ATTEMPTS,
+            1,
+            Infinity,
+          ),
         ),
         delayMS: clamp(policy.delayMS ?? DEFAULT_MIN_TIMEOUT_MS, 1, Infinity),
       };
@@ -187,10 +189,12 @@ export class RetryPolicy {
 
       this.policy = {
         strategy: 'exponential',
-        maxRetryAttempts: clamp(
-          policy.maxRetryAttempts ?? DEFAULT_MAX_RETRY_ATTEMPTS,
-          1,
-          Infinity,
+        maxRetryAttempts: Math.floor(
+          clamp(
+            policy.maxRetryAttempts ?? DEFAULT_MAX_RETRY_ATTEMPTS,
+            1,
+            Infinity,
+          ),
         ),
         factor: clamp(policy.factor ?? DEFAULT_FACTOR, 1, Infinity),
         minTimeoutMS: finalMin,

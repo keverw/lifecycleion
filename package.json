@@ -134,6 +134,11 @@
       "import": "./dist/lib/strings.js",
       "require": "./dist/lib/strings.cjs"
     },
+    "./tmp-dir": {
+      "types": "./dist/lib/tmp-dir.d.ts",
+      "import": "./dist/lib/tmp-dir.js",
+      "require": "./dist/lib/tmp-dir.cjs"
+    },
     "./serialize-error": {
       "types": "./dist/lib/serialize-error/index.d.ts",
       "import": "./dist/lib/serialize-error/index.js",

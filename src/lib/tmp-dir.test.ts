@@ -2,12 +2,12 @@ import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import {
   TmpDir,
   createTempDir,
-  FSUtilsErrTmpDirCleanupFailedNotEmpty,
-  FSUtilsErrTmpDirConfigErrorBaseDirectory,
-  FSUtilsErrTmpDirConfigErrorMaxTries,
-  FSUtilsErrTmpDirInitializeMaxTriesExceeded,
-  FSUtilsErrTmpDirNotInitialized,
-  FSUtilsErrTmpDirWasCleanedUp,
+  ErrTmpDirCleanupFailedNotEmpty,
+  ErrTmpDirConfigErrorBaseDirectory,
+  ErrTmpDirConfigErrorMaxTries,
+  ErrTmpDirInitializeMaxTriesExceeded,
+  ErrTmpDirNotInitialized,
+  ErrTmpDirWasCleanedUp,
 } from './tmp-dir';
 import os from 'os';
 import path from 'path';
@@ -83,7 +83,7 @@ describe('TmpDir', () => {
       err = error;
     }
 
-    expect(err).toBeInstanceOf(FSUtilsErrTmpDirCleanupFailedNotEmpty);
+    expect(err).toBeInstanceOf(ErrTmpDirCleanupFailedNotEmpty);
   });
 
   test('unsafeCleanup with a non-empty directory with unsafeCleanup set true', async () => {
@@ -150,7 +150,7 @@ describe('TmpDir', () => {
       err = error;
     }
 
-    expect(err).toBeInstanceOf(FSUtilsErrTmpDirInitializeMaxTriesExceeded);
+    expect(err).toBeInstanceOf(ErrTmpDirInitializeMaxTriesExceeded);
   });
 
   test('should error when accessing .path before initialization', () => {
@@ -165,7 +165,7 @@ describe('TmpDir', () => {
       err = error;
     }
 
-    expect(err).toBeInstanceOf(FSUtilsErrTmpDirNotInitialized);
+    expect(err).toBeInstanceOf(ErrTmpDirNotInitialized);
     expect(pathStr).toBeUndefined();
   });
 
@@ -185,7 +185,7 @@ describe('TmpDir', () => {
       err = error;
     }
 
-    expect(err).toBeInstanceOf(FSUtilsErrTmpDirWasCleanedUp);
+    expect(err).toBeInstanceOf(ErrTmpDirWasCleanedUp);
     expect(pathStr).toBeUndefined();
   });
 
@@ -200,7 +200,7 @@ describe('TmpDir', () => {
       err = error;
     }
 
-    expect(err).toBeInstanceOf(FSUtilsErrTmpDirConfigErrorBaseDirectory);
+    expect(err).toBeInstanceOf(ErrTmpDirConfigErrorBaseDirectory);
   });
 
   test('should error if maxTries is not a positive number', async () => {
@@ -214,6 +214,6 @@ describe('TmpDir', () => {
       err = error;
     }
 
-    expect(err).toBeInstanceOf(FSUtilsErrTmpDirConfigErrorMaxTries);
+    expect(err).toBeInstanceOf(ErrTmpDirConfigErrorMaxTries);
   });
 });

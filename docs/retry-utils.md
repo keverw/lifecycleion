@@ -76,7 +76,7 @@ Retries a fixed number of times with a fixed delay between attempts.
 ```typescript
 {
   strategy: 'fixed';
-  maxRetryAttempts?: number; // Max retries allowed (excludes initial attempt). Default: 10, Min: 1
+  maxRetryAttempts?: number; // Max retries allowed (excludes initial attempt). Default: 10, Min: 1, floored to integer
   delayMS?: number; // Delay between retries. Default: 1000ms, Min: 1
 }
 ```
@@ -88,7 +88,7 @@ Uses exponential backoff with jitter to calculate delays between retry attempts.
 ```typescript
 {
   strategy: 'exponential';
-  maxRetryAttempts?: number; // Max retries allowed (excludes initial attempt). Default: 10, Min: 1
+  maxRetryAttempts?: number; // Max retries allowed (excludes initial attempt). Default: 10, Min: 1, floored to integer
   factor?: number; // Multiplier for exponential growth. Default: 1.5, Min: 1
   minTimeoutMS?: number; // Shortest delay between retries. Default: 1000ms, Min: 1
   maxTimeoutMS?: number; // Longest delay between retries. Default: 30000ms, Min: 1
@@ -105,7 +105,7 @@ randomOffset = (Math.random() * 2 - 1) * (delay * dispersion);
 finalDelay = clamp(delay + randomOffset, minTimeoutMS, maxTimeoutMS);
 ```
 
-> All numeric options are clamped to their documented ranges. Values outside the allowed range are silently adjusted. Additionally, if `maxTimeoutMS < minTimeoutMS`, the values are automatically swapped to ensure `maxTimeoutMS >= minTimeoutMS`.
+> All numeric options are clamped to their documented ranges. Values outside the allowed range are silently adjusted. `maxRetryAttempts` is additionally floored to an integer after clamping. Additionally, if `maxTimeoutMS < minTimeoutMS`, the values are automatically swapped to ensure `maxTimeoutMS >= minTimeoutMS`.
 
 ## RetryPolicy
 
