@@ -2,7 +2,7 @@
   "name": "lifecycleion",
   "version": "0.0.1",
   "type": "module",
-  "description": "",
+  "description": "A collection of foundational TypeScript utilities for managing application lifecycle, logging, retries, events, and common programming patterns",
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
@@ -155,6 +155,7 @@
   ],
   "scripts": {
     "build": "bun run update-docs && tsup",
+    "prepublishOnly": "bun run build && bun test",
     "dev": "tsup --watch",
     "test": "bun test",
     "lint": "eslint .",
@@ -164,7 +165,23 @@
     "format:docs": "prettier --write README.md \"docs/**/*.md\"",
     "update-docs": "markdown-toc-gen update README.md && find docs -type f -name '*.md' -print0 | xargs -0 -n1 markdown-toc-gen update && bun run scripts/update-readme-version.ts && bun run format:docs"
   },
-  "keywords": [],
+  "keywords": [
+    "lifecycle",
+    "lifecycle-manager",
+    "logger",
+    "logging",
+    "retry",
+    "utilities",
+    "typescript",
+    "event-emitter",
+    "process-signals",
+    "graceful-shutdown",
+    "application-lifecycle",
+    "helpers",
+    "utils",
+    "async",
+    "promises"
+  ],
   "author": "Kevin Whitman (https://github.com/keverw)",
   "license": "MIT",
   "repository": {

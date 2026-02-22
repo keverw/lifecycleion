@@ -1,14 +1,82 @@
 # Lifecycleion v0.0.1
 
-A collection of foundational helpers to manage your application lifecycle
+A collection of foundational TypeScript utilities for managing application lifecycle, logging, retries, events, and common programming patterns.
 
 <!-- toc -->
 
+- [Why Lifecycleion?](#why-lifecycleion)
+  - [Key Features](#key-features)
+- [Installation](#installation)
+- [Quick Example](#quick-example)
 - [Available Libraries](#available-libraries)
+- [Contributing](#contributing)
+- [License](#license)
 
 <!-- tocstop -->
 
+## Why Lifecycleion?
+
+Lifecycleion provides battle-tested, production-ready utilities that handle the complex orchestration of modern applications. Whether you need graceful shutdowns, robust retry logic, flexible logging, or just reliable helper functions, Lifecycleion has you covered.
+
+### Key Features
+
+- 🚀 **Lifecycle Management** - Orchestrate startup, shutdown, and runtime control of application components with dependency resolution
+- 🪵 **Flexible Logger** - Sink-based logger with log levels, redaction, and service scoping
+- 🔄 **Retry Utilities** - Fixed and exponential backoff strategies with cancellation support
+- 📡 **Event Systems** - Event emitters for multiple event types and single-event observers with type safety
+- 🛡️ **Error Handling** - Serialize errors for IPC/RPC, format them as readable tables, and handle callbacks safely
+- 🔧 **Common Utilities** - ID generation (UUID, ULID, ObjectID), string manipulation, deep cloning, and more
+- 📦 **Tree-shakeable** - Import only what you need via subpath exports
+- 💪 **TypeScript-first** - Full type safety with comprehensive TypeScript definitions
+
+## Installation
+
+```bash
+npm install lifecycleion
+# or
+yarn add lifecycleion
+# or
+bun add lifecycleion
+```
+
+## Quick Example
+
+```typescript
+import {
+  LifecycleManager,
+  BaseComponent,
+} from 'lifecycleion/lifecycle-manager';
+import { createLogger } from 'lifecycleion/logger';
+import { RetryRunner } from 'lifecycleion/retry-utils';
+
+// Create a logger
+const logger = createLogger({ service: 'my-app' });
+
+// Set up retry logic
+const runner = new RetryRunner({ maxAttempts: 3, baseDelayMs: 1000 });
+await runner.run(async () => {
+  // Your operation here
+});
+
+// Manage component lifecycle
+class MyComponent extends BaseComponent {
+  async start() {
+    logger.info('Starting component');
+  }
+
+  async stop() {
+    logger.info('Stopping component');
+  }
+}
+
+const manager = new LifecycleManager();
+manager.registerComponent(new MyComponent('my-component'));
+await manager.startAllComponents();
+```
+
 ## Available Libraries
+
+Each library has comprehensive documentation in the [docs](./docs) folder. Click on any library name in the table below to view detailed usage examples, API references, and best practices.
 
 | Library                                                            | Import Path                               | Description                                                                                                                              |
 | ------------------------------------------------------------------ | ----------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
@@ -40,3 +108,11 @@ A collection of foundational helpers to manage your application lifecycle
 | [strings](./docs/strings.md)                                       | `lifecycleion/strings`                    | String type guard, case conversion (PascalCase, camelCase, CONSTANT_CASE), grapheme splitting, character filtering, and chopping helpers |
 | [tmp-dir](./docs/tmp-dir.md)                                       | `lifecycleion/tmp-dir`                    | Create and automatically clean up uniquely-named temporary directories with configurable prefix, postfix, and unsafe cleanup support     |
 | [unix-time-helpers](./docs/unix-time-helpers.md)                   | `lifecycleion/unix-time-helpers`          | Unix timestamp utilities for seconds, milliseconds, high-resolution timing, and unit conversion                                          |
+
+## Contributing
+
+Contributions are welcome! Please feel free to submit issues, feature requests, or pull requests on [GitHub](https://github.com/keverw/lifecycleion).
+
+## License
+
+MIT License - see [LICENSE](./LICENSE) file for details.
