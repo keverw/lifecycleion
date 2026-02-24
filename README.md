@@ -1,5 +1,7 @@
 # Lifecycleion v0.0.1
 
+[![npm version](https://badge.fury.io/js/lifecycleion.svg)](https://badge.fury.io/js/lifecycleion)
+
 A collection of foundational TypeScript utilities for managing application lifecycle, logging, retries, events, and common programming patterns.
 
 <!-- toc -->
@@ -9,6 +11,7 @@ A collection of foundational TypeScript utilities for managing application lifec
 - [Installation](#installation)
 - [Quick Example](#quick-example)
 - [Available Libraries](#available-libraries)
+- [Change Log](#change-log)
 - [Contributing](#contributing)
 - [License](#license)
 
@@ -108,6 +111,10 @@ Each library has comprehensive documentation in the [docs](./docs) folder. Click
 | [strings](./docs/strings.md)                                       | `lifecycleion/strings`                    | String type guard, case conversion (PascalCase, camelCase, CONSTANT_CASE), grapheme splitting, character filtering, and chopping helpers |
 | [tmp-dir](./docs/tmp-dir.md)                                       | `lifecycleion/tmp-dir`                    | Create and automatically clean up uniquely-named temporary directories with configurable prefix, postfix, and unsafe cleanup support     |
 | [unix-time-helpers](./docs/unix-time-helpers.md)                   | `lifecycleion/unix-time-helpers`          | Unix timestamp utilities for seconds, milliseconds, high-resolution timing, and unit conversion                                          |
+
+## Change Log
+
+See [changelog.md](./changelog.md) for version history and release notes.
 
 ## Contributing
 

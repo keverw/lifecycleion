@@ -163,7 +163,7 @@
     "format": "prettier --write \"**/*.{js,jsx,ts,tsx,json,css,md}\"",
     "format:check": "prettier --check \"**/*.{js,jsx,ts,tsx,json,css,md}\"",
     "format:docs": "prettier --write README.md \"docs/**/*.md\"",
-    "update-docs": "markdown-toc-gen update README.md && find docs -type f -name '*.md' -print0 | xargs -0 -n1 markdown-toc-gen update && bun run scripts/update-readme-version.ts && bun run format:docs"
+    "update-docs": "markdown-toc-gen update README.md && bun run scripts/update-readme-version.ts && markdown-toc-gen update changelog.md && find docs -type f -name '*.md' -print0 | xargs -0 -n1 markdown-toc-gen update && bun run format:docs"
   },
   "keywords": [
     "lifecycle",
