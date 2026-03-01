@@ -1831,6 +1831,157 @@ describe('LifecycleManager - Registration & Individual Lifecycle', () => {
       );
     });
 
+    test('should auto-stop a component after startup timeout when no onStartupAborted is defined', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      class LateResolvingStartComponent extends BaseComponent {
+        public stopCalled = false;
+
+        public async start() {
+          await sleep(80);
+        }
+
+        public stop(): void {
+          this.stopCalled = true;
+        }
+      }
+
+      const component = new LateResolvingStartComponent(logger, {
+        name: 'test',
+        startupTimeoutMS: 20,
+      });
+
+      await lifecycle.registerComponent(component);
+      const result = await lifecycle.startComponent('test');
+
+      expect(result.success).toBe(false);
+      expect(result.code).toBe('component_startup_timeout');
+
+      await sleep(120);
+
+      expect(component.stopCalled).toBe(true);
+      expect(lifecycle.isComponentRunning('test')).toBe(false);
+      expect(lifecycle.getComponentStatus('test')?.state).toBe(
+        'starting-timed-out',
+      );
+    });
+
+    test('should ignore late completion from an older timed-out start attempt on the same instance', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      class RetryingStartComponent extends BaseComponent {
+        public stopCalledCount = 0;
+        private startCallCount = 0;
+
+        public async start() {
+          this.startCallCount += 1;
+
+          if (this.startCallCount === 1) {
+            await sleep(80);
+            return;
+          }
+
+          await sleep(140);
+        }
+
+        public stop(): void {
+          this.stopCalledCount += 1;
+        }
+      }
+
+      const component = new RetryingStartComponent(logger, {
+        name: 'test',
+        startupTimeoutMS: 20,
+      });
+
+      await lifecycle.registerComponent(component);
+
+      const firstResult = await lifecycle.startComponent('test');
+      expect(firstResult.success).toBe(false);
+      expect(firstResult.code).toBe('component_startup_timeout');
+
+      await sleep(10);
+
+      const secondStartPromise = lifecycle.startComponent('test');
+      await sleep(30);
+
+      expect(component.stopCalledCount).toBe(0);
+
+      const secondResult = await secondStartPromise;
+      expect(secondResult.success).toBe(false);
+      expect(secondResult.code).toBe('component_startup_timeout');
+
+      await sleep(40);
+      expect(component.stopCalledCount).toBe(0);
+
+      await sleep(80);
+      expect(component.stopCalledCount).toBe(1);
+      expect(lifecycle.isComponentRunning('test')).toBe(false);
+      expect(lifecycle.getComponentStatus('test')?.state).toBe(
+        'starting-timed-out',
+      );
+    });
+
+    test('should ignore late completion from an older timed-out start attempt after unregistering and re-registering the same instance', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      class ReRegisteredStartComponent extends BaseComponent {
+        public stopCalledCount = 0;
+        private startCallCount = 0;
+
+        public async start() {
+          this.startCallCount += 1;
+
+          if (this.startCallCount === 1) {
+            await sleep(80);
+            return;
+          }
+
+          await sleep(140);
+        }
+
+        public stop(): void {
+          this.stopCalledCount += 1;
+        }
+      }
+
+      const component = new ReRegisteredStartComponent(logger, {
+        name: 'test',
+        startupTimeoutMS: 20,
+      });
+
+      await lifecycle.registerComponent(component);
+
+      const firstResult = await lifecycle.startComponent('test');
+      expect(firstResult.success).toBe(false);
+      expect(firstResult.code).toBe('component_startup_timeout');
+
+      const unregisterResult = await lifecycle.unregisterComponent('test');
+      expect(unregisterResult.success).toBe(true);
+
+      const registerResult = await lifecycle.registerComponent(component);
+      expect(registerResult.success).toBe(true);
+
+      const secondStartPromise = lifecycle.startComponent('test');
+      await sleep(30);
+
+      expect(component.stopCalledCount).toBe(0);
+
+      const secondResult = await secondStartPromise;
+      expect(secondResult.success).toBe(false);
+      expect(secondResult.code).toBe('component_startup_timeout');
+
+      await sleep(40);
+      expect(component.stopCalledCount).toBe(0);
+
+      await sleep(80);
+      expect(component.stopCalledCount).toBe(1);
+      expect(lifecycle.isComponentRunning('test')).toBe(false);
+      expect(lifecycle.getComponentStatus('test')?.state).toBe(
+        'starting-timed-out',
+      );
+    });
+
     test('onStartupAborted should NOT be called when start() fails (non-timeout)', async () => {
       const lifecycle = new LifecycleManager({ logger });
 
@@ -2433,6 +2584,59 @@ describe('LifecycleManager - Bulk Operations', () => {
       // Verify duringStartup flag is correctly set to true
       expect(wasDuringStartup).toBe(true);
       expect(shutdownCompletedPayload?.duringStartup).toBe(true);
+    });
+
+    test('should stop a component that finishes starting after shutdown begins', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      class DelayedStartComponent extends BaseComponent {
+        public started = false;
+        public stopCalled = false;
+
+        constructor(componentLogger: Logger, name: string, delayMS: number) {
+          super(componentLogger, {
+            name,
+            startupTimeoutMS: delayMS + 200,
+          });
+          this.delayMS = delayMS;
+        }
+
+        private readonly delayMS: number;
+
+        public async start(): Promise<void> {
+          await sleep(this.delayMS);
+          this.started = true;
+        }
+
+        public stop(): void {
+          this.stopCalled = true;
+          this.started = false;
+        }
+      }
+
+      const fast = new TestComponent(logger, { name: 'fast' });
+      const slow = new DelayedStartComponent(logger, 'slow', 75);
+
+      await lifecycle.registerComponent(fast);
+      await lifecycle.registerComponent(slow);
+
+      const startPromise = lifecycle.startAllComponents();
+
+      await sleep(10);
+
+      const [startResult, stopResult] = await Promise.all([
+        startPromise,
+        lifecycle.stopAllComponents(),
+      ]);
+
+      expect(startResult.success).toBe(false);
+      expect(startResult.code).toBe('shutdown_in_progress');
+      expect(stopResult.success).toBe(true);
+      expect(lifecycle.isComponentRunning('fast')).toBe(false);
+      expect(lifecycle.isComponentRunning('slow')).toBe(false);
+      expect(slow.stopCalled).toBe(true);
+      expect(slow.started).toBe(false);
+      expect(lifecycle.getComponentStatus('slow').state).toBe('stopped');
     });
 
     test('should block startup if stalled components exist', async () => {
@@ -4585,6 +4789,102 @@ describe('LifecycleManager - Signal Integration', () => {
 
       await sleep(1);
       expect(detachEvents).toBe(1);
+    });
+
+    test('attachSignalsOnStart should attach after the first successful component start', async () => {
+      const lifecycle = new LifecycleManager({
+        logger,
+        attachSignalsOnStart: true,
+      });
+
+      class DelayedStartComponent extends BaseComponent {
+        public async start() {
+          await sleep(40);
+        }
+
+        public stop(): void {}
+      }
+
+      await lifecycle.registerComponent(
+        new DelayedStartComponent(logger, {
+          name: 'comp-a',
+          startupTimeoutMS: 100,
+        }),
+      );
+
+      const startPromise = lifecycle.startAllComponents();
+
+      expect(lifecycle.getSignalStatus().isAttached).toBe(false);
+
+      await sleep(10);
+      expect(lifecycle.getSignalStatus().isAttached).toBe(false);
+
+      await startPromise;
+      expect(lifecycle.getSignalStatus().isAttached).toBe(true);
+    });
+
+    test('attachSignalsBeforeStartup should attach before bulk startup begins, even if startup later fails', async () => {
+      const lifecycle = new LifecycleManager({
+        logger,
+        attachSignalsBeforeStartup: true,
+      });
+
+      await lifecycle.registerComponent(
+        new FailingStartComponent(logger, 'comp-a', 'startup failed'),
+      );
+
+      const startPromise = lifecycle.startAllComponents();
+
+      expect(lifecycle.getSignalStatus().isAttached).toBe(true);
+
+      const result = await startPromise;
+
+      expect(result.success).toBe(false);
+      expect(result.code).toBe('required_component_failed');
+      expect(lifecycle.getSignalStatus().isAttached).toBe(true);
+    });
+
+    test('attachSignalsBeforeStartup should detach after failed startup when detachSignalsOnStop is enabled and nothing is running', async () => {
+      const lifecycle = new LifecycleManager({
+        logger,
+        attachSignalsBeforeStartup: true,
+        detachSignalsOnStop: true,
+      });
+
+      await lifecycle.registerComponent(
+        new FailingStartComponent(logger, 'comp-a', 'startup failed'),
+      );
+
+      const startPromise = lifecycle.startAllComponents();
+
+      expect(lifecycle.getSignalStatus().isAttached).toBe(true);
+
+      const result = await startPromise;
+
+      expect(result.success).toBe(false);
+      expect(lifecycle.getSignalStatus().isAttached).toBe(false);
+    });
+
+    test('should re-attach signals on restart when attachSignalsBeforeStartup, attachSignalsOnStart, and detachSignalsOnStop are enabled', async () => {
+      const lifecycle = new LifecycleManager({
+        logger,
+        attachSignalsBeforeStartup: true,
+        attachSignalsOnStart: true,
+        detachSignalsOnStop: true,
+      });
+
+      await lifecycle.registerComponent(
+        new TestComponent(logger, { name: 'comp1' }),
+      );
+
+      await lifecycle.startAllComponents();
+      expect(lifecycle.getSignalStatus().isAttached).toBe(true);
+
+      await lifecycle.stopAllComponents();
+      expect(lifecycle.getSignalStatus().isAttached).toBe(false);
+
+      await lifecycle.startAllComponents();
+      expect(lifecycle.getSignalStatus().isAttached).toBe(true);
     });
   });
 

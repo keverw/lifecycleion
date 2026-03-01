@@ -1,4 +1,5 @@
 import { EventEmitterProtected } from '../event-emitter';
+import { ulid } from 'ulid';
 import type { Logger } from '../logger';
 import type { LoggerService } from '../logger/logger-service';
 import type { BaseComponent } from './base-component';
@@ -86,6 +87,7 @@ export class LifecycleManager
   private readonly messageTimeoutMS: number;
   private readonly startupTimeoutMS: number;
   private readonly shutdownOptions?: StopAllOptions;
+  private readonly attachSignalsBeforeStartup: boolean;
   private readonly attachSignalsOnStart: boolean;
   private readonly detachSignalsOnStop: boolean;
 
@@ -101,11 +103,14 @@ export class LifecycleManager
     { startedAt: number | null; stoppedAt: number | null }
   > = new Map();
   private componentErrors: Map<string, Error | null> = new Map();
+  private componentStartAttemptTokens: Map<string, string> = new Map();
 
   // State flags
   private isStarting = false;
   private isStarted = false;
   private isShuttingDown = false;
+  // Unique token used to detect shutdowns that happened during async start().
+  private shutdownToken = ulid();
   private shutdownMethod: ShutdownMethod | null = null;
   private lastShutdownResult: ShutdownResult | null = null;
 
@@ -141,6 +146,8 @@ export class LifecycleManager
       haltOnStall: true,
       ...options.shutdownOptions,
     };
+    this.attachSignalsBeforeStartup =
+      options.attachSignalsBeforeStartup ?? false;
     this.attachSignalsOnStart = options.attachSignalsOnStart ?? false;
     this.detachSignalsOnStop = options.detachSignalsOnStop ?? false;
 
@@ -360,6 +367,7 @@ export class LifecycleManager
     this.componentStates.delete(name);
     this.componentTimestamps.delete(name);
     this.componentErrors.delete(name);
+    this.componentStartAttemptTokens.delete(name);
     this.stalledComponents.delete(name);
     this.runningComponents.delete(name);
     this.updateStartedFlag();
@@ -867,6 +875,13 @@ export class LifecycleManager
     this.isStarting = true;
     this.shutdownMethod = null; // Clear previous shutdown method on fresh start
     this.lastShutdownResult = null; // Clear last shutdown result on fresh start
+
+    // Track whether this startup attempt attached signals so failure cleanup
+    // does not detach handlers that were attached earlier by some other path.
+    const didAutoAttachSignalsForBulkStartup = this.attachSignalsBeforeStartup
+      ? this.autoAttachSignals('bulk startup')
+      : false;
+
     this.logger.info('Starting all components');
 
     const effectiveTimeout = options?.timeoutMS ?? this.startupTimeoutMS;
@@ -1026,6 +1041,19 @@ export class LifecycleManager
           // Component is already running - this is fine (might have been started manually)
           // Add to startedComponents so it's tracked as part of this bulk operation
           startedComponents.push(name);
+        } else if (result.code === 'shutdown_in_progress') {
+          await this.rollbackStartup(startedComponents);
+
+          return {
+            success: false,
+            startedComponents: [],
+            failedOptionalComponents,
+            skippedDueToDependency: Array.from(skippedDueToDependency),
+            reason: result.reason || 'Shutdown triggered during startup',
+            code: 'shutdown_in_progress',
+            error: result.error,
+            durationMS: Date.now() - startTime,
+          };
         } else {
           // Check if component is optional
           if (component.isOptional()) {
@@ -1140,6 +1168,11 @@ export class LifecycleManager
       if (timeoutHandle) {
         clearTimeout(timeoutHandle);
       }
+
+      if (didAutoAttachSignalsForBulkStartup) {
+        this.autoDetachSignalsIfIdle('failed bulk startup');
+      }
+
       this.isStarting = false;
     }
   }
@@ -2527,6 +2560,7 @@ export class LifecycleManager
         stoppedAt: null,
       });
       this.componentErrors.set(componentName, null);
+      this.componentStartAttemptTokens.set(componentName, ulid());
 
       // Check if manual position was respected for logging
       const isManualPositionRespected = this.isManualPositionRespected({
@@ -2746,6 +2780,7 @@ export class LifecycleManager
 
     // Set shutting down flag and track how shutdown was triggered
     this.isShuttingDown = true;
+    this.shutdownToken = ulid();
     this.shutdownMethod = method;
     const isDuringStartup = this.isStarting;
     this.logger.info('Stopping all components', { params: { method } });
@@ -3115,6 +3150,16 @@ export class LifecycleManager
     this.lifecycleEvents.componentStarting(name);
 
     const timeoutMS = component.startupTimeoutMS;
+    const startAttemptToken = ulid();
+    this.componentStartAttemptTokens.set(name, startAttemptToken);
+    const shutdownTokenAtStart = this.shutdownToken;
+
+    // Same ownership rule as bulk startup: only auto-detach on failure if this
+    // specific component start attempt was the one that attached signals.
+    const didAutoAttachSignalsForComponentStartup = this
+      .attachSignalsBeforeStartup
+      ? this.autoAttachSignals('component startup')
+      : false;
     let timeoutHandle: NodeJS.Timeout | undefined;
 
     try {
@@ -3135,7 +3180,15 @@ export class LifecycleManager
                     params: { error },
                   });
               }
+            } else {
+              this.monitorLateStartupCompletion(
+                name,
+                component,
+                startPromise,
+                startAttemptToken,
+              );
             }
+
             // Prevent unhandled rejection if start() throws after timeout
             Promise.resolve(startPromise).catch(() => {
               // Intentionally ignore errors after timeout
@@ -3154,6 +3207,40 @@ export class LifecycleManager
         await startPromise;
       }
 
+      // If shutdown began while start() was in flight, treat the component as
+      // running long enough to send it through the normal stop pipeline.
+      if (this.isShuttingDown || shutdownTokenAtStart !== this.shutdownToken) {
+        this.componentStates.set(name, 'running');
+        this.runningComponents.add(name);
+        this.stalledComponents.delete(name);
+        this.updateStartedFlag();
+
+        const timestamps = this.componentTimestamps.get(name) ?? {
+          startedAt: null,
+          stoppedAt: null,
+        };
+
+        timestamps.startedAt = Date.now();
+        this.componentTimestamps.set(name, timestamps);
+
+        this.logger
+          .entity(name)
+          .warn(
+            'Component finished starting after shutdown began, stopping immediately',
+          );
+
+        const stopResult = await this.stopComponentInternal(name);
+
+        return {
+          success: false,
+          componentName: name,
+          reason: 'Shutdown triggered during component startup',
+          code: 'shutdown_in_progress',
+          error: stopResult.error,
+          status: this.getComponentStatus(name),
+        };
+      }
+
       // Update state
       this.componentStates.set(name, 'running');
       this.runningComponents.add(name);
@@ -3161,15 +3248,8 @@ export class LifecycleManager
       this.updateStartedFlag();
 
       // Auto-attach signals if this is the first component and option is enabled
-      if (
-        this.attachSignalsOnStart &&
-        this.runningComponents.size === 1 &&
-        !this.processSignalManager
-      ) {
-        this.logger.info(
-          'Auto-attaching process signals on first component start',
-        );
-        this.attachSignals();
+      if (this.attachSignalsOnStart && this.runningComponents.size === 1) {
+        this.autoAttachSignals('first component start');
       }
 
       const timestamps = this.componentTimestamps.get(name) ?? {
@@ -3234,6 +3314,10 @@ export class LifecycleManager
       // unexpectedly later and the timer handle leaks.
       if (timeoutHandle) {
         clearTimeout(timeoutHandle);
+      }
+
+      if (didAutoAttachSignalsForComponentStartup) {
+        this.autoDetachSignalsIfIdle('failed component startup');
       }
     }
   }
@@ -3913,6 +3997,96 @@ export class LifecycleManager
     }
 
     this.logger.info('Rollback completed');
+  }
+
+  private autoAttachSignals(trigger: string): boolean {
+    if (this.processSignalManager?.getStatus().isAttached) {
+      return false;
+    }
+
+    this.logger.info(`Auto-attaching process signals on ${trigger}`);
+    this.attachSignals();
+    return true;
+  }
+
+  private autoDetachSignalsIfIdle(trigger: string): void {
+    if (
+      !this.detachSignalsOnStop ||
+      this.runningComponents.size > 0 ||
+      !this.processSignalManager?.getStatus().isAttached
+    ) {
+      return;
+    }
+
+    this.logger.info(`Auto-detaching process signals after ${trigger}`);
+    this.detachSignals();
+  }
+
+  private monitorLateStartupCompletion(
+    name: string,
+    component: BaseComponent,
+    startPromise: Promise<void> | void,
+    startAttemptToken: string,
+  ): void {
+    this.logger
+      .entity(name)
+      .warn(
+        'Startup timed out without onStartupAborted, stopping component if startup completes later',
+      );
+
+    Promise.resolve(startPromise)
+      .then(async () => {
+        const timeoutState = this.componentStates.get(name);
+
+        if (
+          this.getComponent(name) !== component ||
+          this.componentStartAttemptTokens.get(name) !== startAttemptToken ||
+          this.isComponentRunning(name) ||
+          (timeoutState !== 'starting-timed-out' && timeoutState !== 'failed')
+        ) {
+          return;
+        }
+
+        // Late startup completed after the manager had already timed out. Mark
+        // it running briefly so the normal stop path can clean it up.
+        this.componentStates.set(name, 'running');
+        this.runningComponents.add(name);
+        this.stalledComponents.delete(name);
+        this.updateStartedFlag();
+
+        const timestamps = this.componentTimestamps.get(name) ?? {
+          startedAt: null,
+          stoppedAt: null,
+        };
+
+        timestamps.startedAt = Date.now();
+        this.componentTimestamps.set(name, timestamps);
+
+        this.logger
+          .entity(name)
+          .warn(
+            'Component completed startup after timeout, stopping automatically',
+          );
+
+        const stopResult = await this.stopComponentInternal(name);
+
+        if (!stopResult.success) {
+          this.logger
+            .entity(name)
+            .warn('Automatic stop after startup timeout failed', {
+              params: {
+                error: stopResult.error,
+                code: stopResult.code,
+              },
+            });
+          return;
+        }
+
+        this.componentStates.set(name, timeoutState);
+      })
+      .catch(() => {
+        // If start() eventually rejects after timing out, there is nothing more to clean up.
+      });
   }
 
   /**

@@ -986,7 +986,10 @@ export interface LifecycleManagerOptions {
   /** Default message timeout in ms (default: 5000, 0 = disabled) */
   messageTimeoutMS?: number;
 
-  /** Auto-attach signals when first component starts (default: false) */
+  /** Auto-attach signals before startAllComponents()/startComponent() begins work, even if startup later fails (default: false) */
+  attachSignalsBeforeStartup?: boolean;
+
+  /** Auto-attach signals when the first component successfully starts (default: false) */
   attachSignalsOnStart?: boolean;
 
   /** Auto-detach signals when last component stops (default: false) */

@@ -248,8 +248,8 @@ registered → starting → running → stopping → stopped
 **Starting-Timed-Out State Definition:**
 A component enters "starting-timed-out" when:
 
-1. `start()` exceeds `startupTimeoutMS`, AND
-2. The manager calls `onStartupAborted()` (if implemented) and treats the component as not running
+1. `start()` exceeds `startupTimeoutMS`
+2. The manager marks the component `starting-timed-out` and treats it as not running
 
 This state is for observability only. It behaves like `registered`: the component can be started again, unregistered normally, and will not be stopped during shutdown because it's not running. The state is cleared automatically on a successful start.
 
@@ -264,7 +264,9 @@ When a component `start()` exceeds its `startupTimeoutMS`, the manager:
 3. Calls `onStartupAborted()` if the component implements it
 
 If `onStartupAborted()` is not implemented, the timeout still applies and the
-state remains `starting-timed-out`, and there is simply no abort callback to run.
+state enters `starting-timed-out`. If that delayed `start()` later completes
+successfully, the manager automatically calls `stop()` to clean it up and then
+returns the state to `starting-timed-out` for observability.
 
 Any in-flight startup work may continue in the background, so components should
 either keep startup side effects idempotent or implement their own cancellation
@@ -466,7 +468,8 @@ interface LifecycleManagerOptions {
   shutdownOptions?: StopAllOptions; // Default stopAll options for shutdown hooks (defaults: timeoutMS=30000, retryStalled=true, haltOnStall=true)
   shutdownWarningTimeoutMS?: number; // Global warning phase timeout in ms (default: 500, 0 = fire-and-forget, <0 = skip)
   messageTimeoutMS?: number; // Default message timeout in ms (default: 5000, 0 = disabled)
-  attachSignalsOnStart?: boolean; // Auto-attach signals when first component starts (default: false)
+  attachSignalsBeforeStartup?: boolean; // Auto-attach signals before startAllComponents()/startComponent() begins work, even if startup later fails (default: false)
+  attachSignalsOnStart?: boolean; // Auto-attach signals when the first component successfully starts (default: false)
   detachSignalsOnStop?: boolean; // Auto-detach signals when last component stops (default: false)
   enableLoggerExitHook?: boolean; // Auto-enable logger exit hook integration (default: false)
 
@@ -1173,7 +1176,7 @@ interface GetValueOptions {
 
 #### `attachSignals()`
 
-Attach process signal handlers.
+Attach process signal handlers manually.
 
 ```typescript
 attachSignals(): void
@@ -1185,6 +1188,18 @@ attachSignals(): void
 - **SIGHUP, R key** - Trigger reload (calls `onReload()` on components or custom callback)
 - **SIGUSR1, I key** - Trigger info (custom callback or warning)
 - **SIGUSR2, D key** - Trigger debug (custom callback or warning)
+
+If `attachSignalsBeforeStartup` is enabled, handlers are auto-attached before
+`startAllComponents()` or `startComponent()` begins work, so the startup window
+is covered even if startup fails.
+
+If `attachSignalsOnStart` is enabled, handlers are auto-attached when the first
+component successfully starts.
+
+If `detachSignalsOnStop` is enabled, currently attached handlers are detached
+when the last running component stops, whether they were attached manually or
+automatically. If startup fails before anything is running, handlers attached
+via `attachSignalsBeforeStartup` are detached during startup cleanup.
 
 #### `detachSignals()`
 
@@ -2296,6 +2311,8 @@ When `start()` or `stop()` times out:
 - The manager calls `onStartupAborted()` or `onGracefulStopTimeout()` (if implemented)
 - The manager proceeds with next steps (rollback for startup, force phase for shutdown)
 - **Non-cooperative code continues running in the background** until completion or process exit
+- If `start()` times out and there is no `onStartupAborted()`, the manager will stop the component automatically if that delayed startup eventually completes
+- If shutdown begins while `start()` is still in flight, the manager waits for that startup attempt to settle and then stops the component automatically if it finishes starting
 
 How to avoid surprises:
 

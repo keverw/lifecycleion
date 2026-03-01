@@ -1,6 +1,6 @@
 {
   "name": "lifecycleion",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "type": "module",
   "description": "A collection of foundational TypeScript utilities for managing application lifecycle, logging, retries, events, and common programming patterns",
   "exports": {
