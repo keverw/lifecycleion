@@ -1751,6 +1751,42 @@ describe('LifecycleManager - Registration & Individual Lifecycle', () => {
   });
 
   describe('Abort Callbacks', () => {
+    test('start failure logs raw error object to sinks', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      class FailingStartComponent extends BaseComponent {
+        public start(): Promise<void> {
+          return Promise.reject(new Error('Start error'));
+        }
+
+        public stop(): Promise<void> {
+          return Promise.resolve();
+        }
+      }
+
+      const component = new FailingStartComponent(logger, {
+        name: 'test',
+        startupTimeoutMS: 50,
+      });
+
+      await lifecycle.registerComponent(component);
+      const result = await lifecycle.startComponent('test');
+
+      expect(result.success).toBe(false);
+
+      const errorLog = arraySink.logs.find(
+        (entry) =>
+          entry.type === 'error' &&
+          entry.entityName === 'test' &&
+          entry.message === 'Component failed to start',
+      );
+
+      expect(errorLog).toBeDefined();
+      expect(errorLog?.error).toBeUndefined();
+      expect(errorLog?.params?.error).toBeInstanceOf(Error);
+      expect((errorLog?.params?.error as Error).message).toBe('Start error');
+    });
+
     test('onStartupAborted should be called on startup timeout', async () => {
       const lifecycle = new LifecycleManager({ logger });
 
@@ -1779,6 +1815,20 @@ describe('LifecycleManager - Registration & Individual Lifecycle', () => {
       await lifecycle.startComponent('test');
 
       expect(component.abortCalled).toBe(true);
+
+      const errorLog = arraySink.logs.find(
+        (entry) =>
+          entry.type === 'error' &&
+          entry.entityName === 'test' &&
+          entry.message === 'Component startup timed out',
+      );
+
+      expect(errorLog).toBeDefined();
+      expect(errorLog?.error).toBeUndefined();
+      expect(errorLog?.params?.error).toBeInstanceOf(Error);
+      expect((errorLog?.params?.error as Error).message).toBe(
+        'Component "test" start timed out after 50ms',
+      );
     });
 
     test('onStartupAborted should NOT be called when start() fails (non-timeout)', async () => {

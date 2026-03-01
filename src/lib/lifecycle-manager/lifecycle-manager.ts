@@ -901,7 +901,7 @@ export class LifecycleManager
             : 'unknown_error';
 
         this.logger.error('Failed to resolve startup order', {
-          params: { error: err.message },
+          params: { error: err },
         });
 
         return {
@@ -1032,7 +1032,7 @@ export class LifecycleManager
             this.logger
               .entity(name)
               .warn('Optional component failed to start, continuing', {
-                params: { error: result.error?.message },
+                params: { error: result.error },
               });
 
             this.lifecycleEvents.componentStartFailedOptional(
@@ -1056,7 +1056,7 @@ export class LifecycleManager
             this.logger
               .entity(name)
               .error('Required component failed to start, rolling back', {
-                params: { error: result.error?.message },
+                params: { error: result.error },
               });
 
             await this.rollbackStartup(startedComponents);
@@ -1663,9 +1663,10 @@ export class LifecycleManager
       const durationMS = Date.now() - startTime;
       const err = error as Error;
 
-      this.logger
-        .entity(name)
-        .error('Health check failed', { params: { error: err.message } });
+      this.logger.entity(name).error('Health check failed', {
+        params: { error: err },
+      });
+
       this.lifecycleEvents.componentHealthCheckFailed(name, err);
 
       return {
@@ -1859,9 +1860,10 @@ export class LifecycleManager
         result = component.onMessage(payload, from);
       } catch (error) {
         const err = error instanceof Error ? error : new Error(String(error));
-        this.logger
-          .entity(componentName)
-          .error('Message handler failed', { params: { error: err, from } });
+        this.logger.entity(componentName).error('Message handler failed', {
+          params: { error: err, from },
+        });
+
         this.lifecycleEvents.componentMessageFailed(componentName, from, err, {
           timedOut: false,
           code: 'error',
@@ -2419,7 +2421,7 @@ export class LifecycleManager
           // a cycle (e.g., due to internal bugs or direct mutations), we must not
           // throw from an error handler. Return empty array to fail gracefully.
           this.logger.warn('Failed to compute startup order in error handler', {
-            params: { error: error instanceof Error ? error.message : error },
+            params: { error },
           });
 
           startupOrder = [];
@@ -2763,7 +2765,7 @@ export class LifecycleManager
       this.logger.warn(
         'Could not resolve shutdown order, using registration order',
         {
-          params: { error: (error as Error).message },
+          params: { error },
         },
       );
       shutdownOrder = this.components.map((c) => c.getName()).reverse();
@@ -2856,7 +2858,7 @@ export class LifecycleManager
             this.logger
               .entity(name)
               .error('Component failed to stop, continuing with others', {
-                params: { error: result.error?.message },
+                params: { error: result.error },
               });
 
             const stallInfo = this.stalledComponents.get(name);
@@ -3199,7 +3201,7 @@ export class LifecycleManager
       ) {
         this.componentStates.set(name, 'starting-timed-out'); // Timeout state (observability)
         this.logger.entity(name).error('Component startup timed out', {
-          params: { error: err.message },
+          params: { error: err },
         });
         this.lifecycleEvents.componentStartTimeout(name, err, {
           timeoutMS,
@@ -3208,7 +3210,7 @@ export class LifecycleManager
       } else {
         this.componentStates.set(name, 'registered'); // Reset state
         this.logger.entity(name).error('Component failed to start', {
-          params: { error: err.message },
+          params: { error: err },
         });
         this.lifecycleEvents.componentStartFailed(name, err, {
           reason: err.message,
@@ -3391,7 +3393,7 @@ export class LifecycleManager
           })
           .catch((error) => {
             this.logger.entity(name).warn('Shutdown warning phase failed', {
-              params: { error: (error as Error).message },
+              params: { error },
             });
           });
       }
@@ -3426,7 +3428,7 @@ export class LifecycleManager
           .catch((error) => {
             statuses.set(name, 'rejected');
             this.logger.entity(name).warn('Shutdown warning phase failed', {
-              params: { error: (error as Error).message },
+              params: { error },
             });
           }),
       );
@@ -3598,7 +3600,7 @@ export class LifecycleManager
       } else {
         // Error during graceful stop
         this.logger.entity(name).warn('Graceful shutdown threw error', {
-          params: { error: err.message },
+          params: { error: err },
         });
 
         return {
@@ -3798,7 +3800,7 @@ export class LifecycleManager
         this.lifecycleEvents.componentShutdownForceTimeout(name, timeoutMS);
       } else {
         this.logger.entity(name).error('Force shutdown failed - stalled', {
-          params: { error: err.message },
+          params: { error: err },
         });
       }
 
@@ -3905,7 +3907,7 @@ export class LifecycleManager
         this.logger
           .entity(name)
           .warn('Failed to stop component during rollback, continuing', {
-            params: { error: result.error?.message },
+            params: { error: result.error },
           });
       }
     }
@@ -3946,7 +3948,7 @@ export class LifecycleManager
       // a cycle (e.g., due to internal bugs or direct mutations), we must not
       // throw from an error handler. Return empty array to fail gracefully.
       this.logger.warn('Failed to compute startup order in error handler', {
-        params: { error: error instanceof Error ? error.message : error },
+        params: { error },
       });
 
       startupOrder = [];
@@ -3985,7 +3987,7 @@ export class LifecycleManager
       // a cycle (e.g., due to internal bugs or direct mutations), we must not
       // throw from an error handler. Return empty array to fail gracefully.
       this.logger.warn('Failed to compute startup order in error handler', {
-        params: { error: error instanceof Error ? error.message : error },
+        params: { error },
       });
       startupOrder = [];
     }
