@@ -1378,7 +1378,9 @@ logger.exit(0);
 - This method is idempotent (can be called multiple times safely)
 - Overwrites any existing `beforeExit` callback on the logger
 - If you need custom exit logic, set it up manually with `logger.setBeforeExitCallback()`
-- The `beforeExit` callback installed by `enableLoggerExitHook()` can return `{ action: 'wait' }` to prevent exit when a shutdown is already in progress. In that case, the initial `logger.exit()` will not proceed, and exit is expected to be completed by the in-flight shutdown logic.
+- If `logger.exit()` is called while shutdown is already in progress, that exit call returns `{ action: 'wait' }` instead of exiting immediately.
+- The first such `logger.exit()` call is kept pending and allowed to proceed after the in-flight shutdown finishes.
+- Later duplicate `logger.exit()` calls during the same shutdown also return `{ action: 'wait' }`, but are otherwise ignored so they cannot override the pending exit code or exit early.
 
 #### Logger Requirements
 

@@ -1,6 +1,6 @@
 import { EventEmitterProtected } from '../event-emitter';
 import { ulid } from 'ulid';
-import type { Logger } from '../logger';
+import type { BeforeExitResult, Logger } from '../logger';
 import type { LoggerService } from '../logger/logger-service';
 import type { BaseComponent } from './base-component';
 import { ComponentLifecycle } from './component-lifecycle';
@@ -111,6 +111,10 @@ export class LifecycleManager
   private isShuttingDown = false;
   // Unique token used to detect shutdowns that happened during async start().
   private shutdownToken = ulid();
+  // Resolver for the first logger.exit() deferred during an already-running shutdown.
+  private pendingLoggerExitResolve:
+    | ((result: BeforeExitResult) => void)
+    | null = null;
   private shutdownMethod: ShutdownMethod | null = null;
   private lastShutdownResult: ShutdownResult | null = null;
 
@@ -303,6 +307,7 @@ export class LifecycleManager
         .warn(
           'Cannot unregister running component. Call stopComponent() first or pass { stopIfRunning: true }',
         );
+
       return {
         success: false,
         componentName: name,
@@ -1481,8 +1486,23 @@ export class LifecycleManager
   public enableLoggerExitHook(): void {
     this.rootLogger.setBeforeExitCallback(
       async (exitCode: number, isFirstExit: boolean) => {
-        // If shutdown is already in progress, tell logger to wait
+        // Defer the first logger.exit() that arrives during an already-running
+        // shutdown. Later duplicate exit calls stay ignored so they cannot
+        // override the eventual exit code after shutdown completes.
         if (this.isShuttingDown) {
+          if (isFirstExit && this.pendingLoggerExitResolve === null) {
+            this.logger.debug(
+              'Logger exit called during shutdown, waiting...',
+              {
+                params: { exitCode },
+              },
+            );
+
+            return await new Promise<BeforeExitResult>((resolve) => {
+              this.pendingLoggerExitResolve = resolve;
+            });
+          }
+
           this.logger.debug('Logger exit called during shutdown, waiting...', {
             params: { exitCode },
           });
@@ -2963,7 +2983,22 @@ export class LifecycleManager
       // Reset state
       this.isShuttingDown = false;
       this.updateStartedFlag();
+
+      this.finalizePendingLoggerExit();
     }
+  }
+
+  /**
+   * Release a deferred logger.exit() request after shutdown fully settles.
+   */
+  private finalizePendingLoggerExit(): void {
+    if (this.pendingLoggerExitResolve === null || this.isShuttingDown) {
+      return;
+    }
+
+    const resolve = this.pendingLoggerExitResolve;
+    this.pendingLoggerExitResolve = null;
+    resolve({ action: 'proceed' });
   }
 
   /**

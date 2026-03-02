@@ -652,6 +652,12 @@ logger.error('Fatal error', { exitCode: 1 });
 // Automatically calls lifecycle.stopAllComponents() before exit
 ```
 
+If `logger.exit()` is called while LifecycleManager shutdown is already in
+progress, that exit call returns `{ action: 'wait' }` instead of exiting immediately. The
+first such exit request stays pending and proceeds after shutdown finishes.
+Later duplicate exit calls during that same shutdown also return `{ action: 'wait' }`, but
+are otherwise ignored.
+
 **Manual Integration:** For custom exit logic or when not using LifecycleManager, use `setBeforeExitCallback()` directly:
 
 ```typescript
@@ -677,7 +683,10 @@ logger.setBeforeExitCallback(undefined);
 
 This approach avoids constructor ordering issues and allows components to reference each other without creating circular dependency problems.
 
-**Note:** This method overwrites any existing `beforeExitCallback` (including one set in the Logger constructor).
+**Notes:**
+
+- `isFirstExit` means the first exit request observed by the logger, not necessarily the first exit that has fully completed.
+- This method overwrites any existing `beforeExitCallback` (including one set in the Logger constructor).
 
 ## Built-in Sinks
 

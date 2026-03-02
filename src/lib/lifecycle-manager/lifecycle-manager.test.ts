@@ -5641,6 +5641,32 @@ describe('LifecycleManager - Signal Integration', () => {
       // Components should have been stopped
       expect(lifecycle.getRunningComponentCount()).toBe(0);
     });
+
+    test('should finish the first deferred logger exit after manual shutdown completes', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      await lifecycle.registerComponent(
+        new SlowStopComponent(logger, 'slow', 50),
+      );
+      await lifecycle.startAllComponents();
+
+      lifecycle.enableLoggerExitHook();
+
+      const stopPromise = lifecycle.stopAllComponents();
+
+      await sleep(5);
+
+      logger.exit(7);
+      logger.exit(8);
+
+      await stopPromise;
+      await sleep(5);
+
+      expect(lifecycle.getRunningComponentCount()).toBe(0);
+      expect(logger.didExit).toBe(true);
+      expect(logger.exitCode).toBe(7);
+      expect(logger.isPendingExit).toBe(false);
+    });
   });
 
   describe('stopAllComponents() with timeout parameter', () => {
