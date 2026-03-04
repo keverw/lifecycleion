@@ -300,7 +300,7 @@ logger.success('Payment of ${{amount}} processed for order {{orderId}}', {
 
 #### Nested Object Support
 
-Templates support nested object properties using dot notation and array indexes:
+Templates support nested object properties using dot notation, array indexes, and quoted bracket keys:
 
 ```typescript
 logger.info('User {{user.name}} (ID: {{user.id}}) from {{session.ip}}', {
@@ -327,6 +327,19 @@ logger.info('Primary user {{users[0].name}} from {{sessions[0].ips[1]}}', {
   },
 });
 // Output: "Primary user Alice from 10.0.0.2"
+```
+
+```typescript
+logger.info(
+  'User {{user["display-name"]}} with public ID {{metadata["public-id"]}}',
+  {
+    params: {
+      user: { 'display-name': 'Alice' },
+      metadata: { 'public-id': 'USR-12345' },
+    },
+  },
+);
+// Output: "User Alice with public ID USR-12345"
 ```
 
 ### Redaction of Sensitive Data
@@ -360,7 +373,7 @@ logger.warn('API call with key {{apiKey}}', {
 
 #### Nested Object Redaction
 
-Redaction supports nested object properties and array indexes, just like templates:
+Redaction supports nested object properties, array indexes, and quoted bracket keys, just like templates:
 
 ```typescript
 logger.info('User login attempt', {
@@ -402,7 +415,23 @@ logger.info('User login attempt', {
 });
 ```
 
-**Note:** Redaction paths are exact matches. Array indexes like `users[0].password` are supported, but wildcard selectors such as `users[*].password` are not.
+For simple identifier-style keys, dot notation and quoted bracket notation are equivalent. For example, `user.password` and `user["password"]` resolve to the same field.
+
+```typescript
+logger.info('User login attempt', {
+  params: {
+    users: [
+      {
+        'display-name': 'alice',
+        'password-hash': 'secret123', // Will be masked
+      },
+    ],
+  },
+  redactedKeys: ['users[0]["password-hash"]'],
+});
+```
+
+**Note:** Redaction paths are exact matches. Dot notation, array indexes, and quoted bracket keys like `users[0]["password-hash"]` are supported, but wildcard selectors such as `users[*].password` are not.
 
 #### Custom Redaction Function
 

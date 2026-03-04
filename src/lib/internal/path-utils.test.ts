@@ -24,12 +24,32 @@ describe('getPathParts', () => {
     ]);
   });
 
-  test('should ignore unsupported characters instead of throwing', () => {
-    expect(getPathParts('users[0].profile-name')).toEqual([
+  test('should parse quoted bracket keys', () => {
+    expect(getPathParts('user["display-name"]')).toEqual([
+      'user',
+      'display-name',
+    ]);
+
+    expect(getPathParts("settings['api-key']")).toEqual([
+      'settings',
+      'api-key',
+    ]);
+
+    expect(getPathParts('users[0]["display-name"]')).toEqual([
       'users',
       '0',
-      'profile',
-      'name',
+      'display-name',
     ]);
+  });
+
+  test('should parse root-level quoted bracket keys', () => {
+    expect(getPathParts('["api-key"]')).toEqual(['api-key']);
+    expect(getPathParts("['display name']")).toEqual(['display name']);
+  });
+
+  test('should reject unsupported path syntax', () => {
+    expect(getPathParts('users[0].profile-name')).toBeNull();
+    expect(getPathParts('users[*].password')).toBeNull();
+    expect(getPathParts('user.')).toBeNull();
   });
 });

@@ -7,6 +7,7 @@
 - [0.0.3 (Feb 28, 2026)](#003-feb-28-2026)
 - [0.0.4 (Mar 2, 2026)](#004-mar-2-2026)
 - [0.0.5 (Mar 3, 2026)](#005-mar-3-2026)
+- [0.0.6 (Mar 3, 2026)](#006-mar-3-2026)
 
 <!-- tocstop -->
 
@@ -33,3 +34,9 @@
 - CurlyBrackets now supports array index paths such as `{{users[0].name}}`, `{{matrix[0][2]}}`, and mixed object-array traversal with existing fallback behavior preserved
 - Logger redaction now supports the same mixed object-array paths in `redactedKeys`, including paths like `users[0].password`
 - CurlyBrackets and logger docs/tests now explicitly cover nested path fallback behavior, primitive intermediate values, falsey terminal values, and `Error` interpolation behavior
+
+## 0.0.6 (Mar 3, 2026)
+
+- CurlyBrackets now supports quoted bracket keys such as `{{user["display-name"]}}` and mixed paths like `{{users[0]["display-name"]}}`
+- Logger redaction now supports matching quoted bracket-key paths such as `users[0]["password-hash"]` in `redactedKeys`
+- Shared internal path parsing now rejects unsupported syntax cleanly instead of partially tokenizing invalid paths

@@ -2593,6 +2593,8 @@ describe('LifecycleManager - Bulk Operations', () => {
         public started = false;
         public stopCalled = false;
 
+        private readonly delayMS: number;
+
         constructor(componentLogger: Logger, name: string, delayMS: number) {
           super(componentLogger, {
             name,
@@ -2600,8 +2602,6 @@ describe('LifecycleManager - Bulk Operations', () => {
           });
           this.delayMS = delayMS;
         }
-
-        private readonly delayMS: number;
 
         public async start(): Promise<void> {
           await sleep(this.delayMS);
@@ -2636,7 +2636,9 @@ describe('LifecycleManager - Bulk Operations', () => {
       expect(lifecycle.isComponentRunning('slow')).toBe(false);
       expect(slow.stopCalled).toBe(true);
       expect(slow.started).toBe(false);
-      expect(lifecycle.getComponentStatus('slow').state).toBe('stopped');
+      const slowStatus = lifecycle.getComponentStatus('slow');
+      expect(slowStatus).toBeDefined();
+      expect(slowStatus?.state).toBe('stopped');
     });
 
     test('should block startup if stalled components exist', async () => {

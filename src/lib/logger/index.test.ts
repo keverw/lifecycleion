@@ -143,6 +143,22 @@ describe('Logger', () => {
       );
     });
 
+    test('should support quoted bracket keys in template params', () => {
+      logger.info(
+        'User {{user["display-name"]}} with public ID {{metadata["public-id"]}}',
+        {
+          params: {
+            user: { 'display-name': 'Alice' },
+            metadata: { 'public-id': 'USR-12345' },
+          },
+        },
+      );
+
+      expect(arraySink.logs[0].message).toBe(
+        'User Alice with public ID USR-12345',
+      );
+    });
+
     test('should stringify Error params in templates and support Error properties', () => {
       const error = new Error('Task failed');
 
@@ -265,6 +281,27 @@ describe('Logger', () => {
       expect(redacted.users[0].name).toBe('Alice');
       expect(redacted.users[0].password).not.toBe('secret123');
       expect(redacted.users[0].password).toBe('se*****23');
+    });
+
+    test('should redact quoted bracket-key paths', () => {
+      logger.info('User {{users[0]["display-name"]}} authenticated', {
+        params: {
+          users: [
+            {
+              'display-name': 'Alice',
+              'password-hash': 'secret123',
+            },
+          ],
+        },
+        redactedKeys: ['users[0]["password-hash"]'],
+      });
+
+      const log = arraySink.logs[0];
+      const redacted = log.redactedParams as any;
+
+      expect(log.message).toBe('User Alice authenticated');
+      expect(redacted.users[0]['display-name']).toBe('Alice');
+      expect(redacted.users[0]['password-hash']).toBe('se*****23');
     });
 
     test('should handle deeply nested redaction', () => {

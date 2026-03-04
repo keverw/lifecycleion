@@ -8,8 +8,7 @@ interface CurlyBracketsFunction {
   escape: (str: string) => string;
 }
 
-const PLACEHOLDER_PATTERN =
-  /(?:\\)?{{(\s*\w+(?:\[\d+\])*(?:\.\w+(?:\[\d+\])*)*\s*)(?:\\)?\s*}}/g;
+const PLACEHOLDER_PATTERN = /(?:\\)?{{(\s*[^{}]+?\s*)(?:\\)?\s*}}/g;
 
 /**
  * Processes a template string, replacing placeholders with corresponding values from a provided object.
@@ -73,6 +72,10 @@ CurlyBrackets.compileTemplate = function (
 
       const key = p1.trim();
       const parts = getPathParts(key);
+
+      if (!parts || parts.length === 0) {
+        return match;
+      }
 
       // Use a more specific approach to ensure the type is consistent
       let replacement: unknown = locals;

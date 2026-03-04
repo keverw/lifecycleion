@@ -19,7 +19,7 @@
 
 - **Performance Optimized**: Automatically short-circuits when no placeholders are detected, avoiding unnecessary processing for plain strings.
 - **Fallback Support**: Specify a fallback string to use whenever a placeholder's corresponding value is not found, instead of the default `undefined`.
-- **Nested Path Support**: Resolve nested object properties with paths like `{{user.name}}` and array indexes like `{{users[0].name}}`.
+- **Nested Path Support**: Resolve nested object properties with paths like `{{user.name}}`, array indexes like `{{users[0].name}}`, and quoted bracket keys like `{{user["display-name"]}}`.
 - **Escaped Brackets**: Safely include literal `{{` and `}}` in your templates without them being replaced, by escaping them with a backslash (`\`).
 - **Efficient Template Reuse**: With `compileTemplate`, compile your template once and reuse it with different sets of data, improving performance for repeated template processing.
 - **TypeScript Support**: Fully supports TypeScript for type-safe templating.
@@ -76,7 +76,7 @@ const zeroValue = CurlyBrackets(
 console.log(zeroValue); // Outputs: "0"
 ```
 
-Array indexes can be mixed into the same path:
+Dot notation, array indexes, and quoted bracket keys can be mixed into the same path:
 
 ```typescript
 const userName = CurlyBrackets(
@@ -97,10 +97,22 @@ const matrixValue = CurlyBrackets(
   },
   '(???)',
 );
+
 console.log(matrixValue); // Outputs: "3"
+
+const displayName = CurlyBrackets(
+  '{{users[0]["display-name"]}} - {{["public-id"]}}',
+  {
+    users: [{ 'display-name': 'Alice' }],
+    'public-id': 'USR-12345',
+  },
+  '(???)',
+);
+
+console.log(displayName); // Outputs: "Alice - USR-12345"
 ```
 
-More precisely, the fallback is used when any intermediate segment cannot be traversed, or when the final resolved value is `null` or `undefined`. Final values like `false`, `0`, and `''` are rendered normally.
+More precisely, the fallback is used when any intermediate segment cannot be traversed, or when the final resolved value is `null` or `undefined`. Final values like `false`, `0`, and `''` are rendered normally. Supported path syntax is dot notation, numeric indexes, and quoted bracket keys. Wildcards are not supported.
 
 ### Escaping Brackets
 

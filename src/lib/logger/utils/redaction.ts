@@ -27,6 +27,11 @@ function setNestedValue(
   value: unknown,
 ): void {
   const parts = getPathParts(path);
+
+  if (!parts || parts.length === 0) {
+    return;
+  }
+
   let current: unknown = obj;
 
   for (let i = 0; i < parts.length - 1; i++) {
@@ -67,6 +72,11 @@ function setNestedValue(
  */
 function getNestedValue(obj: Record<string, unknown>, path: string): unknown {
   const parts = getPathParts(path);
+
+  if (!parts || parts.length === 0) {
+    return undefined;
+  }
+
   let current: unknown = obj;
 
   for (const part of parts) {
@@ -86,10 +96,11 @@ function getNestedValue(obj: Record<string, unknown>, path: string): unknown {
 
 /**
  * Apply redaction to params based on redacted keys
- * Supports top-level keys and mixed object/array paths (e.g., 'user.password' or 'users[0].password')
+ * Supports top-level keys and mixed object/array paths
+ * (e.g., 'user.password', 'users[0].password', or 'users[0]["password-hash"]')
  *
  * @param params Original params object
- * @param redactedKeys Keys to redact (supports nested object paths and array indexes)
+ * @param redactedKeys Keys to redact (supports nested object paths, array indexes, and quoted bracket keys)
  * @param redactFunction Custom redaction function (uses defaultRedactFunction if not provided)
  * @returns New object with redacted values
  */
@@ -108,7 +119,7 @@ export function applyRedaction(
   // Deep clone to avoid mutating original
   const redactedParams = deepClone(params);
 
-  // Apply redaction to specified keys (supports nested object paths and array indexes)
+  // Apply redaction to specified keys (supports nested object paths, array indexes, and quoted bracket keys)
   for (const key of redactedKeys) {
     // Check if it's a nested key or array path
     if (key.includes('.') || key.includes('[')) {

@@ -182,6 +182,26 @@ describe('CurlyBrackets', () => {
     ).toEqual('Alice - ops - 3');
   });
 
+  it('should support quoted bracket keys in paths', () => {
+    expect(
+      CurlyBrackets(
+        '{{user["display-name"]}} - {{users[0]["display-name"]}} - {{["public-id"]}}',
+        {
+          user: {
+            'display-name': 'Alice',
+          },
+          users: [
+            {
+              'display-name': 'Bob',
+            },
+          ],
+          'public-id': 'USR-12345',
+        },
+        '(???)',
+      ),
+    ).toEqual('Alice - Bob - USR-12345');
+  });
+
   it('should use the fallback when an indexed path is missing or hits a primitive early', () => {
     expect(
       CurlyBrackets(
@@ -224,6 +244,24 @@ describe('CurlyBrackets', () => {
     expect(CurlyBrackets('{{labels[0]}}', { labels: [''] }, '(???)')).toEqual(
       '',
     );
+  });
+
+  it('should leave unsupported placeholder path syntax unchanged', () => {
+    expect(
+      CurlyBrackets(
+        '{{user.display-name}}',
+        { user: { 'display-name': 'Alice' } },
+        '(???)',
+      ),
+    ).toEqual('{{user.display-name}}');
+
+    expect(
+      CurlyBrackets(
+        '{{users[*].name}}',
+        { users: [{ name: 'Alice' }] },
+        '(???)',
+      ),
+    ).toEqual('{{users[*].name}}');
   });
 
   it('should stringify Error values and allow access to Error properties', () => {

@@ -183,6 +183,42 @@ describe('applyRedaction', () => {
     expect((redacted.sessions as any)[0].tokens[1]).toBe('se*******ken');
   });
 
+  test('should redact quoted bracket-key paths', () => {
+    const params = {
+      users: [
+        {
+          'password-hash': 'secret123',
+        },
+      ],
+      credentials: {
+        'api-key': 'secret-token',
+      },
+    };
+
+    const redacted = applyRedaction(params, [
+      'users[0]["password-hash"]',
+      'credentials["api-key"]',
+    ]);
+
+    expect((redacted.users as any)[0]['password-hash']).toBe('se*****23');
+    expect((redacted.credentials as any)['api-key']).toBe('se*******ken');
+  });
+
+  test('should treat dot notation and quoted bracket notation as equivalent for the same key', () => {
+    const params = {
+      user: {
+        password: 'secret123',
+      },
+    };
+
+    const dotRedacted = applyRedaction(params, ['user.password']);
+    const bracketRedacted = applyRedaction(params, ['user["password"]']);
+
+    expect((dotRedacted.user as any).password).toBe('se*****23');
+    expect((bracketRedacted.user as any).password).toBe('se*****23');
+    expect(dotRedacted).toEqual(bracketRedacted);
+  });
+
   test('should handle both top-level and nested redaction', () => {
     const params = {
       password: 'top-secret',

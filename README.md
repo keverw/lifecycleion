@@ -1,4 +1,4 @@
-# Lifecycleion v0.0.5
+# Lifecycleion v0.0.6
 
 [![npm version](https://badge.fury.io/js/lifecycleion.svg)](https://badge.fury.io/js/lifecycleion)
 
