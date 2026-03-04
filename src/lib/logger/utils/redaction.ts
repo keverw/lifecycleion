@@ -1,5 +1,6 @@
 import datamask from 'datamask';
 import { deepClone } from '../../deep-clone';
+import { getPathParts } from '../../internal/path-utils';
 import type { RedactFunction } from '../types';
 
 /**
@@ -25,23 +26,39 @@ function setNestedValue(
   path: string,
   value: unknown,
 ): void {
-  const parts = path.split('.');
-  let current: Record<string, unknown> = obj;
+  const parts = getPathParts(path);
+  let current: unknown = obj;
 
   for (let i = 0; i < parts.length - 1; i++) {
     const part = parts[i];
-    const next = current[part];
+    if (
+      current === undefined ||
+      current === null ||
+      typeof current !== 'object' ||
+      !(part in current)
+    ) {
+      return; // Path doesn't exist, can't set value
+    }
+
+    const next = (current as Record<string, unknown>)[part];
 
     if (next === undefined || next === null || typeof next !== 'object') {
       return; // Path doesn't exist, can't set value
     }
 
-    current = next as Record<string, unknown>;
+    current = next;
   }
 
   const lastPart = parts[parts.length - 1];
-  if (lastPart !== undefined && lastPart in current) {
-    current[lastPart] = value;
+
+  if (
+    lastPart !== undefined &&
+    current !== undefined &&
+    current !== null &&
+    typeof current === 'object' &&
+    lastPart in current
+  ) {
+    (current as Record<string, unknown>)[lastPart] = value;
   }
 }
 
@@ -49,7 +66,7 @@ function setNestedValue(
  * Get a value at a nested path in an object
  */
 function getNestedValue(obj: Record<string, unknown>, path: string): unknown {
-  const parts = path.split('.');
+  const parts = getPathParts(path);
   let current: unknown = obj;
 
   for (const part of parts) {
@@ -69,10 +86,10 @@ function getNestedValue(obj: Record<string, unknown>, path: string): unknown {
 
 /**
  * Apply redaction to params based on redacted keys
- * Supports both top-level keys and nested paths using dot notation (e.g., 'user.password')
+ * Supports top-level keys and mixed object/array paths (e.g., 'user.password' or 'users[0].password')
  *
  * @param params Original params object
- * @param redactedKeys Keys to redact (supports dot notation for nested keys)
+ * @param redactedKeys Keys to redact (supports nested object paths and array indexes)
  * @param redactFunction Custom redaction function (uses defaultRedactFunction if not provided)
  * @returns New object with redacted values
  */
@@ -91,10 +108,10 @@ export function applyRedaction(
   // Deep clone to avoid mutating original
   const redactedParams = deepClone(params);
 
-  // Apply redaction to specified keys (supports dot notation)
+  // Apply redaction to specified keys (supports nested object paths and array indexes)
   for (const key of redactedKeys) {
-    // Check if it's a nested key (contains dots)
-    if (key.includes('.')) {
+    // Check if it's a nested key or array path
+    if (key.includes('.') || key.includes('[')) {
       const value = getNestedValue(redactedParams, key);
 
       if (value !== undefined) {

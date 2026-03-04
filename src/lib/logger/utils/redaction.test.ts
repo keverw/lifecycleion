@@ -145,6 +145,44 @@ describe('applyRedaction', () => {
     );
   });
 
+  test('should redact array index paths', () => {
+    const params = {
+      users: [
+        {
+          name: 'Alice',
+          password: 'secret123',
+        },
+        {
+          name: 'Bob',
+          password: 'secret456',
+        },
+      ],
+    };
+
+    const redacted = applyRedaction(params, ['users[0].password']);
+
+    expect((redacted.users as any)[0].name).toBe('Alice');
+    expect((redacted.users as any)[0].password).not.toBe('secret123');
+    expect((redacted.users as any)[0].password).toBe('se*****23');
+    expect((redacted.users as any)[1].password).toBe('secret456');
+  });
+
+  test('should redact deeper mixed object and array paths', () => {
+    const params = {
+      sessions: [
+        {
+          tokens: ['public-token', 'secret-token'],
+        },
+      ],
+    };
+
+    const redacted = applyRedaction(params, ['sessions[0].tokens[1]']);
+
+    expect((redacted.sessions as any)[0].tokens[0]).toBe('public-token');
+    expect((redacted.sessions as any)[0].tokens[1]).not.toBe('secret-token');
+    expect((redacted.sessions as any)[0].tokens[1]).toBe('se*******ken');
+  });
+
   test('should handle both top-level and nested redaction', () => {
     const params = {
       password: 'top-secret',
@@ -196,6 +234,17 @@ describe('applyRedaction', () => {
 
     expect(redacted.user).toBe('not-an-object');
     expect((redacted.data as any).value).toBe(123);
+  });
+
+  test('should not fail on non-existent array index paths', () => {
+    const params = {
+      users: [{ name: 'Charlie' }],
+    };
+
+    const redacted = applyRedaction(params, ['users[1].password']);
+
+    expect((redacted.users as any)[0].name).toBe('Charlie');
+    expect(redacted).toBeDefined();
   });
 
   test('should deep clone nested objects to avoid mutation', () => {

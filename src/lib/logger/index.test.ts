@@ -126,6 +126,34 @@ describe('Logger', () => {
         },
       });
     });
+
+    test('should support array index access in template params', () => {
+      logger.info(
+        'Primary user {{users[0].name}} from {{sessions[0].ips[1]}}',
+        {
+          params: {
+            users: [{ name: 'Alice' }],
+            sessions: [{ ips: ['10.0.0.1', '10.0.0.2'] }],
+          },
+        },
+      );
+
+      expect(arraySink.logs[0].message).toBe(
+        'Primary user Alice from 10.0.0.2',
+      );
+    });
+
+    test('should stringify Error params in templates and support Error properties', () => {
+      const error = new Error('Task failed');
+
+      logger.error('Failure {{error}} / {{error.message}}', {
+        params: { error },
+      });
+
+      expect(arraySink.logs[0].message).toBe(
+        'Failure Error: Task failed / Task failed',
+      );
+    });
   });
 
   describe('Redaction', () => {
@@ -142,6 +170,24 @@ describe('Logger', () => {
       expect(log.params?.password).toBe('secret123'); // Original param
       expect(log.redactedParams?.password).not.toBe('secret123'); // Redacted
       expect(log.redactedParams?.username).toBe('john'); // Not redacted
+    });
+
+    test('should keep templated sensitive values in the message while masking redacted params', () => {
+      logger.info('Login attempt for {{username}} with {{password}}', {
+        params: {
+          username: 'john',
+          password: 'secret123',
+        },
+        redactedKeys: ['password'],
+      });
+
+      const log = arraySink.logs[0];
+
+      expect(log.message).toBe('Login attempt for john with secret123');
+      expect(log.params?.password).toBe('secret123');
+      expect(log.redactedParams?.password).not.toBe('secret123');
+      expect(log.redactedParams?.password).toBe('se*****23');
+      expect(log.redactedParams?.username).toBe('john');
     });
 
     test('should use custom redaction function', () => {
@@ -197,6 +243,28 @@ describe('Logger', () => {
       expect(redacted.user.password).not.toBe('secret123'); // Redacted
       expect(redacted.credentials.username).toBe('alice');
       expect(redacted.credentials.apiKey).not.toBe('sk_12345'); // Redacted
+    });
+
+    test('should redact array index paths', () => {
+      logger.info('User {{users[0].name}} authenticated', {
+        params: {
+          users: [
+            {
+              name: 'Alice',
+              password: 'secret123',
+            },
+          ],
+        },
+        redactedKeys: ['users[0].password'],
+      });
+
+      const log = arraySink.logs[0];
+      const redacted = log.redactedParams as any;
+
+      expect(log.message).toBe('User Alice authenticated');
+      expect(redacted.users[0].name).toBe('Alice');
+      expect(redacted.users[0].password).not.toBe('secret123');
+      expect(redacted.users[0].password).toBe('se*****23');
     });
 
     test('should handle deeply nested redaction', () => {

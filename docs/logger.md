@@ -300,7 +300,7 @@ logger.success('Payment of ${{amount}} processed for order {{orderId}}', {
 
 #### Nested Object Support
 
-Templates support nested object properties using dot notation:
+Templates support nested object properties using dot notation and array indexes:
 
 ```typescript
 logger.info('User {{user.name}} (ID: {{user.id}}) from {{session.ip}}', {
@@ -319,7 +319,15 @@ logger.info('User {{user.name}} (ID: {{user.id}}) from {{session.ip}}', {
 // Output: "User Alice (ID: 123) from 192.168.1.1"
 ```
 
-**Note:** Array indexing (e.g., `{{users[0].name}}`) is not supported. Only object property paths using dot notation are supported.
+```typescript
+logger.info('Primary user {{users[0].name}} from {{sessions[0].ips[1]}}', {
+  params: {
+    users: [{ name: 'Alice' }],
+    sessions: [{ ips: ['10.0.0.1', '10.0.0.2'] }],
+  },
+});
+// Output: "Primary user Alice from 10.0.0.2"
+```
 
 ### Redaction of Sensitive Data
 
@@ -352,7 +360,7 @@ logger.warn('API call with key {{apiKey}}', {
 
 #### Nested Object Redaction
 
-Redaction supports nested object properties using dot notation, just like templates:
+Redaction supports nested object properties and array indexes, just like templates:
 
 ```typescript
 logger.info('User login attempt', {
@@ -380,7 +388,21 @@ logger.info('User login attempt', {
 // personalInfo.ssn → '***********'
 ```
 
-**Note:** Array indexing (e.g., `users[0].password`) is not supported. Only object property paths using dot notation are supported.
+```typescript
+logger.info('User login attempt', {
+  params: {
+    users: [
+      {
+        username: 'alice',
+        password: 'secret123', // Will be masked
+      },
+    ],
+  },
+  redactedKeys: ['users[0].password'],
+});
+```
+
+**Note:** Redaction paths are exact matches. Array indexes like `users[0].password` are supported, but wildcard selectors such as `users[*].password` are not.
 
 #### Custom Redaction Function
 

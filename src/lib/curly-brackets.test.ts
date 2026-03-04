@@ -132,6 +132,129 @@ describe('CurlyBrackets', () => {
     ).toEqual('Steve (???) was a founder of Apple Inc.');
   });
 
+  it('should use the fallback when a dot path parent is missing or a primitive', () => {
+    expect(CurlyBrackets('{{foo.bar}}', {}, '(???)')).toEqual('(???)');
+    expect(CurlyBrackets('{{foo.bar}}', { foo: undefined }, '(???)')).toEqual(
+      '(???)',
+    );
+
+    expect(CurlyBrackets('{{foo.bar}}', { foo: true }, '(???)')).toEqual(
+      '(???)',
+    );
+
+    expect(CurlyBrackets('{{foo.bar}}', { foo: 123 }, '(???)')).toEqual(
+      '(???)',
+    );
+  });
+
+  it('should not treat falsey nested values as missing', () => {
+    expect(
+      CurlyBrackets('{{foo.bar}}', { foo: { bar: false } }, '(???)'),
+    ).toEqual('false');
+
+    expect(CurlyBrackets('{{foo.bar}}', { foo: { bar: 0 } }, '(???)')).toEqual(
+      '0',
+    );
+
+    expect(CurlyBrackets('{{foo.bar}}', { foo: { bar: '' } }, '(???)')).toEqual(
+      '',
+    );
+  });
+
+  it('should support array index access in paths', () => {
+    expect(
+      CurlyBrackets(
+        '{{users[0].name}} - {{users[0].roles[1]}} - {{matrix[0][2]}}',
+        {
+          users: [
+            {
+              name: 'Alice',
+              roles: ['admin', 'ops'],
+            },
+          ],
+          matrix: [
+            [1, 2, 3],
+            [4, 5, 6],
+          ],
+        },
+        '(???)',
+      ),
+    ).toEqual('Alice - ops - 3');
+  });
+
+  it('should use the fallback when an indexed path is missing or hits a primitive early', () => {
+    expect(
+      CurlyBrackets(
+        '{{users[1].name}}',
+        { users: [{ name: 'Alice' }] },
+        '(???)',
+      ),
+    ).toEqual('(???)');
+
+    expect(
+      CurlyBrackets(
+        '{{users[0].active.value}}',
+        {
+          users: [{ active: true }],
+        },
+        '(???)',
+      ),
+    ).toEqual('(???)');
+
+    expect(
+      CurlyBrackets(
+        '{{matrix[0][3]}}',
+        {
+          matrix: [[1, 2, 3]],
+        },
+        '(???)',
+      ),
+    ).toEqual('(???)');
+  });
+
+  it('should not treat falsey indexed values as missing', () => {
+    expect(CurlyBrackets('{{flags[0]}}', { flags: [false] }, '(???)')).toEqual(
+      'false',
+    );
+
+    expect(CurlyBrackets('{{counts[0]}}', { counts: [0] }, '(???)')).toEqual(
+      '0',
+    );
+
+    expect(CurlyBrackets('{{labels[0]}}', { labels: [''] }, '(???)')).toEqual(
+      '',
+    );
+  });
+
+  it('should stringify Error values and allow access to Error properties', () => {
+    const error = new Error('boom');
+
+    expect(CurlyBrackets('{{error}}', { error }, '(???)')).toEqual(
+      'Error: boom',
+    );
+
+    expect(CurlyBrackets('{{error.message}}', { error }, '(???)')).toEqual(
+      'boom',
+    );
+
+    expect(CurlyBrackets('{{error.name}}', { error }, '(???)')).toEqual(
+      'Error',
+    );
+  });
+
+  it('should stringify full arrays and objects using default JavaScript coercion', () => {
+    expect(
+      CurlyBrackets('{{users}}', { users: ['Alice', 'Bob'] }, '(???)'),
+    ).toEqual('Alice,Bob');
+    expect(CurlyBrackets('{{counts}}', { counts: [1, 2, 3] }, '(???)')).toEqual(
+      '1,2,3',
+    );
+
+    expect(
+      CurlyBrackets('{{user}}', { user: { name: 'Alice', age: 42 } }, '(???)'),
+    ).toEqual('[object Object]');
+  });
+
   test('compileTemplate and escaped brackets', () => {
     // Usage example:
     // Compile the template once

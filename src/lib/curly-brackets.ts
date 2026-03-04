@@ -1,3 +1,5 @@
+import { getPathParts } from './internal/path-utils';
+
 export type TemplateFunction = (locals: Record<string, unknown>) => string;
 
 interface CurlyBracketsFunction {
@@ -5,6 +7,9 @@ interface CurlyBracketsFunction {
   compileTemplate: (str: string, fallback?: string) => TemplateFunction;
   escape: (str: string) => string;
 }
+
+const PLACEHOLDER_PATTERN =
+  /(?:\\)?{{(\s*\w+(?:\[\d+\])*(?:\.\w+(?:\[\d+\])*)*\s*)(?:\\)?\s*}}/g;
 
 /**
  * Processes a template string, replacing placeholders with corresponding values from a provided object.
@@ -44,10 +49,8 @@ CurlyBrackets.compileTemplate = function (
   str: string,
   fallback: string = '(null)',
 ): TemplateFunction {
-  const pattern = /(?:\\)?{{(\s*[\w.]+?)(?:\\)?\s*}}/g;
-
   return (locals: Record<string, unknown>): string => {
-    return str.replace(pattern, (match, p1: string) => {
+    return str.replace(PLACEHOLDER_PATTERN, (match, p1: string) => {
       if (typeof p1 !== 'string') {
         return match;
       }
@@ -69,7 +72,7 @@ CurlyBrackets.compileTemplate = function (
       }
 
       const key = p1.trim();
-      const parts = key.split('.');
+      const parts = getPathParts(key);
 
       // Use a more specific approach to ensure the type is consistent
       let replacement: unknown = locals;

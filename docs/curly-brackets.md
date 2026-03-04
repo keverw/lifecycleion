@@ -19,6 +19,7 @@
 
 - **Performance Optimized**: Automatically short-circuits when no placeholders are detected, avoiding unnecessary processing for plain strings.
 - **Fallback Support**: Specify a fallback string to use whenever a placeholder's corresponding value is not found, instead of the default `undefined`.
+- **Nested Path Support**: Resolve nested object properties with paths like `{{user.name}}` and array indexes like `{{users[0].name}}`.
 - **Escaped Brackets**: Safely include literal `{{` and `}}` in your templates without them being replaced, by escaping them with a backslash (`\`).
 - **Efficient Template Reuse**: With `compileTemplate`, compile your template once and reuse it with different sets of data, improving performance for repeated template processing.
 - **TypeScript Support**: Fully supports TypeScript for type-safe templating.
@@ -48,6 +49,58 @@ Specify a fallback for any undefined placeholders:
 const result = CurlyBrackets('Hello, {{name}}!', {}, '(???)');
 console.log(result); // Outputs: "Hello, (???)!"
 ```
+
+Dot notation follows the same rule. If any segment in the path is missing, `null`, `undefined`, or a primitive before the final property is reached, the fallback is used:
+
+```typescript
+const missingUser = CurlyBrackets('{{user.name}}', {}, '(???)');
+console.log(missingUser); // Outputs: "(???)"
+
+const primitiveParent = CurlyBrackets('{{user.name}}', { user: true }, '(???)');
+console.log(primitiveParent); // Outputs: "(???)"
+
+const falseValue = CurlyBrackets(
+  '{{user.name}}',
+  { user: { name: false } },
+  '(???)',
+);
+
+console.log(falseValue); // Outputs: "false"
+
+const zeroValue = CurlyBrackets(
+  '{{user.name}}',
+  { user: { name: 0 } },
+  '(???)',
+);
+
+console.log(zeroValue); // Outputs: "0"
+```
+
+Array indexes can be mixed into the same path:
+
+```typescript
+const userName = CurlyBrackets(
+  '{{users[0].name}}',
+  { users: [{ name: 'Alice' }] },
+  '(???)',
+);
+
+console.log(userName); // Outputs: "Alice"
+
+const matrixValue = CurlyBrackets(
+  '{{matrix[0][2]}}',
+  {
+    matrix: [
+      [1, 2, 3],
+      [4, 5, 6],
+    ],
+  },
+  '(???)',
+);
+console.log(matrixValue); // Outputs: "3"
+```
+
+More precisely, the fallback is used when any intermediate segment cannot be traversed, or when the final resolved value is `null` or `undefined`. Final values like `false`, `0`, and `''` are rendered normally.
 
 ### Escaping Brackets
 
