@@ -8,6 +8,7 @@
 - [0.0.4 (Mar 2, 2026)](#004-mar-2-2026)
 - [0.0.5 (Mar 3, 2026)](#005-mar-3-2026)
 - [0.0.6 (Mar 3, 2026)](#006-mar-3-2026)
+- [0.0.7 (Mar 4, 2026)](#007-mar-4-2026)
 
 <!-- tocstop -->
 
@@ -40,3 +41,8 @@
 - CurlyBrackets now supports quoted bracket keys such as `{{user["display-name"]}}` and mixed paths like `{{users[0]["display-name"]}}`
 - Logger redaction now supports matching quoted bracket-key paths such as `users[0]["password-hash"]` in `redactedKeys`
 - Shared internal path parsing now rejects unsupported syntax cleanly instead of partially tokenizing invalid paths
+
+## 0.0.7 (Mar 4, 2026)
+
+- Logger messages now render from redacted params when `redactedKeys` are configured, so templated sensitive fields are masked in `message` as well as `redactedParams`
+- CurlyBrackets and logger redaction now share an internal value-stringification helper so arrays, objects, and `Error` values are normalized consistently before rendering or redaction, non-string values are now always stringified before passing to redaction functions

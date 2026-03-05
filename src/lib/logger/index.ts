@@ -452,10 +452,15 @@ export class Logger extends EventEmitter {
     const redactedKeys = options?.redactedKeys;
 
     // Process template and apply redaction
-    const message = params ? CurlyBrackets(template, params) : template;
-    const redactedParams = params
-      ? applyRedaction(params, redactedKeys, this.redactFunction)
-      : undefined;
+    const redactedParams =
+      params && redactedKeys && redactedKeys.length > 0
+        ? applyRedaction(params, redactedKeys, this.redactFunction)
+        : undefined;
+
+    const messageParams = redactedParams ?? params;
+    const message = messageParams
+      ? CurlyBrackets(template, messageParams)
+      : template;
 
     // Create log entry
     const entry: LogEntry = {

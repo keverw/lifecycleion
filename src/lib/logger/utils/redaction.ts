@@ -1,6 +1,7 @@
 import datamask from 'datamask';
 import { deepClone } from '../../deep-clone';
 import { getPathParts } from '../../internal/path-utils';
+import { stringifyTemplateValue } from '../../internal/stringify-template-value';
 import type { RedactFunction } from '../types';
 
 /**
@@ -14,7 +15,9 @@ export const defaultRedactFunction: RedactFunction = (
   if (typeof value === 'string') {
     return datamask.string(value, '*', 60);
   }
-  // For non-strings, mask as generic redacted value
+
+  // Defensive fallback for direct callers bypassing applyRedaction.
+  // Ideally, this should never be reached.
   return '***REDACTED***';
 };
 
@@ -123,16 +126,19 @@ export function applyRedaction(
   for (const key of redactedKeys) {
     // Check if it's a nested key or array path
     if (key.includes('.') || key.includes('[')) {
-      const value = getNestedValue(redactedParams, key);
+      const value = getNestedValue(params, key);
 
       if (value !== undefined) {
-        const redactedValue = redactFn(key, value);
+        const redactedValue = redactFn(key, stringifyTemplateValue(value));
         setNestedValue(redactedParams, key, redactedValue);
       }
     } else {
       // Top-level key
-      if (key in redactedParams) {
-        redactedParams[key] = redactFn(key, redactedParams[key]);
+      if (key in params) {
+        redactedParams[key] = redactFn(
+          key,
+          stringifyTemplateValue(params[key]),
+        );
       }
     }
   }

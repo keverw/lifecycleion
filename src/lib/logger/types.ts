@@ -67,9 +67,9 @@ export interface LogEntry {
   serviceName?: string; // Service name (if using service logger)
   entityName?: string; // Optional entity identifier (e.g., 'audio-component-123', 'door-main', UUID)
   template: string; // Original template: "User {{userID}} logged in"
-  message: string; // Computed: "User 456 logged in"
+  message: string; // Computed message: "User 456 logged in"
   params?: Record<string, unknown>; // Raw params: { userID: 456, password: 'secret' }
-  redactedParams?: Record<string, unknown>; // Redacted params: { userID: 456, password: '***' }
+  redactedParams?: Record<string, unknown>; // Present when redaction is configured: { userID: 456, password: '***' }
   redactedKeys?: string[]; // List of keys that were redacted (e.g., ['password', 'user.apiKey'])
   error?: unknown; // Original error object from errorObject() calls
   exitCode?: number; // Exit code if this log triggers a process exit
@@ -97,7 +97,9 @@ export interface BeforeExitResult {
 }
 
 /**
- * Redaction function type
+ * Redaction function type.
+ *
+ * Values are stringified before they are passed to the redaction function.
  */
 export type RedactFunction = (keyName: string, value: unknown) => unknown;
 

@@ -188,7 +188,7 @@ describe('Logger', () => {
       expect(log.redactedParams?.username).toBe('john'); // Not redacted
     });
 
-    test('should keep templated sensitive values in the message while masking redacted params', () => {
+    test('should render the message from redacted params when redaction is configured', () => {
       logger.info('Login attempt for {{username}} with {{password}}', {
         params: {
           username: 'john',
@@ -199,11 +199,29 @@ describe('Logger', () => {
 
       const log = arraySink.logs[0];
 
-      expect(log.message).toBe('Login attempt for john with secret123');
+      expect(log.message).toBe('Login attempt for john with se*****23');
       expect(log.params?.password).toBe('secret123');
       expect(log.redactedParams?.password).not.toBe('secret123');
       expect(log.redactedParams?.password).toBe('se*****23');
       expect(log.redactedParams?.username).toBe('john');
+    });
+
+    test('should stringify non-string redacted values before rendering the message', () => {
+      logger.info('Failure {{error}} / {{users}} / {{metadata}}', {
+        params: {
+          error: new Error('boom'),
+          users: ['a', 'b'],
+          metadata: { key: 'value' },
+        },
+        redactedKeys: ['error', 'users', 'metadata'],
+      });
+
+      const log = arraySink.logs[0];
+
+      expect(log.message).toBe('Failure Er******oom / a*b / [ob*********ct]');
+      expect(log.redactedParams?.error).toBe('Er******oom');
+      expect(log.redactedParams?.users).toBe('a*b');
+      expect(log.redactedParams?.metadata).toBe('[ob*********ct]');
     });
 
     test('should use custom redaction function', () => {

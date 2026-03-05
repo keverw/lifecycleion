@@ -1,4 +1,5 @@
 import { getPathParts } from './internal/path-utils';
+import { stringifyTemplateValue } from './internal/stringify-template-value';
 
 export type TemplateFunction = (locals: Record<string, unknown>) => string;
 
@@ -98,8 +99,7 @@ CurlyBrackets.compileTemplate = function (
         return fallback;
       }
 
-      // eslint-disable-next-line @typescript-eslint/no-base-to-string
-      return String(replacement);
+      return stringifyTemplateValue(replacement);
     });
   };
 };

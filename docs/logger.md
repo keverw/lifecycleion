@@ -272,7 +272,7 @@ logger.error('Non-fatal error'); // Process continues
 **Notes:**
 
 - The exit code is included in the `LogEntry` that sinks receive, so custom sinks can see when a log will trigger an exit
-- The `exitCode` must be a valid number; non-numeric values are ignored and won't trigger exit
+- The `exitCode` must be a valid number. Non-numeric values are ignored and won't trigger exit
 
 ### Template Strings with Parameters
 
@@ -1351,7 +1351,7 @@ interface LogEntry {
   template: string; // Original template: "User {{userID}} logged in"
   message: string; // Computed message: "User 456 logged in"
   params?: Record<string, unknown>; // Raw params: { userID: 456, password: 'secret' }
-  redactedParams?: Record<string, unknown>; // Redacted: { userID: 456, password: '***' }
+  redactedParams?: Record<string, unknown>; // Present when redaction is configured: { userID: 456, password: '***' }
   redactedKeys?: string[]; // List of keys that were redacted: ['password', 'user.apiKey']
   error?: unknown; // Original error object from errorObject() calls
   exitCode?: number; // Exit code if this log triggers a process exit
@@ -1361,14 +1361,14 @@ interface LogEntry {
 
 ### Important Notes
 
-- **`message`**: Contains the fully interpolated template with all parameter values (including sensitive data if included in the template)
+- **`message`**: Contains the interpolated template. When `redactedKeys` are configured, the message is rendered from `redactedParams`. Otherwise it is rendered from the original `params`.
 - **`params`**: Raw unredacted parameters
-- **`redactedParams`**: Parameters with sensitive values masked according to `redactedKeys`
+- **`redactedParams`**: Parameters with sensitive values masked according to `redactedKeys` when redaction is configured
 - **`redactedKeys`**: List of parameter keys that were redacted (useful for auditing and metadata)
 
 ### Security Note
 
-The `message` field is computed from the original unredacted `params`. If you include sensitive parameters in your template (e.g., `{{password}}`), they will appear in plain text in the message. Only include non-sensitive fields in your templates, and rely on `redactedParams` for structured data storage.
+If you configure `redactedKeys`, the `message` field is rendered from the redacted values. This means templated sensitive fields such as `{{password}}` are masked in the message as well as in `redactedParams`. Without `redactedKeys`, the message is rendered from the original `params`.
 
 ## Testing
 

@@ -93,7 +93,37 @@ describe('applyRedaction', () => {
 
     expect(redacted.userID).toBe(741);
     expect(redacted.isActive).toBe(true);
-    expect(redacted.metadata).not.toEqual({ key: 'value' });
+    expect(redacted.metadata).toBe('[ob*********ct]');
+  });
+
+  test('should stringify non-string values before calling custom redaction functions', () => {
+    const params = {
+      error: new Error('boom'),
+      users: ['a', 'b'],
+      metadata: { key: 'value' },
+    };
+
+    const seen: Array<[string, unknown]> = [];
+    const customRedact = (keyName: string, value: unknown) => {
+      seen.push([keyName, value]);
+      return `[MASKED-${keyName}]`;
+    };
+
+    const redacted = applyRedaction(
+      params,
+      ['error', 'users', 'metadata'],
+      customRedact,
+    );
+
+    expect(seen).toEqual([
+      ['error', 'Error: boom'],
+      ['users', 'a,b'],
+      ['metadata', '[object Object]'],
+    ]);
+
+    expect(redacted.error).toBe('[MASKED-error]');
+    expect(redacted.users).toBe('[MASKED-users]');
+    expect(redacted.metadata).toBe('[MASKED-metadata]');
   });
 
   test('should redact nested keys using dot notation', () => {
