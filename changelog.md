@@ -9,6 +9,7 @@
 - [0.0.5 (Mar 3, 2026)](#005-mar-3-2026)
 - [0.0.6 (Mar 3, 2026)](#006-mar-3-2026)
 - [0.0.7 (Mar 4, 2026)](#007-mar-4-2026)
+- [0.0.8 (Mar 18, 2026)](#008-mar-18-2026)
 
 <!-- tocstop -->
 
@@ -46,3 +47,7 @@
 
 - Logger messages now render from redacted params when `redactedKeys` are configured, so templated sensitive fields are masked in `message` as well as `redactedParams`
 - CurlyBrackets and logger redaction now share an internal value-stringification helper so arrays, objects, and `Error` values are normalized consistently before rendering or redaction, non-string values are now always stringified before passing to redaction functions
+
+## 0.0.8 (Mar 18, 2026)
+
+- Added `lifecycleion/dev-mode` — runtime-settable dev/production mode flag with auto-detection from CLI args (`'dev'`/`'prod'`) or `NODE_ENV`, first-wins semantics for HTML injection compatibility, and `overrideDevMode()` for test/tooling use
