@@ -726,13 +726,13 @@ describe('RetryRunner', () => {
       const operation = async (reportResult: ReportResult): Promise<void> => {
         attemptCount++;
         if (attemptCount === 1) {
-          await sleep(10);
+          await sleep(50);
           reportResult('error', new Error('First fails'));
         } else if (attemptCount === 2) {
-          await sleep(30);
+          await sleep(150);
           reportResult('error', new Error('Second fails'));
         } else {
-          await sleep(5);
+          await sleep(20);
           reportResult('success');
         }
       };
@@ -756,9 +756,9 @@ describe('RetryRunner', () => {
       await runner.run(true);
 
       // Each attempt should have recorded its own duration
-      expect(attempt1Time).toBeGreaterThanOrEqual(10);
-      expect(attempt2Time).toBeGreaterThanOrEqual(30);
-      expect(attempt3Time).toBeGreaterThanOrEqual(5);
+      expect(attempt1Time).toBeGreaterThanOrEqual(50);
+      expect(attempt2Time).toBeGreaterThanOrEqual(150);
+      expect(attempt3Time).toBeGreaterThanOrEqual(20);
       expect(attempt2Time).toBeGreaterThan(attempt1Time);
 
       // Final value should be the last attempt

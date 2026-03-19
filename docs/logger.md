@@ -1467,10 +1467,17 @@ logger.info('User {{username}} logged in', {
   redactedKeys: ['sessionToken'],
 });
 
-// Mute console in production, unmute in development
-if (process.env.NODE_ENV === 'production') {
+// Mute console in production, unmute in development.
+// lifecycleion/dev-mode provides a runtime-settable flag that works across
+// bundlers and SSR — recommended over process.env.NODE_ENV directly:
+import { getDevMode } from 'lifecycleion/dev-mode';
+
+if (!getDevMode()) {
   consoleSink.mute();
 }
+
+// Or manually via NODE_ENV if you prefer:
+// if (process.env.NODE_ENV === 'production') consoleSink.mute();
 ```
 
 ## Architecture Overview

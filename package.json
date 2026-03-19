@@ -39,6 +39,11 @@
       "import": "./dist/lib/deep-clone.js",
       "require": "./dist/lib/deep-clone.cjs"
     },
+    "./dev-mode": {
+      "types": "./dist/lib/dev-mode.d.ts",
+      "import": "./dist/lib/dev-mode.js",
+      "require": "./dist/lib/dev-mode.cjs"
+    },
     "./error-to-string": {
       "types": "./dist/lib/error-to-string.d.ts",
       "import": "./dist/lib/error-to-string.js",
