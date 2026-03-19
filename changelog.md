@@ -10,6 +10,7 @@
 - [0.0.6 (Mar 3, 2026)](#006-mar-3-2026)
 - [0.0.7 (Mar 4, 2026)](#007-mar-4-2026)
 - [0.0.8 (Mar 18, 2026)](#008-mar-18-2026)
+- [0.0.9 (Mar 19, 2026)](#009-mar-19-2026)
 
 <!-- tocstop -->
 
@@ -51,3 +52,7 @@
 ## 0.0.8 (Mar 18, 2026)
 
 - Added `lifecycleion/dev-mode` — runtime-settable dev/production mode flag with auto-detection from CLI args (`'dev'`/`'prod'`) or `NODE_ENV`, first-wins semantics for HTML injection compatibility, and `overrideDevMode()` for test/tooling use
+
+## 0.0.9 (Mar 19, 2026)
+
+- LifecycleManager error and warning log messages now include `error.message` inline (e.g., `"Component failed to start: Connection refused"`) so failure reasons are visible in plain log output without a custom structured sink

@@ -1778,7 +1778,7 @@ describe('LifecycleManager - Registration & Individual Lifecycle', () => {
         (entry) =>
           entry.type === 'error' &&
           entry.entityName === 'test' &&
-          entry.message === 'Component failed to start',
+          entry.message.startsWith('Component failed to start'),
       );
 
       expect(errorLog).toBeDefined();
@@ -1820,7 +1820,7 @@ describe('LifecycleManager - Registration & Individual Lifecycle', () => {
         (entry) =>
           entry.type === 'error' &&
           entry.entityName === 'test' &&
-          entry.message === 'Component startup timed out',
+          entry.message.startsWith('Component startup timed out'),
       );
 
       expect(errorLog).toBeDefined();

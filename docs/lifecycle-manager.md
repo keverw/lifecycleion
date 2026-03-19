@@ -1422,6 +1422,31 @@ Components receive a scoped logger service via `logger.service(componentName)` w
 - `logger.debug(message, options?)` - Debug messages
 - `logger.entity(name)` - Create entity-scoped logger
 
+**Message Templates:**
+
+Log messages support `{{key}}` template syntax for embedding param values inline. This is useful in component `start()`/`stop()` implementations so errors are visible in any log output without needing a structured sink:
+
+```typescript
+async start() {
+  try {
+    await this.db.connect();
+  } catch (error) {
+    const err = error instanceof Error ? error : new Error(String(error));
+
+    this.logger.error('Failed to connect: {{error.message}}', {
+      params: { error: err },
+    });
+    // → "Failed to connect: Connection refused"
+  }
+}
+```
+
+Normalizing the caught value (`error instanceof Error ? error : new Error(String(error))`) ensures `{{error.message}}` always resolves to a string — without it, a thrown string or plain object would produce `(null)` in the output. Libraries and native APIs occasionally throw non-`Error` values.
+
+The normalized `err` is also captured in `params` for structured sinks that need the full error object or stack trace. Because the pattern only wraps non-`Error` values, original `Error` stack traces are preserved when the thrown value was already an `Error`.
+
+**Note:** The LifecycleManager itself logs `error.message` inline when component lifecycle methods fail (e.g., `start()` throwing, shutdown errors). Avoid including sensitive details like connection strings or credentials in error messages thrown from lifecycle methods, as they will appear in plain log output.
+
 ### Status and Query Methods
 
 #### Component Existence and State
