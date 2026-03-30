@@ -144,6 +144,7 @@ export class RequestTracker {
 
       requests.push({
         requestID: entry.requestID,
+        clientID: entry.clientID,
         label: entry.label,
         state: entry.state,
       });
@@ -155,6 +156,7 @@ export class RequestTracker {
 
 export interface RequestInfo {
   requestID: string;
+  clientID: string;
   label?: string;
   state: RequestState;
 }

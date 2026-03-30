@@ -2192,6 +2192,33 @@ describe('HTTPClient — redirect', () => {
 });
 
 describe('HTTPClient — sub-clients', () => {
+  test('exposes client IDs and adapter types on root and sub-clients', () => {
+    const rootAdapter: HTTPAdapter = {
+      getType: () => 'mock',
+      send: async () => ({
+        status: 200,
+        headers: {},
+        body: null,
+      }),
+    };
+    const subAdapter: HTTPAdapter = {
+      getType: () => 'fetch',
+      send: async () => ({
+        status: 200,
+        headers: {},
+        body: null,
+      }),
+    };
+    const root = new HTTPClient({ adapter: rootAdapter });
+    const sub = root.createSubClient({ adapter: subAdapter });
+
+    expect(root.clientID).toEqual(expect.any(String));
+    expect(sub.clientID).toEqual(expect.any(String));
+    expect(sub.clientID).not.toBe(root.clientID);
+    expect(root.adapterType).toBe('mock');
+    expect(sub.adapterType).toBe('fetch');
+  });
+
   test('sub-client defaultHeaders override inherited headers by default', () => {
     const root = new InspectableHTTPClient({
       defaultHeaders: { 'x-root': 'yes', authorization: 'root-token' },
@@ -2279,6 +2306,67 @@ describe('HTTPClient — sub-clients', () => {
     expect('createSubClient' in sub).toBe(false);
   });
 
+  test('sub-client can use a different adapter', async () => {
+    let usedRootAdapter = false;
+    let usedSubAdapter = false;
+
+    const rootAdapter: HTTPAdapter = {
+      getType: () => 'mock',
+      send: async () => {
+        usedRootAdapter = true;
+
+        return {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+          body: new TextEncoder().encode('{"source":"root"}'),
+        };
+      },
+    };
+    const subAdapter: HTTPAdapter = {
+      getType: () => 'mock',
+      send: async () => {
+        usedSubAdapter = true;
+
+        return {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+          body: new TextEncoder().encode('{"source":"sub"}'),
+        };
+      },
+    };
+    const root = new HTTPClient({ adapter: rootAdapter });
+    const sub = root.createSubClient({ adapter: subAdapter });
+
+    const [rootRes, subRes] = await Promise.all([
+      root.get('https://example.com/root').send<{ source: string }>(),
+      sub.get('https://example.com/sub').send<{ source: string }>(),
+    ]);
+
+    expect(usedRootAdapter).toBe(true);
+    expect(usedSubAdapter).toBe(true);
+    expect(rootRes.body.source).toBe('root');
+    expect(subRes.body.source).toBe('sub');
+  });
+
+  test('sub-client rejects browser-incompatible adapter overrides', () => {
+    (globalThis as Record<string, unknown>).window = {};
+    (globalThis as Record<string, unknown>).document = {};
+
+    const root = new HTTPClient();
+    const nodeAdapter: HTTPAdapter = {
+      getType: () => 'node',
+      send: async () => ({
+        status: 200,
+        headers: {},
+        body: null,
+      }),
+    };
+
+    expect(() => root.createSubClient({ adapter: nodeAdapter })).toThrow(
+      /Node adapter is not supported in browser environments/i,
+    );
+  });
+
   test('cancelAll() on sub-client cancels parent requests too', async () => {
     const root = makeClient();
     const sub = root.createSubClient();
@@ -2357,6 +2445,12 @@ describe('HTTPClient — listRequests', () => {
     await new Promise((r) => setTimeout(r, 5));
 
     expect(root.listRequests({ scope: 'all' }).count).toBe(2);
+    expect(
+      root
+        .listRequests({ scope: 'all' })
+        .requests.map((request) => request.clientID)
+        .sort(),
+    ).toEqual([root.clientID, sub.clientID].sort());
 
     await Promise.all([rootReq, subReq]);
   });

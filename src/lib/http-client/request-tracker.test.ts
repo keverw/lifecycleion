@@ -206,9 +206,16 @@ describe('RequestTracker', () => {
 
     test('exposed RequestInfo omits abortController', () => {
       const tracker = new RequestTracker();
-      tracker.add(makeEntry({ requestID: 'a', label: 'x' }));
+      tracker.add(
+        makeEntry({ requestID: 'a', clientID: 'client-x', label: 'x' }),
+      );
       const [info] = tracker.list().requests;
-      expect(info).toEqual({ requestID: 'a', label: 'x', state: 'pending' });
+      expect(info).toEqual({
+        requestID: 'a',
+        clientID: 'client-x',
+        label: 'x',
+        state: 'pending',
+      });
       expect((info as any).abortController).toBeUndefined();
     });
   });

@@ -126,6 +126,16 @@ export class BaseHTTPClient {
     this._errorObservers = new ErrorObserverManager();
   }
 
+  // --- Client metadata ---
+
+  public get clientID(): string {
+    return this._clientID;
+  }
+
+  public get adapterType(): AdapterType {
+    return this._adapter.getType();
+  }
+
   // --- Interceptors ---
 
   public addRequestInterceptor(
