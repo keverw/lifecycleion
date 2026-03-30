@@ -1,0 +1,569 @@
+import type { CookieJar } from './cookie-jar';
+import type { RetryPolicyOptions } from '../retry-utils';
+
+// --- Adapter Interface ---
+
+export type AdapterType = 'fetch' | 'xhr' | 'node' | 'mock';
+
+export type HTTPMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE' | 'HEAD';
+
+export type ContentType = 'json' | 'text' | 'binary';
+
+/**
+ * Public query value shape compatible with `qs.parse()` output, so consumers
+ * do not need `@types/qs` installed just to use this package's declarations.
+ */
+export type QueryValue = string | QueryObject | QueryValue[] | undefined;
+
+export interface QueryObject {
+  [key: string]: QueryValue;
+}
+
+export interface HTTPAdapter {
+  send(request: AdapterRequest): Promise<AdapterResponse>;
+  getType(): AdapterType;
+}
+
+export interface AdapterRequest {
+  requestURL: string;
+  method: HTTPMethod;
+  headers: Record<string, string>;
+  body?: string | Uint8Array | FormData | null;
+  timeout: number;
+  signal?: AbortSignal;
+  onUploadProgress?: (event: HTTPProgressEvent) => void;
+  onDownloadProgress?: (event: HTTPProgressEvent) => void;
+}
+
+export interface AdapterResponse {
+  status: number;
+  /** Browser Fetch with `redirect: 'manual'` exposes redirects as `opaqueredirect`. */
+  isOpaqueRedirect?: boolean;
+  /**
+   * Most headers are `string`. `set-cookie` is always `string[]` (HTTP spec,
+   * each cookie is a separate header line).
+   *
+   * Adapters may use any header casing, `HTTPClient` normalizes keys to
+   * lowercase before redirect handling, cookies, and the public `HTTPResponse`.
+   */
+  headers: Record<string, string | string[]>;
+  /** Raw response bytes. Higher layers decode/parse based on content-type. */
+  body: Uint8Array | null;
+}
+
+// --- Progress ---
+
+export interface HTTPProgressEvent {
+  loaded: number;
+  total: number;
+  /** 0–1, or -1 if total unknown */
+  progress: number;
+  attemptNumber: number;
+  /** Present only during redirect hops (1 = first redirect, 2 = second, etc.). */
+  hopNumber?: number;
+}
+
+// --- Attempt lifecycle hooks ---
+
+export interface AttemptStartEvent {
+  attemptNumber: number;
+  isRetry: boolean;
+  requestID: string;
+  /**
+   * The resolved URL for this `send()` after initial request interceptors, before any
+   * redirect follow-ups. **Same string as** {@link HTTPResponse.initialURL} (not the
+   * URL of this adapter attempt — see {@link InterceptedRequest.requestURL} and
+   * `redirect.to` for hop context).
+   */
+  initialURL?: string;
+  /**
+   * Set for adapter attempts that are part of a redirect follow-up (1 = first hop).
+   * Aligns with {@link HTTPProgressEvent.hopNumber}.
+   */
+  hopNumber?: number;
+  /**
+   * When `hopNumber` is set, the redirect hop this attempt belongs to — same fields as
+   * `RequestPhase` `redirect` / `retry.redirect` for observers.
+   */
+  redirect?: RedirectHopInfo;
+}
+
+export interface AttemptEndEvent {
+  attemptNumber: number;
+  isRetry: boolean;
+  willRetry: boolean;
+  /** Present only when a retry has been scheduled after this attempt. */
+  nextRetryDelayMS?: number;
+  /** Epoch ms for the scheduled retry, when a retry has been scheduled. */
+  nextRetryAt?: number;
+  status: number;
+  requestID: string;
+  /** Same as {@link AttemptStartEvent.initialURL}. */
+  initialURL?: string;
+  hopNumber?: number;
+  redirect?: RedirectHopInfo;
+}
+
+// --- Config ---
+
+export interface HTTPClientConfig {
+  adapter?: HTTPAdapter;
+  /**
+   * Origin / prefix for relative request paths (`/api/...`, `v1/...`, etc.).
+   *
+   * Omit or leave unset only when every {@link BaseHTTPClient.request} path is
+   * already absolute, or when you resolve URLs yourself.
+   *
+   * Relative paths are appended to this value. Full `http(s)://…` paths (and
+   * `//host/…`) skip concatenation with `baseURL`; see JSDoc on
+   * `BaseHTTPClient.request` and `buildURL` in `utils.ts`.
+   */
+  baseURL?: string;
+  defaultHeaders?: Record<string, string>;
+  timeout?: number;
+  cookieJar?: CookieJar | null;
+  retryPolicy?: RetryPolicyOptions;
+  includeRequestID?: boolean;
+  includeAttemptHeader?: boolean;
+  userAgent?: string;
+  followRedirects?: boolean;
+  maxRedirects?: number;
+}
+
+export interface SubClientConfig extends Partial<HTTPClientConfig> {
+  /**
+   * How sub-client `defaultHeaders` should interact with inherited defaults.
+   * Default: `'replace'`.
+   *
+   * Use `'merge'` to preserve inherited defaults and layer new headers on top.
+   *
+   * If no new `defaultHeaders` are provided, `'merge'` keeps the inherited
+   * defaults as-is.
+   */
+  defaultHeadersStrategy?: 'replace' | 'merge';
+}
+
+// --- Request ---
+
+export interface HTTPRequestOptions {
+  headers?: Record<string, string>;
+  params?: Record<string, unknown>;
+  body?: unknown;
+  timeout?: number;
+  signal?: AbortSignal;
+  retryPolicy?: RetryPolicyOptions | null;
+  label?: string;
+  onUploadProgress?: (event: HTTPProgressEvent) => void;
+  onDownloadProgress?: (event: HTTPProgressEvent) => void;
+  onAttemptStart?: (event: AttemptStartEvent) => void;
+  onAttemptEnd?: (event: AttemptEndEvent) => void;
+}
+
+// --- Response ---
+
+export interface HTTPResponse<T = unknown> {
+  status: number;
+  /**
+   * Lowercase keys (normalized by `HTTPClient` from adapter output).
+   * Most values are `string`; `set-cookie` is `string[]`.
+   */
+  headers: Record<string, string | string[]>;
+  body: T;
+  contentType: ContentType;
+  isJSON: boolean;
+  isText: boolean;
+  isCancelled: boolean;
+  isTimeout: boolean;
+  isNetworkError: boolean;
+  isParseError: boolean;
+  /**
+   * Fully resolved URL for this `send()` after `initial` interceptors, before any
+   * redirect follow-ups. Same string as {@link AttemptStartEvent.initialURL} on attempt hooks.
+   */
+  initialURL: string;
+  /**
+   * URL of the request that produced this response (last adapter attempt after redirects).
+   * Equals {@link HTTPResponse.initialURL} when no redirect occurred.
+   */
+  requestURL: string;
+  /** True when at least one redirect hop was followed. */
+  redirected: boolean;
+  /** Sequence of redirect target URLs that were actually requested, in order. */
+  redirectHistory: string[];
+  requestID: string;
+  adapterType: AdapterType;
+}
+
+// --- Error ---
+
+export interface HTTPClientError {
+  code:
+    | 'network_error'
+    | 'timeout'
+    | 'cancelled'
+    | 'redirect_disabled'
+    | 'redirect_loop'
+    | 'request_setup_error'
+    | 'adapter_error'
+    | 'interceptor_error';
+  message: string;
+  cause?: Error;
+  /**
+   * Fully resolved URL for this `send()` after `initial` interceptors, before redirects.
+   * Same string as {@link HTTPResponse.initialURL} and {@link AttemptStartEvent.initialURL}.
+   */
+  initialURL: string;
+  /** URL of the last request attempt when the error was produced. */
+  requestURL: string;
+  /** True when at least one redirect hop was followed before the error. */
+  redirected: boolean;
+  /** Sequence of redirect target URLs that were actually requested, in order. */
+  redirectHistory: string[];
+  requestID: string;
+  isTimeout: boolean;
+  /** True when a retry policy was active and all attempts were exhausted before a response was received. */
+  isRetriesExhausted: boolean;
+}
+
+// --- Request Phase ---
+
+/**
+ * **Phases vs hooks (one mental model)**
+ *
+ * - **`retry` and `redirect` are both phases** on the same `RequestPhaseName` list. They
+ *   mean “something intermediate happened before this `send()` finishes,” not “only one
+ *   kind of thing counts as a phase.” The names differ because the **payload** differs:
+ *   retries are policy- and attempt-scoped (`attempt`, `maxAttempts`), while redirects are
+ *   HTTP hop-scoped (`hop`, `from`, `to`, `statusCode`). Same idea as having both
+ *   `click` and `keydown` in the DOM, different events but the same observer mechanism.
+ *
+ * - **Global (client-scoped) monitoring:** `addResponseObserver` / `addErrorObserver` on
+ *   `HTTPClient`, with optional `phases` (plain arrays like `['retry', 'redirect', 'final']`).
+ *   One callback with
+ *   `phases: ['retry', 'redirect']` runs **once per matching event**, e.g. a `send()` that
+ *   redirects once then retries once invokes the handler twice with different `phase.type`,
+ *   never twice for the same adapter response (a status is either a redirect hop or a retry
+ *   trigger, not both). The filter list is **OR** on `phase.type`.
+ *
+ * - **Policy retry (`type: ‘retry’`):** fires once per reattempt. Interceptors and observers
+ *   always see the URL being retried, which is the redirect target when a redirect preceded
+ *   the retry. The optional `phase.redirect` field is metadata that tells you which redirect
+ *   hop led to this retry (`{ hop, from, to, statusCode }`), so you don’t have to track
+ *   that yourself.
+ *
+ * - **Per-request (builder-scoped) monitoring:** `onAttemptStart`, `onAttemptEnd`, and
+ *   progress callbacks fire only for that builder’s `send()`. They do not replace global
+ *   observers. They are for when you want lifecycle tied to one call without registering
+ *   on the client. Each **adapter** attempt on the initial URL and on every redirect
+ *   follow-up (including policy retries on a hop) invokes start/end; `initialURL` on
+ *   those events matches {@link HTTPResponse.initialURL}. Redirect attempts include
+ *   `hopNumber` and `redirect` ({@link RedirectHopInfo}) matching observer phases.
+ *
+ * - **`initial`** is for **request** interceptors (mutate before send), not response/error
+ *   observers. Settlement-only errors (interceptor throw mid-redirect/retry setup) still
+ *   use **`final`** on error observers by design.
+ *
+ * **Per-handler phase subsets:**
+ * - Interceptors see: `initial`, `retry`, `redirect` (never `final`)
+ * - Response observers see: `retry`, `redirect`, `final` (never `initial`)
+ * - Error observers see: `retry`, `final` (never `initial` or `redirect` — redirect errors
+ *   surface as `final`, retry errors on redirect hops carry `redirect` inside the `retry` phase)
+ */
+export type RequestPhaseName = 'initial' | 'retry' | 'redirect' | 'final';
+/** Phases that can reach a {@link RequestInterceptor}. */
+export type InterceptorPhaseName = 'initial' | 'retry' | 'redirect';
+/** Phases that can reach a {@link ResponseObserver}. */
+export type ResponseObserverPhaseName = 'retry' | 'redirect' | 'final';
+/** Phases that can reach an {@link ErrorObserver}. */
+export type ErrorObserverPhaseName = 'retry' | 'final';
+
+/**
+ * One HTTP redirect hop. The **`redirect`** phase and **`retry.redirect`** (policy retry on a
+ * post-redirect URL) both use this shape.
+ *
+ * **`from` / `to`:** Intended to be absolute URLs (the {@link InterceptedRequest.requestURL}
+ * that received the redirect response, and the next {@link InterceptedRequest.requestURL}).
+ * `Location` is resolved against `from`, then normalized with the client `baseURL` when
+ * needed. Without a `baseURL`, path-only strings may remain as paths.
+ */
+export type RedirectHopInfo = {
+  hop: number;
+  from: string;
+  to: string;
+  statusCode: number;
+};
+
+/** Discriminated union describing the current phase of a request lifecycle. */
+export type RequestPhase =
+  | { type: 'initial' }
+  | {
+      type: 'retry';
+      attempt: number;
+      maxAttempts: number;
+      /**
+       * When set, this policy retry applies after this redirect hop (same fields as
+       * `type: 'redirect'`). Omit when the reattempt still uses the original request URL.
+       */
+      redirect?: RedirectHopInfo;
+    }
+  | ({ type: 'redirect' } & RedirectHopInfo)
+  | { type: 'final' };
+
+/** Narrowed phase union for {@link RequestInterceptor} — excludes `final`. */
+export type InterceptorPhase = Extract<
+  RequestPhase,
+  { type: InterceptorPhaseName }
+>;
+/** Narrowed phase union for {@link ResponseObserver} — excludes `initial`. */
+export type ResponseObserverPhase = Extract<
+  RequestPhase,
+  { type: ResponseObserverPhaseName }
+>;
+/** Narrowed phase union for {@link ErrorObserver} — the phases actually delivered to the callback (excludes `initial` and `redirect`). */
+export type ErrorObserverPhase = Extract<
+  RequestPhase,
+  { type: ErrorObserverPhaseName }
+>;
+
+// Interceptors vs Observers
+//
+// The core mental model:
+//
+//   Interceptors  = "what WILL happen", run before an attempt, can mutate or cancel the
+//                   request. Fire on `initial` (before the very first send), `retry` (before
+//                   each retry attempt), and `redirect` (before following a Location header).
+//                   Because they run before, they can refresh auth tokens, rewrite URLs,
+//                   add headers, or abort entirely.
+//
+//   Observers     = "what DID happen", run after an attempt produces a result, cannot
+//                   modify anything. Because they run after, they are the right place for
+//                   logging, metrics, cache writes, and analytics. A common pattern is
+//                   reading auth tokens or account metadata out of response bodies (or even
+//                   error bodies) and updating client state, without touching the response
+//                   itself.
+//
+//   Response observers fire on `retry` (retryable HTTP response before the next attempt),
+//   `redirect` (the 3xx response before following Location), and `final` (terminal response).
+//
+//   Error observers only ever fire on `retry` or `final`, there is no `redirect` phase.
+//   When a failure happens while following a redirect hop, the phase is still `retry` or
+//   `final` as normal, redirect context is available via `phase.redirect` (on `retry`) or
+//   `error.redirectHistory` (on `final`).
+
+// --- Interceptors ---
+
+interface PhaseFilter {
+  methods?: HTTPMethod[];
+  hosts?: string[];
+}
+
+/**
+ * Filter for request interceptors.
+ * Default phases: `['initial']`. Only runs before the first request attempt.
+ * Set `phases` to `['initial', 'retry', 'redirect']` to re-run before every attempt.
+ *
+ * On a redirect follow-up, the first adapter attempt uses phase `redirect`. Further
+ * attempts on that same URL (policy retry) use `retry` with the same `redirect` object
+ * shape nested under `retry.redirect`.
+ */
+export interface RequestInterceptorFilter extends PhaseFilter {
+  /**
+   * Which events run this interceptor: **OR** over phase type. Valid values: `initial`,
+   * `retry`, `redirect`. (`final` never reaches interceptors.)
+   *
+   * Default: `['initial']`. Pass `['initial', 'retry', 'redirect']` to re-run on every attempt.
+   * Pass `[]` to match all phases.
+   */
+  phases?: InterceptorPhaseName[];
+  /** Match against the outgoing request body. */
+  bodyContainsKeys?: string[];
+}
+
+/**
+ * Filter for response observers. See {@link RequestPhaseName} for how `retry` and
+ * `redirect` fit together as intermediate phases.
+ *
+ * Default phases: `[‘final’]`. Terminal **HTTP** response for this `send()` only.
+ *
+ * - **`’retry’`**: the adapter returned a **retryable HTTP status** (including `0`
+ *   when it is in the client’s retryable set) and a further attempt will run. Phase is
+ *   `{ type: ‘retry’, attempt, maxAttempts, redirect? }` (aligned with
+ *   `onAttemptEnd.attemptNumber`, with `redirect` only for retries on a post-redirect URL).
+ *   If the adapter **throws** but a retry will follow, that path uses **error**
+ *   observers with the same phase shape, not response observers.
+ * - **`’redirect’`**: each redirect **response** before following `Location`. Phase is
+ *   `{ type: ‘redirect’, hop, from, to, statusCode }` (see {@link RedirectHopInfo}).
+ *
+ * When `send()` **settles** with `status === 0`, **error** observers run with phase
+ * `final` only. **Before** that, each retryable `0` response in a retry cycle can
+ * still invoke **response** observers with phase `retry` when your filter includes it.
+ */
+export interface ResponseObserverFilter extends PhaseFilter {
+  /**
+   * Which events run this observer: **OR** over phase type. Valid values: `retry`,
+   * `redirect`, `final`. (`initial` never reaches response observers.)
+   *
+   * Default: `['final']`. Pass `[]` to match all phases.
+   */
+  phases?: ResponseObserverPhaseName[];
+  statusCodes?: number[];
+  /**
+   * Match against the parsed response content type category (`json`, `text`, `binary`).
+   */
+  contentTypes?: ContentType[];
+  /**
+   * Match against the raw `content-type` header, with optional wildcard subtype patterns
+   * such as `image/*`.
+   */
+  contentTypeHeaders?: string[];
+  /**
+   * Match against the decoded response body.
+   */
+  bodyContainsKeys?: string[];
+}
+
+/**
+ * Filter for error observers. Response-only fields like `statusCodes` and
+ * `bodyContainsKeys` are excluded.
+ *
+ * Default phases: `['final']`. Fires when the request settles with an error,
+ * including failures before any adapter call (for example an interceptor
+ * throw or interceptor cancel). Interceptor failures during `retry` or
+ * `redirect` interceptor phases are also reported as `final`, not as those
+ * phase names. That matches settlement semantics, not “which interceptor
+ * phase threw.”
+ *
+ * Include `'retry'` in `phases` to also run when the **adapter** throws but a retry
+ * will follow. Same `HTTPClientError` shape as terminal adapter errors,
+ * with `isRetriesExhausted: false` and phase
+ * `{ type: 'retry', attempt, maxAttempts, redirect? }`. **Interceptor** throws
+ * (any phase, including `retry` / `redirect`) never emit this: they abort the chain
+ * and only **`final`** error observers run, as in the paragraph above. Retryable **HTTP
+ * status** responses (including `0` when retried) use **response** observers for this
+ * phase name, not error observers.
+ */
+export interface ErrorObserverFilter extends PhaseFilter {
+  /**
+   * Which events run this observer: **OR** over phase type. Any {@link RequestPhaseName} is
+   * accepted, but only `retry` and `final` ever deliver errors — `initial` and `redirect`
+   * never reach error observers (redirect errors surface as `final`; retry errors on
+   * redirect hops carry `redirect` context inside the `retry` phase).
+   *
+   * Default: `['final']`. Pass `[]` to match all phases.
+   */
+  phases?: RequestPhaseName[];
+}
+
+/**
+ * Signal returned by an interceptor to cancel the request.
+ * When returned, the request is aborted and a 'cancelled' error is produced.
+ */
+export interface InterceptorCancel {
+  cancel: true;
+  reason?: string;
+}
+
+/**
+ * Additional context passed to request interceptors so they can see the full
+ * request chain without having to track it themselves.
+ */
+export interface RequestInterceptorContext {
+  /**
+   * Fully resolved URL for this `send()` after `initial` interceptors, before redirects.
+   * Same string as {@link HTTPResponse.initialURL} and {@link AttemptStartEvent.initialURL}.
+   */
+  initialURL: string;
+  /** Redirect target URLs that were followed before this interceptor ran, in order. */
+  redirectHistory: string[];
+}
+
+export type RequestInterceptor = (
+  request: InterceptedRequest,
+  phase: InterceptorPhase,
+  context: RequestInterceptorContext,
+) =>
+  | InterceptedRequest
+  | InterceptorCancel
+  | Promise<InterceptedRequest | InterceptorCancel>;
+
+// --- Observers ---
+
+export interface InterceptedRequest {
+  /** Pending request shape seen by request interceptors before body serialization. */
+  /** URL for this adapter attempt (changes on redirect follow-ups). */
+  requestURL: string;
+  method: HTTPMethod;
+  headers: Record<string, string>;
+  body?: unknown;
+}
+
+/**
+ * Finalized observer-facing snapshot for one adapter attempt, after
+ * headers/body have been prepared for dispatch.
+ */
+export type AttemptRequest = Omit<
+  AdapterRequest,
+  'signal' | 'onUploadProgress' | 'onDownloadProgress'
+> & {
+  /**
+   * Post-interceptor body before attempt materialization. This is useful for
+   * observers that need the semantic payload as well as the adapter-facing body.
+   */
+  rawBody?: unknown;
+};
+
+export type ResponseObserver = (
+  response: HTTPResponse,
+  request: AttemptRequest,
+  phase: ResponseObserverPhase,
+) => void | Promise<void>;
+
+export type ErrorObserver = (
+  error: HTTPClientError,
+  request: AttemptRequest,
+  phase: ErrorObserverPhase,
+) => void | Promise<void>;
+
+// --- Mock Adapter Types ---
+
+export type MockRouteHandler = (
+  request: MockRequest,
+) => MockResponse | Promise<MockResponse>;
+
+export interface MockFormData {
+  /** String fields from the multipart body */
+  fields: Record<string, string>;
+  /** File fields from the multipart body */
+  files: Record<string, File>;
+}
+
+export interface MockRequest {
+  method: string;
+  path: string;
+  params: Record<string, string>;
+  query: QueryObject;
+  headers: Record<string, string>;
+  /** Set for JSON / text bodies. Undefined when formData is present. */
+  body?: unknown;
+  /** Set when request body was multipart/form-data. Undefined otherwise. */
+  formData?: MockFormData;
+}
+
+export interface MockResponse {
+  status: number;
+  body?: unknown;
+  /** Use `set-cookie: string[]` for multiple cookies, same as real HTTP. */
+  headers?: Record<string, string | string[]>;
+  contentType?: ContentType;
+  delay?: number;
+}
+
+// --- Builder state ---
+
+export type RequestState =
+  | 'pending'
+  | 'sending'
+  | 'waiting_for_retry'
+  | 'completed'
+  | 'cancelled'
+  | 'failed';

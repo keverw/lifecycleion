@@ -48,11 +48,11 @@ describe('safeHandleCallback', () => {
     };
 
     const errorHandler = (event: Event): void => {
-      expect((event['error'] as Error).message).toContain(
+      expect((event as ErrorEvent).error.message).toContain(
         'Error in a callback syncCallbackWithError',
       );
 
-      expect((event['error'] as Error).message).toContain('Sync error');
+      expect((event as ErrorEvent).error.message).toContain('Sync error');
 
       done();
     };
@@ -67,18 +67,15 @@ describe('safeHandleCallback', () => {
   it('should handle errors in an asynchronous callback', (done) => {
     const callbackName = 'asyncCallbackWithError';
 
-    // eslint-disable-next-line @typescript-eslint/require-await
-    const callback = async (): Promise<void> => {
-      throw new Error('Async error');
-    };
+    const callback = (): Promise<void> =>
+      Promise.reject(new Error('Async error'));
 
     const errorHandler = (event: Event): void => {
-      // Change the type of the event parameter to Event
-      expect((event['error'] as Error).message).toContain(
+      expect((event as ErrorEvent).error.message).toContain(
         'Error in a callback asyncCallbackWithError',
       );
 
-      expect((event['error'] as Error).message).toContain('Async error');
+      expect((event as ErrorEvent).error.message).toContain('Async error');
 
       globalThis.removeEventListener('reportError', errorHandler);
       done();
@@ -93,12 +90,11 @@ describe('safeHandleCallback', () => {
     const callback = 123;
 
     const errorHandler = (event: Event): void => {
-      // Change the type of the event parameter to Event
-      expect((event['error'] as Error).message).toContain(
+      expect((event as ErrorEvent).error.message).toContain(
         'Error in a callback nonFunctionCallback',
       );
 
-      expect((event['error'] as Error).message).toContain(
+      expect((event as ErrorEvent).error.message).toContain(
         'Callback provided for nonFunctionCallback is not a function',
       );
 
@@ -155,10 +151,10 @@ describe('safeHandleCallbackAndWait', () => {
     };
 
     const errorHandler = (event: Event): void => {
-      expect((event['error'] as Error).message).toContain(
+      expect((event as ErrorEvent).error.message).toContain(
         'Error in a callback syncCallbackWithError',
       );
-      expect((event['error'] as Error).message).toContain('Sync error');
+      expect((event as ErrorEvent).error.message).toContain('Sync error');
     };
 
     globalThis.addEventListener('reportError', errorHandler);
@@ -180,11 +176,11 @@ describe('safeHandleCallbackAndWait', () => {
     };
 
     const errorHandler = (event: Event): void => {
-      expect((event['error'] as Error).message).toContain(
+      expect((event as ErrorEvent).error.message).toContain(
         'Error in a callback asyncCallbackWithError',
       );
 
-      expect((event['error'] as Error).message).toContain('Async error');
+      expect((event as ErrorEvent).error.message).toContain('Async error');
     };
 
     globalThis.addEventListener('reportError', errorHandler);
@@ -211,7 +207,7 @@ describe('safeHandleCallbackAndWait', () => {
 
     // Check if the error is reported using the reportError event
     const errorHandler = (event: Event): void => {
-      const errorMessage = (event['error'] as Error).message;
+      const errorMessage = (event as ErrorEvent).error.message;
       expect(errorMessage).toContain(
         'Callback provided for nonFunctionCallback is not a function',
       );

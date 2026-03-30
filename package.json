@@ -153,6 +153,26 @@
       "types": "./dist/lib/unix-time-helpers.d.ts",
       "import": "./dist/lib/unix-time-helpers.js",
       "require": "./dist/lib/unix-time-helpers.cjs"
+    },
+    "./http-client": {
+      "types": "./dist/lib/http-client/index.d.ts",
+      "import": "./dist/lib/http-client/index.js",
+      "require": "./dist/lib/http-client/index.cjs"
+    },
+    "./http-client-xhr": {
+      "types": "./dist/lib/http-client-xhr/index.d.ts",
+      "import": "./dist/lib/http-client-xhr/index.js",
+      "require": "./dist/lib/http-client-xhr/index.cjs"
+    },
+    "./http-client-node": {
+      "types": "./dist/lib/http-client-node/index.d.ts",
+      "import": "./dist/lib/http-client-node/index.js",
+      "require": "./dist/lib/http-client-node/index.cjs"
+    },
+    "./http-client-mock": {
+      "types": "./dist/lib/http-client-mock/index.d.ts",
+      "import": "./dist/lib/http-client-mock/index.js",
+      "require": "./dist/lib/http-client-mock/index.cjs"
     }
   },
   "files": [
@@ -197,6 +217,7 @@
     "@eslint/js": "^9.39.1",
     "@types/bun": "^1.2.13",
     "@types/node": "^24.10.0",
+    "@types/qs": "^6.15.0",
     "@typescript-eslint/eslint-plugin": "^8.46.3",
     "@typescript-eslint/parser": "^8.46.3",
     "eslint": "^9.39.1",
@@ -218,7 +239,10 @@
     "chalk": "^5.6.2",
     "datamask": "^1.0.0",
     "date-fns": "^4.1.0",
+    "find-my-way": "^9.5.0",
+    "qs": "^6.15.0",
     "string-width": "^8.1.0",
+    "tldts": "^7.0.27",
     "ulid": "^3.0.2",
     "uuid": "^13.0.0"
   }

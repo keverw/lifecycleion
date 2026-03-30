@@ -11,6 +11,7 @@
 - [0.0.7 (Mar 4, 2026)](#007-mar-4-2026)
 - [0.0.8 (Mar 18, 2026)](#008-mar-18-2026)
 - [0.0.9 (Mar 19, 2026)](#009-mar-19-2026)
+- [0.0.10 (Unreleased)](#0010-unreleased)
 
 <!-- tocstop -->
 
@@ -56,3 +57,8 @@
 ## 0.0.9 (Mar 19, 2026)
 
 - LifecycleManager error and warning log messages now include `error.message` inline (e.g., `"Component failed to start: Connection refused"`) so failure reasons are visible in plain log output without a custom structured sink
+
+## 0.0.10 (Unreleased)
+
+- Added `lifecycleion/http-client`, a fetch-based HTTP client with a fluent request builder, retries, redirect handling, cancellation, interceptors, response/error observers, and request tracking
+- Added server-side cookie jar support plus shared HTTP client request/response utilities and test coverage for the new client surface
