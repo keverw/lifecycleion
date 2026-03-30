@@ -320,18 +320,16 @@ describe('FetchAdapter', () => {
     expect(isArrayBufferCalled).toBe(false);
   });
 
-  test('fires progress callbacks with attemptNumber 1', async () => {
+  test('fires progress callbacks', async () => {
     const uploadEvents: Array<{
       loaded: number;
       total: number;
       progress: number;
-      attemptNumber: number;
     }> = [];
     const downloadEvents: Array<{
       loaded: number;
       total: number;
       progress: number;
-      attemptNumber: number;
     }> = [];
 
     (globalThis as any).fetch = () =>
@@ -352,13 +350,11 @@ describe('FetchAdapter', () => {
     });
 
     expect(uploadEvents).toEqual([
-      { loaded: 0, total: 0, progress: 0, attemptNumber: 1 },
-      { loaded: 1, total: 1, progress: 1, attemptNumber: 1 },
+      { loaded: 0, total: 0, progress: 0 },
+      { loaded: 1, total: 1, progress: 1 },
     ]);
 
-    expect(downloadEvents).toEqual([
-      { loaded: 5, total: 5, progress: 1, attemptNumber: 1 },
-    ]);
+    expect(downloadEvents).toEqual([{ loaded: 5, total: 5, progress: 1 }]);
   });
 
   describe('integration requests', () => {

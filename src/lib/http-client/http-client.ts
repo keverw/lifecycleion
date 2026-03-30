@@ -9,6 +9,7 @@ import { HTTPRequestBuilder } from './http-request-builder';
 import { RequestInterceptorManager } from './interceptors';
 import { ResponseObserverManager, ErrorObserverManager } from './observers';
 import {
+  assertSupportedAdapterRuntimeAndConfig,
   assertSupportedRequestBody,
   buildURL,
   isBrowserEnvironment,
@@ -2081,57 +2082,4 @@ function cloneBodyValue(body: unknown): unknown {
 
 function isAbortError(err: unknown): boolean {
   return err instanceof Error && err.name === 'AbortError';
-}
-
-function assertSupportedAdapterRuntimeAndConfig(
-  config: HTTPClientConfig,
-  adapterType: AdapterType,
-  isBrowserRuntime: boolean,
-): void {
-  if (config.followRedirects === false && config.maxRedirects !== undefined) {
-    throw new Error(
-      'HTTPClient maxRedirects cannot be set when followRedirects is false.',
-    );
-  }
-
-  if (
-    config.followRedirects !== false &&
-    config.maxRedirects !== undefined &&
-    config.maxRedirects < 1
-  ) {
-    throw new Error(
-      'HTTPClient maxRedirects must be greater than or equal to 1 when followRedirects is true.',
-    );
-  }
-
-  if (!isBrowserRuntime) {
-    return;
-  }
-
-  if (adapterType === 'node') {
-    throw new Error(
-      'HTTPClient Node adapter is not supported in browser environments.',
-    );
-  }
-
-  if ((adapterType === 'fetch' || adapterType === 'xhr') && config.cookieJar) {
-    throw new Error(
-      `HTTPClient cookieJar is not supported with ${adapterType === 'fetch' ? 'FetchAdapter' : 'XHR adapter'} in browser environments. Browsers manage cookies automatically.`,
-    );
-  }
-
-  if ((adapterType === 'fetch' || adapterType === 'xhr') && config.userAgent) {
-    throw new Error(
-      `HTTPClient userAgent is not supported with ${adapterType === 'fetch' ? 'FetchAdapter' : 'XHR adapter'} in browser environments. Browsers do not allow overriding the User-Agent header.`,
-    );
-  }
-
-  if (
-    (adapterType === 'fetch' || adapterType === 'xhr') &&
-    config.followRedirects === true
-  ) {
-    throw new Error(
-      `HTTPClient redirect handling is not supported with ${adapterType === 'fetch' ? 'FetchAdapter' : 'XHR adapter'} in browser environments. Set followRedirects: false or use a server runtime.`,
-    );
-  }
 }

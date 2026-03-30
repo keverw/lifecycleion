@@ -1,5 +1,10 @@
 import qs from 'qs';
-import type { ContentType, RequestPhaseName } from './types';
+import type {
+  ContentType,
+  RequestPhaseName,
+  HTTPClientConfig,
+  AdapterType,
+} from './types';
 
 /**
  * If `path` is an absolute HTTP(S) URL, returns its canonical `href` (normalized
@@ -177,6 +182,67 @@ export function parseContentType(
     } else {
       return 'binary';
     }
+  }
+}
+
+/**
+ * Validates adapter/runtime combinations and redirect config before a client
+ * is constructed, so unsupported browser-only/server-only options fail fast
+ * with clear errors instead of surfacing later during request dispatch.
+ */
+export function assertSupportedAdapterRuntimeAndConfig(
+  config: HTTPClientConfig,
+  adapterType: AdapterType,
+  isBrowserRuntime: boolean,
+): void {
+  if (config.followRedirects === false && config.maxRedirects !== undefined) {
+    throw new Error(
+      'HTTPClient maxRedirects cannot be set when followRedirects is false.',
+    );
+  }
+
+  if (
+    config.followRedirects !== false &&
+    config.maxRedirects !== undefined &&
+    config.maxRedirects < 1
+  ) {
+    throw new Error(
+      'HTTPClient maxRedirects must be greater than or equal to 1 when followRedirects is true.',
+    );
+  }
+
+  if (!isBrowserRuntime) {
+    return;
+  }
+
+  if (adapterType === 'node') {
+    throw new Error(
+      'HTTPClient Node adapter is not supported in browser environments.',
+    );
+  }
+
+  // MockAdapter is intentionally allowed in browser runtimes: it is an
+  // in-memory test adapter, so cookie jars and redirect following are local
+  // simulation features rather than forbidden browser networking controls.
+  if ((adapterType === 'fetch' || adapterType === 'xhr') && config.cookieJar) {
+    throw new Error(
+      `HTTPClient cookieJar is not supported with ${adapterType === 'fetch' ? 'FetchAdapter' : 'XHR adapter'} in browser environments. Browsers manage cookies automatically.`,
+    );
+  }
+
+  if ((adapterType === 'fetch' || adapterType === 'xhr') && config.userAgent) {
+    throw new Error(
+      `HTTPClient userAgent is not supported with ${adapterType === 'fetch' ? 'FetchAdapter' : 'XHR adapter'} in browser environments. Browsers do not allow overriding the User-Agent header.`,
+    );
+  }
+
+  if (
+    (adapterType === 'fetch' || adapterType === 'xhr') &&
+    config.followRedirects === true
+  ) {
+    throw new Error(
+      `HTTPClient redirect handling is not supported with ${adapterType === 'fetch' ? 'FetchAdapter' : 'XHR adapter'} in browser environments. Set followRedirects: false or use a server runtime.`,
+    );
   }
 }
 
@@ -359,7 +425,7 @@ export function assertSupportedRequestBody(body: unknown): void {
   );
 }
 
-function isPlainJSONBodyObject(
+export function isPlainJSONBodyObject(
   value: unknown,
 ): value is Record<string, unknown> {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) {

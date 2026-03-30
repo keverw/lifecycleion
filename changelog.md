@@ -60,5 +60,6 @@
 
 ## 0.0.10 (Unreleased)
 
-- Added `lifecycleion/http-client`, a fetch-based HTTP client with a fluent request builder, retries, redirect handling, cancellation, interceptors, response/error observers, and request tracking
-- Added server-side cookie jar support plus shared HTTP client request/response utilities and test coverage for the new client surface
+- Added the new adapter-based HTTP client foundation in `lifecycleion/http-client`, including the shared `HTTPAdapter` contract, fluent request builder, retries, redirect handling, cancellation, interceptors, response/error observers, request tracking, and the default `FetchAdapter`
+- Added `MockAdapter` plus server-side cookie jar support and shared HTTP client request/response utilities
+- Added placeholder package entry points for `lifecycleion/http-client-node` and `lifecycleion/http-client-xhr`; Node and XHR adapters are planned as part of the wider HTTP client rollout, and the shared `http-client` codebase already references that adapter model

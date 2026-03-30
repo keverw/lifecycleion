@@ -31,8 +31,8 @@ export interface AdapterRequest {
   body?: string | Uint8Array | FormData | null;
   timeout: number;
   signal?: AbortSignal;
-  onUploadProgress?: (event: HTTPProgressEvent) => void;
-  onDownloadProgress?: (event: HTTPProgressEvent) => void;
+  onUploadProgress?: (event: AdapterProgressEvent) => void;
+  onDownloadProgress?: (event: AdapterProgressEvent) => void;
 }
 
 export interface AdapterResponse {
@@ -53,11 +53,18 @@ export interface AdapterResponse {
 
 // --- Progress ---
 
-export interface HTTPProgressEvent {
+/**
+ * Raw progress event emitted by adapters. Does not include `attemptNumber` or
+ * `hopNumber` — those are injected by `HTTPClient` when forwarding to consumers.
+ */
+export interface AdapterProgressEvent {
   loaded: number;
   total: number;
   /** 0–1, or -1 if total unknown */
   progress: number;
+}
+
+export interface HTTPProgressEvent extends AdapterProgressEvent {
   attemptNumber: number;
   /** Present only during redirect hops (1 = first redirect, 2 = second, etc.). */
   hopNumber?: number;
@@ -523,40 +530,6 @@ export type ErrorObserver = (
   request: AttemptRequest,
   phase: ErrorObserverPhase,
 ) => void | Promise<void>;
-
-// --- Mock Adapter Types ---
-
-export type MockRouteHandler = (
-  request: MockRequest,
-) => MockResponse | Promise<MockResponse>;
-
-export interface MockFormData {
-  /** String fields from the multipart body */
-  fields: Record<string, string>;
-  /** File fields from the multipart body */
-  files: Record<string, File>;
-}
-
-export interface MockRequest {
-  method: string;
-  path: string;
-  params: Record<string, string>;
-  query: QueryObject;
-  headers: Record<string, string>;
-  /** Set for JSON / text bodies. Undefined when formData is present. */
-  body?: unknown;
-  /** Set when request body was multipart/form-data. Undefined otherwise. */
-  formData?: MockFormData;
-}
-
-export interface MockResponse {
-  status: number;
-  body?: unknown;
-  /** Use `set-cookie: string[]` for multiple cookies, same as real HTTP. */
-  headers?: Record<string, string | string[]>;
-  contentType?: ContentType;
-  delay?: number;
-}
 
 // --- Builder state ---
 

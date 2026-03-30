@@ -15,12 +15,7 @@ export class FetchAdapter implements HTTPAdapter {
     const { requestURL, method, headers, body, signal } = request;
 
     // Fire 0% upload progress
-    request.onUploadProgress?.({
-      loaded: 0,
-      total: 0,
-      progress: 0,
-      attemptNumber: 1,
-    });
+    request.onUploadProgress?.({ loaded: 0, total: 0, progress: 0 });
 
     let response: Response;
 
@@ -54,12 +49,7 @@ export class FetchAdapter implements HTTPAdapter {
     }
 
     // Fire 100% upload + download progress (fetch has no real per-chunk progress)
-    request.onUploadProgress?.({
-      loaded: 1,
-      total: 1,
-      progress: 1,
-      attemptNumber: 1,
-    });
+    request.onUploadProgress?.({ loaded: 1, total: 1, progress: 1 });
 
     const rawBody = await readResponseBody(method, response);
 
@@ -67,7 +57,6 @@ export class FetchAdapter implements HTTPAdapter {
       loaded: rawBody?.length ?? 0,
       total: rawBody?.length ?? 0,
       progress: 1,
-      attemptNumber: 1,
     });
 
     return {

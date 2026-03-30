@@ -2195,19 +2195,21 @@ describe('HTTPClient — sub-clients', () => {
   test('exposes client IDs and adapter types on root and sub-clients', () => {
     const rootAdapter: HTTPAdapter = {
       getType: () => 'mock',
-      send: async () => ({
-        status: 200,
-        headers: {},
-        body: null,
-      }),
+      send: () =>
+        Promise.resolve({
+          status: 200,
+          headers: {},
+          body: null,
+        }),
     };
     const subAdapter: HTTPAdapter = {
       getType: () => 'fetch',
-      send: async () => ({
-        status: 200,
-        headers: {},
-        body: null,
-      }),
+      send: () =>
+        Promise.resolve({
+          status: 200,
+          headers: {},
+          body: null,
+        }),
     };
     const root = new HTTPClient({ adapter: rootAdapter });
     const sub = root.createSubClient({ adapter: subAdapter });
@@ -2307,31 +2309,31 @@ describe('HTTPClient — sub-clients', () => {
   });
 
   test('sub-client can use a different adapter', async () => {
-    let usedRootAdapter = false;
-    let usedSubAdapter = false;
+    let didUseRootAdapter = false;
+    let didUseSubAdapter = false;
 
     const rootAdapter: HTTPAdapter = {
       getType: () => 'mock',
-      send: async () => {
-        usedRootAdapter = true;
+      send: () => {
+        didUseRootAdapter = true;
 
-        return {
+        return Promise.resolve({
           status: 200,
           headers: { 'content-type': 'application/json' },
           body: new TextEncoder().encode('{"source":"root"}'),
-        };
+        });
       },
     };
     const subAdapter: HTTPAdapter = {
       getType: () => 'mock',
-      send: async () => {
-        usedSubAdapter = true;
+      send: () => {
+        didUseSubAdapter = true;
 
-        return {
+        return Promise.resolve({
           status: 200,
           headers: { 'content-type': 'application/json' },
           body: new TextEncoder().encode('{"source":"sub"}'),
-        };
+        });
       },
     };
     const root = new HTTPClient({ adapter: rootAdapter });
@@ -2342,8 +2344,8 @@ describe('HTTPClient — sub-clients', () => {
       sub.get('https://example.com/sub').send<{ source: string }>(),
     ]);
 
-    expect(usedRootAdapter).toBe(true);
-    expect(usedSubAdapter).toBe(true);
+    expect(didUseRootAdapter).toBe(true);
+    expect(didUseSubAdapter).toBe(true);
     expect(rootRes.body.source).toBe('root');
     expect(subRes.body.source).toBe('sub');
   });
@@ -2355,11 +2357,12 @@ describe('HTTPClient — sub-clients', () => {
     const root = new HTTPClient();
     const nodeAdapter: HTTPAdapter = {
       getType: () => 'node',
-      send: async () => ({
-        status: 200,
-        headers: {},
-        body: null,
-      }),
+      send: () =>
+        Promise.resolve({
+          status: 200,
+          headers: {},
+          body: null,
+        }),
     };
 
     expect(() => root.createSubClient({ adapter: nodeAdapter })).toThrow(

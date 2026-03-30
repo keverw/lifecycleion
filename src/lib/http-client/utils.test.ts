@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import {
+  assertSupportedAdapterRuntimeAndConfig,
   buildURL,
   extractFetchHeaders,
   extractHostname,
@@ -240,6 +241,133 @@ describe('parseContentType', () => {
   test('is case-insensitive', () => {
     expect(parseContentType('Application/JSON')).toBe('json');
     expect(parseContentType('Text/Plain')).toBe('text');
+  });
+});
+
+describe('assertSupportedAdapterRuntimeAndConfig', () => {
+  // This block is the supported adapter/runtime matrix enforced at client
+  // construction time.
+
+  describe('redirect config invariants', () => {
+    test('rejects maxRedirects when followRedirects is false', () => {
+      expect(() =>
+        assertSupportedAdapterRuntimeAndConfig(
+          { followRedirects: false, maxRedirects: 1 },
+          'mock',
+          false,
+        ),
+      ).toThrow(/maxRedirects cannot be set when followRedirects is false/i);
+    });
+
+    test('rejects non-positive maxRedirects when followRedirects is true', () => {
+      expect(() =>
+        assertSupportedAdapterRuntimeAndConfig(
+          { followRedirects: true, maxRedirects: 0 },
+          'mock',
+          false,
+        ),
+      ).toThrow(
+        /maxRedirects must be greater than or equal to 1 when followRedirects is true/i,
+      );
+    });
+  });
+
+  describe('fetch in browser', () => {
+    test('rejects cookieJar usage', () => {
+      expect(() =>
+        assertSupportedAdapterRuntimeAndConfig(
+          { cookieJar: {} as never },
+          'fetch',
+          true,
+        ),
+      ).toThrow(
+        /cookieJar is not supported with FetchAdapter in browser environments/i,
+      );
+    });
+
+    test('rejects userAgent usage', () => {
+      expect(() =>
+        assertSupportedAdapterRuntimeAndConfig(
+          { userAgent: 'test-agent' },
+          'fetch',
+          true,
+        ),
+      ).toThrow(/userAgent is not supported with FetchAdapter/i);
+    });
+
+    test('rejects redirect handling', () => {
+      expect(() =>
+        assertSupportedAdapterRuntimeAndConfig(
+          { followRedirects: true },
+          'fetch',
+          true,
+        ),
+      ).toThrow(
+        /redirect handling is not supported with FetchAdapter in browser environments/i,
+      );
+    });
+  });
+
+  describe('xhr in browser', () => {
+    test('rejects cookieJar usage', () => {
+      expect(() =>
+        assertSupportedAdapterRuntimeAndConfig(
+          { cookieJar: {} as never },
+          'xhr',
+          true,
+        ),
+      ).toThrow(/cookieJar is not supported with XHR adapter/i);
+    });
+
+    test('rejects userAgent usage', () => {
+      expect(() =>
+        assertSupportedAdapterRuntimeAndConfig(
+          { userAgent: 'test-agent' },
+          'xhr',
+          true,
+        ),
+      ).toThrow(/userAgent is not supported with XHR adapter/i);
+    });
+
+    test('rejects redirect handling', () => {
+      expect(() =>
+        assertSupportedAdapterRuntimeAndConfig(
+          { followRedirects: true },
+          'xhr',
+          true,
+        ),
+      ).toThrow(/redirect handling is not supported with XHR adapter/i);
+    });
+  });
+
+  describe('mock in browser', () => {
+    test('allows cookieJar and redirect following', () => {
+      expect(() =>
+        assertSupportedAdapterRuntimeAndConfig(
+          {
+            cookieJar: {} as never,
+            followRedirects: true,
+            maxRedirects: 5,
+          },
+          'mock',
+          true,
+        ),
+      ).not.toThrow();
+    });
+  });
+
+  describe('node adapter', () => {
+    test('rejects browser runtime', () => {
+      expect(() =>
+        assertSupportedAdapterRuntimeAndConfig({}, 'node', true),
+      ).toThrow(/Node adapter is not supported in browser environments/i);
+    });
+
+    test('allows server runtime', () => {
+      expect(() =>
+        assertSupportedAdapterRuntimeAndConfig({}, 'node', false),
+      ).not.toThrow();
+    });
   });
 });
 
