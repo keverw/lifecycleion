@@ -166,6 +166,7 @@ export class MockAdapter implements HTTPAdapter {
 
   public async send(request: AdapterRequest): Promise<AdapterResponse> {
     const { requestURL, method, headers, body } = request;
+    const materializedHeaders = materializeMockRequestHeaders(headers);
 
     // --- 1. Pre-flight abort check ---
     // Throw immediately if the signal was already cancelled before we even start.
@@ -206,7 +207,7 @@ export class MockAdapter implements HTTPAdapter {
     // cookies are pre-parsed from the `cookie` header for convenience —
     // the raw header is still available on req.headers.cookie.
     const query = qs.parse(queryString) as QueryObject;
-    const cookies = parseCookieHeader(headers['cookie']);
+    const cookies = parseCookieHeader(materializedHeaders['cookie']);
     const match = this.router.find(method as Router.HTTPMethod, path);
     const params = (match?.params ?? {}) as Record<string, string>;
 
@@ -215,12 +216,12 @@ export class MockAdapter implements HTTPAdapter {
       path,
       params,
       query,
-      headers,
+      headers: materializedHeaders,
       cookies,
       body:
         body instanceof FormData
           ? extractFormData(body)
-          : parseRequestBody(body, headers['content-type']),
+          : parseRequestBody(body, materializedHeaders['content-type']),
     };
 
     // --- 4. Invoke handler ---
@@ -256,8 +257,8 @@ export class MockAdapter implements HTTPAdapter {
               this.config.onError(mockRequest, handlerError),
               request.signal,
             );
-          } catch (onErrorFailure) {
-            if (isInternalAbortError(onErrorFailure)) {
+          } catch (error) {
+            if (isInternalAbortError(error)) {
               throwAbortError();
             }
 
@@ -436,6 +437,22 @@ function parseCookieHeader(
   }
 
   return cookies;
+}
+
+function materializeMockRequestHeaders(
+  headers: Record<string, string | string[]>,
+): Record<string, string> {
+  const result: Record<string, string> = {};
+
+  for (const [key, value] of Object.entries(headers)) {
+    result[key] = Array.isArray(value)
+      ? key.toLowerCase() === 'cookie'
+        ? value.join('; ')
+        : value.join(', ')
+      : value;
+  }
+
+  return result;
 }
 
 function cookiesToSetCookieHeaders(

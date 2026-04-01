@@ -27,18 +27,51 @@ export interface HTTPAdapter {
 export interface AdapterRequest {
   requestURL: string;
   method: HTTPMethod;
-  headers: Record<string, string>;
+  /** Lowercase-keyed outbound headers for this attempt. Some adapters materialize string[] values at send time. */
+  headers: Record<string, string | string[]>;
   body?: string | Uint8Array | FormData | null;
   timeout: number;
   signal?: AbortSignal;
   onUploadProgress?: (event: AdapterProgressEvent) => void;
   onDownloadProgress?: (event: AdapterProgressEvent) => void;
+  /**
+   * NodeAdapter only. HTTPClient rejects non-node adapters before dispatch if
+   * this is set. Called after response headers arrive on a 200 response.
+   * Return a writable stream to pipe the body into it, or null to cancel.
+   */
+  streamResponse?: StreamResponseFactory;
+  /** Passed by the client so NodeAdapter can populate StreamResponseInfo. */
+  attemptNumber?: number;
+  /** Passed by the client so NodeAdapter can populate StreamResponseInfo. */
+  requestID?: string;
 }
 
 export interface AdapterResponse {
   status: number;
   /** Browser Fetch with `redirect: 'manual'` exposes redirects as `opaqueredirect`. */
   isOpaqueRedirect?: boolean;
+  /**
+   * True when the adapter wants the client to treat this as a transport-level
+   * failure. Adapters may still preserve a diagnostic status code such as 495,
+   * or use `status: 0` for generic transport failures. The client routes these
+   * through the failed/error path and sets `HTTPResponse.isFailed: true`.
+   */
+  isTransportError?: boolean;
+  /**
+   * Set to `false` when the adapter knows the request/response progressed far
+   * enough that replay is unsafe, even if `status` would normally be retried
+   * by the client (for example a mid-upload socket write failure after some
+   * bytes may already have left the process).
+   */
+  isRetryable?: boolean;
+  /**
+   * Final request headers actually used by the adapter after adapter-local
+   * mutations (for example multipart Content-Type/Content-Length added by the
+   * Node adapter). When present, HTTPClient merges these into the observer-
+   * facing AttemptRequest snapshot so response/error observers see the real
+   * outgoing headers rather than only the pre-adapter request shape.
+   */
+  effectiveRequestHeaders?: Record<string, string | string[]>;
   /**
    * Most headers are `string`. `set-cookie` is always `string[]` (HTTP spec,
    * each cookie is a separate header line).
@@ -49,7 +82,87 @@ export interface AdapterResponse {
   headers: Record<string, string | string[]>;
   /** Raw response bytes. Higher layers decode/parse based on content-type. */
   body: Uint8Array | null;
+  /**
+   * Set by NodeAdapter when the body was piped to a StreamResponseFactory writable.
+   * The client skips body parsing and sets isStreamed: true on HTTPResponse.
+   */
+  isStreamed?: boolean;
+  /**
+   * Set by NodeAdapter when response-body delivery fails after headers arrive
+   * (for example buffered-download truncation, writable errors, or upstream
+   * response-stream errors). The client treats this as a terminal stream
+   * failure: isStreamError: true. The real HTTP status is preserved (not
+   * zeroed) so observers can tell the server responded but body delivery still
+   * failed locally/in-flight.
+   */
+  isStreamError?: boolean;
+  /**
+   * Optional sub-classification for `isStreamError` so the client can surface a
+   * more precise `HTTPClientError.code` while keeping `HTTPResponse`
+   * transport-agnostic.
+   */
+  streamErrorCode?: 'stream_write_error' | 'stream_response_error';
+  /**
+   * Underlying error for an absorbed adapter failure. Populated for transport
+   * failures the adapter resolves instead of throwing, and for streamed-body
+   * failures carried via `isStreamError`.
+   */
+  errorCause?: Error;
 }
+
+// --- Response streaming ---
+
+/**
+ * Minimal write-capable stream interface. Structurally matches Node.js Writable
+ * without importing from 'node:stream', keeping this file isomorphic.
+ */
+export interface WritableLike {
+  write(chunk: Uint8Array | string, cb?: (err?: Error | null) => void): boolean;
+  end(cb?: () => void): void;
+  on(event: 'error', listener: (err: Error) => void): this;
+  on(event: 'close', listener: () => void): this;
+  on(event: 'drain', listener: () => void): this;
+  once(event: 'drain', listener: () => void): this;
+  destroy(error?: Error): void;
+}
+
+/**
+ * Info passed to a StreamResponseFactory. Status is always 200 — the factory
+ * is never called for any other status code.
+ */
+export interface StreamResponseInfo {
+  /** Always 200 — factory is not called for any other status. */
+  status: 200;
+  /** Response headers for this attempt. Most values are string; set-cookie is string[]. */
+  headers: Record<string, string | string[]>;
+  /** Fully resolved request URL for this attempt. */
+  url: string;
+  /** Which attempt this is (1-based). Increments on retry. */
+  attempt: number;
+  /** ULID assigned to this send() call. */
+  requestID: string;
+}
+
+/**
+ * Context passed alongside StreamResponseInfo. Provides an attempt-scoped
+ * AbortSignal that fires on cancel, timeout, or stream write failure — so
+ * cleanup logic (delete partial file, close import stream, etc.) can be
+ * co-located with the stream setup code instead of scattered across observers.
+ */
+export interface StreamResponseContext {
+  /** Fires on cancel, timeout, or stream write failure for this attempt. */
+  signal: AbortSignal;
+}
+
+/**
+ * Factory called by NodeAdapter after response headers arrive on a 200.
+ * Return a WritableLike to pipe the body into it, or null to cancel the request.
+ * May be async.
+ */
+export type StreamResponseFactory = (
+  info: StreamResponseInfo,
+  context: StreamResponseContext,
+) => WritableLike | null | Promise<WritableLike | null>;
 
 // --- Progress ---
 
@@ -126,7 +239,7 @@ export interface HTTPClientConfig {
    * `BaseHTTPClient.request` and `buildURL` in `utils.ts`.
    */
   baseURL?: string;
-  defaultHeaders?: Record<string, string>;
+  defaultHeaders?: Record<string, string | string[]>;
   timeout?: number;
   cookieJar?: CookieJar | null;
   retryPolicy?: RetryPolicyOptions;
@@ -153,7 +266,7 @@ export interface SubClientConfig extends Partial<HTTPClientConfig> {
 // --- Request ---
 
 export interface HTTPRequestOptions {
-  headers?: Record<string, string>;
+  headers?: Record<string, string | string[]>;
   params?: Record<string, unknown>;
   body?: unknown;
   timeout?: number;
@@ -164,6 +277,12 @@ export interface HTTPRequestOptions {
   onDownloadProgress?: (event: HTTPProgressEvent) => void;
   onAttemptStart?: (event: AttemptStartEvent) => void;
   onAttemptEnd?: (event: AttemptEndEvent) => void;
+  /**
+   * NodeAdapter only. Called after response headers arrive on a 200 response.
+   * Return a WritableLike to pipe the body to it, or null to cancel.
+   * HTTPClient rejects non-node adapters before dispatch if this is set.
+   */
+  streamResponse?: StreamResponseFactory;
 }
 
 // --- Response ---
@@ -182,6 +301,22 @@ export interface HTTPResponse<T = unknown> {
   isCancelled: boolean;
   isTimeout: boolean;
   isNetworkError: boolean;
+  /**
+   * True when this response settled through the client's failed/error path.
+   *
+   * In practice this is true for responses flagged as `isCancelled`,
+   * `isTimeout`, `isNetworkError`, `isStreamError`, or adapter
+   * `isTransportError`, as well as other client-level failures that resolve to
+   * `status: 0` (for example request setup, interceptor, and redirect
+   * control-flow failures). For adapter-originated transport failures,
+   * `isTransportError` is the explicit signal; bare `status: 0` is also
+   * treated as a transport failure by the client.
+   *
+   * Ordinary HTTP responses, including HTTP error statuses like 4xx/5xx,
+   * remain `false`. This tracks client-level failure handling, not HTTP
+   * status class.
+   */
+  isFailed: boolean;
   isParseError: boolean;
   /**
    * Fully resolved URL for this `send()` after `initial` interceptors, before any
@@ -199,6 +334,20 @@ export interface HTTPResponse<T = unknown> {
   redirectHistory: string[];
   requestID: string;
   adapterType: AdapterType;
+  /**
+   * True when the response body was piped to a StreamResponseFactory writable.
+   * body is null in this case — do not try to parse it.
+   */
+  isStreamed: boolean;
+  /**
+   * True when streamed body delivery fails after headers arrive (disk full,
+   * writable destroyed, upstream response-stream error, etc.). The request
+   * resolves as a failed response, with the real HTTP status preserved so
+   * observers can distinguish a post-header streaming failure from a transport
+   * failure (status: 0). Stream setup/factory failures do not set
+   * `isStreamError`.
+   */
+  isStreamError: boolean;
 }
 
 // --- Error ---
@@ -212,7 +361,10 @@ export interface HTTPClientError {
     | 'redirect_loop'
     | 'request_setup_error'
     | 'adapter_error'
-    | 'interceptor_error';
+    | 'interceptor_error'
+    | 'stream_write_error'
+    | 'stream_response_error'
+    | 'stream_setup_error';
   message: string;
   cause?: Error;
   /**
@@ -500,7 +652,7 @@ export interface InterceptedRequest {
   /** URL for this adapter attempt (changes on redirect follow-ups). */
   requestURL: string;
   method: HTTPMethod;
-  headers: Record<string, string>;
+  headers: Record<string, string | string[]>;
   body?: unknown;
 }
 
@@ -510,8 +662,15 @@ export interface InterceptedRequest {
  */
 export type AttemptRequest = Omit<
   AdapterRequest,
-  'signal' | 'onUploadProgress' | 'onDownloadProgress'
+  'headers' | 'signal' | 'onUploadProgress' | 'onDownloadProgress'
 > & {
+  /**
+   * Final request headers visible to response/error observers. These are
+   * lowercase-keyed. Most values are `string`, but adapter-local snapshots may
+   * preserve repeated request headers as `string[]` when the underlying runtime
+   * supports them.
+   */
+  headers: Record<string, string | string[]>;
   /**
    * Post-interceptor body before attempt materialization. This is useful for
    * observers that need the semantic payload as well as the adapter-facing body.

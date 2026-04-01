@@ -9,6 +9,7 @@ import {
 import { HTTPClient } from './http-client';
 import { CookieJar } from './cookie-jar';
 import { startTestServer, type TestServer } from './test-helpers/test-server';
+import { scalarHeader } from './utils';
 import {
   DEFAULT_REQUEST_ATTEMPT_HEADER,
   DEFAULT_REQUEST_ID_HEADER,
@@ -265,6 +266,8 @@ describe('HTTPClient — basic HTTP methods', () => {
 
     expect(capturedRedirectMode).toBe('manual');
     expect(response.status).toBe(0);
+    expect(response.isFailed).toBe(true);
+    expect(response.isNetworkError).toBe(false);
     expect(builder.error).not.toBeNull();
     expect(builder.error?.code).toBe('redirect_disabled');
     expect(builder.error?.requestURL).toBe('https://local.test/redirect');
@@ -297,6 +300,7 @@ describe('HTTPClient — basic HTTP methods', () => {
     expect(isFetchCalled).toBe(false);
     expect(res.status).toBe(0);
     expect(res.isNetworkError).toBe(false);
+    expect(res.isFailed).toBe(true);
     expect(builder.state).toBe('failed');
     expect(builder.error?.code).toBe('request_setup_error');
     expect(builder.error?.cause?.message).toMatch(
@@ -335,6 +339,7 @@ describe('HTTPClient — basic HTTP methods', () => {
     expect(isFetchCalled).toBe(false);
     expect(res.status).toBe(0);
     expect(res.isNetworkError).toBe(false);
+    expect(res.isFailed).toBe(true);
     expect(builder.state).toBe('failed');
     expect(builder.error?.code).toBe('interceptor_error');
     expect(builder.error?.cause?.message).toMatch(
@@ -674,7 +679,7 @@ describe('HTTPClient — headers', () => {
   });
 
   test('applies explicit userAgent to mock adapters', async () => {
-    let capturedHeaders: Record<string, string> = {};
+    let capturedHeaders: Record<string, string | string[]> = {};
 
     const adapter: HTTPAdapter = {
       getType: () => 'mock',
@@ -700,7 +705,7 @@ describe('HTTPClient — headers', () => {
   });
 
   test('applies the default user-agent to mock adapters when none is configured', async () => {
-    let capturedHeaders: Record<string, string> = {};
+    let capturedHeaders: Record<string, string | string[]> = {};
 
     const adapter: HTTPAdapter = {
       getType: () => 'mock',
@@ -828,6 +833,7 @@ describe('HTTPClient — cancellation', () => {
     const res = await client.get('/api/slow').signal(controller.signal).send();
     expect(res.status).toBe(0);
     expect(res.isCancelled).toBe(true);
+    expect(res.isFailed).toBe(true);
   });
 
   test('pre-aborted AbortSignal short-circuits before interceptors and adapter dispatch', async () => {
@@ -866,6 +872,7 @@ describe('HTTPClient — cancellation', () => {
 
     expect(res.status).toBe(0);
     expect(res.isCancelled).toBe(true);
+    expect(res.isFailed).toBe(true);
     expect(res.initialURL).toBe('https://example.com/slow');
     expect(res.requestURL).toBe('https://example.com/slow');
     expect(res.redirected).toBe(false);
@@ -887,6 +894,7 @@ describe('HTTPClient — cancellation', () => {
     const res = await promise;
     expect(res.status).toBe(0);
     expect(res.isCancelled).toBe(true);
+    expect(res.isFailed).toBe(true);
   });
 
   test('builder.cancel() cancels the request', async () => {
@@ -900,6 +908,7 @@ describe('HTTPClient — cancellation', () => {
     const res = await promise;
     expect(res.status).toBe(0);
     expect(res.isCancelled).toBe(true);
+    expect(res.isFailed).toBe(true);
   });
 
   test('client.cancelAll() cancels all in-flight requests', async () => {
@@ -913,6 +922,7 @@ describe('HTTPClient — cancellation', () => {
     for (const res of results) {
       expect(res.status).toBe(0);
       expect(res.isCancelled).toBe(true);
+      expect(res.isFailed).toBe(true);
     }
   });
 
@@ -927,6 +937,7 @@ describe('HTTPClient — cancellation', () => {
 
     const [res1, res2] = await Promise.all([p1, p2]);
     expect(res1.isCancelled).toBe(true);
+    expect(res1.isFailed).toBe(true);
     // unlabeled may or may not finish — just check it didn't get cancelled by the label stop
     expect(res2.isCancelled).toBe(false);
   });
@@ -939,7 +950,19 @@ describe('HTTPClient — timeout', () => {
     const res = await builder.send(); // server delays 500ms
     expect(res.status).toBe(0);
     expect(res.isTimeout).toBe(true);
+    expect(res.isFailed).toBe(true);
     expect(builder.error?.code).toBe('timeout');
+  });
+
+  test('timeout(0) disables the per-attempt timeout', async () => {
+    const client = makeClient();
+    const builder = client.get('/api/slow').timeout(0);
+    const res = await builder.send();
+
+    expect(res.status).toBe(200);
+    expect(res.isTimeout).toBe(false);
+    expect(res.isFailed).toBe(false);
+    expect(builder.error).toBeNull();
   });
 
   test('per-attempt timeout is retried when retry policy has budget', async () => {
@@ -1030,6 +1053,7 @@ describe('HTTPClient — timeout', () => {
     expect(res.status).toBe(0);
     expect(res.isTimeout).toBe(true);
     expect(res.isNetworkError).toBe(false);
+    expect(res.isFailed).toBe(true);
     expect(builder.error?.code).toBe('timeout');
     expect(builder.error?.isRetriesExhausted).toBe(true);
     expect(builder.error?.isTimeout).toBe(true);
@@ -1233,7 +1257,7 @@ describe('HTTPClient — cookies', () => {
       getType: () => 'mock',
       send: (request: AdapterRequest) => {
         call++;
-        cookiesSent.push(request.headers.cookie ?? '');
+        cookiesSent.push(scalarHeader(request.headers, 'cookie') ?? '');
         if (call === 1) {
           return Promise.resolve({
             status: 503,
@@ -1297,7 +1321,9 @@ describe('HTTPClient — cookies', () => {
           status: 200,
           headers: { 'content-type': 'application/json' },
           body: new TextEncoder().encode(
-            JSON.stringify({ cookie: request.headers.cookie ?? '' }),
+            JSON.stringify({
+              cookie: scalarHeader(request.headers, 'cookie') ?? '',
+            }),
           ),
         });
       },
@@ -1430,6 +1456,7 @@ describe('HTTPClient — interceptors', () => {
     expect(res.isNetworkError).toBe(false);
     expect(res.isCancelled).toBe(false);
     expect(res.isTimeout).toBe(false);
+    expect(res.isFailed).toBe(true);
     expect(res.initialURL).toBe('https://example.com/users');
     expect(res.requestURL).toBe('https://example.com/users');
     expect(builder.state).toBe('failed');
@@ -1560,6 +1587,7 @@ describe('HTTPClient — redirect', () => {
 
     expect(res.status).toBe(0);
     expect(res.isNetworkError).toBe(false);
+    expect(res.isFailed).toBe(true);
     expect(res.initialURL).toBe(`${server.url}/api/redirect/301`);
     expect(res.requestURL).toBe(`${server.url}/api/redirect/301`);
     expect(res.redirected).toBe(false);
@@ -1653,7 +1681,7 @@ describe('HTTPClient — redirect', () => {
   });
 
   test('cross-origin redirect preserves safelisted headers under lowercase keys', async () => {
-    const followUpHeaders: Record<string, string>[] = [];
+    const followUpHeaders: Array<Record<string, string | string[]>> = [];
 
     const adapter: HTTPAdapter = {
       getType: () => 'mock',
@@ -1702,7 +1730,7 @@ describe('HTTPClient — redirect', () => {
   });
 
   test('same-origin redirect preserves caller-supplied Cookie header without a jar', async () => {
-    const followUpHeaders: Record<string, string>[] = [];
+    const followUpHeaders: Array<Record<string, string | string[]>> = [];
 
     const adapter: HTTPAdapter = {
       getType: () => 'mock',
@@ -1737,7 +1765,7 @@ describe('HTTPClient — redirect', () => {
   });
 
   test('redirect interceptor cannot leak sensitive headers after rewriting to a cross-origin target', async () => {
-    const followUpHeaders: Record<string, string>[] = [];
+    const followUpHeaders: Array<Record<string, string | string[]>> = [];
 
     const adapter: HTTPAdapter = {
       getType: () => 'mock',
@@ -2078,6 +2106,7 @@ describe('HTTPClient — redirect', () => {
     expect(res.status).toBe(0);
     expect(res.isTimeout).toBe(true);
     expect(res.isCancelled).toBe(false);
+    expect(res.isFailed).toBe(true);
     expect(builder.error?.code).toBe('timeout');
     expect(res.initialURL).toBe(`${server.url}/api/redirect/302-slow`);
     expect(res.requestURL).toBe(`${server.url}/api/slow`);
@@ -2119,13 +2148,11 @@ describe('HTTPClient — redirect', () => {
           loaded: 2,
           total: 4,
           progress: 0.5,
-          attemptNumber: 99,
         });
         request.onDownloadProgress?.({
           loaded: 6,
           total: 8,
           progress: 0.75,
-          attemptNumber: 100,
         });
 
         return Promise.resolve({
@@ -2174,6 +2201,7 @@ describe('HTTPClient — redirect', () => {
     expect(res.isNetworkError).toBe(true);
     expect(res.isCancelled).toBe(false);
     expect(res.isTimeout).toBe(false);
+    expect(res.isFailed).toBe(true);
     expect(res.initialURL).toBe(`${server.url}/api/redirect/loop-a`);
     expect(res.requestURL).toBe(`${server.url}/api/redirect/loop-b`);
     expect(res.redirected).toBe(true);
@@ -2379,6 +2407,7 @@ describe('HTTPClient — sub-clients', () => {
 
     const res = await rootReq;
     expect(res.isCancelled).toBe(true);
+    expect(res.isFailed).toBe(true);
   });
 
   test('cancelOwn() only cancels own requests', async () => {
@@ -2392,6 +2421,7 @@ describe('HTTPClient — sub-clients', () => {
 
     const [rootRes, subRes] = await Promise.all([rootReq, subReq]);
     expect(subRes.isCancelled).toBe(true);
+    expect(subRes.isFailed).toBe(true);
     // root request continues (or completes normally)
     expect(rootRes.isCancelled).toBe(false);
   });
@@ -2413,6 +2443,7 @@ describe('HTTPClient — sub-clients', () => {
     ]);
 
     expect(subLabeledRes.isCancelled).toBe(true);
+    expect(subLabeledRes.isFailed).toBe(true);
     expect(rootRes.isCancelled).toBe(false);
     expect(subOtherRes.isCancelled).toBe(false);
   });
@@ -2557,6 +2588,7 @@ describe('HTTPClient — options shorthand', () => {
     const client = makeClient();
     const res = await client.get('/api/slow', { timeout: 100 }).send();
     expect(res.isTimeout).toBe(true);
+    expect(res.isFailed).toBe(true);
   });
 
   test('options and fluent chain can be mixed', async () => {
@@ -2744,6 +2776,7 @@ describe('HTTPClient — builder state', () => {
     const elapsed = Date.now() - start;
 
     expect(res.isCancelled).toBe(true);
+    expect(res.isFailed).toBe(true);
     expect(elapsed).toBeLessThan(1000);
   });
 
@@ -2773,6 +2806,7 @@ describe('HTTPClient — builder state', () => {
     const elapsed = Date.now() - start;
 
     expect(res.isCancelled).toBe(true);
+    expect(res.isFailed).toBe(true);
     expect(elapsed).toBeLessThan(1000);
   });
 });
@@ -2780,7 +2814,7 @@ describe('HTTPClient — builder state', () => {
 describe('HTTPClient — phase-aware interceptors', () => {
   test('retry-phase interceptor injects header on retries only', async () => {
     let callCount = 0;
-    const sentHeaders: Record<string, string>[] = [];
+    const sentHeaders: Array<Record<string, string | string[]>> = [];
 
     const adapter: HTTPAdapter = {
       getType: () => 'mock',
@@ -3108,6 +3142,7 @@ describe('HTTPClient — phase-aware interceptors', () => {
     const res = await builder.send();
 
     expect(res.status).toBe(0);
+    expect(res.isFailed).toBe(true);
     expect(builder.error?.code).toBe('interceptor_error');
     expect(finalCodes).toEqual(['interceptor_error']);
     expect(finalObserverRequestURLs).toEqual([target]);
@@ -3154,6 +3189,7 @@ describe('HTTPClient — phase-aware interceptors', () => {
     const res = await client.get(start).send();
 
     expect(res.isCancelled).toBe(true);
+    expect(res.isFailed).toBe(true);
     expect(finalObserverRequestURLs).toEqual([target]);
     expect(res.initialURL).toBe(start);
     expect(res.requestURL).toBe(target);
@@ -3252,7 +3288,7 @@ describe('HTTPClient — phase-aware interceptors', () => {
     );
 
     // Collect the `request` argument passed to the redirect-phase response observer
-    const observedHeaders: Array<Record<string, string>> = [];
+    const observedHeaders: Array<Record<string, string | string[]>> = [];
     client.addResponseObserver(
       (_res, request) => {
         observedHeaders.push({ ...request.headers });
@@ -3330,6 +3366,320 @@ describe('HTTPClient — phase-aware interceptors', () => {
     expect(contexts[2].redirectHistory).toEqual([b, c]);
   });
 
+  test('one request can traverse initial, redirect, retry, and final phases in order', async () => {
+    const start = 'https://example.com/start';
+    const target = 'https://example.com/target';
+    let targetCalls = 0;
+    const phaseLog: string[] = [];
+    const sentSnapshots: Array<{
+      url: string;
+      headers: Record<string, string | string[]>;
+    }> = [];
+
+    const adapter: HTTPAdapter = {
+      getType: () => 'mock',
+      send: (request: AdapterRequest): Promise<AdapterResponse> => {
+        sentSnapshots.push({
+          url: request.requestURL,
+          headers: { ...request.headers },
+        });
+
+        if (request.requestURL === start) {
+          return Promise.resolve({
+            status: 302,
+            headers: { location: target },
+            body: null,
+          });
+        }
+
+        if (request.requestURL === target) {
+          targetCalls++;
+
+          if (targetCalls === 1) {
+            return Promise.resolve({ status: 503, headers: {}, body: null });
+          }
+
+          return Promise.resolve({
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+            body: new TextEncoder().encode('{"ok":true}'),
+          });
+        }
+
+        throw new Error(`unexpected URL: ${request.requestURL}`);
+      },
+    };
+
+    const client = new HTTPClient({ adapter, followRedirects: true });
+
+    client.addRequestInterceptor((req, phase) => {
+      phaseLog.push(`request:${phase.type}:${req.requestURL}`);
+      return {
+        ...req,
+        headers: { ...req.headers, 'x-initial-phase': 'yes' },
+      };
+    });
+
+    client.addRequestInterceptor(
+      (req, phase) => {
+        if (phase.type !== 'redirect') {
+          throw new Error(`unexpected phase: ${phase.type}`);
+        }
+
+        phaseLog.push(`request:${phase.type}:${req.requestURL}`);
+        return {
+          ...req,
+          headers: { ...req.headers, 'x-redirect-phase': String(phase.hop) },
+        };
+      },
+      { phases: ['redirect'] },
+    );
+
+    client.addRequestInterceptor(
+      (req, phase) => {
+        if (phase.type !== 'retry') {
+          throw new Error(`unexpected phase: ${phase.type}`);
+        }
+
+        phaseLog.push(
+          `request:${phase.type}:${req.requestURL}:attempt:${phase.attempt}`,
+        );
+        return {
+          ...req,
+          headers: { ...req.headers, 'x-retry-phase': String(phase.attempt) },
+        };
+      },
+      { phases: ['retry'] },
+    );
+
+    client.addResponseObserver(
+      (res, _req, phase) => {
+        if (phase.type !== 'redirect') {
+          throw new Error(`unexpected phase: ${phase.type}`);
+        }
+
+        phaseLog.push(`response:${phase.type}:${res.status}:hop:${phase.hop}`);
+      },
+      { phases: ['redirect'] },
+    );
+
+    client.addResponseObserver(
+      (res, _req, phase) => {
+        if (phase.type !== 'retry') {
+          throw new Error(`unexpected phase: ${phase.type}`);
+        }
+
+        phaseLog.push(
+          `response:${phase.type}:${res.status}:attempt:${phase.attempt}`,
+        );
+      },
+      { phases: ['retry'] },
+    );
+
+    client.addResponseObserver((res, request, phase) => {
+      phaseLog.push(
+        `response:${phase.type}:${res.status}:${request.requestURL}`,
+      );
+    });
+
+    const res = await client
+      .get(start)
+      .retryPolicy({ strategy: 'fixed', maxRetryAttempts: 1, delayMS: 10 })
+      .send<{ ok: boolean }>();
+
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(true);
+    expect(res.requestURL).toBe(target);
+    expect(res.redirectHistory).toEqual([target]);
+
+    expect(phaseLog).toEqual([
+      `request:initial:${start}`,
+      'response:redirect:302:hop:1',
+      `request:redirect:${target}`,
+      'response:retry:503:attempt:2',
+      `request:retry:${target}:attempt:3`,
+      `response:final:200:${target}`,
+    ]);
+
+    expect(sentSnapshots).toEqual([
+      {
+        url: start,
+        headers: expect.objectContaining({
+          'x-initial-phase': 'yes',
+        }),
+      },
+      {
+        url: target,
+        headers: expect.objectContaining({
+          'x-initial-phase': 'yes',
+          'x-redirect-phase': '1',
+        }),
+      },
+      {
+        url: target,
+        headers: expect.objectContaining({
+          'x-initial-phase': 'yes',
+          'x-redirect-phase': '1',
+          'x-retry-phase': '3',
+        }),
+      },
+    ]);
+  });
+
+  test('one request can traverse initial, redirect, retry, and final error phases in order', async () => {
+    const start = 'https://example.com/start';
+    const target = 'https://example.com/target';
+    let targetCalls = 0;
+    const phaseLog: string[] = [];
+    const sentSnapshots: Array<{
+      url: string;
+      headers: Record<string, string | string[]>;
+    }> = [];
+
+    const adapter: HTTPAdapter = {
+      getType: () => 'mock',
+      send: (request: AdapterRequest): Promise<AdapterResponse> => {
+        sentSnapshots.push({
+          url: request.requestURL,
+          headers: { ...request.headers },
+        });
+
+        if (request.requestURL === start) {
+          return Promise.resolve({
+            status: 302,
+            headers: { location: target },
+            body: null,
+          });
+        }
+
+        if (request.requestURL === target) {
+          targetCalls++;
+
+          if (targetCalls <= 2) {
+            throw new Error(`transient target failure ${targetCalls}`);
+          }
+        }
+
+        throw new Error(`unexpected URL: ${request.requestURL}`);
+      },
+    };
+
+    const client = new HTTPClient({ adapter, followRedirects: true });
+
+    client.addRequestInterceptor((req, phase) => {
+      phaseLog.push(`request:${phase.type}:${req.requestURL}`);
+      return {
+        ...req,
+        headers: { ...req.headers, 'x-initial-phase': 'yes' },
+      };
+    });
+
+    client.addRequestInterceptor(
+      (req, phase) => {
+        if (phase.type !== 'redirect') {
+          throw new Error(`unexpected phase: ${phase.type}`);
+        }
+
+        phaseLog.push(`request:${phase.type}:${req.requestURL}`);
+        return {
+          ...req,
+          headers: { ...req.headers, 'x-redirect-phase': String(phase.hop) },
+        };
+      },
+      { phases: ['redirect'] },
+    );
+
+    client.addRequestInterceptor(
+      (req, phase) => {
+        if (phase.type !== 'retry') {
+          throw new Error(`unexpected phase: ${phase.type}`);
+        }
+
+        phaseLog.push(
+          `request:${phase.type}:${req.requestURL}:attempt:${phase.attempt}`,
+        );
+        return {
+          ...req,
+          headers: { ...req.headers, 'x-retry-phase': String(phase.attempt) },
+        };
+      },
+      { phases: ['retry'] },
+    );
+
+    client.addResponseObserver(
+      (res, _req, phase) => {
+        if (phase.type !== 'redirect') {
+          throw new Error(`unexpected phase: ${phase.type}`);
+        }
+
+        phaseLog.push(`response:${phase.type}:${res.status}:hop:${phase.hop}`);
+      },
+      { phases: ['redirect'] },
+    );
+
+    client.addErrorObserver(
+      (err, request, phase) => {
+        if (phase.type !== 'retry') {
+          throw new Error(`unexpected phase: ${phase.type}`);
+        }
+
+        phaseLog.push(
+          `error:${phase.type}:${err.code}:${request.requestURL}:attempt:${phase.attempt}`,
+        );
+      },
+      { phases: ['retry'] },
+    );
+
+    client.addErrorObserver((err, request, phase) => {
+      phaseLog.push(`error:${phase.type}:${err.code}:${request.requestURL}`);
+    });
+
+    const builder = client
+      .get(start)
+      .retryPolicy({ strategy: 'fixed', maxRetryAttempts: 1, delayMS: 10 });
+    const res = await builder.send();
+
+    expect(res.status).toBe(0);
+    expect(res.isFailed).toBe(true);
+    expect(res.requestURL).toBe(target);
+    expect(res.redirectHistory).toEqual([target]);
+    expect(builder.error?.code).toBe('adapter_error');
+    expect(builder.error?.isRetriesExhausted).toBe(true);
+
+    expect(phaseLog).toEqual([
+      `request:initial:${start}`,
+      'response:redirect:302:hop:1',
+      `request:redirect:${target}`,
+      `error:retry:adapter_error:${target}:attempt:2`,
+      `request:retry:${target}:attempt:3`,
+      `error:final:adapter_error:${target}`,
+    ]);
+
+    expect(sentSnapshots).toEqual([
+      {
+        url: start,
+        headers: expect.objectContaining({
+          'x-initial-phase': 'yes',
+        }),
+      },
+      {
+        url: target,
+        headers: expect.objectContaining({
+          'x-initial-phase': 'yes',
+          'x-redirect-phase': '1',
+        }),
+      },
+      {
+        url: target,
+        headers: expect.objectContaining({
+          'x-initial-phase': 'yes',
+          'x-redirect-phase': '1',
+          'x-retry-phase': '3',
+        }),
+      },
+    ]);
+  });
+
   test('cancel from initial-phase interceptor returns cancelled response', async () => {
     const adapterCalls: string[] = [];
 
@@ -3362,6 +3712,7 @@ describe('HTTPClient — phase-aware interceptors', () => {
 
     expect(res.status).toBe(0);
     expect(res.isCancelled).toBe(true);
+    expect(res.isFailed).toBe(true);
     expect(builder.state).toBe('cancelled');
 
     // Adapter should never have been called
@@ -3398,6 +3749,7 @@ describe('HTTPClient — phase-aware interceptors', () => {
       .send();
 
     expect(res.isCancelled).toBe(true);
+    expect(res.isFailed).toBe(true);
     // Only one adapter call — the initial attempt. Retry was cancelled by interceptor.
     expect(callCount).toBe(1);
     expect(attemptLifecycle).toEqual(['start:1', 'end:1', 'start:2', 'end:2']);
@@ -3621,6 +3973,7 @@ describe('HTTPClient — phase-aware interceptors', () => {
 
     expect(res.status).toBe(0);
     expect(res.isNetworkError).toBe(true);
+    expect(res.isFailed).toBe(true);
     expect(builder.state).toBe('failed');
     expect(builder.error?.code).toBe('adapter_error');
     expect(builder.error?.message).toBe('Adapter error');
@@ -3663,6 +4016,7 @@ describe('HTTPClient — phase-aware interceptors', () => {
     expect(res.status).toBe(0);
     expect(res.isNetworkError).toBe(true);
     expect(res.redirected).toBe(true);
+    expect(res.isFailed).toBe(true);
     expect(builder.state).toBe('failed');
     expect(builder.error?.code).toBe('adapter_error');
     expect(builder.error?.message).toBe('Adapter error');
@@ -3743,7 +4097,7 @@ describe('HTTPClient — phase-aware interceptors', () => {
   });
 
   test('does not add inferred text/plain when interceptor sets Content-Type with mixed-case key', async () => {
-    let capturedHeaders: Record<string, string> = {};
+    let capturedHeaders: Record<string, string | string[]> = {};
 
     const adapter: HTTPAdapter = {
       getType: () => 'mock',
@@ -3797,10 +4151,44 @@ describe('HTTPClient — phase-aware interceptors', () => {
 
     expect(res.status).toBe(0);
     expect(res.isNetworkError).toBe(true);
+    expect(res.isFailed).toBe(true);
     expect(builder.state).toBe('failed');
     expect(builder.error?.code).toBe('network_error');
     expect(builder.error?.message).toBe('Network error');
     expect(builder.error?.cause).toBeUndefined();
+    expect(errorCodes).toEqual(['network_error']);
+  });
+
+  test('adapter that marks transport error with status: 0 gets network_error code', async () => {
+    const adapter: HTTPAdapter = {
+      getType: () => 'mock',
+      send: (_request: AdapterRequest): Promise<AdapterResponse> =>
+        Promise.resolve({
+          status: 0,
+          isTransportError: true,
+          headers: {},
+          body: null,
+          errorCause: new Error('socket hang up'),
+        }),
+    };
+
+    const client = new HTTPClient({ adapter });
+    const errorCodes: string[] = [];
+
+    client.addErrorObserver((err) => {
+      errorCodes.push(err.code);
+    });
+
+    const builder = client.get('https://example.com/test');
+    const res = await builder.send();
+
+    expect(res.status).toBe(0);
+    expect(res.isNetworkError).toBe(true);
+    expect(res.isFailed).toBe(true);
+    expect(builder.state).toBe('failed');
+    expect(builder.error?.code).toBe('network_error');
+    expect(builder.error?.message).toBe('Network error');
+    expect(builder.error?.cause?.message).toBe('socket hang up');
     expect(errorCodes).toEqual(['network_error']);
   });
 
@@ -3841,6 +4229,7 @@ describe('HTTPClient — phase-aware interceptors', () => {
     expect(res.status).toBe(0);
     expect(res.isNetworkError).toBe(true);
     expect(res.redirected).toBe(true);
+    expect(res.isFailed).toBe(true);
     expect(res.requestURL).toBe('https://example.com/redirected');
     expect(res.redirectHistory).toEqual(['https://example.com/redirected']);
     expect(builder.state).toBe('failed');
@@ -3927,6 +4316,7 @@ describe('HTTPClient — phase-aware interceptors', () => {
     expect(wasAdapterCalled).toBe(false);
     expect(res.status).toBe(0);
     expect(res.isNetworkError).toBe(false);
+    expect(res.isFailed).toBe(true);
     expect(builder.state).toBe('failed');
     expect(builder.attemptCount).toBe(0);
     expect(builder.error?.code).toBe('request_setup_error');
@@ -3972,6 +4362,7 @@ describe('HTTPClient — phase-aware interceptors', () => {
     expect(wasAdapterCalled).toBe(false);
     expect(res.status).toBe(0);
     expect(res.isNetworkError).toBe(false);
+    expect(res.isFailed).toBe(true);
     expect(builder.state).toBe('failed');
     expect(builder.error?.code).toBe('interceptor_error');
     expect(builder.error?.cause?.message).toMatch(

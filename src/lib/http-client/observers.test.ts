@@ -13,7 +13,7 @@ function makeRequest(overrides: Partial<AttemptRequest> = {}): AttemptRequest {
 }
 
 function makeResponse(overrides: Partial<HTTPResponse> = {}): HTTPResponse {
-  return {
+  const response: HTTPResponse = {
     status: 200,
     headers: {},
     body: { ok: true },
@@ -23,6 +23,7 @@ function makeResponse(overrides: Partial<HTTPResponse> = {}): HTTPResponse {
     isCancelled: false,
     isTimeout: false,
     isNetworkError: false,
+    isFailed: false,
     isParseError: false,
     initialURL: 'https://example.com/api',
     requestURL: 'https://example.com/api',
@@ -30,8 +31,19 @@ function makeResponse(overrides: Partial<HTTPResponse> = {}): HTTPResponse {
     redirectHistory: [],
     requestID: 'req-1',
     adapterType: 'fetch',
+    isStreamed: false,
+    isStreamError: false,
     ...overrides,
   };
+
+  response.isFailed =
+    overrides.isFailed ??
+    (response.isCancelled ||
+      response.isTimeout ||
+      response.isNetworkError ||
+      response.isStreamError);
+
+  return response;
 }
 
 function makeError(overrides: Partial<HTTPClientError> = {}): HTTPClientError {
@@ -222,7 +234,13 @@ describe('ResponseObserverManager', () => {
       phases.push(phase.type);
     });
 
-    await mgr.run(makeResponse(), makeRequest(), { type: 'initial' });
+    await mgr.run(makeResponse(), makeRequest(), {
+      type: 'redirect',
+      hop: 1,
+      from: 'a',
+      to: 'b',
+      statusCode: 301,
+    });
     await mgr.run(makeResponse(), makeRequest(), {
       type: 'retry',
       attempt: 2,
@@ -244,7 +262,11 @@ describe('ResponseObserverManager', () => {
       { phases: ['final', 'redirect'] },
     );
 
-    await mgr.run(makeResponse(), makeRequest(), { type: 'initial' });
+    await mgr.run(makeResponse(), makeRequest(), {
+      type: 'retry',
+      attempt: 1,
+      maxAttempts: 3,
+    });
     await mgr.run(makeResponse(), makeRequest(), {
       type: 'redirect',
       hop: 1,
@@ -268,7 +290,11 @@ describe('ResponseObserverManager', () => {
       { phases: [] },
     );
 
-    await mgr.run(makeResponse(), makeRequest(), { type: 'initial' });
+    await mgr.run(makeResponse(), makeRequest(), {
+      type: 'retry',
+      attempt: 1,
+      maxAttempts: 3,
+    });
     await mgr.run(makeResponse(), makeRequest(), {
       type: 'redirect',
       hop: 1,
@@ -278,7 +304,7 @@ describe('ResponseObserverManager', () => {
     });
     await mgr.run(makeResponse(), makeRequest(), { type: 'final' });
 
-    expect(phases).toEqual(['initial', 'redirect', 'final']);
+    expect(phases).toEqual(['retry', 'redirect', 'final']);
   });
 });
 
@@ -356,7 +382,11 @@ describe('ErrorObserverManager', () => {
       phases.push(phase.type);
     });
 
-    await mgr.run(makeError(), makeRequest(), { type: 'initial' });
+    await mgr.run(makeError(), makeRequest(), {
+      type: 'retry',
+      attempt: 1,
+      maxAttempts: 3,
+    });
     await mgr.run(makeError(), makeRequest(), {
       type: 'retry',
       attempt: 2,
@@ -378,7 +408,7 @@ describe('ErrorObserverManager', () => {
       { phases: ['final', 'retry'] },
     );
 
-    await mgr.run(makeError(), makeRequest(), { type: 'initial' });
+    await mgr.run(makeError(), makeRequest(), { type: 'final' });
     await mgr.run(makeError(), makeRequest(), {
       type: 'retry',
       attempt: 2,
@@ -386,7 +416,7 @@ describe('ErrorObserverManager', () => {
     });
     await mgr.run(makeError(), makeRequest(), { type: 'final' });
 
-    expect(phases).toEqual(['retry', 'final']);
+    expect(phases).toEqual(['final', 'retry', 'final']);
   });
 
   test('empty phases filter — does not restrict matching', async () => {
@@ -400,7 +430,7 @@ describe('ErrorObserverManager', () => {
       { phases: [] },
     );
 
-    await mgr.run(makeError(), makeRequest(), { type: 'initial' });
+    await mgr.run(makeError(), makeRequest(), { type: 'final' });
     await mgr.run(makeError(), makeRequest(), {
       type: 'retry',
       attempt: 2,
@@ -408,6 +438,6 @@ describe('ErrorObserverManager', () => {
     });
     await mgr.run(makeError(), makeRequest(), { type: 'final' });
 
-    expect(phases).toEqual(['initial', 'retry', 'final']);
+    expect(phases).toEqual(['final', 'retry', 'final']);
   });
 });

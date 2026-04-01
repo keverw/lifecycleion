@@ -41,6 +41,11 @@ export type {
   ErrorObserverPhase,
   RedirectHopInfo,
   RequestState,
+  // Streaming types — needed to type a StreamResponseFactory function
+  WritableLike,
+  StreamResponseInfo,
+  StreamResponseContext,
+  StreamResponseFactory,
 } from './types';
 
 export type { Cookie, CookieJarJSON } from './cookie-jar';

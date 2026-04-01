@@ -13,6 +13,7 @@ import {
   assertSupportedRequestBody,
   buildURL,
   isBrowserEnvironment,
+  mergeObservedHeaders,
   mergeHeaders,
   normalizeAdapterResponseHeaders,
   parseContentType,
@@ -25,6 +26,9 @@ import {
   DEFAULT_REQUEST_ID_HEADER,
   DEFAULT_REQUEST_ATTEMPT_HEADER,
   DEFAULT_USER_AGENT,
+  NON_RETRYABLE_HTTP_CLIENT_CALLBACK_ERROR_FLAG,
+  RESPONSE_STREAM_ABORT_FLAG,
+  STREAM_FACTORY_ERROR_FLAG,
   RETRYABLE_STATUS_CODES,
   REDIRECT_STATUS_CODES,
   DEFAULT_MAX_REDIRECTS,
@@ -340,6 +344,7 @@ export class BaseHTTPClient {
     }
 
     const { method, path, options, callbacks } = ctx;
+
     const requestID = generateID('ulid');
 
     // Wire up builder state
@@ -466,6 +471,15 @@ export class BaseHTTPClient {
       let completedAttemptCount = 0;
 
       try {
+        // streamResponse is NodeAdapter-only. Validate it inside the normal
+        // request setup flow so builder/error observer state is updated the same
+        // way as every other request_setup_error.
+        if (options.streamResponse && this._adapter.getType() !== 'node') {
+          throw new Error(
+            `[HTTPClient] .streamResponse() requires NodeAdapter. Current adapter: ${this._adapter.getType()}`,
+          );
+        }
+
         this._assertRequestIsSupported(interceptedRequest);
 
         // Run interceptors (initial phase)
@@ -623,6 +637,7 @@ export class BaseHTTPClient {
           if (attemptResult.errorCode) {
             errorCode = attemptResult.errorCode;
           }
+
           if (attemptResult.adapterCause) {
             adapterCause = attemptResult.adapterCause;
           }
@@ -866,6 +881,7 @@ export class BaseHTTPClient {
             requestURL: attemptResult.sentRequest.requestURL,
             redirectHistory,
             ...(attemptResult.errorCode === 'interceptor_error' ||
+            attemptResult.errorCode === 'stream_setup_error' ||
             attemptResult.errorCode === 'redirect_disabled'
               ? { isNetworkErrorOverride: false }
               : {}),
@@ -920,13 +936,16 @@ export class BaseHTTPClient {
       // throw/cancel never retries and reaches this block immediately.
       const finalResponse = response;
 
-      if (response.status === 0) {
+      if (response.isFailed) {
         const error = this._makeError(
           response,
           requestID,
           isRetriesExhausted,
-          // Set for adapter_error, interceptor_error, redirect_loop, etc.; otherwise network_error
-          errorCode,
+          // Set for adapter_error, interceptor_error, redirect_loop, etc.; otherwise network_error.
+          // Streamed-body failures after headers also terminate here, but preserve
+          // their real HTTP status on the response object.
+          errorCode ??
+            (response.isStreamError ? 'stream_write_error' : undefined),
           adapterCause,
         );
 
@@ -968,10 +987,10 @@ export class BaseHTTPClient {
       request.requestURL,
     );
 
-    let headers: Record<string, string>;
+    let headers: Record<string, string | string[]>;
 
     if (isCrossOrigin) {
-      const safeHeaders: Record<string, string> = {};
+      const safeHeaders: Record<string, string | string[]> = {};
       // Cross-origin safety: strip ALL headers except CORS-safelisted ones
       // when the redirect crosses origins (scheme + host + port). Matches
       // Chromium/fetch behaviour — Authorization, X-API-Key, etc. must not
@@ -1130,7 +1149,10 @@ export class BaseHTTPClient {
         policy.shouldDoFirstTry();
       }
 
-      // Per-attempt timeout controller — separate from the cancel signal
+      // Per-attempt wall-clock timeout — separate from the cancel signal.
+      // This covers the full attempt lifetime, including response body
+      // streaming, and is NOT reset by upload/download progress or chunk
+      // activity. Set timeout <= 0 to disable the per-attempt timer.
       const timeoutController = new AbortController();
       let isTimedOut = false;
       let timeoutID: ReturnType<typeof setTimeout> | undefined;
@@ -1272,6 +1294,8 @@ export class BaseHTTPClient {
       const onUploadProgress = options.onUploadProgress;
       const onDownloadProgress = options.onDownloadProgress;
 
+      let observedSentRequest: AttemptRequest = sentRequest;
+
       try {
         const rawAdapterResponse = await this._adapter.send({
           requestURL: sentRequest.requestURL,
@@ -1280,6 +1304,15 @@ export class BaseHTTPClient {
           body: sentRequest.body ?? null,
           timeout: 0, // timeout is managed at this level, not by the adapter
           signal: attemptSignal,
+          // Forward the builder's streaming factory to each adapter attempt.
+          // NodeAdapter invokes it only for a 200 response, letting the caller
+          // create attempt-local writable state when a retry happens.
+          streamResponse: options.streamResponse,
+          // attemptNumber and requestID are passed so NodeAdapter can populate
+          // StreamResponseInfo without the adapter needing to track attempt state
+          // itself.
+          attemptNumber,
+          requestID: requestID,
           onUploadProgress: onUploadProgress
             ? (e) =>
                 onUploadProgress({
@@ -1302,6 +1335,16 @@ export class BaseHTTPClient {
           ...rawAdapterResponse,
           headers: normalizeAdapterResponseHeaders(rawAdapterResponse.headers),
         };
+
+        observedSentRequest = rawAdapterResponse.effectiveRequestHeaders
+          ? {
+              ...sentRequest,
+              headers: mergeObservedHeaders(
+                sentRequest.headers,
+                rawAdapterResponse.effectiveRequestHeaders,
+              ),
+            }
+          : sentRequest;
 
         clearTimeout(timeoutID);
 
@@ -1334,7 +1377,7 @@ export class BaseHTTPClient {
 
           return {
             adapterResponse,
-            sentRequest,
+            sentRequest: observedSentRequest,
             attemptCount: attemptNumber,
             wasCancelled: false,
             wasTimeout: false,
@@ -1343,9 +1386,12 @@ export class BaseHTTPClient {
           };
         }
 
-        // Check if should retry based on status code
+        // Check if should retry based on status code.
+        // Stream failures are terminal even when status is retryable (e.g. 0).
         if (
           policy &&
+          adapterResponse.isRetryable !== false &&
+          !adapterResponse.isStreamError &&
           RETRYABLE_STATUS_CODES.has(adapterResponse.status) &&
           !cancelSignal.aborted
         ) {
@@ -1391,7 +1437,7 @@ export class BaseHTTPClient {
 
             await this._runResponseObservers(
               retryHTTPResponse,
-              sentRequest,
+              observedSentRequest,
               this._retryOutcomePhase(
                 policy,
                 attemptNumber,
@@ -1404,7 +1450,7 @@ export class BaseHTTPClient {
             if (cancelSignal.aborted) {
               return {
                 adapterResponse: null,
-                sentRequest,
+                sentRequest: observedSentRequest,
                 attemptCount: attemptNumber,
                 wasCancelled: true,
                 wasTimeout: false,
@@ -1435,16 +1481,147 @@ export class BaseHTTPClient {
           });
         }
 
+        const responseCause: Error | undefined =
+          adapterResponse.errorCause instanceof Error
+            ? adapterResponse.errorCause
+            : undefined;
+
+        const streamErrorCode = adapterResponse.isStreamError
+          ? (adapterResponse.streamErrorCode ?? 'stream_write_error')
+          : undefined;
+
         return {
           adapterResponse,
-          sentRequest,
+          sentRequest: observedSentRequest,
           attemptCount: attemptNumber,
           wasCancelled: false,
           wasTimeout: false,
           isRetriesExhausted,
+          errorCode: streamErrorCode,
+          adapterCause: responseCause,
         };
       } catch (error) {
         clearTimeout(timeoutID);
+
+        if (isAbortError(error) && isResponseStreamAbortError(error)) {
+          if (cancelSignal.aborted) {
+            options.onAttemptEnd?.({
+              attemptNumber,
+              isRetry,
+              willRetry: false,
+              nextRetryDelayMS: undefined,
+              nextRetryAt: undefined,
+              status: 0,
+              requestID,
+              initialURL,
+              ...(hopContext
+                ? {
+                    hopNumber: hopContext.hopNumber,
+                    redirect: hopContext.redirect,
+                  }
+                : {}),
+            });
+
+            return {
+              adapterResponse: null,
+              sentRequest: sentRequestForObservedAdapterError(
+                sentRequest,
+                error,
+                observedSentRequest,
+              ),
+              attemptCount: attemptNumber,
+              wasCancelled: true,
+              wasTimeout: isTimedOut,
+              isRetriesExhausted: false,
+            };
+          }
+
+          const streamedAbort = getResponseStreamAbortInfo(error);
+
+          if (isTimedOut && streamedAbort) {
+            options.onAttemptEnd?.({
+              attemptNumber,
+              isRetry,
+              willRetry: false,
+              nextRetryDelayMS: undefined,
+              nextRetryAt: undefined,
+              status: streamedAbort.status,
+              requestID,
+              initialURL,
+              ...(hopContext
+                ? {
+                    hopNumber: hopContext.hopNumber,
+                    redirect: hopContext.redirect,
+                  }
+                : {}),
+            });
+
+            return {
+              adapterResponse: {
+                status: streamedAbort.status,
+                headers: streamedAbort.headers,
+                body: null,
+                isStreamError: true,
+                streamErrorCode: 'stream_response_error',
+                errorCause: error,
+                effectiveRequestHeaders:
+                  getEffectiveRequestHeadersFromError(error),
+              },
+              sentRequest: sentRequestForObservedAdapterError(
+                sentRequest,
+                error,
+                observedSentRequest,
+              ),
+              attemptCount: attemptNumber,
+              wasCancelled: false,
+              wasTimeout: true,
+              isRetriesExhausted: false,
+              errorCode: 'stream_response_error',
+              adapterCause: error,
+            };
+          }
+
+          options.onAttemptEnd?.({
+            attemptNumber,
+            isRetry,
+            willRetry: false,
+            nextRetryDelayMS: undefined,
+            nextRetryAt: undefined,
+            status: streamedAbort?.status ?? 0,
+            requestID,
+            initialURL,
+            ...(hopContext
+              ? {
+                  hopNumber: hopContext.hopNumber,
+                  redirect: hopContext.redirect,
+                }
+              : {}),
+          });
+
+          return {
+            adapterResponse: {
+              status: streamedAbort?.status ?? 0,
+              headers: streamedAbort?.headers ?? {},
+              body: null,
+              isStreamError: true,
+              streamErrorCode: 'stream_response_error',
+              errorCause: error,
+              effectiveRequestHeaders:
+                getEffectiveRequestHeadersFromError(error),
+            },
+            sentRequest: sentRequestForObservedAdapterError(
+              sentRequest,
+              error,
+              observedSentRequest,
+            ),
+            attemptCount: attemptNumber,
+            wasCancelled: false,
+            wasTimeout: isTimedOut,
+            isRetriesExhausted: false,
+            errorCode: 'stream_response_error',
+            adapterCause: error,
+          };
+        }
 
         if (isAbortError(error)) {
           // User/parent cancellation — never retry (even if a timeout fired in the same window).
@@ -1508,6 +1685,48 @@ export class BaseHTTPClient {
         }
 
         const didTimeoutThisAttempt = isAbortError(error) && isTimedOut;
+        const isNonRetryableClientCallbackFailure =
+          isNonRetryableClientCallbackError(error);
+
+        if (isNonRetryableClientCallbackFailure) {
+          options.onAttemptEnd?.({
+            attemptNumber,
+            isRetry,
+            willRetry: false,
+            nextRetryDelayMS: undefined,
+            nextRetryAt: undefined,
+            status: 0,
+            requestID,
+            initialURL,
+            ...(hopContext
+              ? {
+                  hopNumber: hopContext.hopNumber,
+                  redirect: hopContext.redirect,
+                }
+              : {}),
+          });
+
+          const isStreamFactoryError =
+            isStreamFactoryClientCallbackError(error);
+
+          return {
+            adapterResponse: null,
+            sentRequest: sentRequestForNonRetryableAdapterCallbackError(
+              sentRequest,
+              error,
+              observedSentRequest,
+            ),
+            attemptCount: attemptNumber,
+            wasCancelled: false,
+            wasTimeout: didTimeoutThisAttempt,
+            isRetriesExhausted: false,
+            errorCode: isStreamFactoryError
+              ? 'stream_setup_error'
+              : 'interceptor_error',
+            adapterCause:
+              error instanceof Error ? error : new Error(String(error)),
+          };
+        }
 
         // Network / adapter / per-attempt timeout — retry if policy allows
         if (policy && !cancelSignal.aborted) {
@@ -1672,7 +1891,7 @@ export class BaseHTTPClient {
 
     const isRedirected = redirectHistory.length > 0;
 
-    if (!adapterResponse || adapterResponse.status === 0) {
+    if (!adapterResponse) {
       return {
         status: 0,
         headers: {},
@@ -1684,7 +1903,96 @@ export class BaseHTTPClient {
         isTimeout: wasTimeout,
         isNetworkError:
           isNetworkErrorOverride ?? (!wasCancelled && !wasTimeout),
+        isFailed: true,
         isParseError: false,
+        isStreamed: false,
+        isStreamError: false,
+        initialURL,
+        requestURL,
+        redirected: isRedirected,
+        redirectHistory,
+        requestID,
+        adapterType,
+      };
+    }
+
+    if (
+      (adapterResponse.isTransportError || adapterResponse.status === 0) &&
+      !adapterResponse.isStreamError
+    ) {
+      return {
+        status: adapterResponse.status,
+        headers: adapterResponse.headers,
+        body: null as unknown as T,
+        contentType: 'binary',
+        isJSON: false,
+        isText: false,
+        isCancelled: false,
+        isTimeout: false,
+        isNetworkError: isNetworkErrorOverride ?? true,
+        isFailed: true,
+        isParseError: false,
+        isStreamed: false,
+        isStreamError: false,
+        initialURL,
+        requestURL,
+        redirected: isRedirected,
+        redirectHistory,
+        requestID,
+        adapterType,
+      };
+    }
+
+    // Response-body failure after headers: the server returned a real HTTP
+    // response, so we
+    // preserve its status and headers on HTTPResponse, but the request must
+    // still follow the failed/error path because the body could not be fully
+    // delivered to the caller's sink. Callers should treat isStreamError /
+    // builder.error as authoritative for success, not the preserved status.
+    if (adapterResponse.isStreamError) {
+      return {
+        status: adapterResponse.status,
+        headers: adapterResponse.headers,
+        body: null as unknown as T,
+        contentType: 'binary',
+        isJSON: false,
+        isText: false,
+        isCancelled: false,
+        isTimeout: wasTimeout,
+        isNetworkError: false,
+        isFailed: true,
+        isParseError: false,
+        isStreamed: false,
+        isStreamError: true,
+        initialURL,
+        requestURL,
+        redirected: isRedirected,
+        redirectHistory,
+        requestID,
+        adapterType,
+      };
+    }
+
+    // Successful stream: body was piped to the caller's writable. Nothing to
+    // parse — body is null. Status and headers are still fully populated.
+    // `contentType` stays `binary` intentionally here: in this client it tracks
+    // how the response body was materialized for callers, and streamed bodies
+    // are never decoded into text/JSON at this layer.
+    if (adapterResponse.isStreamed) {
+      return {
+        status: adapterResponse.status,
+        headers: adapterResponse.headers,
+        body: null as unknown as T,
+        contentType: 'binary',
+        isJSON: false,
+        isText: false,
+        isCancelled: false,
+        isTimeout: false,
+        isNetworkError: false,
+        isFailed: false,
+        isParseError: false,
+        isStreamed: true,
+        isStreamError: false,
         initialURL,
         requestURL,
         redirected: isRedirected,
@@ -1736,7 +2044,10 @@ export class BaseHTTPClient {
       isCancelled: false,
       isTimeout: false,
       isNetworkError: false,
+      isFailed: false,
       isParseError,
+      isStreamed: false,
+      isStreamError: false,
       initialURL,
       requestURL,
       redirected: isRedirected,
@@ -1750,18 +2061,23 @@ export class BaseHTTPClient {
    * Build an HTTPClientError from a failed response.
    *
    * Error code priority:
-   * 1. Explicit codeOverride (redirect_disabled, redirect_loop, request_setup_error, adapter_error)
-   * 2. Response flags (isCancelled → cancelled, isTimeout → timeout)
+   * 1. Explicit codeOverride (redirect_disabled, redirect_loop, request_setup_error, adapter_error, stream_write_error, stream_response_error, stream_setup_error)
+   * 2. Response flags (isCancelled → cancelled, isTimeout → timeout),
+   *    except streamed-body failures preserve their specific stream_* code while
+   *    still surfacing `isTimeout: true`
    * 3. Default fallback → network_error
    *
    * Key distinction:
    * - `adapter_error`: Adapter threw an exception (DNS failure, connection refused, etc.)
    *   The adapter failed to handle the error gracefully.
-   * - `network_error`: Adapter returned status: 0 cleanly (network issue, but adapter
-   *   handled it properly by returning a valid AdapterResponse).
+   * - `network_error`: Adapter reported a transport-level failure cleanly via
+   *   `isTransportError`, or returned `status: 0` to indicate a transport
+   *   failure.
    *
-   * Well-behaved adapters should catch their own errors and return { status: 0 } for
-   * network issues. If an adapter throws, that's an adapter implementation problem.
+   * Well-behaved adapters should catch their own transport failures and return
+   * an AdapterResponse instead of throwing. Prefer `isTransportError: true`
+   * when reporting adapter-originated transport failures. If an adapter
+   * throws, that's an adapter implementation problem.
    */
   private _makeError(
     response: HTTPResponse,
@@ -1773,10 +2089,15 @@ export class BaseHTTPClient {
     let code: HTTPClientError['code'] = codeOverride ?? 'network_error';
     let message = 'Network error';
 
+    const isSpecificStreamCodePreserved =
+      code === 'stream_write_error' ||
+      code === 'stream_response_error' ||
+      code === 'stream_setup_error';
+
     if (response.isCancelled) {
       code = 'cancelled';
       message = 'Request was cancelled';
-    } else if (response.isTimeout) {
+    } else if (response.isTimeout && !isSpecificStreamCodePreserved) {
       code = 'timeout';
       message = 'Request timed out';
     } else if (code === 'redirect_disabled') {
@@ -1789,6 +2110,12 @@ export class BaseHTTPClient {
       message = 'Adapter error';
     } else if (code === 'interceptor_error') {
       message = 'Interceptor error';
+    } else if (code === 'stream_write_error') {
+      message = 'Response stream write failed';
+    } else if (code === 'stream_response_error') {
+      message = 'Response download stream failed';
+    } else if (code === 'stream_setup_error') {
+      message = 'Stream response setup failed';
     }
 
     return {
@@ -1859,10 +2186,10 @@ export class BaseHTTPClient {
   }
 
   private _withInternalRequestHeaders(
-    headers: Record<string, string>,
+    headers: Record<string, string | string[]>,
     requestID: string,
     attemptNumber?: number,
-  ): Record<string, string> {
+  ): Record<string, string | string[]> {
     const nextHeaders = mergeHeaders(headers);
 
     if (this._config.includeRequestID) {
@@ -1887,8 +2214,9 @@ export class BaseHTTPClient {
   ): AttemptRequest {
     const { requestID, timeout, attemptNumber, cookieJar } = params;
 
-    // Build the finalized request for this attempt in the exact form the
-    // adapter will send for this attempt. Header names are normalized to lowercase.
+    // Build the finalized attempt snapshot before adapter-specific transport
+    // materialization. Header names are normalized to lowercase here, and adapters
+    // may further materialize repeated header values at send time.
     const observedBodies = buildObservedAttemptBodies(request.body);
     const { contentType } = observedBodies;
     const headers = this._withInternalRequestHeaders(
@@ -2080,6 +2408,110 @@ function cloneBodyValue(body: unknown): unknown {
   return body;
 }
 
-function isAbortError(err: unknown): boolean {
+function isAbortError(err: unknown): err is Error {
   return err instanceof Error && err.name === 'AbortError';
+}
+
+/**
+ * When `adapter.send()` rejects before resolving (e.g. stream factory throw),
+ * adapters may still attach `effectiveRequestHeaders` on the error so observers
+ * see the same merged headers as on a successful `AdapterResponse`.
+ */
+function sentRequestForNonRetryableAdapterCallbackError(
+  sentRequest: AttemptRequest,
+  error: unknown,
+  observedAfterAdapterResolve: AttemptRequest,
+): AttemptRequest {
+  return sentRequestForObservedAdapterError(
+    sentRequest,
+    error,
+    observedAfterAdapterResolve,
+  );
+}
+
+function isNonRetryableClientCallbackError(err: unknown): boolean {
+  return Boolean(
+    err &&
+    typeof err === 'object' &&
+    NON_RETRYABLE_HTTP_CLIENT_CALLBACK_ERROR_FLAG in err &&
+    (
+      err as Record<
+        typeof NON_RETRYABLE_HTTP_CLIENT_CALLBACK_ERROR_FLAG,
+        boolean | undefined
+      >
+    )[NON_RETRYABLE_HTTP_CLIENT_CALLBACK_ERROR_FLAG] === true,
+  );
+}
+
+function isStreamFactoryClientCallbackError(err: unknown): boolean {
+  return (
+    err !== null && typeof err === 'object' && STREAM_FACTORY_ERROR_FLAG in err
+  );
+}
+
+function sentRequestForObservedAdapterError(
+  sentRequest: AttemptRequest,
+  error: unknown,
+  observedAfterAdapterResolve: AttemptRequest,
+): AttemptRequest {
+  const eff = getEffectiveRequestHeadersFromError(error);
+
+  if (!eff) {
+    return observedAfterAdapterResolve;
+  }
+
+  return {
+    ...sentRequest,
+    headers: mergeObservedHeaders(sentRequest.headers, eff),
+  };
+}
+
+function getEffectiveRequestHeadersFromError(
+  error: unknown,
+): Record<string, string | string[]> | undefined {
+  if (
+    error &&
+    typeof error === 'object' &&
+    'effectiveRequestHeaders' in error &&
+    (error as { effectiveRequestHeaders?: unknown }).effectiveRequestHeaders
+  ) {
+    return (
+      error as {
+        effectiveRequestHeaders: Record<string, string | string[]>;
+      }
+    ).effectiveRequestHeaders;
+  }
+
+  return undefined;
+}
+
+function isResponseStreamAbortError(err: unknown): boolean {
+  return (
+    err !== null && typeof err === 'object' && RESPONSE_STREAM_ABORT_FLAG in err
+  );
+}
+
+function getResponseStreamAbortInfo(
+  err: unknown,
+): { status: number; headers: Record<string, string | string[]> } | undefined {
+  if (
+    !err ||
+    typeof err !== 'object' ||
+    !('streamAbortStatus' in err) ||
+    !('streamAbortHeaders' in err)
+  ) {
+    return undefined;
+  }
+
+  const status = (err as { streamAbortStatus?: unknown }).streamAbortStatus;
+  const headers = (err as { streamAbortHeaders?: unknown }).streamAbortHeaders;
+
+  if (typeof status !== 'number' || !headers || typeof headers !== 'object') {
+    return undefined;
+  }
+
+  return {
+    status,
+    headers: headers as Record<string, string | string[]>,
+  };
 }

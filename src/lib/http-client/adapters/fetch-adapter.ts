@@ -22,7 +22,7 @@ export class FetchAdapter implements HTTPAdapter {
     try {
       response = await fetch(requestURL, {
         method,
-        headers,
+        headers: materializeFetchHeaders(headers),
         body: body as BodyInit | null,
         signal: signal ?? null,
         redirect: 'manual',
@@ -34,8 +34,10 @@ export class FetchAdapter implements HTTPAdapter {
 
       return {
         status: 0,
+        isTransportError: true,
         headers: {},
         body: null,
+        errorCause: error instanceof Error ? error : new Error(String(error)),
       };
     }
 
@@ -81,4 +83,39 @@ async function readResponseBody(
 
 function isAbortError(error: unknown): boolean {
   return error instanceof Error && error.name === 'AbortError';
+}
+
+function materializeFetchHeaders(
+  headers: Record<string, string | string[]>,
+): HeadersInit {
+  let shouldUseHeadersObject = false;
+
+  for (const value of Object.values(headers)) {
+    if (Array.isArray(value)) {
+      shouldUseHeadersObject = true;
+      break;
+    }
+  }
+
+  if (!shouldUseHeadersObject) {
+    return headers as Record<string, string>;
+  }
+
+  const materialized = new Headers();
+
+  for (const [key, value] of Object.entries(headers)) {
+    if (Array.isArray(value)) {
+      if (key.toLowerCase() === 'cookie') {
+        materialized.set(key, value.join('; '));
+      } else {
+        for (const item of value) {
+          materialized.append(key, item);
+        }
+      }
+    } else {
+      materialized.append(key, value);
+    }
+  }
+
+  return materialized;
 }

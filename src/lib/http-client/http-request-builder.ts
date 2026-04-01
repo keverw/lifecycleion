@@ -7,6 +7,7 @@ import type {
   AttemptEndEvent,
   RequestState,
   HTTPClientError,
+  StreamResponseFactory,
 } from './types';
 import type { RetryPolicyOptions } from '../retry-utils';
 
@@ -30,7 +31,7 @@ export interface BuilderSendContext<T = unknown> {
 }
 
 export interface ResolvedBuilderOptions extends HTTPRequestOptions {
-  headers: Record<string, string>;
+  headers: Record<string, string | string[]>;
 }
 
 type SendFn<T> = (context: BuilderSendContext<T>) => Promise<HTTPResponse<T>>;
@@ -42,7 +43,7 @@ type SendFn<T> = (context: BuilderSendContext<T>) => Promise<HTTPResponse<T>>;
 export class HTTPRequestBuilder<T = unknown> {
   private _method: HTTPMethod;
   private _path: string;
-  private _headers: Record<string, string> = {};
+  private _headers: Record<string, string | string[]> = {};
   private _params?: Record<string, unknown>;
   private _body?: unknown;
   private _timeout?: number;
@@ -53,6 +54,7 @@ export class HTTPRequestBuilder<T = unknown> {
   private _onDownloadProgress?: (event: HTTPProgressEvent) => void;
   private _onAttemptStart?: (event: AttemptStartEvent) => void;
   private _onAttemptEnd?: (event: AttemptEndEvent) => void;
+  private _streamResponse?: StreamResponseFactory;
 
   private _sendFn: SendFn<T>;
   private _sent = false;
@@ -86,7 +88,7 @@ export class HTTPRequestBuilder<T = unknown> {
 
   // --- Fluent builder methods ---
 
-  public headers(headers: Record<string, string>): this {
+  public headers(headers: Record<string, string | string[]>): this {
     this._assertNotSent('headers');
     Object.assign(this._headers, headers);
     return this;
@@ -167,6 +169,32 @@ export class HTTPRequestBuilder<T = unknown> {
   public onAttemptEnd(fn: (event: AttemptEndEvent) => void): this {
     this._assertNotSent('onAttemptEnd');
     this._onAttemptEnd = fn;
+    return this;
+  }
+
+  /**
+   * NodeAdapter only. Called after response headers arrive on a 200 response,
+   * before any body bytes are read. Return a WritableLike to pipe the body into
+   * it, or null to cancel the request entirely.
+   *
+   * The context provides an attempt-scoped AbortSignal that fires on cancel,
+   * timeout, or stream write failure — useful for co-locating cleanup with setup:
+   *
+   *   .streamResponse((_info, { signal }) => {
+   *     const stream = createWriteStream('/tmp/file.bin');
+   *
+   *     signal.addEventListener('abort', () => {
+   *       stream.destroy();
+   *       fs.unlinkSync('/tmp/file.bin'); // clean up partial file
+   *     });
+   *     return stream;
+   *   })
+   *
+   * HTTPClient rejects non-node adapters before dispatch if this is set.
+   */
+  public streamResponse(fn: StreamResponseFactory): this {
+    this._assertNotSent('streamResponse');
+    this._streamResponse = fn;
     return this;
   }
 
@@ -285,6 +313,7 @@ export class HTTPRequestBuilder<T = unknown> {
         onDownloadProgress: this._onDownloadProgress,
         onAttemptStart: this._onAttemptStart,
         onAttemptEnd: this._onAttemptEnd,
+        streamResponse: this._streamResponse,
       },
       callbacks: {
         setRequestID: (id) => {
@@ -385,6 +414,11 @@ export class HTTPRequestBuilder<T = unknown> {
     // Called after each attempt (including retries)
     if (opts.onAttemptEnd) {
       this.onAttemptEnd(opts.onAttemptEnd);
+    }
+
+    // NodeAdapter response streaming factory
+    if (opts.streamResponse) {
+      this.streamResponse(opts.streamResponse);
     }
   }
 

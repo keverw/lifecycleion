@@ -45,11 +45,16 @@ export function isBrowserRestrictedHeader(
  * Used by Fetch and XHR adapters to fail fast during development.
  */
 export function assertNoBrowserRestrictedHeaders(
-  headers: Record<string, string>,
+  headers: Record<string, string | string[]>,
   adapterName: string,
 ): void {
   for (const [key, value] of Object.entries(headers)) {
-    if (isBrowserRestrictedHeader(key, value)) {
+    if (
+      isBrowserRestrictedHeader(
+        key,
+        Array.isArray(value) ? value.join(', ') : value,
+      )
+    ) {
       throw new Error(
         `[${adapterName}] Cannot set browser-restricted header "${key}". ` +
           `Browsers silently ignore this header — remove it to avoid subtle bugs.`,

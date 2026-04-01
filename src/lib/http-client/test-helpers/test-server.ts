@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import qs from 'qs';
 
 /**
@@ -208,6 +209,21 @@ export function startTestServer(): TestServer {
       // GET /api/redirect/echo-method — echo the method/body seen after redirect
       const text = await req.text();
       return Response.json({ method: req.method, body: text });
+    } else if (path === '/api/binary' && req.method === 'GET') {
+      // GET /api/binary — 2048 bytes of binary data (0-255 repeating) with explicit
+      // Content-Length so download progress is length-computable in node-adapter tests.
+      const bytes = new Uint8Array(2048);
+
+      for (let i = 0; i < 2048; i++) {
+        bytes[i] = i % 256;
+      }
+
+      return new Response(bytes, {
+        headers: {
+          'content-type': 'application/octet-stream',
+          'content-length': '2048',
+        },
+      });
     } else if (path === '/api/no-content' && req.method === 'GET') {
       // GET /api/no-content — 204
       return new Response(null, { status: 204 });
@@ -237,6 +253,28 @@ export function startTestServer(): TestServer {
       // DELETE /api/users/:id
       const id = path.slice('/api/users/'.length);
       return Response.json({ deleted: true, id });
+    } else if (path === '/api/upload-hash' && req.method === 'POST') {
+      // POST /api/upload-hash — reads a single file field named "file" from
+      // FormData and returns the sha256 hex digest of its bytes. Used by
+      // integrity tests to verify file content survives the upload unchanged.
+      let hash = '';
+
+      try {
+        const form = await req.formData();
+        const entry = form.get('file');
+
+        if (entry instanceof File) {
+          const bytes = await entry.arrayBuffer();
+          hash = crypto
+            .createHash('sha256')
+            .update(Buffer.from(bytes))
+            .digest('hex');
+        }
+      } catch {
+        // fall through — hash stays empty string
+      }
+
+      return Response.json({ hash });
     } else if (path === '/api/head' && req.method === 'HEAD') {
       // HEAD /api/test
       return new Response(null, {

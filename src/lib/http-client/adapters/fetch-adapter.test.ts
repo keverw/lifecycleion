@@ -92,6 +92,64 @@ describe('FetchAdapter', () => {
     expect(capturedInit?.redirect).toBe('manual');
   });
 
+  test('materializes repeated request headers with Headers.append', async () => {
+    let capturedInit: RequestInit | undefined;
+
+    (globalThis as any).fetch = (
+      _url: string | URL | Request,
+      init?: RequestInit,
+    ) => {
+      capturedInit = init;
+      return Promise.resolve(
+        new Response('ok', {
+          status: 200,
+          headers: { 'content-type': 'text/plain; charset=utf-8' },
+        }),
+      );
+    };
+
+    await new FetchAdapter().send({
+      requestURL: 'https://local.test/users',
+      method: 'GET',
+      headers: { accept: ['application/json', 'text/plain'] },
+      timeout: 5000,
+    });
+
+    expect(capturedInit?.headers).toBeInstanceOf(Headers);
+    expect((capturedInit?.headers as Headers).get('accept')).toBe(
+      'application/json, text/plain',
+    );
+  });
+
+  test('materializes repeated Cookie headers with cookie delimiters', async () => {
+    let capturedInit: RequestInit | undefined;
+
+    (globalThis as any).fetch = (
+      _url: string | URL | Request,
+      init?: RequestInit,
+    ) => {
+      capturedInit = init;
+      return Promise.resolve(
+        new Response('ok', {
+          status: 200,
+          headers: { 'content-type': 'text/plain; charset=utf-8' },
+        }),
+      );
+    };
+
+    await new FetchAdapter().send({
+      requestURL: 'https://local.test/users',
+      method: 'GET',
+      headers: { cookie: ['session=abc123', 'theme=dark'] },
+      timeout: 5000,
+    });
+
+    expect(capturedInit?.headers).toBeInstanceOf(Headers);
+    expect((capturedInit?.headers as Headers).get('cookie')).toBe(
+      'session=abc123; theme=dark',
+    );
+  });
+
   test('uses manual redirect mode for fetch requests', async () => {
     let capturedInit: RequestInit | undefined;
 
@@ -250,8 +308,10 @@ describe('FetchAdapter', () => {
 
     expect(response).toEqual({
       status: 0,
+      isTransportError: true,
       headers: {},
       body: null,
+      errorCause: expect.objectContaining({ message: 'fetch failed' }),
     });
   });
 

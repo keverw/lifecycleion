@@ -521,6 +521,7 @@ describe('MockAdapter via HTTPClient', () => {
     setTimeout(() => controller.abort(), 30);
     const res = await promise;
     expect(res.isCancelled).toBe(true);
+    expect(res.isFailed).toBe(true);
   });
 
   // --- routes.clear ---
@@ -677,15 +678,19 @@ describe('MockAdapter.send() — low-level contract', () => {
     const controller = new AbortController();
     setTimeout(() => controller.abort(), 30);
 
-    await expect(
-      errorAdapter.send(
+    let caught: Error | undefined;
+    try {
+      await errorAdapter.send(
         makeAdapterRequest({
           requestURL: '/slow-handler',
           signal: controller.signal,
         }),
-      ),
-    ).rejects.toThrow(/aborted/i);
+      );
+    } catch (error) {
+      caught = error as Error;
+    }
 
+    expect(caught?.message).toMatch(/aborted/i);
     expect(onErrorCalls).toBe(0);
   });
 
@@ -718,5 +723,29 @@ describe('MockAdapter.send() — low-level contract', () => {
     expect(
       adapter.send(makeAdapterRequest({ requestURL: '/map' })),
     ).rejects.toThrow(/Unsupported mock response body type/);
+  });
+
+  test('repeated cookie headers are materialized with cookie delimiters', async () => {
+    let seenCookies: Record<string, string> | undefined;
+
+    adapter.routes.get('/cookies', (req) => {
+      seenCookies = req.cookies;
+      return { status: 200 };
+    });
+
+    const res = await adapter.send(
+      makeAdapterRequest({
+        requestURL: '/cookies',
+        headers: {
+          cookie: ['session=abc123', 'theme=dark'],
+        },
+      }),
+    );
+
+    expect(res.status).toBe(200);
+    expect(seenCookies).toEqual({
+      session: 'abc123',
+      theme: 'dark',
+    });
   });
 });

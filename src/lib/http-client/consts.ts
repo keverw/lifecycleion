@@ -54,6 +54,13 @@ export const DEFAULT_REQUEST_ATTEMPT_HEADER = 'x-request-attempt';
 
 export const DEFAULT_USER_AGENT = 'lifecycleion-http-client';
 
+export const NON_RETRYABLE_HTTP_CLIENT_CALLBACK_ERROR_FLAG =
+  '_lifecycleion_non_retryable_http_client_callback_error';
+
+export const STREAM_FACTORY_ERROR_FLAG = '_lifecycleion_stream_factory_error';
+
+export const RESPONSE_STREAM_ABORT_FLAG = '_lifecycleion_response_stream_abort';
+
 export const HTTP_METHODS: ReadonlyArray<HTTPMethod> = [
   'GET',
   'POST',

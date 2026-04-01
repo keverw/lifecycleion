@@ -20,6 +20,7 @@ function makeSendFn(
     isCancelled: false,
     isTimeout: false,
     isNetworkError: false,
+    isFailed: false,
     isParseError: false,
     initialURL: 'https://example.com/test',
     requestURL: 'https://example.com/test',
@@ -27,8 +28,17 @@ function makeSendFn(
     redirectHistory: [],
     requestID: '',
     adapterType: 'fetch',
+    isStreamed: false,
+    isStreamError: false,
     ...responseOverride,
   };
+
+  response.isFailed =
+    responseOverride?.isFailed ??
+    (response.isCancelled ||
+      response.isTimeout ||
+      response.isNetworkError ||
+      response.isStreamError);
 
   const sendFn = (
     ctx: BuilderSendContext<unknown>,
@@ -331,6 +341,7 @@ describe('HTTPRequestBuilder', () => {
         isCancelled: false,
         isTimeout: false,
         isNetworkError: false,
+        isFailed: false,
         isParseError: false,
         initialURL: 'https://example.com/test',
         requestURL: 'https://example.com/test',
@@ -338,7 +349,15 @@ describe('HTTPRequestBuilder', () => {
         redirectHistory: [],
         requestID: '',
         adapterType: 'fetch',
+        isStreamed: false,
+        isStreamError: false,
       };
+
+      res.isFailed =
+        res.isCancelled ||
+        res.isTimeout ||
+        res.isNetworkError ||
+        res.isStreamError;
 
       const { builder } = makeBuilder(undefined, (ctx) => {
         ctx.callbacks.setResponse(res);

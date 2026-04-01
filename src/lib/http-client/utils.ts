@@ -142,20 +142,48 @@ export function normalizeHeaders(
 }
 
 /**
- * Merges multiple header objects, all normalized to lowercase.
- * Later objects win on conflict.
+ * Merges multiple request-header objects, normalizing keys to lowercase.
+ * Later objects win on conflict. Array values replace earlier scalars/arrays
+ * wholesale, and single-item arrays are collapsed back to a plain string.
  */
 export function mergeHeaders(
-  ...headerSets: Array<Record<string, string> | undefined>
-): Record<string, string> {
-  const result: Record<string, string> = {};
+  ...headerSets: Array<Record<string, string | string[]> | undefined>
+): Record<string, string | string[]> {
+  const result: Record<string, string | string[]> = {};
   for (const headers of headerSets) {
     if (!headers) {
       continue;
     }
 
     for (const [key, value] of Object.entries(headers)) {
-      result[key.toLowerCase()] = value;
+      result[key.toLowerCase()] = Array.isArray(value)
+        ? normalizeMergedHeaderArray(value)
+        : String(value);
+    }
+  }
+
+  return result;
+}
+
+function normalizeMergedHeaderArray(value: string[]): string | string[] {
+  const normalized = value.map((item) => String(item));
+  return normalized.length === 1 ? normalized[0] : normalized;
+}
+
+export function mergeObservedHeaders(
+  ...headerSets: Array<Record<string, string | string[]> | undefined>
+): Record<string, string | string[]> {
+  const result: Record<string, string | string[]> = {};
+
+  for (const headers of headerSets) {
+    if (!headers) {
+      continue;
+    }
+
+    for (const [key, value] of Object.entries(headers)) {
+      result[key.toLowerCase()] = Array.isArray(value)
+        ? value.map((item) => String(item))
+        : String(value);
     }
   }
 

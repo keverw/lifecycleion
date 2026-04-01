@@ -9,6 +9,7 @@ import {
   matchesFilter,
   matchesHostPattern,
   mergeHeaders,
+  mergeObservedHeaders,
   normalizeAdapterResponseHeaders,
   normalizeHeaders,
   parseContentType,
@@ -208,6 +209,62 @@ describe('mergeHeaders', () => {
 
   test('returns empty object with no arguments', () => {
     expect(mergeHeaders()).toEqual({});
+  });
+
+  test('preserves multi-value arrays when merged', () => {
+    expect(
+      mergeHeaders({
+        accept: ['application/json', 'text/plain'],
+      }),
+    ).toEqual({
+      accept: ['application/json', 'text/plain'],
+    });
+  });
+
+  test('collapses single-value arrays to a plain string', () => {
+    expect(
+      mergeHeaders({
+        accept: ['application/json'],
+      }),
+    ).toEqual({
+      accept: 'application/json',
+    });
+  });
+
+  test('later arrays replace earlier scalar values wholesale', () => {
+    expect(
+      mergeHeaders(
+        { accept: 'application/json' },
+        { accept: ['text/plain', 'application/xml'] },
+      ),
+    ).toEqual({
+      accept: ['text/plain', 'application/xml'],
+    });
+  });
+});
+
+describe('mergeObservedHeaders', () => {
+  test('lowercases keys and preserves array values', () => {
+    expect(
+      mergeObservedHeaders(
+        { Authorization: 'Bearer x' },
+        { Accept: ['application/json', 'text/plain'] },
+      ),
+    ).toEqual({
+      authorization: 'Bearer x',
+      accept: ['application/json', 'text/plain'],
+    });
+  });
+
+  test('later sets win on conflict', () => {
+    expect(
+      mergeObservedHeaders(
+        { Accept: 'application/json' },
+        { accept: ['text/plain'] },
+      ),
+    ).toEqual({
+      accept: ['text/plain'],
+    });
   });
 });
 
