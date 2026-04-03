@@ -48,8 +48,32 @@ export interface AdapterRequest {
 
 export interface AdapterResponse {
   status: number;
-  /** Browser Fetch with `redirect: 'manual'` exposes redirects as `opaqueredirect`. */
-  isOpaqueRedirect?: boolean;
+  /**
+   * Set by adapters when a redirect response was encountered.
+   *
+   * - **NodeAdapter / MockAdapter**: set on real 3xx responses. Location is
+   *   accessible, so HTTPClient's redirect loop can follow normally.
+   *
+   * - **FetchAdapter**: uses `redirect: 'manual'`.
+   *   - In server runtimes (Bun, Node) this returns the real 3xx with a Location
+   *     header, so HTTPClient's redirect loop works normally.
+   *
+   *   - In a browser, CORS constraints cause `redirect: 'manual'` to yield an
+   *     opaque response (status 0, no Location). Browser adapters require
+   *     `followRedirects: false`, so a detected redirect always results in
+   *     `redirect_disabled`.
+   *
+   * - **XHRAdapter**: the browser always follows redirects with no opt-out.
+   *   Detected after the fact by comparing `xhr.responseURL` to the original
+   *   URL; resolves as status 0 with `wasRedirectDetected: true`. Same
+   *   HTTPClient routing as FetchAdapter.
+   */
+  wasRedirectDetected?: boolean;
+  /**
+   * Redirect target when the adapter can determine it, even if the client
+   * does not follow that redirect itself.
+   */
+  detectedRedirectURL?: string;
   /**
    * True when the adapter wants the client to treat this as a transport-level
    * failure. Adapters may still preserve a diagnostic status code such as 495,
@@ -328,8 +352,12 @@ export interface HTTPResponse<T = unknown> {
    * Equals {@link HTTPResponse.initialURL} when no redirect occurred.
    */
   requestURL: string;
-  /** True when at least one redirect hop was followed. */
-  redirected: boolean;
+  /** True when a redirect response was encountered at any point (followed or not). */
+  wasRedirectDetected: boolean;
+  /** True when HTTPClient's own redirect loop followed at least one hop. */
+  wasRedirectFollowed: boolean;
+  /** Redirect target when known but not followed by the client loop. */
+  detectedRedirectURL?: string;
   /** Sequence of redirect target URLs that were actually requested, in order. */
   redirectHistory: string[];
   requestID: string;
@@ -374,8 +402,12 @@ export interface HTTPClientError {
   initialURL: string;
   /** URL of the last request attempt when the error was produced. */
   requestURL: string;
-  /** True when at least one redirect hop was followed before the error. */
-  redirected: boolean;
+  /** True when a redirect response was encountered at any point (followed or not). */
+  wasRedirectDetected: boolean;
+  /** True when HTTPClient's own redirect loop followed at least one hop before the error. */
+  wasRedirectFollowed: boolean;
+  /** Redirect target when known but not followed by the client loop. */
+  detectedRedirectURL?: string;
   /** Sequence of redirect target URLs that were actually requested, in order. */
   redirectHistory: string[];
   requestID: string;

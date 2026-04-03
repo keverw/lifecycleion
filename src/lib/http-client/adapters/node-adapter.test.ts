@@ -758,6 +758,78 @@ describe('NodeAdapter.send() — unit branches without server', () => {
     }
   });
 
+  test('3xx response resolves detectedRedirectURL for relative locations', async () => {
+    const req = new MockClientRequest();
+    const res = new MockIncomingMessage(302, {
+      location: '/next',
+      'content-type': 'text/plain',
+    });
+    const requestSpy = spyOn(http, 'request').mockImplementation(
+      (_options, callback) => {
+        const cb = callback as
+          | ((res: http.IncomingMessage) => void)
+          | undefined;
+        queueMicrotask(() => {
+          cb?.(res as unknown as http.IncomingMessage);
+          queueMicrotask(() => {
+            res.emit('end');
+          });
+        });
+        return req as unknown as http.ClientRequest;
+      },
+    );
+
+    try {
+      const result = await new NodeAdapter().send({
+        requestURL: 'http://example.test/start',
+        method: 'GET',
+        headers: {},
+        timeout: 5000,
+      });
+
+      expect(result.wasRedirectDetected).toBe(true);
+      expect(result.detectedRedirectURL).toBe('http://example.test/next');
+    } finally {
+      requestSpy.mockRestore();
+    }
+  });
+
+  test('3xx response preserves absolute detectedRedirectURL', async () => {
+    const req = new MockClientRequest();
+    const res = new MockIncomingMessage(302, {
+      location: 'https://other.test/next',
+      'content-type': 'text/plain',
+    });
+    const requestSpy = spyOn(http, 'request').mockImplementation(
+      (_options, callback) => {
+        const cb = callback as
+          | ((res: http.IncomingMessage) => void)
+          | undefined;
+        queueMicrotask(() => {
+          cb?.(res as unknown as http.IncomingMessage);
+          queueMicrotask(() => {
+            res.emit('end');
+          });
+        });
+        return req as unknown as http.ClientRequest;
+      },
+    );
+
+    try {
+      const result = await new NodeAdapter().send({
+        requestURL: 'http://example.test/start',
+        method: 'GET',
+        headers: {},
+        timeout: 5000,
+      });
+
+      expect(result.wasRedirectDetected).toBe(true);
+      expect(result.detectedRedirectURL).toBe('https://other.test/next');
+    } finally {
+      requestSpy.mockRestore();
+    }
+  });
+
   test('FormData serialization write failure resolves status 0 and disables retry', async () => {
     const req = new MockClientRequest((_data, callback) => {
       callback?.(new Error('write failed'));
@@ -1336,6 +1408,47 @@ describe('NodeAdapter.send() — unit branches without server', () => {
     }
   });
 
+  test('aborted buffered responses settle as stream_response_error', async () => {
+    const req = new MockClientRequest();
+    const res = new MockIncomingMessage(200, {
+      'content-type': 'text/plain',
+      'content-length': '10',
+    });
+    const requestSpy = spyOn(http, 'request').mockImplementation(
+      (_options, callback) => {
+        const cb = callback as
+          | ((res: http.IncomingMessage) => void)
+          | undefined;
+        queueMicrotask(() => {
+          cb?.(res as unknown as http.IncomingMessage);
+          queueMicrotask(() => {
+            res.emit('data', Buffer.from('hello'));
+            res.emit('aborted');
+            res.emit('close');
+          });
+        });
+        return req as unknown as http.ClientRequest;
+      },
+    );
+
+    try {
+      const result = await new NodeAdapter().send({
+        requestURL: 'http://example.test/data',
+        method: 'GET',
+        headers: {},
+        timeout: 5000,
+      });
+
+      expect(result.status).toBe(200);
+      expect(result.isStreamError).toBe(true);
+      expect(result.streamErrorCode).toBe('stream_response_error');
+      expect(result.body).toBeNull();
+      expect(result.errorCause?.message).toBe('Response stream aborted');
+    } finally {
+      requestSpy.mockRestore();
+    }
+  });
+
   test('TLS cert error resolves with status 495 and errorCause set', async () => {
     const certError = Object.assign(new Error('certificate has expired'), {
       code: 'CERT_HAS_EXPIRED',
@@ -1612,9 +1725,7 @@ describe('NodeAdapter.send() — unit branches without server', () => {
         }
 
         let didEmitError = false;
-        let req!: MockClientRequest;
-
-        req = new MockClientRequest((_data, writeCallback) => {
+        const req = new MockClientRequest((_data, writeCallback) => {
           writeCallback?.(null);
 
           if (!didEmitError) {
@@ -2430,6 +2541,16 @@ describe('NodeAdapter via HTTPClient', () => {
     expect(res.body).toBe('hello world');
   });
 
+  test('malformed JSON is surfaced as text with isParseError', async () => {
+    const res = await client.get('/api/invalid-json').send<string>();
+
+    expect(res.status).toBe(200);
+    expect(res.isJSON).toBe(false);
+    expect(res.isText).toBe(false);
+    expect(res.isParseError).toBe(true);
+    expect(res.body).toBe('{"broken":');
+  });
+
   test('PUT echoes body', async () => {
     const res = await client
       .put('/api/update')
@@ -2534,6 +2655,31 @@ describe('NodeAdapter via HTTPClient', () => {
     expect(res.body.hash).toBe(clientHash);
   });
 
+  test('raw Uint8Array upload integrity: server hash matches client hash', async () => {
+    // Same pattern as the FormData integrity test but sends raw binary body
+    // directly (content-type: application/octet-stream) to verify the bytes
+    // arrive intact without FormData framing.
+    const bytes = new Uint8Array(64 * 1024);
+
+    for (let i = 0; i < bytes.length; i++) {
+      bytes[i] = i % 256;
+    }
+
+    const clientHash = crypto
+      .createHash('sha256')
+      .update(Buffer.from(bytes.buffer))
+      .digest('hex');
+
+    const res = await client
+      .post('/api/raw-upload-hash')
+      .headers({ 'content-type': 'application/octet-stream' })
+      .body(bytes)
+      .send<{ hash: string }>();
+
+    expect(res.status).toBe(200);
+    expect(res.body.hash).toBe(clientHash);
+  });
+
   test('FormData with file is uploaded and echoed as file reference', async () => {
     const fd = new FormData();
     fd.append(
@@ -2564,6 +2710,43 @@ describe('NodeAdapter via HTTPClient', () => {
 
     expect(res.status).toBe(200);
     expect(res.body.fields.cv).toBe('[File: resume.pdf]');
+  });
+
+  // --- redirects ---
+
+  test('followRedirects false settles with redirect_disabled on 301', async () => {
+    const redirectClient = makeClient({}, server.url, {
+      followRedirects: false,
+    });
+
+    const builder = redirectClient.get('/api/redirect/301');
+    const res = await builder.send();
+
+    expect(res.status).toBe(0);
+    expect(res.isFailed).toBe(true);
+    expect(res.isNetworkError).toBe(false);
+    expect(res.wasRedirectDetected).toBe(true);
+    expect(res.wasRedirectFollowed).toBe(false);
+    expect(res.detectedRedirectURL).toBe(`${server.url}/api/test`);
+    expect(builder.error?.code).toBe('redirect_disabled');
+    expect(builder.error?.wasRedirectDetected).toBe(true);
+    expect(builder.error?.wasRedirectFollowed).toBe(false);
+    expect(builder.error?.detectedRedirectURL).toBe(`${server.url}/api/test`);
+  });
+
+  test('followRedirects true follows 301 and sets wasRedirectFollowed', async () => {
+    const redirectClient = makeClient({}, server.url, {
+      followRedirects: true,
+    });
+
+    const res = await redirectClient
+      .get('/api/redirect/301')
+      .send<{ headers: Record<string, string> }>();
+
+    expect(res.status).toBe(200);
+    expect(res.wasRedirectDetected).toBe(true);
+    expect(res.wasRedirectFollowed).toBe(true);
+    expect(res.redirectHistory).toEqual([`${server.url}/api/test`]);
   });
 
   // --- upload progress ---
@@ -2623,6 +2806,25 @@ describe('NodeAdapter via HTTPClient', () => {
     expect(events[events.length - 1].loaded).toBe(2048);
   });
 
+  test('buffered download reports progress: -1 when Content-Length is absent', async () => {
+    const events: Array<{ loaded: number; total: number; progress: number }> =
+      [];
+
+    await client
+      .get('/api/chunked')
+      .onDownloadProgress((e) => events.push(e))
+      .send();
+
+    // At least one intermediate event should carry progress: -1 (no
+    // Content-Length so total is unknown until the stream ends).
+    expect(events.some((e) => e.progress === -1)).toBe(true);
+    // total falls back to loaded when unknown — must be > 0.
+    const unknownEvents = events.filter((e) => e.progress === -1);
+    expect(unknownEvents.every((e) => e.total === e.loaded)).toBe(true);
+    // Final event is always 1.
+    expect(events[events.length - 1].progress).toBe(1);
+  });
+
   // --- streaming ---
 
   test('streamResponse pipes body into writable and resolves with isStreamed: true', async () => {
@@ -2660,6 +2862,26 @@ describe('NodeAdapter via HTTPClient', () => {
 
     expect(events.length).toBeGreaterThan(0);
     expect(events[events.length - 1]).toBe(1);
+  });
+
+  test('streaming download reports progress: -1 when Content-Length is absent', async () => {
+    const events: Array<{ loaded: number; total: number; progress: number }> =
+      [];
+    const { stream } = makeMemoryWritable();
+
+    await client
+      .get('/api/chunked')
+      .streamResponse((_info, _ctx) => stream)
+      .onDownloadProgress((e) => events.push(e))
+      .send();
+
+    // At least one event should carry progress: -1 (no Content-Length).
+    expect(events.some((e) => e.progress === -1)).toBe(true);
+    // total falls back to loaded when unknown — must be > 0.
+    const unknownEvents = events.filter((e) => e.progress === -1);
+    expect(unknownEvents.every((e) => e.total === e.loaded)).toBe(true);
+    // Final event is always 1.
+    expect(events[events.length - 1].progress).toBe(1);
   });
 
   test('streamResponse returning null cancels the request (isCancelled: true)', async () => {

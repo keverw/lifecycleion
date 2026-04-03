@@ -223,6 +223,13 @@ export function assertSupportedAdapterRuntimeAndConfig(
   adapterType: AdapterType,
   isBrowserRuntime: boolean,
 ): void {
+  if (
+    config.baseURL !== undefined &&
+    requiresAbsoluteBaseURL(adapterType, isBrowserRuntime)
+  ) {
+    assertValidBaseURL(config.baseURL);
+  }
+
   if (config.followRedirects === false && config.maxRedirects !== undefined) {
     throw new Error(
       'HTTPClient maxRedirects cannot be set when followRedirects is false.',
@@ -236,6 +243,18 @@ export function assertSupportedAdapterRuntimeAndConfig(
   ) {
     throw new Error(
       'HTTPClient maxRedirects must be greater than or equal to 1 when followRedirects is true.',
+    );
+  }
+
+  if (adapterType === 'xhr' && config.followRedirects === true) {
+    throw new Error(
+      'HTTPClient redirect handling is not supported with XHR adapter. Set followRedirects: false or use a different adapter/runtime.',
+    );
+  }
+
+  if (adapterType === 'xhr' && !hasXMLHttpRequestGlobal()) {
+    throw new Error(
+      'HTTPClient XHR adapter is not supported when XMLHttpRequest is unavailable. Use a browser runtime, install a test shim, or switch to the FetchAdapter/NodeAdapter.',
     );
   }
 
@@ -264,14 +283,34 @@ export function assertSupportedAdapterRuntimeAndConfig(
     );
   }
 
-  if (
-    (adapterType === 'fetch' || adapterType === 'xhr') &&
-    config.followRedirects === true
-  ) {
+  if (adapterType === 'fetch' && config.followRedirects === true) {
     throw new Error(
-      `HTTPClient redirect handling is not supported with ${adapterType === 'fetch' ? 'FetchAdapter' : 'XHR adapter'} in browser environments. Set followRedirects: false or use a server runtime.`,
+      'HTTPClient redirect handling is not supported with FetchAdapter in browser environments. Set followRedirects: false or use a server runtime.',
     );
   }
+}
+
+function requiresAbsoluteBaseURL(
+  adapterType: AdapterType,
+  isBrowserRuntime: boolean,
+): boolean {
+  if (adapterType === 'node') {
+    return true;
+  }
+
+  if (adapterType === 'fetch' && !isBrowserRuntime) {
+    return true;
+  }
+
+  return false;
+}
+
+function hasXMLHttpRequestGlobal(): boolean {
+  return (
+    typeof globalThis !== 'undefined' &&
+    typeof (globalThis as { XMLHttpRequest?: unknown }).XMLHttpRequest ===
+      'function'
+  );
 }
 
 /**
@@ -368,6 +407,48 @@ export function scalarHeader(
   }
 
   return Array.isArray(v) ? v[0] : v;
+}
+
+/**
+ * Resolves a redirect target from response headers when the adapter can
+ * observe a redirect response but the client may not follow it itself.
+ */
+export function resolveDetectedRedirectURL(
+  requestURL: string,
+  status: number,
+  headers: Record<string, string | string[]>,
+  baseURL?: string,
+): string | undefined {
+  if (![301, 302, 303, 307, 308].includes(status)) {
+    return undefined;
+  }
+
+  const location = scalarHeader(headers, 'location');
+
+  if (!location) {
+    return undefined;
+  }
+
+  try {
+    const absoluteRequestURL = resolveAbsoluteURL(requestURL, baseURL);
+    return new URL(location, absoluteRequestURL).toString();
+  } catch {
+    return location;
+  }
+}
+
+function assertValidBaseURL(baseURL: string): void {
+  try {
+    const url = new URL(baseURL);
+
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+      throw new Error('unsupported protocol');
+    }
+  } catch {
+    throw new Error(
+      'HTTPClient baseURL must be an absolute http(s) URL (for example "https://api.example.com").',
+    );
+  }
 }
 
 /**

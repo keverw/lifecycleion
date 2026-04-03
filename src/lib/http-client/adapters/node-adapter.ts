@@ -11,6 +11,7 @@ import type {
 } from '../types';
 import {
   NON_RETRYABLE_HTTP_CLIENT_CALLBACK_ERROR_FLAG,
+  REDIRECT_STATUS_CODES,
   RESPONSE_STREAM_ABORT_FLAG,
   STREAM_FACTORY_ERROR_FLAG,
 } from '../consts';
@@ -24,6 +25,7 @@ import {
   materializeNodeRequestHeaders,
   normalizeNodeRequestHeaders,
 } from './node-adapter-utils';
+import { resolveDetectedRedirectURL } from '../utils';
 
 type StreamResponseBodyResult =
   | true
@@ -158,7 +160,20 @@ export class NodeAdapter implements HTTPAdapter {
       let isStreamFactoryPending = false;
       let uploadedBodyBytes = 0;
 
+      // Deduplication guard — Node's upload path can reach 100% from multiple
+      // sources (final drain callback and the upload-complete signal). Once
+      // 100% is reported any further calls are dropped.
+      let didFireUpload100 = false;
+
       const reportUploadProgress = (event: AdapterProgressEvent): void => {
+        if (didFireUpload100) {
+          return;
+        }
+
+        if (event.progress === 1) {
+          didFireUpload100 = true;
+        }
+
         uploadedBodyBytes = Math.max(uploadedBodyBytes, event.loaded);
         request.onUploadProgress?.(event);
       };
@@ -275,12 +290,18 @@ export class NodeAdapter implements HTTPAdapter {
 
             if (streamResult === true) {
               activeResponseStream = undefined;
-              resolveAdapterResponse(resolve, req, request.headers, {
-                status,
-                headers,
-                body: null,
-                isStreamed: true,
-              });
+              resolveAdapterResponse(
+                resolve,
+                req,
+                request.requestURL,
+                request.headers,
+                {
+                  status,
+                  headers,
+                  body: null,
+                  isStreamed: true,
+                },
+              );
             } else {
               activeResponseStream = undefined;
               // Body streaming failure after headers (disk full, writable
@@ -295,14 +316,20 @@ export class NodeAdapter implements HTTPAdapter {
               streamAbort.abort();
               destroyWritableQuietly(writable);
               req.destroy();
-              resolveAdapterResponse(resolve, req, request.headers, {
-                status,
-                headers,
-                body: null,
-                isStreamError: true,
-                streamErrorCode: streamResult.code,
-                errorCause: streamResult.cause,
-              });
+              resolveAdapterResponse(
+                resolve,
+                req,
+                request.requestURL,
+                request.headers,
+                {
+                  status,
+                  headers,
+                  body: null,
+                  isStreamError: true,
+                  streamErrorCode: streamResult.code,
+                  errorCause: streamResult.cause,
+                },
+              );
             }
 
             return;
@@ -315,6 +342,13 @@ export class NodeAdapter implements HTTPAdapter {
           };
           const chunks: Buffer[] = [];
           let loadedBytes = 0;
+
+          // Deduplication guard — when Content-Length is known and the last
+          // `data` chunk fills the body exactly, progress: 1 fires there.
+          // The `end` event fires unconditionally afterward, so skip the
+          // completion event if the last chunk already reported 100%.
+          let didFireDownload100 = false;
+
           const totalBytes =
             parseInt(String(headers['content-length'] ?? '0'), 10) || 0;
 
@@ -322,29 +356,52 @@ export class NodeAdapter implements HTTPAdapter {
             chunks.push(chunk);
             loadedBytes += chunk.length;
 
+            // progress: -1 when Content-Length is absent (chunked transfer,
+            // compressed response, etc.) — callers treat -1 as "length unknown".
+            const progress = totalBytes > 0 ? loadedBytes / totalBytes : -1;
+
+            // Track whether the final chunk already closed out 100% so the
+            // `end` handler can skip a duplicate event.
+            if (progress === 1) {
+              didFireDownload100 = true;
+            }
+
             request.onDownloadProgress?.({
               loaded: loadedBytes,
+              // When total is unknown fall back to loaded so the event always
+              // has a sensible non-zero total.
               total: totalBytes > 0 ? totalBytes : loadedBytes,
-              progress: totalBytes > 0 ? loadedBytes / totalBytes : -1,
+              progress,
             });
           });
 
           res.on('end', () => {
             activeBufferedResponse = undefined;
-            request.onDownloadProgress?.({
-              loaded: loadedBytes,
-              total: loadedBytes,
-              progress: 1,
-            });
+
+            // Final 100% download event — skipped when the last `data` chunk
+            // already reported it (Content-Length known, body filled exactly).
+            if (!didFireDownload100) {
+              request.onDownloadProgress?.({
+                loaded: loadedBytes,
+                total: loadedBytes,
+                progress: 1,
+              });
+            }
 
             const body =
               chunks.length > 0 ? new Uint8Array(Buffer.concat(chunks)) : null;
 
-            resolveAdapterResponse(resolve, req, request.headers, {
-              status,
-              headers,
-              body,
-            });
+            resolveAdapterResponse(
+              resolve,
+              req,
+              request.requestURL,
+              request.headers,
+              {
+                status,
+                headers,
+                body,
+              },
+            );
           });
 
           res.on('error', (err: Error) => {
@@ -353,14 +410,23 @@ export class NodeAdapter implements HTTPAdapter {
             }
 
             activeBufferedResponse = undefined;
-            resolveAdapterResponse(resolve, req, request.headers, {
-              status,
-              headers,
-              body: null,
-              isStreamError: true,
-              streamErrorCode: 'stream_response_error',
-              errorCause: makeResponseStreamError('Response stream error', err),
-            });
+            resolveAdapterResponse(
+              resolve,
+              req,
+              request.requestURL,
+              request.headers,
+              {
+                status,
+                headers,
+                body: null,
+                isStreamError: true,
+                streamErrorCode: 'stream_response_error',
+                errorCause: makeResponseStreamError(
+                  'Response stream error',
+                  err,
+                ),
+              },
+            );
           });
 
           res.on('aborted', () => {
@@ -369,14 +435,20 @@ export class NodeAdapter implements HTTPAdapter {
             }
 
             activeBufferedResponse = undefined;
-            resolveAdapterResponse(resolve, req, request.headers, {
-              status,
-              headers,
-              body: null,
-              isStreamError: true,
-              streamErrorCode: 'stream_response_error',
-              errorCause: makeResponseStreamError('Response stream aborted'),
-            });
+            resolveAdapterResponse(
+              resolve,
+              req,
+              request.requestURL,
+              request.headers,
+              {
+                status,
+                headers,
+                body: null,
+                isStreamError: true,
+                streamErrorCode: 'stream_response_error',
+                errorCause: makeResponseStreamError('Response stream aborted'),
+              },
+            );
           });
 
           res.on('close', () => {
@@ -385,16 +457,22 @@ export class NodeAdapter implements HTTPAdapter {
             }
 
             activeBufferedResponse = undefined;
-            resolveAdapterResponse(resolve, req, request.headers, {
-              status,
-              headers,
-              body: null,
-              isStreamError: true,
-              streamErrorCode: 'stream_response_error',
-              errorCause: makeResponseStreamError(
-                'Response stream closed before completion',
-              ),
-            });
+            resolveAdapterResponse(
+              resolve,
+              req,
+              request.requestURL,
+              request.headers,
+              {
+                status,
+                headers,
+                body: null,
+                isStreamError: true,
+                streamErrorCode: 'stream_response_error',
+                errorCause: makeResponseStreamError(
+                  'Response stream closed before completion',
+                ),
+              },
+            );
           });
         })().catch((error: unknown) => {
           reject(error instanceof Error ? error : new Error(String(error)));
@@ -417,28 +495,40 @@ export class NodeAdapter implements HTTPAdapter {
         // failure so the client routes it through the failed/error path and
         // never retries it.
         if (isTLSCertificateError(error)) {
-          resolveAdapterResponse(resolve, req, request.headers, {
-            status: 495,
-            isTransportError: true,
-            isRetryable: false,
-            headers: {},
-            body: null,
-            errorCause: error,
-          });
+          resolveAdapterResponse(
+            resolve,
+            req,
+            request.requestURL,
+            request.headers,
+            {
+              status: 495,
+              isTransportError: true,
+              isRetryable: false,
+              headers: {},
+              body: null,
+              errorCause: error,
+            },
+          );
           return;
         }
 
         const isRetryableTransportError = uploadedBodyBytes === 0;
 
         // All other transport errors (ECONNREFUSED, ENOTFOUND, etc.) → status 0
-        resolveAdapterResponse(resolve, req, request.headers, {
-          status: 0,
-          isTransportError: true,
-          isRetryable: isRetryableTransportError,
-          headers: {},
-          body: null,
-          errorCause: error,
-        });
+        resolveAdapterResponse(
+          resolve,
+          req,
+          request.requestURL,
+          request.headers,
+          {
+            status: 0,
+            isTransportError: true,
+            isRetryable: isRetryableTransportError,
+            headers: {},
+            body: null,
+            errorCause: error,
+          },
+        );
       });
 
       // Wire abort signal — destroy the underlying socket when fired.
@@ -538,15 +628,21 @@ export class NodeAdapter implements HTTPAdapter {
           })
           .catch((error: unknown) => {
             req.destroy();
-            resolveAdapterResponse(resolve, req, request.headers, {
-              status: 0,
-              isTransportError: true,
-              isRetryable: false,
-              headers: {},
-              body: null,
-              errorCause:
-                error instanceof Error ? error : new Error(String(error)),
-            });
+            resolveAdapterResponse(
+              resolve,
+              req,
+              request.requestURL,
+              request.headers,
+              {
+                status: 0,
+                isTransportError: true,
+                isRetryable: false,
+                headers: {},
+                body: null,
+                errorCause:
+                  error instanceof Error ? error : new Error(String(error)),
+              },
+            );
           });
       } else if (
         typeof request.body === 'string' ||
@@ -567,15 +663,21 @@ export class NodeAdapter implements HTTPAdapter {
           })
           .catch((error: unknown) => {
             req.destroy();
-            resolveAdapterResponse(resolve, req, request.headers, {
-              status: 0,
-              isTransportError: true,
-              isRetryable: false,
-              headers: {},
-              body: null,
-              errorCause:
-                error instanceof Error ? error : new Error(String(error)),
-            });
+            resolveAdapterResponse(
+              resolve,
+              req,
+              request.requestURL,
+              request.headers,
+              {
+                status: 0,
+                isTransportError: true,
+                isRetryable: false,
+                headers: {},
+                body: null,
+                errorCause:
+                  error instanceof Error ? error : new Error(String(error)),
+              },
+            );
           });
       } else {
         // No body — fire 100% upload immediately and end the request
@@ -606,6 +708,12 @@ async function streamResponseBody(
 ): Promise<StreamResponseBodyResult> {
   return new Promise((resolve) => {
     let loadedBytes = 0;
+
+    // Deduplication guard — same as buffered download: when Content-Length is
+    // known and the last write callback fills the body exactly, progress: 1
+    // fires there. The `end` → writable.end callback fires unconditionally
+    // afterward, so skip the completion event if the write already reported 100%.
+    let didFireDownload100 = false;
     let isPaused = false;
     let isSettled = false;
     let didReceiveEnd = false;
@@ -663,10 +771,20 @@ async function streamResponseBody(
 
           loadedBytes += chunk.length;
 
+          // progress: -1 when Content-Length is absent — callers treat -1 as
+          // "length unknown". Track 100% to avoid a duplicate from onResponseEnd.
+          const progress = totalBytes > 0 ? loadedBytes / totalBytes : -1;
+
+          if (progress === 1) {
+            didFireDownload100 = true;
+          }
+
           onProgress?.({
             loaded: loadedBytes,
+            // Fall back to loaded when total is unknown so the event always
+            // has a sensible non-zero total.
             total: totalBytes > 0 ? totalBytes : loadedBytes,
-            progress: totalBytes > 0 ? loadedBytes / totalBytes : -1,
+            progress,
           });
         });
       } catch (error) {
@@ -698,12 +816,17 @@ async function streamResponseBody(
             return;
           }
 
-          // Fire 100% download progress on successful completion
-          onProgress?.({
-            loaded: loadedBytes,
-            total: loadedBytes,
-            progress: 1,
-          });
+          // Fire 100% download progress on successful completion, unless a
+          // data chunk already reported exactly 100% (Content-Length known and
+          // last chunk completed the body).
+          if (!didFireDownload100) {
+            onProgress?.({
+              loaded: loadedBytes,
+              total: loadedBytes,
+              progress: 1,
+            });
+          }
+
           settle(true);
         });
       } catch (error) {
@@ -782,11 +905,23 @@ function snapshotEffectiveRequestHeaders(
 function resolveAdapterResponse(
   resolve: (response: AdapterResponse | PromiseLike<AdapterResponse>) => void,
   req: http.ClientRequest,
+  requestURL: string,
   fallbackHeaders: Record<string, string | string[]>,
   response: Omit<AdapterResponse, 'effectiveRequestHeaders'>,
 ): void {
+  const detectedRedirectURL = resolveDetectedRedirectURL(
+    requestURL,
+    response.status,
+    response.headers,
+  );
+
   resolve({
     ...response,
+    // Flag redirect responses so HTTPClient can surface wasRedirectDetected on
+    // the final HTTPResponse consistently across all adapters. The actual
+    // follow-or-disable decision is still made by HTTPClient's redirect loop.
+    wasRedirectDetected: REDIRECT_STATUS_CODES.has(response.status),
+    ...(detectedRedirectURL ? { detectedRedirectURL } : {}),
     effectiveRequestHeaders: snapshotEffectiveRequestHeaders(
       req,
       fallbackHeaders,

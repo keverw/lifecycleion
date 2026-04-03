@@ -185,7 +185,8 @@
     "build": "bun run update-docs && tsup",
     "prepublishOnly": "bun run build && bun test",
     "dev": "tsup --watch",
-    "test": "bun test",
+    "test": "bun run scripts/check-playwright.ts && bun test",
+    "playwright:install": "bunx playwright install chromium",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
     "format": "prettier --write \"**/*.{js,jsx,ts,tsx,json,css,md}\"",
@@ -218,6 +219,7 @@
   },
   "devDependencies": {
     "@eslint/js": "^9.39.1",
+    "@playwright/test": "^1.59.1",
     "@types/bun": "^1.2.13",
     "@types/node": "^24.10.0",
     "@types/qs": "^6.15.0",

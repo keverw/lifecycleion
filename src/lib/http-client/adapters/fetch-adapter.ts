@@ -1,4 +1,5 @@
-import { extractFetchHeaders } from '../utils';
+import { extractFetchHeaders, resolveDetectedRedirectURL } from '../utils';
+import { REDIRECT_STATUS_CODES } from '../consts';
 import type {
   HTTPAdapter,
   AdapterRequest,
@@ -41,10 +42,22 @@ export class FetchAdapter implements HTTPAdapter {
       };
     }
 
+    // Browser-only: `redirect: 'manual'` in a browser context yields an opaque
+    // redirect response (status 0, no accessible Location header) due to CORS
+    // security constraints. In server runtimes (Bun, Node) `redirect: 'manual'`
+    // returns the real 3xx with a Location header, so this branch is never hit
+    // there — the real status falls through to the normal return path below and
+    // HTTPClient's redirect loop handles it as usual.
     if (response.type === 'opaqueredirect') {
+      // Even though the client will classify this as redirect_disabled, the
+      // browser completed the fetch operation. Emit terminal progress so the
+      // browser adapters match the server/mock adapters' completion semantics.
+      request.onUploadProgress?.({ loaded: 1, total: 1, progress: 1 });
+      request.onDownloadProgress?.({ loaded: 0, total: 0, progress: 1 });
+
       return {
         status: 0,
-        isOpaqueRedirect: true,
+        wasRedirectDetected: true,
         headers: {},
         body: null,
       };
@@ -61,9 +74,22 @@ export class FetchAdapter implements HTTPAdapter {
       progress: 1,
     });
 
+    const responseHeaders = extractFetchHeaders(response.headers);
+    const detectedRedirectURL = resolveDetectedRedirectURL(
+      requestURL,
+      response.status,
+      responseHeaders,
+    );
+
     return {
       status: response.status,
-      headers: extractFetchHeaders(response.headers),
+      // Server/runtime manual redirects reach this path as real 3xx responses.
+      // Browser opaque redirects returned above never reach this branch.
+      wasRedirectDetected:
+        detectedRedirectURL !== undefined ||
+        REDIRECT_STATUS_CODES.has(response.status),
+      ...(detectedRedirectURL ? { detectedRedirectURL } : {}),
+      headers: responseHeaders,
       body: rawBody,
     };
   }

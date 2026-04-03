@@ -7,6 +7,7 @@ import {
   test,
 } from 'bun:test';
 import { FetchAdapter } from './fetch-adapter';
+import { HTTPClient } from '../http-client';
 import { startTestServer, type TestServer } from '../test-helpers/test-server';
 
 let server: TestServer;
@@ -177,6 +178,17 @@ describe('FetchAdapter', () => {
   });
 
   test('converts opaque redirects into status 0 responses', async () => {
+    const uploadEvents: Array<{
+      loaded: number;
+      total: number;
+      progress: number;
+    }> = [];
+    const downloadEvents: Array<{
+      loaded: number;
+      total: number;
+      progress: number;
+    }> = [];
+
     (globalThis as any).fetch = () =>
       Promise.resolve({
         status: 0,
@@ -189,14 +201,22 @@ describe('FetchAdapter', () => {
       method: 'GET',
       headers: {},
       timeout: 5000,
+      onUploadProgress: (e) => uploadEvents.push(e),
+      onDownloadProgress: (e) => downloadEvents.push(e),
     });
 
     expect(response).toEqual({
       status: 0,
-      isOpaqueRedirect: true,
+      wasRedirectDetected: true,
       headers: {},
       body: null,
     });
+    expect(response.detectedRedirectURL).toBeUndefined();
+    expect(uploadEvents).toEqual([
+      { loaded: 0, total: 0, progress: 0 },
+      { loaded: 1, total: 1, progress: 1 },
+    ]);
+    expect(downloadEvents).toEqual([{ loaded: 0, total: 0, progress: 1 }]);
   });
 
   test('delegates browser-restricted headers to fetch in browser environments', async () => {
@@ -417,6 +437,27 @@ describe('FetchAdapter', () => {
     expect(downloadEvents).toEqual([{ loaded: 5, total: 5, progress: 1 }]);
   });
 
+  test('server-side manual redirects expose detectedRedirectURL when Location is available', async () => {
+    (globalThis as any).fetch = () =>
+      Promise.resolve(
+        new Response(null, {
+          status: 301,
+          headers: { location: 'https://other.test/next' },
+        }),
+      );
+
+    const response = await new FetchAdapter().send({
+      requestURL: 'https://local.test/start',
+      method: 'GET',
+      headers: {},
+      timeout: 5000,
+    });
+
+    expect(response.status).toBe(301);
+    expect(response.wasRedirectDetected).toBe(true);
+    expect(response.detectedRedirectURL).toBe('https://other.test/next');
+  });
+
   describe('integration requests', () => {
     let adapter: FetchAdapter;
 
@@ -528,6 +569,27 @@ describe('FetchAdapter', () => {
       });
 
       expect([0, 301]).toContain(response.status);
+    });
+
+    test('server-side redirect_disabled: followRedirects false settles with redirect_disabled', async () => {
+      const client = new HTTPClient({
+        adapter,
+        baseURL: server.url,
+        followRedirects: false,
+      });
+      const builder = client.get('/api/redirect/301');
+      const res = await builder.send();
+
+      expect(res.status).toBe(0);
+      expect(res.isFailed).toBe(true);
+      expect(res.isNetworkError).toBe(false);
+      expect(res.wasRedirectDetected).toBe(true);
+      expect(res.wasRedirectFollowed).toBe(false);
+      expect(res.detectedRedirectURL).toBe(`${server.url}/api/test`);
+      expect(builder.error?.code).toBe('redirect_disabled');
+      expect(builder.error?.wasRedirectDetected).toBe(true);
+      expect(builder.error?.wasRedirectFollowed).toBe(false);
+      expect(builder.error?.detectedRedirectURL).toBe(`${server.url}/api/test`);
     });
 
     test('respects AbortSignal cancellation', () => {

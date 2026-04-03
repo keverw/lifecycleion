@@ -30,6 +30,8 @@ const originalFetch = globalThis.fetch;
 const originalWindow = (globalThis as Record<string, unknown>).window;
 const originalDocument = (globalThis as Record<string, unknown>).document;
 const originalSelf = (globalThis as Record<string, unknown>).self;
+const originalXMLHttpRequest = (globalThis as Record<string, unknown>)
+  .XMLHttpRequest;
 const originalWorkerGlobalScope = (globalThis as Record<string, unknown>)
   .WorkerGlobalScope;
 
@@ -60,6 +62,13 @@ afterEach(() => {
     delete (globalThis as Record<string, unknown>).self;
   } else {
     (globalThis as Record<string, unknown>).self = originalSelf;
+  }
+
+  if (originalXMLHttpRequest === undefined) {
+    delete (globalThis as Record<string, unknown>).XMLHttpRequest;
+  } else {
+    (globalThis as Record<string, unknown>).XMLHttpRequest =
+      originalXMLHttpRequest;
   }
 
   if (originalWorkerGlobalScope === undefined) {
@@ -239,6 +248,48 @@ describe('HTTPClient — basic HTTP methods', () => {
     ).toThrow(/maxRedirects cannot be set when followRedirects is false/i);
   });
 
+  test('server-side fetch rejects baseURL without a protocol', () => {
+    expect(() => new HTTPClient({ baseURL: 'example.com' })).toThrow(
+      /baseURL must be an absolute http\(s\) URL/i,
+    );
+  });
+
+  test('server-side fetch rejects baseURL with a non-http protocol', () => {
+    expect(() => new HTTPClient({ baseURL: 'ftp://example.com' })).toThrow(
+      /baseURL must be an absolute http\(s\) URL/i,
+    );
+  });
+
+  test('server-side fetch allows absolute https baseURL with a path prefix', () => {
+    expect(
+      () => new HTTPClient({ baseURL: 'https://example.com/api/v1' }),
+    ).not.toThrow();
+  });
+
+  test('browser fetch allows relative baseURL prefixes', () => {
+    const originalWindow = (globalThis as Record<string, unknown>).window;
+    const originalDocument = (globalThis as Record<string, unknown>).document;
+
+    (globalThis as Record<string, unknown>).window = {};
+    (globalThis as Record<string, unknown>).document = {};
+
+    try {
+      expect(() => new HTTPClient({ baseURL: '/api' })).not.toThrow();
+    } finally {
+      if (originalWindow === undefined) {
+        delete (globalThis as Record<string, unknown>).window;
+      } else {
+        (globalThis as Record<string, unknown>).window = originalWindow;
+      }
+
+      if (originalDocument === undefined) {
+        delete (globalThis as Record<string, unknown>).document;
+      } else {
+        (globalThis as Record<string, unknown>).document = originalDocument;
+      }
+    }
+  });
+
   test('browser FetchAdapter with followRedirects false treats opaque redirects as disabled', async () => {
     (globalThis as Record<string, unknown>).window = {};
     (globalThis as Record<string, unknown>).document = {};
@@ -271,7 +322,8 @@ describe('HTTPClient — basic HTTP methods', () => {
     expect(builder.error).not.toBeNull();
     expect(builder.error?.code).toBe('redirect_disabled');
     expect(builder.error?.requestURL).toBe('https://local.test/redirect');
-    expect(builder.error?.redirected).toBe(false);
+    expect(builder.error?.wasRedirectDetected).toBe(true);
+    expect(builder.error?.wasRedirectFollowed).toBe(false);
     expect(builder.error?.redirectHistory).toEqual([]);
   });
 
@@ -379,13 +431,14 @@ describe('HTTPClient — basic HTTP methods', () => {
     };
 
     expect(() => new HTTPClient({ adapter, followRedirects: true })).toThrow(
-      /redirect handling is not supported with XHR adapter in browser environments/i,
+      /redirect handling is not supported with XHR adapter/i,
     );
   });
 
   test('allows browser XHR adapter when followRedirects is false', () => {
     (globalThis as Record<string, unknown>).window = {};
     (globalThis as Record<string, unknown>).document = {};
+    (globalThis as Record<string, unknown>).XMLHttpRequest = class {};
 
     const adapter: HTTPAdapter = {
       getType: () => 'xhr',
@@ -433,6 +486,7 @@ describe('HTTPClient — basic HTTP methods', () => {
   test('rejects cookieJar with browser XHR adapter at construction time', () => {
     (globalThis as Record<string, unknown>).window = {};
     (globalThis as Record<string, unknown>).document = {};
+    (globalThis as Record<string, unknown>).XMLHttpRequest = class {};
 
     const adapter: HTTPAdapter = {
       getType: () => 'xhr',
@@ -452,6 +506,7 @@ describe('HTTPClient — basic HTTP methods', () => {
   test('rejects userAgent with browser XHR adapter at construction time', () => {
     (globalThis as Record<string, unknown>).window = {};
     (globalThis as Record<string, unknown>).document = {};
+    (globalThis as Record<string, unknown>).XMLHttpRequest = class {};
 
     const adapter: HTTPAdapter = {
       getType: () => 'xhr',
@@ -512,6 +567,8 @@ describe('HTTPClient — basic HTTP methods', () => {
   });
 
   test('still allows cookieJar and userAgent outside browser environments', () => {
+    (globalThis as Record<string, unknown>).XMLHttpRequest = class {};
+
     const fetchAdapter: HTTPAdapter = {
       getType: () => 'fetch',
       send: (_request: AdapterRequest): Promise<AdapterResponse> =>
@@ -875,7 +932,8 @@ describe('HTTPClient — cancellation', () => {
     expect(res.isFailed).toBe(true);
     expect(res.initialURL).toBe('https://example.com/slow');
     expect(res.requestURL).toBe('https://example.com/slow');
-    expect(res.redirected).toBe(false);
+    expect(res.wasRedirectDetected).toBe(false);
+    expect(res.wasRedirectFollowed).toBe(false);
     expect(res.redirectHistory).toEqual([]);
     expect(adapterCalls).toBe(0);
     expect(interceptorCalls).toBe(0);
@@ -1165,7 +1223,8 @@ describe('HTTPClient — retry', () => {
       .send();
 
     expect(res.status).toBe(200);
-    expect(res.redirected).toBe(true);
+    expect(res.wasRedirectDetected).toBe(true);
+    expect(res.wasRedirectFollowed).toBe(true);
 
     const body = res.body as { ok: boolean; attempt: number };
     expect(body.ok).toBe(true);
@@ -1464,7 +1523,8 @@ describe('HTTPClient — interceptors', () => {
     expect(builder.error?.code).toBe('interceptor_error');
     expect(builder.error?.initialURL).toBe('https://example.com/users');
     expect(builder.error?.requestURL).toBe('https://example.com/users');
-    expect(builder.error?.redirected).toBe(false);
+    expect(builder.error?.wasRedirectDetected).toBe(false);
+    expect(builder.error?.wasRedirectFollowed).toBe(false);
     expect(builder.error?.redirectHistory).toEqual([]);
     expect(builder.error?.cause?.message).toBe('request interceptor blew up');
     expect(adapterCalls).toEqual([]);
@@ -1580,6 +1640,135 @@ describe('HTTPClient — FormData upload', () => {
 });
 
 describe('HTTPClient — redirect', () => {
+  test('passes through detectedRedirectURL for relative redirect targets', async () => {
+    const adapter: HTTPAdapter = {
+      getType: () => 'node',
+      send: (_request: AdapterRequest): Promise<AdapterResponse> =>
+        Promise.resolve({
+          status: 302,
+          detectedRedirectURL: 'https://example.com/next',
+          headers: { location: '/next' },
+          body: null,
+        }),
+    };
+
+    const client = new HTTPClient({
+      adapter,
+      baseURL: 'https://example.com',
+      followRedirects: false,
+    });
+
+    const builder = client.get('/start');
+    const res = await builder.send();
+
+    expect(res.requestURL).toBe('https://example.com/start');
+    expect(res.detectedRedirectURL).toBe('https://example.com/next');
+    expect(builder.error?.detectedRedirectURL).toBe('https://example.com/next');
+  });
+
+  test('passes through detectedRedirectURL for absolute redirect targets', async () => {
+    const adapter: HTTPAdapter = {
+      getType: () => 'node',
+      send: (_request: AdapterRequest): Promise<AdapterResponse> =>
+        Promise.resolve({
+          status: 302,
+          detectedRedirectURL: 'https://other.test/next',
+          headers: { location: 'https://other.test/next' },
+          body: null,
+        }),
+    };
+
+    const client = new HTTPClient({
+      adapter,
+      baseURL: 'https://example.com',
+      followRedirects: false,
+    });
+
+    const builder = client.get('/start');
+    const res = await builder.send();
+
+    expect(res.requestURL).toBe('https://example.com/start');
+    expect(res.detectedRedirectURL).toBe('https://other.test/next');
+    expect(builder.error?.detectedRedirectURL).toBe('https://other.test/next');
+  });
+
+  test('does not retain detectedRedirectURL on the final followed response', async () => {
+    let callCount = 0;
+
+    const adapter: HTTPAdapter = {
+      getType: () => 'node',
+      send: (request: AdapterRequest): Promise<AdapterResponse> => {
+        callCount++;
+
+        if (callCount === 1) {
+          return Promise.resolve({
+            status: 302,
+            detectedRedirectURL: 'https://example.com/next',
+            headers: { location: '/next' },
+            body: null,
+          });
+        }
+
+        expect(request.requestURL).toBe('https://example.com/next');
+
+        return Promise.resolve({
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+          body: new TextEncoder().encode('{"ok":true}'),
+        });
+      },
+    };
+
+    const client = new HTTPClient({
+      adapter,
+      baseURL: 'https://example.com',
+      followRedirects: true,
+    });
+
+    const res = await client.get('/start').send<{ ok: boolean }>();
+
+    expect(res.status).toBe(200);
+    expect(res.requestURL).toBe('https://example.com/next');
+    expect(res.detectedRedirectURL).toBeUndefined();
+    expect(res.redirectHistory).toEqual(['https://example.com/next']);
+  });
+
+  test('XHR-style redirect detection keeps requestURL and exposes detectedRedirectURL', async () => {
+    (globalThis as Record<string, unknown>).XMLHttpRequest = class {};
+
+    const adapter: HTTPAdapter = {
+      getType: () => 'xhr',
+      send: () =>
+        Promise.resolve({
+          status: 0,
+          wasRedirectDetected: true,
+          detectedRedirectURL: 'https://example.com/redirected',
+          headers: {},
+          body: null,
+        }),
+    };
+
+    const client = new HTTPClient({
+      baseURL: 'https://example.com',
+      adapter,
+      followRedirects: false,
+    });
+
+    const builder = client.get('/start');
+    const res = await builder.send();
+
+    expect(res.status).toBe(0);
+    expect(res.requestURL).toBe('https://example.com/start');
+    expect(res.wasRedirectDetected).toBe(true);
+    expect(res.wasRedirectFollowed).toBe(false);
+    expect(res.detectedRedirectURL).toBe('https://example.com/redirected');
+    expect(builder.error?.code).toBe('redirect_disabled');
+    expect(builder.error?.requestURL).toBe('https://example.com/start');
+    expect(builder.error?.detectedRedirectURL).toBe(
+      'https://example.com/redirected',
+    );
+  });
+
   test('disabled redirects settle as redirect_disabled on server responses', async () => {
     const client = makeClient();
     const builder = client.get('/api/redirect/301');
@@ -1590,9 +1779,14 @@ describe('HTTPClient — redirect', () => {
     expect(res.isFailed).toBe(true);
     expect(res.initialURL).toBe(`${server.url}/api/redirect/301`);
     expect(res.requestURL).toBe(`${server.url}/api/redirect/301`);
-    expect(res.redirected).toBe(false);
+    expect(res.wasRedirectDetected).toBe(true);
+    expect(res.wasRedirectFollowed).toBe(false);
+    expect(res.detectedRedirectURL).toBe(`${server.url}/api/test`);
     expect(res.redirectHistory).toEqual([]);
     expect(builder.error?.code).toBe('redirect_disabled');
+    expect(builder.error?.wasRedirectDetected).toBe(true);
+    expect(builder.error?.wasRedirectFollowed).toBe(false);
+    expect(builder.error?.detectedRedirectURL).toBe(`${server.url}/api/test`);
     expect(builder.error?.message).toBe(
       'Redirect encountered while redirects are disabled',
     );
@@ -1607,7 +1801,8 @@ describe('HTTPClient — redirect', () => {
     expect(res.status).toBe(200);
     expect(res.initialURL).toBe(`${server.url}/api/redirect/301`);
     expect(res.requestURL).toBe(`${server.url}/api/test`);
-    expect(res.redirected).toBe(true);
+    expect(res.wasRedirectDetected).toBe(true);
+    expect(res.wasRedirectFollowed).toBe(true);
     expect(res.redirectHistory).toEqual([`${server.url}/api/test`]);
   });
 
@@ -1837,7 +2032,8 @@ describe('HTTPClient — redirect', () => {
     expect(res.body.body).toBe('');
     expect(res.initialURL).toBe(`${server.url}/api/redirect/302-post`);
     expect(res.requestURL).toBe(`${server.url}/api/redirect/echo-method`);
-    expect(res.redirected).toBe(true);
+    expect(res.wasRedirectDetected).toBe(true);
+    expect(res.wasRedirectFollowed).toBe(true);
     expect(res.redirectHistory).toEqual([
       `${server.url}/api/redirect/echo-method`,
     ]);
@@ -2110,7 +2306,8 @@ describe('HTTPClient — redirect', () => {
     expect(builder.error?.code).toBe('timeout');
     expect(res.initialURL).toBe(`${server.url}/api/redirect/302-slow`);
     expect(res.requestURL).toBe(`${server.url}/api/slow`);
-    expect(res.redirected).toBe(true);
+    expect(res.wasRedirectDetected).toBe(true);
+    expect(res.wasRedirectFollowed).toBe(true);
     expect(res.redirectHistory).toEqual([`${server.url}/api/slow`]);
   });
 
@@ -2171,7 +2368,8 @@ describe('HTTPClient — redirect', () => {
       .send<{ ok: boolean }>();
 
     expect(res.status).toBe(200);
-    expect(res.redirected).toBe(true);
+    expect(res.wasRedirectDetected).toBe(true);
+    expect(res.wasRedirectFollowed).toBe(true);
     expect(uploadEvents).toEqual([
       { loaded: 2, total: 4, progress: 0.5, attemptNumber: 2, hopNumber: 1 },
     ]);
@@ -2204,14 +2402,16 @@ describe('HTTPClient — redirect', () => {
     expect(res.isFailed).toBe(true);
     expect(res.initialURL).toBe(`${server.url}/api/redirect/loop-a`);
     expect(res.requestURL).toBe(`${server.url}/api/redirect/loop-b`);
-    expect(res.redirected).toBe(true);
+    expect(res.wasRedirectDetected).toBe(true);
+    expect(res.wasRedirectFollowed).toBe(true);
     expect(res.redirectHistory).toEqual([`${server.url}/api/redirect/loop-b`]);
     expect(builder.state).toBe('failed');
     expect(builder.error?.code).toBe('redirect_loop');
     expect(builder.error?.message).toBe('Redirect limit exceeded');
     expect(builder.error?.initialURL).toBe(`${server.url}/api/redirect/loop-a`);
     expect(builder.error?.requestURL).toBe(`${server.url}/api/redirect/loop-b`);
-    expect(builder.error?.redirected).toBe(true);
+    expect(builder.error?.wasRedirectDetected).toBe(true);
+    expect(builder.error?.wasRedirectFollowed).toBe(true);
     expect(builder.error?.redirectHistory).toEqual([
       `${server.url}/api/redirect/loop-b`,
     ]);
@@ -3015,7 +3215,7 @@ describe('HTTPClient — phase-aware interceptors', () => {
       .send<{ headers: Record<string, string> }>();
 
     expect(res.status).toBe(200);
-    expect(res.redirected).toBe(true);
+    expect(res.wasRedirectFollowed).toBe(true);
     // The redirect-phase interceptor should have injected the header on the redirect hop
     expect(res.body.headers['x-redirect-auth']).toBe('bearer-xyz');
   });
@@ -4015,7 +4215,8 @@ describe('HTTPClient — phase-aware interceptors', () => {
 
     expect(res.status).toBe(0);
     expect(res.isNetworkError).toBe(true);
-    expect(res.redirected).toBe(true);
+    expect(res.wasRedirectDetected).toBe(true);
+    expect(res.wasRedirectFollowed).toBe(true);
     expect(res.isFailed).toBe(true);
     expect(builder.state).toBe('failed');
     expect(builder.error?.code).toBe('adapter_error');
@@ -4228,7 +4429,8 @@ describe('HTTPClient — phase-aware interceptors', () => {
 
     expect(res.status).toBe(0);
     expect(res.isNetworkError).toBe(true);
-    expect(res.redirected).toBe(true);
+    expect(res.wasRedirectDetected).toBe(true);
+    expect(res.wasRedirectFollowed).toBe(true);
     expect(res.isFailed).toBe(true);
     expect(res.requestURL).toBe('https://example.com/redirected');
     expect(res.redirectHistory).toEqual(['https://example.com/redirected']);
@@ -4236,7 +4438,8 @@ describe('HTTPClient — phase-aware interceptors', () => {
     expect(builder.error?.code).toBe('network_error');
     expect(builder.error?.message).toBe('Network error');
     expect(builder.error?.cause).toBeUndefined();
-    expect(builder.error?.redirected).toBe(true);
+    expect(builder.error?.wasRedirectDetected).toBe(true);
+    expect(builder.error?.wasRedirectFollowed).toBe(true);
     expect(builder.error?.requestURL).toBe('https://example.com/redirected');
     expect(builder.error?.redirectHistory).toEqual([
       'https://example.com/redirected',

@@ -63,4 +63,4 @@
 - Added the new adapter-based HTTP client foundation in `lifecycleion/http-client`, including the shared `HTTPAdapter` contract, fluent request builder, retries, redirect handling, cancellation, interceptors, response/error observers, request tracking, and the default `FetchAdapter`
 - Added `MockAdapter` plus server-side cookie jar support and shared HTTP client request/response utilities
 - Added `lifecycleion/http-client-node` with a Node adapter for server-side HTTP requests, streaming downloads, multipart uploads, Unix sockets, and TLS/mTLS options
-- `lifecycleion/http-client-xhr` remains planned as the remaining adapter-specific entry point in the HTTP client rollout
+- Added `lifecycleion/http-client-xhr` with an XHR adapter for environments that expose `XMLHttpRequest`, including real per-chunk upload/download progress, redirect detection, and Playwright-based browser integration tests

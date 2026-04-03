@@ -640,6 +640,152 @@ describe('serializeMultipartFormData', () => {
     expect(callbackOrder).toEqual(writeOrder);
   });
 
+  test('resolves when req emits close during backpressure wait', async () => {
+    const fd = new FormData();
+    fd.append('field', 'value');
+
+    const req = new EventEmitter() as EventEmitter &
+      RequestBodyWritable & { destroyed: boolean };
+    req.destroyed = false;
+    req.setHeader = () => {};
+
+    let writeIndex = 0;
+    req.write = (_data, callback) => {
+      const index = writeIndex++;
+      callback?.(null);
+      return index !== 0;
+    };
+
+    const boundary = generateMultipartBoundary();
+    const writePromise = serializeMultipartFormData(fd, req, boundary);
+
+    await Promise.resolve();
+
+    req.emit('close');
+    await writePromise;
+  });
+
+  test('rejects when req emits error during backpressure wait', async () => {
+    const fd = new FormData();
+    fd.append('field', 'value');
+
+    const req = new EventEmitter() as EventEmitter &
+      RequestBodyWritable & { destroyed: boolean };
+    req.destroyed = false;
+    req.setHeader = () => {};
+
+    let writeIndex = 0;
+    req.write = (_data, callback) => {
+      const index = writeIndex++;
+      callback?.(null);
+      return index !== 0;
+    };
+
+    const boundary = generateMultipartBoundary();
+    const writePromise = serializeMultipartFormData(fd, req, boundary);
+
+    await Promise.resolve();
+
+    req.emit('error', new Error('socket hang up'));
+
+    let caught: Error | undefined;
+    try {
+      await writePromise;
+    } catch (error) {
+      caught = error as Error;
+    }
+
+    expect(caught?.message).toBe('socket hang up');
+  });
+
+  test('resolves immediately when req.destroyed at time drain listeners are registered', async () => {
+    const fd = new FormData();
+    fd.append('field', 'value');
+
+    // req becomes destroyed synchronously after write() returns false,
+    // triggering the race-condition guard at line 329 in multipart.ts
+    let writeIndex = 0;
+    const req: RequestBodyWritable = {
+      get destroyed() {
+        // Destroyed only after the first write has returned false
+        return writeIndex > 0;
+      },
+      setHeader() {},
+      write(_data, callback) {
+        const index = writeIndex++;
+        callback?.(null);
+        // First write returns false to trigger backpressure path
+        return index !== 0;
+      },
+      once() {
+        return this;
+      },
+      off() {
+        return this;
+      },
+    };
+
+    const boundary = generateMultipartBoundary();
+    // Should complete without hanging — destroyed guard calls onClose() immediately
+    await serializeMultipartFormData(fd, req, boundary);
+  });
+
+  test('cancels reader when req.destroyed flips between reader.read() result and write()', async () => {
+    let readCount = 0;
+    let cancelCount = 0;
+    let isDestroyed = false;
+
+    const fd = {
+      *entries() {
+        yield [
+          'upload',
+          {
+            name: 'data.bin',
+            type: 'application/octet-stream',
+            size: 3,
+            stream() {
+              return new ReadableStream<Uint8Array>({
+                pull(controller) {
+                  readCount++;
+                  // Set destroyed before the chunk value reaches the caller so
+                  // the post-read req.destroyed check (lines 380-382) fires.
+                  isDestroyed = true;
+                  controller.enqueue(new Uint8Array([1, 2, 3]));
+                },
+                cancel() {
+                  cancelCount++;
+                },
+              });
+            },
+          },
+        ];
+      },
+    } as unknown as FormData;
+
+    const req: RequestBodyWritable = {
+      get destroyed() {
+        return isDestroyed;
+      },
+      setHeader() {},
+      write(_data, callback) {
+        callback?.(null);
+        return true;
+      },
+      once() {
+        return this;
+      },
+      off() {
+        return this;
+      },
+    };
+
+    const boundary = generateMultipartBoundary();
+    await serializeMultipartFormData(fd, req, boundary);
+
+    expect(readCount).toBe(1);
+    expect(cancelCount).toBe(1);
+  });
+
   test('waits for drain before writing the next multipart chunk', async () => {
     const fd = new FormData();
     fd.append('field', 'value');

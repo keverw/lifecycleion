@@ -198,6 +198,57 @@ describe('writeRequestBodyChunked', () => {
     expect(callbackOrder).toEqual([0, 1]);
   });
 
+  test('resolves if req emits close while waiting for drain', async () => {
+    const data = Buffer.alloc(REQUEST_BODY_CHUNK_SIZE * 2, 0xaa);
+    const req = new EventEmitter() as EventEmitter &
+      RequestBodyWritable & { destroyed: boolean };
+    req.destroyed = false;
+    req.setHeader = () => {};
+
+    let writeIndex = 0;
+    req.write = (_data, callback) => {
+      const index = writeIndex++;
+      callback?.(null);
+      // First write returns false to trigger backpressure path
+      return index !== 0;
+    };
+
+    const writePromise = writeRequestBodyChunked(data, req);
+    await Promise.resolve();
+
+    req.emit('close');
+    await writePromise;
+  });
+
+  test('rejects if req emits error while waiting for drain', async () => {
+    const data = Buffer.alloc(REQUEST_BODY_CHUNK_SIZE * 2, 0xaa);
+    const req = new EventEmitter() as EventEmitter &
+      RequestBodyWritable & { destroyed: boolean };
+    req.destroyed = false;
+    req.setHeader = () => {};
+
+    let writeIndex = 0;
+    req.write = (_data, callback) => {
+      const index = writeIndex++;
+      callback?.(null);
+      return index !== 0;
+    };
+
+    const writePromise = writeRequestBodyChunked(data, req);
+    await Promise.resolve();
+
+    req.emit('error', new Error('socket hang up'));
+
+    let caught: Error | undefined;
+    try {
+      await writePromise;
+    } catch (error) {
+      caught = error as Error;
+    }
+
+    expect(caught?.message).toBe('socket hang up');
+  });
+
   test('waits for drain before writing the next chunk', async () => {
     const data = Buffer.alloc(REQUEST_BODY_CHUNK_SIZE * 2, 0xaa);
     const writeOrder: number[] = [];

@@ -289,6 +289,21 @@ describe('MockAdapter via HTTPClient', () => {
     expect(res.body).toBe('hello');
   });
 
+  test('malformed JSON is surfaced as text with isParseError', async () => {
+    adapter.routes.get('/bad-json', () => ({
+      status: 200,
+      body: '{"broken":',
+      contentType: 'json',
+    }));
+
+    const res = await client.get('/bad-json').send<string>();
+    expect(res.status).toBe(200);
+    expect(res.isJSON).toBe(false);
+    expect(res.isText).toBe(false);
+    expect(res.isParseError).toBe(true);
+    expect(res.body).toBe('{"broken":');
+  });
+
   test('custom response headers are passed through', async () => {
     adapter.routes.get('/hdr', () => ({
       status: 200,
@@ -492,8 +507,57 @@ describe('MockAdapter via HTTPClient', () => {
     adapter.routes.get('/new', () => ({ status: 200, body: { here: true } }));
     const res = await redirectClient.get('/old').send<{ here: boolean }>();
     expect(res.status).toBe(200);
-    expect(res.redirected).toBe(true);
+    expect(res.wasRedirectFollowed).toBe(true);
+    expect(res.detectedRedirectURL).toBeUndefined();
     expect(res.body.here).toBe(true);
+  });
+
+  test('disabled redirects expose detectedRedirectURL for relative targets', async () => {
+    const redirectClient = makeClient(adapter, 'http://mock.test', {
+      followRedirects: false,
+    });
+
+    adapter.routes.get('/old-relative', () => ({
+      status: 302,
+      headers: { Location: '/new-relative' },
+    }));
+
+    const builder = redirectClient.get('/old-relative');
+    const res = await builder.send();
+
+    expect(res.status).toBe(0);
+    expect(res.wasRedirectDetected).toBe(true);
+    expect(res.wasRedirectFollowed).toBe(false);
+    expect(res.requestURL).toBe('http://mock.test/old-relative');
+    expect(res.detectedRedirectURL).toBe('http://mock.test/new-relative');
+    expect(builder.error?.code).toBe('redirect_disabled');
+    expect(builder.error?.detectedRedirectURL).toBe(
+      'http://mock.test/new-relative',
+    );
+  });
+
+  test('disabled redirects expose detectedRedirectURL for absolute targets', async () => {
+    const redirectClient = makeClient(adapter, 'http://mock.test', {
+      followRedirects: false,
+    });
+
+    adapter.routes.get('/old-absolute', () => ({
+      status: 302,
+      headers: { location: 'https://other.test/new-absolute' },
+    }));
+
+    const builder = redirectClient.get('/old-absolute');
+    const res = await builder.send();
+
+    expect(res.status).toBe(0);
+    expect(res.wasRedirectDetected).toBe(true);
+    expect(res.wasRedirectFollowed).toBe(false);
+    expect(res.requestURL).toBe('http://mock.test/old-absolute');
+    expect(res.detectedRedirectURL).toBe('https://other.test/new-absolute');
+    expect(builder.error?.code).toBe('redirect_disabled');
+    expect(builder.error?.detectedRedirectURL).toBe(
+      'https://other.test/new-absolute',
+    );
   });
 
   test('cross-domain redirect works on single adapter (host stripped during match)', async () => {
@@ -723,6 +787,60 @@ describe('MockAdapter.send() — low-level contract', () => {
     expect(
       adapter.send(makeAdapterRequest({ requestURL: '/map' })),
     ).rejects.toThrow(/Unsupported mock response body type/);
+  });
+
+  test('3xx response sets wasRedirectDetected on AdapterResponse', async () => {
+    adapter.routes.get('/moved', () => ({
+      status: 301,
+      headers: { Location: '/new' },
+    }));
+
+    const res = await adapter.send(
+      makeAdapterRequest({ requestURL: 'http://mock.test/moved' }),
+    );
+    expect(res.wasRedirectDetected).toBe(true);
+    expect(res.detectedRedirectURL).toBe('http://mock.test/new');
+  });
+
+  test('non-3xx response does not set wasRedirectDetected', async () => {
+    adapter.routes.get('/ok', () => ({ status: 200 }));
+
+    const res = await adapter.send(makeAdapterRequest({ requestURL: '/ok' }));
+    expect(res.wasRedirectDetected).toBe(false);
+    expect(res.detectedRedirectURL).toBeUndefined();
+  });
+
+  test('async handler rejection propagates through awaitAbortable when signal is present', async () => {
+    adapter.routes.get('/fail', () => {
+      throw new Error('handler boom');
+    });
+
+    const controller = new AbortController();
+
+    const res = await adapter.send(
+      makeAdapterRequest({ requestURL: '/fail', signal: controller.signal }),
+    );
+
+    // Error propagates through awaitAbortable's rejection handler, falls back to 500
+    expect(res.status).toBe(500);
+  });
+
+  test('awaitAbortable normalizes non-Error handler rejection to Error', async () => {
+    adapter.routes.get('/fail-string', () => {
+      // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
+      return Promise.reject('plain string rejection') as never;
+    });
+
+    const controller = new AbortController();
+
+    const res = await adapter.send(
+      makeAdapterRequest({
+        requestURL: '/fail-string',
+        signal: controller.signal,
+      }),
+    );
+
+    expect(res.status).toBe(500);
   });
 
   test('repeated cookie headers are materialized with cookie delimiters', async () => {

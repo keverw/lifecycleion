@@ -13,9 +13,23 @@ import {
   normalizeAdapterResponseHeaders,
   normalizeHeaders,
   parseContentType,
+  resolveDetectedRedirectURL,
   resolveAbsoluteURL,
   serializeBody,
 } from './utils';
+
+const originalXMLHttpRequest = (
+  globalThis as Record<string, unknown>
+).XMLHttpRequest;
+
+afterEach(() => {
+  if (originalXMLHttpRequest === undefined) {
+    delete (globalThis as Record<string, unknown>).XMLHttpRequest;
+  } else {
+    (globalThis as Record<string, unknown>).XMLHttpRequest =
+      originalXMLHttpRequest;
+  }
+});
 
 describe('buildURL', () => {
   test('joins base and path', () => {
@@ -330,6 +344,16 @@ describe('assertSupportedAdapterRuntimeAndConfig', () => {
   });
 
   describe('fetch in browser', () => {
+    test('allows relative baseURL prefixes', () => {
+      expect(() =>
+        assertSupportedAdapterRuntimeAndConfig(
+          { baseURL: '/api' },
+          'fetch',
+          true,
+        ),
+      ).not.toThrow();
+    });
+
     test('rejects cookieJar usage', () => {
       expect(() =>
         assertSupportedAdapterRuntimeAndConfig(
@@ -365,21 +389,37 @@ describe('assertSupportedAdapterRuntimeAndConfig', () => {
     });
   });
 
-  describe('xhr in browser', () => {
-    test('rejects cookieJar usage', () => {
-      expect(() =>
-        assertSupportedAdapterRuntimeAndConfig(
-          { cookieJar: {} as never },
+    describe('xhr in browser', () => {
+      test('allows relative baseURL prefixes', () => {
+        (globalThis as Record<string, unknown>).XMLHttpRequest = class {};
+
+        expect(() =>
+          assertSupportedAdapterRuntimeAndConfig(
+            { baseURL: '/api' },
+          'xhr',
+          true,
+        ),
+      ).not.toThrow();
+      });
+
+      test('rejects cookieJar usage', () => {
+        (globalThis as Record<string, unknown>).XMLHttpRequest = class {};
+
+        expect(() =>
+          assertSupportedAdapterRuntimeAndConfig(
+            { cookieJar: {} as never },
           'xhr',
           true,
         ),
       ).toThrow(/cookieJar is not supported with XHR adapter/i);
-    });
+      });
 
-    test('rejects userAgent usage', () => {
-      expect(() =>
-        assertSupportedAdapterRuntimeAndConfig(
-          { userAgent: 'test-agent' },
+      test('rejects userAgent usage', () => {
+        (globalThis as Record<string, unknown>).XMLHttpRequest = class {};
+
+        expect(() =>
+          assertSupportedAdapterRuntimeAndConfig(
+            { userAgent: 'test-agent' },
           'xhr',
           true,
         ),
@@ -411,6 +451,16 @@ describe('assertSupportedAdapterRuntimeAndConfig', () => {
         ),
       ).not.toThrow();
     });
+
+    test('allows relative baseURL prefixes', () => {
+      expect(() =>
+        assertSupportedAdapterRuntimeAndConfig(
+          { baseURL: '/api' },
+          'mock',
+          true,
+        ),
+      ).not.toThrow();
+    });
   });
 
   describe('node adapter', () => {
@@ -424,6 +474,58 @@ describe('assertSupportedAdapterRuntimeAndConfig', () => {
       expect(() =>
         assertSupportedAdapterRuntimeAndConfig({}, 'node', false),
       ).not.toThrow();
+    });
+
+    test('rejects relative baseURL prefixes', () => {
+      expect(() =>
+        assertSupportedAdapterRuntimeAndConfig(
+          { baseURL: '/api' },
+          'node',
+          false,
+        ),
+      ).toThrow(/baseURL must be an absolute http\(s\) URL/i);
+    });
+  });
+
+  describe('fetch in server runtime', () => {
+    test('rejects relative baseURL prefixes', () => {
+      expect(() =>
+        assertSupportedAdapterRuntimeAndConfig(
+          { baseURL: '/api' },
+          'fetch',
+          false,
+        ),
+      ).toThrow(/baseURL must be an absolute http\(s\) URL/i);
+    });
+  });
+
+  describe('xhr in server runtime', () => {
+    test('rejects when XMLHttpRequest is unavailable', () => {
+      delete (globalThis as Record<string, unknown>).XMLHttpRequest;
+
+      expect(() =>
+        assertSupportedAdapterRuntimeAndConfig({}, 'xhr', false),
+      ).toThrow(/XHR adapter is not supported when XMLHttpRequest is unavailable/i);
+    });
+
+    test('allows a test shim when XMLHttpRequest is present', () => {
+      (globalThis as Record<string, unknown>).XMLHttpRequest = class {};
+
+      expect(() =>
+        assertSupportedAdapterRuntimeAndConfig({}, 'xhr', false),
+      ).not.toThrow();
+    });
+
+    test('rejects redirect handling even when XMLHttpRequest is present', () => {
+      (globalThis as Record<string, unknown>).XMLHttpRequest = class {};
+
+      expect(() =>
+        assertSupportedAdapterRuntimeAndConfig(
+          { followRedirects: true },
+          'xhr',
+          false,
+        ),
+      ).toThrow(/redirect handling is not supported with XHR adapter/i);
     });
   });
 });
@@ -550,6 +652,46 @@ describe('scalarHeader', () => {
     expect(
       scalarHeader({ 'Content-Type': 'application/json' }, 'content-type'),
     ).toBeUndefined();
+  });
+});
+
+describe('resolveDetectedRedirectURL', () => {
+  test('resolves an absolute location header', () => {
+    expect(
+      resolveDetectedRedirectURL('https://example.com/start', 301, {
+        location: 'https://other.test/next',
+      }),
+    ).toBe('https://other.test/next');
+  });
+
+  test('resolves a relative location header against the request URL', () => {
+    expect(
+      resolveDetectedRedirectURL('https://example.com/start', 302, {
+        location: '/next',
+      }),
+    ).toBe('https://example.com/next');
+  });
+
+  test('returns undefined for non-redirect statuses', () => {
+    expect(
+      resolveDetectedRedirectURL('https://example.com/start', 200, {
+        location: '/next',
+      }),
+    ).toBeUndefined();
+  });
+
+  test('returns undefined when location is missing', () => {
+    expect(
+      resolveDetectedRedirectURL('https://example.com/start', 301, {}),
+    ).toBeUndefined();
+  });
+
+  test('falls back to the raw location when URL parsing fails', () => {
+    expect(
+      resolveDetectedRedirectURL('not a url', 301, {
+        location: '%%%bad%%%',
+      }),
+    ).toBe('%%%bad%%%');
   });
 });
 

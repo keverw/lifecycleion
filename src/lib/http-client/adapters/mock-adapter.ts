@@ -1,7 +1,13 @@
 import Router from 'find-my-way';
 import qs from 'qs';
 import { sleep } from '../../sleep';
-import { isPlainJSONBodyObject, parseContentType } from '../utils';
+import { REDIRECT_STATUS_CODES } from '../consts';
+import {
+  isPlainJSONBodyObject,
+  normalizeAdapterResponseHeaders,
+  parseContentType,
+  resolveDetectedRedirectURL,
+} from '../utils';
 import type {
   HTTPAdapter,
   AdapterRequest,
@@ -353,9 +359,20 @@ export class MockAdapter implements HTTPAdapter {
       }
     }
 
+    const normalizedResponseHeaders =
+      normalizeAdapterResponseHeaders(responseHeaders);
+
+    const detectedRedirectURL = resolveDetectedRedirectURL(
+      request.requestURL,
+      mockResponse.status,
+      normalizedResponseHeaders,
+    );
+
     return {
       status: mockResponse.status,
-      headers: responseHeaders,
+      wasRedirectDetected: REDIRECT_STATUS_CODES.has(mockResponse.status),
+      ...(detectedRedirectURL ? { detectedRedirectURL } : {}),
+      headers: normalizedResponseHeaders,
       body: responseBody,
     };
   }

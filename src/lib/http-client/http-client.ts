@@ -651,7 +651,16 @@ export class BaseHTTPClient {
             REDIRECT_STATUS_CODES.has(adapterResponse.status)
           ) {
             response = this._buildResponse<T>({
-              adapterResponse: null,
+              // Pass a synthetic status-0 response so wasRedirectDetected is
+              // preserved — null would lose the flag since _buildResponse
+              // computes it as `adapterResponse?.wasRedirectDetected ?? false`.
+              adapterResponse: {
+                status: 0,
+                wasRedirectDetected: true,
+                detectedRedirectURL: adapterResponse.detectedRedirectURL,
+                headers: {},
+                body: null,
+              },
               requestID,
               wasCancelled: false,
               wasTimeout: false,
@@ -1357,7 +1366,24 @@ export class BaseHTTPClient {
           );
         }
 
-        if (adapterResponse.isOpaqueRedirect) {
+        // Browser-only path: adapter returned status 0 but flagged a redirect
+        // (FetchAdapter opaque redirect or XHR auto-follow).
+        //
+        // Status 0 means no Location header is available, so the normal
+        // REDIRECT_STATUS_CODES check in the outer loop can't handle it.
+        //
+        // When redirects are disabled this is redirect_disabled.
+        // When enabled, the status-0 response falls
+        // through to the transport error path (nowhere to redirect to).
+        //
+        // Real 3xx responses (NodeAdapter, MockAdapter) do NOT reach this path
+        // because their status != 0. They fall through to onAttemptEnd with
+        // the correct status, and the outer redirect loop handles follow/disable.
+        if (
+          adapterResponse.wasRedirectDetected &&
+          adapterResponse.status === 0 &&
+          !this._config.followRedirects
+        ) {
           options.onAttemptEnd?.({
             attemptNumber,
             isRetry,
@@ -1889,7 +1915,10 @@ export class BaseHTTPClient {
       isNetworkErrorOverride,
     } = params;
 
-    const isRedirected = redirectHistory.length > 0;
+    const wasRedirectFollowed = redirectHistory.length > 0;
+    const wasRedirectDetected =
+      wasRedirectFollowed || (adapterResponse?.wasRedirectDetected ?? false);
+    const detectedRedirectURL = adapterResponse?.detectedRedirectURL;
 
     if (!adapterResponse) {
       return {
@@ -1909,7 +1938,9 @@ export class BaseHTTPClient {
         isStreamError: false,
         initialURL,
         requestURL,
-        redirected: isRedirected,
+        wasRedirectDetected,
+        wasRedirectFollowed,
+        detectedRedirectURL,
         redirectHistory,
         requestID,
         adapterType,
@@ -1936,7 +1967,9 @@ export class BaseHTTPClient {
         isStreamError: false,
         initialURL,
         requestURL,
-        redirected: isRedirected,
+        wasRedirectDetected,
+        wasRedirectFollowed,
+        detectedRedirectURL,
         redirectHistory,
         requestID,
         adapterType,
@@ -1966,7 +1999,9 @@ export class BaseHTTPClient {
         isStreamError: true,
         initialURL,
         requestURL,
-        redirected: isRedirected,
+        wasRedirectDetected,
+        wasRedirectFollowed,
+        detectedRedirectURL,
         redirectHistory,
         requestID,
         adapterType,
@@ -1995,7 +2030,9 @@ export class BaseHTTPClient {
         isStreamError: false,
         initialURL,
         requestURL,
-        redirected: isRedirected,
+        wasRedirectDetected,
+        wasRedirectFollowed,
+        detectedRedirectURL,
         redirectHistory,
         requestID,
         adapterType,
@@ -2050,7 +2087,9 @@ export class BaseHTTPClient {
       isStreamError: false,
       initialURL,
       requestURL,
-      redirected: isRedirected,
+      wasRedirectDetected,
+      wasRedirectFollowed,
+      detectedRedirectURL,
       redirectHistory,
       requestID,
       adapterType,
@@ -2124,7 +2163,9 @@ export class BaseHTTPClient {
       cause,
       initialURL: response.initialURL,
       requestURL: response.requestURL,
-      redirected: response.redirected,
+      wasRedirectDetected: response.wasRedirectDetected,
+      wasRedirectFollowed: response.wasRedirectFollowed,
+      detectedRedirectURL: response.detectedRedirectURL,
       redirectHistory: response.redirectHistory,
       requestID,
       isTimeout: response.isTimeout,
