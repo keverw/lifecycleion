@@ -38,7 +38,6 @@ function makeAdapterRequest(
     method: 'GET',
     headers: {},
     body: null,
-    timeout: 5000,
     ...overrides,
   };
 }

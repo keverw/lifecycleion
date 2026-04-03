@@ -79,7 +79,6 @@ describe('FetchAdapter', () => {
       method: 'POST',
       headers: { 'x-test': 'yes' },
       body: 'payload',
-      timeout: 5000,
     });
 
     expect(response.status).toBe(200);
@@ -113,7 +112,6 @@ describe('FetchAdapter', () => {
       requestURL: 'https://local.test/users',
       method: 'GET',
       headers: { accept: ['application/json', 'text/plain'] },
-      timeout: 5000,
     });
 
     expect(capturedInit?.headers).toBeInstanceOf(Headers);
@@ -142,7 +140,6 @@ describe('FetchAdapter', () => {
       requestURL: 'https://local.test/users',
       method: 'GET',
       headers: { cookie: ['session=abc123', 'theme=dark'] },
-      timeout: 5000,
     });
 
     expect(capturedInit?.headers).toBeInstanceOf(Headers);
@@ -171,7 +168,6 @@ describe('FetchAdapter', () => {
       requestURL: 'https://local.test/users',
       method: 'GET',
       headers: {},
-      timeout: 5000,
     });
 
     expect(capturedInit?.redirect).toBe('manual');
@@ -200,7 +196,6 @@ describe('FetchAdapter', () => {
       requestURL: 'https://local.test/users',
       method: 'GET',
       headers: {},
-      timeout: 5000,
       onUploadProgress: (e) => uploadEvents.push(e),
       onDownloadProgress: (e) => downloadEvents.push(e),
     });
@@ -243,7 +238,6 @@ describe('FetchAdapter', () => {
       requestURL: 'https://local.test/users',
       method: 'GET',
       headers: { host: 'local.test' },
-      timeout: 5000,
     });
 
     expect(isFetchCalled).toBe(true);
@@ -270,7 +264,6 @@ describe('FetchAdapter', () => {
       requestURL: 'https://local.test/users',
       method: 'GET',
       headers: { authorization: 'Bearer token' },
-      timeout: 5000,
     });
 
     expect(isFetchCalled).toBe(true);
@@ -306,7 +299,6 @@ describe('FetchAdapter', () => {
       requestURL: 'https://local.test/users',
       method: 'GET',
       headers: { host: 'local.test' },
-      timeout: 5000,
     });
 
     expect(isFetchCalled).toBe(true);
@@ -323,7 +315,6 @@ describe('FetchAdapter', () => {
       requestURL: 'https://local.test/users',
       method: 'GET',
       headers: {},
-      timeout: 5000,
     });
 
     expect(response).toEqual({
@@ -345,8 +336,7 @@ describe('FetchAdapter', () => {
         requestURL: 'https://local.test/users',
         method: 'GET',
         headers: {},
-        timeout: 5000,
-      }),
+        }),
     ).rejects.toThrow(/aborted/i);
   });
 
@@ -367,7 +357,6 @@ describe('FetchAdapter', () => {
       requestURL: 'https://local.test/head',
       method: 'HEAD',
       headers: {},
-      timeout: 5000,
     });
 
     expect(response.status).toBe(200);
@@ -392,7 +381,6 @@ describe('FetchAdapter', () => {
       requestURL: 'https://local.test/cache',
       method: 'GET',
       headers: {},
-      timeout: 5000,
     });
 
     expect(response.status).toBe(304);
@@ -424,7 +412,6 @@ describe('FetchAdapter', () => {
       requestURL: 'https://local.test/test',
       method: 'GET',
       headers: {},
-      timeout: 5000,
       onUploadProgress: (e) => uploadEvents.push(e),
       onDownloadProgress: (e) => downloadEvents.push(e),
     });
@@ -450,7 +437,6 @@ describe('FetchAdapter', () => {
       requestURL: 'https://local.test/start',
       method: 'GET',
       headers: {},
-      timeout: 5000,
     });
 
     expect(response.status).toBe(301);
@@ -475,8 +461,7 @@ describe('FetchAdapter', () => {
         requestURL: `${server.url}/api/users/42`,
         method: 'GET',
         headers: {},
-        timeout: 5000,
-      });
+        });
 
       expect(response.status).toBe(200);
       expect(response.body).toBeInstanceOf(Uint8Array);
@@ -490,8 +475,7 @@ describe('FetchAdapter', () => {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ name: 'Alice' }),
-        timeout: 5000,
-      });
+        });
 
       expect(response.status).toBe(201);
       const body = JSON.parse(decoder.decode(response.body as Uint8Array));
@@ -503,8 +487,7 @@ describe('FetchAdapter', () => {
         requestURL: `${server.url}/api/test`,
         method: 'GET',
         headers: {},
-        timeout: 5000,
-      });
+        });
 
       expect(response.headers).toBeDefined();
 
@@ -518,8 +501,7 @@ describe('FetchAdapter', () => {
         requestURL: `${server.url}/api/nonexistent`,
         method: 'GET',
         headers: {},
-        timeout: 5000,
-      });
+        });
 
       expect(response.status).toBe(404);
     });
@@ -529,8 +511,7 @@ describe('FetchAdapter', () => {
         requestURL: `${server.url}/api/text`,
         method: 'GET',
         headers: {},
-        timeout: 5000,
-      });
+        });
 
       expect(response.status).toBe(200);
       expect(response.body).toBeInstanceOf(Uint8Array);
@@ -542,8 +523,7 @@ describe('FetchAdapter', () => {
         requestURL: `${server.url}/api/no-content`,
         method: 'GET',
         headers: {},
-        timeout: 5000,
-      });
+        });
 
       expect(response.status).toBe(204);
       expect(response.body).toBeNull();
@@ -554,8 +534,7 @@ describe('FetchAdapter', () => {
         requestURL: `${server.url}/api/test`,
         method: 'GET',
         headers: {},
-        timeout: 5000,
-      });
+        });
 
       expect(response.status).toBe(200);
     });
@@ -565,8 +544,7 @@ describe('FetchAdapter', () => {
         requestURL: `${server.url}/api/redirect/301`,
         method: 'GET',
         headers: {},
-        timeout: 5000,
-      });
+        });
 
       expect([0, 301]).toContain(response.status);
     });
@@ -601,8 +579,7 @@ describe('FetchAdapter', () => {
           requestURL: `${server.url}/api/slow`,
           method: 'GET',
           headers: {},
-          timeout: 5000,
-          signal: controller.signal,
+              signal: controller.signal,
         }),
       ).rejects.toThrow();
     });
@@ -616,7 +593,6 @@ describe('FetchAdapter', () => {
           requestURL: `${server.url}/api/slow`,
           method: 'GET',
           headers: {},
-          timeout: 0,
           signal: controller.signal,
         }),
       ).rejects.toThrow();

@@ -49,7 +49,6 @@ function makeAdapterRequest(
     method: 'GET',
     headers: {},
     body: null,
-    timeout: 5000,
     ...overrides,
   };
 }
@@ -661,8 +660,7 @@ describe('NodeAdapter.send() — unit branches without server', () => {
         requestURL: 'http://example.test/data',
         method: 'GET',
         headers: { cookie: ['session=abc123', 'theme=dark'] },
-        timeout: 5000,
-      });
+          });
 
       expect(capturedOptions?.headers).toMatchObject({
         cookie: 'session=abc123; theme=dark',
@@ -690,8 +688,7 @@ describe('NodeAdapter.send() — unit branches without server', () => {
         requestURL: 'http://example.test:8080/data?x=1',
         method: 'GET',
         headers: {},
-        timeout: 5000,
-      });
+          });
 
       expect(capturedOptions?.socketPath).toBe('/tmp/test.sock');
       expect(capturedOptions?.hostname).toBe('example.test');
@@ -720,8 +717,7 @@ describe('NodeAdapter.send() — unit branches without server', () => {
         requestURL: 'http://[::1]:8080/data?x=1',
         method: 'GET',
         headers: {},
-        timeout: 5000,
-      });
+          });
 
       expect(capturedOptions?.hostname).toBe('::1');
       expect(capturedOptions?.port).toBe(8080);
@@ -749,8 +745,7 @@ describe('NodeAdapter.send() — unit branches without server', () => {
         requestURL: 'http://us%3Aer:p%40ss@example.test/data',
         method: 'GET',
         headers: {},
-        timeout: 5000,
-      });
+          });
 
       expect(capturedOptions?.auth).toBe('us:er:p@ss');
     } finally {
@@ -784,8 +779,7 @@ describe('NodeAdapter.send() — unit branches without server', () => {
         requestURL: 'http://example.test/start',
         method: 'GET',
         headers: {},
-        timeout: 5000,
-      });
+          });
 
       expect(result.wasRedirectDetected).toBe(true);
       expect(result.detectedRedirectURL).toBe('http://example.test/next');
@@ -820,8 +814,7 @@ describe('NodeAdapter.send() — unit branches without server', () => {
         requestURL: 'http://example.test/start',
         method: 'GET',
         headers: {},
-        timeout: 5000,
-      });
+          });
 
       expect(result.wasRedirectDetected).toBe(true);
       expect(result.detectedRedirectURL).toBe('https://other.test/next');
@@ -849,8 +842,7 @@ describe('NodeAdapter.send() — unit branches without server', () => {
         method: 'POST',
         headers: {},
         body: fd,
-        timeout: 5000,
-      });
+          });
 
       expect(res.status).toBe(0);
       expect(res.isTransportError).toBe(true);
@@ -894,8 +886,7 @@ describe('NodeAdapter.send() — unit branches without server', () => {
         headers: {},
         body: fd,
         signal: controller.signal,
-        timeout: 5000,
-      });
+          });
 
       expect(pendingCallback).toBeDefined();
       controller.abort();
@@ -933,8 +924,7 @@ describe('NodeAdapter.send() — unit branches without server', () => {
         method: 'POST',
         headers: {},
         body: 'payload',
-        timeout: 5000,
-      });
+          });
 
       expect(res.status).toBe(0);
       expect(res.isTransportError).toBe(true);
@@ -958,8 +948,7 @@ describe('NodeAdapter.send() — unit branches without server', () => {
         method: 'POST',
         headers: {},
         body: 'payload',
-        timeout: 5000,
-      });
+          });
 
       expect(req.headers['content-length']).toBe(
         Buffer.byteLength('payload').toString(),
@@ -985,8 +974,7 @@ describe('NodeAdapter.send() — unit branches without server', () => {
         method: 'POST',
         headers: {},
         body,
-        timeout: 5000,
-      });
+          });
 
       expect(req.headers['content-length']).toBe(body.byteLength.toString());
 
@@ -1031,8 +1019,7 @@ describe('NodeAdapter.send() — unit branches without server', () => {
         method: 'POST',
         headers: {},
         body: 'x'.repeat(32 * 1024),
-        timeout: 5000,
-        onUploadProgress: (e) => {
+            onUploadProgress: (e) => {
           uploadEvents.push(e.progress);
         },
       });
@@ -1087,8 +1074,7 @@ describe('NodeAdapter.send() — unit branches without server', () => {
         method: 'POST',
         headers: {},
         body: '',
-        timeout: 5000,
-        onUploadProgress: (e) => {
+            onUploadProgress: (e) => {
           uploadEvents.push(e.progress);
         },
       });
@@ -1144,8 +1130,7 @@ describe('NodeAdapter.send() — unit branches without server', () => {
         method: 'POST',
         headers: {},
         body: new Uint8Array(0),
-        timeout: 5000,
-        onUploadProgress: (e) => {
+            onUploadProgress: (e) => {
           uploadEvents.push(e.progress);
         },
       });
@@ -1199,8 +1184,7 @@ describe('NodeAdapter.send() — unit branches without server', () => {
         method: 'POST',
         headers: {},
         body: new Uint8Array(32 * 1024),
-        timeout: 5000,
-        onUploadProgress: (e) => {
+            onUploadProgress: (e) => {
           uploadEvents.push(e.progress);
         },
       });
@@ -1258,8 +1242,7 @@ describe('NodeAdapter.send() — unit branches without server', () => {
         method: 'POST',
         headers: {},
         body: fd,
-        timeout: 5000,
-        onUploadProgress: (e) => {
+            onUploadProgress: (e) => {
           uploadEvents.push(e.progress);
         },
       });
@@ -1308,8 +1291,7 @@ describe('NodeAdapter.send() — unit branches without server', () => {
         requestURL: 'http://example.test/data',
         method: 'GET',
         headers: {},
-        timeout: 5000,
-        onUploadProgress: (e) => {
+            onUploadProgress: (e) => {
           uploadEvents.push(e.progress);
         },
       });
@@ -1351,8 +1333,7 @@ describe('NodeAdapter.send() — unit branches without server', () => {
         method: 'POST',
         headers: {},
         body: 'x'.repeat(32 * 1024),
-        timeout: 5000,
-        onUploadProgress: (e) => {
+            onUploadProgress: (e) => {
           uploadEvents.push(e.progress);
         },
       });
@@ -1392,8 +1373,7 @@ describe('NodeAdapter.send() — unit branches without server', () => {
         requestURL: 'http://example.test/data',
         method: 'GET',
         headers: {},
-        timeout: 5000,
-      });
+          });
 
       expect(result.status).toBe(200);
       expect(result.isStreamError).toBe(true);
@@ -1436,8 +1416,7 @@ describe('NodeAdapter.send() — unit branches without server', () => {
         requestURL: 'http://example.test/data',
         method: 'GET',
         headers: {},
-        timeout: 5000,
-      });
+          });
 
       expect(result.status).toBe(200);
       expect(result.isStreamError).toBe(true);
@@ -1469,8 +1448,7 @@ describe('NodeAdapter.send() — unit branches without server', () => {
         requestURL: 'http://example.test/data',
         method: 'GET',
         headers: {},
-        timeout: 5000,
-      });
+          });
 
       expect(res.status).toBe(495);
       expect(res.isTransportError).toBe(true);
@@ -1801,8 +1779,7 @@ describe('NodeAdapter.send() — unit branches without server', () => {
         requestURL: 'http://example.test/data',
         method: 'GET',
         headers: {},
-        timeout: 5000,
-        streamResponse: () => writable,
+            streamResponse: () => writable,
       });
 
       expect(response.status).toBe(200);
@@ -1858,8 +1835,7 @@ describe('NodeAdapter.send() — unit branches without server', () => {
           requestURL: 'http://example.test/data',
           method: 'GET',
           headers: {},
-          timeout: 5000,
-          streamResponse: () => writable,
+                streamResponse: () => writable,
         }),
         new Promise((resolve) => setTimeout(() => resolve('timeout'), 50)),
       ]);
@@ -1915,8 +1891,7 @@ describe('NodeAdapter.send() — unit branches without server', () => {
           requestURL: 'http://example.test/data',
           method: 'GET',
           headers: {},
-          timeout: 5000,
-          streamResponse: () => writable,
+                streamResponse: () => writable,
         }),
         new Promise((resolve) => setTimeout(() => resolve('timeout'), 50)),
       ]);
@@ -1970,8 +1945,7 @@ describe('NodeAdapter.send() — unit branches without server', () => {
         requestURL: 'http://example.test/data',
         method: 'GET',
         headers: {},
-        timeout: 5000,
-        streamResponse: () => writable,
+            streamResponse: () => writable,
       });
 
       expect(response.status).toBe(200);
@@ -2016,8 +1990,7 @@ describe('NodeAdapter.send() — unit branches without server', () => {
         requestURL: 'http://example.test/data',
         method: 'GET',
         headers: {},
-        timeout: 5000,
-        streamResponse: () => writable,
+            streamResponse: () => writable,
       });
 
       expect(response.status).toBe(200);
@@ -2055,8 +2028,7 @@ describe('NodeAdapter.send() — unit branches without server', () => {
           requestURL: 'http://example.test/data',
           method: 'GET',
           headers: {},
-          timeout: 5000,
-          streamResponse: async () => {
+                streamResponse: async () => {
             // Simulate some async work before throwing
             await new Promise((resolve) => setTimeout(resolve, 10));
             throw new Error('factory async rejection');
@@ -2108,8 +2080,7 @@ describe('NodeAdapter.send() — unit branches without server', () => {
         requestURL: 'http://example.test/data',
         method: 'GET',
         headers: {},
-        timeout: 5000,
-        signal: controller.signal,
+            signal: controller.signal,
         streamResponse: async () => {
           await new Promise((resolve) => setTimeout(resolve, 10));
           return writable;
@@ -2306,8 +2277,7 @@ describe('NodeAdapter.send() — unit branches without server', () => {
         requestURL: 'http://example.test/data',
         method: 'GET',
         headers: {},
-        timeout: 5000,
-        signal: controller.signal,
+            signal: controller.signal,
         streamResponse: () => writable,
       });
 
@@ -2432,8 +2402,7 @@ describe('NodeAdapter.send() — unit branches without server', () => {
         requestURL: 'http://example.test/data',
         method: 'GET',
         headers: {},
-        timeout: 5000,
-        streamResponse: () => writable,
+            streamResponse: () => writable,
       });
 
       expect(result.status).toBe(200);
@@ -2485,8 +2454,7 @@ describe('NodeAdapter.send() — unit branches without server', () => {
           requestURL: 'http://example.test/data',
           method: 'GET',
           headers: {},
-          timeout: 5000,
-          streamResponse: () => writable,
+                streamResponse: () => writable,
         });
 
         expect(result.isStreamed).toBe(true);

@@ -1,3 +1,4 @@
+import { XHR_BROWSER_TIMEOUT_FLAG } from '../consts';
 import type {
   HTTPAdapter,
   AdapterRequest,
@@ -33,10 +34,13 @@ export class XHRAdapter implements HTTPAdapter {
       xhr.open(request.method, request.requestURL);
       xhr.responseType = 'arraybuffer';
 
-      // Delegate timeout enforcement to the XHR object. The timeout event
-      // rejects with an AbortError so HTTPClient classifies it via the same
-      // abort/timeout path it uses for FetchAdapter and NodeAdapter.
-      xhr.timeout = request.timeout;
+      // Timeout is managed by the client via the abort signal — the client's
+      // per-attempt timer fires AbortController.abort(), which propagates to
+      // xhr.abort() through the signal listener below. We disable XHR's own
+      // timeout mechanism (0 = no timeout) so the client retains full control.
+      // The 'timeout' event listener below is kept as a defensive fallback in
+      // case a browser fires it anyway (e.g. a hard-coded internal limit).
+      xhr.timeout = 0;
 
       // --- Request headers ---
       //
@@ -264,10 +268,12 @@ export class XHRAdapter implements HTTPAdapter {
         });
       });
 
-      // xhr.timeout fired — reject with AbortError so HTTPClient classifies it
-      // via the same timeout path as FetchAdapter and NodeAdapter.
+      // Defensive fallback: fires if the browser has a hard-coded internal
+      // timeout limit (xhr.timeout is 0 so we never set one ourselves). Mark
+      // the error so HTTPClient classifies it as a timeout (retryable) rather
+      // than an unexpected abort (non-retryable cancel).
       xhr.addEventListener('timeout', () => {
-        reject(new DOMException('Request timed out', 'AbortError'));
+        reject(Object.assign(new DOMException('Request timed out', 'AbortError'), { [XHR_BROWSER_TIMEOUT_FLAG]: true }));
       });
 
       xhr.addEventListener('abort', () => {

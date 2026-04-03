@@ -48,7 +48,6 @@ async function runTests(): Promise<void> {
       requestURL: `${base}/api/users/1`,
       method: 'GET',
       headers: {},
-      timeout: 5000,
     });
 
     browserExpect(r.status).toBe(200);
@@ -60,7 +59,6 @@ async function runTests(): Promise<void> {
       requestURL: `${base}/api/redirect/301`,
       method: 'GET',
       headers: {},
-      timeout: 5000,
     });
 
     browserExpect(r.status).toBe(0);
@@ -74,7 +72,6 @@ async function runTests(): Promise<void> {
       requestURL: `${base}/api/test`,
       method: 'GET',
       headers: { 'x-test-header': 'hello-from-fetch' },
-      timeout: 5000,
     });
 
     browserExpect(r.body).toBeUint8Array();
@@ -92,7 +89,6 @@ async function runTests(): Promise<void> {
       method: 'POST',
       headers: { 'content-type': 'text/plain' },
       body: 'hello',
-      timeout: 5000,
       onUploadProgress: (e) => events.push(e.progress),
     });
 
@@ -109,7 +105,6 @@ async function runTests(): Promise<void> {
       requestURL: `${base}/api/users/1`,
       method: 'GET',
       headers: {},
-      timeout: 5000,
       onDownloadProgress: (e) => events.push(e.progress),
     });
 
@@ -125,7 +120,6 @@ async function runTests(): Promise<void> {
       requestURL: `${base}/api/redirect/301`,
       method: 'GET',
       headers: {},
-      timeout: 5000,
       onUploadProgress: (e) => uploadEvents.push(e.progress),
       onDownloadProgress: (e) => downloadEvents.push(e.progress),
     });

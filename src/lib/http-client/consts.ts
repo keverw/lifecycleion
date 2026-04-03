@@ -61,6 +61,13 @@ export const STREAM_FACTORY_ERROR_FLAG = '_lifecycleion_stream_factory_error';
 
 export const RESPONSE_STREAM_ABORT_FLAG = '_lifecycleion_response_stream_abort';
 
+/**
+ * Set on the AbortError thrown by XHRAdapter's defensive `timeout` event
+ * listener. Lets HTTPClient classify the error as a timeout (retryable) rather
+ * than an unexpected abort (non-retryable cancel).
+ */
+export const XHR_BROWSER_TIMEOUT_FLAG = '_lifecycleion_xhr_browser_timeout';
+
 export const HTTP_METHODS: ReadonlyArray<HTTPMethod> = [
   'GET',
   'POST',

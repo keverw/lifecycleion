@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { XHRAdapter } from './xhr-adapter';
+import { XHR_BROWSER_TIMEOUT_FLAG } from '../consts';
 
 // ---------------------------------------------------------------------------
 // Fake XMLHttpRequest
@@ -200,7 +201,6 @@ describe('XHRAdapter', () => {
       requestURL: 'https://api.test/data',
       method: 'POST',
       headers: {},
-      timeout: 5000,
     });
 
     lastXHR.status = 200;
@@ -221,7 +221,6 @@ describe('XHRAdapter', () => {
       requestURL: 'https://api.test/data',
       method: 'GET',
       headers: {},
-      timeout: 5000,
     });
 
     lastXHR.status = 200;
@@ -233,13 +232,12 @@ describe('XHRAdapter', () => {
     expect(lastXHR.responseType).toBe('arraybuffer');
   });
 
-  test('sets timeout on XHR', async () => {
+  test('sets XHR timeout to 0 (timeout managed via abort signal)', async () => {
     const adapter = new XHRAdapter();
     const promise = adapter.send({
       requestURL: 'https://api.test/data',
       method: 'GET',
       headers: {},
-      timeout: 12_000,
     });
 
     lastXHR.status = 200;
@@ -248,7 +246,7 @@ describe('XHRAdapter', () => {
 
     await promise;
 
-    expect(lastXHR.timeout).toBe(12_000);
+    expect(lastXHR.timeout).toBe(0);
   });
 
   test('sets scalar request headers', async () => {
@@ -257,7 +255,6 @@ describe('XHRAdapter', () => {
       requestURL: 'https://api.test/data',
       method: 'GET',
       headers: { authorization: 'Bearer token', 'x-custom': 'value' },
-      timeout: 5000,
     });
 
     lastXHR.status = 200;
@@ -276,7 +273,6 @@ describe('XHRAdapter', () => {
       requestURL: 'https://api.test/data',
       method: 'GET',
       headers: { accept: ['application/json', 'text/plain'] },
-      timeout: 5000,
     });
 
     lastXHR.status = 200;
@@ -298,7 +294,6 @@ describe('XHRAdapter', () => {
       requestURL: 'https://api.test/data',
       method: 'GET',
       headers: {},
-      timeout: 5000,
     });
 
     lastXHR.status = 200;
@@ -320,7 +315,6 @@ describe('XHRAdapter', () => {
       requestURL: 'https://api.test/data',
       method: 'GET',
       headers: {},
-      timeout: 5000,
     });
 
     lastXHR.status = 200;
@@ -345,7 +339,6 @@ describe('XHRAdapter', () => {
       requestURL: 'https://api.test/data',
       method: 'GET',
       headers: {},
-      timeout: 5000,
     });
 
     lastXHR.status = 200;
@@ -368,7 +361,6 @@ describe('XHRAdapter', () => {
       requestURL: 'https://api.test/data',
       method: 'HEAD',
       headers: {},
-      timeout: 5000,
     });
 
     lastXHR.status = 200;
@@ -386,7 +378,6 @@ describe('XHRAdapter', () => {
       requestURL: 'https://api.test/data',
       method: 'DELETE',
       headers: {},
-      timeout: 5000,
     });
 
     lastXHR.status = 204;
@@ -404,7 +395,6 @@ describe('XHRAdapter', () => {
       requestURL: 'https://api.test/data',
       method: 'GET',
       headers: {},
-      timeout: 5000,
     });
 
     lastXHR.status = 304;
@@ -424,7 +414,6 @@ describe('XHRAdapter', () => {
       requestURL: 'https://api.test/data',
       method: 'GET',
       headers: {},
-      timeout: 5000,
     });
 
     lastXHR.status = 200;
@@ -441,7 +430,6 @@ describe('XHRAdapter', () => {
       requestURL: 'https://api.test/data',
       method: 'GET',
       headers: {},
-      timeout: 5000,
     });
 
     lastXHR.simulateError();
@@ -461,12 +449,26 @@ describe('XHRAdapter', () => {
       requestURL: 'https://api.test/data',
       method: 'GET',
       headers: {},
-      timeout: 100,
     });
 
     lastXHR.simulateTimeout();
 
     return expect(promise).rejects.toMatchObject({ name: 'AbortError' });
+  });
+
+  test('browser-fired timeout event sets XHR_BROWSER_TIMEOUT_FLAG so client classifies as timeout not cancel', async () => {
+    const adapter = new XHRAdapter();
+    const promise = adapter.send({
+      requestURL: 'https://api.test/data',
+      method: 'GET',
+      headers: {},
+    });
+
+    lastXHR.simulateTimeout();
+
+    const err = await promise.catch((error: unknown) => error);
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Record<string, unknown>)[XHR_BROWSER_TIMEOUT_FLAG]).toBe(true);
   });
 
   test('rejects with AbortError on XHR abort event', () => {
@@ -475,7 +477,6 @@ describe('XHRAdapter', () => {
       requestURL: 'https://api.test/data',
       method: 'GET',
       headers: {},
-      timeout: 5000,
     });
 
     lastXHR.simulateAbort();
@@ -491,7 +492,6 @@ describe('XHRAdapter', () => {
       requestURL: 'https://api.test/data',
       method: 'GET',
       headers: {},
-      timeout: 5000,
       signal: controller.signal,
     });
 
@@ -511,7 +511,6 @@ describe('XHRAdapter', () => {
       requestURL: 'https://api.test/data',
       method: 'GET',
       headers: {},
-      timeout: 5000,
       signal: controller.signal,
     });
 
@@ -525,7 +524,6 @@ describe('XHRAdapter', () => {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: '{"name":"Alice"}',
-      timeout: 5000,
     });
 
     lastXHR.status = 201;
@@ -543,7 +541,6 @@ describe('XHRAdapter', () => {
       requestURL: 'https://api.test/data',
       method: 'GET',
       headers: {},
-      timeout: 5000,
     });
 
     lastXHR.status = 200;
@@ -562,7 +559,6 @@ describe('XHRAdapter', () => {
       method: 'POST',
       headers: {},
       body: null,
-      timeout: 5000,
     });
 
     lastXHR.status = 200;
@@ -582,7 +578,6 @@ describe('XHRAdapter', () => {
       method: 'POST',
       headers: { 'content-type': 'application/octet-stream' },
       body: bytes,
-      timeout: 5000,
     });
 
     lastXHR.status = 200;
@@ -607,7 +602,6 @@ describe('XHRAdapter', () => {
       method: 'POST',
       headers: {},
       body: 'payload',
-      timeout: 5000,
       onUploadProgress: (e) => uploadEvents.push(e),
     });
 
@@ -639,7 +633,6 @@ describe('XHRAdapter', () => {
       method: 'POST',
       headers: {},
       body: 'data',
-      timeout: 5000,
       onUploadProgress: (e) => uploadEvents.push(e),
     });
 
@@ -676,7 +669,6 @@ describe('XHRAdapter', () => {
       requestURL: 'https://api.test/data',
       method: 'GET',
       headers: {},
-      timeout: 5000,
       onUploadProgress: (e) => uploadEvents.push(e),
     });
 
@@ -704,7 +696,6 @@ describe('XHRAdapter', () => {
       requestURL: 'https://api.test/data',
       method: 'GET',
       headers: {},
-      timeout: 5000,
       onDownloadProgress: (e) => downloadEvents.push(e),
     });
 
@@ -727,7 +718,6 @@ describe('XHRAdapter', () => {
       requestURL: 'https://api.test/data',
       method: 'GET',
       headers: {},
-      timeout: 5000,
       onDownloadProgress: (e) => events.push(e.progress),
     });
 
@@ -754,7 +744,6 @@ describe('XHRAdapter', () => {
       requestURL: 'https://api.test/data',
       method: 'GET',
       headers: {},
-      timeout: 5000,
       onDownloadProgress: (e) => downloadEvents.push(e),
     });
 
@@ -794,7 +783,6 @@ describe('XHRAdapter', () => {
       requestURL: 'https://api.test/data',
       method: 'GET',
       headers: {},
-      timeout: 5000,
       onDownloadProgress: (e) => downloadEvents.push(e),
     });
 
@@ -816,7 +804,6 @@ describe('XHRAdapter', () => {
       requestURL: 'https://api.test/data',
       method: 'GET',
       headers: {},
-      timeout: 5000,
     });
 
     lastXHR.status = 404;
@@ -845,7 +832,6 @@ describe('XHRAdapter', () => {
       requestURL: 'https://api.test/original',
       method: 'GET',
       headers: {},
-      timeout: 5000,
       onUploadProgress: (e) => uploadEvents.push(e),
       onDownloadProgress: (e) => downloadEvents.push(e),
     });
@@ -878,7 +864,6 @@ describe('XHRAdapter', () => {
       requestURL: 'https://api.test/data',
       method: 'GET',
       headers: {},
-      timeout: 5000,
     });
 
     lastXHR.status = 200;
@@ -898,7 +883,6 @@ describe('XHRAdapter', () => {
       requestURL: 'https://api.test/data#client-fragment',
       method: 'GET',
       headers: {},
-      timeout: 5000,
     });
 
     lastXHR.status = 200;
@@ -931,8 +915,7 @@ describe('XHRAdapter', () => {
         requestURL: '/api/data',
         method: 'GET',
         headers: {},
-        timeout: 5000,
-      });
+        });
 
       lastXHR.status = 200;
       lastXHR.response = textBody('ok');
@@ -964,7 +947,6 @@ describe('XHRAdapter', () => {
       requestURL: 'https://api.test/data',
       method: 'GET',
       headers: {},
-      timeout: 5000,
     });
 
     lastXHR.status = 200;

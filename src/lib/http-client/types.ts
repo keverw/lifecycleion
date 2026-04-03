@@ -30,7 +30,6 @@ export interface AdapterRequest {
   /** Lowercase-keyed outbound headers for this attempt. Some adapters materialize string[] values at send time. */
   headers: Record<string, string | string[]>;
   body?: string | Uint8Array | FormData | null;
-  timeout: number;
   signal?: AbortSignal;
   onUploadProgress?: (event: AdapterProgressEvent) => void;
   onDownloadProgress?: (event: AdapterProgressEvent) => void;

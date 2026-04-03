@@ -29,6 +29,7 @@ import {
   NON_RETRYABLE_HTTP_CLIENT_CALLBACK_ERROR_FLAG,
   RESPONSE_STREAM_ABORT_FLAG,
   STREAM_FACTORY_ERROR_FLAG,
+  XHR_BROWSER_TIMEOUT_FLAG,
   RETRYABLE_STATUS_CODES,
   REDIRECT_STATUS_CODES,
   DEFAULT_MAX_REDIRECTS,
@@ -844,6 +845,7 @@ export class BaseHTTPClient {
                 redirectRequest,
                 { timeout },
               );
+
               response = this._buildResponse<T>({
                 adapterResponse: null,
                 requestID,
@@ -861,7 +863,15 @@ export class BaseHTTPClient {
             const sanitizedRedirectRequest = this._sanitizeRedirectRequest(
               redirectIntercept,
               {
-                fromURL: attemptResult.sentRequest.requestURL,
+                // fromURL is the redirect target URL (what the interceptor received).
+                // This sanitize only strips headers if the interceptor rewrote the
+                // URL to a third host — in that case from=redirectTarget, to=thirdHost
+                // is cross-origin and the strip fires correctly.
+
+                // If the interceptor kept the URL (normal case), from and to are the
+                // same origin and nothing is stripped, preserving any headers the
+                // interceptor added (e.g. Authorization for the redirect target).
+                fromURL: redirectRequest.requestURL,
                 cookieJar: jar ?? undefined,
               },
             );
@@ -1311,7 +1321,6 @@ export class BaseHTTPClient {
           method: sentRequest.method,
           headers: { ...sentRequest.headers },
           body: sentRequest.body ?? null,
-          timeout: 0, // timeout is managed at this level, not by the adapter
           signal: attemptSignal,
           // Forward the builder's streaming factory to each adapter attempt.
           // NodeAdapter invokes it only for a 200 response, letting the caller
@@ -1681,32 +1690,40 @@ export class BaseHTTPClient {
 
           // Per-attempt timeout — fall through and reuse the same retry path as network errors.
           if (!isTimedOut) {
-            // AbortError without our timeout flag (unexpected) — treat as non-retryable cancel.
-            options.onAttemptEnd?.({
-              attemptNumber,
-              isRetry,
-              willRetry: false,
-              nextRetryDelayMS: undefined,
-              nextRetryAt: undefined,
-              status: 0,
-              requestID,
-              initialURL,
-              ...(hopContext
-                ? {
-                    hopNumber: hopContext.hopNumber,
-                    redirect: hopContext.redirect,
-                  }
-                : {}),
-            });
+            // Check for a browser-fired XHR timeout (xhr.timeout = 0 but the browser
+            // has its own hard limit). Treat it the same as our own timeout so it gets
+            // retried and classified as isTimeout rather than isCancelled.
+            if (isXHRBrowserTimeout(error)) {
+              isTimedOut = true;
+              // Fall through to the normal timeout retry path below.
+            } else {
+              // AbortError without our timeout flag (unexpected) — treat as non-retryable cancel.
+              options.onAttemptEnd?.({
+                attemptNumber,
+                isRetry,
+                willRetry: false,
+                nextRetryDelayMS: undefined,
+                nextRetryAt: undefined,
+                status: 0,
+                requestID,
+                initialURL,
+                ...(hopContext
+                  ? {
+                      hopNumber: hopContext.hopNumber,
+                      redirect: hopContext.redirect,
+                    }
+                  : {}),
+              });
 
-            return {
-              adapterResponse: null,
-              sentRequest,
-              attemptCount: attemptNumber,
-              wasCancelled: true,
-              wasTimeout: false,
-              isRetriesExhausted: false,
-            };
+              return {
+                adapterResponse: null,
+                sentRequest,
+                attemptCount: attemptNumber,
+                wasCancelled: true,
+                wasTimeout: false,
+                isRetriesExhausted: false,
+              };
+            }
           }
         }
 
@@ -2529,6 +2546,12 @@ function getEffectiveRequestHeadersFromError(
 function isResponseStreamAbortError(err: unknown): boolean {
   return (
     err !== null && typeof err === 'object' && RESPONSE_STREAM_ABORT_FLAG in err
+  );
+}
+
+function isXHRBrowserTimeout(err: unknown): boolean {
+  return (
+    err !== null && typeof err === 'object' && XHR_BROWSER_TIMEOUT_FLAG in err
   );
 }
 
