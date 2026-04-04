@@ -5,7 +5,6 @@ import {
   extractFetchHeaders,
   extractHostname,
   isBrowserEnvironment,
-  scalarHeader,
   matchesFilter,
   matchesHostPattern,
   mergeHeaders,
@@ -15,12 +14,17 @@ import {
   parseContentType,
   resolveDetectedRedirectURL,
   resolveAbsoluteURL,
+  resolveAbsoluteURLForRuntime,
+  scalarHeader,
   serializeBody,
 } from './utils';
 
-const originalXMLHttpRequest = (
-  globalThis as Record<string, unknown>
-).XMLHttpRequest;
+const originalXMLHttpRequest = (globalThis as Record<string, unknown>)
+  .XMLHttpRequest;
+const originalWindow = (globalThis as Record<string, unknown>).window;
+const originalDocument = (globalThis as Record<string, unknown>).document;
+const originalLocation = (globalThis as Record<string, unknown>).location;
+const originalSelf = (globalThis as Record<string, unknown>).self;
 
 afterEach(() => {
   if (originalXMLHttpRequest === undefined) {
@@ -28,6 +32,30 @@ afterEach(() => {
   } else {
     (globalThis as Record<string, unknown>).XMLHttpRequest =
       originalXMLHttpRequest;
+  }
+
+  if (originalWindow === undefined) {
+    delete (globalThis as Record<string, unknown>).window;
+  } else {
+    (globalThis as Record<string, unknown>).window = originalWindow;
+  }
+
+  if (originalDocument === undefined) {
+    delete (globalThis as Record<string, unknown>).document;
+  } else {
+    (globalThis as Record<string, unknown>).document = originalDocument;
+  }
+
+  if (originalLocation === undefined) {
+    delete (globalThis as Record<string, unknown>).location;
+  } else {
+    (globalThis as Record<string, unknown>).location = originalLocation;
+  }
+
+  if (originalSelf === undefined) {
+    delete (globalThis as Record<string, unknown>).self;
+  } else {
+    (globalThis as Record<string, unknown>).self = originalSelf;
   }
 });
 
@@ -144,6 +172,57 @@ describe('buildURL + resolveAbsoluteURL (request pipeline)', () => {
     const path = '//cdn.other.test/y';
     expect(resolveAbsoluteURL(buildURL(base, path), base)).toBe(
       'https://cdn.other.test/y',
+    );
+  });
+});
+
+describe('resolveAbsoluteURLForRuntime', () => {
+  test('resolves a relative path against document.baseURI in browser runtimes', () => {
+    (globalThis as Record<string, unknown>).window = {
+      location: { href: 'https://app.test/shell/index.html' },
+    };
+    (globalThis as Record<string, unknown>).document = {
+      baseURI: 'https://cdn.test/base/',
+    };
+
+    expect(resolveAbsoluteURLForRuntime('/api/users', undefined, true)).toBe(
+      'https://cdn.test/api/users',
+    );
+  });
+
+  test('resolves a protocol-relative path against window.location in browser runtimes', () => {
+    (globalThis as Record<string, unknown>).window = {
+      location: { href: 'https://app.test/shell/index.html' },
+    };
+    (globalThis as Record<string, unknown>).document = {};
+
+    expect(
+      resolveAbsoluteURLForRuntime('//cdn.test/assets/app.js', undefined, true),
+    ).toBe('https://cdn.test/assets/app.js');
+  });
+
+  test('uses self.location when page globals are unavailable', () => {
+    delete (globalThis as Record<string, unknown>).window;
+    delete (globalThis as Record<string, unknown>).document;
+    (globalThis as Record<string, unknown>).self = {
+      location: { href: 'https://worker.test/worker.js' },
+    };
+
+    expect(resolveAbsoluteURLForRuntime('/api/users', undefined, true)).toBe(
+      'https://worker.test/api/users',
+    );
+  });
+
+  test('leaves relative paths unresolved on non-browser runtimes', () => {
+    (globalThis as Record<string, unknown>).window = {
+      location: { href: 'https://app.test/shell/index.html' },
+    };
+    (globalThis as Record<string, unknown>).document = {
+      baseURI: 'https://cdn.test/base/',
+    };
+
+    expect(resolveAbsoluteURLForRuntime('/api/users', undefined, false)).toBe(
+      '/api/users',
     );
   });
 });
@@ -389,37 +468,37 @@ describe('assertSupportedAdapterRuntimeAndConfig', () => {
     });
   });
 
-    describe('xhr in browser', () => {
-      test('allows relative baseURL prefixes', () => {
-        (globalThis as Record<string, unknown>).XMLHttpRequest = class {};
+  describe('xhr in browser', () => {
+    test('allows relative baseURL prefixes', () => {
+      (globalThis as Record<string, unknown>).XMLHttpRequest = class {};
 
-        expect(() =>
-          assertSupportedAdapterRuntimeAndConfig(
-            { baseURL: '/api' },
+      expect(() =>
+        assertSupportedAdapterRuntimeAndConfig(
+          { baseURL: '/api' },
           'xhr',
           true,
         ),
       ).not.toThrow();
-      });
+    });
 
-      test('rejects cookieJar usage', () => {
-        (globalThis as Record<string, unknown>).XMLHttpRequest = class {};
+    test('rejects cookieJar usage', () => {
+      (globalThis as Record<string, unknown>).XMLHttpRequest = class {};
 
-        expect(() =>
-          assertSupportedAdapterRuntimeAndConfig(
-            { cookieJar: {} as never },
+      expect(() =>
+        assertSupportedAdapterRuntimeAndConfig(
+          { cookieJar: {} as never },
           'xhr',
           true,
         ),
       ).toThrow(/cookieJar is not supported with XHR adapter/i);
-      });
+    });
 
-      test('rejects userAgent usage', () => {
-        (globalThis as Record<string, unknown>).XMLHttpRequest = class {};
+    test('rejects userAgent usage', () => {
+      (globalThis as Record<string, unknown>).XMLHttpRequest = class {};
 
-        expect(() =>
-          assertSupportedAdapterRuntimeAndConfig(
-            { userAgent: 'test-agent' },
+      expect(() =>
+        assertSupportedAdapterRuntimeAndConfig(
+          { userAgent: 'test-agent' },
           'xhr',
           true,
         ),
@@ -505,7 +584,9 @@ describe('assertSupportedAdapterRuntimeAndConfig', () => {
 
       expect(() =>
         assertSupportedAdapterRuntimeAndConfig({}, 'xhr', false),
-      ).toThrow(/XHR adapter is not supported when XMLHttpRequest is unavailable/i);
+      ).toThrow(
+        /XHR adapter is not supported when XMLHttpRequest is unavailable/i,
+      );
     });
 
     test('allows a test shim when XMLHttpRequest is present', () => {

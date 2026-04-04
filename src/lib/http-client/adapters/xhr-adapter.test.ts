@@ -468,7 +468,9 @@ describe('XHRAdapter', () => {
 
     const err = await promise.catch((error: unknown) => error);
     expect(err).toBeInstanceOf(Error);
-    expect((err as Record<string, unknown>)[XHR_BROWSER_TIMEOUT_FLAG]).toBe(true);
+    expect((err as Record<string, unknown>)[XHR_BROWSER_TIMEOUT_FLAG]).toBe(
+      true,
+    );
   });
 
   test('rejects with AbortError on XHR abort event', () => {
@@ -915,7 +917,7 @@ describe('XHRAdapter', () => {
         requestURL: '/api/data',
         method: 'GET',
         headers: {},
-        });
+      });
 
       lastXHR.status = 200;
       lastXHR.response = textBody('ok');
@@ -926,6 +928,56 @@ describe('XHRAdapter', () => {
 
       expect(response.wasRedirectDetected).toBeUndefined();
       expect(response.status).toBe(200);
+    } finally {
+      if (originalWindow === undefined) {
+        delete (globalThis as Record<string, unknown>).window;
+      } else {
+        (globalThis as Record<string, unknown>).window = originalWindow;
+      }
+
+      if (originalDocument === undefined) {
+        delete (globalThis as Record<string, unknown>).document;
+      } else {
+        (globalThis as Record<string, unknown>).document = originalDocument;
+      }
+    }
+  });
+
+  test('detects browser-followed redirect when a relative request URL lands on a different final URL', async () => {
+    const originalWindow = (globalThis as Record<string, unknown>).window;
+    const originalDocument = (globalThis as Record<string, unknown>).document;
+
+    (globalThis as Record<string, unknown>).window = {
+      location: { href: 'https://app.test/shell/index.html' },
+    };
+    (globalThis as Record<string, unknown>).document = {
+      baseURI: 'https://cdn.test/base/',
+    };
+
+    try {
+      const adapter = new XHRAdapter();
+      const promise = adapter.send({
+        requestURL: '/api/data',
+        method: 'GET',
+        headers: {},
+      });
+
+      lastXHR.status = 200;
+      lastXHR.response = textBody('ok');
+      // Simulate the browser auto-following a redirect away from the original
+      // same-origin request target resolved from document.baseURI.
+      lastXHR.responseURL = 'https://cdn.test/login';
+      lastXHR.simulateLoad();
+
+      const response = await promise;
+
+      expect(response).toEqual({
+        status: 0,
+        wasRedirectDetected: true,
+        detectedRedirectURL: 'https://cdn.test/login',
+        headers: {},
+        body: null,
+      });
     } finally {
       if (originalWindow === undefined) {
         delete (globalThis as Record<string, unknown>).window;

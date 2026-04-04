@@ -587,6 +587,34 @@ describe('MockAdapter via HTTPClient', () => {
     expect(res.isFailed).toBe(true);
   });
 
+  test('timeout produces no cancelReason', async () => {
+    adapter.routes.get('/slow', () => ({ status: 200, delay: 500 }));
+    const builder = client.get('/slow').timeout(30);
+    const res = await builder.send();
+    expect(res.isTimeout).toBe(true);
+    expect(res.isFailed).toBe(true);
+    expect(builder.error?.cancelReason).toBeUndefined();
+  });
+
+  test('builder.cancel(reason) surfaces cancelReason via MockAdapter', async () => {
+    adapter.routes.get('/slow', () => ({ status: 200, delay: 200 }));
+    const builder = client.get('/slow');
+    const promise = builder.send();
+    setTimeout(() => builder.cancel('user_navigated_away'), 30);
+    const res = await promise;
+    expect(res.isCancelled).toBe(true);
+    expect(builder.error?.cancelReason).toBe('user_navigated_away');
+  });
+
+  test('builder.cancel() without reason produces no cancelReason via MockAdapter', async () => {
+    adapter.routes.get('/slow', () => ({ status: 200, delay: 200 }));
+    const builder = client.get('/slow');
+    const promise = builder.send();
+    setTimeout(() => builder.cancel(), 30);
+    await promise;
+    expect(builder.error?.cancelReason).toBeUndefined();
+  });
+
   // --- routes.clear ---
 
   test('routes.clear removes all routes', async () => {

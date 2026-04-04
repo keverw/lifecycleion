@@ -178,14 +178,29 @@ export interface StreamResponseContext {
 }
 
 /**
+ * Returned from a StreamResponseFactory to cancel the stream with an optional reason.
+ * Equivalent to returning null, but allows attaching a reason to HTTPClientError.cancelReason.
+ */
+export interface StreamResponseCancel {
+  cancel: true;
+  reason?: string;
+}
+
+/**
  * Factory called by NodeAdapter after response headers arrive on a 200.
- * Return a WritableLike to pipe the body into it, or null to cancel the request.
+ * Return a WritableLike to pipe the body into it, null to cancel, or
+ * `{ cancel: true, reason?: string }` to cancel with an optional reason string
+ * surfaced on HTTPClientError.cancelReason.
  * May be async.
  */
 export type StreamResponseFactory = (
   info: StreamResponseInfo,
   context: StreamResponseContext,
-) => WritableLike | null | Promise<WritableLike | null>;
+) =>
+  | WritableLike
+  | null
+  | StreamResponseCancel
+  | Promise<WritableLike | null | StreamResponseCancel>;
 
 // --- Progress ---
 
@@ -342,8 +357,10 @@ export interface HTTPResponse<T = unknown> {
   isFailed: boolean;
   isParseError: boolean;
   /**
-   * Fully resolved URL for this `send()` after `initial` interceptors, before any
+   * Request URL for this `send()` after `initial` interceptors, before any
    * redirect follow-ups. Same string as {@link AttemptStartEvent.initialURL} on attempt hooks.
+   * Real transport adapters use an absolute http(s) URL here; MockAdapter may
+   * keep a path-only URL when no baseURL is configured.
    */
   initialURL: string;
   /**
@@ -395,8 +412,10 @@ export interface HTTPClientError {
   message: string;
   cause?: Error;
   /**
-   * Fully resolved URL for this `send()` after `initial` interceptors, before redirects.
+   * Request URL for this `send()` after `initial` interceptors, before redirects.
    * Same string as {@link HTTPResponse.initialURL} and {@link AttemptStartEvent.initialURL}.
+   * Real transport adapters use an absolute http(s) URL here; MockAdapter may
+   * keep a path-only URL when no baseURL is configured.
    */
   initialURL: string;
   /** URL of the last request attempt when the error was produced. */
@@ -413,6 +432,14 @@ export interface HTTPClientError {
   isTimeout: boolean;
   /** True when a retry policy was active and all attempts were exhausted before a response was received. */
   isRetriesExhausted: boolean;
+  /**
+   * Optional reason string when the request was cancelled with an explicit string reason.
+   * Set by: a request interceptor returning `{ cancel: true, reason: '...' }`, a
+   * StreamResponseFactory returning `{ cancel: true, reason: '...' }`, or an AbortSignal
+   * aborted via `controller.abort('reason')`. Undefined when no explicit string reason
+   * was provided (e.g. `controller.abort()` with no argument, `builder.cancel()`).
+   */
+  cancelReason?: string;
 }
 
 // --- Request Phase ---
@@ -674,13 +701,17 @@ export type RequestInterceptor = (
 ) =>
   | InterceptedRequest
   | InterceptorCancel
-  | Promise<InterceptedRequest | InterceptorCancel>;
+  | null
+  | Promise<InterceptedRequest | InterceptorCancel | null>;
 
 // --- Observers ---
 
 export interface InterceptedRequest {
-  /** Pending request shape seen by request interceptors before body serialization. */
-  /** URL for this adapter attempt (changes on redirect follow-ups). */
+  /**
+   * Pending request shape seen by request interceptors before body serialization.
+   * `requestURL` changes on redirect follow-ups. It is absolute for
+   * fetch/xhr/node; MockAdapter may keep a path-only URL when no baseURL is set.
+   */
   requestURL: string;
   method: HTTPMethod;
   headers: Record<string, string | string[]>;
@@ -707,6 +738,8 @@ export type AttemptRequest = Omit<
    * observers that need the semantic payload as well as the adapter-facing body.
    */
   rawBody?: unknown;
+  /** Effective per-attempt timeout in ms. */
+  timeout?: number;
 };
 
 export type ResponseObserver = (

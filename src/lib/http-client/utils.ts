@@ -127,6 +127,79 @@ export function resolveAbsoluteURL(url: string, baseURL?: string): string {
 }
 
 /**
+ * Browser-aware absolute URL resolution used by HTTPClient before interceptors
+ * and adapter dispatch. Starts with normal baseURL resolution, then falls back
+ * to the current page/worker location when running in a browser-like runtime.
+ */
+export function resolveAbsoluteURLForRuntime(
+  url: string,
+  baseURL: string | undefined,
+  isBrowserRuntime: boolean,
+): string {
+  const resolved = resolveAbsoluteURL(url, baseURL);
+
+  if (
+    !isBrowserRuntime ||
+    resolved.startsWith('http://') ||
+    resolved.startsWith('https://')
+  ) {
+    return resolved;
+  }
+
+  const browserBase = getBrowserResolutionBase();
+
+  if (!browserBase) {
+    return resolved;
+  }
+
+  return resolveAbsoluteURL(resolved, browserBase);
+}
+
+function getBrowserResolutionBase(): string | undefined {
+  if (
+    typeof document !== 'undefined' &&
+    typeof document.baseURI === 'string' &&
+    document.baseURI
+  ) {
+    return document.baseURI;
+  }
+
+  if (
+    typeof window !== 'undefined' &&
+    window.location &&
+    typeof window.location.href === 'string' &&
+    window.location.href
+  ) {
+    return window.location.href;
+  }
+
+  const globalLocation = (globalThis as { location?: { href?: unknown } })
+    .location;
+
+  if (
+    globalLocation &&
+    typeof globalLocation.href === 'string' &&
+    globalLocation.href
+  ) {
+    return globalLocation.href;
+  }
+
+  const selfLocation = (
+    globalThis as { self?: { location?: { href?: unknown } } }
+  ).self?.location;
+
+  if (
+    selfLocation &&
+    typeof selfLocation.href === 'string' &&
+    selfLocation.href
+  ) {
+    return selfLocation.href;
+  }
+
+  return undefined;
+}
+
+/**
  * Normalizes header keys to lowercase.
  */
 export function normalizeHeaders(

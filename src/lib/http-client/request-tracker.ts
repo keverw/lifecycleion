@@ -38,12 +38,12 @@ export class RequestTracker {
   /**
    * Cancels a single request by ID. Returns 1 if cancelled, 0 if not found.
    */
-  public cancel(requestID: string): number {
+  public cancel(requestID: string, reason?: string): number {
     const entry = this.requests.get(requestID);
 
     if (entry) {
       entry.state = 'cancelled';
-      entry.abortController.abort();
+      entry.abortController.abort(reason);
       return 1;
     }
 
@@ -54,12 +54,12 @@ export class RequestTracker {
    * Cancels ALL in-flight requests across the shared tracker (all clients).
    * Returns the number of requests cancelled.
    */
-  public cancelAll(): number {
+  public cancelAll(reason?: string): number {
     let count = 0;
 
     for (const entry of this.requests.values()) {
       entry.state = 'cancelled';
-      entry.abortController.abort();
+      entry.abortController.abort(reason);
       count++;
     }
 
@@ -70,13 +70,13 @@ export class RequestTracker {
    * Cancels all requests owned by a specific client.
    * Returns the number of requests cancelled.
    */
-  public cancelOwn(clientID: string): number {
+  public cancelOwn(clientID: string, reason?: string): number {
     let count = 0;
 
     for (const entry of this.requests.values()) {
       if (entry.clientID === clientID) {
         entry.state = 'cancelled';
-        entry.abortController.abort();
+        entry.abortController.abort(reason);
         count++;
       }
     }
@@ -88,13 +88,13 @@ export class RequestTracker {
    * Cancels all requests that have the given label (across all clients in the shared tracker).
    * Returns the number of requests cancelled.
    */
-  public cancelAllWithLabel(label: string): number {
+  public cancelAllWithLabel(label: string, reason?: string): number {
     let count = 0;
 
     for (const entry of this.requests.values()) {
       if (entry.label === label) {
         entry.state = 'cancelled';
-        entry.abortController.abort();
+        entry.abortController.abort(reason);
         count++;
       }
     }
@@ -106,13 +106,17 @@ export class RequestTracker {
    * Cancels requests owned by a specific client that also have the given label.
    * Returns the number of requests cancelled.
    */
-  public cancelOwnWithLabel(clientID: string, label: string): number {
+  public cancelOwnWithLabel(
+    clientID: string,
+    label: string,
+    reason?: string,
+  ): number {
     let count = 0;
 
     for (const entry of this.requests.values()) {
       if (entry.clientID === clientID && entry.label === label) {
         entry.state = 'cancelled';
-        entry.abortController.abort();
+        entry.abortController.abort(reason);
         count++;
       }
     }

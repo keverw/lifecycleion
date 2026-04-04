@@ -68,7 +68,12 @@ export class RequestInterceptorManager {
 
       const result = await fn(current, phase, context);
 
-      // Interceptor signalled cancellation
+      // null is shorthand for { cancel: true } with no reason
+      if (result === null) {
+        return { cancel: true };
+      }
+
+      // Interceptor signalled cancellation with optional reason
       if (result && 'cancel' in result && result.cancel === true) {
         return result;
       }

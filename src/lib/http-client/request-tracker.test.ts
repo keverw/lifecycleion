@@ -50,6 +50,23 @@ describe('RequestTracker', () => {
     test('returns 0 for unknown requestID', () => {
       expect(new RequestTracker().cancel('nope')).toBe(0);
     });
+
+    test('passes reason to signal.reason when provided', () => {
+      const tracker = new RequestTracker();
+      const entry = makeEntry();
+      tracker.add(entry);
+      tracker.cancel('req-1', 'user_navigated_away');
+      expect(entry.abortController.signal.reason).toBe('user_navigated_away');
+    });
+
+    test('signal.reason is default AbortError when no reason given', () => {
+      const tracker = new RequestTracker();
+      const entry = makeEntry();
+      tracker.add(entry);
+      tracker.cancel('req-1');
+      expect(entry.abortController.signal.reason).not.toBe(undefined);
+      expect(typeof entry.abortController.signal.reason).not.toBe('string');
+    });
   });
 
   describe('cancelAll', () => {
@@ -68,6 +85,17 @@ describe('RequestTracker', () => {
 
     test('returns 0 when tracker is empty', () => {
       expect(new RequestTracker().cancelAll()).toBe(0);
+    });
+
+    test('passes reason to all signals when provided', () => {
+      const tracker = new RequestTracker();
+      const a = makeEntry({ requestID: 'a' });
+      const b = makeEntry({ requestID: 'b' });
+      tracker.add(a);
+      tracker.add(b);
+      tracker.cancelAll('app_shutdown');
+      expect(a.abortController.signal.reason).toBe('app_shutdown');
+      expect(b.abortController.signal.reason).toBe('app_shutdown');
     });
   });
 
@@ -89,6 +117,17 @@ describe('RequestTracker', () => {
       const tracker = new RequestTracker();
       tracker.add(makeEntry({ requestID: 'a', clientID: 'c1' }));
       expect(tracker.cancelOwn('nobody')).toBe(0);
+    });
+
+    test('passes reason to matching signals', () => {
+      const tracker = new RequestTracker();
+      const mine = makeEntry({ requestID: 'mine', clientID: 'client-a' });
+      const other = makeEntry({ requestID: 'other', clientID: 'client-b' });
+      tracker.add(mine);
+      tracker.add(other);
+      tracker.cancelOwn('client-a', 'component_unmounted');
+      expect(mine.abortController.signal.reason).toBe('component_unmounted');
+      expect(other.abortController.signal.aborted).toBe(false);
     });
   });
 
@@ -116,6 +155,17 @@ describe('RequestTracker', () => {
       tracker.add(unlabeled);
       expect(tracker.cancelAllWithLabel('search')).toBe(0);
       expect(unlabeled.state).toBe('pending');
+    });
+
+    test('passes reason to matching signals', () => {
+      const tracker = new RequestTracker();
+      const labeled = makeEntry({ requestID: 'a', label: 'upload' });
+      const other = makeEntry({ requestID: 'b', label: 'nav' });
+      tracker.add(labeled);
+      tracker.add(other);
+      tracker.cancelAllWithLabel('upload', 'quota_exceeded');
+      expect(labeled.abortController.signal.reason).toBe('quota_exceeded');
+      expect(other.abortController.signal.aborted).toBe(false);
     });
   });
 
@@ -150,6 +200,21 @@ describe('RequestTracker', () => {
       const tracker = new RequestTracker();
       tracker.add(makeEntry({ requestID: 'a', clientID: 'c1', label: 'nav' }));
       expect(tracker.cancelOwnWithLabel('c1', 'search')).toBe(0);
+    });
+
+    test('passes reason to matching signals', () => {
+      const tracker = new RequestTracker();
+      const match = makeEntry({
+        requestID: 'a',
+        clientID: 'c1',
+        label: 'search',
+      });
+      const other = makeEntry({ requestID: 'b', clientID: 'c1', label: 'nav' });
+      tracker.add(match);
+      tracker.add(other);
+      tracker.cancelOwnWithLabel('c1', 'search', 'stale_query');
+      expect(match.abortController.signal.reason).toBe('stale_query');
+      expect(other.abortController.signal.aborted).toBe(false);
     });
   });
 

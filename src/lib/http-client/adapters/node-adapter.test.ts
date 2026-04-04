@@ -660,7 +660,7 @@ describe('NodeAdapter.send() — unit branches without server', () => {
         requestURL: 'http://example.test/data',
         method: 'GET',
         headers: { cookie: ['session=abc123', 'theme=dark'] },
-          });
+      });
 
       expect(capturedOptions?.headers).toMatchObject({
         cookie: 'session=abc123; theme=dark',
@@ -688,7 +688,7 @@ describe('NodeAdapter.send() — unit branches without server', () => {
         requestURL: 'http://example.test:8080/data?x=1',
         method: 'GET',
         headers: {},
-          });
+      });
 
       expect(capturedOptions?.socketPath).toBe('/tmp/test.sock');
       expect(capturedOptions?.hostname).toBe('example.test');
@@ -717,7 +717,7 @@ describe('NodeAdapter.send() — unit branches without server', () => {
         requestURL: 'http://[::1]:8080/data?x=1',
         method: 'GET',
         headers: {},
-          });
+      });
 
       expect(capturedOptions?.hostname).toBe('::1');
       expect(capturedOptions?.port).toBe(8080);
@@ -745,7 +745,7 @@ describe('NodeAdapter.send() — unit branches without server', () => {
         requestURL: 'http://us%3Aer:p%40ss@example.test/data',
         method: 'GET',
         headers: {},
-          });
+      });
 
       expect(capturedOptions?.auth).toBe('us:er:p@ss');
     } finally {
@@ -779,7 +779,7 @@ describe('NodeAdapter.send() — unit branches without server', () => {
         requestURL: 'http://example.test/start',
         method: 'GET',
         headers: {},
-          });
+      });
 
       expect(result.wasRedirectDetected).toBe(true);
       expect(result.detectedRedirectURL).toBe('http://example.test/next');
@@ -814,7 +814,7 @@ describe('NodeAdapter.send() — unit branches without server', () => {
         requestURL: 'http://example.test/start',
         method: 'GET',
         headers: {},
-          });
+      });
 
       expect(result.wasRedirectDetected).toBe(true);
       expect(result.detectedRedirectURL).toBe('https://other.test/next');
@@ -842,7 +842,7 @@ describe('NodeAdapter.send() — unit branches without server', () => {
         method: 'POST',
         headers: {},
         body: fd,
-          });
+      });
 
       expect(res.status).toBe(0);
       expect(res.isTransportError).toBe(true);
@@ -886,7 +886,7 @@ describe('NodeAdapter.send() — unit branches without server', () => {
         headers: {},
         body: fd,
         signal: controller.signal,
-          });
+      });
 
       expect(pendingCallback).toBeDefined();
       controller.abort();
@@ -924,7 +924,7 @@ describe('NodeAdapter.send() — unit branches without server', () => {
         method: 'POST',
         headers: {},
         body: 'payload',
-          });
+      });
 
       expect(res.status).toBe(0);
       expect(res.isTransportError).toBe(true);
@@ -948,7 +948,7 @@ describe('NodeAdapter.send() — unit branches without server', () => {
         method: 'POST',
         headers: {},
         body: 'payload',
-          });
+      });
 
       expect(req.headers['content-length']).toBe(
         Buffer.byteLength('payload').toString(),
@@ -974,7 +974,7 @@ describe('NodeAdapter.send() — unit branches without server', () => {
         method: 'POST',
         headers: {},
         body,
-          });
+      });
 
       expect(req.headers['content-length']).toBe(body.byteLength.toString());
 
@@ -1019,7 +1019,7 @@ describe('NodeAdapter.send() — unit branches without server', () => {
         method: 'POST',
         headers: {},
         body: 'x'.repeat(32 * 1024),
-            onUploadProgress: (e) => {
+        onUploadProgress: (e) => {
           uploadEvents.push(e.progress);
         },
       });
@@ -1074,7 +1074,7 @@ describe('NodeAdapter.send() — unit branches without server', () => {
         method: 'POST',
         headers: {},
         body: '',
-            onUploadProgress: (e) => {
+        onUploadProgress: (e) => {
           uploadEvents.push(e.progress);
         },
       });
@@ -1130,7 +1130,7 @@ describe('NodeAdapter.send() — unit branches without server', () => {
         method: 'POST',
         headers: {},
         body: new Uint8Array(0),
-            onUploadProgress: (e) => {
+        onUploadProgress: (e) => {
           uploadEvents.push(e.progress);
         },
       });
@@ -1184,7 +1184,7 @@ describe('NodeAdapter.send() — unit branches without server', () => {
         method: 'POST',
         headers: {},
         body: new Uint8Array(32 * 1024),
-            onUploadProgress: (e) => {
+        onUploadProgress: (e) => {
           uploadEvents.push(e.progress);
         },
       });
@@ -1242,7 +1242,7 @@ describe('NodeAdapter.send() — unit branches without server', () => {
         method: 'POST',
         headers: {},
         body: fd,
-            onUploadProgress: (e) => {
+        onUploadProgress: (e) => {
           uploadEvents.push(e.progress);
         },
       });
@@ -1291,7 +1291,7 @@ describe('NodeAdapter.send() — unit branches without server', () => {
         requestURL: 'http://example.test/data',
         method: 'GET',
         headers: {},
-            onUploadProgress: (e) => {
+        onUploadProgress: (e) => {
           uploadEvents.push(e.progress);
         },
       });
@@ -1333,7 +1333,7 @@ describe('NodeAdapter.send() — unit branches without server', () => {
         method: 'POST',
         headers: {},
         body: 'x'.repeat(32 * 1024),
-            onUploadProgress: (e) => {
+        onUploadProgress: (e) => {
           uploadEvents.push(e.progress);
         },
       });
@@ -1373,7 +1373,7 @@ describe('NodeAdapter.send() — unit branches without server', () => {
         requestURL: 'http://example.test/data',
         method: 'GET',
         headers: {},
-          });
+      });
 
       expect(result.status).toBe(200);
       expect(result.isStreamError).toBe(true);
@@ -1416,7 +1416,7 @@ describe('NodeAdapter.send() — unit branches without server', () => {
         requestURL: 'http://example.test/data',
         method: 'GET',
         headers: {},
-          });
+      });
 
       expect(result.status).toBe(200);
       expect(result.isStreamError).toBe(true);
@@ -1448,7 +1448,7 @@ describe('NodeAdapter.send() — unit branches without server', () => {
         requestURL: 'http://example.test/data',
         method: 'GET',
         headers: {},
-          });
+      });
 
       expect(res.status).toBe(495);
       expect(res.isTransportError).toBe(true);
@@ -1639,6 +1639,7 @@ describe('NodeAdapter.send() — unit branches without server', () => {
       expect(response.isFailed).toBe(true);
       expect(builder.error?.code).toBe('stream_response_error');
       expect(builder.error?.isTimeout).toBe(true);
+      expect(builder.error?.cancelReason).toBeUndefined();
     } finally {
       requestSpy.mockRestore();
     }
@@ -1779,7 +1780,7 @@ describe('NodeAdapter.send() — unit branches without server', () => {
         requestURL: 'http://example.test/data',
         method: 'GET',
         headers: {},
-            streamResponse: () => writable,
+        streamResponse: () => writable,
       });
 
       expect(response.status).toBe(200);
@@ -1835,7 +1836,7 @@ describe('NodeAdapter.send() — unit branches without server', () => {
           requestURL: 'http://example.test/data',
           method: 'GET',
           headers: {},
-                streamResponse: () => writable,
+          streamResponse: () => writable,
         }),
         new Promise((resolve) => setTimeout(() => resolve('timeout'), 50)),
       ]);
@@ -1891,7 +1892,7 @@ describe('NodeAdapter.send() — unit branches without server', () => {
           requestURL: 'http://example.test/data',
           method: 'GET',
           headers: {},
-                streamResponse: () => writable,
+          streamResponse: () => writable,
         }),
         new Promise((resolve) => setTimeout(() => resolve('timeout'), 50)),
       ]);
@@ -1945,7 +1946,7 @@ describe('NodeAdapter.send() — unit branches without server', () => {
         requestURL: 'http://example.test/data',
         method: 'GET',
         headers: {},
-            streamResponse: () => writable,
+        streamResponse: () => writable,
       });
 
       expect(response.status).toBe(200);
@@ -1990,7 +1991,7 @@ describe('NodeAdapter.send() — unit branches without server', () => {
         requestURL: 'http://example.test/data',
         method: 'GET',
         headers: {},
-            streamResponse: () => writable,
+        streamResponse: () => writable,
       });
 
       expect(response.status).toBe(200);
@@ -2028,7 +2029,7 @@ describe('NodeAdapter.send() — unit branches without server', () => {
           requestURL: 'http://example.test/data',
           method: 'GET',
           headers: {},
-                streamResponse: async () => {
+          streamResponse: async () => {
             // Simulate some async work before throwing
             await new Promise((resolve) => setTimeout(resolve, 10));
             throw new Error('factory async rejection');
@@ -2080,7 +2081,7 @@ describe('NodeAdapter.send() — unit branches without server', () => {
         requestURL: 'http://example.test/data',
         method: 'GET',
         headers: {},
-            signal: controller.signal,
+        signal: controller.signal,
         streamResponse: async () => {
           await new Promise((resolve) => setTimeout(resolve, 10));
           return writable;
@@ -2145,6 +2146,7 @@ describe('NodeAdapter.send() — unit branches without server', () => {
       expect(builder.attemptCount).toBe(1);
       expect(builder.error?.code).toBe('stream_setup_error');
       expect(builder.error?.isRetriesExhausted).toBe(false);
+      expect(builder.error?.cancelReason).toBeUndefined();
     } finally {
       requestSpy.mockRestore();
     }
@@ -2277,7 +2279,7 @@ describe('NodeAdapter.send() — unit branches without server', () => {
         requestURL: 'http://example.test/data',
         method: 'GET',
         headers: {},
-            signal: controller.signal,
+        signal: controller.signal,
         streamResponse: () => writable,
       });
 
@@ -2357,6 +2359,7 @@ describe('NodeAdapter.send() — unit branches without server', () => {
       expect(response.isFailed).toBe(true);
       expect(builder.error?.code).toBe('stream_response_error');
       expect(builder.error?.isTimeout).toBe(true);
+      expect(builder.error?.cancelReason).toBeUndefined();
     } finally {
       requestSpy.mockRestore();
     }
@@ -2402,7 +2405,7 @@ describe('NodeAdapter.send() — unit branches without server', () => {
         requestURL: 'http://example.test/data',
         method: 'GET',
         headers: {},
-            streamResponse: () => writable,
+        streamResponse: () => writable,
       });
 
       expect(result.status).toBe(200);
@@ -2454,7 +2457,7 @@ describe('NodeAdapter.send() — unit branches without server', () => {
           requestURL: 'http://example.test/data',
           method: 'GET',
           headers: {},
-                streamResponse: () => writable,
+          streamResponse: () => writable,
         });
 
         expect(result.isStreamed).toBe(true);
@@ -2870,6 +2873,37 @@ describe('NodeAdapter via HTTPClient', () => {
     expect(attemptEnds).toEqual([{ status: 0, willRetry: false }]);
   });
 
+  test('streamResponse returning null produces no cancelReason on the error', async () => {
+    const builder = client.get('/api/binary').streamResponse(() => null);
+    const res = await builder.send();
+
+    expect(res.isCancelled).toBe(true);
+    expect(builder.error?.cancelReason).toBeUndefined();
+  });
+
+  test('streamResponse returning { cancel: true } cancels without a reason', async () => {
+    const builder = client
+      .get('/api/binary')
+      .streamResponse(() => ({ cancel: true as const }));
+    const res = await builder.send();
+
+    expect(res.isCancelled).toBe(true);
+    expect(res.isFailed).toBe(true);
+    expect(builder.error?.cancelReason).toBeUndefined();
+  });
+
+  test('streamResponse returning { cancel: true, reason } surfaces cancelReason on the error', async () => {
+    const builder = client.get('/api/binary').streamResponse(() => ({
+      cancel: true as const,
+      reason: 'not enough disk space',
+    }));
+    const res = await builder.send();
+
+    expect(res.isCancelled).toBe(true);
+    expect(res.isFailed).toBe(true);
+    expect(builder.error?.cancelReason).toBe('not enough disk space');
+  });
+
   test('streamResponse is only called on 200, not on error status codes', async () => {
     // The factory must not be invoked for non-200 responses — error bodies
     // should be buffered normally so callers can inspect them.
@@ -2971,6 +3005,23 @@ describe('NodeAdapter via HTTPClient', () => {
     const res = await promise;
     expect(res.isCancelled).toBe(true);
     expect(res.isFailed).toBe(true);
+  });
+
+  test('builder.cancel(reason) surfaces cancelReason via NodeAdapter', async () => {
+    const builder = client.get('/api/slow');
+    const promise = builder.send();
+    setTimeout(() => builder.cancel('user_navigated_away'), 30);
+    const res = await promise;
+    expect(res.isCancelled).toBe(true);
+    expect(builder.error?.cancelReason).toBe('user_navigated_away');
+  });
+
+  test('builder.cancel() without reason produces no cancelReason via NodeAdapter', async () => {
+    const builder = client.get('/api/slow');
+    const promise = builder.send();
+    setTimeout(() => builder.cancel(), 30);
+    await promise;
+    expect(builder.error?.cancelReason).toBeUndefined();
   });
 
   // --- transport errors ---

@@ -5,6 +5,7 @@ import type {
   AdapterResponse,
   AdapterType,
 } from '../types';
+import { resolveAbsoluteURLForRuntime } from '../utils';
 
 /**
  * XHR-based adapter for environments that expose `XMLHttpRequest`. Primary
@@ -273,7 +274,11 @@ export class XHRAdapter implements HTTPAdapter {
       // the error so HTTPClient classifies it as a timeout (retryable) rather
       // than an unexpected abort (non-retryable cancel).
       xhr.addEventListener('timeout', () => {
-        reject(Object.assign(new DOMException('Request timed out', 'AbortError'), { [XHR_BROWSER_TIMEOUT_FLAG]: true }));
+        reject(
+          Object.assign(new DOMException('Request timed out', 'AbortError'), {
+            [XHR_BROWSER_TIMEOUT_FLAG]: true,
+          }),
+        );
       });
 
       xhr.addEventListener('abort', () => {
@@ -405,19 +410,10 @@ function didBrowserFollowRedirect(
     const normalizedResponse = new URL(responseURL);
     normalizedResponse.hash = '';
 
-    const documentBase =
-      typeof document !== 'undefined' &&
-      typeof document.baseURI === 'string' &&
-      document.baseURI
-        ? document.baseURI
-        : undefined;
-
-    const requestBase =
-      documentBase ??
-      (typeof window !== 'undefined' && window.location
-        ? window.location.href
-        : normalizedResponse.href);
-    const normalizedRequest = new URL(requestURL, requestBase);
+    const normalizedRequest = new URL(
+      resolveAbsoluteURLForRuntime(requestURL, undefined, true),
+      normalizedResponse.href,
+    );
     normalizedRequest.hash = '';
 
     return normalizedResponse.href !== normalizedRequest.href;

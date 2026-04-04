@@ -48,9 +48,9 @@ export const RETRYABLE_STATUS_CODES: ReadonlySet<number> = new Set([
 
 export const DEFAULT_TIMEOUT_MS = 30_000;
 
-export const DEFAULT_REQUEST_ID_HEADER = 'x-request-id';
+export const DEFAULT_REQUEST_ID_HEADER = 'x-local-client-request-id';
 
-export const DEFAULT_REQUEST_ATTEMPT_HEADER = 'x-request-attempt';
+export const DEFAULT_REQUEST_ATTEMPT_HEADER = 'x-local-client-request-attempt';
 
 export const DEFAULT_USER_AGENT = 'lifecycleion-http-client';
 
@@ -58,6 +58,15 @@ export const NON_RETRYABLE_HTTP_CLIENT_CALLBACK_ERROR_FLAG =
   '_lifecycleion_non_retryable_http_client_callback_error';
 
 export const STREAM_FACTORY_ERROR_FLAG = '_lifecycleion_stream_factory_error';
+
+/**
+ * Attached to the AbortError thrown when a StreamResponseFactory returns null
+ * or `{ cancel: true, reason? }`. The value is the reason string if provided,
+ * or `true` if the factory cancelled without a reason. Lets HTTPClient surface
+ * the reason on HTTPClientError.cancelReason.
+ */
+export const STREAM_FACTORY_CANCEL_KEY =
+  '_lifecycleion_stream_factory_cancel_reason';
 
 export const RESPONSE_STREAM_ABORT_FLAG = '_lifecycleion_response_stream_abort';
 

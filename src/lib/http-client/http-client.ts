@@ -18,6 +18,7 @@ import {
   normalizeAdapterResponseHeaders,
   parseContentType,
   resolveAbsoluteURL,
+  resolveAbsoluteURLForRuntime,
   scalarHeader,
   serializeBody,
 } from './utils';
@@ -28,6 +29,7 @@ import {
   DEFAULT_USER_AGENT,
   NON_RETRYABLE_HTTP_CLIENT_CALLBACK_ERROR_FLAG,
   RESPONSE_STREAM_ABORT_FLAG,
+  STREAM_FACTORY_CANCEL_KEY,
   STREAM_FACTORY_ERROR_FLAG,
   XHR_BROWSER_TIMEOUT_FLAG,
   RETRYABLE_STATUS_CODES,
@@ -120,7 +122,7 @@ export class BaseHTTPClient {
       timeout: config.timeout ?? DEFAULT_TIMEOUT_MS,
       cookieJar: config.cookieJar,
       retryPolicy: config.retryPolicy,
-      includeRequestID: config.includeRequestID ?? true,
+      includeRequestID: config.includeRequestID ?? false,
       includeAttemptHeader: config.includeAttemptHeader ?? false,
       userAgent: config.userAgent,
       followRedirects: config.followRedirects ?? false,
@@ -234,24 +236,24 @@ export class BaseHTTPClient {
 
   // --- Cancellation ---
 
-  public cancel(requestID: string): void {
-    this._tracker.cancel(requestID);
+  public cancel(requestID: string, reason?: string): void {
+    this._tracker.cancel(requestID, reason);
   }
 
-  public cancelAll(): void {
-    this._tracker.cancelAll();
+  public cancelAll(reason?: string): void {
+    this._tracker.cancelAll(reason);
   }
 
-  public cancelOwn(): void {
-    this._tracker.cancelOwn(this._clientID);
+  public cancelOwn(reason?: string): void {
+    this._tracker.cancelOwn(this._clientID, reason);
   }
 
-  public cancelAllWithLabel(label: string): void {
-    this._tracker.cancelAllWithLabel(label);
+  public cancelAllWithLabel(label: string, reason?: string): void {
+    this._tracker.cancelAllWithLabel(label, reason);
   }
 
-  public cancelOwnWithLabel(label: string): void {
-    this._tracker.cancelOwnWithLabel(this._clientID, label);
+  public cancelOwnWithLabel(label: string, reason?: string): void {
+    this._tracker.cancelOwnWithLabel(this._clientID, label, reason);
   }
 
   // --- Request inspection ---
@@ -353,9 +355,10 @@ export class BaseHTTPClient {
     callbacks.setState('sending');
 
     // buildURL: relative path + baseURL, OR absolute http(s) / //host path unchanged
-    const url = resolveAbsoluteURL(
+    const url = resolveAbsoluteURLForRuntime(
       buildURL(this._config.baseURL, path, options.params),
       this._config.baseURL,
+      this._isBrowserRuntime,
     );
     const timeout = options.timeout ?? this._config.timeout;
 
@@ -408,14 +411,19 @@ export class BaseHTTPClient {
         redirectHistory: [],
       });
 
-      const error = this._makeError(response, requestID, false);
+      const error = this._makeError(
+        response,
+        requestID,
+        false,
+        undefined,
+        undefined,
+        options.signal ? getSignalCancelReason(options.signal) : undefined,
+      );
       callbacks.setError(error);
       callbacks.setState('cancelled');
       await this._runErrorObservers(
         error,
-        this._bestEffortAttemptRequestFromPending(interceptedRequest, {
-          timeout,
-        }),
+        this._bestEffortAttemptRequestFromPending(interceptedRequest, timeout),
         {
           type: 'final',
         },
@@ -443,8 +451,8 @@ export class BaseHTTPClient {
     };
 
     // Wire builder.cancel() to our abort controller
-    trackedCallbacks.setCancelFn(() => {
-      abortController.abort();
+    trackedCallbacks.setCancelFn((reason?: string) => {
+      abortController.abort(reason);
     });
 
     // Compose user signal with our internal abort controller
@@ -462,12 +470,11 @@ export class BaseHTTPClient {
       let response: HTTPResponse<T>;
       let observerRequest = this._bestEffortAttemptRequestFromPending(
         interceptedRequest,
-        {
-          timeout,
-        },
+        timeout,
       );
       let errorCode: HTTPClientError['code'] | undefined;
       let adapterCause: Error | undefined;
+      let cancelReason: string | undefined;
       let isRetriesExhausted = false;
       let completedAttemptCount = 0;
 
@@ -478,6 +485,16 @@ export class BaseHTTPClient {
         if (options.streamResponse && this._adapter.getType() !== 'node') {
           throw new Error(
             `[HTTPClient] .streamResponse() requires NodeAdapter. Current adapter: ${this._adapter.getType()}`,
+          );
+        }
+
+        // Validate the resolved URL is a proper http(s) URL. Protocol-relative
+        // //host paths without a baseURL to supply the scheme stay unresolved and
+        // must fail here as a request_setup_error rather than reaching the adapter.
+        if (!this._isSupportedRequestURL(url)) {
+          throw new Error(
+            `[HTTPClient] Request URL could not be resolved to an absolute http(s) URL: "${url}". ` +
+              `Set a baseURL with an http(s) scheme or pass an absolute URL.`,
           );
         }
 
@@ -498,6 +515,7 @@ export class BaseHTTPClient {
           if (!('cancel' in interceptResult)) {
             initialRequestCandidate = interceptResult;
             this._assertRequestIsSupported(interceptResult);
+            this._assertInterceptorResolvedURL(interceptResult.requestURL);
           }
         } catch (error) {
           const response = this._buildResponse<T>({
@@ -526,9 +544,10 @@ export class BaseHTTPClient {
 
           await this._runErrorObservers(
             normalizedError,
-            this._bestEffortAttemptRequestFromPending(initialRequestCandidate, {
+            this._bestEffortAttemptRequestFromPending(
+              initialRequestCandidate,
               timeout,
-            }),
+            ),
             {
               type: 'final',
             },
@@ -549,15 +568,20 @@ export class BaseHTTPClient {
             redirectHistory: [],
           });
 
-          const error = this._makeError(cancelledResponse, requestID, false);
+          const error = this._makeError(
+            cancelledResponse,
+            requestID,
+            false,
+            undefined,
+            undefined,
+            interceptResult.reason,
+          );
           callbacks.setError(error);
           trackedCallbacks.setState('cancelled');
 
           await this._runErrorObservers(
             error,
-            this._bestEffortAttemptRequestFromPending(finalRequest, {
-              timeout,
-            }),
+            this._bestEffortAttemptRequestFromPending(finalRequest, timeout),
             {
               type: 'final',
             },
@@ -641,6 +665,10 @@ export class BaseHTTPClient {
 
           if (attemptResult.adapterCause) {
             adapterCause = attemptResult.adapterCause;
+          }
+
+          if (attemptResult.cancelReason !== undefined) {
+            cancelReason = attemptResult.cancelReason;
           }
 
           callbacks.setAttemptCount(attemptResult.attemptCount);
@@ -732,7 +760,7 @@ export class BaseHTTPClient {
 
             redirectURL = resolveAbsoluteURL(redirectURL, this._config.baseURL);
 
-            // Method rewriting per HTTP spec (matches browser/fetch behaviour):
+            // Method rewriting per HTTP spec (matches browser/fetch behavior):
             //  - 303 (See Other) always becomes GET
             //  - 301 (Moved Permanently) / 302 (Found) rewrite POST to GET
             //  - 307 (Temporary Redirect) / 308 (Permanent Redirect) preserve method/body
@@ -774,7 +802,7 @@ export class BaseHTTPClient {
 
             // Cross-origin safety: strip ALL headers except CORS-safelisted ones
             // when the redirect crosses origins (scheme + host + port). Matches
-            // Chromium/fetch behaviour — Authorization, X-API-Key, etc. must not
+            // Chromium/fetch behavior — Authorization, X-API-Key, etc. must not
             // leak to a different host. Cookies and internal headers (request ID)
             // are re-attached below as needed.
             const nextRedirectHistory = [...redirectHistory, redirectURL];
@@ -814,11 +842,14 @@ export class BaseHTTPClient {
               if (!('cancel' in redirectIntercept)) {
                 failedRedirectRequest = redirectIntercept;
                 this._assertRequestIsSupported(redirectIntercept);
+                this._assertInterceptorResolvedURL(
+                  redirectIntercept.requestURL,
+                );
               }
             } catch (error) {
               observerRequest = this._bestEffortAttemptRequestFromPending(
                 failedRedirectRequest,
-                { timeout },
+                timeout,
               );
               response = this._buildResponse<T>({
                 adapterResponse: null,
@@ -843,8 +874,11 @@ export class BaseHTTPClient {
               const cancelledRequestURL = redirectRequest.requestURL;
               observerRequest = this._bestEffortAttemptRequestFromPending(
                 redirectRequest,
-                { timeout },
+                timeout,
               );
+              if (redirectIntercept.reason !== undefined) {
+                cancelReason = redirectIntercept.reason;
+              }
 
               response = this._buildResponse<T>({
                 adapterResponse: null,
@@ -937,9 +971,10 @@ export class BaseHTTPClient {
         callbacks.setResponse(response);
         await this._runErrorObservers(
           normalizedError,
-          this._bestEffortAttemptRequestFromPending(interceptedRequest, {
+          this._bestEffortAttemptRequestFromPending(
+            interceptedRequest,
             timeout,
-          }),
+          ),
           {
             type: 'final',
           },
@@ -966,6 +1001,7 @@ export class BaseHTTPClient {
           errorCode ??
             (response.isStreamError ? 'stream_write_error' : undefined),
           adapterCause,
+          cancelReason,
         );
 
         callbacks.setError(error);
@@ -1012,7 +1048,7 @@ export class BaseHTTPClient {
       const safeHeaders: Record<string, string | string[]> = {};
       // Cross-origin safety: strip ALL headers except CORS-safelisted ones
       // when the redirect crosses origins (scheme + host + port). Matches
-      // Chromium/fetch behaviour — Authorization, X-API-Key, etc. must not
+      // Chromium/fetch behavior — Authorization, X-API-Key, etc. must not
       // leak to a different host. Cookies and internal headers are re-attached
       // later as needed.
       const safelisted = new Set([
@@ -1120,6 +1156,7 @@ export class BaseHTTPClient {
     isRetriesExhausted: boolean;
     errorCode?: HTTPClientError['code'];
     adapterCause?: Error;
+    cancelReason?: string;
   }> {
     const {
       request: baseRequest,
@@ -1224,6 +1261,7 @@ export class BaseHTTPClient {
           if (!('cancel' in retryIntercept)) {
             failedRetryRequest = retryIntercept;
             this._assertRequestIsSupported(retryIntercept);
+            this._assertInterceptorResolvedURL(retryIntercept.requestURL);
           }
         } catch (error) {
           clearTimeout(timeoutID);
@@ -1251,9 +1289,7 @@ export class BaseHTTPClient {
             adapterResponse: null,
             sentRequest: this._bestEffortAttemptRequestFromPending(
               failedRetryRequest,
-              {
-                timeout,
-              },
+              timeout,
             ),
             attemptCount: attemptNumber,
             wasCancelled: false,
@@ -1289,14 +1325,15 @@ export class BaseHTTPClient {
             adapterResponse: null,
             sentRequest: this._bestEffortAttemptRequestFromPending(
               baseRequest,
-              {
-                timeout,
-              },
+              timeout,
             ),
             attemptCount: attemptNumber,
             wasCancelled: true,
             wasTimeout: false,
             isRetriesExhausted: false,
+            ...(retryIntercept.reason !== undefined
+              ? { cancelReason: retryIntercept.reason }
+              : {}),
           };
         }
 
@@ -1305,9 +1342,9 @@ export class BaseHTTPClient {
 
       const sentRequest = this._buildAttemptRequest(attemptRequest, {
         requestID,
+        timeout,
         attemptNumber,
         cookieJar,
-        timeout,
       });
 
       const onUploadProgress = options.onUploadProgress;
@@ -1483,6 +1520,7 @@ export class BaseHTTPClient {
             await this._cancellableDelay(delayMS, cancelSignal);
 
             if (cancelSignal.aborted) {
+              const signalReason = getSignalCancelReason(cancelSignal);
               return {
                 adapterResponse: null,
                 sentRequest: observedSentRequest,
@@ -1490,6 +1528,9 @@ export class BaseHTTPClient {
                 wasCancelled: true,
                 wasTimeout: false,
                 isRetriesExhausted: false,
+                ...(signalReason !== undefined
+                  ? { cancelReason: signalReason }
+                  : {}),
               };
             }
 
@@ -1538,6 +1579,41 @@ export class BaseHTTPClient {
       } catch (error) {
         clearTimeout(timeoutID);
 
+        // When abort(string) is called, fetch() rejects with the string itself (per Fetch spec),
+        // not an AbortError. Check cancelSignal.aborted first so string-reason cancels are caught.
+        if (cancelSignal.aborted && !isAbortError(error)) {
+          options.onAttemptEnd?.({
+            attemptNumber,
+            isRetry,
+            willRetry: false,
+            nextRetryDelayMS: undefined,
+            nextRetryAt: undefined,
+            status: 0,
+            requestID,
+            initialURL,
+            ...(hopContext
+              ? {
+                  hopNumber: hopContext.hopNumber,
+                  redirect: hopContext.redirect,
+                }
+              : {}),
+          });
+
+          const signalReason = getSignalCancelReason(cancelSignal);
+
+          return {
+            adapterResponse: null,
+            sentRequest,
+            attemptCount: attemptNumber,
+            wasCancelled: true,
+            wasTimeout: isTimedOut,
+            isRetriesExhausted: false,
+            ...(signalReason !== undefined
+              ? { cancelReason: signalReason }
+              : {}),
+          };
+        }
+
         if (isAbortError(error) && isResponseStreamAbortError(error)) {
           if (cancelSignal.aborted) {
             options.onAttemptEnd?.({
@@ -1557,6 +1633,7 @@ export class BaseHTTPClient {
                 : {}),
             });
 
+            const signalReason = getSignalCancelReason(cancelSignal);
             return {
               adapterResponse: null,
               sentRequest: sentRequestForObservedAdapterError(
@@ -1568,6 +1645,9 @@ export class BaseHTTPClient {
               wasCancelled: true,
               wasTimeout: isTimedOut,
               isRetriesExhausted: false,
+              ...(signalReason !== undefined
+                ? { cancelReason: signalReason }
+                : {}),
             };
           }
 
@@ -1678,6 +1758,7 @@ export class BaseHTTPClient {
                 : {}),
             });
 
+            const signalReason = getSignalCancelReason(cancelSignal);
             return {
               adapterResponse: null,
               sentRequest,
@@ -1685,6 +1766,9 @@ export class BaseHTTPClient {
               wasCancelled: true,
               wasTimeout: isTimedOut,
               isRetriesExhausted: false,
+              ...(signalReason !== undefined
+                ? { cancelReason: signalReason }
+                : {}),
             };
           }
 
@@ -1697,7 +1781,21 @@ export class BaseHTTPClient {
               isTimedOut = true;
               // Fall through to the normal timeout retry path below.
             } else {
-              // AbortError without our timeout flag (unexpected) — treat as non-retryable cancel.
+              // AbortError without our timeout flag — treat as non-retryable cancel.
+              // This path includes StreamResponseFactory returning null / { cancel: true }.
+              const factoryCancelValue =
+                error !== null &&
+                typeof error === 'object' &&
+                STREAM_FACTORY_CANCEL_KEY in error
+                  ? (error as Record<string, unknown>)[
+                      STREAM_FACTORY_CANCEL_KEY
+                    ]
+                  : undefined;
+              const factoryCancelReason =
+                typeof factoryCancelValue === 'string'
+                  ? factoryCancelValue
+                  : undefined;
+
               options.onAttemptEnd?.({
                 attemptNumber,
                 isRetry,
@@ -1722,6 +1820,9 @@ export class BaseHTTPClient {
                 wasCancelled: true,
                 wasTimeout: false,
                 isRetriesExhausted: false,
+                ...(factoryCancelReason !== undefined
+                  ? { cancelReason: factoryCancelReason }
+                  : {}),
               };
             }
           }
@@ -1835,6 +1936,7 @@ export class BaseHTTPClient {
             await this._cancellableDelay(delayMS, cancelSignal);
 
             if (cancelSignal.aborted) {
+              const signalReason = getSignalCancelReason(cancelSignal);
               return {
                 adapterResponse: null,
                 sentRequest,
@@ -1842,6 +1944,9 @@ export class BaseHTTPClient {
                 wasCancelled: true,
                 wasTimeout: false,
                 isRetriesExhausted: false,
+                ...(signalReason !== undefined
+                  ? { cancelReason: signalReason }
+                  : {}),
               };
             }
 
@@ -2141,6 +2246,7 @@ export class BaseHTTPClient {
     isRetriesExhausted: boolean,
     codeOverride?: HTTPClientError['code'],
     cause?: Error,
+    cancelReason?: string,
   ): HTTPClientError {
     let code: HTTPClientError['code'] = codeOverride ?? 'network_error';
     let message = 'Network error';
@@ -2187,6 +2293,7 @@ export class BaseHTTPClient {
       requestID,
       isTimeout: response.isTimeout,
       isRetriesExhausted,
+      ...(cancelReason !== undefined ? { cancelReason } : {}),
     };
   }
 
@@ -2313,16 +2420,14 @@ export class BaseHTTPClient {
 
   private _bestEffortAttemptRequestFromPending(
     request: InterceptedRequest,
-    params: {
-      timeout: number;
-    },
+    timeout: number,
   ): AttemptRequest {
-    const { timeout } = params;
-    // Best-effort snapshot for observers on failures before dispatch. This uses
-    // the same serialization rules, but skips internal request headers and jar cookies
-    // because no concrete attempt was materialized. Unsupported body types should
-    // not escape as uncaught errors here; they are reported by the main
-    // request_setup_error path instead.
+    // Best-effort snapshot for observers when a request fails before any adapter
+    // attempt is dispatched (interceptor throw, pre-send cancel, setup error, etc.).
+    // Jar cookies and internal headers (x-local-client-request-id, x-local-client-request-attempt) are omitted
+    // intentionally — they are applied at dispatch time, and since no attempt ever
+    // went out, including them would be misleading. Unsupported body types are caught
+    // and swallowed here; the real error is reported via request_setup_error instead.
     const headers = mergeHeaders(request.headers);
     let clonedBodies: Pick<AttemptRequest, 'body' | 'rawBody'>;
 
@@ -2375,13 +2480,15 @@ export class BaseHTTPClient {
     }
 
     const controller = new AbortController();
-    const abort = () => controller.abort();
+    const abort = (signal: AbortSignal) => controller.abort(signal.reason);
 
-    if (a.aborted || b.aborted) {
-      controller.abort();
+    if (a.aborted) {
+      abort(a);
+    } else if (b.aborted) {
+      abort(b);
     } else {
-      a.addEventListener('abort', abort, { once: true });
-      b.addEventListener('abort', abort, { once: true });
+      a.addEventListener('abort', () => abort(a), { once: true });
+      b.addEventListener('abort', () => abort(b), { once: true });
     }
 
     return controller.signal;
@@ -2398,6 +2505,25 @@ export class BaseHTTPClient {
         request.headers,
         this._adapter.getType() === 'fetch' ? 'FetchAdapter' : 'XHR adapter',
       );
+    }
+  }
+
+  private _assertInterceptorResolvedURL(requestURL: string): void {
+    if (this._isSupportedRequestURL(requestURL)) {
+      return;
+    }
+
+    throw new Error(
+      `[HTTPClient] Interceptor rewrote requestURL to a value that could not be resolved to an absolute http(s) URL: "${requestURL}".`,
+    );
+  }
+
+  private _isSupportedRequestURL(requestURL: string): boolean {
+    try {
+      const url = new URL(requestURL);
+      return url.protocol === 'http:' || url.protocol === 'https:';
+    } catch {
+      return this._adapter.getType() === 'mock' && !requestURL.startsWith('//');
     }
   }
 }
@@ -2578,4 +2704,13 @@ function getResponseStreamAbortInfo(
     status,
     headers: headers as Record<string, string | string[]>,
   };
+}
+
+/**
+ * Returns the AbortSignal's reason as a string if the caller explicitly passed
+ * one (e.g. `controller.abort('my reason')`). Returns undefined for the default
+ * AbortError reason set by the runtime when no explicit reason is provided.
+ */
+function getSignalCancelReason(signal: AbortSignal): string | undefined {
+  return typeof signal.reason === 'string' ? signal.reason : undefined;
 }

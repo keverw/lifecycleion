@@ -29,7 +29,10 @@ export class FetchAdapter implements HTTPAdapter {
         redirect: 'manual',
       });
     } catch (error) {
-      if (isAbortError(error)) {
+      // Re-throw AbortErrors and any error thrown when the signal is already
+      // aborted. When abort(string) is called, fetch rejects with the string
+      // itself (not an AbortError), so checking signal.aborted covers that case.
+      if (isAbortError(error) || signal?.aborted) {
         throw error; // preserve cancellation / timeout classification
       }
 

@@ -8,11 +8,13 @@ import type {
   AdapterProgressEvent,
   AdapterType,
   WritableLike,
+  StreamResponseCancel,
 } from '../types';
 import {
   NON_RETRYABLE_HTTP_CLIENT_CALLBACK_ERROR_FLAG,
   REDIRECT_STATUS_CODES,
   RESPONSE_STREAM_ABORT_FLAG,
+  STREAM_FACTORY_CANCEL_KEY,
   STREAM_FACTORY_ERROR_FLAG,
 } from '../consts';
 import {
@@ -219,7 +221,7 @@ export class NodeAdapter implements HTTPAdapter {
               );
             }
 
-            let writable: WritableLike | null;
+            let writable: WritableLike | null | StreamResponseCancel;
 
             try {
               isStreamFactoryPending = true;
@@ -250,20 +252,29 @@ export class NodeAdapter implements HTTPAdapter {
             // promise has already settled through the abort listener; make a
             // best effort to close the newly created writable and stop here.
             if (streamAbort.signal.aborted) {
-              writable?.destroy();
+              if (writable && !isStreamResponseCancel(writable)) {
+                writable.destroy();
+              }
+
               return;
             }
 
-            if (writable === null) {
+            if (writable === null || isStreamResponseCancel(writable)) {
               // Factory declined to stream — user-initiated cancel. Fire the stream
               // signal so any cleanup listeners wired in the factory run, then throw
               // AbortError so the client's cancel path takes over (isCancelled: true).
+              const cancelReason =
+                writable !== null ? writable.reason : undefined;
+
               streamAbort.abort();
               req.destroy();
               const abortErr = new Error(
                 'Request cancelled by streamResponse factory',
               );
               abortErr.name = 'AbortError';
+              Object.assign(abortErr, {
+                [STREAM_FACTORY_CANCEL_KEY]: cancelReason ?? true,
+              });
               reject(abortErr);
               return;
             }
@@ -1010,4 +1021,12 @@ function markResponseStreamAbortError(
   tagged.streamAbortHeaders = headers;
 
   return error;
+}
+
+function isStreamResponseCancel(value: unknown): value is StreamResponseCancel {
+  return (
+    value !== null &&
+    typeof value === 'object' &&
+    (value as StreamResponseCancel).cancel === true
+  );
 }

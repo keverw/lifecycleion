@@ -506,6 +506,34 @@ describe('HTTPRequestBuilder', () => {
       expect(wasCancelCalled).toBe(true);
     });
 
+    test('passes reason string to cancelFn', async () => {
+      let capturedReason: string | undefined;
+
+      const { builder } = makeBuilder(undefined, (ctx) => {
+        ctx.callbacks.setCancelFn((reason) => {
+          capturedReason = reason;
+        });
+      });
+
+      await builder.send();
+      builder.cancel('user_navigated_away');
+      expect(capturedReason).toBe('user_navigated_away');
+    });
+
+    test('passes undefined to cancelFn when no reason given', async () => {
+      let capturedReason: string | undefined = 'sentinel';
+
+      const { builder } = makeBuilder(undefined, (ctx) => {
+        ctx.callbacks.setCancelFn((reason) => {
+          capturedReason = reason;
+        });
+      });
+
+      await builder.send();
+      builder.cancel();
+      expect(capturedReason).toBeUndefined();
+    });
+
     test('before send: sets state to cancelled and returns true', () => {
       const { builder } = makeBuilder();
       expect(builder.cancel()).toBe(true);

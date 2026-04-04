@@ -20,7 +20,7 @@ export interface BuilderCallbacks<T> {
   setNextRetryDelayMS: (delayMS: number | null) => void;
   setNextRetryAt: (timestampMS: number | null) => void;
   setStartedAt: (timestampMS: number) => void;
-  setCancelFn: (fn: () => void) => void;
+  setCancelFn: (fn: (reason?: string) => void) => void;
 }
 
 export interface BuilderSendContext<T = unknown> {
@@ -69,7 +69,7 @@ export class HTTPRequestBuilder<T = unknown> {
   private _nextRetryAt: number | null = null;
   private _startedAt: number | null = null;
   private _completedAt: number | null = null;
-  private _cancelFn: (() => void) | null = null;
+  private _cancelFn: ((reason?: string) => void) | null = null;
 
   constructor(
     method: HTTPMethod,
@@ -258,7 +258,7 @@ export class HTTPRequestBuilder<T = unknown> {
    * Calling cancel() before send() marks the builder as cancelled so that
    * send() throws instead of dispatching the request.
    */
-  public cancel(): boolean {
+  public cancel(reason?: string): boolean {
     if (
       this._state === 'completed' ||
       this._state === 'cancelled' ||
@@ -274,7 +274,7 @@ export class HTTPRequestBuilder<T = unknown> {
     }
 
     if (this._cancelFn) {
-      this._cancelFn();
+      this._cancelFn(reason);
       return true;
     }
 

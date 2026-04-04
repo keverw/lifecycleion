@@ -15,6 +15,7 @@ import {
   DEFAULT_REQUEST_ID_HEADER,
   DEFAULT_USER_AGENT,
 } from './consts';
+import { MockAdapter } from './adapters/mock-adapter';
 import type {
   AdapterRequest,
   AdapterResponse,
@@ -288,6 +289,58 @@ describe('HTTPClient — basic HTTP methods', () => {
         (globalThis as Record<string, unknown>).document = originalDocument;
       }
     }
+  });
+
+  test('browser fetch resolves relative baseURL requests against document.baseURI', async () => {
+    (globalThis as Record<string, unknown>).window = {
+      location: { href: 'https://app.test/shell/index.html' },
+    };
+    (globalThis as Record<string, unknown>).document = {
+      baseURI: 'https://cdn.test/base/',
+    };
+
+    let capturedURL: string | undefined;
+    globalThis.fetch = ((
+      url: string | URL | Request,
+      _init?: RequestInit,
+    ): Promise<Response> => {
+      capturedURL =
+        typeof url === 'string' ? url : url instanceof URL ? url.href : url.url;
+      return Promise.resolve(new Response('ok'));
+    }) as unknown as typeof fetch;
+
+    const client = new HTTPClient({ baseURL: '/api' });
+    const response = await client.get('/users').send<string>();
+
+    expect(response.status).toBe(200);
+    expect(capturedURL).toBe('https://cdn.test/api/users');
+  });
+
+  test('browser fetch resolves protocol-relative paths against the page scheme', async () => {
+    (globalThis as Record<string, unknown>).window = {
+      location: { href: 'https://app.test/shell/index.html' },
+    };
+    (globalThis as Record<string, unknown>).document = {
+      baseURI: 'https://app.test/base/',
+    };
+
+    let capturedURL: string | undefined;
+    globalThis.fetch = ((
+      url: string | URL | Request,
+      _init?: RequestInit,
+    ): Promise<Response> => {
+      capturedURL =
+        typeof url === 'string' ? url : url instanceof URL ? url.href : url.url;
+      return Promise.resolve(new Response('ok'));
+    }) as unknown as typeof fetch;
+
+    const client = new HTTPClient();
+    const response = await client
+      .get('//cdn.test/assets/app.js')
+      .send<string>();
+
+    expect(response.status).toBe(200);
+    expect(capturedURL).toBe('https://cdn.test/assets/app.js');
   });
 
   test('browser FetchAdapter with followRedirects false treats opaque redirects as disabled', async () => {
@@ -718,21 +771,21 @@ describe('HTTPClient — headers', () => {
     expect(res.body.headers['x-version']).toBe('2');
   });
 
-  test('includes x-request-id by default', async () => {
+  test('does not include x-local-client-request-id by default', async () => {
     const client = makeClient();
     const res = await client
       .get('/api/test')
       .send<{ headers: Record<string, string> }>();
-    expect(res.body.headers['x-request-id']).toBeDefined();
+    expect(res.body.headers['x-local-client-request-id']).toBeUndefined();
     expect(res.requestID).toBeDefined();
   });
 
-  test('x-request-id can be disabled', async () => {
-    const client = makeClient({ includeRequestID: false });
+  test('includes x-local-client-request-id when includeRequestID is enabled', async () => {
+    const client = makeClient({ includeRequestID: true });
     const res = await client
       .get('/api/test')
       .send<{ headers: Record<string, string> }>();
-    expect(res.body.headers['x-request-id']).toBeUndefined();
+    expect(res.body.headers['x-local-client-request-id']).toBeDefined();
   });
 
   test('applies explicit userAgent to mock adapters', async () => {
@@ -893,6 +946,29 @@ describe('HTTPClient — cancellation', () => {
     expect(res.isFailed).toBe(true);
   });
 
+  test('AbortSignal aborted with string reason surfaces cancelReason on the error', async () => {
+    const client = makeClient();
+    const controller = new AbortController();
+    controller.abort('user_navigated_away');
+
+    const builder = client.get('/api/slow').signal(controller.signal);
+    const res = await builder.send();
+
+    expect(res.isCancelled).toBe(true);
+    expect(builder.error?.cancelReason).toBe('user_navigated_away');
+  });
+
+  test('AbortSignal aborted without a reason produces no cancelReason', async () => {
+    const client = makeClient();
+    const controller = new AbortController();
+    controller.abort();
+
+    const builder = client.get('/api/slow').signal(controller.signal);
+    await builder.send();
+
+    expect(builder.error?.cancelReason).toBeUndefined();
+  });
+
   test('pre-aborted AbortSignal short-circuits before interceptors and adapter dispatch', async () => {
     let adapterCalls = 0;
     let interceptorCalls = 0;
@@ -999,6 +1075,235 @@ describe('HTTPClient — cancellation', () => {
     // unlabeled may or may not finish — just check it didn't get cancelled by the label stop
     expect(res2.isCancelled).toBe(false);
   });
+
+  test('builder.cancel(reason) surfaces cancelReason on the error', async () => {
+    const client = makeClient();
+    const builder = client.get('/api/slow');
+    const promise = builder.send();
+    setTimeout(() => builder.cancel('user_navigated_away'), 10);
+    const res = await promise;
+
+    expect(res.isCancelled).toBe(true);
+    expect(builder.error?.cancelReason).toBe('user_navigated_away');
+  });
+
+  test('builder.cancel() without reason produces no cancelReason', async () => {
+    const client = makeClient();
+    const builder = client.get('/api/slow');
+    const promise = builder.send();
+    setTimeout(() => builder.cancel(), 10);
+    await promise;
+
+    expect(builder.error?.cancelReason).toBeUndefined();
+  });
+
+  test('client.cancel(requestID, reason) surfaces cancelReason on the error', async () => {
+    const client = makeClient();
+    const builder = client.get('/api/slow');
+    const promise = builder.send();
+    client.cancel(builder.requestID, 'shutdown');
+    const res = await promise;
+
+    expect(res.isCancelled).toBe(true);
+    expect(builder.error?.cancelReason).toBe('shutdown');
+  });
+
+  test('client.cancelAll(reason) surfaces cancelReason on all cancelled requests', async () => {
+    const client = makeClient();
+    const b1 = client.get('/api/slow');
+    const b2 = client.get('/api/slow');
+    const [p1, p2] = [b1.send(), b2.send()];
+    setTimeout(() => client.cancelAll('app_shutdown'), 10);
+    await Promise.all([p1, p2]);
+
+    expect(b1.error?.cancelReason).toBe('app_shutdown');
+    expect(b2.error?.cancelReason).toBe('app_shutdown');
+  });
+
+  test('client.cancelAllWithLabel(label, reason) surfaces cancelReason on matching requests', async () => {
+    const client = makeClient();
+    const labeled = client.get('/api/slow').label('upload');
+    const unlabeled = client.get('/api/slow');
+    const [p1, p2] = [labeled.send(), unlabeled.send()];
+    setTimeout(() => client.cancelAllWithLabel('upload', 'quota_exceeded'), 10);
+    const [res1] = await Promise.all([p1, p2]);
+
+    expect(res1.isCancelled).toBe(true);
+    expect(labeled.error?.cancelReason).toBe('quota_exceeded');
+  });
+
+  test('client.cancelOwn(reason) surfaces cancelReason on the client own requests', async () => {
+    const client = makeClient();
+    const builder = client.get('/api/slow');
+    const promise = builder.send();
+    setTimeout(() => client.cancelOwn('component_unmounted'), 10);
+    const res = await promise;
+
+    expect(res.isCancelled).toBe(true);
+    expect(builder.error?.cancelReason).toBe('component_unmounted');
+  });
+
+  test('client.cancelOwnWithLabel(label, reason) surfaces cancelReason on matching requests', async () => {
+    const client = makeClient();
+    const labeled = client.get('/api/slow').label('poll');
+    const unlabeled = client.get('/api/slow');
+    const [p1, p2] = [labeled.send(), unlabeled.send()];
+    setTimeout(() => client.cancelOwnWithLabel('poll', 'tab_hidden'), 10);
+    const [res1] = await Promise.all([p1, p2]);
+
+    expect(res1.isCancelled).toBe(true);
+    expect(labeled.error?.cancelReason).toBe('tab_hidden');
+  });
+});
+
+describe('HTTPClient — cancel reason via AbortError-throwing adapters', () => {
+  // These tests use a mock adapter that delays and throws a real AbortError
+  // (the same pattern as XHRAdapter and NodeAdapter) to confirm that cancel
+  // reasons are surfaced via cancelSignal.reason even when the adapter does
+  // NOT propagate signal.reason through the thrown error.
+  function makeAbortErrorAdapter() {
+    const adapter: HTTPAdapter = {
+      getType: () => 'mock' as const,
+      send: (_request: AdapterRequest): Promise<AdapterResponse> => {
+        if (_request.signal?.aborted) {
+          const err = new Error('Request aborted');
+          err.name = 'AbortError';
+          return Promise.reject(err);
+        }
+
+        return new Promise<AdapterResponse>((_resolve, reject) => {
+          _request.signal?.addEventListener('abort', () => {
+            // Always throw a plain AbortError — does NOT include signal.reason,
+            // matching what XHRAdapter and NodeAdapter do.
+            const err = new Error('Request aborted');
+            err.name = 'AbortError';
+            reject(err);
+          });
+        });
+      },
+    };
+
+    return { adapter };
+  }
+
+  test('string cancel reason surfaces via cancelSignal.reason even when adapter throws plain AbortError', async () => {
+    const { adapter } = makeAbortErrorAdapter();
+    const client = new HTTPClient({ adapter });
+    const builder = client.get('https://example.com/slow');
+    const promise = builder.send();
+    setTimeout(() => builder.cancel('user_navigated_away'), 10);
+    const res = await promise;
+
+    expect(res.isCancelled).toBe(true);
+    expect(builder.error?.cancelReason).toBe('user_navigated_away');
+  });
+
+  test('cancelAll with reason surfaces via cancelSignal.reason for AbortError-throwing adapter', async () => {
+    const { adapter } = makeAbortErrorAdapter();
+    const client = new HTTPClient({ adapter });
+    const b1 = client.get('https://example.com/slow');
+    const b2 = client.get('https://example.com/slow');
+    const [p1, p2] = [b1.send(), b2.send()];
+    setTimeout(() => client.cancelAll('app_shutdown'), 10);
+    await Promise.all([p1, p2]);
+
+    expect(b1.error?.cancelReason).toBe('app_shutdown');
+    expect(b2.error?.cancelReason).toBe('app_shutdown');
+  });
+
+  test('external AbortSignal reason is preserved when AbortSignal.any is unavailable', async () => {
+    const { adapter } = makeAbortErrorAdapter();
+    const client = new HTTPClient({ adapter });
+    const controller = new AbortController();
+    const originalAny = AbortSignal.any;
+
+    Object.defineProperty(AbortSignal, 'any', {
+      value: undefined,
+      configurable: true,
+    });
+
+    try {
+      const builder = client
+        .get('https://example.com/slow')
+        .signal(controller.signal);
+      const promise = builder.send();
+      setTimeout(() => controller.abort('user_navigated_away'), 10);
+      const res = await promise;
+
+      expect(res.isCancelled).toBe(true);
+      expect(builder.error?.cancelReason).toBe('user_navigated_away');
+    } finally {
+      Object.defineProperty(AbortSignal, 'any', {
+        value: originalAny,
+        configurable: true,
+      });
+    }
+  });
+
+  test('no cancelReason when cancel called without reason via AbortError-throwing adapter', async () => {
+    const { adapter } = makeAbortErrorAdapter();
+    const client = new HTTPClient({ adapter });
+    const builder = client.get('https://example.com/slow');
+    const promise = builder.send();
+    setTimeout(() => builder.cancel(), 10);
+    await promise;
+
+    expect(builder.error?.cancelReason).toBeUndefined();
+  });
+});
+
+describe('HTTPClient — interceptor cancel reason', () => {
+  test('interceptor returning { cancel: true } sets isCancelled with no cancelReason', async () => {
+    const client = makeClient();
+    client.addRequestInterceptor(() => ({ cancel: true as const }));
+
+    const builder = client.get('/api/test');
+    const res = await builder.send();
+
+    expect(res.isCancelled).toBe(true);
+    expect(builder.error?.cancelReason).toBeUndefined();
+  });
+
+  test('interceptor returning null is treated as cancel with no reason', async () => {
+    const client = makeClient();
+    client.addRequestInterceptor(() => null);
+
+    const builder = client.get('/api/test');
+    const res = await builder.send();
+
+    expect(res.isCancelled).toBe(true);
+    expect(builder.error?.cancelReason).toBeUndefined();
+  });
+
+  test('interceptor returning { cancel: true, reason } surfaces cancelReason on the error', async () => {
+    const client = makeClient();
+    client.addRequestInterceptor(() => ({
+      cancel: true as const,
+      reason: 'auth_missing',
+    }));
+
+    const builder = client.get('/api/test');
+    const res = await builder.send();
+
+    expect(res.isCancelled).toBe(true);
+    expect(builder.error?.cancelReason).toBe('auth_missing');
+  });
+
+  test('retry-phase interceptor cancel reason surfaces on the error', async () => {
+    const client = makeClient({
+      retryPolicy: { strategy: 'fixed', maxRetryAttempts: 1, delayMS: 0 },
+    });
+    client.addRequestInterceptor(
+      () => ({ cancel: true as const, reason: 'no_more_retries' }),
+      { phases: ['retry'] },
+    );
+
+    const builder = client.get('/api/error'); // 500 triggers retry
+    const res = await builder.send();
+
+    expect(res.isCancelled).toBe(true);
+    expect(builder.error?.cancelReason).toBe('no_more_retries');
+  });
 });
 
 describe('HTTPClient — timeout', () => {
@@ -1010,6 +1315,8 @@ describe('HTTPClient — timeout', () => {
     expect(res.isTimeout).toBe(true);
     expect(res.isFailed).toBe(true);
     expect(builder.error?.code).toBe('timeout');
+    // Timeouts must never produce a cancelReason
+    expect(builder.error?.cancelReason).toBeUndefined();
   });
 
   test('timeout(0) disables the per-attempt timeout', async () => {
@@ -1484,6 +1791,19 @@ describe('HTTPClient — interceptors', () => {
     expect(payload.nested.value).toBe(1);
   });
 
+  test('response observer receives the effective request timeout', async () => {
+    const client = makeClient({ followRedirects: true });
+    let observedTimeout: number | undefined;
+
+    client.addResponseObserver((_res, req) => {
+      observedTimeout = req.timeout;
+    });
+
+    await client.get('/api/users/1').timeout(4_321).send();
+
+    expect(observedTimeout).toBe(4_321);
+  });
+
   test('request interceptor failures are normalized as interceptor errors', async () => {
     const adapterCalls: string[] = [];
     const errorCodes: string[] = [];
@@ -1898,7 +2218,12 @@ describe('HTTPClient — redirect', () => {
       },
     };
 
-    const client = new HTTPClient({ adapter, followRedirects: true });
+    const client = new HTTPClient({
+      adapter,
+      followRedirects: true,
+      includeRequestID: true,
+    });
+
     client.addRequestInterceptor((req) => ({
       ...req,
       headers: {
@@ -2527,6 +2852,41 @@ describe('HTTPClient — sub-clients', () => {
     });
 
     await sub.get('/api/test').send();
+    expect(order).toEqual(['root', 'sub']);
+  });
+
+  test('sub-client parent response observers run before sub-client observers', async () => {
+    const root = makeClient();
+    const order: string[] = [];
+
+    root.addResponseObserver(() => {
+      order.push('root');
+    });
+
+    const sub = root.createSubClient();
+    sub.addResponseObserver(() => {
+      order.push('sub');
+    });
+
+    await sub.get('/api/test').send();
+    expect(order).toEqual(['root', 'sub']);
+  });
+
+  test('sub-client parent error observers run before sub-client observers', async () => {
+    const root = new HTTPClient({ timeout: 100 });
+    const order: string[] = [];
+
+    root.addErrorObserver(() => {
+      order.push('root');
+    });
+
+    const sub = root.createSubClient();
+    sub.addErrorObserver(() => {
+      order.push('sub');
+    });
+
+    // Use a port nothing is listening on to guarantee a transport failure
+    await sub.get('http://127.0.0.1:1').send();
     expect(order).toEqual(['root', 'sub']);
   });
 
@@ -3199,6 +3559,62 @@ describe('HTTPClient — phase-aware interceptors', () => {
     expect(attemptLifecycle).toEqual(['start:1', 'end:1', 'start:2', 'end:2']);
   });
 
+  test('retry-phase interceptor rewriting requestURL to unresolvable value gets interceptor_error', async () => {
+    let adapterCalls = 0;
+
+    const adapter: HTTPAdapter = {
+      getType: () => 'mock',
+      send: (_request: AdapterRequest): Promise<AdapterResponse> => {
+        adapterCalls++;
+
+        if (adapterCalls === 1) {
+          return Promise.resolve({ status: 503, headers: {}, body: null });
+        }
+
+        return Promise.resolve({
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+          body: new TextEncoder().encode('{}'),
+        });
+      },
+    };
+
+    const client = new HTTPClient({
+      adapter,
+      retryPolicy: { strategy: 'fixed', maxRetryAttempts: 1, delayMS: 0 },
+    });
+
+    const errorCodes: string[] = [];
+
+    client.addRequestInterceptor(
+      (request, phase) =>
+        phase.type === 'retry'
+          ? {
+              ...request,
+              requestURL: '//bad-retry-rewrite.example.com/path',
+            }
+          : request,
+      { phases: ['retry'] },
+    );
+
+    client.addErrorObserver((err) => {
+      errorCodes.push(err.code);
+    });
+
+    const builder = client.get('https://example.com/users');
+    const res = await builder.send();
+
+    expect(adapterCalls).toBe(1);
+    expect(res.status).toBe(0);
+    expect(res.isFailed).toBe(true);
+    expect(res.isNetworkError).toBe(false);
+    expect(builder.state).toBe('failed');
+    expect(builder.attemptCount).toBe(2);
+    expect(builder.error?.code).toBe('interceptor_error');
+    expect(builder.error?.cause?.message).toMatch(/could not be resolved/i);
+    expect(errorCodes).toEqual(['interceptor_error']);
+  });
+
   test('redirect-phase interceptor injects header on redirects', async () => {
     const client = makeClient({ followRedirects: true });
 
@@ -3447,6 +3863,61 @@ describe('HTTPClient — phase-aware interceptors', () => {
     expect(res.initialURL).toBe(a);
     expect(res.requestURL).toBe(c);
     expect(res.redirectHistory).toEqual([b, c]);
+  });
+
+  test('redirect-phase interceptor rewriting requestURL to unresolvable value gets interceptor_error', async () => {
+    let adapterCalls = 0;
+
+    const adapter: HTTPAdapter = {
+      getType: () => 'mock',
+      send: (request: AdapterRequest): Promise<AdapterResponse> => {
+        adapterCalls++;
+
+        if (request.requestURL === 'https://example.com/start') {
+          return Promise.resolve({
+            status: 302,
+            headers: { location: 'https://example.com/redirected' },
+            body: null,
+          });
+        }
+
+        return Promise.resolve({
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+          body: new TextEncoder().encode('{}'),
+        });
+      },
+    };
+
+    const client = new HTTPClient({ adapter, followRedirects: true });
+    const errorCodes: string[] = [];
+
+    client.addRequestInterceptor(
+      (request, phase) =>
+        phase.type === 'redirect'
+          ? {
+              ...request,
+              requestURL: '//bad-redirect-rewrite.example.com/path',
+            }
+          : request,
+      { phases: ['redirect'] },
+    );
+    client.addErrorObserver((err) => {
+      errorCodes.push(err.code);
+    });
+
+    const builder = client.get('https://example.com/start');
+    const res = await builder.send();
+
+    expect(adapterCalls).toBe(1);
+    expect(res.status).toBe(0);
+    expect(res.isFailed).toBe(true);
+    expect(res.isNetworkError).toBe(false);
+    expect(builder.state).toBe('failed');
+    expect(builder.attemptCount).toBe(1);
+    expect(builder.error?.code).toBe('interceptor_error');
+    expect(builder.error?.cause?.message).toMatch(/could not be resolved/i);
+    expect(errorCodes).toEqual(['interceptor_error']);
   });
 
   test('redirect-phase response observer sees post-interceptor request on subsequent hops', async () => {
@@ -4531,6 +5002,39 @@ describe('HTTPClient — phase-aware interceptors', () => {
     expect(errorCodes).toEqual(['request_setup_error']);
   });
 
+  test('error observer receives the effective request timeout on setup failures', async () => {
+    let wasAdapterCalled = false;
+    let observedTimeout: number | undefined;
+
+    const adapter: HTTPAdapter = {
+      getType: () => 'mock',
+      send: (_request: AdapterRequest): Promise<AdapterResponse> => {
+        wasAdapterCalled = true;
+        return Promise.resolve({
+          status: 200,
+          headers: {},
+          body: null,
+        });
+      },
+    };
+
+    const client = new HTTPClient({ adapter });
+
+    client.addErrorObserver((_err, req) => {
+      observedTimeout = req.timeout;
+    });
+
+    const res = await client
+      .post('https://example.com/test')
+      .timeout(6_789)
+      .body(new URLSearchParams({ a: '1' }))
+      .send();
+
+    expect(wasAdapterCalled).toBe(false);
+    expect(res.isFailed).toBe(true);
+    expect(observedTimeout).toBe(6_789);
+  });
+
   test('unsupported request body from interceptor gets interceptor_error code', async () => {
     let wasAdapterCalled = false;
 
@@ -4572,5 +5076,174 @@ describe('HTTPClient — phase-aware interceptors', () => {
       /Unsupported request body type/i,
     );
     expect(errorCodes).toEqual(['interceptor_error']);
+  });
+
+  test('unresolvable protocol-relative URL without baseURL gets request_setup_error', async () => {
+    let wasAdapterCalled = false;
+
+    const adapter: HTTPAdapter = {
+      getType: () => 'mock',
+      send: (_request: AdapterRequest): Promise<AdapterResponse> => {
+        wasAdapterCalled = true;
+        return Promise.resolve({ status: 200, headers: {}, body: null });
+      },
+    };
+
+    const client = new HTTPClient({ adapter });
+    const errorCodes: string[] = [];
+
+    client.addErrorObserver((err) => {
+      errorCodes.push(err.code);
+    });
+
+    const builder = client.get('//example.com/users');
+    const res = await builder.send();
+
+    expect(wasAdapterCalled).toBe(false);
+    expect(res.status).toBe(0);
+    expect(res.isFailed).toBe(true);
+    expect(res.isNetworkError).toBe(false);
+    expect(builder.state).toBe('failed');
+    expect(builder.attemptCount).toBe(0);
+    expect(builder.error?.code).toBe('request_setup_error');
+    expect(builder.error?.cause?.message).toMatch(/could not be resolved/i);
+    expect(errorCodes).toEqual(['request_setup_error']);
+  });
+
+  test('MockAdapter without baseURL still accepts path-only requests', async () => {
+    const adapter = new MockAdapter();
+    let interceptedURL: string | undefined;
+
+    adapter.routes.get('/users', () => ({
+      status: 200,
+      body: { ok: true },
+    }));
+
+    const client = new HTTPClient({ adapter });
+
+    client.addRequestInterceptor((request) => {
+      interceptedURL = request.requestURL;
+      return request;
+    });
+
+    const res = await client.get('/users').send<{ ok: boolean }>();
+
+    expect(interceptedURL).toBe('/users');
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ ok: true });
+  });
+
+  test('MockAdapter interceptor may rewrite path-only requestURL without baseURL', async () => {
+    const adapter = new MockAdapter();
+    const seenURLs: string[] = [];
+
+    adapter.routes.get('/rewritten', () => ({
+      status: 200,
+      body: { ok: true },
+    }));
+
+    const client = new HTTPClient({ adapter });
+
+    client.addRequestInterceptor((request) => {
+      seenURLs.push(request.requestURL);
+
+      return {
+        ...request,
+        requestURL: '/rewritten',
+      };
+    });
+
+    const res = await client.get('/users').send<{ ok: boolean }>();
+
+    expect(seenURLs).toEqual(['/users']);
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ ok: true });
+  });
+
+  test('MockAdapter interceptor still rejects protocol-relative rewrites without baseURL', async () => {
+    const adapter = new MockAdapter();
+    let wasRouteCalled = false;
+
+    adapter.routes.get('/users', () => {
+      wasRouteCalled = true;
+      return {
+        status: 200,
+        body: { ok: true },
+      };
+    });
+
+    const client = new HTTPClient({ adapter });
+
+    client.addRequestInterceptor((request) => ({
+      ...request,
+      requestURL: '//bad-rewrite.example.com/path',
+    }));
+
+    const builder = client.get('/users');
+    const res = await builder.send();
+
+    expect(wasRouteCalled).toBe(false);
+    expect(res.status).toBe(0);
+    expect(res.isFailed).toBe(true);
+    expect(builder.error?.code).toBe('interceptor_error');
+  });
+
+  test('interceptor rewriting requestURL to unresolvable value gets interceptor_error', async () => {
+    let wasAdapterCalled = false;
+
+    const adapter: HTTPAdapter = {
+      getType: () => 'mock',
+      send: (_request: AdapterRequest): Promise<AdapterResponse> => {
+        wasAdapterCalled = true;
+        return Promise.resolve({ status: 200, headers: {}, body: null });
+      },
+    };
+
+    const client = new HTTPClient({ adapter });
+    const errorCodes: string[] = [];
+
+    client.addRequestInterceptor((request) => ({
+      ...request,
+      requestURL: '//bad-rewrite.example.com/path',
+    }));
+    client.addErrorObserver((err) => {
+      errorCodes.push(err.code);
+    });
+
+    const builder = client.get('https://example.com/users');
+    const res = await builder.send();
+
+    expect(wasAdapterCalled).toBe(false);
+    expect(res.status).toBe(0);
+    expect(res.isFailed).toBe(true);
+    expect(res.isNetworkError).toBe(false);
+    expect(builder.state).toBe('failed');
+    expect(builder.error?.code).toBe('interceptor_error');
+    expect(builder.error?.cause?.message).toMatch(
+      /interceptor rewrote requestURL/i,
+    );
+    expect(errorCodes).toEqual(['interceptor_error']);
+  });
+
+  test('interceptor rewriting requestURL to uppercase-scheme absolute URL remains valid', async () => {
+    const adapter = new MockAdapter();
+    adapter.routes.get('/users', () => ({
+      status: 200,
+      body: { ok: true },
+    }));
+
+    const client = new HTTPClient({ adapter });
+
+    client.addRequestInterceptor((request) => ({
+      ...request,
+      requestURL: 'HTTPS://example.com/users',
+    }));
+
+    const builder = client.get('https://example.com/original');
+    const res = await builder.send<{ ok: boolean }>();
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ ok: true });
+    expect(builder.error).toBeNull();
   });
 });

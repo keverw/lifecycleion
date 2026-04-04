@@ -336,7 +336,7 @@ describe('FetchAdapter', () => {
         requestURL: 'https://local.test/users',
         method: 'GET',
         headers: {},
-        }),
+      }),
     ).rejects.toThrow(/aborted/i);
   });
 
@@ -461,7 +461,7 @@ describe('FetchAdapter', () => {
         requestURL: `${server.url}/api/users/42`,
         method: 'GET',
         headers: {},
-        });
+      });
 
       expect(response.status).toBe(200);
       expect(response.body).toBeInstanceOf(Uint8Array);
@@ -475,7 +475,7 @@ describe('FetchAdapter', () => {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ name: 'Alice' }),
-        });
+      });
 
       expect(response.status).toBe(201);
       const body = JSON.parse(decoder.decode(response.body as Uint8Array));
@@ -487,7 +487,7 @@ describe('FetchAdapter', () => {
         requestURL: `${server.url}/api/test`,
         method: 'GET',
         headers: {},
-        });
+      });
 
       expect(response.headers).toBeDefined();
 
@@ -501,7 +501,7 @@ describe('FetchAdapter', () => {
         requestURL: `${server.url}/api/nonexistent`,
         method: 'GET',
         headers: {},
-        });
+      });
 
       expect(response.status).toBe(404);
     });
@@ -511,7 +511,7 @@ describe('FetchAdapter', () => {
         requestURL: `${server.url}/api/text`,
         method: 'GET',
         headers: {},
-        });
+      });
 
       expect(response.status).toBe(200);
       expect(response.body).toBeInstanceOf(Uint8Array);
@@ -523,7 +523,7 @@ describe('FetchAdapter', () => {
         requestURL: `${server.url}/api/no-content`,
         method: 'GET',
         headers: {},
-        });
+      });
 
       expect(response.status).toBe(204);
       expect(response.body).toBeNull();
@@ -534,7 +534,7 @@ describe('FetchAdapter', () => {
         requestURL: `${server.url}/api/test`,
         method: 'GET',
         headers: {},
-        });
+      });
 
       expect(response.status).toBe(200);
     });
@@ -544,7 +544,7 @@ describe('FetchAdapter', () => {
         requestURL: `${server.url}/api/redirect/301`,
         method: 'GET',
         headers: {},
-        });
+      });
 
       expect([0, 301]).toContain(response.status);
     });
@@ -579,7 +579,7 @@ describe('FetchAdapter', () => {
           requestURL: `${server.url}/api/slow`,
           method: 'GET',
           headers: {},
-              signal: controller.signal,
+          signal: controller.signal,
         }),
       ).rejects.toThrow();
     });
