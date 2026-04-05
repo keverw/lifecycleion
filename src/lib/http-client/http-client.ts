@@ -346,12 +346,9 @@ export class BaseHTTPClient {
       );
     }
 
-    const { method, path, options, callbacks } = ctx;
-
-    const requestID = generateID('ulid');
+    const { method, path, requestID, options, callbacks } = ctx;
 
     // Wire up builder state
-    callbacks.setRequestID(requestID);
     callbacks.setState('sending');
 
     // buildURL: relative path + baseURL, OR absolute http(s) / //host path unchanged
@@ -427,7 +424,7 @@ export class BaseHTTPClient {
       callbacks.setState('cancelled');
       await this._runErrorObservers(
         error,
-        this._bestEffortAttemptRequestFromPending(interceptedRequest, timeout),
+        this._bestEffortAttemptRequestFromPending(interceptedRequest, timeout, requestID),
         {
           type: 'final',
         },
@@ -475,6 +472,7 @@ export class BaseHTTPClient {
       let observerRequest = this._bestEffortAttemptRequestFromPending(
         interceptedRequest,
         timeout,
+        requestID,
       );
       let errorCode: HTTPClientError['code'] | undefined;
       let adapterCause: Error | undefined;
@@ -513,7 +511,7 @@ export class BaseHTTPClient {
           interceptResult = await this._runInterceptors(
             finalRequest,
             initialPhase,
-            { initialURL: url, redirectHistory: [] },
+            { initialURL: url, redirectHistory: [], requestID, attemptNumber: 1 },
           );
 
           if (!('cancel' in interceptResult)) {
@@ -551,6 +549,7 @@ export class BaseHTTPClient {
             this._bestEffortAttemptRequestFromPending(
               initialRequestCandidate,
               timeout,
+              requestID,
             ),
             {
               type: 'final',
@@ -585,7 +584,7 @@ export class BaseHTTPClient {
 
           await this._runErrorObservers(
             error,
-            this._bestEffortAttemptRequestFromPending(finalRequest, timeout),
+            this._bestEffortAttemptRequestFromPending(finalRequest, timeout, requestID),
             {
               type: 'final',
             },
@@ -841,6 +840,8 @@ export class BaseHTTPClient {
                 {
                   initialURL: finalRequest.requestURL,
                   redirectHistory: nextRedirectHistory,
+                  requestID,
+                  attemptNumber: lastAttemptNumber + 1,
                 },
               );
               if (!('cancel' in redirectIntercept)) {
@@ -854,6 +855,7 @@ export class BaseHTTPClient {
               observerRequest = this._bestEffortAttemptRequestFromPending(
                 failedRedirectRequest,
                 timeout,
+                requestID,
               );
               response = this._buildResponse<T>({
                 adapterResponse: null,
@@ -879,6 +881,7 @@ export class BaseHTTPClient {
               observerRequest = this._bestEffortAttemptRequestFromPending(
                 redirectRequest,
                 timeout,
+                requestID,
               );
               if (redirectIntercept.reason !== undefined) {
                 cancelReason = redirectIntercept.reason;
@@ -978,6 +981,7 @@ export class BaseHTTPClient {
           this._bestEffortAttemptRequestFromPending(
             interceptedRequest,
             timeout,
+            requestID,
           ),
           {
             type: 'final',
@@ -1260,7 +1264,7 @@ export class BaseHTTPClient {
               ),
             },
             retryPhase,
-            { initialURL, redirectHistory },
+            { initialURL, redirectHistory, requestID, attemptNumber },
           );
           if (!('cancel' in retryIntercept)) {
             failedRetryRequest = retryIntercept;
@@ -1294,6 +1298,7 @@ export class BaseHTTPClient {
             sentRequest: this._bestEffortAttemptRequestFromPending(
               failedRetryRequest,
               timeout,
+              requestID,
             ),
             attemptCount: attemptNumber,
             wasCancelled: false,
@@ -1330,6 +1335,7 @@ export class BaseHTTPClient {
             sentRequest: this._bestEffortAttemptRequestFromPending(
               baseRequest,
               timeout,
+              requestID,
             ),
             attemptCount: attemptNumber,
             wasCancelled: true,
@@ -2419,12 +2425,15 @@ export class BaseHTTPClient {
       body: observedBodies.body,
       rawBody: observedBodies.rawBody,
       timeout,
+      attemptNumber,
+      requestID,
     };
   }
 
   private _bestEffortAttemptRequestFromPending(
     request: InterceptedRequest,
     timeout: number,
+    requestID: string,
   ): AttemptRequest {
     // Best-effort snapshot for observers when a request fails before any adapter
     // attempt is dispatched (interceptor throw, pre-send cancel, setup error, etc.).
@@ -2451,6 +2460,7 @@ export class BaseHTTPClient {
       body: clonedBodies.body,
       rawBody: clonedBodies.rawBody,
       timeout,
+      requestID,
     };
   }
 

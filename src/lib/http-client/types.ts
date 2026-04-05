@@ -716,6 +716,16 @@ export interface RequestInterceptorContext {
    * target before any rewrite returned from that interceptor.
    */
   redirectHistory: string[];
+  /**
+   * ULID assigned to this `send()` call.
+   * Matches {@link HTTPResponse.requestID} and {@link HTTPClientError.requestID}.
+   */
+  requestID: string;
+  /**
+   * The adapter attempt number that will be dispatched after this interceptor
+   * chain completes (1-based). Increments on each retry across all redirect hops.
+   */
+  attemptNumber: number;
 }
 
 export type RequestInterceptor = (
@@ -748,7 +758,11 @@ export interface InterceptedRequest {
  */
 export type AttemptRequest = Omit<
   AdapterRequest,
-  'headers' | 'signal' | 'onUploadProgress' | 'onDownloadProgress'
+  | 'headers'
+  | 'signal'
+  | 'onUploadProgress'
+  | 'onDownloadProgress'
+  | 'streamResponse'
 > & {
   /**
    * Final request headers visible to response/error observers. These are
@@ -764,6 +778,19 @@ export type AttemptRequest = Omit<
   rawBody?: unknown;
   /** Effective per-attempt timeout in ms. */
   timeout?: number;
+  /**
+   * 1-based attempt number for this adapter call. Increments on each retry.
+   * Undefined on best-effort snapshots produced before any adapter attempt is
+   * dispatched (e.g. interceptor errors, pre-send cancellations).
+   */
+  attemptNumber?: number;
+  /**
+   * ULID assigned to this {@link BaseHTTPClient.request} `send()` call.
+   * Matches {@link HTTPResponse.requestID} and {@link HTTPClientError.requestID}.
+   * Undefined on best-effort snapshots produced before the request ID is assigned
+   * (should not occur in practice).
+   */
+  requestID?: string;
 };
 
 export type ResponseObserver = (

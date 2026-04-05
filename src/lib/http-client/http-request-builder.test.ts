@@ -111,11 +111,10 @@ describe('HTTPRequestBuilder', () => {
       expect(builder.elapsedMS).toBeNull();
     });
 
-    test('requestID throws before send', () => {
+    test('requestID is available before send', () => {
       const { builder } = makeBuilder();
-      expect(() => builder.requestID).toThrow(
-        /not available until after .send\(\)/,
-      );
+      expect(typeof builder.requestID).toBe('string');
+      expect(builder.requestID.length).toBeGreaterThan(0);
     });
   });
 
@@ -337,13 +336,24 @@ describe('HTTPRequestBuilder', () => {
   });
 
   describe('callbacks wire up post-send state', () => {
-    test('setRequestID makes requestID available', async () => {
-      const { builder } = makeBuilder(undefined, (ctx) => {
-        ctx.callbacks.setRequestID('req-abc');
-      });
+    test('requestID is available before send()', () => {
+      const { builder } = makeBuilder();
+      expect(typeof builder.requestID).toBe('string');
+      expect(builder.requestID.length).toBeGreaterThan(0);
+    });
 
+    test('requestID is stable — same value before and after send()', async () => {
+      const { builder } = makeBuilder();
+      const idBeforeSend = builder.requestID;
       await builder.send();
-      expect(builder.requestID).toBe('req-abc');
+      expect(builder.requestID).toBe(idBeforeSend);
+    });
+
+    test('sendFn receives the builder requestID in context', async () => {
+      const { builder, requireContext } = makeBuilder();
+      const idBeforeSend = builder.requestID;
+      await builder.send();
+      expect(requireContext().requestID).toBe(idBeforeSend);
     });
 
     test('setState updates state', async () => {
@@ -568,6 +578,20 @@ describe('HTTPRequestBuilder', () => {
       const { builder } = makeBuilder();
       builder.cancel();
       expect(() => builder.send()).toThrow(/after cancel\(\)/);
+    });
+
+    test('before send: send() error includes reason when cancel() was called with one', () => {
+      const { builder } = makeBuilder();
+      builder.cancel('quota_exceeded');
+      expect(() => builder.send()).toThrow(/after cancel\(\).*quota_exceeded/);
+    });
+
+    test('before send: send() error has no reason suffix when cancel() had no reason', () => {
+      const { builder } = makeBuilder();
+      builder.cancel();
+      expect(() => builder.send()).toThrow(
+        'HTTPRequestBuilder.send() cannot be called after cancel() has been called.',
+      );
     });
 
     test('returns false when state is completed', async () => {

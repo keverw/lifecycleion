@@ -1,3 +1,4 @@
+import { generateID } from '../id-helpers';
 import type {
   HTTPMethod,
   HTTPResponse,
@@ -12,7 +13,6 @@ import type {
 import type { RetryPolicyOptions } from '../retry-utils';
 
 export interface BuilderCallbacks<T> {
-  setRequestID: (id: string) => void;
   setState: (state: RequestState) => void;
   setResponse: (response: HTTPResponse<T>) => void;
   setError: (error: HTTPClientError) => void;
@@ -26,6 +26,7 @@ export interface BuilderCallbacks<T> {
 export interface BuilderSendContext<T = unknown> {
   method: HTTPMethod;
   path: string;
+  requestID: string;
   options: ResolvedBuilderOptions;
   callbacks: BuilderCallbacks<T>;
 }
@@ -60,7 +61,7 @@ export class HTTPRequestBuilder<T = unknown> {
   private _sent = false;
 
   // Post-send state (public read-only after send)
-  private _requestID: string | null = null;
+  private _requestID: string = generateID('ulid');
   private _state: RequestState = 'pending';
   private _response: HTTPResponse<T> | null = null;
   private _error: HTTPClientError | null = null;
@@ -70,6 +71,7 @@ export class HTTPRequestBuilder<T = unknown> {
   private _startedAt: number | null = null;
   private _completedAt: number | null = null;
   private _cancelFn: ((reason?: string) => void) | null = null;
+  private _preSendCancelReason: string | undefined = undefined;
 
   constructor(
     method: HTTPMethod,
@@ -208,12 +210,6 @@ export class HTTPRequestBuilder<T = unknown> {
   // --- Post-send accessors ---
 
   public get requestID(): string {
-    if (!this._requestID) {
-      throw new Error(
-        'requestID is not available until after .send() is called',
-      );
-    }
-
     return this._requestID;
   }
 
@@ -277,6 +273,7 @@ export class HTTPRequestBuilder<T = unknown> {
     // Pre-send cancel: mark as cancelled so send() is blocked
     if (!this._sent) {
       this._state = 'cancelled';
+      this._preSendCancelReason = reason;
       return true;
     }
 
@@ -292,8 +289,12 @@ export class HTTPRequestBuilder<T = unknown> {
 
   public async send<U = T>(): Promise<HTTPResponse<U>> {
     if (this._state === 'cancelled') {
+      const reasonSuffix =
+        this._preSendCancelReason !== undefined
+          ? ` (reason: '${this._preSendCancelReason}')`
+          : '';
       throw new Error(
-        'HTTPRequestBuilder.send() cannot be called after cancel() has been called.',
+        `HTTPRequestBuilder.send() cannot be called after cancel() has been called.${reasonSuffix}`,
       );
     }
 
@@ -308,6 +309,7 @@ export class HTTPRequestBuilder<T = unknown> {
     const response = await this._sendFn({
       method: this._method,
       path: this._path,
+      requestID: this._requestID,
       options: {
         headers: this._headers,
         params: this._params,
@@ -323,9 +325,6 @@ export class HTTPRequestBuilder<T = unknown> {
         streamResponse: this._streamResponse,
       },
       callbacks: {
-        setRequestID: (id) => {
-          this._requestID = id;
-        },
         setState: (state) => {
           this._state = state;
 

@@ -23,6 +23,8 @@ function makeContext(
   return {
     initialURL: 'https://example.com/api',
     redirectHistory: [],
+    requestID: 'test-request-id',
+    attemptNumber: 1,
     ...overrides,
   };
 }
@@ -372,6 +374,8 @@ describe('RequestInterceptorManager', () => {
     const ctx = makeContext({
       initialURL: 'https://example.com/original',
       redirectHistory: ['https://example.com/hop-1'],
+      requestID: 'req-123',
+      attemptNumber: 2,
     });
 
     await mgr.run(
@@ -391,5 +395,7 @@ describe('RequestInterceptorManager', () => {
     expect(receivedContexts[0].redirectHistory).toEqual([
       'https://example.com/hop-1',
     ]);
+    expect(receivedContexts[0].requestID).toBe('req-123');
+    expect(receivedContexts[0].attemptNumber).toBe(2);
   });
 });

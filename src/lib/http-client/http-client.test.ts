@@ -1812,6 +1812,84 @@ describe('HTTPClient — interceptors', () => {
     expect(observedTimeout).toBe(4_321);
   });
 
+  test('response observer receives attemptNumber and requestID on AttemptRequest', async () => {
+    const client = makeClient();
+    let observedAttemptNumber: number | undefined;
+    let observedRequestID: string | undefined;
+
+    client.addResponseObserver((_res, req) => {
+      observedAttemptNumber = req.attemptNumber;
+      observedRequestID = req.requestID;
+    });
+
+    const res = await client.get('/api/users/1').send();
+
+    expect(observedAttemptNumber).toBe(1);
+    expect(observedRequestID).toBe(res.requestID);
+  });
+
+  test('response observer AttemptRequest.attemptNumber increments on retries, requestID stays consistent', async () => {
+    let callCount = 0;
+    const adapter: HTTPAdapter = {
+      getType: () => 'mock',
+      send: (): Promise<AdapterResponse> => {
+        callCount++;
+        if (callCount < 3) {
+          return Promise.resolve({ status: 503, headers: {}, body: null });
+        }
+        return Promise.resolve({
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+          body: new TextEncoder().encode('{}'),
+        });
+      },
+    };
+
+    const client = new HTTPClient({ adapter });
+    const seen: Array<{ attemptNumber: number | undefined; requestID: string | undefined }> = [];
+
+    client.addResponseObserver(
+      (_res, req) => { seen.push({ attemptNumber: req.attemptNumber, requestID: req.requestID }); },
+      { phases: ['retry', 'final'] },
+    );
+
+    const res = await client
+      .get('https://example.com/flaky')
+      .retryPolicy({ strategy: 'fixed', maxRetryAttempts: 3, delayMS: 0 })
+      .send();
+
+    expect(seen).toHaveLength(3); // two retry phases + final
+    expect(seen[0].attemptNumber).toBe(1);
+    expect(seen[1].attemptNumber).toBe(2);
+    expect(seen[2].attemptNumber).toBe(3);
+    // requestID is the same for all three
+    expect(seen[0].requestID).toBe(res.requestID);
+    expect(seen[1].requestID).toBe(res.requestID);
+    expect(seen[2].requestID).toBe(res.requestID);
+  });
+
+  test('error observer receives requestID on best-effort snapshot for pre-dispatch failures', async () => {
+    const client = makeClient();
+    let observedRequestID: string | undefined;
+    let observedAttemptNumber: number | undefined;
+
+    client.addErrorObserver((err, req) => {
+      observedRequestID = req.requestID;
+      observedAttemptNumber = req.attemptNumber;
+    });
+
+    client.addRequestInterceptor(() => {
+      throw new Error('interceptor boom');
+    });
+
+    const res = await client.get('/api/users/1').send();
+
+    expect(res.isFailed).toBe(true);
+    expect(observedRequestID).toBe(res.requestID);
+    // No adapter attempt was dispatched — attemptNumber is undefined
+    expect(observedAttemptNumber).toBeUndefined();
+  });
+
   test('request interceptor failures are normalized as interceptor errors', async () => {
     const adapterCalls: string[] = [];
     const errorCodes: string[] = [];
@@ -3200,13 +3278,22 @@ describe('HTTPClient — builder state', () => {
     expect(() => builder.send()).toThrow(/once/);
   });
 
-  test('builder.requestID is available after send()', async () => {
+  test('builder.requestID is available before send()', () => {
     const client = makeClient();
     const builder = client.get('/api/test');
-    await builder.send();
 
     expect(typeof builder.requestID).toBe('string');
     expect(builder.requestID.length).toBeGreaterThan(0);
+  });
+
+  test('builder.requestID matches response.requestID after send()', async () => {
+    const client = makeClient();
+    const builder = client.get('/api/test');
+    const idBeforeSend = builder.requestID;
+    const res = await builder.send();
+
+    expect(builder.requestID).toBe(idBeforeSend);
+    expect(res.requestID).toBe(idBeforeSend);
   });
 
   test('startedAt is set after send()', async () => {
@@ -3412,6 +3499,62 @@ describe('HTTPClient — phase-aware interceptors', () => {
     expect(sentHeaders[0]['x-retry-token']).toBeUndefined();
     // Second attempt (retry phase) should have it
     expect(sentHeaders[1]['x-retry-token']).toBe('refreshed');
+  });
+
+  test('retry-phase interceptor context carries correct attemptNumber and consistent requestID', async () => {
+    let callCount = 0;
+    const adapter: HTTPAdapter = {
+      getType: () => 'mock',
+      send: (): Promise<AdapterResponse> => {
+        callCount++;
+        if (callCount < 2) {
+          return Promise.resolve({ status: 503, headers: {}, body: null });
+        }
+        return Promise.resolve({
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+          body: new TextEncoder().encode('{"ok":true}'),
+        });
+      },
+    };
+
+    const client = new HTTPClient({ adapter });
+    const retryContexts: Array<{ attemptNumber: number; requestID: string }> = [];
+
+    client.addRequestInterceptor(
+      (req, _phase, context) => {
+        retryContexts.push({ attemptNumber: context.attemptNumber, requestID: context.requestID });
+        return req;
+      },
+      { phases: ['retry'] },
+    );
+
+    const builder = client
+      .get('https://example.com/flaky')
+      .retryPolicy({ strategy: 'fixed', maxRetryAttempts: 2, delayMS: 0 });
+
+    const res = await builder.send();
+
+    expect(retryContexts).toHaveLength(1);
+    expect(retryContexts[0].attemptNumber).toBe(2); // retry is always attempt >= 2
+    expect(retryContexts[0].requestID).toBe(res.requestID);
+    expect(retryContexts[0].requestID).toBe(builder.requestID);
+  });
+
+  test('initial-phase interceptor context carries attemptNumber: 1 and requestID matching builder', async () => {
+    const client = makeClient();
+    let capturedContext: RequestInterceptorContext | undefined;
+
+    client.addRequestInterceptor((req, _phase, context) => {
+      capturedContext = context;
+      return req;
+    }); // default phases: ['initial']
+
+    const builder = client.get('/api/users/1');
+    await builder.send();
+
+    expect(capturedContext?.attemptNumber).toBe(1);
+    expect(capturedContext?.requestID).toBe(builder.requestID);
   });
 
   test('retry-phase interceptor can rewrite method and body for the retried attempt', async () => {
@@ -4010,18 +4153,25 @@ describe('HTTPClient — phase-aware interceptors', () => {
       { phases: ['initial', 'redirect'] },
     );
 
-    await client.get(a).send();
+    const res = await client.get(a).send();
 
     expect(contexts).toHaveLength(3);
-    // Initial phase: no redirects yet
+    // All phases share the same requestID
+    expect(contexts[0].requestID).toBe(res.requestID);
+    expect(contexts[1].requestID).toBe(res.requestID);
+    expect(contexts[2].requestID).toBe(res.requestID);
+    // Initial phase: attempt 1, no redirects yet
     expect(contexts[0].initialURL).toBe(a);
     expect(contexts[0].redirectHistory).toEqual([]);
-    // First redirect hop: a → b
+    expect(contexts[0].attemptNumber).toBe(1);
+    // First redirect hop: attempt 2 (continues from attempt 1)
     expect(contexts[1].initialURL).toBe(a);
     expect(contexts[1].redirectHistory).toEqual([b]);
-    // Second redirect hop: b → c
+    expect(contexts[1].attemptNumber).toBe(2);
+    // Second redirect hop: attempt 3
     expect(contexts[2].initialURL).toBe(a);
     expect(contexts[2].redirectHistory).toEqual([b, c]);
+    expect(contexts[2].attemptNumber).toBe(3);
   });
 
   test('one request can traverse initial, redirect, retry, and final phases in order', async () => {

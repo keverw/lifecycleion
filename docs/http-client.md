@@ -193,7 +193,8 @@ const builder = client
   .onUploadProgress((e) => console.log(e))
   .onDownloadProgress((e) => console.log(e))
   .onAttemptStart((e) => console.log(e))
-  .onAttemptEnd((e) => console.log(e));
+  .onAttemptEnd((e) => console.log(e))
+  .signal(controller.signal); // external AbortSignal, composed with builder.cancel()
 
 const response = await builder.send();
 ```
@@ -428,7 +429,7 @@ interface RequestInterceptorFilter {
 }
 ```
 
-All specified filters are ANDed together. An empty `phases: []` matches all phases.
+All specified filter fields are ANDed together. Within each field, values are ORed — any one match is sufficient. An empty `phases: []` matches all phases.
 
 ### Cancelling from an Interceptor
 
@@ -450,6 +451,8 @@ client.addRequestInterceptor((request, phase, context) => {
 interface RequestInterceptorContext {
   initialURL: string; // Original resolved URL for this send(). During `initial` interceptors this is the pre-interceptor resolved URL; later phases match HTTPResponse.initialURL
   redirectHistory: string[]; // Redirect targets already recorded for this send; during redirect-phase interceptors this includes the current detected target before any rewrite returned from that interceptor
+  requestID: string; // ULID for this send() — matches HTTPResponse.requestID and HTTPClientError.requestID
+  attemptNumber: number; // 1-based attempt that will be dispatched after this interceptor chain completes; increments across retries and redirect hops
 }
 ```
 
@@ -486,6 +489,8 @@ interface AttemptRequest {
   body?: string | Uint8Array | FormData | null; // serialized adapter-facing body
   rawBody?: unknown; // structured pre-serialization body when available
   timeout?: number; // configured per-attempt timeout budget in ms
+  attemptNumber?: number; // 1-based; undefined on pre-dispatch best-effort snapshots
+  requestID?: string; // matches HTTPResponse.requestID / HTTPClientError.requestID
 }
 ```
 
@@ -766,7 +771,7 @@ Calling `cancel()` before `send()` marks the builder so that `send()` throws a p
 const builder = client.get('/users');
 builder.send(); // fire-and-forget
 
-// Cancel using the ULID assigned at send() time
+// Cancel using the builder's ULID (available before or after send())
 client.cancel(builder.requestID);
 client.cancel(builder.requestID, 'shutdown');
 ```
@@ -964,6 +969,8 @@ const client = new HTTPClient({
 });
 ```
 
+No configuration options. Adapter-level behavior is controlled through `HTTPClientConfig`.
+
 **XHRAdapter constraints** (same as FetchAdapter browser constraints, plus one more):
 
 - `cookieJar` must not be set
@@ -1160,7 +1167,7 @@ After calling `.send()`, the builder exposes live state:
 const builder = client.get('/users');
 const response = await builder.send();
 
-builder.requestID; // ULID assigned at send() time (throws before send())
+builder.requestID; // ULID assigned at construction time — available before and after send()
 builder.state; // Current RequestState
 builder.response; // HTTPResponse<T> | null
 builder.error; // HTTPClientError | null
