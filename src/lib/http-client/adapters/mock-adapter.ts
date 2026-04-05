@@ -87,10 +87,9 @@ export interface MockResponse {
    * - `string` → `name=value; Path=/` — session cookie (no expiry)
    * - `null` → `name=; Path=/; Max-Age=0` — deletes that same default
    *   root-scoped cookie
-   * - `MockCookieOptions` / raw `set-cookie` → full control over path/domain
-   *   and attributes; when deleting one of these scoped cookies, the delete
-   *   cookie must use the same identity (name + path + domain) and typically
-   *   `maxAge: 0`
+   * - `MockCookieOptions` → full control over path, domain, and attributes;
+   *   when deleting one of these scoped cookies, the delete cookie must use
+   *   the same identity (name + path + domain) and typically `maxAge: 0`
    */
   cookies?: Record<string, string | MockCookieOptions | null>;
 }

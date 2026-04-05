@@ -424,8 +424,8 @@ client.addRequestInterceptor((request) => ({
 interface RequestInterceptorFilter {
   phases?: ('initial' | 'retry' | 'redirect')[]; // Default: ['initial']
   methods?: HTTPMethod[];
-  hosts?: string[]; // Exact hostnames and wildcard patterns like '*.example.com'
-  bodyContainsKeys?: string[]; // Dot-path object matching like 'data.results'; array indexing is not supported
+  hosts?: string[]; // Exact hostnames and wildcard patterns like '*.example.com' — note: '*.example.com' matches 'sub.example.com' but not 'example.com' itself
+  bodyContainsKeys?: string[]; // Dot-path object matching like 'data.results'; array indexing is not supported; the body must be a plain object at the root level — JSON array responses never match
 }
 ```
 
@@ -502,11 +502,11 @@ Use `request.timeout` to inspect what timeout budget was configured for that att
 interface ResponseObserverFilter {
   phases?: ('retry' | 'redirect' | 'final')[]; // Default: ['final']
   methods?: HTTPMethod[];
-  hosts?: string[]; // Exact hostnames and wildcard patterns like '*.example.com'
+  hosts?: string[]; // Exact hostnames and wildcard patterns like '*.example.com' — note: '*.example.com' matches 'sub.example.com' but not 'example.com' itself
   statusCodes?: number[];
   contentTypes?: ('json' | 'text' | 'binary')[];
   contentTypeHeaders?: string[]; // Supports wildcards like 'image/*'
-  bodyContainsKeys?: string[]; // Dot-path object matching like 'data.results'; array indexing is not supported
+  bodyContainsKeys?: string[]; // Dot-path object matching like 'data.results'; array indexing is not supported; the body must be a plain object at the root level — JSON array responses never match
 }
 ```
 
@@ -554,7 +554,7 @@ When a request fails before any adapter attempt is dispatched (for example reque
 interface ErrorObserverFilter {
   phases?: ('retry' | 'final')[]; // Default: ['final']
   methods?: HTTPMethod[];
-  hosts?: string[]; // Exact hostnames and wildcard patterns like '*.example.com'
+  hosts?: string[]; // Exact hostnames and wildcard patterns like '*.example.com' — note: '*.example.com' matches 'sub.example.com' but not 'example.com' itself
 }
 ```
 
@@ -1056,9 +1056,11 @@ interface MockResponse {
 
 `MockResponse.cookies` shorthand:
 
-- `string` → session cookie: `name=value; Path=/`
+- `string` → session cookie: `name=value; Path=/` (the string is the cookie value, not a raw Set-Cookie header)
 - `null` → delete cookie: `name=; Path=/; Max-Age=0`
 - `MockCookieOptions` → full control over path, domain, maxAge, httpOnly, secure, sameSite
+
+`cookies` entries are appended after any `headers['set-cookie']` entries. If the same cookie name appears in both, the `cookies` entry wins (last Set-Cookie header takes precedence).
 
 **Simulate multiple domains in tests:**
 
@@ -1196,7 +1198,7 @@ type RequestState =
 
 **Internal representation:** All header keys are lowercased. `set-cookie` is always `string[]`. Other multi-value headers that arrive as comma-joined strings remain as `string`.
 
-**Merging:** When multiple sources set the same header (default headers, request headers, interceptors), later values win wholesale. A `string[]` value replaces a `string` value entirely rather than being appended.
+**Merging:** When multiple sources set the same header (default headers, request headers, interceptors), later values win wholesale. A `string[]` value replaces a `string` value entirely rather than being appended. A single-element `string[]` is normalized to a plain `string` after merging — do not rely on `Array.isArray()` checks on merged header values.
 
 **Browser-restricted headers** (applying to FetchAdapter and XHRAdapter):
 

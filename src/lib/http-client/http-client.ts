@@ -424,7 +424,11 @@ export class BaseHTTPClient {
       callbacks.setState('cancelled');
       await this._runErrorObservers(
         error,
-        this._bestEffortAttemptRequestFromPending(interceptedRequest, timeout, requestID),
+        this._bestEffortAttemptRequestFromPending(
+          interceptedRequest,
+          timeout,
+          requestID,
+        ),
         {
           type: 'final',
         },
@@ -511,7 +515,12 @@ export class BaseHTTPClient {
           interceptResult = await this._runInterceptors(
             finalRequest,
             initialPhase,
-            { initialURL: url, redirectHistory: [], requestID, attemptNumber: 1 },
+            {
+              initialURL: url,
+              redirectHistory: [],
+              requestID,
+              attemptNumber: 1,
+            },
           );
 
           if (!('cancel' in interceptResult)) {
@@ -584,7 +593,11 @@ export class BaseHTTPClient {
 
           await this._runErrorObservers(
             error,
-            this._bestEffortAttemptRequestFromPending(finalRequest, timeout, requestID),
+            this._bestEffortAttemptRequestFromPending(
+              finalRequest,
+              timeout,
+              requestID,
+            ),
             {
               type: 'final',
             },

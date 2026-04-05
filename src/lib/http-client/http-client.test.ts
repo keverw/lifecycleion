@@ -1846,10 +1846,18 @@ describe('HTTPClient — interceptors', () => {
     };
 
     const client = new HTTPClient({ adapter });
-    const seen: Array<{ attemptNumber: number | undefined; requestID: string | undefined }> = [];
+    const seen: Array<{
+      attemptNumber: number | undefined;
+      requestID: string | undefined;
+    }> = [];
 
     client.addResponseObserver(
-      (_res, req) => { seen.push({ attemptNumber: req.attemptNumber, requestID: req.requestID }); },
+      (_res, req) => {
+        seen.push({
+          attemptNumber: req.attemptNumber,
+          requestID: req.requestID,
+        });
+      },
       { phases: ['retry', 'final'] },
     );
 
@@ -3519,11 +3527,15 @@ describe('HTTPClient — phase-aware interceptors', () => {
     };
 
     const client = new HTTPClient({ adapter });
-    const retryContexts: Array<{ attemptNumber: number; requestID: string }> = [];
+    const retryContexts: Array<{ attemptNumber: number; requestID: string }> =
+      [];
 
     client.addRequestInterceptor(
       (req, _phase, context) => {
-        retryContexts.push({ attemptNumber: context.attemptNumber, requestID: context.requestID });
+        retryContexts.push({
+          attemptNumber: context.attemptNumber,
+          requestID: context.requestID,
+        });
         return req;
       },
       { phases: ['retry'] },
