@@ -403,19 +403,21 @@ export interface HTTPResponse<T = unknown> {
 
 // --- Error ---
 
+export type ErrorCode =
+  | 'network_error'
+  | 'timeout'
+  | 'cancelled'
+  | 'redirect_disabled'
+  | 'redirect_loop'
+  | 'request_setup_error'
+  | 'adapter_error'
+  | 'interceptor_error'
+  | 'stream_write_error'
+  | 'stream_response_error'
+  | 'stream_setup_error';
+
 export interface HTTPClientError {
-  code:
-    | 'network_error'
-    | 'timeout'
-    | 'cancelled'
-    | 'redirect_disabled'
-    | 'redirect_loop'
-    | 'request_setup_error'
-    | 'adapter_error'
-    | 'interceptor_error'
-    | 'stream_write_error'
-    | 'stream_response_error'
-    | 'stream_setup_error';
+  code: ErrorCode;
   message: string;
   cause?: Error;
   /**

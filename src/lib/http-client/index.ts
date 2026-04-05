@@ -16,6 +16,7 @@ export type {
   SubClientConfig,
   HTTPRequestOptions,
   HTTPResponse,
+  ErrorCode,
   HTTPClientError,
   HTTPProgressEvent,
   AttemptStartEvent,
