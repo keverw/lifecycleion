@@ -228,10 +228,12 @@ export interface AttemptStartEvent {
   isRetry: boolean;
   requestID: string;
   /**
-   * The resolved URL for this `send()` after initial request interceptors, before any
-   * redirect follow-ups. **Same string as** {@link HTTPResponse.initialURL} (not the
-   * URL of this adapter attempt — see {@link InterceptedRequest.requestURL} and
-   * `redirect.to` for hop context).
+   * The original resolved URL for this `send()` before redirect follow-ups.
+   *
+   * During `initial` interceptors this is the pre-interceptor resolved URL.
+   * In later phases it matches {@link HTTPResponse.initialURL}. This is not
+   * the URL of the current adapter attempt — see
+   * {@link InterceptedRequest.requestURL} and `redirect.to` for hop context.
    */
   initialURL?: string;
   /**
@@ -417,8 +419,11 @@ export interface HTTPClientError {
   message: string;
   cause?: Error;
   /**
-   * Request URL for this `send()` after `initial` interceptors, before redirects.
-   * Same string as {@link HTTPResponse.initialURL} and {@link AttemptStartEvent.initialURL}.
+   * Original resolved URL for this `send()` before redirects.
+   *
+   * During `initial` interceptors this is the pre-interceptor resolved URL.
+   * In later phases it matches {@link HTTPResponse.initialURL} and
+   * {@link AttemptStartEvent.initialURL}.
    * Real transport adapters use an absolute http(s) URL here; MockAdapter may
    * keep a path-only URL when no baseURL is configured.
    */
@@ -696,8 +701,11 @@ export interface InterceptorCancel {
  */
 export interface RequestInterceptorContext {
   /**
-   * Fully resolved URL for this `send()` after `initial` interceptors, before redirects.
-   * Same string as {@link HTTPResponse.initialURL} and {@link AttemptStartEvent.initialURL}.
+   * Original resolved URL for this `send()` before redirects.
+   *
+   * During `initial` interceptors this is the pre-interceptor resolved URL.
+   * In later phases it matches {@link HTTPResponse.initialURL} and
+   * {@link AttemptStartEvent.initialURL}.
    */
   initialURL: string;
   /**

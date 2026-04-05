@@ -282,16 +282,16 @@ The response `Content-Type` header determines how the body is parsed:
 
 ## Error Handling
 
-`send()` always resolves for network-level outcomes — HTTP errors (4xx/5xx), timeouts, cancels, and transport failures all produce a settled `HTTPResponse` with no exception. Check `response.isFailed` for client-level failures and `response.status` for HTTP errors.
+`send()` always resolves for request outcomes handled by the client runtime — HTTP errors (4xx/5xx), timeouts, cancels, transport failures, redirect control-flow failures, and other client-managed failure states all produce a settled `HTTPResponse` with no exception. Check `response.isFailed` for client-level failures and `response.status` for HTTP errors.
 
-`send()` rejects (returns a rejected promise) only for programming errors: calling it on a disabled client, calling it a second time on the same builder, or calling it after `builder.cancel()` was already called pre-send.
+`send()` rejects (returns a rejected promise) only for programming errors around builder/client usage: calling it on a disabled client, calling it a second time on the same builder, or calling it after `builder.cancel()` was already called pre-send.
 
 ```typescript
 const builder = client.get('/users/999');
 const response = await builder.send();
 
 if (response.isFailed) {
-  // Transport error (timeout, cancelled, network error, etc.)
+  // Client-level failure (timeout, cancelled, network error, redirect handling failure, etc.)
   const err = builder.error; // HTTPClientError
   console.log(err.code, err.message);
 } else if (response.status === 404) {
@@ -303,7 +303,7 @@ if (response.isFailed) {
 
 ### HTTPClientError
 
-When a request fails at the transport level the builder's `.error` property is set:
+When a request settles through the client's failure path the builder's `.error` property is set. This includes transport failures as well as client-managed failures such as request setup errors, interceptor errors, redirect control-flow failures, and stream setup failures:
 
 ```typescript
 interface HTTPClientError {
@@ -325,19 +325,19 @@ interface HTTPClientError {
 
 ### Error Codes
 
-| Code                    | Meaning                                                                                                               |
-| ----------------------- | --------------------------------------------------------------------------------------------------------------------- |
-| `network_error`         | Transport-level failure before a response was received                                                                |
-| `timeout`               | Request exceeded the configured timeout                                                                               |
-| `cancelled`             | Request was cancelled via `builder.cancel()`, `client.cancel()`, AbortSignal, or an interceptor/stream factory cancel |
-| `redirect_disabled`     | A redirect response was received but `followRedirects` is `false`                                                     |
-| `redirect_loop`         | The configured `maxRedirects` limit was reached                                                                       |
-| `request_setup_error`   | Invalid request configuration (e.g. browser-restricted header, unsupported body type)                                 |
-| `adapter_error`         | The adapter threw an unexpected error                                                                                 |
-| `interceptor_error`     | A request interceptor threw                                                                                           |
-| `stream_write_error`    | Writing chunks to the StreamResponseFactory writable failed                                                           |
-| `stream_response_error` | The upstream response stream errored after headers arrived                                                            |
-| `stream_setup_error`    | The StreamResponseFactory threw an error during setup                                                                 |
+| Code                    | Meaning                                                                                                                                                        |
+| ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `network_error`         | Transport-level failure before a response was received                                                                                                         |
+| `timeout`               | Request exceeded the configured timeout                                                                                                                        |
+| `cancelled`             | Request was cancelled via `builder.cancel()`, `client.cancel()`, AbortSignal, or an interceptor/stream factory cancel                                          |
+| `redirect_disabled`     | A redirect response was received but `followRedirects` is `false`                                                                                              |
+| `redirect_loop`         | The configured `maxRedirects` limit was reached                                                                                                                |
+| `request_setup_error`   | Request setup or local orchestration failure before a normal adapter response was produced (e.g. invalid configuration, unsupported body type, unresolved URL) |
+| `adapter_error`         | The adapter threw an unexpected error                                                                                                                          |
+| `interceptor_error`     | A request interceptor threw                                                                                                                                    |
+| `stream_write_error`    | Writing chunks to the StreamResponseFactory writable failed                                                                                                    |
+| `stream_response_error` | The upstream response stream errored after headers arrived                                                                                                     |
+| `stream_setup_error`    | The StreamResponseFactory threw an error during setup                                                                                                          |
 
 ## Request Interceptors
 
@@ -423,8 +423,8 @@ client.addRequestInterceptor((request) => ({
 interface RequestInterceptorFilter {
   phases?: ('initial' | 'retry' | 'redirect')[]; // Default: ['initial']
   methods?: HTTPMethod[];
-  hosts?: string[];
-  bodyContainsKeys?: string[];
+  hosts?: string[]; // Exact hostnames and wildcard patterns like '*.example.com'
+  bodyContainsKeys?: string[]; // Dot-path object matching like 'data.results'; array indexing is not supported
 }
 ```
 
@@ -448,7 +448,7 @@ client.addRequestInterceptor((request, phase, context) => {
 
 ```typescript
 interface RequestInterceptorContext {
-  initialURL: string; // Resolved URL after the initial interceptors
+  initialURL: string; // Original resolved URL for this send(). During `initial` interceptors this is the pre-interceptor resolved URL; later phases match HTTPResponse.initialURL
   redirectHistory: string[]; // Redirect targets already recorded for this send; during redirect-phase interceptors this includes the current detected target before any rewrite returned from that interceptor
 }
 ```
@@ -497,11 +497,11 @@ Use `request.timeout` to inspect what timeout budget was configured for that att
 interface ResponseObserverFilter {
   phases?: ('retry' | 'redirect' | 'final')[]; // Default: ['final']
   methods?: HTTPMethod[];
-  hosts?: string[];
+  hosts?: string[]; // Exact hostnames and wildcard patterns like '*.example.com'
   statusCodes?: number[];
   contentTypes?: ('json' | 'text' | 'binary')[];
   contentTypeHeaders?: string[]; // Supports wildcards like 'image/*'
-  bodyContainsKeys?: string[];
+  bodyContainsKeys?: string[]; // Dot-path object matching like 'data.results'; array indexing is not supported
 }
 ```
 
@@ -518,7 +518,7 @@ client.addResponseObserver(
 
 ## Error Observers
 
-Error observers run when a request fails at the transport level.
+Error observers run when a request settles through the client's failure path.
 
 ```typescript
 const removeObserver = client.addErrorObserver(
@@ -547,7 +547,7 @@ The `request` argument is the same `AttemptRequest` snapshot described above, in
 interface ErrorObserverFilter {
   phases?: ('retry' | 'final')[]; // Default: ['final']
   methods?: HTTPMethod[];
-  hosts?: string[];
+  hosts?: string[]; // Exact hostnames and wildcard patterns like '*.example.com'
 }
 ```
 
@@ -1015,6 +1015,8 @@ interface MockAdapterConfig {
   ) => MockResponse | Promise<MockResponse>;
 }
 ```
+
+`mock.routes.clear()` removes all registered mock routes.
 
 **MockRequest** (received by route handlers):
 
