@@ -246,7 +246,15 @@ describe('HTTPClient — basic HTTP methods', () => {
         followRedirects: false,
         maxRedirects: 1,
       }),
-    ).toThrow(/maxRedirects cannot be set when followRedirects is false/i);
+    ).toThrow(/maxRedirects requires followRedirects: true/i);
+  });
+
+  test('rejects maxRedirects without followRedirects: true', () => {
+    expect(() =>
+      makeClient({
+        maxRedirects: 3,
+      }),
+    ).toThrow(/maxRedirects requires followRedirects: true/i);
   });
 
   test('server-side fetch rejects baseURL without a protocol', () => {
@@ -512,7 +520,7 @@ describe('HTTPClient — basic HTTP methods', () => {
     ).not.toThrow();
   });
 
-  test('rejects browser XHR maxRedirects when followRedirects is false', () => {
+  test('rejects browser XHR maxRedirects without followRedirects: true', () => {
     (globalThis as Record<string, unknown>).window = {};
     (globalThis as Record<string, unknown>).document = {};
 
@@ -533,7 +541,7 @@ describe('HTTPClient — basic HTTP methods', () => {
           followRedirects: false,
           maxRedirects: -1,
         }),
-    ).toThrow(/maxRedirects cannot be set when followRedirects is false/i);
+    ).toThrow(/maxRedirects requires followRedirects: true/i);
   });
 
   test('rejects cookieJar with browser XHR adapter at construction time', () => {
@@ -1867,17 +1875,8 @@ describe('HTTPClient — interceptors', () => {
       throw new Error('boom');
     });
 
-    const initialOnlyCodes: string[] = [];
     const finalCodes: string[] = [];
 
-    // Error observers use request phase names for filtering; `initial` does not apply here
-    // (interceptor errors settle as `final` only).
-    client.addErrorObserver(
-      (err) => {
-        initialOnlyCodes.push(err.code);
-      },
-      { phases: ['initial'] },
-    );
     client.addErrorObserver(
       (err) => {
         finalCodes.push(err.code);
@@ -1887,7 +1886,6 @@ describe('HTTPClient — interceptors', () => {
 
     await client.get('https://example.com/x').send();
 
-    expect(initialOnlyCodes).toEqual([]);
     expect(finalCodes).toEqual(['interceptor_error']);
   });
 
@@ -3729,7 +3727,6 @@ describe('HTTPClient — phase-aware interceptors', () => {
 
     const client = new HTTPClient({ adapter, followRedirects: true });
     const finalCodes: string[] = [];
-    const redirectOnlyCodes: string[] = [];
     const finalObserverRequestURLs: string[] = [];
 
     // Same pattern as retry-phase interceptor throw: settlement is `final` only.
@@ -3737,15 +3734,6 @@ describe('HTTPClient — phase-aware interceptors', () => {
       finalCodes.push(err.code);
       finalObserverRequestURLs.push(request.requestURL);
     });
-
-    client.addErrorObserver(
-      (err) => {
-        redirectOnlyCodes.push(err.code);
-      },
-      {
-        phases: ['redirect'],
-      },
-    );
 
     client.addRequestInterceptor(
       () => {
@@ -3762,7 +3750,6 @@ describe('HTTPClient — phase-aware interceptors', () => {
     expect(builder.error?.code).toBe('interceptor_error');
     expect(finalCodes).toEqual(['interceptor_error']);
     expect(finalObserverRequestURLs).toEqual([target]);
-    expect(redirectOnlyCodes).toEqual([]);
     expect(res.initialURL).toBe(start);
     expect(res.requestURL).toBe(target);
     expect(res.redirectHistory).toEqual([target]);

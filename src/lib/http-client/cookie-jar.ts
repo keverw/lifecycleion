@@ -31,9 +31,15 @@ export interface Cookie {
   secure?: boolean;
   httpOnly?: boolean;
   sameSite?: 'Strict' | 'Lax' | 'None';
-  /** Time the cookie was stored (used with maxAge) */
+  /** Epoch ms when the cookie was stored. Used with {@link maxAge} to compute expiry. */
   createdAt: number;
 }
+
+/**
+ * Input shape for {@link CookieJar.setCookie}. Identical to {@link Cookie} except
+ * `createdAt` is optional — the jar injects `Date.now()` when omitted.
+ */
+export type CookieInput = Omit<Cookie, 'createdAt'> & { createdAt?: number };
 
 export interface CookieJarJSON {
   cookies: Cookie[];
@@ -68,7 +74,7 @@ export class CookieJar {
    * For server responses use parseSetCookieHeader — it also enforces PSL
    * validation and domain-suffix checks on top of the syntax check here.
    */
-  public setCookie(cookie: Cookie): boolean {
+  public setCookie(cookie: CookieInput): boolean {
     const domain = cookie.domain ?? '';
 
     if (!this.isSyntaxValidDomain(domain)) {
@@ -77,10 +83,12 @@ export class CookieJar {
 
     const normalizedDomain = this.normalizeStoredDomain(domain);
     const path = cookie.path ?? '/';
+    const createdAt = cookie.createdAt ?? Date.now();
     const bucket = this.getOrCreateBucket(this.apexFor(normalizedDomain));
 
     bucket.set(this.cookieKey(cookie.name, normalizedDomain, path), {
       ...cookie,
+      createdAt,
       domain: normalizedDomain,
       path,
     });

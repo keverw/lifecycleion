@@ -57,10 +57,15 @@ import { RetryRunner } from 'lifecycleion/retry-utils';
 const logger = createLogger({ service: 'my-app' });
 
 // Set up retry logic
-const runner = new RetryRunner({ maxAttempts: 3, baseDelayMs: 1000 });
-await runner.run(async () => {
-  // Your operation here
-});
+const runner = new RetryRunner(
+  { strategy: 'fixed', maxRetryAttempts: 3, delayMS: 1000 },
+  async (reportResult) => {
+    // Your operation here
+    reportResult('success');
+  },
+);
+
+await runner.run(true);
 
 // Manage component lifecycle
 class MyComponent extends BaseComponent {

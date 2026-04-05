@@ -93,6 +93,67 @@ describe('CookieJar', () => {
       ).toBe(true);
     });
 
+    test('injects createdAt when omitted so maxAge expiry still works', () => {
+      const originalNow = Date.now;
+
+      try {
+        Date.now = () => 1_000;
+
+        jar.setCookie({
+          name: 'sid',
+          value: 'abc',
+          domain: 'example.com',
+          path: '/',
+          maxAge: 1,
+        });
+
+        expect(jar.getAllCookies()[0]?.createdAt).toBe(1_000);
+
+        Date.now = () => 2_500;
+
+        expect(jar.getCookieFor('sid', 'https://example.com')).toBeUndefined();
+      } finally {
+        Date.now = originalNow;
+      }
+    });
+
+    test('treats createdAt: undefined the same as omitted input', () => {
+      const originalNow = Date.now;
+
+      try {
+        Date.now = () => 2_000;
+
+        jar.setCookie({
+          name: 'sid',
+          value: 'abc',
+          domain: 'example.com',
+          path: '/',
+          maxAge: 1,
+          createdAt: undefined,
+        });
+
+        expect(jar.getAllCookies()[0]?.createdAt).toBe(2_000);
+
+        Date.now = () => 3_500;
+
+        expect(jar.getCookieFor('sid', 'https://example.com')).toBeUndefined();
+      } finally {
+        Date.now = originalNow;
+      }
+    });
+
+    test('preserves an explicit createdAt value', () => {
+      jar.setCookie({
+        name: 'sid',
+        value: 'abc',
+        domain: 'example.com',
+        path: '/',
+        createdAt: 123,
+      });
+
+      expect(jar.getAllCookies()[0]?.createdAt).toBe(123);
+    });
+
     test('returns false and does not store for empty domain', () => {
       const isCookieStored = jar.setCookie({
         name: 'a',

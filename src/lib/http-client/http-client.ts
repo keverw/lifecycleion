@@ -381,7 +381,11 @@ export class BaseHTTPClient {
         adapterType === 'mock')
     ) {
       baseHeaders['user-agent'] = this._config.userAgent;
-    } else if (adapterType === 'node' || adapterType === 'mock') {
+    } else if (
+      adapterType === 'node' ||
+      adapterType === 'mock' ||
+      (adapterType === 'fetch' && !this._isBrowserRuntime)
+    ) {
       baseHeaders['user-agent'] = DEFAULT_USER_AGENT;
     }
 

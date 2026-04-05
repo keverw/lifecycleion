@@ -165,6 +165,12 @@ describe('HTTPRequestBuilder', () => {
       expect(builder.label('my-label')).toBe(builder);
     });
 
+    test('label() rejects empty or whitespace-only labels', () => {
+      const { builder } = makeBuilder();
+      expect(() => builder.label('')).toThrow(/non-empty, non-whitespace/i);
+      expect(() => builder.label('   ')).toThrow(/non-empty, non-whitespace/i);
+    });
+
     test('retryPolicy() returns this', () => {
       const { builder } = makeBuilder();
       expect(builder.retryPolicy(null)).toBe(builder);
@@ -298,6 +304,24 @@ describe('HTTPRequestBuilder', () => {
       expect(requireContext().options.headers['x-init']).toBe('yes');
       expect(requireContext().options.timeout).toBe(1000);
       expect(requireContext().options.label).toBe('init-label');
+    });
+
+    test('constructor options reject empty or whitespace-only labels', () => {
+      const { sendFn } = makeSendFn();
+
+      expect(
+        () =>
+          new HTTPRequestBuilder('GET', '/test', sendFn as any, {
+            label: '',
+          }),
+      ).toThrow(/non-empty, non-whitespace/i);
+
+      expect(
+        () =>
+          new HTTPRequestBuilder('GET', '/test', sendFn as any, {
+            label: '   ',
+          }),
+      ).toThrow(/non-empty, non-whitespace/i);
     });
 
     test('fluent headers() merge on top of constructor headers', async () => {

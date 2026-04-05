@@ -138,6 +138,13 @@ export class HTTPRequestBuilder<T = unknown> {
 
   public label(label: string): this {
     this._assertNotSent('label');
+
+    if (label.trim().length === 0) {
+      throw new Error(
+        'HTTPRequestBuilder.label() requires a non-empty, non-whitespace label.',
+      );
+    }
+
     this._label = label;
     return this;
   }
@@ -392,7 +399,7 @@ export class HTTPRequestBuilder<T = unknown> {
     }
 
     // Tracking label for cancel/list filtering
-    if (opts.label) {
+    if (opts.label !== undefined) {
       this.label(opts.label);
     }
 

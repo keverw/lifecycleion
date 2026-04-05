@@ -303,14 +303,12 @@ export function assertSupportedAdapterRuntimeAndConfig(
     assertValidBaseURL(config.baseURL);
   }
 
-  if (config.followRedirects === false && config.maxRedirects !== undefined) {
-    throw new Error(
-      'HTTPClient maxRedirects cannot be set when followRedirects is false.',
-    );
+  if (config.maxRedirects !== undefined && config.followRedirects !== true) {
+    throw new Error('HTTPClient maxRedirects requires followRedirects: true.');
   }
 
   if (
-    config.followRedirects !== false &&
+    config.followRedirects === true &&
     config.maxRedirects !== undefined &&
     config.maxRedirects < 1
   ) {

@@ -406,7 +406,17 @@ describe('assertSupportedAdapterRuntimeAndConfig', () => {
           'mock',
           false,
         ),
-      ).toThrow(/maxRedirects cannot be set when followRedirects is false/i);
+      ).toThrow(/maxRedirects requires followRedirects: true/i);
+    });
+
+    test('rejects maxRedirects without followRedirects: true', () => {
+      expect(() =>
+        assertSupportedAdapterRuntimeAndConfig(
+          { maxRedirects: 3 },
+          'mock',
+          false,
+        ),
+      ).toThrow(/maxRedirects requires followRedirects: true/i);
     });
 
     test('rejects non-positive maxRedirects when followRedirects is true', () => {

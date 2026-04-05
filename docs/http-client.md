@@ -39,6 +39,7 @@ A TypeScript HTTP client with a fluent request builder, request/response interce
   - [ID-Scoped Cancel](#id-scoped-cancel)
   - [Tracker-Wide Cancel](#tracker-wide-cancel)
   - [AbortSignal Integration](#abortsignal-integration)
+- [Client Identity](#client-identity)
 - [Request Tracking](#request-tracking)
 - [Sub-Client Creation](#sub-client-creation)
 - [Enable and Disable](#enable-and-disable)
@@ -120,9 +121,9 @@ interface HTTPClientConfig {
   retryPolicy?: RetryPolicyOptions; // Retry strategy (disabled by default)
   includeRequestID?: boolean; // Default: false — sends x-local-client-request-id header
   includeAttemptHeader?: boolean; // Default: false — sends x-local-client-request-attempt header
-  userAgent?: string; // Default: 'lifecycleion-http-client' (server runtimes only, not supported in browsers)
+  userAgent?: string; // Auto-set to 'lifecycleion-http-client' for NodeAdapter, MockAdapter, and FetchAdapter on server runtimes. Browsers block this header — constructor throws if set with FetchAdapter or XHRAdapter in a browser.
   followRedirects?: boolean; // Default: false (security-conscious default)
-  maxRedirects?: number; // Default: 5 (only used when followRedirects: true)
+  maxRedirects?: number; // Default: 5 (only meaningful when followRedirects: true; throws at construction unless followRedirects: true; must be >= 1)
 }
 ```
 
@@ -132,17 +133,21 @@ const client = new HTTPClient({
   defaultHeaders: { 'x-api-version': '2024-01' },
   timeout: 15_000,
   followRedirects: true,
-  retryPolicy: { maxAttempts: 3, baseDelayMs: 500, strategy: 'exponential' },
+  retryPolicy: {
+    strategy: 'exponential',
+    maxRetryAttempts: 3,
+    minTimeoutMS: 500,
+  },
 });
 ```
 
 **Platform constraints:**
 
-| Feature           | Browser + FetchAdapter | Browser + XHRAdapter | Server / Node | MockAdapter |
-| ----------------- | ---------------------- | -------------------- | ------------- | ----------- |
-| `cookieJar`       | Not supported          | Not supported        | Supported     | Supported   |
-| `userAgent`       | Not supported          | Not supported        | Supported     | Supported   |
-| `followRedirects` | Not supported          | Not supported        | Supported     | Supported   |
+| Feature           | Browser + FetchAdapter | Browser + XHRAdapter | Server + FetchAdapter | Server + NodeAdapter | MockAdapter |
+| ----------------- | ---------------------- | -------------------- | --------------------- | -------------------- | ----------- |
+| `cookieJar`       | Not supported          | Not supported        | Supported             | Supported            | Supported   |
+| `userAgent`       | Not supported          | Not supported        | Supported             | Supported            | Supported   |
+| `followRedirects` | Not supported          | Not supported        | Supported             | Supported            | Supported   |
 
 The constructor throws immediately on unsupported combinations so failures are caught at startup, not at request time.
 
@@ -167,8 +172,8 @@ client.request<T>(method, path, options?)
 **Path resolution:**
 
 - Relative paths (`/v1/users`, `v1/users`) are appended to `baseURL`.
-- Absolute `http(s)://` URLs bypass `baseURL` entirely.
-- Protocol-relative `//host/path` URLs bypass `baseURL` and resolve the scheme from `baseURL` if set. Without a `baseURL` to resolve against the scheme, the URL stays unresolved and the request will fail — this is a user/configuration error.
+- Absolute `http(s)://` URLs bypass `baseURL` entirely and work with or without a `baseURL`.
+- Protocol-relative `//host/path` URLs also bypass `baseURL` as a path prefix. If `baseURL` is configured, they are resolved using its scheme. If `baseURL` is omitted, browser runtimes resolve them against the current page/worker scheme, while server runtimes cannot resolve them and the request fails at send time as a configuration error.
 
 All paths are resolved as far as possible before interceptors, the cookie jar, or any adapter sees them. For the real transport adapters (`fetch`, `xhr`, `node`) that means an absolute `http(s)://` URL. `MockAdapter` is the one exception: if you omit `baseURL`, path-only URLs like `/users` are preserved so host-agnostic mock routes keep working.
 
@@ -180,10 +185,10 @@ All builder methods are fluent (chainable) and must be called **before** `.send(
 const builder = client
   .post<User>('/users')
   .headers({ 'x-idempotency-key': 'abc123' }) // merged onto defaultHeaders
-  .json({ name: 'Alice' }) // sets body + content-type: application/json
+  .json({ name: 'Alice' }) // sets a JSON body; content-type is inferred during request materialization
   .timeout(5_000) // per-request timeout override
-  .retryPolicy({ maxAttempts: 2 }) // per-request retry override
-  .label('create-user') // for grouping / cancel-by-label
+  .retryPolicy({ strategy: 'fixed', maxRetryAttempts: 2, delayMS: 1000 }) // per-request retry override
+  .label('create-user') // non-empty grouping label for cancel/list filtering
   .params({ source: 'web' }) // appended to query string
   .onUploadProgress((e) => console.log(e))
   .onDownloadProgress((e) => console.log(e))
@@ -207,13 +212,15 @@ const response = await client
 
 ### Body Types
 
-| Method / value       | Content-Type set                                           | Notes                                                                                         |
-| -------------------- | ---------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
-| `.json(data)`        | `application/json`                                         | Serialized via `JSON.stringify`                                                               |
-| `.text(str)`         | `text/plain`                                               | UTF-8 encoded                                                                                 |
-| `.formData(fd)`      | `multipart/form-data`                                      | Boundary set by adapter                                                                       |
-| `.body(data)`        | Inferred from type (same rules as the named methods above) | Generic form — accepts JSON objects/arrays, strings, FormData, Uint8Array, null, or undefined |
-| `undefined` / `null` | none                                                       | No body sent                                                                                  |
+| Method / value       | Content-Type set                     | Notes                                                                                                                                                                                                                            |
+| -------------------- | ------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `.json(data)`        | `application/json`                   | Serialized via `JSON.stringify`. Passing `null` or `undefined` results in no body (see note below).                                                                                                                              |
+| `.text(str)`         | `text/plain`                         | UTF-8 encoded                                                                                                                                                                                                                    |
+| `.formData(fd)`      | _(none — set by adapter)_            | The library does not set this header; the adapter (or browser runtime) sets `multipart/form-data` with the boundary. Not visible in `request.headers` inside interceptors — use `request.body instanceof FormData` to detect it. |
+| `.body(data)`        | Inferred from value type (see below) | Generic form — accepts JSON objects/arrays (`application/json`), strings (`text/plain`), Uint8Array (`application/octet-stream`), FormData (see `.formData`), null, or undefined                                                 |
+| `undefined` / `null` | none                                 | No body sent                                                                                                                                                                                                                     |
+
+> **Note:** Passing `null` or `undefined` to any body method — including `.json()` — always results in no body and no `Content-Type`. This applies across all methods since serialization is type-based, not method-based. If you need to send a JSON null payload, use `.body('null').headers({ 'content-type': 'application/json' })` explicitly.
 
 ### Query Parameters
 
@@ -246,11 +253,11 @@ interface HTTPResponse<T = unknown> {
   // false for ordinary HTTP errors like 4xx/5xx
   isParseError: boolean;
   initialURL: string; // URL after initial interceptors, before any redirect hops
-  requestURL: string; // URL of the last adapter attempt (after redirects)
+  requestURL: string; // URL of the last adapter attempt, or the redirect target being processed when redirect handling failed before dispatch
   wasRedirectDetected: boolean;
   wasRedirectFollowed: boolean;
   detectedRedirectURL?: string;
-  redirectHistory: string[]; // Each redirect target URL, in order
+  redirectHistory: string[]; // Redirect target URLs recorded during redirect handling, in order; entries may appear before the follow-up attempt is dispatched, and a continued redirect rewrite updates later entries to the rewritten target
   requestID: string;
   adapterType: AdapterType;
   isStreamed: boolean; // Body was piped to a StreamResponseFactory; body is null
@@ -268,16 +275,20 @@ The response `Content-Type` header determines how the body is parsed:
 | -------------------------------------- | ------------- | ------------------------- |
 | Contains `application/json` or `+json` | `'json'`      | Parsed via `JSON.parse()` |
 | Starts with `text/`                    | `'text'`      | UTF-8 decoded string      |
+| `application/x-www-form-urlencoded`    | `'text'`      | UTF-8 decoded string      |
 | Absent or anything else                | `'binary'`    | Raw `Uint8Array`          |
 
 `isText` mirrors `contentType === 'text'`. `isJSON` is `true` only when JSON parsing actually succeeded — it stays `false` on a parse failure. `isParseError` is `true` when the server sent a JSON `Content-Type` but the body could not be parsed. In that case `contentType` is still `'json'`, `isJSON` is `false`, and `body` falls back to the raw string.
 
 ## Error Handling
 
-`send()` resolves (never throws) for both successful and failed requests. Check `response.isFailed` for client-level failures and `response.status` for HTTP errors.
+`send()` always resolves for network-level outcomes — HTTP errors (4xx/5xx), timeouts, cancels, and transport failures all produce a settled `HTTPResponse` with no exception. Check `response.isFailed` for client-level failures and `response.status` for HTTP errors.
+
+`send()` rejects (returns a rejected promise) only for programming errors: calling it on a disabled client, calling it a second time on the same builder, or calling it after `builder.cancel()` was already called pre-send.
 
 ```typescript
-const response = await client.get('/users/999').send();
+const builder = client.get('/users/999');
+const response = await builder.send();
 
 if (response.isFailed) {
   // Transport error (timeout, cancelled, network error, etc.)
@@ -300,11 +311,11 @@ interface HTTPClientError {
   message: string;
   cause?: Error; // Underlying error when available
   initialURL: string;
-  requestURL: string; // URL of the last attempt
+  requestURL: string; // URL of the last adapter attempt, or the redirect target being processed when redirect handling failed before dispatch
   wasRedirectDetected: boolean;
   wasRedirectFollowed: boolean;
   detectedRedirectURL?: string;
-  redirectHistory: string[];
+  redirectHistory: string[]; // Redirect target URLs recorded during redirect handling, in order
   requestID: string;
   isTimeout: boolean;
   isRetriesExhausted: boolean; // true when all retry attempts were spent
@@ -438,7 +449,7 @@ client.addRequestInterceptor((request, phase, context) => {
 ```typescript
 interface RequestInterceptorContext {
   initialURL: string; // Resolved URL after the initial interceptors
-  redirectHistory: string[]; // Redirect targets followed so far
+  redirectHistory: string[]; // Redirect targets already recorded for this send; during redirect-phase interceptors this includes the current detected target before any rewrite returned from that interceptor
 }
 ```
 
@@ -615,7 +626,10 @@ Status `0` covers adapter-level "no real HTTP response" conditions (network unre
 
 ```typescript
 // Override for one request
-await client.get('/unstable').retryPolicy({ maxAttempts: 2 }).send();
+await client
+  .get('/unstable')
+  .retryPolicy({ strategy: 'fixed', maxRetryAttempts: 2, delayMS: 1000 })
+  .send();
 
 // Disable retries for one request (even if the client has a default policy)
 await client.post('/payments').retryPolicy(null).send();
@@ -646,8 +660,9 @@ When a `CookieJar` is attached to the client:
 ```typescript
 const jar = new CookieJar();
 
-// Manually set a cookie
-jar.setCookie({
+// Manually set a cookie (createdAt is optional — injected automatically if omitted)
+// Returns false if domain is missing or syntactically invalid (empty string, spaces, etc.)
+const ok = jar.setCookie({
   name: 'session',
   value: 'abc123',
   domain: 'example.com',
@@ -671,12 +686,12 @@ const cookieHeader = jar.getCookieHeaderString('https://api.example.com/users');
 
 // Maintenance
 jar.clearExpiredCookies(); // Returns count removed
-jar.clear(); // Remove all cookies
-jar.clear('api.example.com', 'hostname'); // Remove cookies for exactly that hostname only
-jar.clear('example.com', 'domain'); // Remove example.com and all its subdomains (the entire apex bucket)
+jar.clear(); // Remove all cookies — returns count removed
+jar.clear('api.example.com', 'hostname'); // Remove cookies for exactly that hostname only — returns count removed
+jar.clear('example.com', 'domain'); // Remove example.com and all its subdomains (the entire apex bucket) — returns count removed
 
 // Inspection
-jar.getAllCookies();
+jar.getAllCookies(); // All stored cookies, including expired — call clearExpiredCookies() first if needed
 jar.getStoredDomains(); // [{ domain, count }]
 
 // Serialization
@@ -708,6 +723,10 @@ const client = new HTTPClient({
 
 Cross-origin redirects strip unsafe headers (Authorization, Cookie, etc.) from the forwarded request.
 
+Note: `MockAdapter` strips the domain before route matching, so "cross-origin" redirects in tests are effectively same-origin to its router — header stripping still applies, but test routes don't need to be registered per-domain.
+
+Redirect metadata is recorded when a redirect target is detected and enters redirect handling. That means `redirectHistory` can include the current redirect target before the follow-up adapter attempt is dispatched. During redirect-phase interception, the metadata reflects the target detected from the redirect response. If a redirect interceptor rewrites `requestURL` and redirect handling continues, later `requestURL` / `redirectHistory` values reflect the rewritten target. If redirect handling is cancelled or errors before dispatch, the response/error metadata may still reflect the originally detected target rather than a completed adapter attempt.
+
 ### Redirect Phase Info
 
 ```typescript
@@ -735,7 +754,9 @@ const response = await builder.send();
 builder.cancel('timeout_budget_exceeded');
 ```
 
-Calling `cancel()` before `send()` marks the builder so that `send()` throws immediately.
+`cancel()` returns `true` if the cancel was applied, `false` if it was a no-op (the request had already completed, been cancelled, or failed).
+
+Calling `cancel()` before `send()` marks the builder so that `send()` throws a plain `Error` (not an `HTTPClientError`) immediately rather than dispatching the request.
 
 ### ID-Scoped Cancel
 
@@ -777,6 +798,15 @@ controller.abort('user_navigated_away');
 ```
 
 The external signal is composed with the client's cancel signal (`builder.cancel()`, `client.cancelAll()`, etc.) — either will abort the request and set `isCancelled: true`. The per-attempt timeout is independent, it fires its own abort but sets `isTimeout: true` instead. If `controller.abort()` is called with an explicit string reason, it appears on `HTTPClientError.cancelReason`.
+
+## Client Identity
+
+```typescript
+client.clientID; // ULID string — unique per HTTPClient or sub-client instance
+client.adapterType; // AdapterType: 'fetch' | 'xhr' | 'node' | 'mock'
+```
+
+`clientID` matches the `clientID` field on tracked request entries. `adapterType` lets you inspect the active adapter without sending a request — useful in shared utilities that need to behave differently per runtime.
 
 ## Request Tracking
 
@@ -937,6 +967,7 @@ const client = new HTTPClient({
 - `cookieJar` must not be set
 - `userAgent` must not be set
 - `followRedirects` must not be `true`
+- Must be used in a browser environment — throws at construction if `XMLHttpRequest` is not available (e.g. Node.js without a shim)
 
 Because browsers follow redirects silently, XHR cannot intercept them mid-flight. Instead, after the request completes, the adapter compares `xhr.responseURL` to the original URL to detect whether a redirect occurred. If one is detected the response carries `wasRedirectDetected: true` and an `HTTPClientError` with code `redirect_disabled`.
 
@@ -1109,6 +1140,8 @@ type StreamResponseFactory = (
   | Promise<WritableLike | null | StreamResponseCancel>;
 ```
 
+`StreamResponseFactory` can also be supplied via `HTTPRequestOptions.streamResponse` when passing options directly to `client.get(...)`, `client.post(...)`, and the other request helpers.
+
 Return `null` or `{ cancel: true, reason? }` from the factory to cancel the request (produces `isCancelled: true`, error code `cancelled`). The `reason` string is surfaced on `HTTPClientError.cancelReason`. If the factory throws, the error code is `stream_setup_error` instead.
 
 When streaming is active on a retry attempt (before headers arrive), the factory is called again for the new attempt. The `signal` from the previous attempt will have fired, allowing cleanup code to run before the new stream is set up.
@@ -1133,6 +1166,8 @@ builder.nextRetryAt; // Epoch ms for next retry, or null
 builder.startedAt; // Epoch ms when first attempt dispatched (null before send)
 builder.elapsedMS; // Wall-clock ms including retry waits; freezes on completion
 ```
+
+Labels default to `undefined`. When set, they must be non-empty strings, empty or whitespace-only labels throw.
 
 ## Request State Values
 
@@ -1165,6 +1200,10 @@ Method-override headers `x-http-method`, `x-http-method-override`, `x-method-ove
 From `lifecycleion/http-client`:
 
 ```typescript
+// Client
+HTTPClient;
+HTTPRequestBuilder; // Use as a type annotation: let builder: HTTPRequestBuilder<User>
+
 // Adapter
 (HTTPAdapter, AdapterRequest, AdapterResponse, AdapterType);
 FetchAdapter;
@@ -1200,7 +1239,7 @@ RedirectHopInfo;
   StreamResponseFactory);
 
 // Cookies
-(Cookie, CookieJarJSON);
+(Cookie, CookieInput, CookieJarJSON);
 ```
 
 From `lifecycleion/http-client-node`:

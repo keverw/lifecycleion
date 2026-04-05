@@ -2,7 +2,6 @@ export { HTTPClient } from './http-client';
 export { HTTPRequestBuilder } from './http-request-builder';
 export { CookieJar } from './cookie-jar';
 export { FetchAdapter } from './adapters/fetch-adapter';
-export { normalizeAdapterResponseHeaders, scalarHeader } from './utils';
 
 export type {
   HTTPAdapter,
@@ -45,10 +44,11 @@ export type {
   WritableLike,
   StreamResponseInfo,
   StreamResponseContext,
+  StreamResponseCancel,
   StreamResponseFactory,
 } from './types';
 
-export type { Cookie, CookieJarJSON } from './cookie-jar';
+export type { Cookie, CookieInput, CookieJarJSON } from './cookie-jar';
 export type { RequestInfo } from './request-tracker';
 
 export {

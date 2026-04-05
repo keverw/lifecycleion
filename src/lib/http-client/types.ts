@@ -374,7 +374,12 @@ export interface HTTPResponse<T = unknown> {
   wasRedirectFollowed: boolean;
   /** Redirect target when known but not followed by the client loop. */
   detectedRedirectURL?: string;
-  /** Sequence of redirect target URLs that were actually requested, in order. */
+  /**
+   * Redirect target URLs recorded during redirect handling, in order.
+   * The current detected target may appear here before its follow-up request is
+   * dispatched. If a redirect-phase interceptor rewrites that target and
+   * redirect handling continues, later entries reflect the rewritten URL.
+   */
   redirectHistory: string[];
   requestID: string;
   adapterType: AdapterType;
@@ -426,7 +431,12 @@ export interface HTTPClientError {
   wasRedirectFollowed: boolean;
   /** Redirect target when known but not followed by the client loop. */
   detectedRedirectURL?: string;
-  /** Sequence of redirect target URLs that were actually requested, in order. */
+  /**
+   * Redirect target URLs recorded during redirect handling, in order.
+   * The current detected target may appear here before its follow-up request is
+   * dispatched. If a redirect-phase interceptor rewrites that target and
+   * redirect handling continues, later entries reflect the rewritten URL.
+   */
   redirectHistory: string[];
   requestID: string;
   isTimeout: boolean;
@@ -661,14 +671,14 @@ export interface ResponseObserverFilter extends PhaseFilter {
  */
 export interface ErrorObserverFilter extends PhaseFilter {
   /**
-   * Which events run this observer: **OR** over phase type. Any {@link RequestPhaseName} is
-   * accepted, but only `retry` and `final` ever deliver errors — `initial` and `redirect`
-   * never reach error observers (redirect errors surface as `final`; retry errors on
-   * redirect hops carry `redirect` context inside the `retry` phase).
+   * Which events run this observer: **OR** over phase type. Only `retry` and
+   * `final` are valid here — `initial` and `redirect` never reach error
+   * observers (redirect errors surface as `final`; retry errors on redirect
+   * hops carry `redirect` context inside the `retry` phase).
    *
    * Default: `['final']`. Pass `[]` to match all phases.
    */
-  phases?: RequestPhaseName[];
+  phases?: ErrorObserverPhaseName[];
 }
 
 /**
@@ -690,7 +700,11 @@ export interface RequestInterceptorContext {
    * Same string as {@link HTTPResponse.initialURL} and {@link AttemptStartEvent.initialURL}.
    */
   initialURL: string;
-  /** Redirect target URLs that were followed before this interceptor ran, in order. */
+  /**
+   * Redirect targets already recorded for this send, in order.
+   * During redirect-phase interceptors this includes the current detected
+   * target before any rewrite returned from that interceptor.
+   */
   redirectHistory: string[];
 }
 
