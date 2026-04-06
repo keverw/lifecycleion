@@ -116,7 +116,7 @@ const ok = matchesOriginList(
 - Rejects partial-label wildcards (e.g., `ex*.example.com`)
 - Rejects invalid characters in patterns: ports, paths, fragments, brackets, userinfo, backslashes
 - PSL/IP tail guard: disallows patterns like `*.com` or `**.co.uk`, and forbids wildcarding around IPs
-- Only `localhost` bypasses the PSL tail guard for wildcard patterns; other special-use names such as `.local` or `.test` are not allowlisted
+- `localhost` and `local` bypass the PSL tail guard for wildcard patterns; other special-use names such as `.test` or `.invalid` are not allowlisted
 - Unicode dot normalization (`．。｡` → `.`) to avoid bypasses
 - Step limits and label count caps to avoid pathological inputs
 - Credentials helpers: exact-only and wildcard-enabled variants
@@ -354,15 +354,16 @@ getSubdomain('localhost'); // null
 
 ### isApexDomain
 
-Returns `true` if a domain/hostname is an apex (registrable) domain with no subdomain. Uses `tldts` to correctly handle multi-part TLDs like `.co.uk` and `.com.au`. Returns `false` for IPs, `localhost`, bare TLDs, and any input that `tldts` cannot resolve to a registrable domain.
+Returns `true` if a domain/hostname is an apex (registrable) domain with no subdomain. Uses `tldts` to correctly handle multi-part TLDs like `.co.uk` and `.com.au`. Internal pseudo-TLDs (`localhost`, `local`) are treated as apex by definition; a single label under a pseudo-TLD (e.g. `foo.local`) is also considered apex. Returns `false` for IPs, bare public TLDs, and any input that `tldts` cannot resolve to a registrable domain.
 
 ```typescript
 isApexDomain('example.com'); // true
 isApexDomain('example.co.uk'); // true
+isApexDomain('localhost'); // true (pseudo-TLD)
+isApexDomain('foo.local'); // true (apex under .local pseudo-TLD)
 isApexDomain('www.example.com'); // false (subdomain)
 isApexDomain('api.example.com'); // false (subdomain)
-isApexDomain('sub.example.co.uk'); // false (subdomain)
-isApexDomain('localhost'); // false (no PSL match)
+isApexDomain('bar.foo.local'); // false (subdomain under foo.local)
 isApexDomain('192.168.1.1'); // false (IP)
 ```
 

@@ -1384,6 +1384,19 @@ export function isApexDomain(domain: string): boolean {
     return false;
   }
 
+  // Handle pseudo-TLD domains before tldts, which doesn't know about them.
+  const labels = normalizedDomain.split('.');
+  const lastLabel = labels[labels.length - 1];
+  if (INTERNAL_PSEUDO_TLDS.has(lastLabel)) {
+    if (normalizedDomain === lastLabel) {
+      return true; // bare pseudo-TLD hostname (e.g. localhost, local) → apex
+    }
+    if (lastLabel === 'localhost') {
+      return false; // localhost is a hostname, not a TLD; sub.localhost is not apex
+    }
+    return labels.length === 2; // foo.local → apex; bar.foo.local → not
+  }
+
   // Use tldts to properly detect apex domains vs subdomains
   // This correctly handles multi-part TLDs like .co.uk, .com.au, etc.
   const parsedDomain = getDomain(normalizedDomain);

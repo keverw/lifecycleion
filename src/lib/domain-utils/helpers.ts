@@ -10,10 +10,10 @@ export const INVALID_DOMAIN_CHARS = /[/?#:[\]@\\]/;
 
 // Internal / special-use TLDs that we explicitly treat as non-PSL for wildcard-tail checks.
 // Keep this list explicit—do not guess.
-// Currently we only allow 'localhost'. If you want to allow other IANA special-use
-// names (e.g., 'test', 'example', 'invalid', 'local'), add them here deliberately.
+// Currently: 'localhost' and 'local'. If you want to allow other IANA special-use
+// names (e.g., 'test', 'example', 'invalid'), add them here deliberately.
 export const INTERNAL_PSEUDO_TLDS = Object.freeze(
-  new Set<string>(['localhost']),
+  new Set<string>(['localhost', 'local']),
 );
 
 // Helper functions for wildcard pattern validation

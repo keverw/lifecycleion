@@ -3653,8 +3653,18 @@ describe('domain-utils', () => {
       expect(isApexDomain('::1')).toBe(false);
     });
 
-    it('should return false for localhost and bare TLDs (no PSL match)', () => {
-      expect(isApexDomain('localhost')).toBe(false);
+    it('should return true for internal pseudo-TLD apex domains', () => {
+      expect(isApexDomain('localhost')).toBe(true);
+      expect(isApexDomain('foo.local')).toBe(true);
+      expect(isApexDomain('myapp.local')).toBe(true);
+    });
+
+    it('should return false for subdomains under pseudo-TLDs', () => {
+      expect(isApexDomain('bar.foo.local')).toBe(false);
+      expect(isApexDomain('sub.localhost')).toBe(false);
+    });
+
+    it('should return false for bare TLDs and empty input (no PSL match)', () => {
       expect(isApexDomain('com')).toBe(false);
       expect(isApexDomain('')).toBe(false);
     });
