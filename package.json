@@ -44,6 +44,11 @@
       "import": "./dist/lib/dev-mode.js",
       "require": "./dist/lib/dev-mode.cjs"
     },
+    "./domain-utils": {
+      "types": "./dist/lib/domain-utils/domain-utils.d.ts",
+      "import": "./dist/lib/domain-utils/domain-utils.js",
+      "require": "./dist/lib/domain-utils/domain-utils.cjs"
+    },
     "./error-to-string": {
       "types": "./dist/lib/error-to-string.d.ts",
       "import": "./dist/lib/error-to-string.js",
@@ -223,6 +228,7 @@
     "@types/bun": "^1.2.13",
     "@types/node": "^24.10.0",
     "@types/qs": "^6.15.0",
+    "@types/tr46": "^5.0.1",
     "@typescript-eslint/eslint-plugin": "^8.46.3",
     "@typescript-eslint/parser": "^8.46.3",
     "eslint": "^9.39.1",
@@ -248,6 +254,7 @@
     "qs": "^6.15.0",
     "string-width": "^8.1.0",
     "tldts": "^7.0.27",
+    "tr46": "^5.1.1",
     "ulid": "^3.0.2",
     "uuid": "^13.0.0"
   }

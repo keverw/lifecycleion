@@ -59,6 +59,7 @@ export default defineConfig({
     'src/lib/curly-brackets.ts',
     'src/lib/deep-clone.ts',
     'src/lib/dev-mode.ts',
+    'src/lib/domain-utils/domain-utils.ts',
     'src/lib/error-to-string.ts',
     'src/lib/event-emitter.ts',
     'src/lib/id-helpers.ts',
