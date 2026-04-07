@@ -94,6 +94,11 @@
       "import": "./dist/lib/is-plain-object.js",
       "require": "./dist/lib/is-plain-object.cjs"
     },
+    "./lru-cache": {
+      "types": "./dist/lib/lru-cache/index.d.ts",
+      "import": "./dist/lib/lru-cache/index.js",
+      "require": "./dist/lib/lru-cache/index.cjs"
+    },
     "./lifecycle-manager": {
       "types": "./dist/lib/lifecycle-manager/index.d.ts",
       "import": "./dist/lib/lifecycle-manager/index.js",

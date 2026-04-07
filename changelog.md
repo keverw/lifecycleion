@@ -65,3 +65,4 @@
 - Added `lifecycleion/http-client-node` with a Node adapter for server-side HTTP requests, streaming downloads, multipart uploads, Unix sockets, and TLS/mTLS options
 - Added `lifecycleion/http-client-xhr` with an XHR adapter for environments that expose `XMLHttpRequest`, including real per-chunk upload/download progress, redirect detection, and Playwright-based browser integration tests
 - Added `lifecycleion/domain-utils` — hardened helpers for normalizing and matching domains and origins, including IDNA/TR46 normalization, IPv6 literal support with zone-ID rejection, wildcard CORS matching with PSL/IP-tail guards, credentials-safe origin matching, and re-exports of `tldts` helpers (`getDomain`, `getSubdomain`) so consumers don't need a separate install
+- Added `lifecycleion/lru-cache` — TTL-aware LRU cache with configurable max entries, optional byte-size limit, per-entry TTL overrides, automatic expiration, and pluggable size calculators

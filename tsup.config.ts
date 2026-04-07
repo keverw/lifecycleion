@@ -69,6 +69,7 @@ export default defineConfig({
     'src/lib/json-helpers.ts',
     'src/lib/is-boolean.ts',
     'src/lib/is-plain-object.ts',
+    'src/lib/lru-cache/index.ts',
     'src/lib/lifecycle-manager/index.ts',
     'src/lib/logger/index.ts',
     'src/lib/padding-utils.ts',
