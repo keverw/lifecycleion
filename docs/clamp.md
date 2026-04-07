@@ -47,6 +47,6 @@ finiteClampMin(null, 1000, 3000); // 3000 (null, returns default)
 
 **Parameters:**
 
-- `value` — The value to clamp (can be `undefined` or `null`)
-- `min` — The minimum allowed value
-- `defaultValue` — The default to return if value is not finite or is `undefined`/`null`
+- `value` - The value to clamp (can be `undefined` or `null`)
+- `min` - The minimum allowed value
+- `defaultValue` - The default to return if value is not finite or is `undefined`/`null`

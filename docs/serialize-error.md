@@ -1,6 +1,6 @@
 # serialize-error
 
-Simple utilities to convert any `Error` into a plain, JSON-serializable object — and back again if you need to re-throw it.
+Simple utilities to convert any `Error` into a plain, JSON-serializable object - and back again if you need to re-throw it.
 
 Useful for IPC, internal RPCs, and storing errors in a database (e.g. logging failed jobs, audit trails, error reports). For external RESTful APIs, don't use these as they can expose sensitive information (like the stack trace) to the client.
 
@@ -52,7 +52,7 @@ isErrorLike(value); // true | false
 
 ## RESTful API Error Guidelines
 
-For RESTful APIs, don't use `serializeError` — it exposes internals like stack traces. Instead, follow these guidelines:
+For RESTful APIs, don't use `serializeError` - it exposes internals like stack traces. Instead, follow these guidelines:
 
 1. Use appropriate HTTP status codes (e.g., 400 for bad requests, 404 for not found, 500 for server errors).
 2. Provide a JSON response body with error details. Typical fields include:

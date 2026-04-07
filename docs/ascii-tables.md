@@ -99,7 +99,7 @@ console.log(table.toString());
 
 #### addValueOnSeparateRow
 
-Adds a key with its value displayed on its own row beneath the centered key header — useful for longer text content.
+Adds a key with its value displayed on its own row beneath the centered key header - useful for longer text content.
 
 ```typescript
 const table = new KeyValueASCIITable({ tableWidth: 30 });

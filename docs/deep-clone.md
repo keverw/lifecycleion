@@ -65,5 +65,5 @@ cloned !== obj; // true (distinct object)
 
 ## Notes
 
-- Circular references are detected via an internal `WeakMap` and handled gracefully — no infinite recursion.
+- Circular references are detected via an internal `WeakMap` and handled gracefully - no infinite recursion.
 - Symbol keys are **not** cloned (they are not enumerable by `for...in`).

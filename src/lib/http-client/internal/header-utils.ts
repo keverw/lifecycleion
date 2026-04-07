@@ -74,14 +74,3 @@ export function isJSONContentType(contentType: string | undefined): boolean {
   const lower = contentType.toLowerCase();
   return lower.includes('application/json') || lower.includes('+json');
 }
-
-/**
- * Returns true if the content-type indicates a text body.
- */
-export function isTextContentType(contentType: string | undefined): boolean {
-  if (!contentType) {
-    return false;
-  }
-
-  return contentType.toLowerCase().includes('text/');
-}

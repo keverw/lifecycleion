@@ -58,10 +58,10 @@ padCenter('Hi', 7, 'right', '*'); // '**Hi***'  (extra on right)
 
 **Parameters:**
 
-- `str` — The string to center
-- `length` — The total target length
-- `prefer` — Which side gets the extra pad character when odd: `'left'` (default) or `'right'`
-- `padStr` — The character(s) to pad with (default: space)
+- `str` - The string to center
+- `length` - The total target length
+- `prefer` - Which side gets the extra pad character when odd: `'left'` (default) or `'right'`
+- `padStr` - The character(s) to pad with (default: space)
 
 ### padCenterPreferLeft
 

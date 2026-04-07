@@ -31,7 +31,7 @@ new PromiseProtectedResolver<T>(options?)
 
 **Options:**
 
-- `beforeResolveOrReject?` — `(action: 'resolve' | 'reject', valueOrReason: unknown) => void | Promise<void>` — Optional callback invoked just before the promise is settled. Useful for logging or side effects. Errors in this callback are caught and reported via the global `reportError` event rather than propagating.
+- `beforeResolveOrReject?` - `(action: 'resolve' | 'reject', valueOrReason: unknown) => void | Promise<void>` - Optional callback invoked just before the promise is settled. Useful for logging or side effects. Errors in this callback are caught and reported via the global `reportError` event rather than propagating.
 
 ### promise
 
@@ -69,7 +69,7 @@ console.log(resolver.hasResolved); // true
 resolver.resolveOnce(value: T): void
 ```
 
-Resolves the promise with the given value. Subsequent calls are silently ignored — the promise is only resolved the first time.
+Resolves the promise with the given value. Subsequent calls are silently ignored - the promise is only resolved the first time.
 
 ```typescript
 const resolver = new PromiseProtectedResolver<string>();

@@ -303,16 +303,15 @@ describe('domain-utils', () => {
       expect(normalizeOrigin('https://[abc]:443')).toBe('');
     });
 
-    it('should normalize exact origins to a bare origin without trailing slashes', () => {
+    it('should normalize an exact origin with a single trailing slash', () => {
       expect(normalizeOrigin('https://example.com/')).toBe(
         'https://example.com',
       );
-      expect(normalizeOrigin('https://example.com//')).toBe(
-        'https://example.com',
-      );
-      expect(normalizeOrigin('http://api.example.com:8080///')).toBe(
-        'http://api.example.com:8080',
-      );
+    });
+
+    it('should reject repeated trailing slashes in origins', () => {
+      expect(normalizeOrigin('https://example.com//')).toBe('');
+      expect(normalizeOrigin('http://api.example.com:8080///')).toBe('');
     });
 
     it('should return empty sentinel when hostname normalization fails (pathological IDN)', () => {
@@ -1032,6 +1031,18 @@ describe('domain-utils', () => {
           ),
         ).toBe(true);
       });
+
+      it('should reject origins with repeated slashes in the path', () => {
+        expect(
+          matchesWildcardOrigin('https://api.example.com//', '*.example.com'),
+        ).toBe(false);
+        expect(
+          matchesWildcardOrigin(
+            'https://api.example.com//',
+            'https://*.example.com',
+          ),
+        ).toBe(false);
+      });
     });
 
     describe('Double asterisk (**) - All subdomains including nested', () => {
@@ -1177,13 +1188,16 @@ describe('domain-utils', () => {
       );
       expect(matchesWildcardOrigin('https://x.y.z.net', '*.*.net')).toBe(false);
 
-      // Non-PSL tails (e.g., localhost) should still be allowed
-      expect(matchesWildcardDomain('api.localhost', '*.localhost')).toBe(true);
+      // Pseudo-TLD tails follow the same wildcard guard as public suffixes.
+      expect(matchesWildcardDomain('api.localhost', '*.localhost')).toBe(false);
       expect(
         matchesWildcardOrigin('https://api.localhost', '*.localhost'),
-      ).toBe(true);
+      ).toBe(false);
+      expect(matchesWildcardDomain('api.test', '*.test')).toBe(false);
+      expect(matchesWildcardDomain('myapp.local', '*.local')).toBe(false);
+      expect(matchesWildcardDomain('api.internal', '*.internal')).toBe(false);
 
-      // Apex localhost should not match wildcard (must be explicit)
+      // Apex pseudo-TLD should not match wildcard either (must be explicit)
       expect(matchesWildcardDomain('localhost', '*.localhost')).toBe(false);
     });
   });
@@ -1460,6 +1474,12 @@ describe('domain-utils', () => {
       expect(
         matchesOriginList('https://example.com', ['https://example.com/']),
       ).toBe(true);
+      expect(
+        matchesOriginList('https://example.com//', ['https://example.com']),
+      ).toBe(false);
+      expect(
+        matchesOriginList('https://example.com', ['https://example.com//']),
+      ).toBe(false);
       expect(
         matchesOriginList('https://example.com', ['https://example.com:']),
       ).toBe(false);
@@ -2258,13 +2278,13 @@ describe('domain-utils', () => {
         ).toBe(true); // exact match
       });
 
-      it("should handle domain list matching with 'null'", () => {
+      it("should reject 'null' in domain lists", () => {
         // Domain matching should not work with "null" for wildcards
         expect(matchesDomainList('null', ['*.example.com'])).toBe(false);
         expect(matchesDomainList('null', ['**.example.com'])).toBe(false);
 
-        // But exact domain matching should work
-        expect(matchesDomainList('null', ['null', 'example.com'])).toBe(true);
+        // Exact domain matching should also reject "null"; it is origin-only.
+        expect(matchesDomainList('null', ['null', 'example.com'])).toBe(false);
         expect(matchesDomainList('null', ['example.com'])).toBe(false);
       });
 
@@ -2786,6 +2806,11 @@ describe('domain-utils', () => {
         expect(r.info).toBeUndefined();
       });
 
+      it("rejects literal 'null' in domain context", () => {
+        const r = validateConfigEntry('null', 'domain');
+        expect(r.valid).toBe(false);
+      });
+
       it('rejects mixed-case null origins that would never match at runtime', () => {
         const upper = validateConfigEntry('NULL', 'origin');
         expect(upper.valid).toBe(false);
@@ -2885,7 +2910,7 @@ describe('domain-utils', () => {
       });
 
       it('rejects wildcard patterns that exceed the runtime label cap', () => {
-        const oversized = `${Array(33).fill('*').join('.')}.example.com`;
+        const oversized = `${new Array(33).fill('*').join('.')}.example.com`;
 
         expect(validateConfigEntry(oversized, 'domain')).toEqual({
           valid: false,
@@ -3067,7 +3092,10 @@ describe('domain-utils', () => {
 
       it('applies domain rules to bare domains in origin context', () => {
         const ok = validateConfigEntry('*.localhost', 'origin');
-        expect(ok.valid).toBe(true);
+        expect(ok.valid).toBe(false);
+        expect(ok.info).toBe(
+          'wildcard tail targets public suffix or IP (disallowed)',
+        );
 
         const bad = validateConfigEntry('*.127.0.0.1', 'origin');
         expect(bad.valid).toBe(false);
@@ -3196,12 +3224,12 @@ describe('domain-utils', () => {
       ).toBe(false);
     });
 
-    it('allows *.localhost as an internal pseudo-TLD', () => {
+    it('rejects *.localhost like other suffix-wide wildcards', () => {
       expect(
         matchesCORSCredentialsList('https://app.localhost', ['*.localhost'], {
           allowWildcardSubdomains: true,
         }),
-      ).toBe(true);
+      ).toBe(false);
     });
 
     it('rejects wildcard pattern where all concrete labels come before the wildcard (no fixed tail)', () => {
@@ -3657,11 +3685,15 @@ describe('domain-utils', () => {
       expect(isApexDomain('localhost')).toBe(true);
       expect(isApexDomain('foo.local')).toBe(true);
       expect(isApexDomain('myapp.local')).toBe(true);
+      expect(isApexDomain('myapp.test')).toBe(true);
+      expect(isApexDomain('test')).toBe(true);
+      expect(isApexDomain('api.internal')).toBe(true);
     });
 
     it('should return false for subdomains under pseudo-TLDs', () => {
       expect(isApexDomain('bar.foo.local')).toBe(false);
       expect(isApexDomain('sub.localhost')).toBe(false);
+      expect(isApexDomain('sub.myapp.test')).toBe(false);
     });
 
     it('should return false for bare TLDs and empty input (no PSL match)', () => {

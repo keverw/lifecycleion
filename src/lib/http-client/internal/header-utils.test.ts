@@ -3,7 +3,6 @@ import {
   assertNoBrowserRestrictedHeaders,
   isBrowserRestrictedHeader,
   isJSONContentType,
-  isTextContentType,
 } from './header-utils';
 
 describe('isBrowserRestrictedHeader', () => {
@@ -140,31 +139,5 @@ describe('isJSONContentType', () => {
 
   test('is case-insensitive', () => {
     expect(isJSONContentType('Application/JSON')).toBe(true);
-  });
-});
-
-describe('isTextContentType', () => {
-  test('returns true for text/plain', () => {
-    expect(isTextContentType('text/plain')).toBe(true);
-  });
-
-  test('returns true for text/html', () => {
-    expect(isTextContentType('text/html')).toBe(true);
-  });
-
-  test('returns true for text/csv', () => {
-    expect(isTextContentType('text/csv')).toBe(true);
-  });
-
-  test('returns false for application/json', () => {
-    expect(isTextContentType('application/json')).toBe(false);
-  });
-
-  test('returns false for undefined', () => {
-    expect(isTextContentType(undefined)).toBe(false);
-  });
-
-  test('is case-insensitive', () => {
-    expect(isTextContentType('Text/Plain')).toBe(true);
   });
 });

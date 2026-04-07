@@ -114,13 +114,13 @@ console.log(created.status); // 201
 ```typescript
 interface HTTPClientConfig {
   adapter?: HTTPAdapter; // Default: FetchAdapter
-  baseURL?: string; // Origin / prefix for relative paths
+  baseURL?: string; // Origin / prefix for relative paths. If set, MockAdapter, NodeAdapter, and server-side FetchAdapter require an absolute http(s):// URL.
   defaultHeaders?: Record<string, string | string[]>;
   timeout?: number; // Default: 30,000 ms; <= 0 disables the per-attempt timeout
   cookieJar?: CookieJar | null; // Cookie management (null disables)
   retryPolicy?: RetryPolicyOptions; // Retry strategy (disabled by default)
   includeRequestID?: boolean; // Default: false — sends x-local-client-request-id header
-  includeAttemptHeader?: boolean; // Default: false — sends x-local-client-request-attempt header
+  includeAttemptHeader?: boolean; // Default: false — sends x-local-client-request-attempt header with the 1-based attempt number as a decimal string. The counter is global across redirect hops: attempt 2 on a redirect hop follows attempt 1 on the initial request, not reset per hop.
   userAgent?: string; // Auto-set to 'lifecycleion-http-client' for NodeAdapter and MockAdapter, and for FetchAdapter on server runtimes. Browsers block this header — constructor throws if set with FetchAdapter or XHRAdapter in a browser.
   followRedirects?: boolean; // Default: false (security-conscious default)
   maxRedirects?: number; // Default: 5 (only meaningful when followRedirects: true; throws at construction unless followRedirects: true; must be >= 1)
@@ -173,9 +173,11 @@ client.request<T>(method, path, options?)
 
 - Relative paths (`/v1/users`, `v1/users`) are appended to `baseURL`.
 - Absolute `http(s)://` URLs bypass `baseURL` entirely and work with or without a `baseURL`.
-- Protocol-relative `//host/path` URLs also bypass `baseURL` as a path prefix. If `baseURL` is configured, they are resolved using its scheme. If `baseURL` is omitted, browser runtimes resolve them against the current page/worker scheme, while server runtimes cannot resolve them and the request fails at send time as a configuration error.
+- Protocol-relative `//host/path` URLs also bypass `baseURL` as a path prefix. If `baseURL` is configured, they are resolved using its scheme. If `baseURL` is omitted, browser runtimes resolve them against the current page/worker scheme, `MockAdapter` materializes them as `http://host/...`, and other server-side adapters cannot resolve them so the request fails at send time as a configuration error.
 
-All paths are resolved as far as possible before interceptors, the cookie jar, or any adapter sees them. For the real transport adapters (`fetch`, `xhr`, `node`) that means an absolute `http(s)://` URL. `MockAdapter` is the one exception: if you omit `baseURL`, path-only URLs like `/users` are preserved so host-agnostic mock routes keep working.
+All paths are resolved as far as possible before interceptors, the cookie jar, or any adapter sees them. For the real transport adapters (`fetch`, `xhr`, `node`) that means an absolute `http(s)://` URL. For `MockAdapter`, requests without a client `baseURL` are resolved before interceptors run using deterministic mock defaults: true path-only inputs become `http://localhost/...`, and protocol-relative inputs (`//host/...`) become `http://host/...`. Other unresolved non-HTTP inputs still fail during request setup.
+
+For `MockAdapter`, those resolved URLs are used for features that inspect the resolved URL, such as host/scheme filters and shared `CookieJar` state. If you want mock clients to use different default origins, use distinct cookie jars, protocol-relative request URLs, or give each client an explicit absolute `baseURL`.
 
 ### Request Builder API
 
@@ -194,7 +196,8 @@ const builder = client
   .onDownloadProgress((e) => console.log(e))
   .onAttemptStart((e) => console.log(e))
   .onAttemptEnd((e) => console.log(e))
-  .signal(controller.signal); // external AbortSignal, composed with builder.cancel()
+  .signal(controller.signal) // external AbortSignal, composed with builder.cancel()
+  .streamResponse((info, ctx) => writable); // NodeAdapter only — pipe response body to a writable stream
 
 const response = await builder.send();
 ```
@@ -254,7 +257,7 @@ interface HTTPResponse<T = unknown> {
   // false for ordinary HTTP errors like 4xx/5xx
   isParseError: boolean;
   initialURL: string; // URL after initial interceptors, before any redirect hops
-  requestURL: string; // URL of the last adapter attempt, or the redirect target being processed when redirect handling failed before dispatch
+  requestURL: string; // URL of the last adapter attempt, or the redirect target if redirect handling failed before the follow-up was dispatched
   wasRedirectDetected: boolean;
   wasRedirectFollowed: boolean;
   detectedRedirectURL?: string;
@@ -312,7 +315,7 @@ interface HTTPClientError {
   message: string;
   cause?: Error; // Underlying error when available
   initialURL: string;
-  requestURL: string; // URL of the last adapter attempt, or the redirect target being processed when redirect handling failed before dispatch
+  requestURL: string; // URL of the last adapter attempt, or the redirect target if redirect handling failed before the follow-up was dispatched
   wasRedirectDetected: boolean;
   wasRedirectFollowed: boolean;
   detectedRedirectURL?: string;
@@ -387,14 +390,14 @@ client.addRequestInterceptor((req) => {
 });
 
 interface InterceptedRequest {
-  requestURL: string; // Absolute for fetch/xhr/node; MockAdapter may keep a path-only URL when no baseURL is set
+  requestURL: string; // Absolute before dispatch
   method: HTTPMethod;
   headers: Record<string, string | string[]>;
   body?: unknown; // Pre-serialization
 }
 ```
 
-When rewriting `requestURL`, produce an absolute URL for the real transport adapters (`fetch`, `xhr`, `node`). `MockAdapter` is the exception: when no `baseURL` is configured, interceptors may keep or rewrite to path-only URLs like `/users`, but protocol-relative `//host/...` values are still invalid.
+When rewriting `requestURL`, always produce an absolute `http:` or `https:` URL. This applies to `MockAdapter` too. The client may materialize an absolute URL for you before interceptors run (for example via `baseURL`, browser resolution, or MockAdapter's synthetic `http://...` fallback), but interceptor outputs themselves must stay absolute.
 
 To change just the path while keeping the same origin:
 
@@ -406,30 +409,19 @@ client.addRequestInterceptor((request) => {
 });
 ```
 
-MockAdapter without a baseURL can stay path-only:
-
-```typescript
-const adapter = new MockAdapter();
-const client = new HTTPClient({ adapter });
-
-client.addRequestInterceptor((request) => ({
-  ...request,
-  requestURL: '/v2/users',
-}));
-```
-
 ### Filter Options
 
 ```typescript
 interface RequestInterceptorFilter {
   phases?: ('initial' | 'retry' | 'redirect')[]; // Default: ['initial']
   methods?: HTTPMethod[];
-  hosts?: string[]; // Exact hostnames and wildcard patterns like '*.example.com' — note: '*.example.com' matches 'sub.example.com' but not 'example.com' itself
+  hosts?: string[]; // Exact hostnames or wildcard patterns. '*.example.com' = one subdomain label only; '**.example.com' = any depth. Neither matches the apex — list it explicitly. '*' matches everything. PSL tail guard prevents '*.com'-style patterns.
+  schemes?: ('http' | 'https')[]; // Match on request scheme. requestURL is absolute whenever it could be resolved before dispatch — MockAdapter synthesizes `http://...` URLs when no baseURL is configured, browser adapters resolve against window.location, Node adapter requires absolute URLs.
   bodyContainsKeys?: string[]; // Dot-path object matching like 'data.results'; array indexing is not supported; the body must be a plain object at the root level — JSON array responses never match
 }
 ```
 
-All specified filter fields are ANDed together. Within each field, values are ORed — any one match is sufficient. An empty `phases: []` matches all phases.
+All specified filter fields are ANDed together. Within each field, values are ORed. Any one match is sufficient. An empty `phases: []` matches all phases.
 
 ### Cancelling from an Interceptor
 
@@ -502,7 +494,8 @@ Use `request.timeout` to inspect what timeout budget was configured for that att
 interface ResponseObserverFilter {
   phases?: ('retry' | 'redirect' | 'final')[]; // Default: ['final']
   methods?: HTTPMethod[];
-  hosts?: string[]; // Exact hostnames and wildcard patterns like '*.example.com' — note: '*.example.com' matches 'sub.example.com' but not 'example.com' itself
+  hosts?: string[]; // Exact hostnames or wildcard patterns. '*.example.com' = one subdomain label only; '**.example.com' = any depth. Neither matches the apex — list it explicitly. '*' matches everything. PSL tail guard prevents '*.com'-style patterns.
+  schemes?: ('http' | 'https')[]; // Match on request scheme. requestURL is absolute whenever it could be resolved before dispatch — MockAdapter synthesizes `http://...` URLs when no baseURL is configured, browser adapters resolve against window.location, Node adapter requires absolute URLs.
   statusCodes?: number[];
   contentTypes?: ('json' | 'text' | 'binary')[];
   contentTypeHeaders?: string[]; // Supports wildcards like 'image/*'
@@ -554,7 +547,8 @@ When a request fails before any adapter attempt is dispatched (for example reque
 interface ErrorObserverFilter {
   phases?: ('retry' | 'final')[]; // Default: ['final']
   methods?: HTTPMethod[];
-  hosts?: string[]; // Exact hostnames and wildcard patterns like '*.example.com' — note: '*.example.com' matches 'sub.example.com' but not 'example.com' itself
+  hosts?: string[]; // Exact hostnames or wildcard patterns. '*.example.com' = one subdomain label only; '**.example.com' = any depth. Neither matches the apex — list it explicitly. '*' matches everything. PSL tail guard prevents '*.com'-style patterns.
+  schemes?: ('http' | 'https')[]; // Match on request scheme. requestURL is absolute whenever it could be resolved before dispatch — MockAdapter synthesizes `http://...` URLs when no baseURL is configured, browser adapters resolve against window.location, Node adapter requires absolute URLs.
 }
 ```
 
@@ -601,7 +595,7 @@ import type { RetryPolicyOptions } from 'lifecycleion/retry-utils';
 const client = new HTTPClient({
   retryPolicy: {
     strategy: 'exponential',
-    maxRetryAttempts: 3, // Retries after the first attempt. Default: 10
+    maxRetryAttempts: 3, // Retries after the first attempt. Default: 10; minimum: 1
     minTimeoutMS: 500, // Initial delay (ms). Default: 1000
     maxTimeoutMS: 10_000, // Maximum delay cap (ms). Default: 30_000
     factor: 1.5, // Backoff multiplier. Default: 1.5
@@ -613,8 +607,8 @@ const client = new HTTPClient({
 const client2 = new HTTPClient({
   retryPolicy: {
     strategy: 'fixed',
-    maxRetryAttempts: 2, // Default: 10
-    delayMS: 1_000, // Delay between each attempt (ms). Default: 1000
+    maxRetryAttempts: 2, // Default: 10; minimum: 1
+    delayMS: 1_000, // Delay between each attempt (ms). Default: 1000; minimum: 1
   },
 });
 ```
@@ -763,7 +757,7 @@ builder.cancel('timeout_budget_exceeded');
 
 `cancel()` returns `true` if the cancel was applied, `false` if it was a no-op (the request had already completed, been cancelled, or failed).
 
-Calling `cancel()` before `send()` marks the builder so that `send()` throws a plain `Error` (not an `HTTPClientError`) immediately rather than dispatching the request.
+Calling `cancel()` before `send()` marks the builder so that `send()` throws a plain `Error` (not an `HTTPClientError`) immediately rather than dispatching the request. In this case `builder.error` is `null`. No `HTTPClientError` is produced and `cancelReason` is not accessible programmatically (the reason string, if any, appears only in the thrown `Error` message).
 
 ### ID-Scoped Cancel
 
@@ -832,7 +826,7 @@ const { count, requests } = client.listRequests({
 
 ## Sub-Client Creation
 
-Sub-clients share the parent's request tracker and enable/disable state. `createSubClient` is only available on `HTTPClient`, not on the `BaseHTTPClient` it returns, so nesting sub-clients is not supported.
+Sub-clients share the parent's request tracker and enable/disable state. `createSubClient` is only available on `HTTPClient`, and it returns an `HTTPSubClient` that omits `createSubClient`, so nesting sub-clients is not supported.
 
 ```typescript
 const authClient = client.createSubClient({
@@ -876,12 +870,12 @@ interface HTTPProgressEvent {
 
 Progress granularity depends on the adapter:
 
-| Adapter      | Upload progress | Download progress |
-| ------------ | --------------- | ----------------- |
-| FetchAdapter | 0% then 100%    | 0% then 100%      |
-| NodeAdapter  | Real per-chunk  | Real per-chunk    |
-| XHRAdapter   | Real per-chunk  | Real per-chunk    |
-| MockAdapter  | 0% then 100%    | 0% then 100%      |
+| Adapter      | Upload progress          | Download progress                |
+| ------------ | ------------------------ | -------------------------------- |
+| FetchAdapter | 0% at start, 100% at end | Terminal 100% only (no 0% event) |
+| NodeAdapter  | Real per-chunk           | Real per-chunk                   |
+| XHRAdapter   | Real per-chunk           | Real per-chunk                   |
+| MockAdapter  | 0% at start, 100% at end | Terminal 100% only (no 0% event) |
 
 ## Adapters
 
@@ -1056,8 +1050,8 @@ interface MockResponse {
 
 `MockResponse.cookies` shorthand:
 
-- `string` → session cookie: `name=value; Path=/` (the string is the cookie value, not a raw Set-Cookie header)
-- `null` → delete cookie: `name=; Path=/; Max-Age=0`
+- `string` -> session cookie: `name=value; Path=/` (the string is the cookie value, not a raw Set-Cookie header)
+- `null` -> delete cookie: `name=; Path=/; Max-Age=0`
 - `MockCookieOptions` → full control over path, domain, maxAge, httpOnly, secure, sameSite
 
 `cookies` entries are appended after any `headers['set-cookie']` entries. If the same cookie name appears in both, the `cookies` entry wins (last Set-Cookie header takes precedence).
@@ -1155,6 +1149,17 @@ type StreamResponseFactory = (
 
 `StreamResponseFactory` can also be supplied via `HTTPRequestOptions.streamResponse` when passing options directly to `client.get(...)`, `client.post(...)`, and the other request helpers.
 
+```typescript
+const response = await client.get('/large-file.bin', {
+  streamResponse: (info, { signal }) => {
+    const dest = createWriteStream('/tmp/large-file.bin');
+
+    signal.addEventListener('abort', () => dest.destroy(), { once: true });
+    return dest;
+  },
+});
+```
+
 Return `null` or `{ cancel: true, reason? }` from the factory to cancel the request (produces `isCancelled: true`, error code `cancelled`). The `reason` string is surfaced on `HTTPClientError.cancelReason`. If the factory throws, the error code is `stream_setup_error` instead.
 
 When streaming is active on a retry attempt (before headers arrive), the factory is called again for the new attempt. The `signal` from the previous attempt will have fired, allowing cleanup code to run before the new stream is set up.
@@ -1176,8 +1181,8 @@ builder.error; // HTTPClientError | null
 builder.attemptCount; // Total adapter calls made (null before send)
 builder.nextRetryDelayMS; // Scheduled delay for next retry (ms), or null
 builder.nextRetryAt; // Epoch ms for next retry, or null
-builder.startedAt; // Epoch ms when first attempt dispatched (null before send)
-builder.elapsedMS; // Wall-clock ms including retry waits; freezes on completion
+builder.startedAt; // Epoch ms when first attempt dispatched (null before send, and null when no adapter attempt was dispatched — e.g. pre-send cancel(), pre-aborted AbortSignal, request setup error, or interceptor cancel/error)
+builder.elapsedMS; // Wall-clock ms including retry waits; freezes on completion (null when startedAt is null)
 ```
 
 Labels default to `undefined`. When set, they must be non-empty strings, empty or whitespace-only labels throw.
@@ -1198,7 +1203,7 @@ type RequestState =
 
 **Internal representation:** All header keys are lowercased. `set-cookie` is always `string[]`. Other multi-value headers that arrive as comma-joined strings remain as `string`.
 
-**Merging:** When multiple sources set the same header (default headers, request headers, interceptors), later values win wholesale. A `string[]` value replaces a `string` value entirely rather than being appended. A single-element `string[]` is normalized to a plain `string` after merging — do not rely on `Array.isArray()` checks on merged header values.
+**Merging:** When multiple sources set the same header (default headers, request headers, interceptors), later values win wholesale. A `string[]` value replaces a `string` value entirely rather than being appended. A single-element `string[]` is normalized to a plain `string` when merging outgoing request headers and when normalizing response headers. Observer-facing `AttemptRequest.headers` may still contain `string[]` values when an adapter reports repeated effective request headers, but array preservation is not guaranteed. Do not rely on `Array.isArray()` checks on header values in any context.
 
 **Browser-restricted headers** (applying to FetchAdapter and XHRAdapter):
 

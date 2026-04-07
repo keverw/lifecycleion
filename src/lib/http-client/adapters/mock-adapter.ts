@@ -156,6 +156,7 @@ export class MockAdapter implements HTTPAdapter {
 
   constructor(config?: MockAdapterConfig) {
     this.config = config ?? {};
+
     this.router = Router({
       ignoreTrailingSlash: true,
       ignoreDuplicateSlashes: false,

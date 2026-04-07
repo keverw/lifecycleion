@@ -20,7 +20,7 @@ import { isPromise } from 'lifecycleion/is-promise';
 
 ### isPromise
 
-Returns `true` if the value is a thenable — an object or function with a `then` method — which is the Promises/A+ definition of a promise. Returns `false` otherwise.
+Returns `true` if the value is a thenable - an object or function with a `then` method - which is the Promises/A+ definition of a promise. Returns `false` otherwise.
 
 This means native `Promise` instances, custom thenables, and any function with a `then` method are all considered promises. A plain `{}` or `{ then: true }` (non-function `then`) are not.
 

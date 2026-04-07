@@ -31,7 +31,7 @@ function errorToString(error: unknown, maxRowLength?: number): string;
 
 | Parameter      | Type      | Default | Description                            |
 | -------------- | --------- | ------- | -------------------------------------- |
-| `error`        | `unknown` | —       | The error or thrown value to format    |
+| `error`        | `unknown` | -       | The error or thrown value to format    |
 | `maxRowLength` | `number`  | `80`    | Maximum character width for table rows |
 
 ```typescript

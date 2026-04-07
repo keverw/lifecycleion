@@ -351,10 +351,24 @@ export class BaseHTTPClient {
     // Wire up builder state
     callbacks.setState('sending');
 
-    // buildURL: relative path + baseURL, OR absolute http(s) / //host path unchanged
+    // buildURL: relative path + baseURL, OR absolute http(s) / //host path unchanged.
+    // For MockAdapter only, synthesize a deterministic absolute base URL when
+    // no baseURL is configured so interceptors and observers do not depend on
+    // ambient browser location state:
+    //   - true path-only inputs -> http://localhost/...
+    //   - protocol-relative //host/... inputs -> http://host/...
+    // Other non-HTTP absolute-like inputs still fail validation later.
+    const effectiveBaseURL =
+      this._config.baseURL ??
+      (this._adapter.getType() === 'mock'
+        ? !/^[a-z][a-z0-9+\-.]*:/i.test(path)
+          ? 'http://localhost'
+          : undefined
+        : undefined);
+
     const url = resolveAbsoluteURLForRuntime(
-      buildURL(this._config.baseURL, path, options.params),
-      this._config.baseURL,
+      buildURL(effectiveBaseURL, path, options.params),
+      effectiveBaseURL,
       this._isBrowserRuntime,
     );
     const timeout = options.timeout ?? this._config.timeout;
@@ -2550,7 +2564,7 @@ export class BaseHTTPClient {
       const url = new URL(requestURL);
       return url.protocol === 'http:' || url.protocol === 'https:';
     } catch {
-      return this._adapter.getType() === 'mock' && !requestURL.startsWith('//');
+      return false;
     }
   }
 }
@@ -2571,13 +2585,22 @@ export class HTTPClient extends BaseHTTPClient {
    * If no new `defaultHeaders` are provided, `'merge'` keeps the inherited defaults as-is,
    * which is useful for sub-clients that only swap adapters or other non-header config.
    */
-  public createSubClient(overrides: SubClientConfig = {}): BaseHTTPClient {
+  public createSubClient(overrides: SubClientConfig = {}): HTTPSubClient {
     return new BaseHTTPClient(this._buildSubClientConfig(overrides), {
       tracker: this._tracker,
       parentClient: this,
     });
   }
 }
+
+/**
+ * Public type for sub-clients returned by {@link HTTPClient.createSubClient}.
+ *
+ * Identical to {@link HTTPClient} except `createSubClient` is not available —
+ * sub-clients share the parent's tracker and observer chain but cannot spawn
+ * further sub-clients.
+ */
+export type HTTPSubClient = Omit<HTTPClient, 'createSubClient'>;
 
 function buildObservedAttemptBodies(
   rawBody: unknown,

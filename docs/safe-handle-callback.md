@@ -32,9 +32,9 @@ safeHandleCallback('onData', myCallback, arg1, arg2);
 
 **Parameters:**
 
-- `callbackName` — Name used in error messages for identification
-- `callback` — The function to execute (sync or async)
-- `...args` — Arguments forwarded to the callback
+- `callbackName` - Name used in error messages for identification
+- `callback` - The function to execute (sync or async)
+- `...args` - Arguments forwarded to the callback
 
 **Error handling:**
 
@@ -62,5 +62,5 @@ if (result.success) {
 
 **Returns:** `Promise<{ success: boolean; value?: T; error?: Error }>`
 
-- `success: true` — callback completed without throwing; `value` holds the return value
-- `success: false` — callback threw or was not a function; `error` holds the caught error
+- `success: true` - callback completed without throwing, and `value` holds the return value
+- `success: false` - callback threw or was not a function, and `error` holds the caught error

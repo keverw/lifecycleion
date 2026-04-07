@@ -75,12 +75,12 @@ export function normalizeOrigin(origin: string): string {
 
   const url = safeParseURL(normalizedOrigin);
   if (url) {
-    // Only normalize bare origins. Allow slash-only suffixes so callers can
-    // pass values like "https://example.com/" without broadening real paths.
+    // Only normalize bare origins. Allow a single trailing slash so callers
+    // can pass values like "https://example.com/" without broadening real paths.
     if (
       url.username ||
       url.password ||
-      (url.pathname && !/^\/+$/.test(url.pathname)) ||
+      (url.pathname && url.pathname !== '/') ||
       url.search ||
       url.hash
     ) {
@@ -223,7 +223,7 @@ export function matchesWildcardDomain(
     return false;
   }
 
-  // PSL/IP tail guard: ensure the fixed tail is neither a PSL nor an IP (except explicit localhost)
+  // PSL/IP tail guard: ensure the fixed tail is neither a PSL, a pseudo-TLD, nor an IP.
   // This prevents patterns like "*.com" or "**.co.uk" from matching
 
   const labels = normalizedPattern.split('.');
@@ -235,16 +235,14 @@ export function matchesWildcardDomain(
 
   const tail = fixedTailLabels.join('.');
 
-  if (!INTERNAL_PSEUDO_TLDS.has(tail)) {
-    if (isIPAddress(tail)) {
-      return false; // no wildcarding around IPs
-    }
+  if (isIPAddress(tail)) {
+    return false; // no wildcarding around IPs
+  }
 
-    const ps = getPublicSuffix(tail);
+  const ps = getPublicSuffix(tail);
 
-    if (ps && ps === tail) {
-      return false; // no wildcarding around public suffixes
-    }
+  if (INTERNAL_PSEUDO_TLDS.has(tail) || (ps && ps === tail)) {
+    return false; // no wildcarding around suffix-like tails
   }
 
   // "**." requires at least one label before the remainder, so a domain that
@@ -444,8 +442,10 @@ function isAllowedExactHostname(normalizedHostname: string): boolean {
     return false;
   }
 
+  // The literal string "null" is origin-only and must never match in domain context.
+  // Guard explicitly rather than relying on PSL classification of unknown single-label TLDs.
   if (normalizedHostname === 'null') {
-    return true;
+    return false;
   }
 
   if (
@@ -475,9 +475,15 @@ function isAllowedExactHostname(normalizedHostname: string): boolean {
  * - All-wildcards domain patterns (e.g., "*.*") are invalid. The global "*" may be allowed
  *   in origin context when explicitly enabled via options.
  * - Wildcards cannot target IP tails.
- * - PSL tail guard (with allowlist for internal pseudo-TLDs like localhost).
+ * - PSL tail guard also rejects pseudo-TLD suffix wildcards like `*.localhost`.
  */
 export type WildcardKind = 'none' | 'global' | 'protocol' | 'subdomain';
+
+export type ValidationResult = {
+  valid: boolean;
+  info?: string;
+  wildcardKind: WildcardKind;
+};
 
 function isValidPortString(port: string): boolean {
   if (!/^\d+$/.test(port)) {
@@ -492,7 +498,7 @@ export function validateConfigEntry(
   entry: string,
   context: 'domain' | 'origin',
   options?: { allowGlobalWildcard?: boolean; allowProtocolWildcard?: boolean },
-): { valid: boolean; info?: string; wildcardKind: WildcardKind } {
+): ValidationResult {
   const raw = (entry ?? '').trim();
   const SCHEME_RE = /^[a-z][a-z0-9+\-.]*$/i;
   if (!raw) {
@@ -555,25 +561,18 @@ export function validateConfigEntry(
     }
 
     const tail = fixedTailLabels.join('.');
-    if (INTERNAL_PSEUDO_TLDS.has(tail)) {
-      return false; // allow *.localhost etc.
-    }
     if (isIPAddress(tail)) {
       return true; // no wildcarding around IPs
     }
     const ps = getPublicSuffix(tail);
-    if (ps && ps === tail) {
+    if (INTERNAL_PSEUDO_TLDS.has(tail) || (ps && ps === tail)) {
       return true;
     }
     return false;
   }
 
   // Helper: domain-wildcard structural checks (no URL chars, full labels, etc.)
-  function validateDomainWildcard(pattern: string): {
-    valid: boolean;
-    info?: string;
-    wildcardKind: WildcardKind;
-  } {
+  function validateDomainWildcard(pattern: string): ValidationResult {
     // Normalize Unicode dots and trim
     const trimmed = pattern
       .trim()
@@ -642,11 +641,17 @@ export function validateConfigEntry(
   }
 
   // Helper: exact domain check (no protocols). Reject apex public suffixes.
-  function validateExactDomain(s: string): {
-    valid: boolean;
-    info?: string;
-    wildcardKind: WildcardKind;
-  } {
+  function validateExactDomain(s: string): ValidationResult {
+    // The literal string "null" is origin-only; reject it explicitly
+    // rather than relying on PSL classification of unknown single-label TLDs.
+    if (s.toLowerCase() === 'null') {
+      return {
+        valid: false,
+        info: '"null" is not a valid domain entry',
+        wildcardKind: 'none',
+      };
+    }
+
     // Check if it's an IP address first - if so, allow it (consistent with matchesDomainList)
     // Normalize Unicode dots for consistent IP detection
     const sDots = toAsciiDots(s);
@@ -1073,16 +1078,12 @@ function isCredentialsSafeWildcardOriginPattern(pattern: string): boolean {
     }
 
     const tail = fixedTail.join('.');
-    if (INTERNAL_PSEUDO_TLDS.has(tail)) {
-      return true;
-    }
-
     if (isIPAddress(tail)) {
       return false;
     }
 
     const ps = getPublicSuffix(tail);
-    return !(ps && ps === tail);
+    return !INTERNAL_PSEUDO_TLDS.has(tail) && !(ps && ps === tail);
   }
 
   if (!trimmed.includes('*')) {

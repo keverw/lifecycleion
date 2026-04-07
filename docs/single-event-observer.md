@@ -61,10 +61,10 @@ observer.unsubscribe(callback);
 
 **Methods:**
 
-- `subscribe(fn)` — Add a subscriber.
-- `unsubscribe(fn)` — Remove a subscriber.
-- `hasSubscriber(fn)` — Check whether a subscriber is currently registered.
-- `notify(data)` — Notify all subscribers with the provided event payload.
+- `subscribe(fn)` - Add a subscriber.
+- `unsubscribe(fn)` - Remove a subscriber.
+- `hasSubscriber(fn)` - Check whether a subscriber is currently registered.
+- `notify(data)` - Notify all subscribers with the provided event payload.
 
 ### SingleEventObserverProtected
 
@@ -84,7 +84,7 @@ emitter.emit('hello');
 
 **Methods:**
 
-- `subscribe(fn)` — Add a subscriber.
-- `unsubscribe(fn)` — Remove a subscriber.
-- `hasSubscriber(fn)` — Check whether a subscriber is currently registered.
-- `notify(data)` _(protected)_ — Notify all subscribers. Only accessible inside the class or subclasses.
+- `subscribe(fn)` - Add a subscriber.
+- `unsubscribe(fn)` - Remove a subscriber.
+- `hasSubscriber(fn)` - Check whether a subscriber is currently registered.
+- `notify(data)` _(protected)_ - Notify all subscribers. Only accessible inside the class or subclasses.

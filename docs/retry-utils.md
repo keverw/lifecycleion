@@ -135,7 +135,7 @@ if (policy.shouldDoFirstTry()) {
 
 Decides if a retry should happen based on the error and policy. Records the error unless `isQueryOnly` is `true`.
 
-When `isQueryOnly` is `true`, the `error` parameter can be omitted — no error is recorded and the method purely queries whether a retry is available.
+When `isQueryOnly` is `true`, the `error` parameter can be omitted - no error is recorded and the method purely queries whether a retry is available.
 
 > **Note:** Errors are recorded even after `markAsSuccessful()` has been called (unless `isQueryOnly` is `true`). In that case, `shouldRetry` will still return `false`, but the error will be tracked in the `errors` array.
 >
@@ -181,7 +181,7 @@ Resets the policy to its initial state, clearing all errors and attempt tracking
 | `mostCommonError`        | `unknown`              | Most frequent error (grouped by reference equality and message string), or `null` if no errors have occurred |
 | `lastError`              | `unknown`              | Most recent error, or `null` if no errors have been recorded                                                 |
 
-> **Note:** `mostCommonError` uses two strategies to determine frequency — reference equality (`===`) and message-string grouping — and returns whichever finds the highest count. Reference equality catches reused error objects (including those with unstable or dynamic messages). Message grouping uses the `.message` property for `Error` instances and objects, nested `.error.message` for wrapped errors, or `String()` conversion as a fallback, so distinct objects with the same message are counted together. The first instance encountered for the winning group is returned. In case of ties across strategies, the first error encountered with the maximum count is returned.
+> **Note:** `mostCommonError` uses two strategies to determine frequency - reference equality (`===`) and message-string grouping - and returns whichever finds the highest count. Reference equality catches reused error objects (including those with unstable or dynamic messages). Message grouping uses the `.message` property for `Error` instances and objects, nested `.error.message` for wrapped errors, or `String()` conversion as a fallback, so distinct objects with the same message are counted together. The first instance encountered for the winning group is returned. In case of ties across strategies, the first error encountered with the maximum count is returned.
 
 ### Example
 
@@ -523,7 +523,7 @@ unsubscribe();
 The runner also inherits these methods from its event emitter base class:
 
 - **`on(event, callback)`** - Subscribe to an event. Returns an unsubscribe function.
-- **`once(event, callback)`** - Subscribe to an event once; automatically unsubscribes after the first emission. Returns an unsubscribe function.
+- **`once(event, callback)`** - Subscribe to an event once. It automatically unsubscribes after the first emission. Returns an unsubscribe function.
 - **`hasListener(event, callback)`** - Returns `true` if the exact callback is registered for the event. Note: for `once()` subscriptions, this checks the internal wrapper, not the original callback.
 - **`hasListeners(event)`** - Returns `true` if the event has any subscribers.
 - **`listenerCount(event)`** - Returns the number of subscribers for the event.
@@ -641,11 +641,11 @@ The following types are exported for use in consuming code:
 | `RetryPolicyOptions`                    | Union of fixed and exponential strategy option interfaces                                                                                            |
 | `RetryPolicyOptionsStrategyFixed`       | Options interface for the `'fixed'` strategy                                                                                                         |
 | `RetryPolicyOptionsStrategyExponential` | Options interface for the `'exponential'` strategy                                                                                                   |
-| `RetryPolicyValidated`                  | `Required<RetryPolicyOptions>` — all options resolved (narrow on `strategy` to access strategy-specific properties)                                  |
+| `RetryPolicyValidated`                  | `Required<RetryPolicyOptions>` - all options resolved (narrow on `strategy` to access strategy-specific properties)                                  |
 | `RetryQueryResult`                      | Return type of `RetryPolicy.shouldRetry()`: `{ shouldRetry: boolean, delayMS: number }`                                                              |
 | `RunAttemptStatusCodes`                 | Union of all possible `status` values in `RunResult`                                                                                                 |
 | `RunnerErrorCode`                       | Union of all possible `code` values in pre-operation errors                                                                                          |
-| `RunResult<T>`                          | Return type of `run()`, `resume()`, `forceTry()`, `waitForCompletion()`. Discriminated union — narrow on `status`                                    |
+| `RunResult<T>`                          | Return type of `run()`, `resume()`, `forceTry()`, `waitForCompletion()`. Discriminated union - narrow on `status`                                    |
 | `RunResultSuccess<T>`                   | Success branch of `RunResult<T>`: `{ status: 'attempt_success', data?: T }`                                                                          |
 | `RunResultNonSuccess`                   | Non-success branch of `RunResult<T>`: `{ status, code?, error?, reattached? }` (`reattached` only present for `status: 'running'` from `forceTry()`) |
 | `RunnerState`                           | Union of all runner lifecycle states                                                                                                                 |

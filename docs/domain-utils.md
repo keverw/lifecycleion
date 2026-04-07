@@ -66,6 +66,9 @@ import {
   getDomain,
   getSubdomain,
   isApexDomain,
+  type ParsedHost,
+  type WildcardKind,
+  type ValidationResult,
 } from 'lifecycleion/domain-utils';
 ```
 
@@ -102,10 +105,10 @@ const ok = matchesOriginList(
 ## Wildcard semantics
 
 - `*` matches exactly one label
-- `**` matches one-or-more labels when leftmost; in an interior position such as `a.**.example.com` it matches zero-or-more labels
+- `**` matches one-or-more labels when leftmost. In an interior position such as `a.**.example.com`, it matches zero-or-more labels. For example: `**.example.com` matches `api.example.com` but not `example.com` (1+ labels required), while `a.**.example.com` matches both `a.example.com` and `a.b.c.example.com` (0+ labels)
 - Multi-label patterns like `*.*.example.com` are supported and must match the exact number of wildcarded labels
 - Partial-label wildcards are not allowed. A label may be `*` or `**` only, patterns like `ex*.demo.com`, `*ample.demo.com`, `a*b.demo.com`, `foo*bar.demo.com` are rejected.
-- Apex domains never match non-global wildcard patterns; list apex explicitly. The global `*` is an exception and does match apex domains.
+- Apex domains never match non-global wildcard patterns. List apex explicitly. The global `*` is an exception and does match apex domains.
 - Origins:
   - `*` matches any valid HTTP(S) origin
   - `https://*` or `http://*` matches any origin with that scheme
@@ -116,7 +119,7 @@ const ok = matchesOriginList(
 - Rejects partial-label wildcards (e.g., `ex*.example.com`)
 - Rejects invalid characters in patterns: ports, paths, fragments, brackets, userinfo, backslashes
 - PSL/IP tail guard: disallows patterns like `*.com` or `**.co.uk`, and forbids wildcarding around IPs
-- `localhost` and `local` bypass the PSL tail guard for wildcard patterns; other special-use names such as `.test` or `.invalid` are not allowlisted
+- Wildcard tails are guarded consistently: public suffixes and the recognized pseudo-TLDs (`localhost`, `local`, `test`, `internal` - this is the complete set) are rejected for patterns like `*.suffix`
 - Unicode dot normalization (`．。｡` → `.`) to avoid bypasses
 - Step limits and label count caps to avoid pathological inputs
 - Credentials helpers: exact-only and wildcard-enabled variants
@@ -150,11 +153,11 @@ safeParseURL('not-a-url'); // null
 
 ### normalizeOrigin
 
-Normalizes a bare origin for consistent comparison. Returns the canonical origin form with a normalized hostname, lowercase scheme, no trailing slash, and default ports removed (80 for `http`, 443 for `https`). Returns `""` on invalid input or failed hostname normalization. Preserves the literal `"null"` origin.
+Normalizes a bare origin for consistent comparison. Returns the canonical origin form with a normalized hostname, lowercase scheme, no trailing slash, and default ports removed (80 for `http`, 443 for `https`). Returns `""` on invalid input or failed hostname normalization. Preserves the literal `"null"` origin. Like `normalizeDomain()`, it accepts only the canonical bare form plus one optional trailing separator: a single trailing `/` is normalized away, but repeated trailing slashes are rejected.
 
 ```typescript
 normalizeOrigin('HTTPS://Example.COM:443/'); // 'https://example.com'
-normalizeOrigin('https://example.com//'); // 'https://example.com'
+normalizeOrigin('https://example.com//'); // ''
 normalizeOrigin('http://example.com:80'); // 'http://example.com'
 normalizeOrigin('https://example.com:8080'); // 'https://example.com:8080'
 normalizeOrigin('https://example.com:'); // ''
@@ -162,7 +165,7 @@ normalizeOrigin('https://example.com:'); // ''
 
 ### parseHostHeader
 
-Parses an HTTP `Host` header into `{ domain, port }`. Surrounding whitespace is trimmed before parsing, and IPv6 brackets are stripped from the returned `domain`. Returns `{ domain: '', port: '' }` on malformed input, including empty or whitespace-only values, invalid port strings (non-numeric or outside 0–65535), and bracketed IPv6 addresses that fail validation. The returned `domain` is not normalized — pass it to `normalizeDomain()` before comparison. See [Parsing Host headers](#parsing-host-headers) for full details.
+Parses an HTTP `Host` header into `{ domain, port }`. Surrounding whitespace is trimmed before parsing, and IPv6 brackets are stripped from the returned `domain`. Returns `{ domain: '', port: '' }` on malformed input, including empty or whitespace-only values, invalid port strings (non-numeric or outside 0–65535), and bracketed IPv6 addresses that fail validation. The returned `domain` is not normalized. Pass it to `normalizeDomain()` before comparison. See [Parsing Host headers](#parsing-host-headers) for full details.
 
 ```typescript
 parseHostHeader('example.com:8080'); // { domain: 'example.com', port: '8080' }
@@ -171,7 +174,7 @@ parseHostHeader('[::1]:443'); // { domain: '::1', port: '443' }
 
 ### matchesWildcardDomain
 
-Matches a domain/hostname against a single wildcard pattern. Apex domains never match non-global wildcard patterns — list them explicitly. The global `*` is an exception and matches any valid domain including apex. If you start with a full URL, parse it first and pass `url.hostname`.
+Matches a domain/hostname against a single wildcard pattern. Apex domains never match non-global wildcard patterns. List them explicitly. The global `*` is an exception and matches any valid domain including apex. If you start with a full URL, parse it first and pass `url.hostname`.
 
 ```typescript
 matchesWildcardDomain('api.example.com', '*.example.com'); // true
@@ -190,6 +193,7 @@ Matches a bare origin against a single wildcard pattern. Supports protocol-speci
 - A bare domain pattern like `*.example.com` or `**.example.com` is protocol-agnostic and ignores the origin port.
 - A protocol-specific pattern like `https://*.example.com` or `https://*` requires that exact scheme.
 - Wildcard patterns do not include ports. If you need an exact port match, use `matchesOriginList` or `matchesCORSCredentialsList` with exact origins instead.
+- The `"null"` origin is never matched by wildcard patterns. Include `"null"` explicitly in list helpers if needed.
 
 ```typescript
 matchesWildcardOrigin('https://api.example.com', 'https://*.example.com'); // true
@@ -201,7 +205,11 @@ matchesWildcardOrigin('https://example.com', '*'); // true
 
 ### matchesDomainList
 
-Checks if a domain/hostname matches any entry in a list. Throws if any entry looks like an origin URL (starts with a scheme followed by `://`). Pre-validate entries with `validateConfigEntry(..., 'domain')`. If you start with a full URL, parse it first and pass `url.hostname`.
+Checks if a domain/hostname matches any entry in a list. Throws if any entry looks like an origin URL (starts with a scheme followed by `://`). Pre-validate entries with `validateConfigEntry(..., 'domain')`. Empty or invalid domain inputs return `false` without throwing. If you start with a full URL, parse it first and pass `url.hostname`.
+
+Exact entries are normalized before comparison, including canonical IP literal handling (for example, `0x7f.0.0.1` matches `127.0.0.1`). Exact entries that equal a public suffix such as `com` or `co.uk` are never matched. Internal pseudo-TLDs such as `localhost`, `local`, `test`, and `internal` are handled separately and may be valid exact entries. The global wildcard `"*"` matches any valid domain, so reject it at config time with `validateConfigEntry(..., 'domain', { allowGlobalWildcard: false })` if undesired.
+
+The literal string `"null"` is origin-only. It has no special meaning in domain matching and is never matched by `matchesDomainList`, whether passed as the domain input or included in the allowlist.
 
 ```typescript
 matchesDomainList('api.example.com', ['*.example.com', 'other.com']); // true
@@ -210,21 +218,24 @@ matchesDomainList('test.com', ['*.example.com', 'other.com']); // false
 
 ### matchesOriginList
 
-Checks if an origin matches any entry in a list. The runtime `origin` input must be an origin string, not a full URL. The literal browser `Origin` header value `null` must be listed explicitly as the exact string `"null"` to be matched. Allowlist entries may be exact bare origins or bare domains. Exact origins may use non-HTTP(S) schemes and are matched exactly, although wildcard origin matching remains HTTP(S)-only. Full URL inputs with userinfo, paths other than a single trailing slash, queries, and fragments are rejected instead of being normalized. Default: `{ treatNoOriginAsAllowed: false }`.
+Checks if an origin matches any entry in a list. The runtime `origin` input must be an origin string, not a full URL. The literal browser `Origin` header value `null` must be listed explicitly as the exact string `"null"` to be matched. Allowlist entries may be exact bare origins or bare domains. Exact origins may use non-HTTP(S) schemes and are matched exactly, although wildcard origin matching remains HTTP(S)-only. Full URL inputs with userinfo, paths other than trailing slashes, queries, and fragments are rejected instead of being normalized. Default: `{ treatNoOriginAsAllowed: false }`.
 
-`treatNoOriginAsAllowed: true` only takes effect when `"*"` is also present in the allowlist — it does not unconditionally allow no-origin requests. With any other allowlist, a missing `Origin` header always returns `false`.
+`treatNoOriginAsAllowed: true` only takes effect when `"*"` is also present in the allowlist. It does not unconditionally allow no-origin requests. With any other allowlist, a missing `Origin` header always returns `false`.
 
-Invalid inputs are handled internally. Callers do not need to wrap this helper in `try/catch`; malformed origin strings simply return `false`.
+Invalid inputs are handled internally. Callers do not need to wrap this helper in `try/catch`. Malformed origin strings simply return `false`.
 
 Blank or whitespace-only allowlist entries are trimmed and ignored.
 
 - Exact origin entries may include a port: `https://example.com:8443`
+- Exact origin and bare-domain entries are normalized before comparison, including canonical IP literal handling
+- Exact origin or bare-domain entries that equal a public suffix such as `com` or `co.uk` are never matched. Internal pseudo-TLDs such as `localhost`, `local`, `test`, and `internal` are handled separately and may be valid exact entries
 - Bare-domain entries such as `example.com` match by hostname only and ignore scheme and port
 - Wildcard entries may be:
   - host-only patterns such as `*.example.com` or `**.example.com`
   - protocol wildcards such as `https://*`
   - protocol + host wildcards such as `https://*.example.com`
-- Wildcard entries do not match on port; exact entries do.
+- Wildcard entries do not match on port. Exact entries do.
+- Origin matchers accept a bare origin or that same origin with a single trailing `/`, consistent with `normalizeOrigin`
 - If you have a full URL, parse it first and pass `url.origin`.
 
 ```typescript
@@ -238,11 +249,13 @@ matchesOriginList(undefined, ['*'], { treatNoOriginAsAllowed: true }); // true
 
 ### matchesCORSCredentialsList
 
-Credentials-safe origin matching. Exact-only by default; optionally enables subdomain wildcards. The runtime `origin` input must be an origin string, not a full URL. Malformed origins and malformed exact allowlist entries are rejected rather than compared via the invalid-input sentinel. Allowlist entries may be exact bare origins or bare domains; bare-domain entries match by hostname only and ignore scheme and port, so use exact origins like `https://example.com` when scheme restriction is required. Exact origins may use non-HTTP(S) schemes and are matched exactly, but wildcard matching in credentials mode is limited to host subdomain patterns only. Protocol-only wildcards such as `https://*` and global `"*"` are never honored here. Full URL inputs with userinfo, paths, queries, or fragments are rejected. The literal string `"null"` may be included explicitly in the allowlist to match sandbox/file/data origins that emit a `null` Origin header.
+Credentials-safe origin matching. Exact-only by default, with optional subdomain wildcards. The runtime `origin` input must be an origin string, not a full URL. Malformed origins and malformed exact allowlist entries are rejected rather than compared via the invalid-input sentinel. Allowlist entries may be exact bare origins or bare domains. Bare-domain entries match by hostname only and ignore scheme and port, so use exact origins like `https://example.com` when scheme restriction is required. Exact origins may use non-HTTP(S) schemes and are matched exactly, but wildcard matching in credentials mode is limited to host subdomain patterns only. Protocol-only wildcards such as `https://*` and global `"*"` are never honored here. Full URL inputs with userinfo, paths other than trailing slashes, queries, or fragments are rejected. A missing or empty origin always returns `false`, and there is no `treatNoOriginAsAllowed` option in credentials mode. The literal string `"null"` may be included explicitly in the allowlist to match sandbox/file/data origins that emit a `null` Origin header.
 
-Invalid inputs are handled internally. Callers do not need to wrap this helper in `try/catch`; malformed origin strings simply return `false`.
+Invalid inputs are handled internally. Callers do not need to wrap this helper in `try/catch`. Malformed origin strings simply return `false`.
 
 Blank or whitespace-only allowlist entries are trimmed and ignored.
+
+Exact origin and bare-domain entries are normalized before comparison, including canonical IP literal handling. Exact origin or bare-domain entries that equal a public suffix such as `com` or `co.uk` are never matched. Internal pseudo-TLDs such as `localhost`, `local`, `test`, and `internal` are handled separately and may be valid exact entries.
 
 ```typescript
 // Exact match only (default)
@@ -255,11 +268,14 @@ matchesCORSCredentialsList(
   ['https://*.example.com'],
   { allowWildcardSubdomains: true },
 ); // true
+
+// Matching "null" origin explicitly
+matchesCORSCredentialsList('null', ['null']); // true
 ```
 
 ### validateConfigEntry
 
-Validates a domain or origin config entry. Non-throwing — returns a result object. Exact origins may include an explicit port, but it must be in the range `0-65535`. See [Configuration & validation](#configuration--validation) for usage guidance.
+Validates a domain or origin config entry. Non-throwing, returns a result object. Exact origins may include an explicit port, but it must be in the range `0-65535`. See [Configuration & validation](#configuration--validation) for usage guidance.
 
 For exact origins with bracketed hosts, the bracket contents must be a valid IPv6 literal.
 
@@ -271,7 +287,9 @@ validateConfigEntry('*.com', 'domain');
 // { valid: false, info: '...public suffix...', wildcardKind: 'none' }
 ```
 
-Options: `{ allowGlobalWildcard?: boolean; allowProtocolWildcard?: boolean }` — defaults: `allowGlobalWildcard: false`, `allowProtocolWildcard: true`.
+Options: `{ allowGlobalWildcard?: boolean; allowProtocolWildcard?: boolean }`. Defaults: `allowGlobalWildcard: false`, `allowProtocolWildcard: true`.
+
+`allowProtocolWildcard` applies only to the protocol-only wildcard forms `http://*` and `https://*`. It does not disable scheme-qualified host wildcards such as `https://*.example.com` or `https://**.example.com`.
 
 ### isIPAddress
 
@@ -322,7 +340,7 @@ Validates DNS length constraints for a hostname. Non-throwing. Assumes ASCII inp
 
 - Each label must be ≤ 63 octets
 - Total FQDN must be ≤ 255 octets
-- Maximum 127 labels
+- Maximum 127 labels (128+ is rejected)
 
 ```typescript
 checkDNSLength('example.com'); // true
@@ -332,7 +350,7 @@ checkDNSLength('x.'.repeat(127) + 'com'); // false (128 labels > 127 limit)
 
 ### getDomain
 
-Returns the registrable domain (e.g. `example.com` from a subdomain). Re-exported from [`tldts`](https://github.com/remusao/tldts) — no separate install needed.
+Returns the registrable domain (e.g. `example.com` from a subdomain). Re-exported from [`tldts`](https://github.com/remusao/tldts). No separate install is needed.
 
 ```typescript
 getDomain('api.example.com'); // 'example.com'
@@ -343,7 +361,7 @@ getDomain('localhost'); // null
 
 ### getSubdomain
 
-Returns the subdomain portion of a hostname. Re-exported from [`tldts`](https://github.com/remusao/tldts) — no separate install needed.
+Returns the subdomain portion of a hostname. Re-exported from [`tldts`](https://github.com/remusao/tldts). No separate install is needed.
 
 ```typescript
 getSubdomain('api.example.com'); // 'api'
@@ -354,23 +372,26 @@ getSubdomain('localhost'); // null
 
 ### isApexDomain
 
-Returns `true` if a domain/hostname is an apex (registrable) domain with no subdomain. Uses `tldts` to correctly handle multi-part TLDs like `.co.uk` and `.com.au`. Internal pseudo-TLDs (`localhost`, `local`) are treated as apex by definition; a single label under a pseudo-TLD (e.g. `foo.local`) is also considered apex. Returns `false` for IPs, bare public TLDs, and any input that `tldts` cannot resolve to a registrable domain.
+Returns `true` if a domain/hostname is an apex (registrable) domain with no subdomain. Uses `tldts` to correctly handle multi-part TLDs like `.co.uk` and `.com.au`. Internal pseudo-TLDs (`localhost`, `local`, `test`, `internal`) are treated as apex by definition. A single label under a pseudo-TLD (e.g. `foo.local`, `myapp.test`, `api.internal`) is also considered apex. Returns `false` for IPs, bare public TLDs, and any input that `tldts` cannot resolve to a registrable domain.
 
 ```typescript
 isApexDomain('example.com'); // true
 isApexDomain('example.co.uk'); // true
 isApexDomain('localhost'); // true (pseudo-TLD)
 isApexDomain('foo.local'); // true (apex under .local pseudo-TLD)
+isApexDomain('myapp.test'); // true (apex under .test pseudo-TLD)
 isApexDomain('www.example.com'); // false (subdomain)
 isApexDomain('api.example.com'); // false (subdomain)
 isApexDomain('bar.foo.local'); // false (subdomain under foo.local)
+isApexDomain('sub.localhost'); // false (localhost is a hostname, not a TLD suffix)
 isApexDomain('192.168.1.1'); // false (IP)
 ```
 
 ### Types
 
-- `ParsedHost` — `{ domain: string; port: string }` — result of `parseHostHeader`
-- `WildcardKind` — `'none' | 'global' | 'protocol' | 'subdomain'` — returned by `validateConfigEntry`
+- `ParsedHost`: `{ domain: string; port: string }`, result of `parseHostHeader`
+- `WildcardKind`: `'none' | 'global' | 'protocol' | 'subdomain'`, returned by `validateConfigEntry`
+- `ValidationResult`: `{ valid: boolean; info?: string; wildcardKind: WildcardKind }`, returned by `validateConfigEntry`
 
 ## Parsing Host headers
 
@@ -441,6 +462,15 @@ Outputs: `{ valid, info?, wildcardKind }`, where `wildcardKind` is `"none" | "gl
 For exact origins, the scheme must be syntactically valid and any explicit port must be numeric. Exact origins with non-HTTP(S) schemes are structurally valid and may return an informational hint because wildcard matching is CORS-oriented. A single trailing slash on an exact origin is accepted and normalized at runtime, so entries like `https://example.com/` remain valid, but paths other than that bare-origin form are rejected. Wildcard origin patterns are restricted to `http` and `https`. Entries like `1http://example.com`, `://example.com`, `https://example.com/path`, `https://example.com//`, `https://example.com:abc`, or `https://[::1]:abc` are rejected at validation time.
 Ports must also be in the valid URL range `0-65535`. Entries like `https://example.com:65536` are rejected.
 Wildcard patterns are also rejected when they exceed the runtime label-processing cap.
+The literal string `"null"` is valid only in origin context, where it represents the browser `Origin: null` value. In domain context, `"null"` is invalid:
+
+```typescript
+validateConfigEntry('null', 'domain');
+// { valid: false, info: '"null" is not a valid domain entry', wildcardKind: 'none' }
+
+validateConfigEntry('null', 'origin');
+// { valid: true, wildcardKind: 'none' }
+```
 
 ## End-to-end example
 
@@ -486,11 +516,11 @@ const ok = matchesOriginList(
 - Domain-only checks (`matchesDomainList`) reject origin-style entries (anything with `://`) by throwing. Use `matchesOriginList` for origin-style matching.
 - Origin matching:
   - `matchesWildcardOrigin` and `matchesOriginList` expect a bare origin, not a full URL with path/query/fragment/userinfo.
-  - A single trailing slash is accepted as a bare-origin form, but paths other than `/` are rejected.
+  - A single trailing `/` is accepted as a bare-origin form, but repeated trailing slashes and other paths are rejected.
   - Empty-port origins such as `https://example.com:` are treated as malformed and rejected.
   - `matchesCORSCredentialsList` also expects a bare origin, not a full URL.
   - If you start with a full URL, pass `new URL(url).origin` to origin helpers and `new URL(url).hostname` to domain helpers.
-  - Exact non-HTTP(S) origins such as `ftp://example.com` are allowed and matched exactly by the list helpers; this is separate from wildcard matching.
+  - Exact non-HTTP(S) origins such as `ftp://example.com` are allowed and matched exactly by the list helpers. This is separate from wildcard matching.
   - Domain wildcard patterns (e.g., `*.example.com`, `**.example.com`) are protocol-agnostic.
   - Wildcard origin matching is HTTP(S)-only. Protocol wildcards (e.g., `https://*`) and protocol + host wildcards (e.g., `https://*.example.com`) match only that scheme.
   - Wildcard origin matching ignores ports. Use exact origins when the port matters.
@@ -502,10 +532,10 @@ const ok = matchesOriginList(
 ### Defaults by function
 
 - `validateConfigEntry(entry, "domain")`
-  - Typical: disallow global `"*"`. Validate concrete domains and wildcard patterns only.
+  - Default: `allowGlobalWildcard: false`. Validate concrete domains and wildcard patterns only.
 
 - `validateConfigEntry(entry, "origin", { allowGlobalWildcard, allowProtocolWildcard })`
-  - Recommended: `{ allowGlobalWildcard: false, allowProtocolWildcard: true }`. Disable protocol wildcards for stricter setups.
+  - Recommended: `{ allowGlobalWildcard: false, allowProtocolWildcard: true }`. Set `allowProtocolWildcard: false` to reject only the protocol-only wildcard forms `http://*` and `https://*`.
   - Exact origins and bare domains are validated, origins must not include path/query/fragment/userinfo, bracketed IPv6 is supported.
 
 - `matchesDomainList(domain, allowedDomains)`
@@ -514,7 +544,7 @@ const ok = matchesOriginList(
 
 - `matchesOriginList(origin, allowedOrigins, { treatNoOriginAsAllowed })`
   - Default: `{ treatNoOriginAsAllowed: false }`.
-  - `"*"` matches any valid HTTP(S) origin; `"null"` must be explicitly listed.
+  - `"*"` matches any valid HTTP(S) origin. `"null"` must be explicitly listed.
 
 - `matchesCORSCredentialsList(origin, allowedOrigins, { allowWildcardSubdomains })`
   - Default: exact-only. When `allowWildcardSubdomains: true`, host subdomain wildcards are honored (e.g., `https://*.example.com`). Protocol-only wildcards like `https://*` and global `"*"` are still rejected. Always pre-validate entries.

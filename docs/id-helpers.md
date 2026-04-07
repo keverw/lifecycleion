@@ -43,9 +43,9 @@ import {
 
 **Case handling:** `validateID` accepts upper or lowercase input for all types. Generated output follows canonical case: `objectID`, `uuid4`, and `uuid7` produce lowercase, while `ulid` produces uppercase.
 
-> **Tip — normalize IDs in your application or API layer.** Even though validation is case-insensitive, database queries and equality checks require exact matches. Call `.toLowerCase()` before persisting `objectID` or UUID values, or `.toUpperCase()` for ULIDs.
+> **Tip - normalize IDs in your application or API layer.** Even though validation is case-insensitive, database queries and equality checks require exact matches. Call `.toLowerCase()` before persisting `objectID` or UUID values, or `.toUpperCase()` for ULIDs.
 
-> **Security tip — avoid timestamp-based IDs for sensitive tokens.** `objectID`, `uuid7`, and `ulid` embed a creation timestamp, which lets anyone holding the ID infer roughly when it was issued. For tokens where that is a privacy or security concern — email verification links, password reset tokens, invitation codes — use `uuid4` instead. Its fully random structure reveals nothing about when it was generated. For email verification and password reset flows, a common pattern is to pair a `uuid4` (used as a record lookup key) with a separate `crypto.randomBytes(32).toString('hex')` nonce (the actual secret, stored hashed in the database) — e.g. `/verify?id=<uuid4>&token=<nonce>`. This way the ID reveals nothing, and the token is what provides the security.
+> **Security tip - avoid timestamp-based IDs for sensitive tokens.** `objectID`, `uuid7`, and `ulid` embed a creation timestamp, which lets anyone holding the ID infer roughly when it was issued. For tokens where that is a privacy or security concern - email verification links, password reset tokens, invitation codes - use `uuid4` instead. Its fully random structure reveals nothing about when it was generated. For email verification and password reset flows, a common pattern is to pair a `uuid4` (used as a record lookup key) with a separate `crypto.randomBytes(32).toString('hex')` nonce (the actual secret, stored hashed in the database) - e.g. `/verify?id=<uuid4>&token=<nonce>`. This way the ID reveals nothing, and the token is what provides the security.
 
 ## API
 
@@ -60,9 +60,9 @@ const uuid7 = generateID('uuid7'); // "018e8c6e-4f7e-7000-8000-0123456789ab"
 const id = generateID('ulid'); // "01ARZ3NDEKTSV4RRFFQ69G5FAV"
 ```
 
-Pass a `seedTime` (milliseconds) to embed a specific timestamp in the ID. Supported by `objectID`, `uuid7`, and `ulid`. Accepted but ignored by `uuid4` (always random) — however, passing an invalid value still throws. Throws `TypeError` if `seedTime` is provided but is not a non-negative finite number.
+Pass a `seedTime` (milliseconds) to embed a specific timestamp in the ID. Supported by `objectID`, `uuid7`, and `ulid`. Accepted but ignored by `uuid4` (always random) - however, passing an invalid value still throws. Throws `TypeError` if `seedTime` is provided but is not a non-negative finite number.
 
-> **Note — `objectID` timestamp precision:** ObjectIDs store timestamps at **second-level** granularity. The provided millisecond value is truncated via `Math.floor(ms / 1000)`. Two calls within the same second but with different millisecond values will embed the same timestamp. `uuid7` and `ulid` preserve full millisecond precision.
+> **Note - `objectID` timestamp precision:** ObjectIDs store timestamps at **second-level** granularity. The provided millisecond value is truncated via `Math.floor(ms / 1000)`. Two calls within the same second but with different millisecond values will embed the same timestamp. `uuid7` and `ulid` preserve full millisecond precision.
 
 ```typescript
 const timestamp = Date.now();
@@ -82,7 +82,7 @@ validateID('objectID', '507f1f77bcf86cd799439011'); // true
 validateID('objectID', 'invalid'); // false
 ```
 
-> **Note — ULID validation:** In addition to checking character set and length, `validateID` enforces the ULID spec overflow constraint: the first character must be `0`–`7` (Crockford base32 digits 0–7). Any higher value in the first position would overflow the 48-bit timestamp field.
+> **Note - ULID validation:** In addition to checking character set and length, `validateID` enforces the ULID spec overflow constraint: the first character must be `0`–`7` (Crockford base32 digits 0–7). Any higher value in the first position would overflow the 48-bit timestamp field.
 
 ### emptyID
 

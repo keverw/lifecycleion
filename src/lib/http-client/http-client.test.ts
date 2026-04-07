@@ -275,6 +275,12 @@ describe('HTTPClient — basic HTTP methods', () => {
     ).not.toThrow();
   });
 
+  test('MockAdapter rejects relative baseURL prefixes', () => {
+    expect(
+      () => new HTTPClient({ adapter: new MockAdapter(), baseURL: '/api' }),
+    ).toThrow(/baseURL must be an absolute http\(s\) URL/i);
+  });
+
   test('browser fetch allows relative baseURL prefixes', () => {
     const originalWindow = (globalThis as Record<string, unknown>).window;
     const originalDocument = (globalThis as Record<string, unknown>).document;
@@ -1223,7 +1229,10 @@ describe('HTTPClient — cancel reason via AbortError-throwing adapters', () => 
     const { adapter } = makeAbortErrorAdapter();
     const client = new HTTPClient({ adapter });
     const controller = new AbortController();
-    const originalAny = AbortSignal.any;
+    const originalAnyDescriptor = Object.getOwnPropertyDescriptor(
+      AbortSignal,
+      'any',
+    );
 
     Object.defineProperty(AbortSignal, 'any', {
       value: undefined,
@@ -1241,10 +1250,9 @@ describe('HTTPClient — cancel reason via AbortError-throwing adapters', () => 
       expect(res.isCancelled).toBe(true);
       expect(builder.error?.cancelReason).toBe('user_navigated_away');
     } finally {
-      Object.defineProperty(AbortSignal, 'any', {
-        value: originalAny,
-        configurable: true,
-      });
+      if (originalAnyDescriptor) {
+        Object.defineProperty(AbortSignal, 'any', originalAnyDescriptor);
+      }
     }
   });
 
@@ -5227,11 +5235,11 @@ describe('HTTPClient — phase-aware interceptors', () => {
     expect(errorCodes).toEqual(['interceptor_error']);
   });
 
-  test('unresolvable protocol-relative URL without baseURL gets request_setup_error', async () => {
+  test('non-mock protocol-relative URL without baseURL gets request_setup_error', async () => {
     let wasAdapterCalled = false;
 
     const adapter: HTTPAdapter = {
-      getType: () => 'mock',
+      getType: () => 'node',
       send: (_request: AdapterRequest): Promise<AdapterResponse> => {
         wasAdapterCalled = true;
         return Promise.resolve({ status: 200, headers: {}, body: null });
@@ -5259,7 +5267,7 @@ describe('HTTPClient — phase-aware interceptors', () => {
     expect(errorCodes).toEqual(['request_setup_error']);
   });
 
-  test('MockAdapter without baseURL still accepts path-only requests', async () => {
+  test('MockAdapter without baseURL resolves path-only requests to http://localhost', async () => {
     const adapter = new MockAdapter();
     let interceptedURL: string | undefined;
 
@@ -5277,16 +5285,16 @@ describe('HTTPClient — phase-aware interceptors', () => {
 
     const res = await client.get('/users').send<{ ok: boolean }>();
 
-    expect(interceptedURL).toBe('/users');
+    expect(interceptedURL).toBe('http://localhost/users');
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ ok: true });
   });
 
-  test('MockAdapter interceptor may rewrite path-only requestURL without baseURL', async () => {
+  test('MockAdapter without baseURL resolves slashless relative requests to http://localhost', async () => {
     const adapter = new MockAdapter();
-    const seenURLs: string[] = [];
+    let interceptedURL: string | undefined;
 
-    adapter.routes.get('/rewritten', () => ({
+    adapter.routes.get('/users', () => ({
       status: 200,
       body: { ok: true },
     }));
@@ -5294,19 +5302,91 @@ describe('HTTPClient — phase-aware interceptors', () => {
     const client = new HTTPClient({ adapter });
 
     client.addRequestInterceptor((request) => {
-      seenURLs.push(request.requestURL);
+      interceptedURL = request.requestURL;
+      return request;
+    });
 
+    const res = await client.get('users').send<{ ok: boolean }>();
+
+    expect(interceptedURL).toBe('http://localhost/users');
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ ok: true });
+  });
+
+  test('MockAdapter without baseURL resolves protocol-relative request paths to http', async () => {
+    const adapter = new MockAdapter();
+    let wasRouteCalled = false;
+    let interceptedURL: string | undefined;
+
+    adapter.routes.get('/users', () => {
+      wasRouteCalled = true;
+      return { status: 200, body: { ok: true } };
+    });
+
+    const client = new HTTPClient({ adapter });
+    client.addRequestInterceptor((request) => {
+      interceptedURL = request.requestURL;
+      return request;
+    });
+    const builder = client.get('//example.com/users');
+    const res = await builder.send();
+
+    expect(wasRouteCalled).toBe(true);
+    expect(interceptedURL).toBe('http://example.com/users');
+    expect(res.status).toBe(200);
+    expect(res.isFailed).toBe(false);
+    expect(builder.error).toBeNull();
+  });
+
+  test('MockAdapter without baseURL still rejects non-http absolute-like paths', async () => {
+    const adapter = new MockAdapter();
+    let wasRouteCalled = false;
+
+    adapter.routes.get('/ftp://files.test/x', () => {
+      wasRouteCalled = true;
+      return { status: 200, body: { ok: true } };
+    });
+
+    const client = new HTTPClient({ adapter });
+    const builder = client.get('ftp://files.test/x');
+    const res = await builder.send();
+
+    expect(wasRouteCalled).toBe(false);
+    expect(res.status).toBe(0);
+    expect(res.isFailed).toBe(true);
+    expect(builder.error?.code).toBe('request_setup_error');
+    expect(builder.error?.cause?.message).toMatch(/could not be resolved/i);
+  });
+
+  test('MockAdapter interceptor rejects path-only requestURL rewrites without baseURL', async () => {
+    const adapter = new MockAdapter();
+    let wasRouteCalled = false;
+
+    adapter.routes.get('/rewritten', () => {
+      wasRouteCalled = true;
       return {
-        ...request,
-        requestURL: '/rewritten',
+        status: 200,
+        body: { ok: true },
       };
     });
 
-    const res = await client.get('/users').send<{ ok: boolean }>();
+    const client = new HTTPClient({ adapter });
 
-    expect(seenURLs).toEqual(['/users']);
-    expect(res.status).toBe(200);
-    expect(res.body).toEqual({ ok: true });
+    client.addRequestInterceptor((request) => ({
+      ...request,
+      requestURL: '/rewritten',
+    }));
+
+    const builder = client.get('/users');
+    const res = await builder.send();
+
+    expect(wasRouteCalled).toBe(false);
+    expect(res.status).toBe(0);
+    expect(res.isFailed).toBe(true);
+    expect(builder.error?.code).toBe('interceptor_error');
+    expect(builder.error?.cause?.message).toMatch(
+      /interceptor rewrote requestURL/i,
+    );
   });
 
   test('MockAdapter interceptor still rejects protocol-relative rewrites without baseURL', async () => {

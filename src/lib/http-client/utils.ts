@@ -1,4 +1,8 @@
 import qs from 'qs';
+import {
+  matchesWildcardDomain,
+  normalizeDomain,
+} from '../domain-utils/domain-utils';
 import type {
   ContentType,
   RequestPhaseName,
@@ -272,11 +276,11 @@ export function parseContentType(
   if (!contentTypeHeader) {
     return 'binary';
   } else {
-    const lower = contentTypeHeader.toLowerCase();
+    const lower = contentTypeHeader.trim().toLowerCase();
 
     if (lower.includes('application/json') || lower.includes('+json')) {
       return 'json';
-    } else if (lower.includes('text/')) {
+    } else if (lower.startsWith('text/')) {
       return 'text';
     } else if (lower.includes('application/x-www-form-urlencoded')) {
       return 'text';
@@ -365,7 +369,7 @@ function requiresAbsoluteBaseURL(
   adapterType: AdapterType,
   isBrowserRuntime: boolean,
 ): boolean {
-  if (adapterType === 'node') {
+  if (adapterType === 'node' || adapterType === 'mock') {
     return true;
   }
 
@@ -508,7 +512,10 @@ export function resolveDetectedRedirectURL(
   }
 }
 
-function assertValidBaseURL(baseURL: string): void {
+export function assertValidBaseURL(
+  baseURL: string,
+  fieldName = 'baseURL',
+): void {
   try {
     const url = new URL(baseURL);
 
@@ -517,7 +524,7 @@ function assertValidBaseURL(baseURL: string): void {
     }
   } catch {
     throw new Error(
-      'HTTPClient baseURL must be an absolute http(s) URL (for example "https://api.example.com").',
+      `HTTPClient ${fieldName} must be an absolute http(s) URL (for example "https://api.example.com").`,
     );
   }
 }
@@ -628,15 +635,23 @@ export function extractHostname(url: string): string {
 }
 
 /**
- * Wildcard hostname matching. '*.example.com' matches 'api.example.com' but NOT 'example.com'.
+ * Wildcard hostname matching backed by {@link matchesWildcardDomain}.
+ *
+ * - `*` — global wildcard, matches any valid hostname including apex domains
+ * - `*.example.com` — matches exactly one subdomain label (`api.example.com`) but not deeper levels or the apex
+ * - `**.example.com` — matches one or more subdomain labels (`api.example.com`, `a.b.example.com`) but not the apex
+ * - Exact patterns (no `*`) — normalized comparison, case-insensitive
+ * - PSL tail guard active: `*.com`, `**.co.uk`, etc. never match
+ * - Pseudo-TLD suffix wildcards are rejected just like PSL tails (`*.localhost`, `*.local`, etc.)
  */
 export function matchesHostPattern(hostname: string, pattern: string): boolean {
-  if (pattern.startsWith('*.')) {
-    const suffix = pattern.slice(1); // '.example.com'
-    return hostname.endsWith(suffix) && hostname !== suffix.slice(1);
+  if (pattern.includes('*')) {
+    return matchesWildcardDomain(hostname, pattern);
   }
 
-  return hostname === pattern;
+  const normalizedHostname = normalizeDomain(hostname);
+  const normalizedPattern = normalizeDomain(pattern);
+  return normalizedHostname !== '' && normalizedHostname === normalizedPattern;
 }
 
 /**
@@ -702,8 +717,15 @@ function matchesContentTypePattern(
  *   `filter.phases` is omitted or empty.
  * - `statusCodes`: skipped if `context.status` is absent.
  * - `methods`: skipped if `context.method` is absent.
- * - `hosts`: supports exact hostnames and wildcard patterns (e.g. `*.example.com`
- *   matches subdomains but not the apex). Skipped if `context.requestURL` is absent.
+ * - `hosts`: supports exact hostnames and wildcard patterns. `*.example.com` matches
+ *   exactly one subdomain label; `**.example.com` matches any depth. Neither matches the
+ *   apex — list it explicitly. PSL tail guard prevents `*.com`-style patterns. `*` is a
+ *   global wildcard that matches any valid hostname. Skipped if `context.requestURL` is absent.
+ * - `schemes`: `'http'` or `'https'`. `requestURL` is absolute whenever the
+ *   request could be resolved before dispatch. For `MockAdapter`, path-only
+ *   requests without a client `baseURL` are materialized as `http://localhost/...`;
+ *   browser adapters fall back to `window.location`, and the Node adapter requires
+ *   absolute URLs. Skipped only when `requestURL` is absent.
  * - `bodyContainsKeys`: supports dot paths (e.g. `data.results`). Each segment in
  *   the path must resolve to a plain object for traversal to continue — the final
  *   value can be anything (array, string, null, etc). Array indexing is not supported.
@@ -715,6 +737,7 @@ export function matchesFilter(
     methods?: string[];
     bodyContainsKeys?: string[];
     hosts?: string[];
+    schemes?: ('http' | 'https')[];
     phases?: RequestPhaseName[];
     contentTypes?: ContentType[];
     contentTypeHeaders?: string[];
@@ -798,6 +821,27 @@ export function matchesFilter(
         matchesHostPattern(hostname, pattern),
       )
     ) {
+      return false;
+    }
+  }
+
+  if (filter.schemes && filter.schemes.length > 0 && context.requestURL) {
+    let scheme: 'http' | 'https' | null = null;
+
+    try {
+      const parsedScheme = new URL(context.requestURL).protocol.replace(
+        ':',
+        '',
+      );
+
+      if (parsedScheme === 'http' || parsedScheme === 'https') {
+        scheme = parsedScheme;
+      }
+    } catch {
+      scheme = null;
+    }
+
+    if (!scheme || !filter.schemes.includes(scheme)) {
       return false;
     }
   }

@@ -235,7 +235,7 @@ export interface AttemptStartEvent {
    * the URL of the current adapter attempt — see
    * {@link InterceptedRequest.requestURL} and `redirect.to` for hop context.
    */
-  initialURL?: string;
+  initialURL: string;
   /**
    * Set for adapter attempts that are part of a redirect follow-up (1 = first hop).
    * Aligns with {@link HTTPProgressEvent.hopNumber}.
@@ -259,7 +259,7 @@ export interface AttemptEndEvent {
   status: number;
   requestID: string;
   /** Same as {@link AttemptStartEvent.initialURL}. */
-  initialURL?: string;
+  initialURL: string;
   hopNumber?: number;
   redirect?: RedirectHopInfo;
 }
@@ -361,8 +361,9 @@ export interface HTTPResponse<T = unknown> {
   /**
    * Request URL for this `send()` after `initial` interceptors, before any
    * redirect follow-ups. Same string as {@link AttemptStartEvent.initialURL} on attempt hooks.
-   * Real transport adapters use an absolute http(s) URL here; MockAdapter may
-   * keep a path-only URL when no baseURL is configured.
+   * Real transport adapters use an absolute http(s) URL here. MockAdapter
+   * path-only requests without a client `baseURL` are materialized as
+   * `http://localhost/...` before interceptors run.
    */
   initialURL: string;
   /**
@@ -426,8 +427,9 @@ export interface HTTPClientError {
    * During `initial` interceptors this is the pre-interceptor resolved URL.
    * In later phases it matches {@link HTTPResponse.initialURL} and
    * {@link AttemptStartEvent.initialURL}.
-   * Real transport adapters use an absolute http(s) URL here; MockAdapter may
-   * keep a path-only URL when no baseURL is configured.
+   * Real transport adapters use an absolute http(s) URL here. MockAdapter
+   * path-only requests without a client `baseURL` are materialized as
+   * `http://localhost/...` before interceptors run.
    */
   initialURL: string;
   /** URL of the last request attempt when the error was produced. */
@@ -589,6 +591,16 @@ export type ErrorObserverPhase = Extract<
 interface PhaseFilter {
   methods?: HTTPMethod[];
   hosts?: string[];
+  /**
+   * Match against the request scheme (`'http'` or `'https'`). In practice
+   * `requestURL` is absolute whenever the request could be resolved before
+   * dispatch. `MockAdapter` path-only requests without a client `baseURL`
+   * are materialized as `http://localhost/...`, browser adapters resolve
+   * against `window.location`, and non-mock adapters still require absolute
+   * URLs at validation time. The scheme check is skipped only when
+   * `requestURL` is absent.
+   */
+  schemes?: ('http' | 'https')[];
 }
 
 /**
@@ -743,8 +755,7 @@ export type RequestInterceptor = (
 export interface InterceptedRequest {
   /**
    * Pending request shape seen by request interceptors before body serialization.
-   * `requestURL` changes on redirect follow-ups. It is absolute for
-   * fetch/xhr/node; MockAdapter may keep a path-only URL when no baseURL is set.
+   * `requestURL` changes on redirect follow-ups and is absolute before dispatch.
    */
   requestURL: string;
   method: HTTPMethod;

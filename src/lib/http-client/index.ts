@@ -1,4 +1,5 @@
 export { HTTPClient } from './http-client';
+export type { HTTPSubClient } from './http-client';
 export { HTTPRequestBuilder } from './http-request-builder';
 export { CookieJar } from './cookie-jar';
 export { FetchAdapter } from './adapters/fetch-adapter';

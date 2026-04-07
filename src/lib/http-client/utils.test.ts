@@ -541,14 +541,14 @@ describe('assertSupportedAdapterRuntimeAndConfig', () => {
       ).not.toThrow();
     });
 
-    test('allows relative baseURL prefixes', () => {
+    test('rejects relative baseURL prefixes', () => {
       expect(() =>
         assertSupportedAdapterRuntimeAndConfig(
           { baseURL: '/api' },
           'mock',
           true,
         ),
-      ).not.toThrow();
+      ).toThrow(/baseURL must be an absolute http\(s\) URL/i);
     });
   });
 
@@ -926,24 +926,92 @@ describe('matchesHostPattern', () => {
     expect(matchesHostPattern('example.com', 'example.com')).toBe(true);
   });
 
+  test('exact match is case-insensitive', () => {
+    expect(matchesHostPattern('Example.COM', 'example.com')).toBe(true);
+  });
+
   test('does not match different exact hostname', () => {
     expect(matchesHostPattern('other.com', 'example.com')).toBe(false);
   });
 
-  test('wildcard matches subdomain', () => {
-    expect(matchesHostPattern('api.example.com', '*.example.com')).toBe(true);
+  describe('* (single-label wildcard)', () => {
+    test('matches one subdomain label', () => {
+      expect(matchesHostPattern('api.example.com', '*.example.com')).toBe(true);
+    });
+
+    test('does not match the apex domain', () => {
+      expect(matchesHostPattern('example.com', '*.example.com')).toBe(false);
+    });
+
+    test('does not match a different domain', () => {
+      expect(matchesHostPattern('api.other.com', '*.example.com')).toBe(false);
+    });
+
+    test('does not match deeper nesting (use ** for that)', () => {
+      expect(matchesHostPattern('a.b.example.com', '*.example.com')).toBe(
+        false,
+      );
+    });
   });
 
-  test('wildcard does not match the root domain itself', () => {
-    expect(matchesHostPattern('example.com', '*.example.com')).toBe(false);
+  describe('** (multi-label wildcard)', () => {
+    test('matches one subdomain label', () => {
+      expect(matchesHostPattern('api.example.com', '**.example.com')).toBe(
+        true,
+      );
+    });
+
+    test('matches deeply nested subdomains', () => {
+      expect(matchesHostPattern('a.b.example.com', '**.example.com')).toBe(
+        true,
+      );
+    });
+
+    test('does not match the apex domain', () => {
+      expect(matchesHostPattern('example.com', '**.example.com')).toBe(false);
+    });
   });
 
-  test('wildcard does not match a different domain', () => {
-    expect(matchesHostPattern('api.other.com', '*.example.com')).toBe(false);
+  describe('* (global wildcard)', () => {
+    test('matches any hostname including apex', () => {
+      expect(matchesHostPattern('example.com', '*')).toBe(true);
+    });
+
+    test('matches subdomains', () => {
+      expect(matchesHostPattern('api.example.com', '*')).toBe(true);
+    });
   });
 
-  test('wildcard matches deeply nested subdomain', () => {
-    expect(matchesHostPattern('a.b.example.com', '*.example.com')).toBe(true);
+  describe('PSL tail guard', () => {
+    test('rejects *.com style patterns', () => {
+      expect(matchesHostPattern('anything.com', '*.com')).toBe(false);
+    });
+
+    test('rejects **.co.uk style patterns', () => {
+      expect(matchesHostPattern('anything.co.uk', '**.co.uk')).toBe(false);
+    });
+  });
+
+  describe('pseudo-TLD wildcard guard', () => {
+    test('rejects *.localhost patterns', () => {
+      expect(matchesHostPattern('api.localhost', '*.localhost')).toBe(false);
+    });
+
+    test('rejects *.local patterns', () => {
+      expect(matchesHostPattern('myapp.local', '*.local')).toBe(false);
+    });
+
+    test('rejects *.test patterns', () => {
+      expect(matchesHostPattern('myapp.test', '*.test')).toBe(false);
+    });
+
+    test('rejects *.internal patterns', () => {
+      expect(matchesHostPattern('api.internal', '*.internal')).toBe(false);
+    });
+
+    test('rejects **.localhost patterns', () => {
+      expect(matchesHostPattern('a.b.localhost', '**.localhost')).toBe(false);
+    });
   });
 });
 
@@ -1102,6 +1170,78 @@ describe('matchesFilter', () => {
         'request',
       ),
     ).toBe(true);
+  });
+
+  test('schemes — matches https', () => {
+    expect(
+      matchesFilter(
+        { schemes: ['https'] },
+        { requestURL: 'https://api.example.com/path' },
+        'initial',
+        'request',
+      ),
+    ).toBe(true);
+  });
+
+  test('schemes — rejects wrong scheme', () => {
+    expect(
+      matchesFilter(
+        { schemes: ['https'] },
+        { requestURL: 'http://api.example.com/path' },
+        'initial',
+        'request',
+      ),
+    ).toBe(false);
+  });
+
+  test('schemes — matches http', () => {
+    expect(
+      matchesFilter(
+        { schemes: ['http'] },
+        { requestURL: 'http://api.example.com/path' },
+        'initial',
+        'request',
+      ),
+    ).toBe(true);
+  });
+
+  test('schemes — skipped when requestURL is absent', () => {
+    expect(
+      matchesFilter({ schemes: ['https'] }, {}, 'initial', 'request'),
+    ).toBe(true);
+  });
+
+  test('schemes — non-absolute requestURL is a non-match (no throw)', () => {
+    expect(
+      matchesFilter(
+        { schemes: ['https'] },
+        { requestURL: '/api/users' },
+        'initial',
+        'request',
+      ),
+    ).toBe(false);
+  });
+
+  test('schemes — AND with hosts both matching', () => {
+    expect(
+      matchesFilter(
+        { schemes: ['https'], hosts: ['*.example.com'] },
+        { requestURL: 'https://api.example.com/path' },
+        'initial',
+        'request',
+      ),
+    ).toBe(true);
+  });
+
+  test('schemes — AND with hosts, scheme mismatch fails', () => {
+    expect(
+      matchesFilter(
+        { schemes: ['https'], hosts: ['*.example.com'] },
+        { requestURL: 'http://api.example.com/path' },
+        'initial',
+        'request',
+      ),
+    ).toBe(false);
   });
 
   test('bodyContainsKeys — matches when key present at top level', () => {

@@ -76,11 +76,11 @@ initDevMode({ detect: 'both' });
 
 #### Detection strategies
 
-| Strategy     | Logic                                                                                       |
-| ------------ | ------------------------------------------------------------------------------------------- |
-| `'cmd'`      | `true` if `process.argv` contains `'dev'`; `false` if contains `'prod'`; `false` if neither |
-| `'node_env'` | `true` if `process.env.NODE_ENV === 'development'`                                          |
-| `'both'`     | cmd takes precedence when an explicit word is present; otherwise falls back to NODE_ENV     |
+| Strategy     | Logic                                                                                             |
+| ------------ | ------------------------------------------------------------------------------------------------- |
+| `'cmd'`      | `true` if `process.argv` contains `'dev'`, `false` if it contains `'prod'`, and `false` otherwise |
+| `'node_env'` | `true` if `process.env.NODE_ENV === 'development'`                                                |
+| `'both'`     | cmd takes precedence when an explicit word is present and otherwise falls back to NODE_ENV        |
 
 #### Strict mode
 
@@ -108,7 +108,7 @@ Reads `globalThis.__lifecycleion_is_dev__`. Returns `false` if not yet initializ
 const isDev = getDevMode(); // false if not initialized
 ```
 
-Safe to call anywhere — server, client, tests, libraries. No side effects.
+Safe to call anywhere - server, client, tests, libraries. No side effects.
 
 ### `overrideDevMode(value: boolean | 'redetect')`
 

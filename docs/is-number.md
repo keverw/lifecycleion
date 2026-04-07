@@ -37,7 +37,7 @@ isNumber(undefined); // false
 
 ### isFiniteNumber
 
-Returns `true` if the value is a finite number — excludes `NaN`, `Infinity`, and `-Infinity`. Acts as a TypeScript type guard narrowing the type to `number`.
+Returns `true` if the value is a finite number - excludes `NaN`, `Infinity`, and `-Infinity`. Acts as a TypeScript type guard narrowing the type to `number`.
 
 ```typescript
 isFiniteNumber(42); // true
