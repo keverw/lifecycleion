@@ -11,7 +11,7 @@
 - [0.0.7 (Mar 4, 2026)](#007-mar-4-2026)
 - [0.0.8 (Mar 18, 2026)](#008-mar-18-2026)
 - [0.0.9 (Mar 19, 2026)](#009-mar-19-2026)
-- [0.0.10 (Unreleased)](#0010-unreleased)
+- [0.0.10 (Apr 7, 2026)](#0010-apr-7-2026)
 
 <!-- tocstop -->
 
@@ -58,7 +58,7 @@
 
 - LifecycleManager error and warning log messages now include `error.message` inline (e.g., `"Component failed to start: Connection refused"`) so failure reasons are visible in plain log output without a custom structured sink
 
-## 0.0.10 (Unreleased)
+## 0.0.10 (Apr 7, 2026)
 
 - Added the new adapter-based HTTP client foundation in `lifecycleion/http-client`, including the shared `HTTPAdapter` contract, fluent request builder, retries, redirect handling, cancellation, interceptors, response/error observers, request tracking, and the default `FetchAdapter`
 - Added `MockAdapter` plus server-side cookie jar support and shared HTTP client request/response utilities
@@ -66,3 +66,5 @@
 - Added `lifecycleion/http-client-xhr` with an XHR adapter for environments that expose `XMLHttpRequest`, including real per-chunk upload/download progress, redirect detection, and Playwright-based browser integration tests
 - Added `lifecycleion/domain-utils` — hardened helpers for normalizing and matching domains and origins, including IDNA/TR46 normalization, IPv6 literal support with zone-ID rejection, wildcard CORS matching with PSL/IP-tail guards, credentials-safe origin matching, and re-exports of `tldts` helpers (`getDomain`, `getSubdomain`) so consumers don't need a separate install
 - Added `lifecycleion/lru-cache` — TTL-aware LRU cache with configurable max entries, optional byte-size limit, per-entry TTL overrides, automatic expiration, and pluggable size calculators
+- Fixed test-only TypeScript assertion issues reported in some unit test cases. No runtime or API behavior changed for them
+- Added `lint` and `type-check` to `prepublishOnly` to strengthen the future release process

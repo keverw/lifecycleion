@@ -1,6 +1,6 @@
 {
   "name": "lifecycleion",
-  "version": "0.0.9",
+  "version": "0.0.10",
   "type": "module",
   "description": "A collection of foundational TypeScript utilities for managing application lifecycle, logging, retries, events, and common programming patterns",
   "exports": {
@@ -193,7 +193,8 @@
   },
   "scripts": {
     "build": "bun run update-docs && tsup",
-    "prepublishOnly": "bun run build && bun test",
+    "type-check": "tsc --noEmit",
+    "prepublishOnly": "bun run lint && bun run type-check && bun run build && bun test",
     "dev": "tsup --watch",
     "test": "bun run scripts/check-playwright.ts && bun test",
     "playwright:install": "bunx playwright install chromium",

@@ -1,6 +1,14 @@
 import { describe, test, expect, mock } from 'bun:test';
 import { EventEmitter, EventEmitterProtected } from './event-emitter';
 
+function getFirstReportedError(
+  errorHandler: ReturnType<typeof mock>,
+): ErrorEvent {
+  const [errorEvent] = errorHandler.mock.calls.at(0) ?? [];
+  expect(errorEvent).toBeDefined();
+  return errorEvent as ErrorEvent;
+}
+
 describe('EventEmitter', () => {
   test('basic event subscription and emission', () => {
     const emitter = new EventEmitter();
@@ -121,7 +129,7 @@ describe('EventEmitter', () => {
     emitter.emit('test');
 
     expect(errorHandler).toHaveBeenCalled();
-    const errorEvent = errorHandler.mock.calls[0][0] as ErrorEvent;
+    const errorEvent = getFirstReportedError(errorHandler);
     expect(errorEvent.error.message).toContain('event handler for test');
     expect(errorEvent.error.message).toContain('Test error');
 
@@ -142,7 +150,7 @@ describe('EventEmitter', () => {
 
     await new Promise((resolve) => setTimeout(resolve, 10));
     expect(errorHandler).toHaveBeenCalled();
-    const errorEvent = errorHandler.mock.calls[0][0] as ErrorEvent;
+    const errorEvent = getFirstReportedError(errorHandler);
     expect(errorEvent.error.message).toContain('event handler for test');
     expect(errorEvent.error.message).toContain('Test error');
 
@@ -215,7 +223,7 @@ describe('EventEmitterProtected', () => {
     emitter.triggerEvent();
 
     expect(errorHandler).toHaveBeenCalled();
-    const errorEvent = errorHandler.mock.calls[0][0] as ErrorEvent;
+    const errorEvent = getFirstReportedError(errorHandler);
     expect(errorEvent.error.message).toContain('event handler for test');
     expect(errorEvent.error.message).toContain('Protected error');
 

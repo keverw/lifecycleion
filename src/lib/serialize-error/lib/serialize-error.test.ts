@@ -5,6 +5,10 @@ import {
   isErrorLike,
 } from './serialize-error';
 
+function withExtras(error: Error): Error & Record<string, unknown> {
+  return error as Error & Record<string, unknown>;
+}
+
 class WorkerCrashedError extends Error {
   public errPrefix = 'IPCWorkerErr';
   public errType = 'Client';
@@ -95,11 +99,11 @@ describe('serializeError', () => {
     });
 
     const error = new Error('Main error');
-    (error as Record<string, unknown>).nestedError = nested;
-    (error as Record<string, unknown>).deeplyNested = {
+    withExtras(error).nestedError = nested;
+    withExtras(error).deeplyNested = {
       anotherError: new Error('Deep error'),
     };
-    (error as Record<string, unknown>).someOtherInfo = 'info';
+    withExtras(error).someOtherInfo = 'info';
 
     const serialized = serializeError(error);
 
@@ -161,8 +165,8 @@ describe('deserializeError', () => {
     expect(error.message).toBe(
       'Worker crashed too many times. Stopping restarts.',
     );
-    expect((error as Record<string, unknown>).errPrefix).toBe('IPCWorkerErr');
-    expect((error as Record<string, unknown>).errCode).toBe(
+    expect(withExtras(error).errPrefix).toBe('IPCWorkerErr');
+    expect(withExtras(error).errCode).toBe(
       'WorkerCrashedFatally',
     );
   });
@@ -182,7 +186,7 @@ describe('deserializeError', () => {
     expect(restored.message).toBe(
       'Worker crashed too many times. Stopping restarts.',
     );
-    expect((restored as Record<string, unknown>).errPrefix).toBe(
+    expect(withExtras(restored).errPrefix).toBe(
       'IPCWorkerErr',
     );
   });
