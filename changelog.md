@@ -12,6 +12,7 @@
 - [0.0.8 (Mar 18, 2026)](#008-mar-18-2026)
 - [0.0.9 (Mar 19, 2026)](#009-mar-19-2026)
 - [0.0.10 (Apr 7, 2026)](#0010-apr-7-2026)
+- [0.0.11 (Apr 9, 2026)](#0011-apr-9-2026)
 
 <!-- tocstop -->
 
@@ -52,7 +53,7 @@
 
 ## 0.0.8 (Mar 18, 2026)
 
-- Added `lifecycleion/dev-mode` — runtime-settable dev/production mode flag with auto-detection from CLI args (`'dev'`/`'prod'`) or `NODE_ENV`, first-wins semantics for HTML injection compatibility, and `overrideDevMode()` for test/tooling use
+- Added `lifecycleion/dev-mode`, a runtime-settable dev/production mode flag with auto-detection from CLI args (`'dev'`/`'prod'`) or `NODE_ENV`, first-wins semantics for HTML injection compatibility, and `overrideDevMode()` for test/tooling use
 
 ## 0.0.9 (Mar 19, 2026)
 
@@ -64,7 +65,13 @@
 - Added `MockAdapter` plus server-side cookie jar support and shared HTTP client request/response utilities
 - Added `lifecycleion/http-client-node` with a Node adapter for server-side HTTP requests, streaming downloads, multipart uploads, Unix sockets, and TLS/mTLS options
 - Added `lifecycleion/http-client-xhr` with an XHR adapter for environments that expose `XMLHttpRequest`, including real per-chunk upload/download progress, redirect detection, and Playwright-based browser integration tests
-- Added `lifecycleion/domain-utils` — hardened helpers for normalizing and matching domains and origins, including IDNA/TR46 normalization, IPv6 literal support with zone-ID rejection, wildcard CORS matching with PSL/IP-tail guards, credentials-safe origin matching, and re-exports of `tldts` helpers (`getDomain`, `getSubdomain`) so consumers don't need a separate install
-- Added `lifecycleion/lru-cache` — TTL-aware LRU cache with configurable max entries, optional byte-size limit, per-entry TTL overrides, automatic expiration, and pluggable size calculators
+- Added `lifecycleion/domain-utils`, hardened helpers for normalizing and matching domains and origins, including IDNA/TR46 normalization, IPv6 literal support with zone-ID rejection, wildcard CORS matching with PSL/IP-tail guards, credentials-safe origin matching, and re-exports of `tldts` helpers (`getDomain`, `getSubdomain`) so consumers don't need a separate install
+- Added `lifecycleion/lru-cache`, a TTL-aware LRU cache with configurable max entries, optional byte-size limit, per-entry TTL overrides, automatic expiration, and pluggable size calculators
 - Fixed test-only TypeScript assertion issues reported in some unit test cases. No runtime or API behavior changed for them
 - Added `lint` and `type-check` to `prepublishOnly` to strengthen the future release process
+
+## 0.0.11 (Apr 9, 2026)
+
+- Node.js support now targets `>=25` so browser-style global error event APIs such as `ErrorEvent` are available consistently for callback error reporting
+- `lifecycleion/lru-cache` now supports `onChange` callbacks for cache writes and removals, with typed `set`, `skip`, `evict`, `expired`, `delete`, and `clear` events plus optional `onChangeReasons` filtering
+- `lifecycleion/lru-cache` now skips writes that cannot fit within `maxSize` as a single value, emitting `reason: 'skip'` with `cause: 'maxSize'` while leaving existing cache state unchanged

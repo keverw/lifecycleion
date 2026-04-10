@@ -246,7 +246,7 @@ export class Logger extends EventEmitter {
    * @param prefix - The prefix to use when logging the error object. Default is 'Uncaught exception'.
    * @returns 'success' if the listener is registered successfully,
    *          'already_registered' if the listener is already registered,
-   *          'not_available' if 'globalThis.reportError' is not available.
+   *          'not_available' if the required global event primitives are not available.
    */
 
   public registerReportErrorListener(
@@ -256,7 +256,7 @@ export class Logger extends EventEmitter {
       return 'already_registered';
     }
 
-    if (typeof globalThis.reportError === 'undefined') {
+    if (!this.isReportErrorAvailable()) {
       return 'not_available';
     }
 
@@ -308,12 +308,19 @@ export class Logger extends EventEmitter {
   }
 
   /**
-   * Check if 'globalThis.reportError' is available
+   * Check if the global event primitives used for `reportError` dispatch are available.
    *
-   * @returns 'true' if 'globalThis.reportError' is available, 'false' otherwise.
+   * @returns 'true' if the required global event primitives are available, 'false' otherwise.
    */
   public isReportErrorAvailable(): boolean {
-    return typeof globalThis.reportError !== 'undefined';
+    const globalRecord = globalThis as Record<string, unknown>;
+
+    return (
+      typeof globalRecord.addEventListener === 'function' &&
+      typeof globalRecord.removeEventListener === 'function' &&
+      typeof globalRecord.dispatchEvent === 'function' &&
+      typeof globalRecord.ErrorEvent === 'function'
+    );
   }
 
   /**

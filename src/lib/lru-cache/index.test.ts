@@ -1,5 +1,17 @@
 import { test, expect, describe, beforeEach, mock } from 'bun:test';
-import { LRUCache } from '.';
+import {
+  LRUCache,
+  type LRUCacheChangeEvent,
+  type LRUCacheChangeReason,
+} from '.';
+
+function getFirstReportedError(
+  errorHandler: ReturnType<typeof mock>,
+): ErrorEvent {
+  const [errorEvent] = errorHandler.mock.calls.at(0) ?? [];
+  expect(errorEvent).toBeDefined();
+  return errorEvent as ErrorEvent;
+}
 
 describe('LRUCache', () => {
   describe('Basic operations', () => {
@@ -437,6 +449,461 @@ describe('LRUCache', () => {
     });
   });
 
+  describe('Change events', () => {
+    test('should emit set when adding and updating a key', () => {
+      const events: LRUCacheChangeEvent<string, string>[] = [];
+      const cache = new LRUCache<string, string>(3, {
+        onChange: (event) => {
+          events.push(event);
+        },
+      });
+
+      cache.set('key1', 'value1');
+      cache.set('key1', 'value2');
+
+      expect(events).toEqual([
+        {
+          reason: 'set',
+          key: 'key1',
+          newValue: 'value1',
+        },
+        {
+          reason: 'set',
+          key: 'key1',
+          oldValue: 'value1',
+          newValue: 'value2',
+        },
+      ]);
+      expect('oldValue' in events[0]).toBe(false);
+      expect('oldValue' in events[1]).toBe(true);
+      expect(cache.get('key1')).toBe('value2');
+    });
+
+    test('should emit delete for manual deletions', () => {
+      const events: LRUCacheChangeEvent<string, string>[] = [];
+      const cache = new LRUCache<string, string>(3, {
+        onChange: (event) => {
+          events.push(event);
+        },
+        onChangeReasons: ['delete'],
+      });
+
+      cache.set('key1', 'value1');
+      expect(cache.delete('key1')).toBe(true);
+
+      expect(events).toEqual([
+        {
+          reason: 'delete',
+          key: 'key1',
+          value: 'value1',
+        },
+      ]);
+    });
+
+    test('should emit clear for each removed entry during clear()', () => {
+      const events: LRUCacheChangeEvent<string, string>[] = [];
+      const cache = new LRUCache<string, string>(3, {
+        onChange: (event) => {
+          events.push(event);
+        },
+        onChangeReasons: ['clear'],
+      });
+
+      cache.set('key1', 'value1');
+      cache.set('key2', 'value2');
+      cache.clear();
+
+      expect(events).toEqual([
+        {
+          reason: 'clear',
+          key: 'key1',
+          value: 'value1',
+        },
+        {
+          reason: 'clear',
+          key: 'key2',
+          value: 'value2',
+        },
+      ]);
+    });
+
+    test('should emit expired when an expired entry is removed during access', () => {
+      const originalNow = Date.now;
+      let currentTime = 1000;
+      const events: LRUCacheChangeEvent<string, string>[] = [];
+
+      try {
+        Date.now = mock(() => currentTime);
+
+        const cache = new LRUCache<string, string>(3, {
+          defaultTtl: 100,
+          onChange: (event) => {
+            events.push(event);
+          },
+          onChangeReasons: ['expired'],
+        });
+
+        cache.set('key1', 'value1');
+        currentTime += 150;
+
+        expect(cache.get('key1')).toBeUndefined();
+        expect(events).toEqual([
+          {
+            reason: 'expired',
+            key: 'key1',
+            value: 'value1',
+          },
+        ]);
+      } finally {
+        Date.now = originalNow;
+      }
+    });
+
+    test('should emit evict when a least recently used entry is removed for capacity', () => {
+      const events: LRUCacheChangeEvent<string, string>[] = [];
+      const cache = new LRUCache<string, string>(2, {
+        onChange: (event) => {
+          events.push(event);
+        },
+        onChangeReasons: ['evict'],
+      });
+
+      cache.set('key1', 'value1');
+      cache.set('key2', 'value2');
+      cache.set('key3', 'value3');
+
+      expect(events).toEqual([
+        {
+          reason: 'evict',
+          key: 'key1',
+          value: 'value1',
+        },
+      ]);
+      expect(cache.get('key1')).toBeUndefined();
+    });
+
+    test('should emit set and clear with distinct payload shapes', () => {
+      const setEvents: LRUCacheChangeEvent<string, string>[] = [];
+      const clearEvents: LRUCacheChangeEvent<string, string>[] = [];
+
+      const replacingCache = new LRUCache<string, string>(1, {
+        onChange: (event) => {
+          setEvents.push(event);
+        },
+      });
+
+      const clearingCache = new LRUCache<string, string>(1, {
+        onChange: (event) => {
+          clearEvents.push(event);
+        },
+      });
+
+      // `set` events use the write payload shape.
+      replacingCache.set('key1', 'value1');
+      replacingCache.set('key1', 'value2');
+
+      // `clear` events use the removal payload shape.
+      clearingCache.set('key1', 'value1');
+      clearingCache.clear();
+
+      const setEvent = setEvents[0];
+      const clearEvent = clearEvents[1];
+
+      // `set` carries write-specific fields.
+      expect(setEvent.reason).toBe('set');
+      expect('newValue' in setEvent).toBe(true);
+
+      // `clear` carries removal-specific fields.
+      expect(clearEvent.reason).toBe('clear');
+      expect('value' in clearEvent).toBe(true);
+      expect('oldValue' in clearEvent).toBe(false);
+      expect('newValue' in clearEvent).toBe(false);
+    });
+
+    test('should only emit subscribed change reasons when onChangeReasons is provided', () => {
+      const events: LRUCacheChangeEvent<string, string>[] = [];
+      const onChangeReasons: LRUCacheChangeReason[] = ['expired', 'set'];
+      const originalNow = Date.now;
+      let currentTime = 1000;
+
+      try {
+        Date.now = mock(() => currentTime);
+
+        const cache = new LRUCache<string, string>(2, {
+          defaultTtl: 100,
+          onChange: (event) => {
+            events.push(event);
+          },
+          onChangeReasons,
+        });
+
+        cache.set('a', 'one');
+        cache.set('a', 'two'); // set with overwrite
+        cache.set('b', 'three');
+        cache.delete('b'); // filtered out
+        currentTime += 150;
+        cache.get('a'); // expired
+
+        expect(events).toEqual([
+          {
+            reason: 'set',
+            key: 'a',
+            newValue: 'one',
+          },
+          {
+            reason: 'set',
+            key: 'a',
+            oldValue: 'one',
+            newValue: 'two',
+          },
+          {
+            reason: 'set',
+            key: 'b',
+            newValue: 'three',
+          },
+          {
+            reason: 'expired',
+            key: 'a',
+            value: 'two',
+          },
+        ]);
+      } finally {
+        Date.now = originalNow;
+      }
+    });
+
+    test('should emit skip and avoid storing values that cannot fit maxSize', () => {
+      const events: LRUCacheChangeEvent<string, string>[] = [];
+      const cache = new LRUCache<string, string>(3, {
+        maxSize: 4,
+        onChange: (event) => {
+          events.push(event);
+        },
+      });
+
+      cache.set('key1', 'abc'); // size 6, too large for maxSize 4
+
+      expect(cache.get('key1')).toBeUndefined();
+      expect(cache.size).toBe(0);
+      expect(cache.byteSize).toBe(0);
+      expect(events).toEqual([
+        {
+          reason: 'skip',
+          key: 'key1',
+          newValue: 'abc',
+          cause: 'maxSize',
+        },
+      ]);
+      expect('currentValue' in events[0]).toBe(false);
+    });
+
+    test('should emit skip and preserve an existing value when an oversized overwrite is attempted', () => {
+      const events: LRUCacheChangeEvent<string, string>[] = [];
+      const cache = new LRUCache<string, string>(3, {
+        maxSize: 8,
+        onChange: (event) => {
+          events.push(event);
+        },
+      });
+
+      cache.set('key1', 'ok');
+      cache.set('key1', 'abcde'); // size 10, too large for maxSize 8
+
+      expect(cache.get('key1')).toBe('ok');
+      expect(cache.size).toBe(1);
+      expect(events).toEqual([
+        {
+          reason: 'set',
+          key: 'key1',
+          newValue: 'ok',
+        },
+        {
+          reason: 'skip',
+          key: 'key1',
+          currentValue: 'ok',
+          newValue: 'abcde',
+          cause: 'maxSize',
+        },
+      ]);
+      expect('oldValue' in events[0]).toBe(false);
+      expect('oldValue' in events[1]).toBe(false);
+      expect('currentValue' in events[1]).toBe(true);
+    });
+
+    test('should cleanup expired entries before emitting skip for an oversized write', () => {
+      const originalNow = Date.now;
+      let currentTime = 1000;
+      const events: LRUCacheChangeEvent<string, string>[] = [];
+
+      try {
+        Date.now = mock(() => currentTime);
+
+        const cache = new LRUCache<string, string>(3, {
+          defaultTtl: 100,
+          maxSize: 4,
+          onChange: (event) => {
+            events.push(event);
+          },
+        });
+
+        cache.set('stale', 'x');
+        currentTime += 150;
+        cache.set('key1', 'abc'); // size 6, too large for maxSize 4
+
+        expect(cache.size).toBe(0);
+        expect(cache.byteSize).toBe(0);
+        expect(events).toEqual([
+          {
+            reason: 'set',
+            key: 'stale',
+            newValue: 'x',
+          },
+          {
+            reason: 'expired',
+            key: 'stale',
+            value: 'x',
+          },
+          {
+            reason: 'skip',
+            key: 'key1',
+            newValue: 'abc',
+            cause: 'maxSize',
+          },
+        ]);
+      } finally {
+        Date.now = originalNow;
+      }
+    });
+
+    test('should not include oldValue when rewriting a key whose previous entry already expired', () => {
+      const originalNow = Date.now;
+      let currentTime = 1000;
+      const events: LRUCacheChangeEvent<string, string>[] = [];
+
+      try {
+        Date.now = mock(() => currentTime);
+
+        const cache = new LRUCache<string, string>(2, {
+          defaultTtl: 100,
+          onChange: (event) => {
+            events.push(event);
+          },
+        });
+
+        cache.set('key1', 'old');
+        currentTime += 150;
+        cache.set('key1', 'new');
+
+        expect(events).toEqual([
+          {
+            reason: 'set',
+            key: 'key1',
+            newValue: 'old',
+          },
+          {
+            reason: 'expired',
+            key: 'key1',
+            value: 'old',
+          },
+          {
+            reason: 'set',
+            key: 'key1',
+            newValue: 'new',
+          },
+        ]);
+      } finally {
+        Date.now = originalNow;
+      }
+    });
+
+    test('should not include currentValue when skipping an oversized write after the previous entry expired', () => {
+      const originalNow = Date.now;
+      let currentTime = 1000;
+      const events: LRUCacheChangeEvent<string, string>[] = [];
+
+      try {
+        Date.now = mock(() => currentTime);
+
+        const cache = new LRUCache<string, string>(2, {
+          defaultTtl: 100,
+          maxSize: 4,
+          onChange: (event) => {
+            events.push(event);
+          },
+        });
+
+        cache.set('key1', 'x');
+        currentTime += 150;
+        cache.set('key1', 'abc');
+
+        expect(events).toEqual([
+          {
+            reason: 'set',
+            key: 'key1',
+            newValue: 'x',
+          },
+          {
+            reason: 'expired',
+            key: 'key1',
+            value: 'x',
+          },
+          {
+            reason: 'skip',
+            key: 'key1',
+            newValue: 'abc',
+            cause: 'maxSize',
+          },
+        ]);
+        expect('currentValue' in events[2]).toBe(false);
+      } finally {
+        Date.now = originalNow;
+      }
+    });
+
+    test('should report synchronous onChange errors without breaking cache operations', () => {
+      const errorHandler = mock(() => {});
+      const cache = new LRUCache<string, string>(3, {
+        onChange: () => {
+          throw new Error('onChange sync failure');
+        },
+      });
+
+      globalThis.addEventListener('reportError', errorHandler);
+
+      cache.set('key1', 'value1');
+
+      expect(cache.get('key1')).toBe('value1');
+      expect(errorHandler).toHaveBeenCalled();
+
+      const errorEvent = getFirstReportedError(errorHandler);
+      expect(errorEvent.error.message).toContain('LRUCache onChange');
+      expect(errorEvent.error.message).toContain('onChange sync failure');
+
+      globalThis.removeEventListener('reportError', errorHandler);
+    });
+
+    test('should report async onChange rejections without breaking cache operations', async () => {
+      const errorHandler = mock(() => {});
+      const cache = new LRUCache<string, string>(3, {
+        onChange: () => Promise.reject(new Error('onChange async failure')),
+      });
+
+      globalThis.addEventListener('reportError', errorHandler);
+
+      cache.set('key1', 'value1');
+
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(cache.get('key1')).toBe('value1');
+      expect(errorHandler).toHaveBeenCalled();
+
+      const errorEvent = getFirstReportedError(errorHandler);
+      expect(errorEvent.error.message).toContain('LRUCache onChange');
+      expect(errorEvent.error.message).toContain('onChange async failure');
+
+      globalThis.removeEventListener('reportError', errorHandler);
+    });
+  });
+
   describe('Size-based eviction', () => {
     test('should evict items when max size is reached', () => {
       // Create a cache with max 100 bytes
@@ -634,6 +1101,33 @@ describe('LRUCache', () => {
             sizeCalculator: 'not-a-function' as any,
           }),
       ).toThrow('sizeCalculator must be a function');
+    });
+
+    test('should reject non-function onChange values', () => {
+      expect(
+        () =>
+          new LRUCache<string, string>(1, {
+            onChange: 'not-a-function' as any,
+          }),
+      ).toThrow('onChange must be a function');
+    });
+
+    test('should reject non-array onChangeReasons values', () => {
+      expect(
+        () =>
+          new LRUCache<string, string>(1, {
+            onChangeReasons: 'set' as any,
+          }),
+      ).toThrow('onChangeReasons must be an array');
+    });
+
+    test('should reject invalid onChangeReasons entries', () => {
+      expect(
+        () =>
+          new LRUCache<string, string>(1, {
+            onChangeReasons: ['set', 'skip', 'bogus' as any],
+          }),
+      ).toThrow('Invalid onChange reason: bogus');
     });
 
     test('should reject invalid custom TTL values', () => {

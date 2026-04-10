@@ -472,7 +472,7 @@ Overrides the default 1000ms cancellation grace period. Non-finite or negative v
 
 Subscribe using the `on` method or provide handlers in the constructor.
 
-> **Note:** Event handlers should not return values. Any returned values are ignored. Both sync and async handlers are supported. Errors from either are caught and dispatched as `ErrorEvent` objects via `globalThis.dispatchEvent()` (listen with `globalThis.addEventListener('reportError', handler)`). They do not propagate to the runner or interrupt its operation.
+> **Note:** Event handlers should not return values. Any returned values are ignored. Both sync and async handlers are supported. Errors from either are caught and dispatched as `ErrorEvent` objects via `globalThis.dispatchEvent()` (listen with `globalThis.addEventListener('reportError', handler)`). This reporting path is supported in Node.js 25+, Bun, Deno, and modern browsers. Errors do not propagate to the runner or interrupt its operation.
 
 | Event               | Constant            | Payload                                                                                                                                                |
 | ------------------- | ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |

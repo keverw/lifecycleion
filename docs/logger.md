@@ -1262,7 +1262,7 @@ When a log includes an `exitCode`, the logger will:
    - Callback must return `{ action: 'proceed' }` to continue with exit
    - Or return `{ action: 'wait' }` to prevent exit (e.g., shutdown already in progress)
    - **IMPORTANT:** If the callback throws an error or rejects, the exit process proceeds automatically to prevent the application from hanging
-   - Errors from the callback are reported via the global `reportError` event
+   - Errors from the callback are reported via the global `'reportError'` event when the required browser-style event primitives are available
    - Design your callback to handle errors internally if you need guaranteed cleanup
 2. Set `logger.didExit = true` and `logger.exitCode = <code>`
 3. Close all sinks

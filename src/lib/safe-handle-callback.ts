@@ -5,7 +5,7 @@ import { DOUBLE_EOL } from './constants';
 
 /**
  * Safely handles a callback function by catching any errors and reporting them
- * using the global `reportError` event (standard API available in Node.js 15+, Bun, Deno, and browsers).
+ * using the global `reportError` event (supported in Node.js 25+, Bun, Deno, and browsers).
  * This function can seamlessly handle both synchronous and asynchronous (Promise-based) callback functions.
  *
  * Errors are dispatched as ErrorEvent objects with type 'reportError' via `globalThis.dispatchEvent()`.
@@ -29,7 +29,7 @@ export function safeHandleCallback(
 ): void {
   const handleError = (error: Error): void => {
     // Dispatch error using the standard reportError event API
-    // Available in Node.js 15+, Bun, Deno, and browsers
+    // Supported in Node.js 25+, Bun, Deno, and browsers
     if (
       typeof (globalThis as Record<string, unknown>).dispatchEvent ===
       'function'
@@ -77,7 +77,7 @@ interface CallbackResult<T> {
 
 /**
  * Safely handles a callback function by catching any errors and reporting them
- * using the global `reportError` event (standard API available in Node.js 15+, Bun, Deno, and browsers).
+ * using the global `reportError` event (supported in Node.js 25+, Bun, Deno, and browsers).
  * This function can seamlessly handle both synchronous and asynchronous (Promise-based) callback
  * functions, and it waits for the callback to complete before returning the result or an error.
  *
@@ -99,7 +99,7 @@ export async function safeHandleCallbackAndWait<T>(
 ): Promise<CallbackResult<T>> {
   const handleError = (error: Error): CallbackResult<T> => {
     // Dispatch error using the standard reportError event API
-    // Available in Node.js 15+, Bun, Deno, and browsers
+    // Supported in Node.js 25+, Bun, Deno, and browsers
     if (
       typeof (globalThis as Record<string, unknown>).dispatchEvent ===
       'function'

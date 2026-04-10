@@ -784,7 +784,7 @@ All callbacks are wrapped with `safeHandleCallback()`, which:
 
 - Catches synchronous errors
 - Catches asynchronous promise rejections
-- Reports errors via the global `reportError` event (standard API available in Node.js 15+, Bun, Deno, and browsers)
+- Reports errors via the global `reportError` event (supported in Node.js 25+, Bun, Deno, and browsers)
 - Prevents uncaught exceptions from crashing the process
 
 ```typescript

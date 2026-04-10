@@ -1,4 +1,4 @@
-# Lifecycleion v0.0.10
+# Lifecycleion v0.0.11
 
 [![npm version](https://badge.fury.io/js/lifecycleion.svg)](https://badge.fury.io/js/lifecycleion)
 
@@ -42,6 +42,8 @@ yarn add lifecycleion
 # or
 bun add lifecycleion
 ```
+
+For Node.js runtimes, Lifecycleion currently targets `Node >=25`. Some libraries, including `safe-handle-callback` and `lru-cache`'s `onChange`, rely on browser-style global error event APIs such as `ErrorEvent`, which are also available in Bun, Deno, and modern browsers.
 
 ## Quick Example
 
@@ -114,7 +116,7 @@ Each library has comprehensive documentation in the [docs](./docs) folder. Click
 | [process-signal-manager](./docs/process-signal-manager.md)         | `lifecycleion/process-signal-manager`                   | Unified handler for process signals (SIGINT, SIGTERM, SIGHUP, etc.) and keyboard shortcuts with graceful shutdown and hot-reload support |
 | [promise-protected-resolver](./docs/promise-protected-resolver.md) | `lifecycleion/promise-protected-resolver`               | Promise wrapper with `resolveOnce` and `rejectOnce` that guarantee a promise is only settled once                                        |
 | [retry-utils](./docs/retry-utils.md)                               | `lifecycleion/retry-utils`                              | Retry logic with fixed and exponential backoff via `RetryPolicy` (low-level) and `RetryRunner` (high-level with events and cancellation) |
-| [safe-handle-callback](./docs/safe-handle-callback.md)             | `lifecycleion/safe-handle-callback`                     | Safely execute sync or async callbacks with automatic error reporting via the standard `reportError` event API                           |
+| [safe-handle-callback](./docs/safe-handle-callback.md)             | `lifecycleion/safe-handle-callback`                     | Safely execute sync or async callbacks with automatic error reporting via browser-style `reportError`/`ErrorEvent` globals               |
 | [serialize-error](./docs/serialize-error.md)                       | `lifecycleion/serialize-error`                          | Convert any `Error` into a plain JSON-serializable object and back again for IPC, RPCs, and database storage                             |
 | [single-event-observer](./docs/single-event-observer.md)           | `lifecycleion/single-event-observer`                    | Lightweight type-safe observer pattern for a single event type, with public and protected notify variants                                |
 | [sleep](./docs/sleep.md)                                           | `lifecycleion/sleep`                                    | Pause async execution for a given number of milliseconds                                                                                 |

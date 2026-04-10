@@ -1,6 +1,6 @@
 # safe-handle-callback
 
-Safely execute sync or async callbacks with automatic error reporting via the standard `reportError` event API.
+Safely execute sync or async callbacks with automatic error reporting via browser-style `reportError` / `ErrorEvent` globals.
 
 <!-- toc -->
 
@@ -24,7 +24,7 @@ import {
 
 ### safeHandleCallback
 
-Fire-and-forget wrapper that executes a callback (sync or async) and reports any errors via `globalThis.dispatchEvent` using the standard `reportError` event API (available in Node.js 15+, Bun, Deno, and browsers). Does not return a value or wait for async completion.
+Fire-and-forget wrapper that executes a callback (sync or async) and reports any errors via `globalThis.dispatchEvent` using browser-style `reportError` / `ErrorEvent` globals. This is supported in Bun, Deno, modern browsers, and Node.js 25+. Does not return a value or wait for async completion.
 
 ```typescript
 safeHandleCallback('onData', myCallback, arg1, arg2);

@@ -1997,7 +1997,7 @@ lifecycle.on('lifecycle-manager:shutdown-completed', (data) => {
 
 Event handlers are **fire-and-forget** - they do not block lifecycle operations.
 
-**Event Handler Error Handling:** The LifecycleManager automatically catches errors thrown by event handlers via `safeHandleCallback`, preventing them from breaking lifecycle operations. Errors are dispatched as ErrorEvent objects using the standard `reportError` event API:
+**Event Handler Error Handling:** The LifecycleManager automatically catches errors thrown by event handlers via `safeHandleCallback`, preventing them from breaking lifecycle operations. Errors are dispatched as `ErrorEvent` objects using the standard `reportError` event API:
 
 ```typescript
 // Listen for event handler errors
@@ -2009,7 +2009,7 @@ globalThis.addEventListener('reportError', (event) => {
 });
 ```
 
-Available in Node.js 15+, Bun, Deno, and modern browsers. **Note:** Errors are NOT logged to the LifecycleManager's logger - use the `reportError` listener for custom logging/monitoring.
+Available in Node.js 25+, Bun, Deno, and modern browsers. **Note:** Errors are NOT logged to the LifecycleManager's logger - use the `reportError` listener for custom logging/monitoring.
 
 However, it's still best practice to handle errors explicitly in your handlers for better control over error logging and recovery.
 

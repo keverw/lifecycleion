@@ -36,7 +36,7 @@ import {
 - `notify` is fire-and-forget:
   - Sync subscribers run immediately.
   - Async subscribers are started, but `notify` does not wait for completion.
-- Errors thrown (or promise rejections) in subscribers are reported via `reportError` instead of breaking other subscribers.
+- Errors thrown (or promise rejections) in subscribers are reported via the global `'reportError'` event instead of breaking other subscribers.
 
 ## API
 

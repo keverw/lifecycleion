@@ -146,7 +146,7 @@ Removes event listeners.
 
 ## Error Handling
 
-The emitter automatically catches and reports errors from both synchronous and asynchronous event handlers using the global `reportError` event mechanism:
+The emitter automatically catches and reports errors from both synchronous and asynchronous event handlers using the global `'reportError'` event mechanism:
 
 ```typescript
 // Listen for errors

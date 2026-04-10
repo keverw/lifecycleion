@@ -166,9 +166,7 @@ describe('deserializeError', () => {
       'Worker crashed too many times. Stopping restarts.',
     );
     expect(withExtras(error).errPrefix).toBe('IPCWorkerErr');
-    expect(withExtras(error).errCode).toBe(
-      'WorkerCrashedFatally',
-    );
+    expect(withExtras(error).errCode).toBe('WorkerCrashedFatally');
   });
 
   test('full round-trip: Error → serialize → JSON → parse → deserialize → Error', () => {
@@ -186,9 +184,7 @@ describe('deserializeError', () => {
     expect(restored.message).toBe(
       'Worker crashed too many times. Stopping restarts.',
     );
-    expect(withExtras(restored).errPrefix).toBe(
-      'IPCWorkerErr',
-    );
+    expect(withExtras(restored).errPrefix).toBe('IPCWorkerErr');
   });
 });
 

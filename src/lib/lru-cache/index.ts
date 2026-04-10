@@ -1,3 +1,5 @@
+import { safeHandleCallback } from '../safe-handle-callback';
+
 /**
  * TTL-aware LRU (Least Recently Used) Cache implementation
  *
@@ -10,6 +12,47 @@
  * - Size-aware eviction when memory limits are reached
  */
 
+type CacheEntry<V> = {
+  value: V;
+  expires?: number;
+  size: number;
+};
+
+export type LRUCacheChangeEvent<K, V> =
+  | {
+      reason: 'evict' | 'expired' | 'delete' | 'clear';
+      key: K;
+      value: V;
+    }
+  | {
+      reason: 'set';
+      key: K;
+      newValue: V;
+      oldValue?: V;
+    }
+  | {
+      reason: 'skip';
+      key: K;
+      newValue: V;
+      currentValue?: V;
+      cause: 'maxSize';
+    };
+
+// Extract the reason string union from the event type so it stays in sync.
+export type LRUCacheChangeReason = LRUCacheChangeEvent<
+  unknown,
+  unknown
+>['reason'];
+
+const VALID_CHANGE_REASONS: ReadonlySet<LRUCacheChangeReason> = new Set([
+  'evict',
+  'expired',
+  'delete',
+  'clear',
+  'set',
+  'skip',
+]);
+
 export class LRUCache<K, V> {
   private maxEntries: number;
   private maxSize?: number; // Optional maximum size in bytes
@@ -19,9 +62,11 @@ export class LRUCache<K, V> {
   private currentSize = 0; // Track current total size in bytes
   private expirableEntryCount = 0; // Track how many entries currently have expirations
   private sizeCalculator?: (value: V) => number; // Optional function to calculate item size
+  private onChange?: (event: LRUCacheChangeEvent<K, V>) => void | Promise<void>;
+  private onChangeReasons?: ReadonlySet<LRUCacheChangeReason>;
 
   // Store values with their expiration time and size
-  private map = new Map<K, { value: V; expires?: number; size: number }>();
+  private map = new Map<K, CacheEntry<V>>();
 
   /**
    * Create a new LRU cache
@@ -30,6 +75,8 @@ export class LRUCache<K, V> {
    * @param options.defaultTtl Default time to live in milliseconds for all entries
    * @param options.maxSize Maximum total size in bytes
    * @param options.sizeCalculator Function to calculate the size of a value
+   * @param options.onChange Callback invoked for cache changes
+   * @param options.onChangeReasons Optional list of change reasons that should trigger onChange
    */
 
   constructor(
@@ -38,6 +85,8 @@ export class LRUCache<K, V> {
       defaultTtl?: number;
       maxSize?: number;
       sizeCalculator?: (value: V) => number;
+      onChange?: (event: LRUCacheChangeEvent<K, V>) => void | Promise<void>;
+      onChangeReasons?: LRUCacheChangeReason[];
     },
   ) {
     if (!Number.isInteger(maxEntries) || maxEntries <= 0) {
@@ -64,10 +113,33 @@ export class LRUCache<K, V> {
       throw new TypeError('sizeCalculator must be a function');
     }
 
+    if (
+      options?.onChange !== undefined &&
+      typeof options.onChange !== 'function'
+    ) {
+      throw new TypeError('onChange must be a function');
+    }
+
+    if (options?.onChangeReasons !== undefined) {
+      if (!Array.isArray(options.onChangeReasons)) {
+        throw new TypeError('onChangeReasons must be an array');
+      }
+
+      for (const reason of options.onChangeReasons) {
+        if (!VALID_CHANGE_REASONS.has(reason)) {
+          throw new RangeError(`Invalid onChange reason: ${String(reason)}`);
+        }
+      }
+    }
+
     this.maxEntries = maxEntries;
     this.defaultTtl = options?.defaultTtl;
     this.maxSize = options?.maxSize;
     this.sizeCalculator = options?.sizeCalculator;
+    this.onChange = options?.onChange;
+    this.onChangeReasons = options?.onChangeReasons
+      ? new Set(options.onChangeReasons)
+      : undefined;
   }
 
   /**
@@ -97,7 +169,9 @@ export class LRUCache<K, V> {
     if (entry) {
       // Check if entry has expired
       if (entry.expires && Date.now() > entry.expires) {
-        this.delete(key);
+        const changeEvents = this.createLocalChangeQueue();
+        this.removeEntry(key, 'expired', changeEvents);
+        this.flushLocalChangeQueue(changeEvents);
         return false;
       }
 
@@ -113,7 +187,9 @@ export class LRUCache<K, V> {
     if (entry) {
       // Check if entry has expired
       if (entry.expires && Date.now() > entry.expires) {
-        this.delete(key);
+        const changeEvents = this.createLocalChangeQueue();
+        this.removeEntry(key, 'expired', changeEvents);
+        this.flushLocalChangeQueue(changeEvents);
         return undefined;
       }
 
@@ -138,12 +214,42 @@ export class LRUCache<K, V> {
       );
     }
 
-    // Calculate the size of the new value
+    // Calculate size first so failed sizeCalculator calls do not mutate cache state.
     const size = this.calculateSize(value);
+    const changeEvents = this.createLocalChangeQueue();
 
-    // Remove existing entry if present
-    if (this.map.has(key)) {
-      this.delete(key);
+    // Reclaim expired entries before deciding whether this write is a fresh insert,
+    // an overwrite, or a skipped oversized write.
+    this.cleanupExpiredInternal(changeEvents);
+    const existingEntry = this.map.get(key);
+
+    // Oversized writes are skipped before mutating live entries so they remain a true no-op.
+    if (this.maxSize !== undefined && size > this.maxSize) {
+      changeEvents.push(
+        existingEntry
+          ? {
+              reason: 'skip',
+              key,
+              currentValue: existingEntry.value,
+              newValue: value,
+              cause: 'maxSize',
+            }
+          : {
+              reason: 'skip',
+              key,
+              newValue: value,
+              cause: 'maxSize',
+            },
+      );
+
+      this.flushLocalChangeQueue(changeEvents);
+      return;
+    }
+
+    // Remove the old entry silently so an overwrite emits one `set` event,
+    // not a separate removal event followed by `set`.
+    if (existingEntry) {
+      this.removeEntry(key);
     }
 
     // Calculate expiration if TTL is set
@@ -158,11 +264,27 @@ export class LRUCache<K, V> {
       this.expirableEntryCount++;
     }
 
-    // Reclaim expired entries before evicting live entries for capacity.
-    this.cleanupExpired();
+    // Record the write after state is updated so observers see the final value.
+    changeEvents?.push(
+      existingEntry
+        ? {
+            reason: 'set',
+            key,
+            oldValue: existingEntry.value,
+            newValue: value,
+          }
+        : {
+            reason: 'set',
+            key,
+            newValue: value,
+          },
+    );
 
     // Evict entries if we exceed capacity (either by count or size)
-    this.evictIfNeeded();
+    this.evictIfNeeded(changeEvents);
+
+    // Flush this operation's queued events after all related state changes finish.
+    this.flushLocalChangeQueue(changeEvents);
   }
 
   /**
@@ -170,31 +292,29 @@ export class LRUCache<K, V> {
    */
 
   public clear(): void {
+    const changeEvents = this.createLocalChangeQueue();
+    const shouldEmitClear =
+      this.onChange !== undefined &&
+      (this.onChangeReasons === undefined || this.onChangeReasons.has('clear'));
+
+    // Capture per-entry clear events before clearing the internal map.
+    if (shouldEmitClear) {
+      for (const [key, entry] of this.map.entries()) {
+        changeEvents.push({
+          reason: 'clear',
+          key,
+          value: entry.value,
+        });
+      }
+    }
+
     this.map.clear();
     this.currentSize = 0;
     this.expirableEntryCount = 0;
     this.lastCleanup = Date.now();
-  }
 
-  /**
-   * Remove all expired entries from the cache
-   * @returns The number of entries removed
-   */
-
-  public cleanupExpired(): number {
-    let removed = 0;
-    const now = Date.now();
-
-    for (const [key, entry] of this.map.entries()) {
-      if (entry.expires && now > entry.expires) {
-        this.delete(key);
-        removed++;
-      }
-    }
-
-    this.lastCleanup = now;
-
-    return removed;
+    // Flush this operation's queued events after the cache has been reset.
+    this.flushLocalChangeQueue(changeEvents);
   }
 
   /**
@@ -204,21 +324,44 @@ export class LRUCache<K, V> {
    */
 
   public delete(key: K): boolean {
-    const entry = this.map.get(key);
+    const changeEvents = this.createLocalChangeQueue();
+    const wasDeleted = this.removeEntry(key, 'delete', changeEvents);
 
-    if (entry) {
-      this.currentSize -= entry.size;
+    // Flush this operation's queued events after the delete has been applied.
+    this.flushLocalChangeQueue(changeEvents);
+    return wasDeleted;
+  }
 
-      if (entry.expires !== undefined) {
-        this.expirableEntryCount--;
+  /**
+   * Remove all expired entries from the cache
+   * @returns The number of entries removed
+   */
+
+  public cleanupExpired(): number {
+    const changeEvents = this.createLocalChangeQueue();
+    const removed = this.cleanupExpiredInternal(changeEvents);
+
+    // Flush this operation's queued events after expired entries have been removed.
+    this.flushLocalChangeQueue(changeEvents);
+    return removed;
+  }
+
+  private cleanupExpiredInternal(
+    changeEvents: LRUCacheChangeEvent<K, V>[],
+  ): number {
+    let removed = 0;
+    const now = Date.now();
+
+    for (const [key, entry] of this.map.entries()) {
+      if (entry.expires && now > entry.expires) {
+        this.removeEntry(key, 'expired', changeEvents);
+        removed++;
       }
-
-      this.map.delete(key);
-
-      return true;
     }
 
-    return false;
+    this.lastCleanup = now;
+
+    return removed;
   }
 
   private isBufferValue(value: unknown): value is { length: number } {
@@ -317,17 +460,17 @@ export class LRUCache<K, V> {
    * Evict entries if we exceed either max entries or max size
    */
 
-  private evictIfNeeded(): void {
+  private evictIfNeeded(changeEvents: LRUCacheChangeEvent<K, V>[]): void {
     // First check if we need to evict based on entry count
     if (this.map.size > this.maxEntries) {
-      this.evictOldest();
+      this.evictOldest(changeEvents);
     }
 
     // Then check if we need to evict based on total size
     if (this.maxSize !== undefined && this.currentSize > this.maxSize) {
       // Keep evicting until we're under the size limit or the cache is empty
       while (this.currentSize > this.maxSize && this.map.size > 0) {
-        this.evictOldest();
+        this.evictOldest(changeEvents);
       }
     }
   }
@@ -336,10 +479,10 @@ export class LRUCache<K, V> {
    * Evict the oldest (least recently used) entry
    */
 
-  private evictOldest(): void {
+  private evictOldest(changeEvents: LRUCacheChangeEvent<K, V>[]): void {
     if (this.map.size > 0) {
       const oldest = this.map.keys().next().value as K; // Safe: map.size > 0 guarantees a key exists
-      this.delete(oldest);
+      this.removeEntry(oldest, 'evict', changeEvents);
     }
   }
 
@@ -353,6 +496,62 @@ export class LRUCache<K, V> {
     ) {
       this.cleanupExpired();
     }
+  }
+
+  // Collect changes locally so each cache operation flushes its own events in order.
+  private createLocalChangeQueue(): LRUCacheChangeEvent<K, V>[] {
+    return [];
+  }
+
+  private flushLocalChangeQueue(
+    changeEvents: LRUCacheChangeEvent<K, V>[],
+  ): void {
+    if (!this.onChange || changeEvents.length === 0) {
+      return;
+    }
+
+    for (const changeEvent of changeEvents) {
+      if (
+        this.onChangeReasons !== undefined &&
+        !this.onChangeReasons.has(changeEvent.reason)
+      ) {
+        continue;
+      }
+
+      safeHandleCallback('LRUCache onChange', this.onChange, changeEvent);
+    }
+  }
+
+  private removeEntry(
+    key: K,
+    reason?: 'evict' | 'expired' | 'delete',
+    changeEvents?: LRUCacheChangeEvent<K, V>[],
+  ): boolean {
+    const entry = this.map.get(key);
+
+    if (!entry) {
+      return false;
+    }
+
+    this.currentSize -= entry.size;
+
+    if (entry.expires !== undefined) {
+      this.expirableEntryCount--;
+    }
+
+    this.map.delete(key);
+
+    // Internal callers can omit `reason` to perform a state-only removal without
+    // notifying observers, which is how overwrite handling avoids duplicate events.
+    if (reason && changeEvents) {
+      changeEvents.push({
+        reason,
+        key,
+        value: entry.value,
+      });
+    }
+
+    return true;
   }
 
   private assertNonNegativeFiniteNumber(value: number, message: string): void {

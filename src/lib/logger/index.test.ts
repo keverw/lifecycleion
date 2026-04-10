@@ -759,6 +759,25 @@ describe('Logger', () => {
   });
 
   describe('reportError Listener', () => {
+    test('should not depend on globalThis.reportError when event primitives exist', () => {
+      const originalReportError = (
+        globalThis as Record<string, unknown>
+      ).reportError;
+
+      try {
+        (globalThis as Record<string, unknown>).reportError = undefined;
+
+        const result = logger.registerReportErrorListener();
+
+        expect(result).toBe('success');
+        expect(logger.isReportErrorListenerRegistered()).toBe(true);
+      } finally {
+        logger.unregisterReportErrorListener();
+        (globalThis as Record<string, unknown>).reportError =
+          originalReportError;
+      }
+    });
+
     test('should register reportError listener', () => {
       const result = logger.registerReportErrorListener();
 

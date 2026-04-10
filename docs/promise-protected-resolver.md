@@ -31,7 +31,7 @@ new PromiseProtectedResolver<T>(options?)
 
 **Options:**
 
-- `beforeResolveOrReject?` - `(action: 'resolve' | 'reject', valueOrReason: unknown) => void | Promise<void>` - Optional callback invoked just before the promise is settled. Useful for logging or side effects. Errors in this callback are caught and reported via the global `reportError` event rather than propagating.
+- `beforeResolveOrReject?` - `(action: 'resolve' | 'reject', valueOrReason: unknown) => void | Promise<void>` - Optional callback invoked just before the promise is settled. Useful for logging or side effects. Errors in this callback are caught and reported via the global `'reportError'` event rather than propagating.
 
 ### promise
 
