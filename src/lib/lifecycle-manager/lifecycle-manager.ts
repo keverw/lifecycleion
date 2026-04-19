@@ -4882,7 +4882,7 @@ export class LifecycleManager
     this.logger.warn(
       this.isShuttingDown
         ? 'Shutdown already in progress, tracking repeated signal'
-        : 'Previous shutdown attempt finished with stalled components; escalation window still armed, tracking repeated request',
+        : 'Previous shutdown attempt finished with stalled components or timeout, escalation window still armed, tracking repeated request',
       {
         params: {
           method,
