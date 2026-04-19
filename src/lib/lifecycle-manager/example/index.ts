@@ -111,10 +111,32 @@ async function main() {
     },
   );
 
-  lifecycle.on('lifecycle-manager:shutdown-completed', () => {
-    logger.success('Shutdown complete');
-    process.exit(0);
-  });
+  lifecycle.on(
+    'lifecycle-manager:shutdown-completed',
+    (
+      data: LifecycleManagerEventMap['lifecycle-manager:shutdown-completed'],
+    ) => {
+      if (data.success) {
+        logger.success('Shutdown complete', {
+          params: { durationMS: data.durationMS, method: data.method },
+        });
+        process.exit(0);
+        return;
+      }
+
+      logger.warn('Shutdown completed with issues', {
+        params: {
+          method: data.method,
+          durationMS: data.durationMS,
+          timedOut: data.timedOut ?? false,
+          stalledComponents: data.stalledComponents.map((c) => c.name),
+          code: data.code,
+          reason: data.reason,
+        },
+      });
+      process.exit(1);
+    },
+  );
 
   // Register components
   await lifecycle.registerComponent(new DatabaseComponent(logger));

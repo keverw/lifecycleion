@@ -13,6 +13,7 @@
 - [0.0.9 (Mar 19, 2026)](#009-mar-19-2026)
 - [0.0.10 (Apr 7, 2026)](#0010-apr-7-2026)
 - [0.0.11 (Apr 9, 2026)](#0011-apr-9-2026)
+- [0.0.12 (Apr 18, 2026)](#0012-apr-18-2026)
 
 <!-- tocstop -->
 
@@ -75,3 +76,8 @@
 - Node.js support now targets `>=25` so browser-style global error event APIs such as `ErrorEvent` are available consistently for callback error reporting
 - `lifecycleion/lru-cache` now supports `onChange` callbacks for cache writes and removals, with typed `set`, `skip`, `evict`, `expired`, `delete`, and `clear` events plus optional `onChangeReasons` filtering
 - `lifecycleion/lru-cache` now skips writes that cannot fit within `maxSize` as a single value, emitting `reason: 'skip'` with `cause: 'maxSize'` while leaving existing cache state unchanged
+
+## 0.0.12 (Apr 18, 2026)
+
+- LifecycleManager `lifecycle-manager:shutdown-completed` events now include the shutdown result fields directly on the event payload, making ESC/SIGINT-triggered shutdown results observable without polling `getLastShutdownResult()`
+- Clarified LifecycleManager shutdown event semantics in code/docs: `shutdown-completed` means the manager finished waiting. If a global shutdown timeout fires, the payload reflects the result at that point

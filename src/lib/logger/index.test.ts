@@ -760,9 +760,8 @@ describe('Logger', () => {
 
   describe('reportError Listener', () => {
     test('should not depend on globalThis.reportError when event primitives exist', () => {
-      const originalReportError = (
-        globalThis as Record<string, unknown>
-      ).reportError;
+      const originalReportError = (globalThis as Record<string, unknown>)
+        .reportError;
 
       try {
         (globalThis as Record<string, unknown>).reportError = undefined;

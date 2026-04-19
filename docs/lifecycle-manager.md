@@ -1926,7 +1926,12 @@ lifecycle.on('component:started', (data) => {
 
 lifecycle.on('lifecycle-manager:shutdown-completed', (data) => {
   console.log(`Shutdown completed in ${data.durationMS}ms`);
-  process.exit(0);
+
+  if (!data.success) {
+    console.error('Shutdown issues:', data);
+  }
+
+  process.exit(data.success ? 0 : 1);
 });
 ```
 
@@ -1939,7 +1944,7 @@ lifecycle.on('lifecycle-manager:shutdown-completed', (data) => {
 - `lifecycle-manager:shutdown-warning` - Global warning phase started
 - `lifecycle-manager:shutdown-warning-completed` - Warning phase completed
 - `lifecycle-manager:shutdown-warning-timeout` - Warning phase timed out
-- `lifecycle-manager:shutdown-completed` - Shutdown process completed
+- `lifecycle-manager:shutdown-completed` - Shutdown attempt completed, includes the `ShutdownResult` fields at the top level plus `method` / `duringStartup`. If the global shutdown timeout was hit, the payload reflects the result at the moment the manager stopped waiting
 
 **Component Registration:**
 

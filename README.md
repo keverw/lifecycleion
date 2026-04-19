@@ -1,4 +1,4 @@
-# Lifecycleion v0.0.11
+# Lifecycleion v0.0.12
 
 [![npm version](https://badge.fury.io/js/lifecycleion.svg)](https://badge.fury.io/js/lifecycleion)
 
@@ -84,6 +84,8 @@ const manager = new LifecycleManager();
 manager.registerComponent(new MyComponent('my-component'));
 await manager.startAllComponents();
 ```
+
+Tip: listen for `lifecycle-manager:shutdown-completed` when you want one place to react to shutdown results from manual stops, signals like `SIGINT` / `SIGTERM`, or logger-exit hooks. If `timedOut` is `true`, the payload reflects the result when the manager stopped waiting.
 
 ## Available Libraries
 

@@ -2583,7 +2583,9 @@ describe('LifecycleManager - Bulk Operations', () => {
       expect(shutdownCompletedCount).toBe(1);
       // Verify duringStartup flag is correctly set to true
       expect(wasDuringStartup).toBe(true);
+      expect(shutdownCompletedPayload?.method).toBe('manual');
       expect(shutdownCompletedPayload?.duringStartup).toBe(true);
+      expect(shutdownCompletedPayload?.success).toBe(true);
     });
 
     test('should stop a component that finishes starting after shutdown begins', async () => {
@@ -3058,6 +3060,30 @@ describe('LifecycleManager - Bulk Operations', () => {
       expect(wasShutdownCompletedEmitted).toBe(true);
       expect(shutdownCompletedPayload?.method).toBe('manual');
       expect(shutdownCompletedPayload?.duringStartup).toBe(false);
+      expect(shutdownCompletedPayload?.success).toBe(true);
+      expect(shutdownCompletedPayload?.stoppedComponents).toEqual(['comp1']);
+    });
+
+    test('should include timeout metadata in shutdown-completed event result', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      await lifecycle.registerComponent(
+        new SlowStopComponent(logger, 'slow', 5000),
+      );
+      await lifecycle.startAllComponents();
+
+      let shutdownCompletedPayload: any;
+      lifecycle.on('lifecycle-manager:shutdown-completed', (data) => {
+        shutdownCompletedPayload = data;
+      });
+
+      const result = await lifecycle.stopAllComponents({ timeoutMS: 50 });
+
+      expect(result.code).toBe('shutdown_timeout');
+      expect(result.timedOut).toBe(true);
+      expect(shutdownCompletedPayload).toMatchObject(result);
+      expect(shutdownCompletedPayload?.code).toBe('shutdown_timeout');
+      expect(shutdownCompletedPayload?.timedOut).toBe(true);
     });
 
     test('should reset state flags after completion', async () => {
@@ -5510,12 +5536,18 @@ describe('LifecycleManager - Signal Integration', () => {
       expect(lifecycle.getSignalStatus().shutdownMethod).toBeNull();
 
       // Shutdown with specific method (simulating signal)
+      let shutdownCompletedPayload: any;
       const shutdownCompleted = new Promise<void>((resolve) => {
-        lifecycle.on('lifecycle-manager:shutdown-completed', () => resolve());
+        lifecycle.on('lifecycle-manager:shutdown-completed', (data) => {
+          shutdownCompletedPayload = data;
+          resolve();
+        });
       });
       (lifecycle as any).handleShutdownRequest('SIGTERM');
       await shutdownCompleted;
       expect(lifecycle.getSignalStatus().shutdownMethod).toBe('SIGTERM');
+      expect(shutdownCompletedPayload?.method).toBe('SIGTERM');
+      expect(shutdownCompletedPayload?.success).toBe(true);
 
       // Start again - should clear
       await lifecycle.startAllComponents();
@@ -5537,8 +5569,12 @@ describe('LifecycleManager - Signal Integration', () => {
       lifecycle.enableLoggerExitHook();
 
       // Set up shutdown completion listener
+      let shutdownCompletedPayload: any;
       const shutdownCompleted = new Promise<void>((resolve) => {
-        lifecycle.on('lifecycle-manager:shutdown-completed', () => resolve());
+        lifecycle.on('lifecycle-manager:shutdown-completed', (data) => {
+          shutdownCompletedPayload = data;
+          resolve();
+        });
       });
 
       // Trigger logger exit
@@ -5554,6 +5590,8 @@ describe('LifecycleManager - Signal Integration', () => {
       expect(lifecycle.getRunningComponentCount()).toBe(0);
       expect(logger.didExit).toBe(true);
       expect(logger.exitCode).toBe(0);
+      expect(shutdownCompletedPayload?.method).toBe('manual');
+      expect(shutdownCompletedPayload?.success).toBe(true);
     });
 
     test('should handle multiple exit calls gracefully', async () => {
@@ -5593,8 +5631,12 @@ describe('LifecycleManager - Signal Integration', () => {
 
       lifecycle.enableLoggerExitHook();
 
+      let shutdownCompletedPayload: any;
       const shutdownCompleted = new Promise<void>((resolve) => {
-        lifecycle.on('lifecycle-manager:shutdown-completed', () => resolve());
+        lifecycle.on('lifecycle-manager:shutdown-completed', (data) => {
+          shutdownCompletedPayload = data;
+          resolve();
+        });
       });
 
       // Trigger exit via logger.error with exitCode
@@ -5608,6 +5650,8 @@ describe('LifecycleManager - Signal Integration', () => {
       expect(lifecycle.getRunningComponentCount()).toBe(0);
       expect(logger.didExit).toBe(true);
       expect(logger.exitCode).toBe(1);
+      expect(shutdownCompletedPayload?.method).toBe('manual');
+      expect(shutdownCompletedPayload?.success).toBe(true);
     });
 
     test('should overwrite existing beforeExit callback', async () => {
@@ -5631,8 +5675,12 @@ describe('LifecycleManager - Signal Integration', () => {
       // Enable hook (overwrites custom callback)
       lifecycle.enableLoggerExitHook();
 
+      let shutdownCompletedPayload: any;
       const shutdownCompleted = new Promise<void>((resolve) => {
-        lifecycle.on('lifecycle-manager:shutdown-completed', () => resolve());
+        lifecycle.on('lifecycle-manager:shutdown-completed', (data) => {
+          shutdownCompletedPayload = data;
+          resolve();
+        });
       });
 
       customLogger.exit(0);
@@ -5642,6 +5690,8 @@ describe('LifecycleManager - Signal Integration', () => {
       expect(customCallbackCalls.length).toBe(0);
       // Components should have been stopped
       expect(lifecycle.getRunningComponentCount()).toBe(0);
+      expect(shutdownCompletedPayload?.method).toBe('manual');
+      expect(shutdownCompletedPayload?.success).toBe(true);
     });
 
     test('should finish the first deferred logger exit after manual shutdown completes', async () => {

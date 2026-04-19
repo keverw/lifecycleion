@@ -8,6 +8,7 @@ import type {
   RegistrationFailureCode,
   RegisterComponentResult,
   ShutdownMethod,
+  ShutdownResult,
   StartupResult,
   ValueResult,
 } from './types';
@@ -107,10 +108,7 @@ export interface LifecycleManagerEventMap {
     method: ShutdownMethod;
     duringStartup: boolean;
   };
-  'lifecycle-manager:shutdown-completed': {
-    durationMS: number;
-    stoppedComponents: string[];
-    stalledComponents: ComponentStallInfo[];
+  'lifecycle-manager:shutdown-completed': ShutdownResult & {
     method: ShutdownMethod;
     duringStartup: boolean;
   };
@@ -364,13 +362,12 @@ export class LifecycleManagerEvents {
     });
   }
 
-  public lifecycleManagerShutdownCompleted(input: {
-    durationMS: number;
-    stoppedComponents: string[];
-    stalledComponents: ComponentStallInfo[];
-    method: ShutdownMethod;
-    duringStartup: boolean;
-  }): void {
+  public lifecycleManagerShutdownCompleted(
+    input: ShutdownResult & {
+      method: ShutdownMethod;
+      duringStartup: boolean;
+    },
+  ): void {
     this.emit('lifecycle-manager:shutdown-completed', input);
   }
 

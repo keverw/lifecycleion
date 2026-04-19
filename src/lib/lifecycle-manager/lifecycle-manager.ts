@@ -2992,14 +2992,6 @@ export class LifecycleManager
         },
       });
 
-      this.lifecycleEvents.lifecycleManagerShutdownCompleted({
-        durationMS,
-        stoppedComponents,
-        stalledComponents,
-        method,
-        duringStartup: isDuringStartup,
-      });
-
       const result: ShutdownResult = {
         success: isSuccess,
         stoppedComponents,
@@ -3016,6 +3008,16 @@ export class LifecycleManager
 
       // Store for getLastShutdownResult() - useful for debugging and metrics
       this.lastShutdownResult = result;
+
+      // "Completed" means the manager finished waiting and a shutdown result
+      // snapshot exists, not necessarily that every component stopped cleanly.
+      // Callers must inspect success / stalledComponents / timedOut to decide
+      // what to do next.
+      this.lifecycleEvents.lifecycleManagerShutdownCompleted({
+        ...result,
+        method,
+        duringStartup: isDuringStartup,
+      });
 
       return result;
     } finally {
