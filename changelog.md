@@ -14,7 +14,7 @@
 - [0.0.10 (Apr 7, 2026)](#0010-apr-7-2026)
 - [0.0.11 (Apr 9, 2026)](#0011-apr-9-2026)
 - [0.0.12 (Apr 18, 2026)](#0012-apr-18-2026)
-- [Unreleased](#unreleased)
+- [0.0.13 (Apr 19, 2026)](#0013-apr-19-2026)
 
 <!-- tocstop -->
 
@@ -83,7 +83,7 @@
 - LifecycleManager `lifecycle-manager:shutdown-completed` events now include the shutdown result fields directly on the event payload, making ESC/SIGINT-triggered shutdown results observable without polling `getLastShutdownResult()`
 - Clarified LifecycleManager shutdown event semantics in code/docs: `shutdown-completed` means the manager finished waiting. If a global shutdown timeout fires, the payload reflects the result at that point
 
-## Unreleased
+## 0.0.13 (Apr 19, 2026)
 
 - LifecycleManager now supports an opt-in `repeatedShutdownRequestPolicy` with a required `onForceShutdown()` hook so applications can decide how to escalate repeated shutdown requests received during an already-running shutdown
 - Repeated shutdown escalation now tracks request count and timing window across real signals, keyboard-triggered shutdown requests, and programmatic `triggerShutdown()` calls that flow through the same signal callback path

@@ -1378,9 +1378,21 @@ const lifecycle = new LifecycleManager({
     withinMS: 2000, // default
     armedAfterFailureMS: 6000, // optional override; default is withinMS * forceAfterCount
     countManualRetriesTowardEscalation: false, // default
-    onForceShutdown: ({ requestCount, firstMethod, latestMethod, isShuttingDown, wasArmedAfterFailure }) => {
+    onForceShutdown: ({
+      requestCount,
+      firstMethod,
+      latestMethod,
+      isShuttingDown,
+      wasArmedAfterFailure,
+    }) => {
       logger.warn('Force shutdown requested', {
-        params: { requestCount, firstMethod, latestMethod, isShuttingDown, wasArmedAfterFailure },
+        params: {
+          requestCount,
+          firstMethod,
+          latestMethod,
+          isShuttingDown,
+          wasArmedAfterFailure,
+        },
       });
 
       process.exit(1);
