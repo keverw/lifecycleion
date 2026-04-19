@@ -132,6 +132,7 @@ export interface LifecycleManagerEventMap {
     requestCount: number;
     firstRequestAt: number;
     latestRequestAt: number;
+    wasArmedAfterFailure: boolean;
   };
   'component:starting': { name: string };
   'component:started': { name: string; status?: ComponentStatus };
@@ -418,6 +419,7 @@ export class LifecycleManagerEvents {
     requestCount: number;
     firstRequestAt: number;
     latestRequestAt: number;
+    wasArmedAfterFailure: boolean;
   }): void {
     this.emit('lifecycle-manager:shutdown-escalation-forced', input);
   }

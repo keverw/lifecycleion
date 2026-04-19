@@ -5949,6 +5949,7 @@ describe('LifecycleManager - Signal Integration', () => {
         firstMethod: string;
         latestMethod: string;
         isShuttingDown: boolean;
+        wasArmedAfterFailure: boolean;
       }> = [];
       let forcedEventCount = 0;
       const eventOrder: string[] = [];
@@ -5965,6 +5966,7 @@ describe('LifecycleManager - Signal Integration', () => {
               firstMethod: context.firstMethod,
               latestMethod: context.latestMethod,
               isShuttingDown: context.isShuttingDown,
+              wasArmedAfterFailure: context.wasArmedAfterFailure,
             });
           },
         },
@@ -6002,6 +6004,7 @@ describe('LifecycleManager - Signal Integration', () => {
         firstMethod: 'SIGINT',
         latestMethod: 'SIGTERM',
         isShuttingDown: true,
+        wasArmedAfterFailure: false,
       });
       expect(eventOrder).toEqual(['callback', 'event']);
 
@@ -6498,6 +6501,7 @@ describe('LifecycleManager - Signal Integration', () => {
         firstMethod: string;
         latestMethod: string;
         isShuttingDown: boolean;
+        wasArmedAfterFailure: boolean;
       }> = [];
 
       const lifecycle = new LifecycleManager({
@@ -6511,6 +6515,7 @@ describe('LifecycleManager - Signal Integration', () => {
               firstMethod: context.firstMethod,
               latestMethod: context.latestMethod,
               isShuttingDown: context.isShuttingDown,
+              wasArmedAfterFailure: context.wasArmedAfterFailure,
             });
           },
         },
@@ -6542,6 +6547,7 @@ describe('LifecycleManager - Signal Integration', () => {
           firstMethod: 'manual',
           latestMethod: 'SIGTERM',
           isShuttingDown: false,
+          wasArmedAfterFailure: true,
         },
       ]);
     });
@@ -6722,6 +6728,7 @@ describe('LifecycleManager - Signal Integration', () => {
         firstMethod: string;
         latestMethod: string;
         isShuttingDown: boolean;
+        wasArmedAfterFailure: boolean;
       }> = [];
       const lifecycle = new LifecycleManager({
         logger,
@@ -6739,6 +6746,7 @@ describe('LifecycleManager - Signal Integration', () => {
               firstMethod: context.firstMethod,
               latestMethod: context.latestMethod,
               isShuttingDown: context.isShuttingDown,
+              wasArmedAfterFailure: context.wasArmedAfterFailure,
             });
           },
         },
@@ -6784,6 +6792,7 @@ describe('LifecycleManager - Signal Integration', () => {
           firstMethod: 'SIGINT',
           latestMethod: 'SIGTERM',
           isShuttingDown: false,
+          wasArmedAfterFailure: true,
         },
       ]);
       expect(lifecycle.getComponentStatus('failing-stop')?.state).toBe(
@@ -7000,6 +7009,7 @@ describe('LifecycleManager - Signal Integration', () => {
         firstMethod: string;
         latestMethod: string;
         isShuttingDown: boolean;
+        wasArmedAfterFailure: boolean;
       }> = [];
       const lifecycle = new LifecycleManager({
         logger,
@@ -7014,6 +7024,7 @@ describe('LifecycleManager - Signal Integration', () => {
               firstMethod: context.firstMethod,
               latestMethod: context.latestMethod,
               isShuttingDown: context.isShuttingDown,
+              wasArmedAfterFailure: context.wasArmedAfterFailure,
             });
           },
         },
@@ -7050,6 +7061,7 @@ describe('LifecycleManager - Signal Integration', () => {
           firstMethod: 'manual',
           latestMethod: 'manual',
           isShuttingDown: false,
+          wasArmedAfterFailure: true,
         },
       ]);
       expect(lifecycle.getShutdownEscalationStatus()).toMatchObject({
@@ -7067,6 +7079,7 @@ describe('LifecycleManager - Signal Integration', () => {
         firstMethod: string;
         latestMethod: string;
         isShuttingDown: boolean;
+        wasArmedAfterFailure: boolean;
       }> = [];
 
       class SlowFailingStopComponent extends TestComponent {
@@ -7092,6 +7105,7 @@ describe('LifecycleManager - Signal Integration', () => {
               firstMethod: context.firstMethod,
               latestMethod: context.latestMethod,
               isShuttingDown: context.isShuttingDown,
+              wasArmedAfterFailure: context.wasArmedAfterFailure,
             });
           },
         },
@@ -7133,6 +7147,7 @@ describe('LifecycleManager - Signal Integration', () => {
           firstMethod: 'manual',
           latestMethod: 'SIGTERM',
           isShuttingDown: true,
+          wasArmedAfterFailure: false,
         },
       ]);
     });

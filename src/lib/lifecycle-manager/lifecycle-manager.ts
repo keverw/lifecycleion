@@ -4918,6 +4918,7 @@ export class LifecycleManager
       firstRequestAt: state.firstRequestAt,
       latestRequestAt: state.latestRequestAt,
       isShuttingDown: this.isShuttingDown,
+      wasArmedAfterFailure: state.remainsArmedUntil !== null,
     };
 
     this.logger.warn(
@@ -4948,6 +4949,7 @@ export class LifecycleManager
       requestCount: context.requestCount,
       firstRequestAt: context.firstRequestAt,
       latestRequestAt: context.latestRequestAt,
+      wasArmedAfterFailure: context.wasArmedAfterFailure,
     });
     return true;
   }
