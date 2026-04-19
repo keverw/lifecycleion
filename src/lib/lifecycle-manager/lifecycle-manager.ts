@@ -4879,20 +4879,25 @@ export class LifecycleManager
     state.latestMethod = method;
     state.latestRequestAt = now;
 
-    this.logger.warn('Shutdown already in progress, tracking repeated signal', {
-      params: {
-        method,
-        requestCount: state.requestCount,
-        firstMethod: state.firstMethod,
-        latestMethod: state.latestMethod,
-        firstRequestAt: state.firstRequestAt,
-        latestRequestAt: state.latestRequestAt,
-        repeatedWindowStartedAt: state.repeatedWindowStartedAt,
-        remainsArmedUntil: state.remainsArmedUntil,
-        withinMS: policy.withinMS,
-        forceAfterCount: policy.forceAfterCount,
+    this.logger.warn(
+      this.isShuttingDown
+        ? 'Shutdown already in progress, tracking repeated signal'
+        : 'Shutdown escalation window still armed, tracking repeated request',
+      {
+        params: {
+          method,
+          requestCount: state.requestCount,
+          firstMethod: state.firstMethod,
+          latestMethod: state.latestMethod,
+          firstRequestAt: state.firstRequestAt,
+          latestRequestAt: state.latestRequestAt,
+          repeatedWindowStartedAt: state.repeatedWindowStartedAt,
+          remainsArmedUntil: state.remainsArmedUntil,
+          withinMS: policy.withinMS,
+          forceAfterCount: policy.forceAfterCount,
+        },
       },
-    });
+    );
 
     if (
       // Force escalation is single-fire per shutdown cycle. Later requests are
