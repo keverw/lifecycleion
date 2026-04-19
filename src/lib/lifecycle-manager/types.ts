@@ -1076,8 +1076,38 @@ export interface ForceShutdownContext {
   /** Unix timestamp in ms for the most recent request in the current window */
   latestRequestAt: number;
 
-  /** Whether shutdown is still actively running when the force callback fires */
+  /**
+   * Whether shutdown is still actively running when the force callback fires.
+   *
+   * This is `true` when escalation fires during an active shutdown (the normal
+   * path: operator pressed the shutdown signal multiple times while
+   * `stopAllComponents()` was still running).
+   *
+   * This is `false` when escalation fires from the post-failure armed window
+   * (i.e. a previous shutdown attempt already returned unsuccessfully and the
+   * manager kept escalation armed briefly). In that path the force callback
+   * fires before the follow-up `stopAllComponents()` call is issued, so no
+   * shutdown is actively in progress at the moment the callback runs.
+   *
+   * Check `wasArmedAfterFailure` to distinguish the two cases.
+   */
   isShuttingDown: boolean;
+
+  /**
+   * Whether this force-shutdown was triggered from the post-failure armed
+   * state rather than during an active shutdown.
+   *
+   * `true`  — a previous shutdown attempt returned unsuccessfully, the manager
+   *           kept escalation armed, and the force threshold was crossed while
+   *           that armed window was still open (no shutdown running yet).
+   *
+   * `false` — the force threshold was crossed while `stopAllComponents()` was
+   *           actively in progress (the common path).
+   *
+   * Use this to decide whether your force handler needs to start or re-trigger
+   * shutdown, or whether it can assume a shutdown run is already underway.
+   */
+  wasArmedAfterFailure: boolean;
 }
 
 /**
