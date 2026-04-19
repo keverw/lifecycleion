@@ -7,6 +7,7 @@ import type {
   LifecycleManagerStatus,
   DependencyValidationResult,
   LifecycleSignalStatus,
+  ShutdownEscalationStatus,
   RestartComponentOptions,
   RestartResult,
   RestartAllOptions,
@@ -187,6 +188,10 @@ export class ComponentLifecycle implements ComponentLifecycleRef {
 
   public getSignalStatus(): LifecycleSignalStatus {
     return this.manager.getSignalStatus();
+  }
+
+  public getShutdownEscalationStatus(): ShutdownEscalationStatus {
+    return this.manager.getShutdownEscalationStatus();
   }
 
   public triggerReload(): Promise<SignalBroadcastResult> {

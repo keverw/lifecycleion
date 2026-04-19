@@ -65,7 +65,10 @@ export type {
   InsertComponentAtResult,
   LifecycleManagerOptions,
   LifecycleManagerStatus,
+  ShutdownEscalationStatus,
   DependencyValidationResult,
+  RepeatedShutdownRequestPolicy,
+  ForceShutdownContext,
 } from './types';
 
 // Errors

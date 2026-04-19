@@ -112,6 +112,27 @@ export interface LifecycleManagerEventMap {
     method: ShutdownMethod;
     duringStartup: boolean;
   };
+  /** Failed/timed-out shutdown left escalation armed briefly for follow-up force presses. */
+  'lifecycle-manager:shutdown-escalation-armed': {
+    firstMethod: ShutdownMethod;
+    requestCount: number;
+    armedUntil: number;
+  };
+  /** Armed escalation window expired and the manager cleared that old escalation state. */
+  'lifecycle-manager:shutdown-escalation-expired': {
+    firstMethod: ShutdownMethod;
+    latestMethod: ShutdownMethod | null;
+    requestCount: number;
+    armedUntil: number;
+  };
+  /** Repeated shutdown requests crossed the force threshold and onForceShutdown() was invoked. */
+  'lifecycle-manager:shutdown-escalation-forced': {
+    firstMethod: ShutdownMethod;
+    latestMethod: ShutdownMethod;
+    requestCount: number;
+    firstRequestAt: number;
+    latestRequestAt: number;
+  };
   'component:starting': { name: string };
   'component:started': { name: string; status?: ComponentStatus };
   'component:start-timeout': {
@@ -155,7 +176,10 @@ export interface LifecycleManagerEventMap {
   'component:shutdown-force-completed': { name: string };
   'component:shutdown-force-timeout': { name: string; timeoutMS: number };
   'component:startup-rollback': { name: string };
-  'signal:shutdown': { method: ShutdownSignal };
+  'signal:shutdown': {
+    method: ShutdownSignal;
+    isAlreadyShuttingDown: boolean;
+  };
   'signal:reload': undefined;
   'signal:info': undefined;
   'signal:debug': undefined;
@@ -371,6 +395,33 @@ export class LifecycleManagerEvents {
     this.emit('lifecycle-manager:shutdown-completed', input);
   }
 
+  public lifecycleManagerShutdownEscalationArmed(input: {
+    firstMethod: ShutdownMethod;
+    requestCount: number;
+    armedUntil: number;
+  }): void {
+    this.emit('lifecycle-manager:shutdown-escalation-armed', input);
+  }
+
+  public lifecycleManagerShutdownEscalationExpired(input: {
+    firstMethod: ShutdownMethod;
+    latestMethod: ShutdownMethod | null;
+    requestCount: number;
+    armedUntil: number;
+  }): void {
+    this.emit('lifecycle-manager:shutdown-escalation-expired', input);
+  }
+
+  public lifecycleManagerShutdownEscalationForced(input: {
+    firstMethod: ShutdownMethod;
+    latestMethod: ShutdownMethod;
+    requestCount: number;
+    firstRequestAt: number;
+    latestRequestAt: number;
+  }): void {
+    this.emit('lifecycle-manager:shutdown-escalation-forced', input);
+  }
+
   public componentStarting(name: string): void {
     this.emit('component:starting', { name });
   }
@@ -490,8 +541,11 @@ export class LifecycleManagerEvents {
     this.emit('component:startup-rollback', { name });
   }
 
-  public signalShutdown(method: ShutdownSignal): void {
-    this.emit('signal:shutdown', { method });
+  public signalShutdown(
+    method: ShutdownSignal,
+    isAlreadyShuttingDown = false,
+  ): void {
+    this.emit('signal:shutdown', { method, isAlreadyShuttingDown });
   }
 
   public signalReload(): void {

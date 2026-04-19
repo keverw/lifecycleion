@@ -1,4 +1,4 @@
-import { describe, expect, test, beforeEach } from 'bun:test';
+import { describe, expect, test, beforeEach, mock } from 'bun:test';
 import { Logger } from '../logger';
 import { ArraySink } from '../logger/sinks/array';
 import { BaseComponent } from './base-component';
@@ -15,6 +15,7 @@ import {
   lifecycleManagerErrTypes,
   lifecycleManagerErrCodes,
 } from './errors';
+import type { LifecycleManagerEventMap } from './events';
 import { sleep } from '../sleep';
 import {
   TestComponent,
@@ -3029,7 +3030,9 @@ describe('LifecycleManager - Bulk Operations', () => {
         retryStalled: false,
       });
 
-      expect(retryResult.success).toBe(true);
+      expect(retryResult.success).toBe(false);
+      expect(retryResult.stalledComponents).toHaveLength(1);
+      expect(retryResult.stalledComponents[0].name).toBe('failing');
       expect(lifecycle.getComponentStatus('failing')?.state).toBe('stalled');
     });
 
@@ -3195,6 +3198,74 @@ describe('LifecycleManager - Bulk Operations', () => {
       expect(result.shutdownResult.stalledComponents).toHaveLength(1);
       // Startup should still succeed with ignoreStalledComponents
       expect(result.startupResult.success).toBe(true);
+    });
+
+    test('should normalize stale armed escalation state before the restart shutdown phase', async () => {
+      class RecoverableFailingStopComponent extends TestComponent {
+        public started = true;
+        private forceShouldSucceed = false;
+
+        public stop(): void {
+          throw new Error('Initial stop failed');
+        }
+
+        public onShutdownForce(): Promise<void> {
+          if (!this.forceShouldSucceed) {
+            throw new Error('Force retry still failing');
+          }
+
+          this.started = false;
+          return Promise.resolve();
+        }
+
+        public allowForceShutdownRetry(): void {
+          this.forceShouldSucceed = true;
+        }
+      }
+
+      let expiredEventPayload: any = null;
+      const lifecycle = new LifecycleManager({
+        logger,
+        repeatedShutdownRequestPolicy: {
+          forceAfterCount: 3,
+          withinMS: 100,
+          armedAfterFailureMS: 400,
+          onForceShutdown: () => {},
+        },
+      });
+      const component = new RecoverableFailingStopComponent(logger, {
+        name: 'recoverable-failing-stop',
+      });
+
+      lifecycle.on(
+        'lifecycle-manager:shutdown-escalation-expired',
+        (data: any) => {
+          expiredEventPayload = data;
+        },
+      );
+
+      await lifecycle.registerComponent(component);
+      await lifecycle.startAllComponents();
+
+      const failedShutdown = await lifecycle.stopAllComponents();
+      expect(failedShutdown.success).toBe(false);
+
+      const repeatedState = (lifecycle as any).repeatedShutdownRequestState;
+      repeatedState.remainsArmedUntil = Date.now() - 1;
+
+      component.allowForceShutdownRetry();
+
+      const result = await lifecycle.restartAllComponents();
+
+      expect(expiredEventPayload).not.toBeNull();
+      expect(expiredEventPayload).toMatchObject({
+        firstMethod: 'manual',
+        latestMethod: 'manual',
+        requestCount: 0,
+      });
+      expect(result.shutdownResult.success).toBe(true);
+      expect(result.startupResult.success).toBe(true);
+      expect(result.success).toBe(true);
     });
   });
 
@@ -4744,10 +4815,12 @@ describe('LifecycleManager - Multi-Phase Shutdown', () => {
 
 describe('LifecycleManager - Signal Integration', () => {
   let logger: Logger;
+  let arraySink: ArraySink;
 
   beforeEach(() => {
+    arraySink = new ArraySink();
     logger = new Logger({
-      sinks: [],
+      sinks: [arraySink],
       callProcessExit: false,
     });
   });
@@ -5471,6 +5544,100 @@ describe('LifecycleManager - Signal Integration', () => {
     });
   });
 
+  describe('signal:shutdown', () => {
+    test('should include whether shutdown was already in progress for each shutdown request', async () => {
+      const lifecycle = new LifecycleManager({
+        logger,
+        repeatedShutdownRequestPolicy: {
+          forceAfterCount: 3,
+          withinMS: 100,
+          onForceShutdown: () => {},
+        },
+      });
+      const shutdownSignals: Array<{
+        method: string;
+        isAlreadyShuttingDown: boolean;
+      }> = [];
+
+      lifecycle.on(
+        'signal:shutdown',
+        (data: LifecycleManagerEventMap['signal:shutdown']) => {
+          shutdownSignals.push({
+            method: data.method,
+            isAlreadyShuttingDown: data.isAlreadyShuttingDown,
+          });
+        },
+      );
+
+      await lifecycle.registerComponent(
+        new SlowStopComponent(logger, 'slow-stop', 100),
+      );
+      await lifecycle.startAllComponents();
+
+      const shutdownCompleted = new Promise<void>((resolve) => {
+        lifecycle.on('lifecycle-manager:shutdown-completed', () => {
+          resolve();
+        });
+      });
+
+      (lifecycle as any).handleShutdownRequest('SIGINT');
+      await sleep(10);
+      (lifecycle as any).handleShutdownRequest('SIGTERM');
+      await sleep(10);
+      (lifecycle as any).handleShutdownRequest('SIGTERM');
+
+      await shutdownCompleted;
+
+      expect(shutdownSignals).toEqual([
+        { method: 'SIGINT', isAlreadyShuttingDown: false },
+        { method: 'SIGTERM', isAlreadyShuttingDown: true },
+        { method: 'SIGTERM', isAlreadyShuttingDown: true },
+      ]);
+    });
+
+    test('should mark post-failure armed shutdown requests as fresh retries', async () => {
+      const lifecycle = new LifecycleManager({
+        logger,
+        repeatedShutdownRequestPolicy: {
+          forceAfterCount: 3,
+          withinMS: 100,
+          armedAfterFailureMS: 250,
+          onForceShutdown: () => {},
+        },
+      });
+      const shutdownSignals: Array<{
+        method: string;
+        isAlreadyShuttingDown: boolean;
+      }> = [];
+
+      lifecycle.on(
+        'signal:shutdown',
+        (data: LifecycleManagerEventMap['signal:shutdown']) => {
+          shutdownSignals.push({
+            method: data.method,
+            isAlreadyShuttingDown: data.isAlreadyShuttingDown,
+          });
+        },
+      );
+
+      await lifecycle.registerComponent(
+        new FailingStopComponent(logger, 'failing-stop', 'Stop failed fast'),
+      );
+      await lifecycle.startAllComponents();
+
+      const failedShutdown = await lifecycle.stopAllComponents();
+      expect(failedShutdown.success).toBe(false);
+      expect((lifecycle as any).isShuttingDown).toBe(false);
+
+      (lifecycle as any).handleShutdownRequest('SIGTERM');
+
+      expect(shutdownSignals.at(-1)).toEqual({
+        method: 'SIGTERM',
+        isAlreadyShuttingDown: false,
+      });
+    });
+  });
+
   describe('getSignalStatus()', () => {
     test('should return correct status when not attached', () => {
       const lifecycle = new LifecycleManager({ logger });
@@ -5552,6 +5719,1770 @@ describe('LifecycleManager - Signal Integration', () => {
       // Start again - should clear
       await lifecycle.startAllComponents();
       expect(lifecycle.getSignalStatus().shutdownMethod).toBeNull();
+    });
+  });
+
+  describe('getShutdownEscalationStatus()', () => {
+    test('should report unconfigured escalation status by default', () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      expect(lifecycle.getShutdownEscalationStatus()).toEqual({
+        configured: false,
+        isShuttingDown: false,
+        isArmed: false,
+        forceAfterCount: null,
+        withinMS: null,
+        armedAfterFailureMS: null,
+        armedAfterFailureMSSource: null,
+        requestCount: 0,
+        firstMethod: null,
+        latestMethod: null,
+        firstRequestAt: null,
+        latestRequestAt: null,
+        repeatedWindowStartedAt: null,
+        armedUntil: null,
+        hasTriggeredForceShutdown: false,
+      });
+    });
+
+    test('should report the effective armedAfterFailureMS and mark it as derived when using the default', () => {
+      const lifecycle = new LifecycleManager({
+        logger,
+        repeatedShutdownRequestPolicy: {
+          forceAfterCount: 4,
+          withinMS: 150,
+          onForceShutdown: () => {},
+        },
+      });
+
+      expect(lifecycle.getShutdownEscalationStatus()).toMatchObject({
+        configured: true,
+        forceAfterCount: 4,
+        withinMS: 150,
+        armedAfterFailureMS: 600,
+        armedAfterFailureMSSource: 'derived',
+        countManualRetriesTowardEscalation: false,
+      });
+    });
+
+    test('should sanitize non-finite repeated shutdown policy values back to safe defaults', () => {
+      const lifecycle = new LifecycleManager({
+        logger,
+        repeatedShutdownRequestPolicy: {
+          forceAfterCount: NaN,
+          withinMS: Infinity,
+          armedAfterFailureMS: NaN,
+          onForceShutdown: () => {},
+        },
+      });
+
+      expect(lifecycle.getShutdownEscalationStatus()).toMatchObject({
+        configured: true,
+        forceAfterCount: 3,
+        withinMS: 2000,
+        armedAfterFailureMS: 6000,
+        armedAfterFailureMSSource: 'derived',
+        countManualRetriesTowardEscalation: false,
+      });
+    });
+
+    test('should return an empty disabled snapshot even after a failed signal shutdown', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      await lifecycle.registerComponent(
+        new FailingStopComponent(
+          logger,
+          'failing-stop',
+          'Disabled escalation status should stay empty',
+        ),
+      );
+      await lifecycle.startAllComponents();
+
+      (lifecycle as any).handleShutdownRequest('SIGTERM');
+      await sleep(10);
+
+      expect(lifecycle.getShutdownEscalationStatus()).toEqual({
+        configured: false,
+        isShuttingDown: false,
+        isArmed: false,
+        forceAfterCount: null,
+        withinMS: null,
+        armedAfterFailureMS: null,
+        armedAfterFailureMSSource: null,
+        requestCount: 0,
+        firstMethod: null,
+        latestMethod: null,
+        firstRequestAt: null,
+        latestRequestAt: null,
+        repeatedWindowStartedAt: null,
+        armedUntil: null,
+        hasTriggeredForceShutdown: false,
+      });
+    });
+
+    test('should report armed escalation state after unsuccessful shutdown', async () => {
+      const lifecycle = new LifecycleManager({
+        logger,
+        repeatedShutdownRequestPolicy: {
+          forceAfterCount: 3,
+          withinMS: 100,
+          armedAfterFailureMS: 250,
+          onForceShutdown: () => {},
+        },
+      });
+
+      await lifecycle.registerComponent(
+        new FailingStopComponent(
+          logger,
+          'failing-stop',
+          'Escalation status failed',
+        ),
+      );
+      await lifecycle.startAllComponents();
+
+      const shutdownResult = await lifecycle.stopAllComponents();
+      expect(shutdownResult.success).toBe(false);
+
+      const status = lifecycle.getShutdownEscalationStatus();
+      expect(status.configured).toBe(true);
+      expect(status.isShuttingDown).toBe(false);
+      expect(status.isArmed).toBe(true);
+      expect(status.forceAfterCount).toBe(3);
+      expect(status.withinMS).toBe(100);
+      expect(status.armedAfterFailureMS).toBe(250);
+      expect(status.armedAfterFailureMSSource).toBe('explicit');
+      expect(status.requestCount).toBe(0);
+      expect(status.firstMethod).toBe('manual');
+      expect(status.latestMethod).toBe('manual');
+      expect(typeof status.firstRequestAt).toBe('number');
+      expect(typeof status.latestRequestAt).toBe('number');
+      expect(status.repeatedWindowStartedAt).toBeNull();
+      expect(typeof status.armedUntil).toBe('number');
+      expect(status.hasTriggeredForceShutdown).toBe(false);
+    });
+
+    test('should not report armed escalation after the armed window has expired', async () => {
+      const lifecycle = new LifecycleManager({
+        logger,
+        repeatedShutdownRequestPolicy: {
+          forceAfterCount: 3,
+          withinMS: 20,
+          armedAfterFailureMS: 40,
+          onForceShutdown: () => {},
+        },
+      });
+
+      await lifecycle.registerComponent(
+        new FailingStopComponent(
+          logger,
+          'failing-stop',
+          'Escalation status expiry failed',
+        ),
+      );
+      await lifecycle.startAllComponents();
+
+      const shutdownResult = await lifecycle.stopAllComponents();
+      expect(shutdownResult.success).toBe(false);
+      expect(lifecycle.getShutdownEscalationStatus().isArmed).toBe(true);
+
+      await sleep(60);
+
+      const status = lifecycle.getShutdownEscalationStatus();
+      expect(status.isArmed).toBe(false);
+      expect(status.armedUntil).toBeNull();
+      expect(status.firstMethod).toBeNull();
+      expect(status.latestMethod).toBeNull();
+    });
+
+    test('should expire stale armed escalation state even before the timer callback fires', async () => {
+      let expiredEventPayload: any = null;
+      const lifecycle = new LifecycleManager({
+        logger,
+        repeatedShutdownRequestPolicy: {
+          forceAfterCount: 3,
+          withinMS: 100,
+          armedAfterFailureMS: 400,
+          onForceShutdown: () => {},
+        },
+      });
+
+      lifecycle.on(
+        'lifecycle-manager:shutdown-escalation-expired',
+        (data: any) => {
+          expiredEventPayload = data;
+        },
+      );
+
+      await lifecycle.registerComponent(
+        new FailingStopComponent(
+          logger,
+          'failing-stop',
+          'Stale status expiry failed',
+        ),
+      );
+      await lifecycle.startAllComponents();
+
+      const failedShutdown = await lifecycle.stopAllComponents();
+      expect(failedShutdown.success).toBe(false);
+
+      const repeatedState = (lifecycle as any).repeatedShutdownRequestState;
+      repeatedState.remainsArmedUntil = Date.now() - 1;
+
+      const status = lifecycle.getShutdownEscalationStatus();
+      expect(status.isArmed).toBe(false);
+      expect(status.armedUntil).toBeNull();
+      expect(status.firstMethod).toBeNull();
+      expect(status.latestMethod).toBeNull();
+      expect(expiredEventPayload).not.toBeNull();
+      expect(expiredEventPayload).toMatchObject({
+        firstMethod: 'manual',
+        latestMethod: 'manual',
+        requestCount: 0,
+      });
+    });
+  });
+
+  describe('repeatedShutdownRequestPolicy', () => {
+    test('should invoke onForceShutdown when post-start escalation requests reach the threshold within the escalation window', async () => {
+      const forceShutdownCalls: Array<{
+        requestCount: number;
+        firstMethod: string;
+        latestMethod: string;
+        isShuttingDown: boolean;
+      }> = [];
+      let forcedEventCount = 0;
+      const eventOrder: string[] = [];
+
+      const lifecycle = new LifecycleManager({
+        logger,
+        repeatedShutdownRequestPolicy: {
+          forceAfterCount: 3,
+          withinMS: 100,
+          onForceShutdown: (context) => {
+            eventOrder.push('callback');
+            forceShutdownCalls.push({
+              requestCount: context.requestCount,
+              firstMethod: context.firstMethod,
+              latestMethod: context.latestMethod,
+              isShuttingDown: context.isShuttingDown,
+            });
+          },
+        },
+      });
+      lifecycle.on('lifecycle-manager:shutdown-escalation-forced', () => {
+        forcedEventCount++;
+        eventOrder.push('event');
+      });
+
+      await lifecycle.registerComponent(
+        new SlowStopComponent(logger, 'slow-stop', 100),
+      );
+      await lifecycle.startAllComponents();
+
+      const shutdownCompleted = new Promise<void>((resolve) => {
+        lifecycle.on('lifecycle-manager:shutdown-completed', () => {
+          resolve();
+        });
+      });
+
+      (lifecycle as any).handleShutdownRequest('SIGINT');
+      await sleep(10);
+      (lifecycle as any).handleShutdownRequest('SIGTERM');
+      await sleep(5);
+      (lifecycle as any).handleShutdownRequest('SIGTERM');
+      await sleep(5);
+      (lifecycle as any).handleShutdownRequest('SIGTERM');
+
+      await shutdownCompleted;
+
+      expect(forceShutdownCalls).toHaveLength(1);
+      expect(forcedEventCount).toBe(1);
+      expect(forceShutdownCalls[0]).toEqual({
+        requestCount: 3,
+        firstMethod: 'SIGINT',
+        latestMethod: 'SIGTERM',
+        isShuttingDown: true,
+      });
+      expect(eventOrder).toEqual(['callback', 'event']);
+
+      expect(
+        arraySink.logs.some(
+          (log) =>
+            log.message ===
+            'Shutdown already in progress, tracking repeated signal',
+        ),
+      ).toBe(true);
+      expect(
+        arraySink.logs.some(
+          (log) =>
+            log.message ===
+            'Repeated shutdown request threshold reached, invoking force shutdown handler',
+        ),
+      ).toBe(true);
+    });
+
+    test('should fall back to default threshold and window when policy values are non-finite', async () => {
+      const forceShutdownCalls: Array<{
+        requestCount: number;
+        firstMethod: string;
+        latestMethod: string;
+      }> = [];
+      const lifecycle = new LifecycleManager({
+        logger,
+        repeatedShutdownRequestPolicy: {
+          forceAfterCount: NaN,
+          withinMS: NaN,
+          armedAfterFailureMS: NaN,
+          onForceShutdown: (context) => {
+            forceShutdownCalls.push({
+              requestCount: context.requestCount,
+              firstMethod: context.firstMethod,
+              latestMethod: context.latestMethod,
+            });
+          },
+        },
+      });
+
+      await lifecycle.registerComponent(
+        new SlowStopComponent(logger, 'slow-stop', 100),
+      );
+      await lifecycle.startAllComponents();
+
+      const shutdownCompleted = new Promise<void>((resolve) => {
+        lifecycle.on('lifecycle-manager:shutdown-completed', () => {
+          resolve();
+        });
+      });
+
+      (lifecycle as any).handleShutdownRequest('SIGINT');
+      await sleep(10);
+      (lifecycle as any).handleShutdownRequest('SIGTERM');
+      await sleep(10);
+      expect(forceShutdownCalls).toEqual([]);
+
+      (lifecycle as any).handleShutdownRequest('SIGTERM');
+      await sleep(10);
+      expect(forceShutdownCalls).toEqual([]);
+
+      (lifecycle as any).handleShutdownRequest('SIGTERM');
+
+      await shutdownCompleted;
+
+      expect(forceShutdownCalls).toEqual([
+        {
+          requestCount: 3,
+          firstMethod: 'SIGINT',
+          latestMethod: 'SIGTERM',
+        },
+      ]);
+    });
+
+    test('should restart only the post-start escalation window when repeated requests are too far apart', async () => {
+      const forceShutdownCalls: Array<{
+        requestCount: number;
+        firstMethod: string;
+        latestMethod: string;
+      }> = [];
+      const lifecycle = new LifecycleManager({
+        logger,
+        repeatedShutdownRequestPolicy: {
+          forceAfterCount: 3,
+          withinMS: 20,
+          onForceShutdown: (context) => {
+            forceShutdownCalls.push({
+              requestCount: context.requestCount,
+              firstMethod: context.firstMethod,
+              latestMethod: context.latestMethod,
+            });
+          },
+        },
+      });
+
+      await lifecycle.registerComponent(
+        new SlowStopComponent(logger, 'slow-stop', 120),
+      );
+      await lifecycle.startAllComponents();
+
+      const shutdownCompleted = new Promise<void>((resolve) => {
+        lifecycle.on('lifecycle-manager:shutdown-completed', () => {
+          resolve();
+        });
+      });
+
+      (lifecycle as any).handleShutdownRequest('SIGINT');
+      await sleep(40);
+      (lifecycle as any).handleShutdownRequest('SIGTERM');
+      await sleep(40);
+      (lifecycle as any).handleShutdownRequest('SIGTERM');
+      await sleep(5);
+      (lifecycle as any).handleShutdownRequest('SIGTERM');
+      await sleep(5);
+      (lifecycle as any).handleShutdownRequest('SIGTERM');
+
+      await shutdownCompleted;
+
+      expect(forceShutdownCalls).toHaveLength(1);
+      expect(forceShutdownCalls[0]).toEqual({
+        requestCount: 3,
+        firstMethod: 'SIGINT',
+        latestMethod: 'SIGTERM',
+      });
+    });
+
+    test('should keep the same escalation window when a repeated request arrives exactly at withinMS', async () => {
+      const originalNow = Date.now;
+      let currentTime = 1000;
+      const forceShutdownCalls: Array<{
+        requestCount: number;
+        firstMethod: string;
+        latestMethod: string;
+      }> = [];
+
+      try {
+        Date.now = mock(() => currentTime);
+
+        const lifecycle = new LifecycleManager({
+          logger,
+          repeatedShutdownRequestPolicy: {
+            forceAfterCount: 2,
+            withinMS: 100,
+            onForceShutdown: (context) => {
+              forceShutdownCalls.push({
+                requestCount: context.requestCount,
+                firstMethod: context.firstMethod,
+                latestMethod: context.latestMethod,
+              });
+            },
+          },
+        });
+
+        await lifecycle.registerComponent(
+          new SlowStopComponent(logger, 'slow-stop', 100),
+        );
+        await lifecycle.startAllComponents();
+
+        const shutdownCompleted = new Promise<void>((resolve) => {
+          lifecycle.on('lifecycle-manager:shutdown-completed', () => {
+            resolve();
+          });
+        });
+
+        (lifecycle as any).handleShutdownRequest('SIGINT');
+        await sleep(10);
+
+        currentTime = 1100;
+        (lifecycle as any).handleShutdownRequest('SIGTERM');
+        await sleep(10);
+
+        currentTime = 1200;
+        (lifecycle as any).handleShutdownRequest('SIGTERM');
+
+        await shutdownCompleted;
+
+        expect(forceShutdownCalls).toEqual([
+          {
+            requestCount: 2,
+            firstMethod: 'SIGINT',
+            latestMethod: 'SIGTERM',
+          },
+        ]);
+      } finally {
+        Date.now = originalNow;
+      }
+    });
+
+    test('should require same-tick repeated requests when withinMS is zero', async () => {
+      const originalNow = Date.now;
+      let currentTime = 2000;
+      const forceShutdownCalls: Array<{
+        requestCount: number;
+        firstMethod: string;
+        latestMethod: string;
+      }> = [];
+
+      try {
+        Date.now = mock(() => currentTime);
+
+        const lifecycle = new LifecycleManager({
+          logger,
+          repeatedShutdownRequestPolicy: {
+            forceAfterCount: 2,
+            withinMS: 0,
+            onForceShutdown: (context) => {
+              forceShutdownCalls.push({
+                requestCount: context.requestCount,
+                firstMethod: context.firstMethod,
+                latestMethod: context.latestMethod,
+              });
+            },
+          },
+        });
+
+        await lifecycle.registerComponent(
+          new SlowStopComponent(logger, 'slow-stop', 100),
+        );
+        await lifecycle.startAllComponents();
+
+        const shutdownCompleted = new Promise<void>((resolve) => {
+          lifecycle.on('lifecycle-manager:shutdown-completed', () => {
+            resolve();
+          });
+        });
+
+        (lifecycle as any).handleShutdownRequest('SIGINT');
+        await sleep(10);
+
+        currentTime = 2100;
+        (lifecycle as any).handleShutdownRequest('SIGTERM');
+        await sleep(10);
+
+        currentTime = 2101;
+        (lifecycle as any).handleShutdownRequest('SIGTERM');
+        await sleep(10);
+        expect(forceShutdownCalls).toEqual([]);
+
+        currentTime = 2200;
+        (lifecycle as any).handleShutdownRequest('SIGTERM');
+        currentTime = 2200;
+        (lifecycle as any).handleShutdownRequest('SIGTERM');
+
+        await shutdownCompleted;
+
+        expect(forceShutdownCalls).toEqual([
+          {
+            requestCount: 2,
+            firstMethod: 'SIGINT',
+            latestMethod: 'SIGTERM',
+          },
+        ]);
+      } finally {
+        Date.now = originalNow;
+      }
+    });
+
+    test('should force on the first repeated request when forceAfterCount is one', async () => {
+      const forceShutdownCalls: Array<{
+        requestCount: number;
+        firstMethod: string;
+        latestMethod: string;
+      }> = [];
+
+      const lifecycle = new LifecycleManager({
+        logger,
+        repeatedShutdownRequestPolicy: {
+          forceAfterCount: 1,
+          withinMS: 100,
+          onForceShutdown: (context) => {
+            forceShutdownCalls.push({
+              requestCount: context.requestCount,
+              firstMethod: context.firstMethod,
+              latestMethod: context.latestMethod,
+            });
+          },
+        },
+      });
+
+      await lifecycle.registerComponent(
+        new SlowStopComponent(logger, 'slow-stop', 100),
+      );
+      await lifecycle.startAllComponents();
+
+      const shutdownCompleted = new Promise<void>((resolve) => {
+        lifecycle.on('lifecycle-manager:shutdown-completed', () => {
+          resolve();
+        });
+      });
+
+      (lifecycle as any).handleShutdownRequest('SIGINT');
+      await sleep(10);
+      (lifecycle as any).handleShutdownRequest('SIGTERM');
+
+      await shutdownCompleted;
+
+      expect(forceShutdownCalls).toEqual([
+        {
+          requestCount: 1,
+          firstMethod: 'SIGINT',
+          latestMethod: 'SIGTERM',
+        },
+      ]);
+    });
+
+    test('should reset repeated shutdown tracking after shutdown completes and startup runs again', async () => {
+      const forceShutdownCalls: Array<{
+        requestCount: number;
+        firstMethod: string;
+        latestMethod: string;
+      }> = [];
+      const lifecycle = new LifecycleManager({
+        logger,
+        repeatedShutdownRequestPolicy: {
+          forceAfterCount: 3,
+          withinMS: 100,
+          onForceShutdown: (context) => {
+            forceShutdownCalls.push({
+              requestCount: context.requestCount,
+              firstMethod: context.firstMethod,
+              latestMethod: context.latestMethod,
+            });
+          },
+        },
+      });
+
+      await lifecycle.registerComponent(
+        new SlowStopComponent(logger, 'slow-stop', 60),
+      );
+      await lifecycle.startAllComponents();
+
+      let shutdownCompleted = new Promise<void>((resolve) => {
+        lifecycle.on('lifecycle-manager:shutdown-completed', () => {
+          resolve();
+        });
+      });
+
+      (lifecycle as any).handleShutdownRequest('SIGINT');
+      await sleep(10);
+      (lifecycle as any).handleShutdownRequest('SIGINT');
+      await sleep(10);
+      (lifecycle as any).handleShutdownRequest('SIGINT');
+      await sleep(10);
+      (lifecycle as any).handleShutdownRequest('SIGINT');
+      await shutdownCompleted;
+
+      await lifecycle.startAllComponents();
+
+      shutdownCompleted = new Promise<void>((resolve) => {
+        lifecycle.on('lifecycle-manager:shutdown-completed', () => {
+          resolve();
+        });
+      });
+
+      (lifecycle as any).handleShutdownRequest('SIGTERM');
+      await sleep(10);
+      (lifecycle as any).handleShutdownRequest('SIGTERM');
+      await sleep(10);
+      (lifecycle as any).handleShutdownRequest('SIGTERM');
+      await sleep(10);
+      (lifecycle as any).handleShutdownRequest('SIGTERM');
+      await shutdownCompleted;
+
+      expect(forceShutdownCalls).toEqual([
+        {
+          requestCount: 3,
+          firstMethod: 'SIGINT',
+          latestMethod: 'SIGINT',
+        },
+        {
+          requestCount: 3,
+          firstMethod: 'SIGTERM',
+          latestMethod: 'SIGTERM',
+        },
+      ]);
+    });
+
+    test('should clear repeated shutdown tracking immediately after successful shutdown completes', async () => {
+      const forceShutdownCalls: Array<{
+        requestCount: number;
+        firstMethod: string;
+        latestMethod: string;
+      }> = [];
+      const lifecycle = new LifecycleManager({
+        logger,
+        repeatedShutdownRequestPolicy: {
+          forceAfterCount: 3,
+          withinMS: 100,
+          onForceShutdown: (context) => {
+            forceShutdownCalls.push({
+              requestCount: context.requestCount,
+              firstMethod: context.firstMethod,
+              latestMethod: context.latestMethod,
+            });
+          },
+        },
+      });
+
+      await lifecycle.registerComponent(
+        new SlowStopComponent(logger, 'slow-stop', 20),
+      );
+      await lifecycle.startAllComponents();
+
+      const shutdownCompleted = new Promise<void>((resolve) => {
+        lifecycle.on('lifecycle-manager:shutdown-completed', () => {
+          resolve();
+        });
+      });
+
+      (lifecycle as any).handleShutdownRequest('SIGINT');
+      await shutdownCompleted;
+
+      expect(lifecycle.getRunningComponentCount()).toBe(0);
+
+      (lifecycle as any).handleShutdownRequest('SIGTERM');
+      await sleep(10);
+      (lifecycle as any).handleShutdownRequest('SIGTERM');
+      await sleep(10);
+      (lifecycle as any).handleShutdownRequest('SIGTERM');
+
+      expect(forceShutdownCalls).toEqual([]);
+    });
+
+    test('should keep escalation armed for a short period after unsuccessful shutdown completes', async () => {
+      const forceShutdownCalls: Array<{
+        requestCount: number;
+        firstMethod: string;
+        latestMethod: string;
+      }> = [];
+      let armedEvent: any = null;
+      const lifecycle = new LifecycleManager({
+        logger,
+        repeatedShutdownRequestPolicy: {
+          forceAfterCount: 3,
+          withinMS: 100,
+          onForceShutdown: (context) => {
+            forceShutdownCalls.push({
+              requestCount: context.requestCount,
+              firstMethod: context.firstMethod,
+              latestMethod: context.latestMethod,
+            });
+          },
+        },
+      });
+      lifecycle.on(
+        'lifecycle-manager:shutdown-escalation-armed',
+        (data: any) => {
+          armedEvent = data;
+        },
+      );
+
+      await lifecycle.registerComponent(
+        new FailingStopComponent(logger, 'failing-stop', 'Stop failed fast'),
+      );
+      await lifecycle.startAllComponents();
+
+      let shutdownResult: any;
+      const shutdownCompleted = new Promise<void>((resolve) => {
+        lifecycle.on('lifecycle-manager:shutdown-completed', (result) => {
+          shutdownResult = result;
+          resolve();
+        });
+      });
+
+      (lifecycle as any).handleShutdownRequest('SIGINT');
+      await shutdownCompleted;
+
+      expect(shutdownResult?.success).toBe(false);
+      expect(shutdownResult?.stalledComponents?.length).toBeGreaterThan(0);
+      expect(armedEvent).not.toBeNull();
+      expect(armedEvent.firstMethod).toBe('SIGINT');
+      expect(armedEvent.requestCount).toBe(0);
+      expect(typeof armedEvent.armedUntil).toBe('number');
+
+      (lifecycle as any).handleShutdownRequest('SIGINT');
+      await sleep(10);
+      (lifecycle as any).handleShutdownRequest('SIGTERM');
+      await sleep(10);
+      (lifecycle as any).handleShutdownRequest('SIGTERM');
+
+      expect(forceShutdownCalls).toEqual([
+        {
+          requestCount: 3,
+          firstMethod: 'SIGINT',
+          latestMethod: 'SIGTERM',
+        },
+      ]);
+    });
+
+    test('should report isShuttingDown=false when force escalation fires after shutdown already returned', async () => {
+      const forceShutdownCalls: Array<{
+        requestCount: number;
+        firstMethod: string;
+        latestMethod: string;
+        isShuttingDown: boolean;
+      }> = [];
+
+      const lifecycle = new LifecycleManager({
+        logger,
+        repeatedShutdownRequestPolicy: {
+          forceAfterCount: 3,
+          withinMS: 100,
+          onForceShutdown: (context) => {
+            forceShutdownCalls.push({
+              requestCount: context.requestCount,
+              firstMethod: context.firstMethod,
+              latestMethod: context.latestMethod,
+              isShuttingDown: context.isShuttingDown,
+            });
+          },
+        },
+      });
+
+      await lifecycle.registerComponent(
+        new FailingStopComponent(
+          logger,
+          'failing-stop',
+          'Post-failure escalation should report inactive shutdown state',
+        ),
+      );
+      await lifecycle.startAllComponents();
+
+      const failedShutdown = await lifecycle.stopAllComponents();
+      expect(failedShutdown.success).toBe(false);
+      expect(lifecycle.getShutdownEscalationStatus().isArmed).toBe(true);
+      expect((lifecycle as any).isShuttingDown).toBe(false);
+
+      (lifecycle as any).handleShutdownRequest('SIGINT');
+      await sleep(10);
+      (lifecycle as any).handleShutdownRequest('SIGTERM');
+      await sleep(10);
+      (lifecycle as any).handleShutdownRequest('SIGTERM');
+
+      expect(forceShutdownCalls).toEqual([
+        {
+          requestCount: 3,
+          firstMethod: 'manual',
+          latestMethod: 'SIGTERM',
+          isShuttingDown: false,
+        },
+      ]);
+    });
+
+    test('should not keep post-failure escalation armed when armedAfterFailureMS is zero', async () => {
+      const forceShutdownCalls: Array<{
+        requestCount: number;
+        firstMethod: string;
+        latestMethod: string;
+      }> = [];
+      const armedEvents: Array<{
+        firstMethod: string;
+        requestCount: number;
+        armedUntil: number;
+      }> = [];
+
+      const lifecycle = new LifecycleManager({
+        logger,
+        repeatedShutdownRequestPolicy: {
+          forceAfterCount: 3,
+          withinMS: 100,
+          armedAfterFailureMS: 0,
+          onForceShutdown: (context) => {
+            forceShutdownCalls.push({
+              requestCount: context.requestCount,
+              firstMethod: context.firstMethod,
+              latestMethod: context.latestMethod,
+            });
+          },
+        },
+      });
+      lifecycle.on(
+        'lifecycle-manager:shutdown-escalation-armed',
+        (event) => {
+          armedEvents.push(event);
+        },
+      );
+
+      await lifecycle.registerComponent(
+        new FailingStopComponent(
+          logger,
+          'failing-stop',
+          'Zero post-failure armed window should not preserve escalation state',
+        ),
+      );
+      await lifecycle.startAllComponents();
+
+      const failedShutdown = await lifecycle.stopAllComponents();
+      expect(failedShutdown.success).toBe(false);
+      expect(lifecycle.getShutdownEscalationStatus().isArmed).toBe(false);
+      expect(armedEvents).toEqual([]);
+
+      (lifecycle as any).handleShutdownRequest('SIGTERM');
+      await sleep(10);
+      (lifecycle as any).handleShutdownRequest('SIGTERM');
+      await sleep(10);
+      (lifecycle as any).handleShutdownRequest('SIGTERM');
+
+      expect(forceShutdownCalls).toEqual([]);
+      expect(lifecycle.getShutdownEscalationStatus()).toMatchObject({
+        firstMethod: 'SIGTERM',
+        latestMethod: 'SIGTERM',
+        requestCount: 0,
+        hasTriggeredForceShutdown: false,
+      });
+    });
+
+    test('should honor a custom armedAfterFailureMS override for post-failure escalation timing and refresh', async () => {
+      const lifecycle = new LifecycleManager({
+        logger,
+        repeatedShutdownRequestPolicy: {
+          forceAfterCount: 3,
+          withinMS: 20,
+          armedAfterFailureMS: 400,
+          onForceShutdown: () => {},
+        },
+      });
+
+      await lifecycle.registerComponent(
+        new FailingStopComponent(
+          logger,
+          'failing-stop',
+          'Custom armedAfterFailureMS should stay armed',
+        ),
+      );
+      await lifecycle.startAllComponents();
+
+      const failedShutdown = await lifecycle.stopAllComponents();
+      expect(failedShutdown.success).toBe(false);
+      const armedStatus = lifecycle.getShutdownEscalationStatus();
+      const initialArmedUntil = requireDefined(
+        armedStatus.armedUntil,
+        'initialArmedUntil',
+      );
+
+      // The derived default would only arm for 60ms here (20 * 3). Waiting
+      // past that proves later requests are using the explicit override.
+      await sleep(120);
+      expect(lifecycle.getShutdownEscalationStatus().isArmed).toBe(true);
+
+      (lifecycle as any).handleShutdownRequest('SIGTERM');
+      await sleep(10);
+      const refreshedStatus = lifecycle.getShutdownEscalationStatus();
+
+      expect(refreshedStatus.isArmed).toBe(true);
+      expect(refreshedStatus.firstMethod).toBe('manual');
+      expect(refreshedStatus.latestMethod).toBe('SIGTERM');
+      expect(refreshedStatus.requestCount).toBe(1);
+      expect(refreshedStatus.armedUntil).toBeGreaterThan(initialArmedUntil);
+    });
+
+    test('should retry shutdown when a signal arrives during the armed post-failure window', async () => {
+      class RecoverableFailingStopComponent extends TestComponent {
+        public started = true;
+        private forceShouldSucceed = false;
+
+        public stop(): void {
+          throw new Error('Initial stop failed');
+        }
+
+        public onShutdownForce(): Promise<void> {
+          if (!this.forceShouldSucceed) {
+            throw new Error('Force retry still failing');
+          }
+
+          this.started = false;
+          return Promise.resolve();
+        }
+
+        public allowForceShutdownRetry(): void {
+          this.forceShouldSucceed = true;
+        }
+      }
+
+      const lifecycle = new LifecycleManager({
+        logger,
+        repeatedShutdownRequestPolicy: {
+          forceAfterCount: 3,
+          withinMS: 100,
+          armedAfterFailureMS: 250,
+          onForceShutdown: () => {},
+        },
+      });
+      const component = new RecoverableFailingStopComponent(logger, {
+        name: 'recoverable-failing-stop',
+      });
+      let shutdownInitiatedCount = 0;
+
+      lifecycle.on('lifecycle-manager:shutdown-initiated', () => {
+        shutdownInitiatedCount++;
+      });
+
+      await lifecycle.registerComponent(component);
+      await lifecycle.startAllComponents();
+
+      const failedShutdown = await lifecycle.stopAllComponents();
+      expect(failedShutdown.success).toBe(false);
+      expect(lifecycle.getShutdownEscalationStatus().isArmed).toBe(true);
+
+      component.allowForceShutdownRetry();
+
+      const retriedShutdown = new Promise<any>((resolve) => {
+        lifecycle.once('lifecycle-manager:shutdown-completed', resolve);
+      });
+
+      (lifecycle as any).handleShutdownRequest('SIGTERM');
+
+      const retryResult = await retriedShutdown;
+      expect(retryResult.success).toBe(true);
+      expect(shutdownInitiatedCount).toBe(2);
+      expect(lifecycle.getRunningComponentCount()).toBe(0);
+      expect(lifecycle.getShutdownEscalationStatus().isArmed).toBe(false);
+    });
+
+    test('should preserve repeated shutdown escalation across signal retries that skip stalled components', async () => {
+      const forceShutdownCalls: Array<{
+        requestCount: number;
+        firstMethod: string;
+        latestMethod: string;
+        isShuttingDown: boolean;
+      }> = [];
+      const lifecycle = new LifecycleManager({
+        logger,
+        shutdownOptions: {
+          retryStalled: false,
+          haltOnStall: false,
+        },
+        repeatedShutdownRequestPolicy: {
+          forceAfterCount: 3,
+          withinMS: 200,
+          armedAfterFailureMS: 400,
+          onForceShutdown: (context) => {
+            forceShutdownCalls.push({
+              requestCount: context.requestCount,
+              firstMethod: context.firstMethod,
+              latestMethod: context.latestMethod,
+              isShuttingDown: context.isShuttingDown,
+            });
+          },
+        },
+      });
+
+      await lifecycle.registerComponent(
+        new FailingStopComponent(
+          logger,
+          'failing-stop',
+          'Signal retries that skip stalled components should stay unsuccessful',
+        ),
+      );
+      await lifecycle.startAllComponents();
+
+      (lifecycle as any).handleShutdownRequest('SIGINT');
+      await sleep(10);
+      expect(lifecycle.getShutdownEscalationStatus()).toMatchObject({
+        isShuttingDown: false,
+        isArmed: true,
+        requestCount: 0,
+        firstMethod: 'SIGINT',
+        latestMethod: 'SIGINT',
+      });
+
+      (lifecycle as any).handleShutdownRequest('SIGTERM');
+      await sleep(10);
+      expect(lifecycle.getShutdownEscalationStatus()).toMatchObject({
+        isShuttingDown: false,
+        isArmed: true,
+        requestCount: 1,
+        firstMethod: 'SIGINT',
+        latestMethod: 'SIGTERM',
+      });
+
+      (lifecycle as any).handleShutdownRequest('SIGTERM');
+      await sleep(10);
+      (lifecycle as any).handleShutdownRequest('SIGTERM');
+      await sleep(10);
+
+      expect(forceShutdownCalls).toEqual([
+        {
+          requestCount: 3,
+          firstMethod: 'SIGINT',
+          latestMethod: 'SIGTERM',
+          isShuttingDown: false,
+        },
+      ]);
+      expect(lifecycle.getComponentStatus('failing-stop')?.state).toBe(
+        'stalled',
+      );
+    });
+
+    test('should seed escalation state for manual stopAllComponents shutdowns', async () => {
+      const forceShutdownCalls: Array<{
+        requestCount: number;
+        firstMethod: string;
+        latestMethod: string;
+      }> = [];
+      const lifecycle = new LifecycleManager({
+        logger,
+        repeatedShutdownRequestPolicy: {
+          forceAfterCount: 3,
+          withinMS: 100,
+          onForceShutdown: (context) => {
+            forceShutdownCalls.push({
+              requestCount: context.requestCount,
+              firstMethod: context.firstMethod,
+              latestMethod: context.latestMethod,
+            });
+          },
+        },
+      });
+
+      await lifecycle.registerComponent(
+        new FailingStopComponent(logger, 'failing-stop', 'Manual stop failed'),
+      );
+      await lifecycle.startAllComponents();
+
+      const shutdownResult = await lifecycle.stopAllComponents();
+      expect(shutdownResult.success).toBe(false);
+
+      (lifecycle as any).handleShutdownRequest('SIGTERM');
+      await sleep(10);
+      (lifecycle as any).handleShutdownRequest('SIGTERM');
+      await sleep(10);
+      (lifecycle as any).handleShutdownRequest('SIGTERM');
+
+      expect(forceShutdownCalls).toEqual([
+        {
+          requestCount: 3,
+          firstMethod: 'manual',
+          latestMethod: 'SIGTERM',
+        },
+      ]);
+    });
+
+    test('should reset escalation state across manual stopAllComponents retries while armed by default', async () => {
+      const lifecycle = new LifecycleManager({
+        logger,
+        repeatedShutdownRequestPolicy: {
+          forceAfterCount: 3,
+          withinMS: 100,
+          armedAfterFailureMS: 400,
+          onForceShutdown: () => {},
+        },
+      });
+
+      await lifecycle.registerComponent(
+        new FailingStopComponent(
+          logger,
+          'failing-stop',
+          'Manual retry should continue armed escalation state',
+        ),
+      );
+      await lifecycle.startAllComponents();
+
+      const firstShutdown = await lifecycle.stopAllComponents();
+      expect(firstShutdown.success).toBe(false);
+
+      (lifecycle as any).handleShutdownRequest('SIGTERM');
+      await sleep(10);
+      const statusAfterSignal = lifecycle.getShutdownEscalationStatus();
+      expect(statusAfterSignal.requestCount).toBe(1);
+      expect(statusAfterSignal.firstMethod).toBe('manual');
+      expect(statusAfterSignal.latestMethod).toBe('SIGTERM');
+      const firstRequestAt = requireDefined(
+        statusAfterSignal.firstRequestAt,
+        'firstRequestAt',
+      );
+
+      const secondShutdown = await lifecycle.stopAllComponents({
+        retryStalled: true,
+        haltOnStall: false,
+      });
+      expect(secondShutdown.success).toBe(false);
+
+      const statusAfterManualRetry = lifecycle.getShutdownEscalationStatus();
+      expect(statusAfterManualRetry.isArmed).toBe(true);
+      expect(statusAfterManualRetry.requestCount).toBe(0);
+      expect(statusAfterManualRetry.firstMethod).toBe('manual');
+      expect(statusAfterManualRetry.latestMethod).toBe('manual');
+      expect(statusAfterManualRetry.firstRequestAt).toBeGreaterThanOrEqual(
+        firstRequestAt,
+      );
+      expect(statusAfterManualRetry.latestRequestAt).toBeGreaterThanOrEqual(
+        firstRequestAt,
+      );
+    });
+
+    test('should preserve escalation state across manual stopAllComponents retries when opted in', async () => {
+      const lifecycle = new LifecycleManager({
+        logger,
+        repeatedShutdownRequestPolicy: {
+          forceAfterCount: 3,
+          withinMS: 100,
+          armedAfterFailureMS: 400,
+          countManualRetriesTowardEscalation: true,
+          onForceShutdown: () => {},
+        },
+      });
+
+      await lifecycle.registerComponent(
+        new FailingStopComponent(
+          logger,
+          'failing-stop',
+          'Manual retry should continue armed escalation state when opted in',
+        ),
+      );
+      await lifecycle.startAllComponents();
+
+      const firstShutdown = await lifecycle.stopAllComponents();
+      expect(firstShutdown.success).toBe(false);
+
+      (lifecycle as any).handleShutdownRequest('SIGTERM');
+      await sleep(10);
+      const statusAfterSignal = lifecycle.getShutdownEscalationStatus();
+      expect(statusAfterSignal.requestCount).toBe(1);
+      expect(statusAfterSignal.firstMethod).toBe('manual');
+      expect(statusAfterSignal.latestMethod).toBe('SIGTERM');
+      const firstRequestAt = requireDefined(
+        statusAfterSignal.firstRequestAt,
+        'firstRequestAt',
+      );
+
+      const secondShutdown = await lifecycle.stopAllComponents({
+        retryStalled: true,
+        haltOnStall: false,
+      });
+      expect(secondShutdown.success).toBe(false);
+
+      const statusAfterManualRetry = lifecycle.getShutdownEscalationStatus();
+      expect(statusAfterManualRetry.isArmed).toBe(true);
+      expect(statusAfterManualRetry.requestCount).toBe(2);
+      expect(statusAfterManualRetry.firstMethod).toBe('manual');
+      expect(statusAfterManualRetry.latestMethod).toBe('manual');
+      expect(statusAfterManualRetry.firstRequestAt).toBe(firstRequestAt);
+    });
+
+    test('should not reach force escalation through manual retries alone by default', async () => {
+      const forceShutdownCalls: Array<{
+        requestCount: number;
+        firstMethod: string;
+        latestMethod: string;
+      }> = [];
+      const lifecycle = new LifecycleManager({
+        logger,
+        repeatedShutdownRequestPolicy: {
+          forceAfterCount: 2,
+          withinMS: 100,
+          armedAfterFailureMS: 400,
+          onForceShutdown: (context) => {
+            forceShutdownCalls.push({
+              requestCount: context.requestCount,
+              firstMethod: context.firstMethod,
+              latestMethod: context.latestMethod,
+            });
+          },
+        },
+      });
+
+      await lifecycle.registerComponent(
+        new FailingStopComponent(
+          logger,
+          'failing-stop',
+          'Default manual retries should not force escalate',
+        ),
+      );
+      await lifecycle.startAllComponents();
+
+      const firstShutdown = await lifecycle.stopAllComponents();
+      expect(firstShutdown.success).toBe(false);
+      expect(lifecycle.getShutdownEscalationStatus().isArmed).toBe(true);
+
+      const secondShutdown = await lifecycle.stopAllComponents({
+        retryStalled: true,
+        haltOnStall: false,
+      });
+      expect(secondShutdown.success).toBe(false);
+
+      const thirdShutdown = await lifecycle.stopAllComponents({
+        retryStalled: true,
+        haltOnStall: false,
+      });
+      expect(thirdShutdown.success).toBe(false);
+
+      expect(forceShutdownCalls).toEqual([]);
+      expect(lifecycle.getShutdownEscalationStatus()).toMatchObject({
+        configured: true,
+        requestCount: 0,
+        firstMethod: 'manual',
+        latestMethod: 'manual',
+        hasTriggeredForceShutdown: false,
+      });
+    });
+
+    test('should reach force escalation through manual retries alone when opted in', async () => {
+      const forceShutdownCalls: Array<{
+        requestCount: number;
+        firstMethod: string;
+        latestMethod: string;
+        isShuttingDown: boolean;
+      }> = [];
+      const lifecycle = new LifecycleManager({
+        logger,
+        repeatedShutdownRequestPolicy: {
+          forceAfterCount: 2,
+          withinMS: 100,
+          armedAfterFailureMS: 400,
+          countManualRetriesTowardEscalation: true,
+          onForceShutdown: (context) => {
+            forceShutdownCalls.push({
+              requestCount: context.requestCount,
+              firstMethod: context.firstMethod,
+              latestMethod: context.latestMethod,
+              isShuttingDown: context.isShuttingDown,
+            });
+          },
+        },
+      });
+
+      await lifecycle.registerComponent(
+        new FailingStopComponent(
+          logger,
+          'failing-stop',
+          'Opted-in manual retries should force escalate',
+        ),
+      );
+      await lifecycle.startAllComponents();
+
+      const firstShutdown = await lifecycle.stopAllComponents();
+      expect(firstShutdown.success).toBe(false);
+      expect(lifecycle.getShutdownEscalationStatus().isArmed).toBe(true);
+
+      const secondShutdown = await lifecycle.stopAllComponents({
+        retryStalled: true,
+        haltOnStall: false,
+      });
+      expect(secondShutdown.success).toBe(false);
+
+      const thirdShutdown = await lifecycle.stopAllComponents({
+        retryStalled: true,
+        haltOnStall: false,
+      });
+      expect(thirdShutdown.success).toBe(false);
+
+      expect(forceShutdownCalls).toEqual([
+        {
+          requestCount: 2,
+          firstMethod: 'manual',
+          latestMethod: 'manual',
+          isShuttingDown: false,
+        },
+      ]);
+      expect(lifecycle.getShutdownEscalationStatus()).toMatchObject({
+        configured: true,
+        requestCount: 2,
+        firstMethod: 'manual',
+        latestMethod: 'manual',
+        hasTriggeredForceShutdown: true,
+      });
+    });
+
+    test('should keep escalation state live during a long manual retry after the armed window would have expired', async () => {
+      const forceShutdownCalls: Array<{
+        requestCount: number;
+        firstMethod: string;
+        latestMethod: string;
+        isShuttingDown: boolean;
+      }> = [];
+
+      class SlowFailingStopComponent extends TestComponent {
+        public stop(): void {
+          throw new Error('Slow stop failed');
+        }
+
+        public async onShutdownForce(): Promise<void> {
+          await sleep(150);
+          throw new Error('Slow force stop failed');
+        }
+      }
+
+      const lifecycle = new LifecycleManager({
+        logger,
+        repeatedShutdownRequestPolicy: {
+          forceAfterCount: 3,
+          withinMS: 50,
+          armedAfterFailureMS: 80,
+          onForceShutdown: (context) => {
+            forceShutdownCalls.push({
+              requestCount: context.requestCount,
+              firstMethod: context.firstMethod,
+              latestMethod: context.latestMethod,
+              isShuttingDown: context.isShuttingDown,
+            });
+          },
+        },
+      });
+
+      await lifecycle.registerComponent(
+        new SlowFailingStopComponent(logger, {
+          name: 'slow-failing-stop',
+        }),
+      );
+      await lifecycle.startAllComponents();
+
+      const firstShutdown = await lifecycle.stopAllComponents();
+      expect(firstShutdown.success).toBe(false);
+      expect(lifecycle.getShutdownEscalationStatus().isArmed).toBe(true);
+
+      const retryPromise = lifecycle.stopAllComponents({
+        retryStalled: true,
+        haltOnStall: false,
+      });
+
+      await sleep(100);
+      expect((lifecycle as any).isShuttingDown).toBe(true);
+      expect(lifecycle.getShutdownEscalationStatus().firstMethod).toBe(
+        'manual',
+      );
+
+      (lifecycle as any).handleShutdownRequest('SIGTERM');
+      await sleep(10);
+      (lifecycle as any).handleShutdownRequest('SIGTERM');
+      await sleep(10);
+      (lifecycle as any).handleShutdownRequest('SIGTERM');
+
+      const secondShutdown = await retryPromise;
+      expect(secondShutdown.success).toBe(false);
+      expect(forceShutdownCalls).toEqual([
+        {
+          requestCount: 3,
+          firstMethod: 'manual',
+          latestMethod: 'SIGTERM',
+          isShuttingDown: true,
+        },
+      ]);
+    });
+
+    test('should clear armed escalation state after a later successful shutdown', async () => {
+      const forceShutdownCalls: Array<{
+        requestCount: number;
+        firstMethod: string;
+        latestMethod: string;
+      }> = [];
+      const lifecycle = new LifecycleManager({
+        logger,
+        repeatedShutdownRequestPolicy: {
+          forceAfterCount: 3,
+          withinMS: 100,
+          onForceShutdown: (context) => {
+            forceShutdownCalls.push({
+              requestCount: context.requestCount,
+              firstMethod: context.firstMethod,
+              latestMethod: context.latestMethod,
+            });
+          },
+        },
+      });
+
+      const failing = new FailingStopComponent(
+        logger,
+        'failing-stop',
+        'First shutdown failed',
+      );
+
+      await lifecycle.registerComponent(failing);
+      await lifecycle.startAllComponents();
+
+      const failedShutdown = await lifecycle.stopAllComponents();
+      expect(failedShutdown.success).toBe(false);
+
+      // Simulate an external fix for the retry path. Stalled component retries
+      // go through onShutdownForce(), not back through stop().
+      failing.onShutdownForce = (): void => {
+        failing.started = false;
+      };
+
+      const successfulShutdown = await lifecycle.stopAllComponents({
+        retryStalled: true,
+        haltOnStall: false,
+      });
+      expect(successfulShutdown.success).toBe(true);
+      expect(lifecycle.getRunningComponentCount()).toBe(0);
+
+      (lifecycle as any).handleShutdownRequest('SIGTERM');
+      await sleep(10);
+      (lifecycle as any).handleShutdownRequest('SIGTERM');
+      await sleep(10);
+      (lifecycle as any).handleShutdownRequest('SIGTERM');
+
+      expect(forceShutdownCalls).toEqual([]);
+    });
+
+    test('should expire armed escalation state and fall back to a fresh shutdown attempt', async () => {
+      let expiredEventPayload: any = null;
+      let shutdownInitiatedCount = 0;
+      let lastShutdownMethod: any = null;
+      const lifecycle = new LifecycleManager({
+        logger,
+        repeatedShutdownRequestPolicy: {
+          forceAfterCount: 3,
+          withinMS: 20,
+          onForceShutdown: () => {},
+        },
+      });
+
+      lifecycle.on(
+        'lifecycle-manager:shutdown-escalation-expired',
+        (data: any) => {
+          expiredEventPayload = data;
+        },
+      );
+      lifecycle.on('lifecycle-manager:shutdown-initiated', (data: any) => {
+        shutdownInitiatedCount++;
+        lastShutdownMethod = data.method;
+      });
+
+      await lifecycle.registerComponent(
+        new FailingStopComponent(
+          logger,
+          'failing-stop',
+          'Expiry fallback failed',
+        ),
+      );
+      await lifecycle.startAllComponents();
+
+      const failedShutdown = await lifecycle.stopAllComponents();
+      expect(failedShutdown.success).toBe(false);
+
+      await sleep(80);
+
+      (lifecycle as any).handleShutdownRequest('SIGTERM');
+      await sleep(10);
+
+      expect(expiredEventPayload).not.toBeNull();
+      expect(expiredEventPayload).toMatchObject({
+        firstMethod: 'manual',
+        latestMethod: 'manual',
+        requestCount: 0,
+      });
+      expect(typeof expiredEventPayload.armedUntil).toBe('number');
+      expect(shutdownInitiatedCount).toBe(2);
+      expect(lastShutdownMethod).toBe('SIGTERM');
+    });
+
+    test('should not refresh a stale armed escalation window when the expiry timer is delayed', async () => {
+      let expiredEventPayload: any = null;
+      let shutdownInitiatedCount = 0;
+      const forceShutdownCalls: Array<{ requestCount: number }> = [];
+      const lifecycle = new LifecycleManager({
+        logger,
+        repeatedShutdownRequestPolicy: {
+          forceAfterCount: 3,
+          withinMS: 100,
+          armedAfterFailureMS: 400,
+          onForceShutdown: (context) => {
+            forceShutdownCalls.push({
+              requestCount: context.requestCount,
+            });
+          },
+        },
+      });
+
+      lifecycle.on(
+        'lifecycle-manager:shutdown-escalation-expired',
+        (data: any) => {
+          expiredEventPayload = data;
+        },
+      );
+      lifecycle.on('lifecycle-manager:shutdown-initiated', () => {
+        shutdownInitiatedCount++;
+      });
+
+      await lifecycle.registerComponent(
+        new FailingStopComponent(
+          logger,
+          'failing-stop',
+          'Delayed expiry fallback failed',
+        ),
+      );
+      await lifecycle.startAllComponents();
+
+      const failedShutdown = await lifecycle.stopAllComponents();
+      expect(failedShutdown.success).toBe(false);
+      expect(shutdownInitiatedCount).toBe(1);
+
+      const repeatedState = (lifecycle as any).repeatedShutdownRequestState;
+      repeatedState.remainsArmedUntil = Date.now() - 1;
+
+      (lifecycle as any).handleShutdownRequest('SIGTERM');
+      await sleep(10);
+
+      expect(expiredEventPayload).not.toBeNull();
+      expect(shutdownInitiatedCount).toBe(2);
+      expect(forceShutdownCalls).toEqual([]);
+      expect(lifecycle.getShutdownEscalationStatus()).toMatchObject({
+        firstMethod: 'SIGTERM',
+        latestMethod: 'SIGTERM',
+        requestCount: 0,
+        hasTriggeredForceShutdown: false,
+      });
+    });
+
+    test('should emit signal:shutdown only once when a stale armed window falls back to a fresh shutdown', async () => {
+      const shutdownSignals: Array<{
+        method: string;
+        isAlreadyShuttingDown: boolean;
+      }> = [];
+      const lifecycle = new LifecycleManager({
+        logger,
+        repeatedShutdownRequestPolicy: {
+          forceAfterCount: 3,
+          withinMS: 100,
+          armedAfterFailureMS: 400,
+          onForceShutdown: () => {},
+        },
+      });
+
+      lifecycle.on(
+        'signal:shutdown',
+        (data: LifecycleManagerEventMap['signal:shutdown']) => {
+          shutdownSignals.push({
+            method: data.method,
+            isAlreadyShuttingDown: data.isAlreadyShuttingDown,
+          });
+        },
+      );
+
+      await lifecycle.registerComponent(
+        new FailingStopComponent(
+          logger,
+          'failing-stop',
+          'Single event after stale armed window fallback',
+        ),
+      );
+      await lifecycle.startAllComponents();
+
+      const failedShutdown = await lifecycle.stopAllComponents();
+      expect(failedShutdown.success).toBe(false);
+
+      const repeatedState = (lifecycle as any).repeatedShutdownRequestState;
+      repeatedState.remainsArmedUntil = Date.now() - 1;
+
+      (lifecycle as any).handleShutdownRequest('SIGTERM');
+      await sleep(10);
+
+      expect(shutdownSignals).toEqual([
+        {
+          method: 'SIGTERM',
+          isAlreadyShuttingDown: false,
+        },
+      ]);
+    });
+
+    test('should reset expired armed escalation state before a later manual shutdown retry', async () => {
+      let expiredEventPayload: any = null;
+      const lifecycle = new LifecycleManager({
+        logger,
+        repeatedShutdownRequestPolicy: {
+          forceAfterCount: 3,
+          withinMS: 20,
+          onForceShutdown: () => {},
+        },
+      });
+
+      lifecycle.on(
+        'lifecycle-manager:shutdown-escalation-expired',
+        (data: any) => {
+          expiredEventPayload = data;
+        },
+      );
+
+      await lifecycle.registerComponent(
+        new FailingStopComponent(
+          logger,
+          'failing-stop',
+          'Manual expiry reset failed',
+        ),
+      );
+      await lifecycle.startAllComponents();
+
+      const firstShutdown = await lifecycle.stopAllComponents();
+      expect(firstShutdown.success).toBe(false);
+      const firstStatus = lifecycle.getShutdownEscalationStatus();
+      const firstRequestAt = requireDefined(
+        firstStatus.firstRequestAt,
+        'firstRequestAt',
+      );
+
+      await sleep(80);
+      expect(lifecycle.getShutdownEscalationStatus().isArmed).toBe(false);
+
+      const retriedShutdown = await lifecycle.stopAllComponents({
+        retryStalled: true,
+        haltOnStall: false,
+      });
+      expect(retriedShutdown.success).toBe(false);
+
+      const statusAfterRetry = lifecycle.getShutdownEscalationStatus();
+      expect(statusAfterRetry.firstMethod).toBe('manual');
+      expect(statusAfterRetry.latestMethod).toBe('manual');
+      expect(statusAfterRetry.requestCount).toBe(0);
+      // The retry seeds a fresh escalation cycle, but the two shutdown attempts
+      // can still land in the same clock millisecond on fast test runs.
+      expect(statusAfterRetry.firstRequestAt).toBeGreaterThanOrEqual(
+        firstRequestAt,
+      );
+      expect(statusAfterRetry.latestRequestAt).toBeGreaterThanOrEqual(
+        firstRequestAt,
+      );
+      expect(statusAfterRetry.isArmed).toBe(true);
+
+      expect(expiredEventPayload).not.toBeNull();
+      expect(expiredEventPayload).toMatchObject({
+        firstMethod: 'manual',
+        latestMethod: 'manual',
+        requestCount: 0,
+      });
+    });
+
+    test('should reset stale armed escalation state before a manual retry even if status was never queried', async () => {
+      let expiredEventPayload: any = null;
+      const lifecycle = new LifecycleManager({
+        logger,
+        repeatedShutdownRequestPolicy: {
+          forceAfterCount: 3,
+          withinMS: 100,
+          armedAfterFailureMS: 400,
+          onForceShutdown: () => {},
+        },
+      });
+
+      lifecycle.on(
+        'lifecycle-manager:shutdown-escalation-expired',
+        (data: any) => {
+          expiredEventPayload = data;
+        },
+      );
+
+      await lifecycle.registerComponent(
+        new FailingStopComponent(
+          logger,
+          'failing-stop',
+          'Manual stale retry reset failed',
+        ),
+      );
+      await lifecycle.startAllComponents();
+
+      const firstShutdown = await lifecycle.stopAllComponents();
+      expect(firstShutdown.success).toBe(false);
+
+      const repeatedState = (lifecycle as any).repeatedShutdownRequestState;
+      const firstRequestAt = requireDefined(
+        repeatedState.firstRequestAt,
+        'firstRequestAt',
+      );
+      repeatedState.remainsArmedUntil = Date.now() - 1;
+
+      const retriedShutdown = await lifecycle.stopAllComponents({
+        retryStalled: true,
+        haltOnStall: false,
+      });
+      expect(retriedShutdown.success).toBe(false);
+
+      const statusAfterRetry = lifecycle.getShutdownEscalationStatus();
+      expect(statusAfterRetry.firstMethod).toBe('manual');
+      expect(statusAfterRetry.latestMethod).toBe('manual');
+      expect(statusAfterRetry.requestCount).toBe(0);
+      // The retry seeds a fresh escalation cycle, but the two shutdown attempts
+      // can still land in the same clock millisecond on fast test runs.
+      expect(statusAfterRetry.firstRequestAt).toBeGreaterThanOrEqual(
+        firstRequestAt,
+      );
+      expect(statusAfterRetry.latestRequestAt).toBeGreaterThanOrEqual(
+        firstRequestAt,
+      );
+      expect(statusAfterRetry.isArmed).toBe(true);
+
+      expect(expiredEventPayload).not.toBeNull();
+      expect(expiredEventPayload).toMatchObject({
+        firstMethod: 'manual',
+        latestMethod: 'manual',
+        requestCount: 0,
+      });
     });
   });
 

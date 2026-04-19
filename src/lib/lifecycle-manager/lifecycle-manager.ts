@@ -34,6 +34,7 @@ import type {
   SignalBroadcastResult,
   ComponentSignalResult,
   LifecycleSignalStatus,
+  ShutdownEscalationStatus,
   ComponentLifecycleRef,
   LifecycleCommon,
   MessageResult,
@@ -46,6 +47,8 @@ import type {
   ValueResult,
   ComponentHealthResult,
   LifecycleInternalCallbacks,
+  RepeatedShutdownRequestPolicy,
+  ForceShutdownContext,
 } from './types';
 import {
   LifecycleManagerEvents,
@@ -62,6 +65,8 @@ import {
   type ShutdownSignal,
 } from '../process-signal-manager';
 import { isPromise } from '../is-promise';
+import { safeHandleCallback } from '../safe-handle-callback';
+import { finiteClampMin } from '../clamp';
 
 /**
  * LifecycleManager - Comprehensive lifecycle orchestration system
@@ -90,6 +95,14 @@ export class LifecycleManager
   private readonly attachSignalsBeforeStartup: boolean;
   private readonly attachSignalsOnStart: boolean;
   private readonly detachSignalsOnStop: boolean;
+  private readonly repeatedShutdownRequestPolicy?: {
+    forceAfterCount: number;
+    withinMS: number;
+    armedAfterFailureMS: number;
+    countManualRetriesTowardEscalation: boolean;
+    hasExplicitArmedAfterFailureMS: boolean;
+    onForceShutdown: RepeatedShutdownRequestPolicy['onForceShutdown'];
+  };
 
   // Component management
   private components: BaseComponent[] = [];
@@ -117,6 +130,28 @@ export class LifecycleManager
     | null = null;
   private shutdownMethod: ShutdownMethod | null = null;
   private lastShutdownResult: ShutdownResult | null = null;
+  private repeatedShutdownExpiryTimer: NodeJS.Timeout | null = null;
+  private repeatedShutdownRequestState: {
+    requestCount: number;
+    firstMethod: ShutdownMethod | null;
+    latestMethod: ShutdownMethod | null;
+    firstRequestAt: number | null;
+    latestRequestAt: number | null;
+    repeatedWindowRequestCount: number;
+    repeatedWindowStartedAt: number | null;
+    hasTriggeredForceShutdown: boolean;
+    remainsArmedUntil: number | null;
+  } = {
+    requestCount: 0,
+    firstMethod: null,
+    latestMethod: null,
+    firstRequestAt: null,
+    latestRequestAt: null,
+    repeatedWindowRequestCount: 0,
+    repeatedWindowStartedAt: null,
+    hasTriggeredForceShutdown: false,
+    remainsArmedUntil: null,
+  };
 
   // Signal management
   private processSignalManager: ProcessSignalManager | null = null;
@@ -154,6 +189,43 @@ export class LifecycleManager
       options.attachSignalsBeforeStartup ?? false;
     this.attachSignalsOnStart = options.attachSignalsOnStart ?? false;
     this.detachSignalsOnStop = options.detachSignalsOnStop ?? false;
+    const repeatedShutdownRequestPolicy = options.repeatedShutdownRequestPolicy;
+    if (repeatedShutdownRequestPolicy === undefined) {
+      this.repeatedShutdownRequestPolicy = undefined;
+    } else {
+      const hasFiniteExplicitArmedAfterFailureMS = Number.isFinite(
+        repeatedShutdownRequestPolicy.armedAfterFailureMS,
+      );
+      // Require at least one follow-up request so threshold comparisons stay meaningful.
+      const forceAfterCount = finiteClampMin(
+        repeatedShutdownRequestPolicy.forceAfterCount,
+        1,
+        3,
+      );
+      // A zero-width window is valid and means only same-tick follow-up requests count.
+      const withinMS = finiteClampMin(
+        repeatedShutdownRequestPolicy.withinMS,
+        0,
+        2000,
+      );
+      // Invalid explicit durations fall back to the derived default instead of
+      // breaking the post-failure arming timer.
+      const armedAfterFailureMS = finiteClampMin(
+        repeatedShutdownRequestPolicy.armedAfterFailureMS,
+        0,
+        withinMS * forceAfterCount,
+      );
+      this.repeatedShutdownRequestPolicy = {
+        forceAfterCount,
+        withinMS,
+        armedAfterFailureMS,
+        countManualRetriesTowardEscalation:
+          repeatedShutdownRequestPolicy.countManualRetriesTowardEscalation ??
+          false,
+        hasExplicitArmedAfterFailureMS: hasFiniteExplicitArmedAfterFailureMS,
+        onForceShutdown: repeatedShutdownRequestPolicy.onForceShutdown,
+      };
+    }
 
     // Store custom signal callbacks
     this.onReloadRequested = options.onReloadRequested;
@@ -878,6 +950,7 @@ export class LifecycleManager
 
     // Set starting flag and clear previous shutdown state
     this.isStarting = true;
+    this.resetRepeatedShutdownRequestState();
     this.shutdownMethod = null; // Clear previous shutdown method on fresh start
     this.lastShutdownResult = null; // Clear last shutdown result on fresh start
 
@@ -1465,6 +1538,62 @@ export class LifecycleManager
     return {
       ...this.processSignalManager.getStatus(),
       shutdownMethod: this.shutdownMethod,
+    };
+  }
+
+  /**
+   * Get status information about repeated shutdown escalation configuration and runtime state.
+   */
+  public getShutdownEscalationStatus(): ShutdownEscalationStatus {
+    if (this.repeatedShutdownRequestPolicy === undefined) {
+      return {
+        configured: false,
+        isShuttingDown: this.isShuttingDown,
+        isArmed: false,
+        forceAfterCount: null,
+        withinMS: null,
+        armedAfterFailureMS: null,
+        armedAfterFailureMSSource: null,
+        requestCount: 0,
+        firstMethod: null,
+        latestMethod: null,
+        firstRequestAt: null,
+        latestRequestAt: null,
+        repeatedWindowStartedAt: null,
+        armedUntil: null,
+        hasTriggeredForceShutdown: false,
+      };
+    }
+
+    this.normalizeRepeatedShutdownRequestStateArmedStatus();
+
+    const armedUntil = this.repeatedShutdownRequestState.remainsArmedUntil;
+    const isArmed = armedUntil !== null;
+
+    return {
+      configured: true,
+      isShuttingDown: this.isShuttingDown,
+      isArmed,
+      forceAfterCount: this.repeatedShutdownRequestPolicy.forceAfterCount,
+      withinMS: this.repeatedShutdownRequestPolicy.withinMS,
+      armedAfterFailureMS:
+        this.repeatedShutdownRequestPolicy.armedAfterFailureMS,
+      armedAfterFailureMSSource: this.repeatedShutdownRequestPolicy
+        .hasExplicitArmedAfterFailureMS
+        ? 'explicit'
+        : 'derived',
+      countManualRetriesTowardEscalation:
+        this.repeatedShutdownRequestPolicy.countManualRetriesTowardEscalation,
+      requestCount: this.repeatedShutdownRequestState.requestCount,
+      firstMethod: this.repeatedShutdownRequestState.firstMethod,
+      latestMethod: this.repeatedShutdownRequestState.latestMethod,
+      firstRequestAt: this.repeatedShutdownRequestState.firstRequestAt,
+      latestRequestAt: this.repeatedShutdownRequestState.latestRequestAt,
+      repeatedWindowStartedAt:
+        this.repeatedShutdownRequestState.repeatedWindowStartedAt,
+      armedUntil: isArmed ? armedUntil : null,
+      hasTriggeredForceShutdown:
+        this.repeatedShutdownRequestState.hasTriggeredForceShutdown,
     };
   }
 
@@ -2831,10 +2960,37 @@ export class LifecycleManager
       };
     }
 
+    this.normalizeRepeatedShutdownRequestStateArmedStatus();
+
+    const repeatedShutdownPolicy = this.repeatedShutdownRequestPolicy;
+    const isManualRetryWhileArmed =
+      repeatedShutdownPolicy !== undefined &&
+      method === 'manual' &&
+      this.repeatedShutdownRequestState.firstRequestAt !== null &&
+      this.repeatedShutdownRequestState.remainsArmedUntil !== null;
+
+    if (isManualRetryWhileArmed) {
+      if (repeatedShutdownPolicy.countManualRetriesTowardEscalation) {
+        this.handleRepeatedShutdownRequest(method);
+      } else {
+        this.resetRepeatedShutdownRequestState();
+      }
+    }
+
     // Set shutting down flag and track how shutdown was triggered
+    if (this.repeatedShutdownRequestState.remainsArmedUntil !== null) {
+      this.clearRepeatedShutdownExpiryTimer();
+      this.repeatedShutdownRequestState.remainsArmedUntil = null;
+    }
     this.isShuttingDown = true;
     this.shutdownToken = ulid();
     this.shutdownMethod = method;
+    if (
+      this.repeatedShutdownRequestPolicy &&
+      this.repeatedShutdownRequestState.firstRequestAt === null
+    ) {
+      this.seedRepeatedShutdownRequestState(method);
+    }
     const isDuringStartup = this.isStarting;
     this.logger.info('Stopping all components', { params: { method } });
     this.lifecycleEvents.lifecycleManagerShutdownInitiated(
@@ -2981,16 +3137,33 @@ export class LifecycleManager
         await shutdownOperation();
       }
 
+      if (!shouldRetryStalled) {
+        for (const name of stalledComponentNames) {
+          const stallInfo = this.stalledComponents.get(name);
+          if (
+            stallInfo &&
+            !stalledComponents.some((component) => component.name === name)
+          ) {
+            stalledComponents.push(stallInfo);
+          }
+        }
+      }
+
       const durationMS = Date.now() - startTime;
       const isSuccess = !hasTimedOut && stalledComponents.length === 0;
 
-      this.logger[isSuccess ? 'success' : 'warn']('Shutdown completed', {
+      this.logger[isSuccess ? 'success' : 'warn'](
+        isSuccess
+          ? 'Shutdown completed successfully'
+          : 'Shutdown attempt completed with stalled components or timeout',
+        {
         params: {
           stopped: stoppedComponents.length,
           stalled: stalledComponents.length,
           durationMS,
         },
-      });
+        },
+      );
 
       const result: ShutdownResult = {
         success: isSuccess,
@@ -3018,6 +3191,12 @@ export class LifecycleManager
         method,
         duringStartup: isDuringStartup,
       });
+
+      if (isSuccess) {
+        this.resetRepeatedShutdownRequestState();
+      } else {
+        this.armRepeatedShutdownAfterFailure();
+      }
 
       return result;
     } finally {
@@ -4583,23 +4762,351 @@ export class LifecycleManager
 
   /**
    * Handle shutdown signal - initiates stopAllComponents().
-   * Double signal protection: if already shutting down, log warning and ignore.
+   * If already shutting down, optionally escalate through the repeated shutdown
+   * request policy.
    */
   private handleShutdownRequest(method: ShutdownSignal): void {
     if (this.isShuttingDown) {
-      this.logger.warn('Shutdown already in progress, ignoring signal', {
-        params: { method },
-      });
-      return;
+      this.lifecycleEvents.signalShutdown(method, true);
+      if (this.handleRepeatedShutdownRequest(method)) {
+        return;
+      }
+    }
+
+    let didEmitShutdownSignal = false;
+    let shouldSeedRepeatedShutdownState =
+      this.repeatedShutdownRequestPolicy !== undefined;
+
+    // This branch is only for the post-failure "armed" state.
+    // A previous shutdown request already happened, shutdown has already
+    // finished returning, and we intentionally keep escalation alive for a
+    // short period so follow-up presses can continue the same force count.
+    if (
+      this.repeatedShutdownRequestPolicy &&
+      this.repeatedShutdownRequestState.firstRequestAt !== null &&
+      this.normalizeRepeatedShutdownRequestStateArmedStatus()
+    ) {
+      this.lifecycleEvents.signalShutdown(method, false);
+      didEmitShutdownSignal = true;
+      shouldSeedRepeatedShutdownState = false;
+      this.handleRepeatedShutdownRequest(method);
+    }
+
+    if (shouldSeedRepeatedShutdownState) {
+      this.seedRepeatedShutdownRequestState(method);
     }
 
     this.logger.info('Shutdown signal received', { params: { method } });
-    this.lifecycleEvents.signalShutdown(method);
+    if (!didEmitShutdownSignal) {
+      this.lifecycleEvents.signalShutdown(method, false);
+    }
 
     // Initiate shutdown asynchronously (don't await in signal handler)
     void this.stopAllComponentsInternal(method, {
       ...this.shutdownOptions,
     });
+  }
+
+  /**
+   * Tracks repeated shutdown requests during an active shutdown and optionally
+   * invokes the configured force shutdown callback when the threshold is reached.
+   *
+   * @returns true when the request was consumed as part of the repeated-shutdown
+   * escalation flow, false when the caller should treat it as a fresh shutdown request
+   */
+  private handleRepeatedShutdownRequest(method: ShutdownMethod): boolean {
+    const policy = this.repeatedShutdownRequestPolicy;
+
+    if (!policy) {
+      this.logger.warn('Shutdown already in progress, ignoring signal', {
+        params: { method },
+      });
+      return true;
+    }
+
+    const now = Date.now();
+    const state = this.repeatedShutdownRequestState;
+
+    if (state.remainsArmedUntil !== null) {
+      if (now > state.remainsArmedUntil) {
+        this.expireRepeatedShutdownRequestState();
+        return false;
+      }
+
+      // Keep the post-failure escalation window alive while shutdown requests
+      // are still arriving. This avoids a stale deadline expiring mid-stream
+      // when an operator is actively trying to force the process down.
+      this.refreshRepeatedShutdownArmedWindow(now);
+    }
+
+    // The initial shutdown request starts graceful shutdown but does not count
+    // toward force escalation. Only follow-up escalation presses are windowed.
+    const shouldStartNewWindow =
+      state.repeatedWindowStartedAt === null ||
+      now - state.repeatedWindowStartedAt > policy.withinMS;
+
+    if (shouldStartNewWindow) {
+      // This request starts a new escalation window for post-start escalation
+      // presses only.
+      state.repeatedWindowRequestCount = 1;
+      state.repeatedWindowStartedAt = now;
+    } else {
+      // Still inside the escalation window, so this request advances the same
+      // repeated-request streak.
+      state.repeatedWindowRequestCount++;
+    }
+
+    state.requestCount = state.repeatedWindowRequestCount;
+
+    // Always keep the latest request details current so the eventual callback
+    // can see both how the window started and what most recently arrived.
+    state.latestMethod = method;
+    state.latestRequestAt = now;
+
+    this.logger.warn('Shutdown already in progress, tracking repeated signal', {
+      params: {
+        method,
+        requestCount: state.requestCount,
+        firstMethod: state.firstMethod,
+        latestMethod: state.latestMethod,
+        firstRequestAt: state.firstRequestAt,
+        latestRequestAt: state.latestRequestAt,
+        repeatedWindowRequestCount: state.repeatedWindowRequestCount,
+        repeatedWindowStartedAt: state.repeatedWindowStartedAt,
+        remainsArmedUntil: state.remainsArmedUntil,
+        withinMS: policy.withinMS,
+        forceAfterCount: policy.forceAfterCount,
+      },
+    });
+
+    if (
+      // Force escalation is single-fire per shutdown cycle. Later requests are
+      // still logged but do not re-enter user force-shutdown logic.
+      state.hasTriggeredForceShutdown ||
+      state.requestCount < policy.forceAfterCount ||
+      state.firstMethod === null ||
+      state.firstRequestAt === null ||
+      state.latestMethod === null ||
+      state.latestRequestAt === null
+    ) {
+      return true;
+    }
+
+    state.hasTriggeredForceShutdown = true;
+
+    // The callback receives a snapshot of the active window at the moment the
+    // threshold is crossed. It does not continue to mutate after dispatch.
+    const context: ForceShutdownContext = {
+      requestCount: state.requestCount,
+      firstMethod: state.firstMethod,
+      latestMethod: state.latestMethod,
+      firstRequestAt: state.firstRequestAt,
+      latestRequestAt: state.latestRequestAt,
+      isShuttingDown: this.isShuttingDown,
+    };
+
+    this.logger.warn(
+      'Repeated shutdown request threshold reached, invoking force shutdown handler',
+      {
+        params: {
+          method,
+          requestCount: context.requestCount,
+          firstMethod: context.firstMethod,
+          latestMethod: context.latestMethod,
+          firstRequestAt: context.firstRequestAt,
+          latestRequestAt: context.latestRequestAt,
+          repeatedWindowRequestCount: state.repeatedWindowRequestCount,
+          repeatedWindowStartedAt: state.repeatedWindowStartedAt,
+          remainsArmedUntil: state.remainsArmedUntil,
+          withinMS: policy.withinMS,
+          forceAfterCount: policy.forceAfterCount,
+        },
+      },
+    );
+    safeHandleCallback(
+      'repeatedShutdownRequestPolicy.onForceShutdown',
+      policy.onForceShutdown,
+      context,
+    );
+    this.lifecycleEvents.lifecycleManagerShutdownEscalationForced({
+      firstMethod: context.firstMethod,
+      latestMethod: context.latestMethod,
+      requestCount: context.requestCount,
+      firstRequestAt: context.firstRequestAt,
+      latestRequestAt: context.latestRequestAt,
+    });
+    return true;
+  }
+
+  /**
+   * Clears repeated shutdown request tracking so a new shutdown cycle starts fresh.
+   */
+  private resetRepeatedShutdownRequestState(): void {
+    this.clearRepeatedShutdownExpiryTimer();
+    this.repeatedShutdownRequestState = {
+      requestCount: 0,
+      firstMethod: null,
+      latestMethod: null,
+      firstRequestAt: null,
+      latestRequestAt: null,
+      repeatedWindowRequestCount: 0,
+      repeatedWindowStartedAt: null,
+      hasTriggeredForceShutdown: false,
+      remainsArmedUntil: null,
+    };
+  }
+
+  /**
+   * Clear any pending expiration timer for the post-failure escalation window.
+   */
+  private clearRepeatedShutdownExpiryTimer(): void {
+    if (this.repeatedShutdownExpiryTimer === null) {
+      return;
+    }
+
+    clearTimeout(this.repeatedShutdownExpiryTimer);
+    this.repeatedShutdownExpiryTimer = null;
+  }
+
+  /**
+   * Returns whether post-failure escalation remains armed after first
+   * normalizing any stale timer-backed state.
+   *
+   * The method can expire old armed windows as a side effect because the timer
+   * callback may not have run yet on a delayed event loop. Callers use this
+   * when they need the effective runtime truth, not just the last timer write.
+   */
+  private normalizeRepeatedShutdownRequestStateArmedStatus(
+    now = Date.now(),
+  ): boolean {
+    const armedUntil = this.repeatedShutdownRequestState.remainsArmedUntil;
+
+    if (armedUntil === null) {
+      return false;
+    }
+
+    if (now >= armedUntil) {
+      this.expireRepeatedShutdownRequestState();
+      return false;
+    }
+
+    return true;
+  }
+
+  /**
+   * Transition armed post-failure escalation state into its expired/reset state.
+   */
+  private expireRepeatedShutdownRequestState(): void {
+    const policy = this.repeatedShutdownRequestPolicy;
+    const state = this.repeatedShutdownRequestState;
+
+    if (!policy || state.remainsArmedUntil === null) {
+      return;
+    }
+
+    this.clearRepeatedShutdownExpiryTimer();
+
+    const expiredState = {
+      firstMethod: state.firstMethod,
+      latestMethod: state.latestMethod,
+      requestCount: state.requestCount,
+      armedUntil: state.remainsArmedUntil,
+    };
+
+    this.logger.warn(
+      'Repeated shutdown escalation window expired, clearing previous shutdown state',
+      {
+        params: {
+          remainsArmedUntil: state.remainsArmedUntil,
+          withinMS: policy.withinMS,
+          forceAfterCount: policy.forceAfterCount,
+        },
+      },
+    );
+
+    if (expiredState.firstMethod !== null && expiredState.armedUntil !== null) {
+      this.lifecycleEvents.lifecycleManagerShutdownEscalationExpired({
+        firstMethod: expiredState.firstMethod,
+        latestMethod: expiredState.latestMethod,
+        requestCount: expiredState.requestCount,
+        armedUntil: expiredState.armedUntil,
+      });
+    }
+
+    this.resetRepeatedShutdownRequestState();
+  }
+
+  /**
+   * Arms or refreshes the post-failure escalation window and its expiration timer.
+   */
+  private refreshRepeatedShutdownArmedWindow(now = Date.now()): void {
+    const policy = this.repeatedShutdownRequestPolicy;
+
+    if (!policy) {
+      return;
+    }
+
+    this.clearRepeatedShutdownExpiryTimer();
+
+    const armedUntil = now + policy.armedAfterFailureMS;
+    this.repeatedShutdownRequestState.remainsArmedUntil = armedUntil;
+    this.repeatedShutdownExpiryTimer = setTimeout(() => {
+      this.expireRepeatedShutdownRequestState();
+    }, policy.armedAfterFailureMS);
+    // Expiry should not keep the process alive when nothing else is pending.
+    this.repeatedShutdownExpiryTimer.unref();
+  }
+
+  /**
+   * Seeds shutdown escalation tracking for a new shutdown cycle.
+   *
+   * The first shutdown trigger starts graceful shutdown and arms escalation with
+   * an effective post-start count of 0. Later shutdown requests can then count
+   * toward the configured force threshold regardless of whether the shutdown
+   * started from a signal, keyboard shortcut, or direct API call.
+   */
+  private seedRepeatedShutdownRequestState(method: ShutdownMethod): void {
+    const now = Date.now();
+    this.repeatedShutdownRequestState = {
+      requestCount: 0,
+      firstMethod: method,
+      latestMethod: method,
+      firstRequestAt: now,
+      latestRequestAt: now,
+      repeatedWindowRequestCount: 0,
+      repeatedWindowStartedAt: null,
+      hasTriggeredForceShutdown: false,
+      remainsArmedUntil: null,
+    };
+  }
+
+  /**
+   * Preserves a short-lived post-failure escalation window after shutdown
+   * returns unsuccessfully so operators can keep pressing shutdown without
+   * losing the existing force count the moment the graceful attempt finishes.
+   */
+  private armRepeatedShutdownAfterFailure(): void {
+    const policy = this.repeatedShutdownRequestPolicy;
+    const state = this.repeatedShutdownRequestState;
+
+    if (
+      !policy ||
+      policy.armedAfterFailureMS <= 0 ||
+      state.firstRequestAt === null ||
+      state.hasTriggeredForceShutdown
+    ) {
+      return;
+    }
+
+    this.refreshRepeatedShutdownArmedWindow();
+    const armedUntil = state.remainsArmedUntil;
+    if (state.firstMethod !== null && armedUntil !== null) {
+      this.lifecycleEvents.lifecycleManagerShutdownEscalationArmed({
+        firstMethod: state.firstMethod,
+        requestCount: state.requestCount,
+        armedUntil,
+      });
+    }
   }
 
   /**

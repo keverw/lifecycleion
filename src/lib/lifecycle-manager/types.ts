@@ -662,6 +662,7 @@ export interface LifecycleCommon extends EventEmitterSurface {
   attachSignals(): void;
   detachSignals(): void;
   getSignalStatus(): LifecycleSignalStatus;
+  getShutdownEscalationStatus(): ShutdownEscalationStatus;
   triggerReload(): Promise<SignalBroadcastResult>;
   triggerInfo(): Promise<SignalBroadcastResult>;
   triggerDebug(): Promise<SignalBroadcastResult>;
@@ -964,6 +965,161 @@ export interface LifecycleSignalStatus extends ProcessSignalManagerStatus {
   shutdownMethod: ShutdownMethod | null;
 }
 
+export interface ShutdownEscalationStatusDisabled {
+  /** Whether repeated shutdown escalation is configured */
+  configured: false;
+
+  /** Whether a shutdown is currently in progress */
+  isShuttingDown: boolean;
+
+  /** Escalation cannot be armed when the policy is disabled */
+  isArmed: false;
+
+  /** Config fields are unavailable while the policy is disabled */
+  forceAfterCount: null;
+  withinMS: null;
+  armedAfterFailureMS: null;
+  armedAfterFailureMSSource: null;
+
+  /** Runtime counters remain empty while the policy is disabled */
+  requestCount: 0;
+  firstMethod: null;
+  latestMethod: null;
+  firstRequestAt: null;
+  latestRequestAt: null;
+  repeatedWindowStartedAt: null;
+  armedUntil: null;
+  hasTriggeredForceShutdown: false;
+}
+
+export interface ShutdownEscalationStatusEnabled {
+  /** Whether repeated shutdown escalation is configured */
+  configured: true;
+
+  /** Whether a shutdown is currently in progress */
+  isShuttingDown: boolean;
+
+  /** Whether escalation remains armed after an unsuccessful shutdown */
+  isArmed: boolean;
+
+  /** Configured force threshold when policy is enabled */
+  forceAfterCount: number;
+
+  /** Configured escalation window when policy is enabled */
+  withinMS: number;
+
+  /** Effective post-failure armed duration in ms when policy is enabled */
+  armedAfterFailureMS: number;
+
+  /** Whether the effective armed duration was explicitly configured or derived from defaults */
+  armedAfterFailureMSSource: 'explicit' | 'derived';
+
+  /** Whether manual stopAllComponents() retries continue the armed escalation state */
+  countManualRetriesTowardEscalation: boolean;
+
+  /** Number of post-start escalation requests counted so far */
+  requestCount: number;
+
+  /** Method that started the current/most recent shutdown escalation cycle */
+  firstMethod: ShutdownMethod | null;
+
+  /** Most recent shutdown request method seen by escalation tracking */
+  latestMethod: ShutdownMethod | null;
+
+  /** Timestamp of the first shutdown request that seeded this escalation state */
+  firstRequestAt: number | null;
+
+  /** Timestamp of the most recent shutdown request counted by escalation tracking */
+  latestRequestAt: number | null;
+
+  /** Timestamp when the current post-start escalation window began */
+  repeatedWindowStartedAt: number | null;
+
+  /** Timestamp when armed-after-failure escalation will expire */
+  armedUntil: number | null;
+
+  /** Whether onForceShutdown() has already been dispatched for this shutdown cycle */
+  hasTriggeredForceShutdown: boolean;
+}
+
+/**
+ * Read-only snapshot of repeated shutdown escalation configuration and runtime state.
+ */
+export type ShutdownEscalationStatus =
+  | ShutdownEscalationStatusDisabled
+  | ShutdownEscalationStatusEnabled;
+
+/**
+ * Context passed to repeated shutdown force handlers.
+ *
+ * The first request starts graceful shutdown. If additional shutdown requests
+ * arrive within the configured time window and the threshold is reached, the
+ * LifecycleManager invokes `onForceShutdown()` with this snapshot.
+ */
+export interface ForceShutdownContext {
+  /** Number of escalation requests counted after shutdown had already started */
+  requestCount: number;
+
+  /** Method that started the current shutdown cycle */
+  firstMethod: ShutdownMethod;
+
+  /** Most recent shutdown request method */
+  latestMethod: ShutdownMethod;
+
+  /** Unix timestamp in ms for the request that started the current shutdown cycle */
+  firstRequestAt: number;
+
+  /** Unix timestamp in ms for the most recent request in the current window */
+  latestRequestAt: number;
+
+  /** Whether shutdown is still actively running when the force callback fires */
+  isShuttingDown: boolean;
+}
+
+/**
+ * Optional policy for escalating repeated shutdown requests during an already
+ * running shutdown.
+ */
+export interface RepeatedShutdownRequestPolicy {
+  /**
+   * Number of shutdown requests required before force escalation runs.
+   * Only escalation requests received after shutdown has already started count
+   * toward this threshold. The initial request that starts graceful shutdown
+   * does not count.
+   * @default 3
+   */
+  forceAfterCount?: number;
+
+  /**
+   * Time window in ms for counting follow-up escalation requests received
+   * after shutdown has already started.
+   * Requests outside the window start a new escalation window.
+   * @default 2000
+   */
+  withinMS?: number;
+
+  /**
+   * How long escalation should remain armed after an unsuccessful shutdown
+   * returns. When omitted, the manager derives it as `withinMS * forceAfterCount`.
+   */
+  armedAfterFailureMS?: number;
+
+  /**
+   * If true, manual `stopAllComponents()` retries that happen while the
+   * post-failure armed window is still open continue the same escalation state.
+   * When false, manual retries always start a fresh escalation cycle.
+   * @default false
+   */
+  countManualRetriesTowardEscalation?: boolean;
+
+  /**
+   * Invoked once per shutdown cycle when repeated requests reach the threshold.
+   * Typical uses: final logging, telemetry flush, `logger.exit()`, or
+   * `process.exit()` by the application.
+   */
+  onForceShutdown: (context: ForceShutdownContext) => void | Promise<void>;
+}
+
 /**
  * Configuration options for LifecycleManager
  */
@@ -1012,4 +1168,10 @@ export interface LifecycleManagerOptions {
   onDebugRequested?: (
     broadcastDebug: () => Promise<SignalBroadcastResult>,
   ) => void | Promise<void>;
+
+  /**
+   * Optional policy for escalating repeated shutdown requests received while a
+   * graceful shutdown is already in progress.
+   */
+  repeatedShutdownRequestPolicy?: RepeatedShutdownRequestPolicy;
 }

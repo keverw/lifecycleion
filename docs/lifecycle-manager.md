@@ -37,8 +37,10 @@ A comprehensive lifecycle orchestration system that manages startup, shutdown, a
     - [`attachSignals()`](#attachsignals)
     - [`detachSignals()`](#detachsignals)
     - [`getSignalStatus()`](#getsignalstatus)
+    - [`getShutdownEscalationStatus()`](#getshutdownescalationstatus)
     - [Manual Signal Triggers](#manual-signal-triggers)
     - [Custom Signal Handlers](#custom-signal-handlers)
+    - [Repeated Shutdown Request Policy](#repeated-shutdown-request-policy)
   - [Logger Integration](#logger-integration)
     - [`enableLoggerExitHook()`](#enableloggerexithook)
     - [Logger Requirements](#logger-requirements)
@@ -1254,6 +1256,66 @@ if (status.isAttached) {
 }
 ```
 
+#### `getShutdownEscalationStatus()`
+
+```typescript
+getShutdownEscalationStatus(): ShutdownEscalationStatus
+```
+
+Returns a read-only snapshot of repeated shutdown escalation configuration and runtime state.
+
+```typescript
+type ShutdownEscalationStatus =
+  | {
+      configured: false;
+      isShuttingDown: boolean;
+      isArmed: false;
+      forceAfterCount: null;
+      withinMS: null;
+      armedAfterFailureMS: null;
+      armedAfterFailureMSSource: null;
+      requestCount: 0;
+      firstMethod: null;
+      latestMethod: null;
+      firstRequestAt: null;
+      latestRequestAt: null;
+      repeatedWindowStartedAt: null;
+      armedUntil: null;
+      hasTriggeredForceShutdown: false;
+    }
+  | {
+      configured: true;
+      isShuttingDown: boolean;
+      isArmed: boolean;
+      forceAfterCount: number;
+      withinMS: number;
+      armedAfterFailureMS: number;
+      armedAfterFailureMSSource: 'explicit' | 'derived';
+      countManualRetriesTowardEscalation: boolean;
+      requestCount: number;
+      firstMethod: ShutdownMethod | null;
+      latestMethod: ShutdownMethod | null;
+      firstRequestAt: number | null;
+      latestRequestAt: number | null;
+      repeatedWindowStartedAt: number | null;
+      armedUntil: number | null;
+      hasTriggeredForceShutdown: boolean;
+    };
+```
+
+When consuming this in TypeScript, check `configured` first so the union narrows cleanly before reading enabled-only fields such as `forceAfterCount` or `countManualRetriesTowardEscalation`.
+
+**Example:**
+
+```typescript
+const escalation = lifecycle.getShutdownEscalationStatus();
+
+if (escalation.configured && escalation.isArmed) {
+  console.log('Shutdown escalation is armed until:', escalation.armedUntil);
+  console.log('Current escalation count:', escalation.requestCount);
+}
+```
+
 #### Manual Signal Triggers
 
 ```typescript
@@ -1290,6 +1352,106 @@ const lifecycle = new LifecycleManager({
   },
 });
 ```
+
+#### Repeated Shutdown Request Policy
+
+Use `repeatedShutdownRequestPolicy` when you want repeated shutdown requests
+during an already-running shutdown to escalate into application-defined behavior.
+
+Terminology used below:
+
+- **Escalation state** is the logical repeated-shutdown context for one shutdown cycle
+- **Armed window** is the short post-failure period after an unsuccessful shutdown returns, before the next retry starts
+- During an active retry, the escalation state is still preserved, but the armed window is not active because shutdown is running again
+
+This applies to shutdown requests from:
+
+- OS signals
+- Keyboard shortcuts such as `Escape` and `Ctrl+C`
+- Programmatic signal-style shutdown requests such as `ProcessSignalManager.triggerShutdown()`
+
+```typescript
+const lifecycle = new LifecycleManager({
+  logger,
+  repeatedShutdownRequestPolicy: {
+    forceAfterCount: 3, // default
+    withinMS: 2000, // default
+    armedAfterFailureMS: 6000, // optional override; default is withinMS * forceAfterCount
+    countManualRetriesTowardEscalation: false, // default
+    onForceShutdown: ({ requestCount, firstMethod, latestMethod }) => {
+      logger.warn('Force shutdown requested', {
+        params: { requestCount, firstMethod, latestMethod },
+      });
+
+      process.exit(1);
+    },
+  },
+});
+```
+
+**How counting works:**
+
+- The first shutdown request starts graceful shutdown but does not count toward the force threshold
+- That first request still arms the escalation state with an effective escalation count of `0`
+- Additional shutdown requests received while shutdown is still in progress are treated as escalation requests
+- By default, only signal-style shutdown requests count toward escalation
+- Manual `stopAllComponents()` retries start a fresh escalation cycle unless `countManualRetriesTowardEscalation` is enabled
+- Escalation requests are counted inside a `withinMS` window
+- If a new escalation request arrives more than `withinMS` after the first escalation request in the current window, a new escalation window starts
+- `onForceShutdown()` fires once per escalation state when the count reaches `forceAfterCount`
+
+**Important reset behavior:**
+
+- The repeated-request counter belongs to one active escalation state
+- If shutdown completes successfully, the repeated-request state resets immediately
+- If shutdown completes unsuccessfully, times out, or leaves stalled components behind, escalation stays armed briefly so follow-up shutdown requests can continue the same force count
+- That post-failure armed period defaults to `withinMS * forceAfterCount`, or uses `armedAfterFailureMS` when explicitly configured
+- A shutdown request received during that armed period continues the same escalation state and starts a fresh shutdown attempt
+- While that retry is running, the armed timer is no longer active because shutdown is in progress again
+- If the retry also finishes unsuccessfully, the manager re-arms the post-failure window so follow-up requests can continue the same escalation state
+- It also resets on a fresh `startAllComponents()`
+- A later `stopAllComponents()` attempt only continues the same escalation state when `countManualRetriesTowardEscalation` is `true`
+- Once the armed period expires, or shutdown/startup later succeeds, the next escalation state starts fresh
+
+**Stalled shutdown behavior:**
+
+- The policy can still escalate while shutdown is stalled or still waiting on component timeouts
+- This is intentional: repeated shutdown requests are meant to express stronger operator intent during a hanging shutdown
+- If `stopAllComponents()` returns unsuccessfully, the escalation state remains armed briefly so quick follow-up signal presses still count
+- Manual retry attempts only keep counting during that armed period when `countManualRetriesTowardEscalation` is enabled
+- A follow-up signal during that armed period retries shutdown immediately instead of being treated as telemetry-only
+- Once that armed period expires, or a later shutdown/startup succeeds, the old escalation state is cleared
+
+**Example timeline (`forceAfterCount: 3`, `withinMS: 2000`):**
+
+- `t=0ms`: first shutdown request arrives, graceful shutdown starts
+- `t=5000ms`: second shutdown request arrives, escalation count = `1`
+- `t=6500ms`: third shutdown request arrives within 2000ms of the previous escalation window start, escalation count = `2`
+- `t=7000ms`: fourth shutdown request arrives within that same window, escalation count = `3`, `onForceShutdown()` fires
+
+If instead the fourth request arrived at `t=8000ms`, the escalation window would reset there and the escalation count would start over from `1`.
+
+**Post-failure retry example (`forceAfterCount: 3`, `withinMS: 2000`):**
+
+- `t=0ms`: first shutdown request arrives, graceful shutdown starts
+- `t=3000ms`: shutdown returns unsuccessfully, so the post-failure armed window opens briefly
+- `t=3500ms`: another shutdown signal arrives during that armed window
+- That signal increments the same escalation state and immediately starts a new shutdown attempt
+- While that retry is running, the armed window itself is no longer active
+- If the retry also returns unsuccessfully, the manager opens a new armed window so later requests can continue the same escalation state
+
+**Design note:**
+
+- `onForceShutdown()` is application-defined on purpose
+- The LifecycleManager detects repeated requests, but your app decides what "force" means
+- Common choices include final logging, telemetry flush, `logger.exit()`, or `process.exit()`
+
+**Escalation events:**
+
+- `lifecycle-manager:shutdown-escalation-armed` means a failed/timed-out shutdown left a short-lived escalation window open
+- `lifecycle-manager:shutdown-escalation-expired` means that armed window elapsed and the old escalation state was cleared
+- `lifecycle-manager:shutdown-escalation-forced` means the repeated-request threshold was crossed and the manager invoked `onForceShutdown()`
+- The `forced` event does **not** guarantee that the process exited. It only means the force callback was dispatched
 
 ### Logger Integration
 
@@ -1963,10 +2125,13 @@ lifecycle.on('lifecycle-manager:shutdown-completed', (data) => {
 
 **Signal Events:**
 
-- `signal:shutdown` - Shutdown signal received
+- `signal:shutdown` - Shutdown request received, includes `method` and whether shutdown was already in progress via `isAlreadyShuttingDown`
 - `signal:reload` - Reload signal received
 - `signal:info` - Info signal received
 - `signal:debug` - Debug signal received
+- `lifecycle-manager:shutdown-escalation-armed` - Failed/timed-out shutdown left escalation armed briefly for follow-up force presses
+- `lifecycle-manager:shutdown-escalation-expired` - Armed escalation window expired and was cleared
+- `lifecycle-manager:shutdown-escalation-forced` - Repeated shutdown requests crossed the force threshold and `onForceShutdown()` was invoked
 
 **Component Signal Events:**
 
