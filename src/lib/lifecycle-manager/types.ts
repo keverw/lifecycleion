@@ -1017,7 +1017,11 @@ export interface ShutdownEscalationStatusEnabled {
   /** Whether manual stopAllComponents() retries continue the armed escalation state */
   countManualRetriesTowardEscalation: boolean;
 
-  /** Number of post-start escalation requests counted so far */
+  /**
+   * Number of follow-up shutdown requests counted in the current escalation
+   * window (resets when a new window starts). This is a window-local count,
+   * not a cumulative total of all requests since shutdown began.
+   */
   requestCount: number;
 
   /** Method that started the current/most recent shutdown escalation cycle */
@@ -1101,6 +1105,10 @@ export interface RepeatedShutdownRequestPolicy {
   /**
    * How long escalation should remain armed after an unsuccessful shutdown
    * returns. When omitted, the manager derives it as `withinMS * forceAfterCount`.
+   * Set to `0` to disable post-failure arming entirely — the escalation window
+   * will not persist once a shutdown attempt returns, and each new request will
+   * start a fresh escalation cycle. (Note: `withinMS = 0` is a separate option
+   * that controls the width of the active-shutdown escalation window, not this.)
    */
   armedAfterFailureMS?: number;
 

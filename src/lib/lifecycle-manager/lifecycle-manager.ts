@@ -137,7 +137,6 @@ export class LifecycleManager
     latestMethod: ShutdownMethod | null;
     firstRequestAt: number | null;
     latestRequestAt: number | null;
-    repeatedWindowRequestCount: number;
     repeatedWindowStartedAt: number | null;
     hasTriggeredForceShutdown: boolean;
     remainsArmedUntil: number | null;
@@ -147,7 +146,6 @@ export class LifecycleManager
     latestMethod: null,
     firstRequestAt: null,
     latestRequestAt: null,
-    repeatedWindowRequestCount: 0,
     repeatedWindowStartedAt: null,
     hasTriggeredForceShutdown: false,
     remainsArmedUntil: null,
@@ -3157,11 +3155,11 @@ export class LifecycleManager
           ? 'Shutdown completed successfully'
           : 'Shutdown attempt completed with stalled components or timeout',
         {
-        params: {
-          stopped: stoppedComponents.length,
-          stalled: stalledComponents.length,
-          durationMS,
-        },
+          params: {
+            stopped: stoppedComponents.length,
+            stalled: stalledComponents.length,
+            durationMS,
+          },
         },
       );
 
@@ -4762,8 +4760,28 @@ export class LifecycleManager
 
   /**
    * Handle shutdown signal - initiates stopAllComponents().
-   * If already shutting down, optionally escalate through the repeated shutdown
-   * request policy.
+   *
+   * Four cases depending on the current shutdown state:
+   *
+   * 1. **Active shutdown** (`isShuttingDown = true`): escalate through the
+   *    repeated-shutdown policy if configured, otherwise log and discard.
+   *    Emits `signal:shutdown` with `isAlreadyShuttingDown: true` and returns
+   *    without starting another shutdown.
+   *
+   * 2. **Armed post-failure** (previous shutdown finished, armed window still
+   *    open): count the request toward the escalation window, emit
+   *    `signal:shutdown` with `isAlreadyShuttingDown: false`, then start a
+   *    new `stopAllComponents()` run to retry.
+   *
+   * 3. **Armed post-failure expired** (armed window opened but has since
+   *    elapsed): expire the stale state, treat the request as a fresh
+   *    shutdown (falls through to case 4).
+   *
+   * 4. **Fresh shutdown** (no prior shutdown state): seed escalation tracking
+   *    if policy is configured, emit `signal:shutdown` with
+   *    `isAlreadyShuttingDown: false`, and start `stopAllComponents()`.
+   *
+   * In all cases `signal:shutdown` is emitted exactly once.
    */
   private handleShutdownRequest(method: ShutdownSignal): void {
     if (this.isShuttingDown) {
@@ -4828,7 +4846,7 @@ export class LifecycleManager
     const state = this.repeatedShutdownRequestState;
 
     if (state.remainsArmedUntil !== null) {
-      if (now > state.remainsArmedUntil) {
+      if (now >= state.remainsArmedUntil) {
         this.expireRepeatedShutdownRequestState();
         return false;
       }
@@ -4848,15 +4866,13 @@ export class LifecycleManager
     if (shouldStartNewWindow) {
       // This request starts a new escalation window for post-start escalation
       // presses only.
-      state.repeatedWindowRequestCount = 1;
+      state.requestCount = 1;
       state.repeatedWindowStartedAt = now;
     } else {
       // Still inside the escalation window, so this request advances the same
       // repeated-request streak.
-      state.repeatedWindowRequestCount++;
+      state.requestCount++;
     }
-
-    state.requestCount = state.repeatedWindowRequestCount;
 
     // Always keep the latest request details current so the eventual callback
     // can see both how the window started and what most recently arrived.
@@ -4871,7 +4887,6 @@ export class LifecycleManager
         latestMethod: state.latestMethod,
         firstRequestAt: state.firstRequestAt,
         latestRequestAt: state.latestRequestAt,
-        repeatedWindowRequestCount: state.repeatedWindowRequestCount,
         repeatedWindowStartedAt: state.repeatedWindowStartedAt,
         remainsArmedUntil: state.remainsArmedUntil,
         withinMS: policy.withinMS,
@@ -4915,7 +4930,6 @@ export class LifecycleManager
           latestMethod: context.latestMethod,
           firstRequestAt: context.firstRequestAt,
           latestRequestAt: context.latestRequestAt,
-          repeatedWindowRequestCount: state.repeatedWindowRequestCount,
           repeatedWindowStartedAt: state.repeatedWindowStartedAt,
           remainsArmedUntil: state.remainsArmedUntil,
           withinMS: policy.withinMS,
@@ -4949,7 +4963,6 @@ export class LifecycleManager
       latestMethod: null,
       firstRequestAt: null,
       latestRequestAt: null,
-      repeatedWindowRequestCount: 0,
       repeatedWindowStartedAt: null,
       hasTriggeredForceShutdown: false,
       remainsArmedUntil: null,
@@ -5004,27 +5017,30 @@ export class LifecycleManager
       return;
     }
 
+    // Narrowed to number by the null guard above.
+    const armedUntil: number = state.remainsArmedUntil;
+
     this.clearRepeatedShutdownExpiryTimer();
 
     const expiredState = {
       firstMethod: state.firstMethod,
       latestMethod: state.latestMethod,
       requestCount: state.requestCount,
-      armedUntil: state.remainsArmedUntil,
+      armedUntil,
     };
 
     this.logger.warn(
       'Repeated shutdown escalation window expired, clearing previous shutdown state',
       {
         params: {
-          remainsArmedUntil: state.remainsArmedUntil,
+          remainsArmedUntil: armedUntil,
           withinMS: policy.withinMS,
           forceAfterCount: policy.forceAfterCount,
         },
       },
     );
 
-    if (expiredState.firstMethod !== null && expiredState.armedUntil !== null) {
+    if (expiredState.firstMethod !== null) {
       this.lifecycleEvents.lifecycleManagerShutdownEscalationExpired({
         firstMethod: expiredState.firstMethod,
         latestMethod: expiredState.latestMethod,
@@ -5073,7 +5089,6 @@ export class LifecycleManager
       latestMethod: method,
       firstRequestAt: now,
       latestRequestAt: now,
-      repeatedWindowRequestCount: 0,
       repeatedWindowStartedAt: null,
       hasTriggeredForceShutdown: false,
       remainsArmedUntil: null,
@@ -5091,7 +5106,7 @@ export class LifecycleManager
 
     if (
       !policy ||
-      policy.armedAfterFailureMS <= 0 ||
+      policy.armedAfterFailureMS <= 0 || // armedAfterFailureMS = 0 disables post-failure arming
       state.firstRequestAt === null ||
       state.hasTriggeredForceShutdown
     ) {
