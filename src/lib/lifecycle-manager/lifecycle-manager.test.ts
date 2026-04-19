@@ -6575,7 +6575,7 @@ describe('LifecycleManager - Signal Integration', () => {
       });
       lifecycle.on(
         'lifecycle-manager:shutdown-escalation-armed',
-        (event) => {
+        (event: LifecycleManagerEventMap['lifecycle-manager:shutdown-escalation-armed']) => {
           armedEvents.push(event);
         },
       );
