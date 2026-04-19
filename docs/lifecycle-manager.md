@@ -1445,7 +1445,7 @@ If instead the fourth request arrived at `t=8000ms`, the escalation window would
 - `onForceShutdown()` is application-defined on purpose
 - The LifecycleManager detects repeated requests, but your app decides what "force" means
 - Common choices include final logging, telemetry flush, `logger.exit()`, or `process.exit()`
-- `isShuttingDown` in the callback context is `true` when force escalation fires during an active shutdown (the normal path: operator pressed the shutdown signal multiple times while `stopAllComponents()` was running). It is `false` when escalation fires from the post-failure armed window (a previous shutdown returned unsuccessfully and the manager kept escalation armed briefly — no shutdown is actively running at the moment the callback fires)
+- `isShuttingDown` in the callback context is `true` when force escalation fires during an active shutdown (the normal path: operator pressed the shutdown signal multiple times while `stopAllComponents()` was running). It is `false` when escalation fires from the post-failure armed window (a previous shutdown returned unsuccessfully and the manager kept escalation armed briefly, and no shutdown is actively running when the callback fires)
 - `wasArmedAfterFailure` is `true` in the post-failure case above and `false` during an active shutdown. Use this flag to distinguish the two paths if your handler needs to know whether it must start a new shutdown or assume one is already underway
 
 **Escalation events:**
@@ -2133,7 +2133,7 @@ lifecycle.on('lifecycle-manager:shutdown-completed', (data) => {
 - `signal:debug` - Debug signal received
 - `lifecycle-manager:shutdown-escalation-armed` - Failed/timed-out shutdown left escalation armed briefly for follow-up force presses
 - `lifecycle-manager:shutdown-escalation-expired` - Armed escalation window expired and was cleared
-- `lifecycle-manager:shutdown-escalation-forced` - Repeated shutdown requests crossed the force threshold and `onForceShutdown()` was invoked; payload includes `wasArmedAfterFailure` to indicate whether the threshold was crossed during an active shutdown or from the post-failure armed window
+- `lifecycle-manager:shutdown-escalation-forced` - Repeated shutdown requests crossed the force threshold and `onForceShutdown()` was invoked. The payload includes `wasArmedAfterFailure` to indicate whether the threshold was crossed during an active shutdown or from the post-failure armed window
 
 **Component Signal Events:**
 
