@@ -2120,7 +2120,7 @@ lifecycle.on('lifecycle-manager:shutdown-completed', (data) => {
 - `lifecycle-manager:shutdown-warning` - Global warning phase started
 - `lifecycle-manager:shutdown-warning-completed` - Warning phase completed
 - `lifecycle-manager:shutdown-warning-timeout` - Warning phase timed out
-- `lifecycle-manager:shutdown-completed` - Shutdown attempt completed, includes the `ShutdownResult` fields at the top level plus `method` / `duringStartup`. If the global shutdown timeout was hit, the payload reflects the result at the moment the manager stopped waiting
+- `lifecycle-manager:shutdown-completed` - Shutdown attempt completed, includes the `ShutdownResult` fields at the top level plus `method` / `duringStartup`. This is the best single event for centralized logging or follow-up policy when shutdown times out or leaves stalled components. If the global shutdown timeout was hit, the payload reflects the result at the moment the manager stopped waiting
 
 **Component Registration:**
 
@@ -2371,6 +2371,8 @@ if (!validation.valid) {
 ### Stalled Component Recovery
 
 Handle components that fail to stop:
+
+`lifecycle-manager:shutdown-completed` is the usual global hook for deciding what to do next with `timedOut` or `stalledComponents`. Use repeated shutdown escalation separately when you want follow-up shutdown requests to trigger another shutdown pass or invoke force behavior.
 
 ```typescript
 const shutdownResult = await lifecycle.stopAllComponents();
