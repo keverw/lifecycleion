@@ -4,6 +4,7 @@ import type {
   ComponentOptions,
   ComponentHealthResult,
   ComponentLifecycleRef,
+  ComponentStatus,
   ComponentValueResult,
 } from './types';
 import { InvalidComponentNameError } from './errors';
@@ -99,6 +100,10 @@ export abstract class BaseComponent {
   /** Reference to component-scoped lifecycle (set by manager when registered) */
   protected lifecycle!: ComponentLifecycleRef;
 
+  /** @internal Set by LifecycleManager while the component is running. */
+  private _unexpectedStopHandler?: (error?: Error) => boolean;
+  /** @internal Incremented whenever the unexpected-stop handler is re-armed or cleared. */
+  private _unexpectedStopGeneration = 0;
   /**
    * Create a new component
    *
@@ -139,6 +144,27 @@ export abstract class BaseComponent {
       500, // Minimum 500ms
       2000, // Default if undefined/null/non-finite
     );
+  }
+
+  /** @internal Called by LifecycleManager after a successful start. */
+  public _setUnexpectedStopHandler(handler: (error?: Error) => boolean): void {
+    this._unexpectedStopGeneration += 1;
+    this._unexpectedStopHandler = handler;
+    const generation = this._unexpectedStopGeneration;
+    this.reportUnexpectedStop = (error?: Error) => {
+      if (this._unexpectedStopGeneration !== generation) {
+        return false;
+      }
+
+      return this._unexpectedStopHandler?.(error) ?? false;
+    };
+  }
+
+  /** @internal Called by LifecycleManager when stop begins or component is unregistered. */
+  public _clearUnexpectedStopHandler(): void {
+    this._unexpectedStopGeneration += 1;
+    this._unexpectedStopHandler = undefined;
+    this.reportUnexpectedStop = () => false;
   }
 
   /**
@@ -352,5 +378,42 @@ export abstract class BaseComponent {
    */
   public isOptional(): boolean {
     return this.optional;
+  }
+
+  /**
+   * Run-scoped unexpected-stop callback. Rebound by LifecycleManager on each
+   * successful start so captured references from older runs go stale.
+   */
+  protected reportUnexpectedStop: (error?: Error) => boolean = () => false;
+
+  /**
+   * Get this component's own status from the manager's perspective.
+   *
+   * Equivalent to `this.lifecycle.getComponentStatus(this.getName())` but without
+   * needing to pass the name. Returns `undefined` if the component is not registered.
+   *
+   * Check `status?.state === 'running'` to test whether the component is currently running.
+   */
+  protected getSelfStatus(): ComponentStatus | undefined {
+    return this.lifecycle?.getComponentStatus(this.name);
+  }
+
+  /**
+   * Capture a run-scoped unexpected-stop reporter for async listeners created during start().
+   *
+   * Unlike calling `this.reportUnexpectedStop()` later, the returned callback becomes a no-op
+   * once the component is stopped, unregistered, or restarted. This prevents stale listeners
+   * from a previous run from stopping a newer run of the same component instance.
+   */
+  protected getUnexpectedStopReporter(): (error?: Error) => boolean {
+    const generation = this._unexpectedStopGeneration;
+
+    return (error?: Error) => {
+      if (this._unexpectedStopGeneration !== generation) {
+        return false;
+      }
+
+      return this._unexpectedStopHandler?.(error) ?? false;
+    };
   }
 }

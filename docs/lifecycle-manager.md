@@ -56,6 +56,7 @@ A comprehensive lifecycle orchestration system that manages startup, shutdown, a
   - [Messaging](#messaging)
   - [Health Checks](#health-checks)
   - [Value Sharing](#value-sharing-1)
+  - [Reporting Unexpected Stops](#reporting-unexpected-stops)
   - [Component Properties](#component-properties)
 - [Events](#events)
   - [Subscribing to Events](#subscribing-to-events)
@@ -320,7 +321,9 @@ Once stalled, a component remains registered but:
 - `startAllComponents()` will fail unless you pass `ignoreStalledComponents: true` (which skips stalled components during bulk startup)
 - `startComponent(name)` will fail unless you pass `forceStalled: true` (which calls `start()` regardless of stalled state)
 
-To recover: unregister the component, retry stopping it via `stopAllComponents({ retryStalled: true })`, or force start with the appropriate option (`ignoreStalledComponents` for bulk, `forceStalled` for individual).
+To recover: unregister the component, retry via `stopAllComponents({ retryStalled: true })` (this escalates to the force phase and does not re-run `stop()`), or force start with the appropriate option (`ignoreStalledComponents` for bulk, `forceStalled` for individual).
+
+**Automatic late resolution:** If `stop()` eventually completes after the graceful timeout (e.g., a server waiting on keep-alive connections), the manager automatically clears the stall and emits `component:stalled-resolved`. No manual retry is needed. The same applies to `onShutdownForce()`: if it eventually resolves after its own timeout, the stall is cleared automatically. If neither ever completes, the stall persists until you intervene.
 
 ### Dependency Management
 
@@ -430,7 +433,8 @@ The shutdown process has three phases:
 
 3. **Force Phase** (per-component)
    - Called if graceful `stop()` times out
-   - Component is marked as `stalled`
+   - Also called (skipping graceful) when retrying a previously stalled component via `retryStalled: true`
+   - Component is marked as `stalled` if force phase also times out or is not implemented
    - Manager stops after the first stall by default (set `haltOnStall: false` to continue)
 
 ```typescript
@@ -792,7 +796,7 @@ interface StopAllOptions {
 
 **Option Details:**
 
-- `retryStalled`: If `true`, attempts to stop components that are currently in the `stalled` state from previous shutdown attempts. If `false`, skips components already marked as stalled.
+- `retryStalled`: If `true`, attempts to stop components that are currently in the `stalled` state from previous shutdown attempts. If `false`, skips components already marked as stalled. **Note:** retry goes directly to the force phase (`onShutdownForce`), not the graceful phase. `stop()` is not called again. The assumption is that graceful already had its chance, and the retry is an escalation.
 - `haltOnStall`: If `true`, stops processing remaining components as soon as any component becomes stalled during _this_ shutdown. If `false`, continues attempting to stop remaining components even after a stall occurs.
 
 **Timeout Behavior:**
@@ -1970,6 +1974,8 @@ onShutdownForce?(): Promise<void> | void;
 onShutdownForceAborted?(): void;
 ```
 
+**Shutdown contract:** `stop()` should always eventually settle (resolve or reject) on every path. If you implement `onShutdownForce()`, it should also eventually settle. In many components, `onShutdownForce()` should not start a completely separate shutdown flow; instead, it should help the in-flight `stop()` finish or await the same underlying stop work.
+
 **Important:** `onShutdownWarning()` is only fired during bulk shutdowns via `stopAllComponents()` or `restartAllComponents()`. Individual `stopComponent()` calls do NOT trigger the warning phase. There is no built-in "warning cleared" event, so if shutdown is canceled or stalls, reset any warning state on the next successful `start()` or via an app-specific signal.
 
 ### Signal Handlers
@@ -2030,6 +2036,53 @@ return false; // Wrapped to { healthy: false, message: undefined, details: undef
 getValue?<T>(key: string, from: string | null): ComponentValueResult<T>;
 ```
 
+### Reporting Unexpected Stops
+
+If a component stops on its own — a crashed server, a lost database connection, a worker thread that exited — call `reportUnexpectedStop()` so the manager can update its state, emit `component:unexpected-stop`, and then emit the canonical `component:stopped` event for the resulting stopped state:
+
+```typescript
+class ServerComponent extends BaseComponent {
+  private server?: http.Server;
+  private stopping = false;
+  private serverError?: Error;
+
+  async start() {
+    const reportUnexpectedStop = this.getUnexpectedStopReporter();
+    this.stopping = false;
+    this.serverError = undefined;
+    this.server = http.createServer(this.handler);
+    this.server.listen(8080);
+
+    this.server.on('error', (err) => {
+      // 'error' isn't always fatal (e.g. a transient socket error may leave the
+      // server still listening). Store it so 'close' can report it with context.
+      this.serverError = err;
+    });
+
+    this.server.on('close', () => {
+      // 'close' is the definitive "server stopped" signal. Guard with the
+      // stopping flag so it only fires when the manager didn't ask us to stop.
+      if (!this.stopping) {
+        reportUnexpectedStop(
+          this.serverError ?? new Error('Server closed unexpectedly'),
+        );
+      }
+    });
+  }
+
+  async stop() {
+    this.stopping = true;
+    await new Promise<void>((resolve, reject) => {
+      this.server?.close((err) => (err ? reject(err) : resolve()));
+    });
+  }
+}
+```
+
+The `component:unexpected-stop` event gives callers a single place to decide what to do — restart, escalate, or shut everything down. `component:stopped` follows immediately afterward so generic "component is now stopped" listeners still work for this path. If you call `stopAllComponents()` in response, the already-stopped component is skipped naturally (it's no longer running), and the rest of the shutdown proceeds in normal dependency order. The error passed to `reportUnexpectedStop()` is stored as `lastError` on the component's status and remains visible after shutdown. For async listeners registered in `start()`, prefer `getUnexpectedStopReporter()` as shown above so callbacks from an older run become a no-op after restart. `reportUnexpectedStop()` remains useful for immediate or synchronous detection paths. Both return `true` if the manager accepted the signal for the current run, otherwise `false`.
+
+If a component reports an unexpected stop while `startAllComponents()` is still in progress, the startup attempt is reconciled before completion: a required component causes bulk startup to fail with `code: 'component_unexpected_stop'` and triggers rollback of any later-started components, while a stopped optional component is recorded in `failedOptionalComponents` and startup continues.
+
 ### Component Properties
 
 ```typescript
@@ -2037,6 +2090,20 @@ getValue?<T>(key: string, from: string | null): ComponentValueResult<T>;
 getName(): string
 getDependencies(): string[]
 isOptional(): boolean
+
+// Get this component's own status from the manager (no need to pass name)
+// Returns undefined if the component is not registered
+// Check status?.state === 'running' to test if currently running
+protected getSelfStatus(): ComponentStatus | undefined
+
+// Capture a run-scoped callback for async listeners created during start()
+// The returned function becomes a no-op after stop, unregister, or restart
+// Returns true if the signal was accepted for the current run
+protected getUnexpectedStopReporter(): (error?: Error) => boolean
+
+// Report an unexpected stop directly for immediate or synchronous detection paths
+// Returns true if the signal was accepted for the current run
+protected reportUnexpectedStop(error?: Error): boolean
 
 // Logger (pre-configured with component name)
 protected logger: LoggerService
@@ -2074,7 +2141,7 @@ class ApiComponent extends BaseComponent {
 **Available methods through `lifecycle`:**
 
 - **Event listeners**: `on()`, `once()`, `hasListener()`, `hasListeners()`, `listenerCount()`
-- **Component queries**: `hasComponent()`, `isComponentRunning()`, `getComponentStatus()`, `getComponentNames()`, `getRunningComponentNames()`, `getComponentCount()`, `getRunningComponentCount()`, `getStalledComponentCount()`, `getStoppedComponentCount()`, `getAllComponentStatuses()`
+- **Component queries**: `hasComponent()`, `isComponentRunning()`, `getComponentStatus()`, `getComponentNames()`, `getRunningComponentNames()`, `getComponentCount()`, `getRunningComponentCount()`, `getStalledComponentCount()`, `getStoppedComponentCount()`, `getAllComponentStatuses()` — use `getSelfStatus()` (on `BaseComponent` directly) to query your own state without passing the name
 - **System state**: `getSystemState()`, `getStatus()`
 - **Stalled/stopped components**: `getStalledComponents()`, `getStalledComponentNames()`, `getStoppedComponentNames()`
 - **Dependency validation**: `validateDependencies()`, `getStartupOrder()`
@@ -2133,9 +2200,11 @@ lifecycle.on('lifecycle-manager:shutdown-completed', (data) => {
 - `component:started` - Component started successfully
 - `component:start-failed` - Component start failed
 - `component:stopping` - Component stop initiated
-- `component:stopped` - Component stopped successfully
+- `component:stopped` - Component is now stopped. Emitted after normal manager-driven stop flows, after late stall resolution, and after `reportUnexpectedStop()` transitions a running component into the stopped state
 - `component:stop-failed` - Component stop failed
 - `component:stalled` - Component failed to stop (timeout)
+- `component:stalled-resolved` - Previously stalled component's `stop()` or `onShutdownForce()` promise eventually resolved on its own, and the stall was cleared automatically
+- `component:unexpected-stop` - Component reported stopping on its own via `reportUnexpectedStop()`. Payload includes `name` and an optional `error`. This event fires before the follow-up `component:stopped` event so listeners can react to the abnormal cause separately from the generic stopped-state transition
 
 **Signal Events:**
 
@@ -2380,7 +2449,9 @@ const shutdownResult = await lifecycle.stopAllComponents();
 if (shutdownResult.stalledComponents.length > 0) {
   console.error('Stalled components:', shutdownResult.stalledComponents);
 
-  // Option 0: Retry stalled components in another shutdown pass
+  // Option 0: Retry via force phase (escalation — does NOT re-run stop())
+  // If the component implements onShutdownForce(), that is called.
+  // If not, the component stalls again immediately.
   await lifecycle.stopAllComponents({ retryStalled: true });
 
   // Option 1: Unregister stalled components
@@ -2392,6 +2463,57 @@ if (shutdownResult.stalledComponents.length > 0) {
   await lifecycle.startAllComponents({ ignoreStalledComponents: true });
 }
 ```
+
+**If `onShutdownForce()` should join the already-running `stop()`**, deduplicate the promise in `stop()` so that calling it again, or calling it from `onShutdownForce()`, simply awaits the same in-flight operation:
+
+```typescript
+class ServerComponent extends BaseComponent {
+  private stopPromise: Promise<void> | null = null;
+
+  async stop() {
+    // Return the same promise if stop is already running.
+    // This lets onShutdownForce safely call this.stop() without starting
+    // a second concurrent close.
+    if (this.stopPromise) return this.stopPromise;
+    this.stopPromise = this.server.close(); // waits for keep-alive connections
+    return this.stopPromise;
+  }
+
+  async onShutdownForce() {
+    // Force-close open connections so server.close() in the in-flight stop()
+    // can finish draining and resolve. Both ?. guards are needed: the outer one
+    // handles server not yet assigned (e.g. start() failed), the inner one
+    // handles runtimes that don't expose closeAllConnections.
+    this.server?.closeAllConnections?.();
+
+    // Join the original stop() — won't start a second close
+    await this.stop();
+  }
+}
+```
+
+Alternatively, use `onGracefulStopTimeout()` to unblock `stop()` directly without needing `onShutdownForce()` at all:
+
+```typescript
+class ServerComponent extends BaseComponent {
+  async stop() {
+    await this.server.close(); // waits for keep-alive connections to drain
+  }
+
+  onGracefulStopTimeout() {
+    // Called while stop() is still running but has exceeded shutdownGracefulTimeoutMS.
+    // Force-closing connections unblocks server.close(), which lets stop() resolve.
+    // Once stop() resolves, the manager auto-clears the stall via late resolution.
+    // Both ?. guards are needed: the outer one handles server not yet assigned,
+    // the inner one handles runtimes that don't expose closeAllConnections.
+    this.server?.closeAllConnections?.();
+  }
+}
+```
+
+If `stop()` (or `onShutdownForce()`) just needs more time and will eventually complete on its own, the automatic late-resolution behavior handles it: the manager clears the stall and emits `component:stalled-resolved` when the promise resolves, with no manual retry needed.
+
+The key requirement is still that the promise eventually settles: late resolution is supported, but never-settling shutdown work will remain stalled until you intervene or the process exits.
 
 ## Best Practices
 

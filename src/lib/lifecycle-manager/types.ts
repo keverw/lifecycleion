@@ -216,6 +216,7 @@ export type ComponentOperationFailureCode =
   | 'has_running_dependents'
   | 'startup_in_progress'
   | 'shutdown_in_progress'
+  | 'component_unexpected_stop'
   | 'component_startup_timeout'
   | 'component_shutdown_timeout'
   | 'restart_stop_failed'
@@ -284,6 +285,7 @@ export interface StartupResult {
   /** Error code (when success is false) */
   code?:
     | 'already_in_progress'
+    | 'component_unexpected_stop'
     | 'shutdown_in_progress'
     | 'dependency_cycle'
     | 'no_components_registered'

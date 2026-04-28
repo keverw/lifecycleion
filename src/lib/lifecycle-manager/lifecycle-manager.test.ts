@@ -1588,6 +1588,488 @@ describe('LifecycleManager - Registration & Individual Lifecycle', () => {
       expect(stallInfo.reason).toBe('timeout');
     });
 
+    test('stopComponent should auto-clear stall and emit component:stalled-resolved when stop() eventually resolves', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      // stopDuration (1500ms) exceeds graceful timeout (1000ms) so it stalls,
+      // but the stop() promise does eventually resolve.
+      const component = new SlowStopComponent(logger, 'slow', 1500);
+
+      await lifecycle.registerComponent(component);
+      await lifecycle.startComponent('slow');
+
+      const stalledResolvedEvents: LifecycleManagerEventMap['component:stalled-resolved'][] =
+        [];
+      const stoppedEvents: LifecycleManagerEventMap['component:stopped'][] = [];
+
+      lifecycle.on<LifecycleManagerEventMap['component:stalled-resolved']>(
+        'component:stalled-resolved',
+        (data) => {
+          stalledResolvedEvents.push(data);
+        },
+      );
+
+      lifecycle.on<LifecycleManagerEventMap['component:stopped']>(
+        'component:stopped',
+        (data) => {
+          stoppedEvents.push(data);
+        },
+      );
+
+      // Stop times out at 1000ms — component marked stalled
+      const result = await lifecycle.stopComponent('slow');
+      expect(result.success).toBe(false);
+      expect(result.code).toBe('component_shutdown_timeout');
+      expect(lifecycle.getComponentStatus('slow')?.state).toBe('stalled');
+      expect(lifecycle.getStalledComponents()).toHaveLength(1);
+
+      // Wait for stop() to finish (500ms past the graceful timeout)
+      await sleep(600);
+
+      // Late resolution should have fired automatically
+      expect(component.stopped).toBe(true);
+      expect(lifecycle.getComponentStatus('slow')?.state).toBe('stopped');
+      expect(lifecycle.getStalledComponents()).toHaveLength(0);
+      expect(stalledResolvedEvents).toHaveLength(1);
+      expect(stalledResolvedEvents[0].name).toBe('slow');
+      expect(stalledResolvedEvents[0].stalledDurationMS).toBeGreaterThan(0);
+      expect(stalledResolvedEvents[0].stallInfo.reason).toBe('timeout');
+      // component:stopped should also have been emitted
+      expect(stoppedEvents.some((e) => e.name === 'slow')).toBe(true);
+      // componentErrors should be cleared — lastError null after clean late stop
+      expect(lifecycle.getComponentStatus('slow')?.lastError).toBeNull();
+    }, 3000);
+
+    test('late stop resolution should still fire after retryStalled when no onShutdownForce exists', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+      // stop() takes 1500ms, graceful timeout is 1000ms — stalls but eventually resolves
+      const component = new SlowStopComponent(logger, 'slow', 1500);
+
+      await lifecycle.registerComponent(component);
+      await lifecycle.startComponent('slow');
+
+      const stalledResolvedEvents: LifecycleManagerEventMap['component:stalled-resolved'][] =
+        [];
+      lifecycle.on<LifecycleManagerEventMap['component:stalled-resolved']>(
+        'component:stalled-resolved',
+        (data) => {
+          stalledResolvedEvents.push(data);
+        },
+      );
+
+      // First stop times out → stalled
+      await lifecycle.stopComponent('slow');
+      expect(lifecycle.getComponentStatus('slow')?.state).toBe('stalled');
+
+      // Retry via retryStalled — no onShutdownForce, so it re-stalls immediately.
+      // Generation is NOT bumped (no handler = no async work to protect), so the
+      // original floating stop() can still late-resolve the stall.
+      const retryResult = await lifecycle.stopAllComponents({
+        retryStalled: true,
+      });
+      expect(retryResult.stalledComponents).toHaveLength(1);
+      expect(lifecycle.getComponentStatus('slow')?.state).toBe('stalled');
+
+      // Wait for the original stop() to resolve
+      await sleep(600);
+
+      // Late resolution should have fired — the re-stall did not orphan the promise
+      expect(stalledResolvedEvents).toHaveLength(1);
+      expect(lifecycle.getComponentStatus('slow')?.state).toBe('stopped');
+    }, 3000);
+
+    test('retryStalled without onShutdownForce should not accumulate force waiters', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      class NeverResolvingStopComponent extends BaseComponent {
+        constructor() {
+          super(logger, {
+            name: 'never-resolving-stop',
+            shutdownGracefulTimeoutMS: 1000,
+          });
+        }
+
+        public start(): void {}
+
+        public stop(): Promise<void> {
+          return new Promise(() => {});
+        }
+      }
+
+      await lifecycle.registerComponent(new NeverResolvingStopComponent());
+      await lifecycle.startComponent('never-resolving-stop');
+
+      await lifecycle.stopComponent('never-resolving-stop');
+      expect(lifecycle.getComponentStatus('never-resolving-stop')?.state).toBe(
+        'stalled',
+      );
+
+      await lifecycle.stopAllComponents({ retryStalled: true });
+      await lifecycle.stopAllComponents({ retryStalled: true });
+      await lifecycle.stopAllComponents({ retryStalled: true });
+
+      const waiters = (lifecycle as any).pendingForceStopWaiters.get(
+        'never-resolving-stop',
+      ) as Set<() => void> | undefined;
+
+      expect(waiters?.size ?? 0).toBe(0);
+    }, 2500);
+
+    test('stop token guard should block old stop() from clearing stall when retryStalled has an onShutdownForce', async () => {
+      // Timeouts are clamped to minimums (1000ms graceful, 500ms force).
+      // stop() takes 2200ms — it floats through both the graceful and force phase
+      // timeouts and resolves ~200ms after retryStalled's force phase also stalls.
+      // onShutdownForce() takes 5000ms so it never resolves within the test window.
+      // This isolates the stop token guard: the only late resolution that fires is
+      // the original stop(), and the newer stop token should block it.
+      class DualSlowComponent extends BaseComponent {
+        constructor() {
+          super(logger, {
+            name: 'dual-slow',
+            shutdownGracefulTimeoutMS: 1000,
+            shutdownForceTimeoutMS: 500,
+          });
+        }
+
+        public start(): void {}
+
+        public async stop(): Promise<void> {
+          await sleep(2200); // outlasts graceful (1000ms) + force (500ms) + retry force (500ms)
+        }
+
+        public async onShutdownForce(): Promise<void> {
+          await sleep(5000); // intentionally never resolves within test window
+        }
+      }
+
+      const lifecycle = new LifecycleManager({ logger });
+      const component = new DualSlowComponent();
+
+      await lifecycle.registerComponent(component);
+      await lifecycle.startComponent('dual-slow');
+
+      const stalledResolvedEvents: LifecycleManagerEventMap['component:stalled-resolved'][] =
+        [];
+      lifecycle.on<LifecycleManagerEventMap['component:stalled-resolved']>(
+        'component:stalled-resolved',
+        (data) => {
+          stalledResolvedEvents.push(data);
+        },
+      );
+
+      // Graceful times out at ~1000ms, force also times out at ~1500ms → stalled
+      await lifecycle.stopComponent('dual-slow');
+      expect(lifecycle.getComponentStatus('dual-slow')?.state).toBe('stalled');
+
+      // Retry — onShutdownForce exists so a new stop token IS issued, force re-stalls at ~2000ms
+      const retryResult = await lifecycle.stopAllComponents({
+        retryStalled: true,
+      });
+      expect(retryResult.stalledComponents).toHaveLength(1);
+      expect(lifecycle.getComponentStatus('dual-slow')?.state).toBe('stalled');
+
+      // Wait for original stop() to resolve (~200ms after retryStalled returned) then
+      // a bit more. onShutdownForce() won't resolve for ~3000ms more.
+      await sleep(400);
+
+      // Stop token guard should have blocked it — stall from the force-retry persists
+      expect(stalledResolvedEvents).toHaveLength(0);
+      expect(lifecycle.getComponentStatus('dual-slow')?.state).toBe('stalled');
+    }, 3000);
+
+    test('onShutdownForce late resolution should auto-clear stall and emit component:stalled-resolved', async () => {
+      // stop() fails immediately so the force phase runs.
+      // onShutdownForce() takes 800ms but shutdownForceTimeoutMS is 500ms,
+      // so the force phase stalls. The floating promise eventually resolves.
+      class SlowForceComponent extends BaseComponent {
+        public forceStopped = false;
+
+        constructor() {
+          super(logger, {
+            name: 'slow-force',
+            shutdownGracefulTimeoutMS: 1000,
+            shutdownForceTimeoutMS: 500,
+          });
+        }
+
+        public start(): void {}
+
+        public async stop(): Promise<void> {
+          await Promise.resolve();
+          throw new Error('Graceful stop unavailable — use force');
+        }
+
+        public async onShutdownForce(): Promise<void> {
+          await sleep(800);
+          this.forceStopped = true;
+        }
+      }
+
+      const lifecycle = new LifecycleManager({ logger });
+      const component = new SlowForceComponent();
+
+      await lifecycle.registerComponent(component);
+      await lifecycle.startComponent('slow-force');
+
+      const stalledResolvedEvents: LifecycleManagerEventMap['component:stalled-resolved'][] =
+        [];
+
+      lifecycle.on<LifecycleManagerEventMap['component:stalled-resolved']>(
+        'component:stalled-resolved',
+        (data) => {
+          stalledResolvedEvents.push(data);
+        },
+      );
+
+      // Force phase times out — component marked stalled
+      const result = await lifecycle.stopComponent('slow-force');
+      expect(result.success).toBe(false);
+      expect(lifecycle.getComponentStatus('slow-force')?.state).toBe('stalled');
+      expect(lifecycle.getStalledComponents()).toHaveLength(1);
+
+      // componentErrors should have the force timeout error before late resolution
+      expect(
+        lifecycle.getComponentStatus('slow-force')?.lastError,
+      ).not.toBeNull();
+
+      // Wait for onShutdownForce() to finish (300ms past the force timeout)
+      await sleep(400);
+
+      // Late resolution should have fired automatically
+      expect(component.forceStopped).toBe(true);
+      expect(lifecycle.getComponentStatus('slow-force')?.state).toBe('stopped');
+      expect(lifecycle.getStalledComponents()).toHaveLength(0);
+      expect(stalledResolvedEvents).toHaveLength(1);
+      expect(stalledResolvedEvents[0].name).toBe('slow-force');
+      expect(stalledResolvedEvents[0].stalledDurationMS).toBeGreaterThan(0);
+      // componentErrors should be cleared after clean late resolution
+      expect(lifecycle.getComponentStatus('slow-force')?.lastError).toBeNull();
+    }, 2500);
+
+    test('onShutdownForce late resolution should emit component:shutdown-force-completed', async () => {
+      class SlowForceComponent extends BaseComponent {
+        constructor() {
+          super(logger, {
+            name: 'slow-force',
+            shutdownGracefulTimeoutMS: 1000,
+            shutdownForceTimeoutMS: 500,
+          });
+        }
+
+        public start(): void {}
+
+        public async stop(): Promise<void> {
+          await Promise.resolve();
+          throw new Error('Graceful stop unavailable');
+        }
+
+        public async onShutdownForce(): Promise<void> {
+          await sleep(800);
+        }
+      }
+
+      const lifecycle = new LifecycleManager({ logger });
+      const forceCompletedEvents: LifecycleManagerEventMap['component:shutdown-force-completed'][] =
+        [];
+
+      lifecycle.on<
+        LifecycleManagerEventMap['component:shutdown-force-completed']
+      >('component:shutdown-force-completed', (data) => {
+        forceCompletedEvents.push(data);
+      });
+
+      await lifecycle.registerComponent(new SlowForceComponent());
+      await lifecycle.startComponent('slow-force');
+
+      const result = await lifecycle.stopComponent('slow-force');
+      expect(result.success).toBe(false);
+      expect(lifecycle.getComponentStatus('slow-force')?.state).toBe('stalled');
+
+      await sleep(400);
+
+      expect(forceCompletedEvents).toHaveLength(1);
+      expect(forceCompletedEvents[0].name).toBe('slow-force');
+      expect(lifecycle.getComponentStatus('slow-force')?.state).toBe('stopped');
+    }, 2500);
+
+    test('graceful late resolution after force stall should not emit force completed', async () => {
+      class GracefulOutlastsForceComponent extends BaseComponent {
+        constructor() {
+          super(logger, {
+            name: 'graceful-outlasts-force',
+            shutdownGracefulTimeoutMS: 1000,
+            shutdownForceTimeoutMS: 500,
+          });
+        }
+
+        public start(): void {}
+
+        public async stop(): Promise<void> {
+          await sleep(1800);
+        }
+
+        public async onShutdownForce(): Promise<void> {
+          await sleep(5000);
+        }
+      }
+
+      const lifecycle = new LifecycleManager({ logger });
+      const forceCompletedEvents: LifecycleManagerEventMap['component:shutdown-force-completed'][] =
+        [];
+      const stalledResolvedEvents: LifecycleManagerEventMap['component:stalled-resolved'][] =
+        [];
+
+      lifecycle.on<
+        LifecycleManagerEventMap['component:shutdown-force-completed']
+      >('component:shutdown-force-completed', (data) => {
+        forceCompletedEvents.push(data);
+      });
+      lifecycle.on<LifecycleManagerEventMap['component:stalled-resolved']>(
+        'component:stalled-resolved',
+        (data) => {
+          stalledResolvedEvents.push(data);
+        },
+      );
+
+      await lifecycle.registerComponent(new GracefulOutlastsForceComponent());
+      await lifecycle.startComponent('graceful-outlasts-force');
+
+      const result = await lifecycle.stopComponent('graceful-outlasts-force');
+      expect(result.success).toBe(false);
+      expect(
+        lifecycle.getComponentStatus('graceful-outlasts-force')?.state,
+      ).toBe('stalled');
+
+      await sleep(400);
+
+      expect(stalledResolvedEvents).toHaveLength(1);
+      expect(forceCompletedEvents).toHaveLength(0);
+      expect(
+        lifecycle.getComponentStatus('graceful-outlasts-force')?.state,
+      ).toBe('stopped');
+    }, 3000);
+
+    test('graceful late resolution during force phase should stop cleanly without stalling', async () => {
+      class GracefulWinsDuringForcePhaseComponent extends BaseComponent {
+        constructor() {
+          super(logger, {
+            name: 'graceful-wins-during-force-phase',
+            shutdownGracefulTimeoutMS: 1000,
+            shutdownForceTimeoutMS: 500,
+          });
+        }
+
+        public start(): void {}
+
+        public async stop(): Promise<void> {
+          await sleep(1300);
+        }
+
+        public async onShutdownForce(): Promise<void> {
+          await sleep(5000);
+        }
+      }
+
+      const lifecycle = new LifecycleManager({ logger });
+      const forceCompletedEvents: LifecycleManagerEventMap['component:shutdown-force-completed'][] =
+        [];
+      const stalledResolvedEvents: LifecycleManagerEventMap['component:stalled-resolved'][] =
+        [];
+      const stoppedEvents: LifecycleManagerEventMap['component:stopped'][] = [];
+
+      lifecycle.on<
+        LifecycleManagerEventMap['component:shutdown-force-completed']
+      >('component:shutdown-force-completed', (data) => {
+        forceCompletedEvents.push(data);
+      });
+      lifecycle.on<LifecycleManagerEventMap['component:stalled-resolved']>(
+        'component:stalled-resolved',
+        (data) => {
+          stalledResolvedEvents.push(data);
+        },
+      );
+      lifecycle.on<LifecycleManagerEventMap['component:stopped']>(
+        'component:stopped',
+        (data) => {
+          stoppedEvents.push(data);
+        },
+      );
+
+      await lifecycle.registerComponent(
+        new GracefulWinsDuringForcePhaseComponent(),
+      );
+      await lifecycle.startComponent('graceful-wins-during-force-phase');
+
+      const result = await lifecycle.stopComponent(
+        'graceful-wins-during-force-phase',
+      );
+
+      expect(result.success).toBe(true);
+      expect(
+        lifecycle.getComponentStatus('graceful-wins-during-force-phase')?.state,
+      ).toBe('stopped');
+      expect(lifecycle.getStalledComponents()).toHaveLength(0);
+      expect(stalledResolvedEvents).toHaveLength(0);
+      expect(forceCompletedEvents).toHaveLength(0);
+      expect(stoppedEvents).toHaveLength(1);
+    }, 3000);
+
+    test('graceful late resolution should not double-emit stopped when force finishes later', async () => {
+      class GracefulWinsBeforeForceCompletesComponent extends BaseComponent {
+        constructor() {
+          super(logger, {
+            name: 'graceful-wins-before-force-completes',
+            shutdownGracefulTimeoutMS: 1000,
+            shutdownForceTimeoutMS: 500,
+          });
+        }
+
+        public start(): void {}
+
+        public async stop(): Promise<void> {
+          await sleep(1300);
+        }
+
+        public async onShutdownForce(): Promise<void> {
+          await sleep(400);
+        }
+      }
+
+      const lifecycle = new LifecycleManager({ logger });
+      const forceCompletedEvents: LifecycleManagerEventMap['component:shutdown-force-completed'][] =
+        [];
+      const stoppedEvents: LifecycleManagerEventMap['component:stopped'][] = [];
+
+      lifecycle.on<
+        LifecycleManagerEventMap['component:shutdown-force-completed']
+      >('component:shutdown-force-completed', (data) => {
+        forceCompletedEvents.push(data);
+      });
+      lifecycle.on<LifecycleManagerEventMap['component:stopped']>(
+        'component:stopped',
+        (data) => {
+          stoppedEvents.push(data);
+        },
+      );
+
+      await lifecycle.registerComponent(
+        new GracefulWinsBeforeForceCompletesComponent(),
+      );
+      await lifecycle.startComponent('graceful-wins-before-force-completes');
+
+      const result = await lifecycle.stopComponent(
+        'graceful-wins-before-force-completes',
+      );
+
+      expect(result.success).toBe(true);
+      expect(forceCompletedEvents).toHaveLength(0);
+      expect(stoppedEvents).toHaveLength(1);
+      expect(
+        lifecycle.getComponentStatus('graceful-wins-before-force-completes')
+          ?.state,
+      ).toBe('stopped');
+    }, 3000);
+
     test('stopComponent should mark as stalled on error', async () => {
       const lifecycle = new LifecycleManager({ logger });
 
@@ -1748,6 +2230,523 @@ describe('LifecycleManager - Registration & Individual Lifecycle', () => {
       expect(result.reason).toContain('api1');
       expect(result.reason).toContain('api2');
       expect(lifecycle.isComponentRunning('database')).toBe(true);
+    });
+  });
+
+  describe('reportUnexpectedStop', () => {
+    test('fires component:unexpected-stop then component:stopped when running', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      let reportFn!: (err?: Error) => boolean;
+
+      class SelfStoppingComponent extends BaseComponent {
+        public start(): void {
+          // Capture the trigger so the test can call it
+          reportFn = (err?: Error) => this.reportUnexpectedStop(err);
+        }
+        public stop(): void {}
+      }
+
+      const component = new SelfStoppingComponent(logger, {
+        name: 'self-stop',
+      });
+      await lifecycle.registerComponent(component);
+      await lifecycle.startComponent('self-stop');
+
+      expect(lifecycle.isComponentRunning('self-stop')).toBe(true);
+
+      const events: string[] = [];
+      const unexpectedStopEvents: LifecycleManagerEventMap['component:unexpected-stop'][] =
+        [];
+      const stoppedEvents: LifecycleManagerEventMap['component:stopped'][] = [];
+      lifecycle.on<LifecycleManagerEventMap['component:unexpected-stop']>(
+        'component:unexpected-stop',
+        (data) => {
+          events.push('unexpected-stop');
+          unexpectedStopEvents.push(data);
+        },
+      );
+      lifecycle.on<LifecycleManagerEventMap['component:stopped']>(
+        'component:stopped',
+        (data) => {
+          events.push('stopped');
+          stoppedEvents.push(data);
+        },
+      );
+
+      const err = new Error('connection lost');
+      expect(reportFn(err)).toBe(true);
+
+      expect(lifecycle.isComponentRunning('self-stop')).toBe(false);
+      expect(lifecycle.getComponentStatus('self-stop')?.state).toBe('stopped');
+      expect(events).toEqual(['unexpected-stop', 'stopped']);
+      expect(unexpectedStopEvents).toHaveLength(1);
+      expect(unexpectedStopEvents[0].name).toBe('self-stop');
+      expect(unexpectedStopEvents[0].error).toBe(err);
+      expect(stoppedEvents).toHaveLength(1);
+      expect(stoppedEvents[0].name).toBe('self-stop');
+      expect(stoppedEvents[0].status?.state).toBe('stopped');
+    });
+
+    test('startComponent fails if component stops unexpectedly before start() completes', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      class SlowSelfStoppingComponent extends BaseComponent {
+        public async start(): Promise<void> {
+          const reportUnexpectedStop = this.getUnexpectedStopReporter();
+
+          setTimeout(() => {
+            reportUnexpectedStop(new Error('boot crash'));
+          }, 10);
+
+          await sleep(50);
+        }
+
+        public stop(): void {}
+      }
+
+      await lifecycle.registerComponent(
+        new SlowSelfStoppingComponent(logger, { name: 'self-stop' }),
+      );
+
+      const result = await lifecycle.startComponent('self-stop');
+
+      expect(result.success).toBe(false);
+      expect(result.code).toBe('component_unexpected_stop');
+      expect(result.reason).toBe('boot crash');
+      expect(lifecycle.isComponentRunning('self-stop')).toBe(false);
+      expect(lifecycle.getComponentStatus('self-stop')?.state).toBe('stopped');
+      expect(
+        lifecycle.getComponentStatus('self-stop')?.lastError?.message,
+      ).toBe('boot crash');
+    });
+
+    test('startComponent preserves unexpected stop when start() rejects afterward', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      class RejectingSelfStoppingComponent extends BaseComponent {
+        public async start(): Promise<void> {
+          const reportUnexpectedStop = this.getUnexpectedStopReporter();
+
+          setTimeout(() => {
+            reportUnexpectedStop(new Error('boot crash'));
+          }, 10);
+
+          await sleep(30);
+          throw new Error('start rejected after crash');
+        }
+
+        public stop(): void {}
+      }
+
+      await lifecycle.registerComponent(
+        new RejectingSelfStoppingComponent(logger, { name: 'self-stop' }),
+      );
+
+      const result = await lifecycle.startComponent('self-stop');
+
+      expect(result.success).toBe(false);
+      expect(result.code).toBe('component_unexpected_stop');
+      expect(result.reason).toBe('boot crash');
+      expect(result.error?.message).toBe('boot crash');
+      expect(lifecycle.isComponentRunning('self-stop')).toBe(false);
+      expect(lifecycle.getComponentStatus('self-stop')?.state).toBe('stopped');
+      expect(
+        lifecycle.getComponentStatus('self-stop')?.lastError?.message,
+      ).toBe('boot crash');
+    });
+
+    test('startComponent lets later thrown startup error win when unexpected stop had no error', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      class RejectingSignalOnlySelfStoppingComponent extends BaseComponent {
+        public async start(): Promise<void> {
+          const reportUnexpectedStop = this.getUnexpectedStopReporter();
+
+          setTimeout(() => {
+            reportUnexpectedStop();
+          }, 10);
+
+          await sleep(30);
+          throw new Error('start rejected after stop signal');
+        }
+
+        public stop(): void {}
+      }
+
+      await lifecycle.registerComponent(
+        new RejectingSignalOnlySelfStoppingComponent(logger, {
+          name: 'self-stop',
+        }),
+      );
+
+      const result = await lifecycle.startComponent('self-stop');
+
+      expect(result.success).toBe(false);
+      expect(result.code).toBe('unknown_error');
+      expect(result.reason).toBe('start rejected after stop signal');
+      expect(result.error?.message).toBe('start rejected after stop signal');
+      expect(lifecycle.isComponentRunning('self-stop')).toBe(false);
+      expect(lifecycle.getComponentStatus('self-stop')?.state).toBe(
+        'registered',
+      );
+      expect(
+        lifecycle.getComponentStatus('self-stop')?.lastError?.message,
+      ).toBe('start rejected after stop signal');
+    });
+
+    test('error is preserved in component status after unexpected stop', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      let reportFn!: (err?: Error) => boolean;
+
+      class SelfStoppingComponent extends BaseComponent {
+        public start(): void {
+          reportFn = (err?: Error) => this.reportUnexpectedStop(err);
+        }
+        public stop(): void {}
+      }
+
+      const component = new SelfStoppingComponent(logger, {
+        name: 'self-stop',
+      });
+      await lifecycle.registerComponent(component);
+      await lifecycle.startComponent('self-stop');
+
+      const err = new Error('worker crashed');
+      expect(reportFn(err)).toBe(true);
+
+      const status = lifecycle.getComponentStatus('self-stop');
+      expect(status?.lastError?.message).toBe('worker crashed');
+    });
+
+    test('is a no-op when component is already being stopped by the manager', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      let reportFn!: (err?: Error) => boolean;
+
+      class SelfStoppingComponent extends BaseComponent {
+        public start(): void {
+          reportFn = (err?: Error) => this.reportUnexpectedStop(err);
+        }
+        public async stop(): Promise<void> {
+          await Promise.resolve();
+        }
+      }
+
+      const component = new SelfStoppingComponent(logger, {
+        name: 'self-stop',
+      });
+      await lifecycle.registerComponent(component);
+      await lifecycle.startComponent('self-stop');
+
+      const unexpectedStopEvents: LifecycleManagerEventMap['component:unexpected-stop'][] =
+        [];
+      lifecycle.on<LifecycleManagerEventMap['component:unexpected-stop']>(
+        'component:unexpected-stop',
+        (data) => {
+          unexpectedStopEvents.push(data);
+        },
+      );
+
+      // Stop via manager then immediately call report — handler is already cleared
+      const stopPromise = lifecycle.stopComponent('self-stop');
+      expect(reportFn(new Error('too late'))).toBe(false);
+      await stopPromise;
+
+      expect(unexpectedStopEvents).toHaveLength(0);
+      expect(lifecycle.getComponentStatus('self-stop')?.state).toBe('stopped');
+    });
+
+    test('is a no-op after component is unregistered', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      let reportFn!: (err?: Error) => boolean;
+
+      class SelfStoppingComponent extends BaseComponent {
+        public start(): void {
+          reportFn = (err?: Error) => this.reportUnexpectedStop(err);
+        }
+        public stop(): void {}
+      }
+
+      const component = new SelfStoppingComponent(logger, {
+        name: 'self-stop',
+      });
+      await lifecycle.registerComponent(component);
+      await lifecycle.startComponent('self-stop');
+      await lifecycle.stopComponent('self-stop');
+      await lifecycle.unregisterComponent('self-stop');
+
+      const unexpectedStopEvents: LifecycleManagerEventMap['component:unexpected-stop'][] =
+        [];
+      lifecycle.on<LifecycleManagerEventMap['component:unexpected-stop']>(
+        'component:unexpected-stop',
+        (data) => {
+          unexpectedStopEvents.push(data);
+        },
+      );
+
+      expect(reportFn(new Error('ignored'))).toBe(false);
+
+      expect(unexpectedStopEvents).toHaveLength(0);
+    });
+
+    test('handler is re-armed after stop and restart', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      let reportFn!: (err?: Error) => boolean;
+
+      class SelfStoppingComponent extends BaseComponent {
+        public start(): void {
+          reportFn = (err?: Error) => this.reportUnexpectedStop(err);
+        }
+        public stop(): void {}
+      }
+
+      const component = new SelfStoppingComponent(logger, {
+        name: 'self-stop',
+      });
+      await lifecycle.registerComponent(component);
+      await lifecycle.startComponent('self-stop');
+      await lifecycle.stopComponent('self-stop');
+      await lifecycle.startComponent('self-stop');
+
+      const unexpectedStopEvents: LifecycleManagerEventMap['component:unexpected-stop'][] =
+        [];
+      lifecycle.on<LifecycleManagerEventMap['component:unexpected-stop']>(
+        'component:unexpected-stop',
+        (data) => {
+          unexpectedStopEvents.push(data);
+        },
+      );
+
+      expect(reportFn(new Error('second run crash'))).toBe(true);
+
+      expect(unexpectedStopEvents).toHaveLength(1);
+      expect(lifecycle.getComponentStatus('self-stop')?.state).toBe('stopped');
+    });
+
+    test('stale unexpected-stop callback from previous run is ignored after restart', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      const reportFns: Array<(err?: Error) => boolean> = [];
+
+      class SelfStoppingComponent extends BaseComponent {
+        public start(): void {
+          reportFns.push(this.getUnexpectedStopReporter());
+        }
+        public stop(): void {}
+      }
+
+      const component = new SelfStoppingComponent(logger, {
+        name: 'self-stop',
+      });
+      await lifecycle.registerComponent(component);
+      await lifecycle.startComponent('self-stop');
+
+      const firstRunReport = reportFns[0];
+
+      await lifecycle.stopComponent('self-stop');
+      await lifecycle.startComponent('self-stop');
+
+      const unexpectedStopEvents: LifecycleManagerEventMap['component:unexpected-stop'][] =
+        [];
+      lifecycle.on<LifecycleManagerEventMap['component:unexpected-stop']>(
+        'component:unexpected-stop',
+        (data) => {
+          unexpectedStopEvents.push(data);
+        },
+      );
+
+      expect(firstRunReport(new Error('stale callback'))).toBe(false);
+
+      expect(unexpectedStopEvents).toHaveLength(0);
+      expect(lifecycle.getComponentStatus('self-stop')?.state).toBe('running');
+
+      expect(reportFns[1](new Error('current run crash'))).toBe(true);
+
+      expect(unexpectedStopEvents).toHaveLength(1);
+      expect(unexpectedStopEvents[0].error?.message).toBe('current run crash');
+      expect(lifecycle.getComponentStatus('self-stop')?.state).toBe('stopped');
+    });
+
+    test('stale direct reportUnexpectedStop reference from previous run is ignored after restart', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      const reportFns: Array<(err?: Error) => boolean> = [];
+
+      class SelfStoppingComponent extends BaseComponent {
+        public start(): void {
+          reportFns.push(this.reportUnexpectedStop);
+        }
+        public stop(): void {}
+      }
+
+      const component = new SelfStoppingComponent(logger, {
+        name: 'self-stop',
+      });
+      await lifecycle.registerComponent(component);
+      await lifecycle.startComponent('self-stop');
+
+      const firstRunReport = reportFns[0];
+
+      await lifecycle.stopComponent('self-stop');
+      await lifecycle.startComponent('self-stop');
+
+      const unexpectedStopEvents: LifecycleManagerEventMap['component:unexpected-stop'][] =
+        [];
+      lifecycle.on<LifecycleManagerEventMap['component:unexpected-stop']>(
+        'component:unexpected-stop',
+        (data) => {
+          unexpectedStopEvents.push(data);
+        },
+      );
+
+      expect(firstRunReport(new Error('stale callback'))).toBe(false);
+
+      expect(unexpectedStopEvents).toHaveLength(0);
+      expect(lifecycle.getComponentStatus('self-stop')?.state).toBe('running');
+
+      expect(reportFns[1](new Error('current run crash'))).toBe(true);
+
+      expect(unexpectedStopEvents).toHaveLength(1);
+      expect(unexpectedStopEvents[0].error?.message).toBe('current run crash');
+      expect(lifecycle.getComponentStatus('self-stop')?.state).toBe('stopped');
+    });
+
+    test('getSelfStatus returns own component status', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      let capturedStatus: ReturnType<BaseComponent['getSelfStatus']>;
+
+      class StatusCheckComponent extends BaseComponent {
+        // Expose protected method for testing
+        public getSelfStatus(): ReturnType<BaseComponent['getSelfStatus']> {
+          return super.getSelfStatus();
+        }
+        public start(): void {}
+        public stop(): void {}
+      }
+
+      const component = new StatusCheckComponent(logger, { name: 'checker' });
+      await lifecycle.registerComponent(component);
+      await lifecycle.startComponent('checker');
+
+      capturedStatus = component.getSelfStatus();
+      expect(capturedStatus?.state).toBe('running');
+
+      await lifecycle.stopComponent('checker');
+
+      capturedStatus = component.getSelfStatus();
+      expect(capturedStatus?.state).toBe('stopped');
+    });
+
+    test('getSelfStatus returns undefined before registration', () => {
+      class StatusCheckComponent extends BaseComponent {
+        public getSelfStatus(): ReturnType<BaseComponent['getSelfStatus']> {
+          return super.getSelfStatus();
+        }
+        public start(): void {}
+        public stop(): void {}
+      }
+
+      const component = new StatusCheckComponent(logger, { name: 'checker' });
+
+      expect(component.getSelfStatus()).toBeUndefined();
+    });
+
+    test('fires without an error when called with no argument', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      let reportFn!: () => boolean;
+
+      class SelfStoppingComponent extends BaseComponent {
+        public start(): void {
+          reportFn = () => this.reportUnexpectedStop();
+        }
+        public stop(): void {}
+      }
+
+      const component = new SelfStoppingComponent(logger, {
+        name: 'self-stop',
+      });
+      await lifecycle.registerComponent(component);
+      await lifecycle.startComponent('self-stop');
+
+      const unexpectedStopEvents: LifecycleManagerEventMap['component:unexpected-stop'][] =
+        [];
+      lifecycle.on<LifecycleManagerEventMap['component:unexpected-stop']>(
+        'component:unexpected-stop',
+        (data) => {
+          unexpectedStopEvents.push(data);
+        },
+      );
+
+      expect(reportFn()).toBe(true);
+
+      expect(unexpectedStopEvents).toHaveLength(1);
+      expect(unexpectedStopEvents[0].error).toBeUndefined();
+      expect(lifecycle.getComponentStatus('self-stop')?.state).toBe('stopped');
+    });
+
+    test('reportUnexpectedStop without an error clears stale lastError', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      let reportFn!: (err?: Error) => boolean;
+
+      class SelfStoppingComponent extends BaseComponent {
+        public start(): void {
+          reportFn = (err?: Error) => this.reportUnexpectedStop(err);
+        }
+        public stop(): void {}
+      }
+
+      const component = new SelfStoppingComponent(logger, {
+        name: 'self-stop',
+      });
+      await lifecycle.registerComponent(component);
+      await lifecycle.startComponent('self-stop');
+
+      expect(reportFn(new Error('first run crash'))).toBe(true);
+      expect(
+        lifecycle.getComponentStatus('self-stop')?.lastError?.message,
+      ).toBe('first run crash');
+
+      await lifecycle.startComponent('self-stop');
+
+      expect(reportFn()).toBe(true);
+      expect(lifecycle.getComponentStatus('self-stop')?.state).toBe('stopped');
+      expect(lifecycle.getComponentStatus('self-stop')?.lastError).toBeNull();
+    });
+
+    test('detaches process signals when the last running component stops unexpectedly', async () => {
+      const lifecycle = new LifecycleManager({
+        logger,
+        attachSignalsOnStart: true,
+        detachSignalsOnStop: true,
+      });
+
+      let reportFn!: (err?: Error) => boolean;
+
+      class SelfStoppingComponent extends BaseComponent {
+        public start(): void {
+          reportFn = (err?: Error) => this.reportUnexpectedStop(err);
+        }
+        public stop(): void {}
+      }
+
+      await lifecycle.registerComponent(
+        new SelfStoppingComponent(logger, { name: 'self-stop' }),
+      );
+      await lifecycle.startComponent('self-stop');
+
+      expect(lifecycle.getSignalStatus().isAttached).toBe(true);
+
+      expect(reportFn(new Error('lost connection'))).toBe(true);
+
+      expect(lifecycle.getComponentStatus('self-stop')?.state).toBe('stopped');
+      expect(lifecycle.getSignalStatus().isAttached).toBe(false);
     });
   });
 
@@ -2745,6 +3744,467 @@ describe('LifecycleManager - Bulk Operations', () => {
       expect(lifecycle.isComponentRunning('stalled')).toBe(true);
     });
 
+    test('should fail and roll back bulk startup when a required component stops unexpectedly mid-startup', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      class SelfStoppingRequiredComponent extends BaseComponent {
+        public start(): void {
+          const reportUnexpectedStop = this.getUnexpectedStopReporter();
+
+          setTimeout(() => {
+            reportUnexpectedStop(new Error('boot crash'));
+          }, 20);
+        }
+
+        public stop(): void {}
+      }
+
+      class SlowStartComponent extends BaseComponent {
+        public stopCalls = 0;
+
+        constructor() {
+          super(logger, { name: 'slow-start' });
+        }
+
+        public async start(): Promise<void> {
+          await sleep(80);
+        }
+
+        public stop(): void {
+          this.stopCalls += 1;
+        }
+      }
+
+      const slowStart = new SlowStartComponent();
+
+      await lifecycle.registerComponent(
+        new SelfStoppingRequiredComponent(logger, { name: 'required' }),
+      );
+      await lifecycle.registerComponent(slowStart);
+
+      const result = await lifecycle.startAllComponents();
+
+      expect(result.success).toBe(false);
+      expect(result.code).toBe('component_unexpected_stop');
+      expect(result.reason).toBe('boot crash');
+      expect(result.error?.message).toBe('boot crash');
+      expect(result.startedComponents).toEqual([]);
+      expect(lifecycle.getComponentStatus('required')?.state).toBe('stopped');
+      expect(lifecycle.getComponentStatus('slow-start')?.state).toBe('stopped');
+      expect(lifecycle.isComponentRunning('required')).toBe(false);
+      expect(lifecycle.isComponentRunning('slow-start')).toBe(false);
+      expect(slowStart.stopCalls).toBe(1);
+    });
+
+    test('should fail and roll back bulk startup when a required component stops before start() completes', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      class SlowSelfStoppingRequiredComponent extends BaseComponent {
+        public async start(): Promise<void> {
+          const reportUnexpectedStop = this.getUnexpectedStopReporter();
+
+          setTimeout(() => {
+            reportUnexpectedStop(new Error('boot crash'));
+          }, 10);
+
+          await sleep(50);
+        }
+
+        public stop(): void {}
+      }
+
+      class SlowStartComponent extends BaseComponent {
+        public stopCalls = 0;
+
+        constructor() {
+          super(logger, { name: 'slow-start' });
+        }
+
+        public async start(): Promise<void> {
+          await sleep(80);
+        }
+
+        public stop(): void {
+          this.stopCalls += 1;
+        }
+      }
+
+      const slowStart = new SlowStartComponent();
+
+      await lifecycle.registerComponent(
+        new SlowSelfStoppingRequiredComponent(logger, { name: 'required' }),
+      );
+      await lifecycle.registerComponent(slowStart);
+
+      const result = await lifecycle.startAllComponents();
+
+      expect(result.success).toBe(false);
+      expect(result.code).toBe('component_unexpected_stop');
+      expect(result.reason).toBe('boot crash');
+      expect(result.error?.message).toBe('boot crash');
+      expect(result.startedComponents).toEqual([]);
+      expect(lifecycle.getComponentStatus('required')?.state).toBe('stopped');
+      expect(lifecycle.getComponentStatus('slow-start')?.state).toBe(
+        'registered',
+      );
+      expect(lifecycle.isComponentRunning('required')).toBe(false);
+      expect(lifecycle.isComponentRunning('slow-start')).toBe(false);
+      expect(slowStart.stopCalls).toBe(0);
+    });
+
+    test('should fail and roll back bulk startup when a required component stops and then rejects during startup', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      class RejectingSelfStoppingRequiredComponent extends BaseComponent {
+        public async start(): Promise<void> {
+          const reportUnexpectedStop = this.getUnexpectedStopReporter();
+
+          setTimeout(() => {
+            reportUnexpectedStop(new Error('boot crash'));
+          }, 10);
+
+          await sleep(40);
+          throw new Error('start rejected after crash');
+        }
+
+        public stop(): void {}
+      }
+
+      class SlowStartComponent extends BaseComponent {
+        public stopCalls = 0;
+
+        constructor() {
+          super(logger, { name: 'slow-start' });
+        }
+
+        public async start(): Promise<void> {
+          await sleep(80);
+        }
+
+        public stop(): void {
+          this.stopCalls += 1;
+        }
+      }
+
+      const slowStart = new SlowStartComponent();
+
+      await lifecycle.registerComponent(
+        new RejectingSelfStoppingRequiredComponent(logger, {
+          name: 'required',
+        }),
+      );
+      await lifecycle.registerComponent(slowStart);
+
+      const result = await lifecycle.startAllComponents();
+
+      expect(result.success).toBe(false);
+      expect(result.code).toBe('component_unexpected_stop');
+      expect(result.reason).toBe('boot crash');
+      expect(result.error?.message).toBe('boot crash');
+      expect(result.startedComponents).toEqual([]);
+      expect(lifecycle.getComponentStatus('required')?.state).toBe('stopped');
+      expect(lifecycle.getComponentStatus('slow-start')?.state).toBe(
+        'registered',
+      );
+      expect(lifecycle.isComponentRunning('required')).toBe(false);
+      expect(lifecycle.isComponentRunning('slow-start')).toBe(false);
+      expect(slowStart.stopCalls).toBe(0);
+    });
+
+    test('should keep bulk-startup signal attachment and continue when an optional component stops unexpectedly', async () => {
+      const lifecycle = new LifecycleManager({
+        logger,
+        attachSignalsBeforeStartup: true,
+        detachSignalsOnStop: true,
+        attachSignalsOnStart: false,
+      });
+
+      class SelfStoppingOptionalComponent extends BaseComponent {
+        constructor() {
+          super(logger, { name: 'optional-stop', optional: true });
+        }
+
+        public start(): void {
+          const reportUnexpectedStop = this.getUnexpectedStopReporter();
+
+          setTimeout(() => {
+            reportUnexpectedStop(new Error('optional boot crash'));
+          }, 20);
+        }
+
+        public stop(): void {}
+      }
+
+      class StableSlowStartComponent extends BaseComponent {
+        constructor() {
+          super(logger, { name: 'stable' });
+        }
+
+        public async start(): Promise<void> {
+          await sleep(80);
+        }
+
+        public stop(): void {}
+      }
+
+      await lifecycle.registerComponent(new SelfStoppingOptionalComponent());
+      await lifecycle.registerComponent(new StableSlowStartComponent());
+
+      const result = await lifecycle.startAllComponents();
+
+      expect(result.success).toBe(true);
+      expect(result.startedComponents).toEqual(['stable']);
+      expect(result.failedOptionalComponents).toHaveLength(1);
+      expect(result.failedOptionalComponents[0].name).toBe('optional-stop');
+      expect(result.failedOptionalComponents[0].error.message).toBe(
+        'optional boot crash',
+      );
+      expect(lifecycle.getComponentStatus('optional-stop')?.state).toBe(
+        'stopped',
+      );
+      expect(lifecycle.getComponentStatus('stable')?.state).toBe('running');
+      expect(lifecycle.getSignalStatus().isAttached).toBe(true);
+    });
+
+    test('forceStalled start should ignore late resolution from previous stop attempt', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      class RestartableSlowStopComponent extends BaseComponent {
+        constructor() {
+          super(logger, {
+            name: 'restartable',
+            shutdownGracefulTimeoutMS: 1000,
+          });
+        }
+
+        public async start(): Promise<void> {
+          await sleep(700);
+        }
+
+        public async stop(): Promise<void> {
+          await sleep(1500);
+        }
+      }
+
+      await lifecycle.registerComponent(new RestartableSlowStopComponent());
+      await lifecycle.startComponent('restartable');
+
+      const stalledResolvedEvents: LifecycleManagerEventMap['component:stalled-resolved'][] =
+        [];
+      const stoppedEvents: LifecycleManagerEventMap['component:stopped'][] = [];
+
+      lifecycle.on<LifecycleManagerEventMap['component:stalled-resolved']>(
+        'component:stalled-resolved',
+        (data) => {
+          stalledResolvedEvents.push(data);
+        },
+      );
+      lifecycle.on<LifecycleManagerEventMap['component:stopped']>(
+        'component:stopped',
+        (data) => {
+          stoppedEvents.push(data);
+        },
+      );
+
+      const stopPromise = lifecycle.stopComponent('restartable');
+      await sleep(1100);
+
+      expect(lifecycle.getComponentStatus('restartable')?.state).toBe(
+        'stalled',
+      );
+
+      const startPromise = lifecycle.startComponent('restartable', {
+        forceStalled: true,
+      });
+
+      await sleep(500);
+
+      expect(lifecycle.getComponentStatus('restartable')?.state).toBe(
+        'starting',
+      );
+      expect(stalledResolvedEvents).toHaveLength(0);
+      expect(stoppedEvents).toHaveLength(0);
+
+      const startResult = await startPromise;
+      const stopResult = await stopPromise;
+
+      expect(startResult.success).toBe(true);
+      expect(stopResult.success).toBe(false);
+      expect(lifecycle.getComponentStatus('restartable')?.state).toBe(
+        'running',
+      );
+      expect(lifecycle.getStalledComponentCount()).toBe(0);
+      expect(stalledResolvedEvents).toHaveLength(0);
+      expect(stoppedEvents).toHaveLength(0);
+    }, 4000);
+
+    test('failed forceStalled start should still clear the old stall once stop resolves', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      class FailingRestartSlowStopComponent extends BaseComponent {
+        private startCount = 0;
+
+        constructor() {
+          super(logger, {
+            name: 'failing-restart',
+            shutdownGracefulTimeoutMS: 1000,
+          });
+        }
+
+        public async start(): Promise<void> {
+          this.startCount += 1;
+
+          if (this.startCount === 1) {
+            return;
+          }
+
+          await sleep(700);
+          throw new Error('restart failed');
+        }
+
+        public async stop(): Promise<void> {
+          await sleep(1500);
+        }
+      }
+
+      await lifecycle.registerComponent(new FailingRestartSlowStopComponent());
+      await lifecycle.startComponent('failing-restart');
+
+      const stopPromise = lifecycle.stopComponent('failing-restart');
+      await sleep(1100);
+
+      expect(lifecycle.getComponentStatus('failing-restart')?.state).toBe(
+        'stalled',
+      );
+
+      const startResult = await lifecycle.startComponent('failing-restart', {
+        forceStalled: true,
+      });
+      const stopResult = await stopPromise;
+
+      expect(startResult.success).toBe(false);
+      expect(startResult.code).toBe('unknown_error');
+      expect(stopResult.success).toBe(false);
+      expect(lifecycle.getStalledComponentCount()).toBe(0);
+      expect(lifecycle.getComponentStatus('failing-restart')?.state).toBe(
+        'registered',
+      );
+    }, 4000);
+
+    test('successful forceStalled start should make the previous stop resolution stale', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      class RestartedSlowStopComponent extends BaseComponent {
+        constructor() {
+          super(logger, {
+            name: 'restarted-slow-stop',
+            shutdownGracefulTimeoutMS: 1000,
+          });
+        }
+
+        public start(): void {}
+
+        public async stop(): Promise<void> {
+          await sleep(2500);
+        }
+      }
+
+      await lifecycle.registerComponent(new RestartedSlowStopComponent());
+      await lifecycle.startComponent('restarted-slow-stop');
+
+      await lifecycle.stopComponent('restarted-slow-stop');
+
+      expect(lifecycle.getComponentStatus('restarted-slow-stop')?.state).toBe(
+        'stalled',
+      );
+
+      const startResult = await lifecycle.startComponent(
+        'restarted-slow-stop',
+        { forceStalled: true },
+      );
+      expect(startResult.success).toBe(true);
+      expect(lifecycle.getComponentStatus('restarted-slow-stop')?.state).toBe(
+        'running',
+      );
+
+      // forceImmediate is only used here to create a fresh stall in the new run.
+      // The old stop() promise from the previous run should not clear it.
+      const forceImmediateResult = await lifecycle.stopComponent(
+        'restarted-slow-stop',
+        { forceImmediate: true },
+      );
+      expect(forceImmediateResult.success).toBe(false);
+      expect(lifecycle.getComponentStatus('restarted-slow-stop')?.state).toBe(
+        'stalled',
+      );
+
+      await sleep(1600);
+
+      expect(lifecycle.getComponentStatus('restarted-slow-stop')?.state).toBe(
+        'stalled',
+      );
+      expect(lifecycle.getStalledComponentCount()).toBe(1);
+    }, 4000);
+
+    test('late stop resolution from an unregistered instance should not clear a same-name replacement stall', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      class SlowStopComponent extends BaseComponent {
+        constructor(private readonly stopDelayMS: number) {
+          super(logger, {
+            name: 'duplicate-name',
+            shutdownGracefulTimeoutMS: 1000,
+          });
+        }
+
+        public start(): void {}
+
+        public async stop(): Promise<void> {
+          await sleep(this.stopDelayMS);
+        }
+      }
+
+      const firstComponent = new SlowStopComponent(2500);
+      await lifecycle.registerComponent(firstComponent);
+      await lifecycle.startComponent('duplicate-name');
+
+      const firstStopPromise = lifecycle.stopComponent('duplicate-name');
+      await sleep(1100);
+
+      expect(lifecycle.getComponentStatus('duplicate-name')?.state).toBe(
+        'stalled',
+      );
+
+      const unregisterResult = await lifecycle.unregisterComponent(
+        'duplicate-name',
+        { stopIfRunning: false },
+      );
+      expect(unregisterResult.success).toBe(true);
+
+      const replacementComponent = new SlowStopComponent(5000);
+      await lifecycle.registerComponent(replacementComponent);
+      await lifecycle.startComponent('duplicate-name');
+
+      const replacementStopPromise = lifecycle.stopComponent('duplicate-name');
+      await sleep(1100);
+
+      expect(lifecycle.getComponentStatus('duplicate-name')?.state).toBe(
+        'stalled',
+      );
+
+      // The original stop() resolves at ~2500ms from its start. That late
+      // resolution must not clear the replacement component's stalled state.
+      await sleep(500);
+
+      expect(lifecycle.getComponentStatus('duplicate-name')?.state).toBe(
+        'stalled',
+      );
+      expect(lifecycle.getStalledComponentCount()).toBe(1);
+
+      await firstStopPromise;
+      await replacementStopPromise;
+    }, 8000);
+
     test('should emit lifecycle-manager:started event on success', async () => {
       const lifecycle = new LifecycleManager({ logger });
 
@@ -2913,6 +4373,139 @@ describe('LifecycleManager - Bulk Operations', () => {
       // Remaining components should still be running since shutdown halted
       expect(lifecycle.isComponentRunning('comp2')).toBe(true);
       expect(lifecycle.isComponentRunning('comp1')).toBe(true);
+    });
+
+    test('should clear stale stalledComponents entries when late resolution finishes during shutdown', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      class SlowThenStopsComponent extends BaseComponent {
+        constructor(
+          name: string,
+          private readonly stopDelayMS: number,
+        ) {
+          super(logger, {
+            name,
+            shutdownGracefulTimeoutMS: 1000,
+          });
+        }
+
+        public start(): void {}
+
+        public async stop(): Promise<void> {
+          await sleep(this.stopDelayMS);
+        }
+      }
+
+      await lifecycle.registerComponent(
+        new SlowThenStopsComponent('first', 400),
+      );
+      await lifecycle.registerComponent(
+        new SlowThenStopsComponent('slow', 1100),
+      );
+      await lifecycle.registerComponent(
+        new SlowThenStopsComponent('last', 400),
+      );
+      await lifecycle.registerComponent(
+        new SlowThenStopsComponent('tail', 400),
+      );
+
+      await lifecycle.startAllComponents();
+
+      const result = await lifecycle.stopAllComponents({
+        haltOnStall: false,
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.stalledComponents).toHaveLength(0);
+      expect(result.stoppedComponents).toEqual([
+        'tail',
+        'last',
+        'first',
+        'slow',
+      ]);
+      expect(lifecycle.getStalledComponents()).toHaveLength(0);
+      expect(lifecycle.getComponentStatus('slow')?.state).toBe('stopped');
+      expect(lifecycle.getComponentStatus('first')?.state).toBe('stopped');
+      expect(lifecycle.getComponentStatus('last')?.state).toBe('stopped');
+      expect(lifecycle.getComponentStatus('tail')?.state).toBe('stopped');
+    }, 3000);
+
+    test('should not hit the global shutdown timeout after graceful completion wins during force phase', async () => {
+      class GracefulWinsDuringHungForceComponent extends BaseComponent {
+        constructor() {
+          super(logger, {
+            name: 'graceful-wins-during-hung-force',
+            shutdownGracefulTimeoutMS: 1000,
+            shutdownForceTimeoutMS: 500,
+          });
+        }
+
+        public start(): void {}
+
+        public async stop(): Promise<void> {
+          await sleep(1100);
+        }
+
+        public async onShutdownForce(): Promise<void> {
+          await sleep(5000);
+        }
+      }
+
+      const lifecycle = new LifecycleManager({
+        logger,
+        shutdownOptions: {
+          timeoutMS: 1200,
+        },
+      });
+
+      await lifecycle.registerComponent(
+        new GracefulWinsDuringHungForceComponent(),
+      );
+      await lifecycle.startComponent('graceful-wins-during-hung-force');
+
+      const result = await lifecycle.stopAllComponents();
+
+      expect(result.success).toBe(true);
+      expect(result.code).toBeUndefined();
+      expect(result.timedOut).toBeUndefined();
+      expect(result.stalledComponents).toHaveLength(0);
+      expect(result.stoppedComponents).toEqual([
+        'graceful-wins-during-hung-force',
+      ]);
+      expect(
+        lifecycle.getComponentStatus('graceful-wins-during-hung-force')?.state,
+      ).toBe('stopped');
+    }, 3000);
+
+    test('should count warning-phase unexpected stops as stopped in shutdown results', async () => {
+      const lifecycle = new LifecycleManager({
+        logger,
+        shutdownWarningTimeoutMS: 10,
+      });
+
+      class SelfStoppingWarningComponent extends BaseComponent {
+        public start(): void {}
+        public stop(): void {}
+
+        public onShutdownWarning(): void {
+          this.reportUnexpectedStop(new Error('warning phase self-stop'));
+        }
+      }
+
+      await lifecycle.registerComponent(
+        new SelfStoppingWarningComponent(logger, { name: 'self-stop' }),
+      );
+
+      await lifecycle.startComponent('self-stop');
+
+      const result = await lifecycle.stopAllComponents({
+        haltOnStall: false,
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.stalledComponents).toHaveLength(0);
+      expect(result.stoppedComponents).toEqual(['self-stop']);
+      expect(lifecycle.getComponentStatus('self-stop')?.state).toBe('stopped');
     });
 
     test('should retry stalled components when retryStalled is true', async () => {
@@ -4966,6 +6559,49 @@ describe('LifecycleManager - Signal Integration', () => {
       expect(lifecycle.getSignalStatus().isAttached).toBe(false);
     });
 
+    test('attachSignalsOnStart should detach after startup-time unexpected stop and failed startup', async () => {
+      const lifecycle = new LifecycleManager({
+        logger,
+        attachSignalsOnStart: true,
+        detachSignalsOnStop: true,
+      });
+
+      class SelfStoppingComponent extends BaseComponent {
+        public start(): void {
+          const reportUnexpectedStop = this.getUnexpectedStopReporter();
+
+          setTimeout(() => {
+            reportUnexpectedStop(new Error('startup self-stop'));
+          }, 10);
+        }
+
+        public stop(): void {}
+      }
+
+      class SlowFailingStartComponent extends BaseComponent {
+        public async start(): Promise<void> {
+          await sleep(50);
+          throw new Error('startup failed');
+        }
+
+        public stop(): void {}
+      }
+
+      await lifecycle.registerComponent(
+        new SelfStoppingComponent(logger, { name: 'self-stop' }),
+      );
+      await lifecycle.registerComponent(
+        new SlowFailingStartComponent(logger, { name: 'slow-fail' }),
+      );
+
+      const result = await lifecycle.startAllComponents();
+
+      expect(result.success).toBe(false);
+      expect(result.code).toBe('required_component_failed');
+      expect(lifecycle.getRunningComponentCount()).toBe(0);
+      expect(lifecycle.getSignalStatus().isAttached).toBe(false);
+    });
+
     test('should re-attach signals on restart when attachSignalsBeforeStartup, attachSignalsOnStart, and detachSignalsOnStop are enabled', async () => {
       const lifecycle = new LifecycleManager({
         logger,
@@ -6581,7 +8217,9 @@ describe('LifecycleManager - Signal Integration', () => {
       });
       lifecycle.on(
         'lifecycle-manager:shutdown-escalation-armed',
-        (event: LifecycleManagerEventMap['lifecycle-manager:shutdown-escalation-armed']) => {
+        (
+          event: LifecycleManagerEventMap['lifecycle-manager:shutdown-escalation-armed'],
+        ) => {
           armedEvents.push(event);
         },
       );

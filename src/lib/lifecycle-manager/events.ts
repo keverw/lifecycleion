@@ -174,6 +174,12 @@ export interface LifecycleManagerEventMap {
     reason?: string;
     code?: string;
   };
+  'component:stalled-resolved': {
+    name: string;
+    stallInfo: ComponentStallInfo;
+    stalledDurationMS: number;
+  };
+  'component:unexpected-stop': { name: string; error?: Error };
   'component:shutdown-force-completed': { name: string };
   'component:shutdown-force-timeout': { name: string; timeoutMS: number };
   'component:startup-rollback': { name: string };
@@ -529,6 +535,22 @@ export class LifecycleManagerEvents {
       reason: info?.reason,
       code: info?.code,
     });
+  }
+
+  public componentStalledResolved(
+    name: string,
+    stallInfo: ComponentStallInfo,
+    stalledDurationMS: number,
+  ): void {
+    this.emit('component:stalled-resolved', {
+      name,
+      stallInfo,
+      stalledDurationMS,
+    });
+  }
+
+  public componentUnexpectedStop(name: string, error?: Error): void {
+    this.emit('component:unexpected-stop', { name, error });
   }
 
   public componentShutdownForceCompleted(name: string): void {

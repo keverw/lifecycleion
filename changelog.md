@@ -15,6 +15,7 @@
 - [0.0.11 (Apr 9, 2026)](#0011-apr-9-2026)
 - [0.0.12 (Apr 18, 2026)](#0012-apr-18-2026)
 - [0.0.13 (Apr 19, 2026)](#0013-apr-19-2026)
+- [Unreleased](#unreleased)
 
 <!-- tocstop -->
 
@@ -90,3 +91,12 @@
 - The default repeated shutdown escalation window is now 2 seconds with a default force threshold of 3 requests
 - Repeated shutdown escalation now supports optional `armedAfterFailureMS` overrides so failed or stalled shutdown attempts can stay force-armed longer than the default derived post-failure window
 - LifecycleManager shutdown logs now distinguish between the normal first shutdown request, repeated shutdown requests still being tracked, and repeated-request escalation when the force threshold is reached
+
+## Unreleased
+
+- LifecycleManager now detects when a stalled component's original `stop()` or `onShutdownForce()` promise eventually resolves and automatically transitions it from `stalled` to `stopped`, clearing the stall record and emitting a `component:stalled-resolved` event. A per-component stop generation token prevents a late-resolving promise from affecting a component that has already been restarted since stalling.
+- Docs now document the `stop()` promise-deduplication pattern as the recommended approach when `onShutdownForce()` should join an already-running `stop()`, and the `onGracefulStopTimeout()` pattern as an alternative for unblocking `stop()` without a concurrent second close.
+- BaseComponent now exposes a protected `reportUnexpectedStop(error?)` method. Call it when the component detects an internal failure (crashed server, lost connection, exited worker) to let the manager mark it stopped, store the error as `lastError`, emit `component:unexpected-stop`, and then emit the canonical `component:stopped` event for the resulting stopped state. A subsequent `stopAllComponents()` call skips the already-stopped component and proceeds normally. The call is a no-op once the manager begins stopping or unregistering the component, and the handler is automatically re-armed after each successful restart.
+- If `reportUnexpectedStop()` fires during `startAllComponents()`, required components now fail the bulk startup with `code: 'component_unexpected_stop'` and trigger rollback of later-started components, while optional components are recorded in `failedOptionalComponents`.
+- Added `component:unexpected-stop` event (payload: `{ name, error? }`) emitted when a running component calls `reportUnexpectedStop()`, immediately before the follow-up `component:stopped` event.
+- BaseComponent now exposes a protected `getSelfStatus()` method that returns the component's own `ComponentStatus` from the manager without requiring the caller to pass the component name.
