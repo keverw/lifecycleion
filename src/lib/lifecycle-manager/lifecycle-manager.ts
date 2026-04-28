@@ -5767,113 +5767,234 @@ export class LifecycleManager
   }
 
   /**
-   * Handle reload request - calls custom callback or broadcasts to components.
+   * Shared dispatch path for reload/info/debug requests. Logs the dispatch,
+   * emits the signal event, then either invokes the user-supplied callback
+   * (passing the broadcast function so the user controls when/whether to
+   * broadcast) or broadcasts directly when no callback is configured.
    *
    * When called from signal handlers (source='signal'), the Promise is started
-   * but not awaited due to Node.js signal handler constraints. Components are
-   * still notified and the work completes, but return values are not accessible.
-   *
+   * but not awaited — Node.js signal handlers cannot return values, so results
+   * are not accessible. Components are still notified and the work completes.
    * When called from manual triggers (source='trigger'), the Promise is awaited
    * and results are returned for programmatic use.
-   *
-   * @param source - Whether triggered from signal manager or manual trigger
    */
+  private async handleSignalRequest(
+    descriptor: {
+      signal: 'reload' | 'info' | 'debug';
+      dispatchedLogLabel: string;
+      emitSignal: () => void;
+      customCallback?: (
+        broadcastFn: () => Promise<SignalBroadcastResult>,
+      ) => void | Promise<void>;
+      broadcast: () => Promise<SignalBroadcastResult>;
+    },
+    source: 'signal' | 'trigger',
+  ): Promise<SignalBroadcastResult> {
+    this.logger.info(descriptor.dispatchedLogLabel, { params: { source } });
+    descriptor.emitSignal();
+
+    if (descriptor.customCallback) {
+      const result = descriptor.customCallback(descriptor.broadcast);
+
+      if (isPromise(result)) {
+        await result;
+      }
+
+      // Return empty result (custom callback handled it)
+      return {
+        signal: descriptor.signal,
+        results: [],
+        timedOut: false,
+        code: 'ok',
+      };
+    }
+
+    return descriptor.broadcast();
+  }
+
   private async handleReloadRequest(
     source: 'signal' | 'trigger' = 'trigger',
   ): Promise<SignalBroadcastResult> {
-    this.logger.info('Reload request received', { params: { source } });
-    this.lifecycleEvents.signalReload();
-
-    if (this.onReloadRequested) {
-      // Call custom callback with broadcast function
-      const broadcastFn = () => this.broadcastReload();
-      const result = this.onReloadRequested(broadcastFn);
-
-      if (isPromise(result)) {
-        await result;
-      }
-
-      // Return empty result (custom callback handled it)
-      return {
+    return this.handleSignalRequest(
+      {
         signal: 'reload',
-        results: [],
-        timedOut: false,
-        code: 'ok',
-      };
-    }
-
-    // No custom callback - broadcast to all components
-    return this.broadcastReload();
+        dispatchedLogLabel: 'Reload dispatched',
+        emitSignal: () => this.lifecycleEvents.signalReload(),
+        customCallback: this.onReloadRequested,
+        broadcast: () => this.broadcastReload(),
+      },
+      source,
+    );
   }
 
-  /**
-   * Handle info request - calls custom callback or broadcasts to components.
-   *
-   * When called from signal handlers, the Promise executes but return values
-   * are not accessible due to Node.js signal handler constraints.
-   *
-   * @param source - Whether triggered from signal manager or manual trigger
-   */
   private async handleInfoRequest(
     source: 'signal' | 'trigger' = 'trigger',
   ): Promise<SignalBroadcastResult> {
-    this.logger.info('Info request received', { params: { source } });
-    this.lifecycleEvents.signalInfo();
-
-    if (this.onInfoRequested) {
-      // Call custom callback with broadcast function
-      const broadcastFn = () => this.broadcastInfo();
-      const result = this.onInfoRequested(broadcastFn);
-      if (isPromise(result)) {
-        await result;
-      }
-
-      // Return empty result (custom callback handled it)
-      return {
+    return this.handleSignalRequest(
+      {
         signal: 'info',
-        results: [],
-        timedOut: false,
-        code: 'ok',
-      };
-    }
-
-    // No custom callback - broadcast to all components
-    return this.broadcastInfo();
+        dispatchedLogLabel: 'Info dispatched',
+        emitSignal: () => this.lifecycleEvents.signalInfo(),
+        customCallback: this.onInfoRequested,
+        broadcast: () => this.broadcastInfo(),
+      },
+      source,
+    );
   }
 
-  /**
-   * Handle debug request - calls custom callback or broadcasts to components.
-   *
-   * When called from signal handlers, the Promise executes but return values
-   * are not accessible due to Node.js signal handler constraints.
-   *
-   * @param source - Whether triggered from signal manager or manual trigger
-   */
   private async handleDebugRequest(
     source: 'signal' | 'trigger' = 'trigger',
   ): Promise<SignalBroadcastResult> {
-    this.logger.info('Debug request received', { params: { source } });
-    this.lifecycleEvents.signalDebug();
-
-    if (this.onDebugRequested) {
-      // Call custom callback with broadcast function
-      const broadcastFn = () => this.broadcastDebug();
-      const result = this.onDebugRequested(broadcastFn);
-      if (isPromise(result)) {
-        await result;
-      }
-
-      // Return empty result (custom callback handled it)
-      return {
+    return this.handleSignalRequest(
+      {
         signal: 'debug',
-        results: [],
-        timedOut: false,
-        code: 'ok',
-      };
+        dispatchedLogLabel: 'Debug dispatched',
+        emitSignal: () => this.lifecycleEvents.signalDebug(),
+        customCallback: this.onDebugRequested,
+        broadcast: () => this.broadcastDebug(),
+      },
+      source,
+    );
+  }
+
+  /**
+   * Shared signal broadcast pipeline used by reload/info/debug.
+   * Iterates running components, runs the picked handler with timeout, and
+   * aggregates per-component results into a SignalBroadcastResult.
+   */
+  private async runSignalBroadcast(descriptor: {
+    signal: 'reload' | 'info' | 'debug';
+    pickHandler: (
+      component: BaseComponent,
+    ) => (() => Promise<void> | void) | undefined;
+    startupLog: string;
+    timeoutLog: string;
+    errorLog: string;
+    emitStarted: (name: string) => void;
+    emitCompleted: (name: string) => void;
+    emitFailed: (name: string, error: Error) => void;
+  }): Promise<SignalBroadcastResult> {
+    const results: ComponentSignalResult[] = [];
+
+    const targets = this.components.filter((component) =>
+      this.runningComponents.has(component.getName()),
+    );
+
+    if (this.isStarting) {
+      this.logger.info(descriptor.startupLog);
     }
 
-    // No custom callback - broadcast to all components
-    return this.broadcastDebug();
+    for (const component of targets) {
+      const name = component.getName();
+      const handler = descriptor.pickHandler(component);
+
+      if (!handler) {
+        results.push({
+          name,
+          called: false,
+          error: null,
+          timedOut: false,
+          code: 'no_handler',
+        });
+        continue;
+      }
+
+      descriptor.emitStarted(name);
+
+      const timeoutMS = component.signalTimeoutMS;
+      let timeoutHandle: NodeJS.Timeout | undefined;
+      const timeoutResult = { timedOut: true } as const;
+
+      try {
+        const handlerResult = handler();
+        const handlerPromise: Promise<unknown> = isPromise(handlerResult)
+          ? (handlerResult as Promise<unknown>)
+          : Promise.resolve(handlerResult as unknown);
+
+        const outcome: unknown =
+          timeoutMS > 0
+            ? await Promise.race([
+                handlerPromise,
+                new Promise<typeof timeoutResult>((resolve) => {
+                  timeoutHandle = setTimeout(() => {
+                    resolve(timeoutResult);
+                  }, timeoutMS);
+                }),
+              ])
+            : await handlerPromise;
+
+        if (outcome === timeoutResult) {
+          this.logger.entity(name).warn(descriptor.timeoutLog, {
+            params: { timeoutMS },
+          });
+          // Prevent unhandled rejection if handler throws after timeout
+          Promise.resolve(handlerPromise).catch(() => {
+            // Intentionally ignore errors after timeout
+          });
+          results.push({
+            name,
+            called: true,
+            error: null,
+            timedOut: true,
+            code: 'timeout',
+          });
+        } else {
+          descriptor.emitCompleted(name);
+          results.push({
+            name,
+            called: true,
+            error: null,
+            timedOut: false,
+            code: 'called',
+          });
+        }
+      } catch (error) {
+        const err = error instanceof Error ? error : new Error(String(error));
+
+        this.logger.entity(name).error(descriptor.errorLog, {
+          params: { error: err },
+        });
+
+        descriptor.emitFailed(name, err);
+
+        results.push({
+          name,
+          called: true,
+          error: err,
+          timedOut: false,
+          code: 'error',
+        });
+      } finally {
+        if (timeoutHandle) {
+          clearTimeout(timeoutHandle);
+        }
+      }
+    }
+
+    const calledResults = results.filter((result) => result.called);
+    const hasError = calledResults.some((result) => result.error);
+    const isAllError =
+      calledResults.length > 0 && calledResults.every((result) => result.error);
+    const hasTimeout = calledResults.some((result) => result.timedOut);
+    const isAllTimeout =
+      calledResults.length > 0 &&
+      calledResults.every((result) => result.timedOut);
+    const code = hasError
+      ? isAllError
+        ? 'error'
+        : 'partial_error'
+      : hasTimeout
+        ? isAllTimeout
+          ? 'timeout'
+          : 'partial_timeout'
+        : 'ok';
+
+    return {
+      signal: descriptor.signal,
+      results,
+      timedOut: hasTimeout,
+      code,
+    };
   }
 
   /**
@@ -5882,130 +6003,19 @@ export class LifecycleManager
    * Continues on errors - collects all results.
    */
   private async broadcastReload(): Promise<SignalBroadcastResult> {
-    const results: ComponentSignalResult[] = [];
-
-    // Only call onReload() on running components
-    const componentsToReload = this.components.filter((component) =>
-      this.runningComponents.has(component.getName()),
-    );
-
-    if (this.isStarting) {
-      this.logger.info(
-        'Reload during startup: only reloading already-started components',
-      );
-    }
-
-    for (const component of componentsToReload) {
-      const name = component.getName();
-
-      if (!component.onReload) {
-        // Component doesn't implement onReload
-        results.push({
-          name,
-          called: false,
-          error: null,
-          timedOut: false,
-          code: 'no_handler',
-        });
-        continue;
-      }
-
-      this.lifecycleEvents.componentReloadStarted(name);
-
-      const timeoutMS = component.signalTimeoutMS;
-      let timeoutHandle: NodeJS.Timeout | undefined;
-      const timeoutResult = { timedOut: true } as const;
-
-      try {
-        const result = component.onReload();
-        const handlerPromise: Promise<unknown> = isPromise(result)
-          ? (result as Promise<unknown>)
-          : Promise.resolve(result as unknown);
-
-        const outcome: unknown =
-          timeoutMS > 0
-            ? await Promise.race([
-                handlerPromise,
-                new Promise<typeof timeoutResult>((resolve) => {
-                  timeoutHandle = setTimeout(() => {
-                    resolve(timeoutResult);
-                  }, timeoutMS);
-                }),
-              ])
-            : await handlerPromise;
-
-        if (outcome === timeoutResult) {
-          this.logger.entity(name).warn('Reload handler timed out', {
-            params: { timeoutMS },
-          });
-          // Prevent unhandled rejection if handler throws after timeout
-          Promise.resolve(handlerPromise).catch(() => {
-            // Intentionally ignore errors after timeout
-          });
-          results.push({
-            name,
-            called: true,
-            error: null,
-            timedOut: true,
-            code: 'timeout',
-          });
-        } else {
-          this.lifecycleEvents.componentReloadCompleted(name);
-          results.push({
-            name,
-            called: true,
-            error: null,
-            timedOut: false,
-            code: 'called',
-          });
-        }
-      } catch (error) {
-        const err = error instanceof Error ? error : new Error(String(error));
-
-        this.logger.entity(name).error('Reload failed: {{error.message}}', {
-          params: { error: err },
-        });
-
-        this.lifecycleEvents.componentReloadFailed(name, err);
-
-        results.push({
-          name,
-          called: true,
-          error: err,
-          timedOut: false,
-          code: 'error',
-        });
-      } finally {
-        if (timeoutHandle) {
-          clearTimeout(timeoutHandle);
-        }
-      }
-    }
-
-    const calledResults = results.filter((result) => result.called);
-    const hasError = calledResults.some((result) => result.error);
-    const isAllError =
-      calledResults.length > 0 && calledResults.every((result) => result.error);
-    const hasTimeout = calledResults.some((result) => result.timedOut);
-    const isAllTimeout =
-      calledResults.length > 0 &&
-      calledResults.every((result) => result.timedOut);
-    const code = hasError
-      ? isAllError
-        ? 'error'
-        : 'partial_error'
-      : hasTimeout
-        ? isAllTimeout
-          ? 'timeout'
-          : 'partial_timeout'
-        : 'ok';
-
-    return {
+    return this.runSignalBroadcast({
       signal: 'reload',
-      results,
-      timedOut: hasTimeout,
-      code,
-    };
+      pickHandler: (component) => component.onReload?.bind(component),
+      startupLog:
+        'Reload during startup: only reloading already-started components',
+      timeoutLog: 'Reload handler timed out',
+      errorLog: 'Reload failed: {{error.message}}',
+      emitStarted: (name) => this.lifecycleEvents.componentReloadStarted(name),
+      emitCompleted: (name) =>
+        this.lifecycleEvents.componentReloadCompleted(name),
+      emitFailed: (name, error) =>
+        this.lifecycleEvents.componentReloadFailed(name, error),
+    });
   }
 
   /**
@@ -6014,132 +6024,19 @@ export class LifecycleManager
    * Continues on errors - collects all results.
    */
   private async broadcastInfo(): Promise<SignalBroadcastResult> {
-    const results: ComponentSignalResult[] = [];
-
-    // Only call onInfo() on running components
-    const componentsToNotify = this.components.filter((component) =>
-      this.runningComponents.has(component.getName()),
-    );
-
-    if (this.isStarting) {
-      this.logger.info(
-        'Info during startup: only notifying already-started components',
-      );
-    }
-
-    for (const component of componentsToNotify) {
-      const name = component.getName();
-
-      if (!component.onInfo) {
-        // Component doesn't implement onInfo
-        results.push({
-          name,
-          called: false,
-          error: null,
-          timedOut: false,
-          code: 'no_handler',
-        });
-        continue;
-      }
-
-      this.lifecycleEvents.componentInfoStarted(name);
-
-      const timeoutMS = component.signalTimeoutMS;
-      let timeoutHandle: NodeJS.Timeout | undefined;
-      const timeoutResult = { timedOut: true } as const;
-
-      try {
-        const result = component.onInfo();
-        const handlerPromise: Promise<unknown> = isPromise(result)
-          ? (result as Promise<unknown>)
-          : Promise.resolve(result as unknown);
-
-        const outcome: unknown =
-          timeoutMS > 0
-            ? await Promise.race([
-                handlerPromise,
-                new Promise<typeof timeoutResult>((resolve) => {
-                  timeoutHandle = setTimeout(() => {
-                    resolve(timeoutResult);
-                  }, timeoutMS);
-                }),
-              ])
-            : await handlerPromise;
-
-        if (outcome === timeoutResult) {
-          this.logger.entity(name).warn('Info handler timed out', {
-            params: { timeoutMS },
-          });
-          // Prevent unhandled rejection if handler throws after timeout
-          Promise.resolve(handlerPromise).catch(() => {
-            // Intentionally ignore errors after timeout
-          });
-          results.push({
-            name,
-            called: true,
-            error: null,
-            timedOut: true,
-            code: 'timeout',
-          });
-        } else {
-          this.lifecycleEvents.componentInfoCompleted(name);
-          results.push({
-            name,
-            called: true,
-            error: null,
-            timedOut: false,
-            code: 'called',
-          });
-        }
-      } catch (error) {
-        const err = error instanceof Error ? error : new Error(String(error));
-
-        this.logger
-          .entity(name)
-          .error('Info handler failed: {{error.message}}', {
-            params: { error: err },
-          });
-
-        this.lifecycleEvents.componentInfoFailed(name, err);
-
-        results.push({
-          name,
-          called: true,
-          error: err,
-          timedOut: false,
-          code: 'error',
-        });
-      } finally {
-        if (timeoutHandle) {
-          clearTimeout(timeoutHandle);
-        }
-      }
-    }
-
-    const calledResults = results.filter((result) => result.called);
-    const hasError = calledResults.some((result) => result.error);
-    const isAllError =
-      calledResults.length > 0 && calledResults.every((result) => result.error);
-    const hasTimeout = calledResults.some((result) => result.timedOut);
-    const isAllTimeout =
-      calledResults.length > 0 &&
-      calledResults.every((result) => result.timedOut);
-    const code = hasError
-      ? isAllError
-        ? 'error'
-        : 'partial_error'
-      : hasTimeout
-        ? isAllTimeout
-          ? 'timeout'
-          : 'partial_timeout'
-        : 'ok';
-
-    return {
+    return this.runSignalBroadcast({
       signal: 'info',
-      results,
-      timedOut: hasTimeout,
-      code,
-    };
+      pickHandler: (component) => component.onInfo?.bind(component),
+      startupLog:
+        'Info during startup: only notifying already-started components',
+      timeoutLog: 'Info handler timed out',
+      errorLog: 'Info handler failed: {{error.message}}',
+      emitStarted: (name) => this.lifecycleEvents.componentInfoStarted(name),
+      emitCompleted: (name) =>
+        this.lifecycleEvents.componentInfoCompleted(name),
+      emitFailed: (name, error) =>
+        this.lifecycleEvents.componentInfoFailed(name, error),
+    });
   }
 
   /**
@@ -6148,131 +6045,18 @@ export class LifecycleManager
    * Continues on errors - collects all results.
    */
   private async broadcastDebug(): Promise<SignalBroadcastResult> {
-    const results: ComponentSignalResult[] = [];
-
-    // Only call onDebug() on running components
-    const componentsToNotify = this.components.filter((component) =>
-      this.runningComponents.has(component.getName()),
-    );
-
-    if (this.isStarting) {
-      this.logger.info(
-        'Debug during startup: only notifying already-started components',
-      );
-    }
-
-    for (const component of componentsToNotify) {
-      const name = component.getName();
-
-      if (!component.onDebug) {
-        // Component doesn't implement onDebug
-        results.push({
-          name,
-          called: false,
-          error: null,
-          timedOut: false,
-          code: 'no_handler',
-        });
-        continue;
-      }
-
-      this.lifecycleEvents.componentDebugStarted(name);
-
-      const timeoutMS = component.signalTimeoutMS;
-      let timeoutHandle: NodeJS.Timeout | undefined;
-      const timeoutResult = { timedOut: true } as const;
-
-      try {
-        const result = component.onDebug();
-        const handlerPromise: Promise<unknown> = isPromise(result)
-          ? (result as Promise<unknown>)
-          : Promise.resolve(result as unknown);
-
-        const outcome: unknown =
-          timeoutMS > 0
-            ? await Promise.race([
-                handlerPromise,
-                new Promise<typeof timeoutResult>((resolve) => {
-                  timeoutHandle = setTimeout(() => {
-                    resolve(timeoutResult);
-                  }, timeoutMS);
-                }),
-              ])
-            : await handlerPromise;
-
-        if (outcome === timeoutResult) {
-          this.logger.entity(name).warn('Debug handler timed out', {
-            params: { timeoutMS },
-          });
-          // Prevent unhandled rejection if handler throws after timeout
-          Promise.resolve(handlerPromise).catch(() => {
-            // Intentionally ignore errors after timeout
-          });
-          results.push({
-            name,
-            called: true,
-            error: null,
-            timedOut: true,
-            code: 'timeout',
-          });
-        } else {
-          this.lifecycleEvents.componentDebugCompleted(name);
-          results.push({
-            name,
-            called: true,
-            error: null,
-            timedOut: false,
-            code: 'called',
-          });
-        }
-      } catch (error) {
-        const err = error instanceof Error ? error : new Error(String(error));
-
-        this.logger
-          .entity(name)
-          .error('Debug handler failed: {{error.message}}', {
-            params: { error: err },
-          });
-
-        this.lifecycleEvents.componentDebugFailed(name, err);
-
-        results.push({
-          name,
-          called: true,
-          error: err,
-          timedOut: false,
-          code: 'error',
-        });
-      } finally {
-        if (timeoutHandle) {
-          clearTimeout(timeoutHandle);
-        }
-      }
-    }
-
-    const calledResults = results.filter((result) => result.called);
-    const hasError = calledResults.some((result) => result.error);
-    const isAllError =
-      calledResults.length > 0 && calledResults.every((result) => result.error);
-    const hasTimeout = calledResults.some((result) => result.timedOut);
-    const isAllTimeout =
-      calledResults.length > 0 &&
-      calledResults.every((result) => result.timedOut);
-    const code = hasError
-      ? isAllError
-        ? 'error'
-        : 'partial_error'
-      : hasTimeout
-        ? isAllTimeout
-          ? 'timeout'
-          : 'partial_timeout'
-        : 'ok';
-
-    return {
+    return this.runSignalBroadcast({
       signal: 'debug',
-      results,
-      timedOut: hasTimeout,
-      code,
-    };
+      pickHandler: (component) => component.onDebug?.bind(component),
+      startupLog:
+        'Debug during startup: only notifying already-started components',
+      timeoutLog: 'Debug handler timed out',
+      errorLog: 'Debug handler failed: {{error.message}}',
+      emitStarted: (name) => this.lifecycleEvents.componentDebugStarted(name),
+      emitCompleted: (name) =>
+        this.lifecycleEvents.componentDebugCompleted(name),
+      emitFailed: (name, error) =>
+        this.lifecycleEvents.componentDebugFailed(name, error),
+    });
   }
 }

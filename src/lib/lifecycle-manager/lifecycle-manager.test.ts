@@ -3278,6 +3278,22 @@ describe('LifecycleManager - Registration & Individual Lifecycle', () => {
       );
       expect(failedStopStatus.state).toBe('stalled');
     });
+
+    test('getLastShutdownResult returns null before shutdown and result after', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+      await lifecycle.registerComponent(
+        new TestComponent(logger, { name: 'comp' }),
+      );
+
+      expect(lifecycle.getLastShutdownResult()).toBeNull();
+
+      await lifecycle.startAllComponents();
+      await lifecycle.stopAllComponents();
+
+      const result = lifecycle.getLastShutdownResult();
+      expect(result).not.toBeNull();
+      expect(result?.success).toBe(true);
+    });
   });
 });
 
@@ -4283,6 +4299,26 @@ describe('LifecycleManager - Bulk Operations', () => {
       const partialResult = await lifecycle.startAllComponents();
       expect(partialResult.success).toBe(false);
       expect(partialResult.startedComponents).toEqual(['alpha', 'beta']);
+    });
+
+    test('should respect manager-level timeoutMS and log warning when startup loop exceeds it', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      class HangingStartComponent extends TestComponent {
+        public async start() {
+          await sleep(300);
+        }
+      }
+
+      await lifecycle.registerComponent(
+        new HangingStartComponent(logger, { name: 'slow' }),
+      );
+
+      const result = await lifecycle.startAllComponents({ timeoutMS: 50 });
+
+      expect(result.success).toBe(false);
+      expect(result.timedOut).toBe(true);
+      expect(result.code).toBe('startup_timeout');
     });
   });
 
@@ -5916,6 +5952,61 @@ describe('LifecycleManager - Multi-Phase Shutdown', () => {
 
       expect(wasTimeoutEmitted).toBe(true);
     });
+
+    test('should log warning when onShutdownWarning throws in fire-and-forget mode (timeoutMS=0)', async () => {
+      const lifecycle = new LifecycleManager({
+        logger,
+        shutdownWarningTimeoutMS: 0,
+      });
+
+      class ThrowingWarningComponent extends TestComponent {
+        public onShutdownWarning(): void {
+          throw new Error('warning failed');
+        }
+      }
+
+      await lifecycle.registerComponent(
+        new ThrowingWarningComponent(logger, { name: 'throwing-warn' }),
+      );
+
+      await lifecycle.startAllComponents();
+      await lifecycle.stopAllComponents();
+
+      // Flush microtasks so the fire-and-forget .catch() has time to run
+      await sleep(10);
+
+      const warnEntry = arraySink.logs.find((e) =>
+        e.message.includes('Shutdown warning phase failed'),
+      );
+
+      expect(warnEntry).toBeDefined();
+    });
+
+    test('should log warning when onShutdownWarning throws in normal mode (timeoutMS>0)', async () => {
+      const lifecycle = new LifecycleManager({
+        logger,
+        shutdownWarningTimeoutMS: 500,
+      });
+
+      class ThrowingWarningComponent extends TestComponent {
+        public onShutdownWarning(): void {
+          throw new Error('warning failed');
+        }
+      }
+
+      await lifecycle.registerComponent(
+        new ThrowingWarningComponent(logger, { name: 'throwing-warn' }),
+      );
+
+      await lifecycle.startAllComponents();
+      await lifecycle.stopAllComponents();
+
+      const warnEntry = arraySink.logs.find((e) =>
+        e.message.includes('Shutdown warning phase failed'),
+      );
+
+      expect(warnEntry).toBeDefined();
+    });
   });
 
   describe('Graceful to Force Transition', () => {
@@ -6623,6 +6714,28 @@ describe('LifecycleManager - Signal Integration', () => {
       await lifecycle.startAllComponents();
       expect(lifecycle.getSignalStatus().isAttached).toBe(true);
     });
+
+    test('onShutdownRequested callback routes through handleShutdownRequest when triggered via ProcessSignalManager', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+      await lifecycle.registerComponent(
+        new TestComponent(logger, { name: 'comp' }),
+      );
+      await lifecycle.startAllComponents();
+
+      lifecycle.attachSignals();
+
+      const shutdownCompleted = new Promise<void>((resolve) => {
+        lifecycle.on('lifecycle-manager:shutdown-completed', () => resolve());
+      });
+
+      // Invoke the onShutdownRequested callback directly through ProcessSignalManager's
+      // test helper, which routes it through the closure registered in attachSignals().
+      (lifecycle as any).processSignalManager.triggerShutdown('SIGTERM', true);
+
+      await shutdownCompleted;
+
+      expect(lifecycle.getSignalStatus().shutdownMethod).toBe('SIGTERM');
+    });
   });
 
   describe('triggerReload() with default behavior', () => {
@@ -7125,6 +7238,29 @@ describe('LifecycleManager - Signal Integration', () => {
       expect(result.signal).toBe('debug');
       expect(result.results).toHaveLength(1);
       // Warning should be logged (verified by manual inspection)
+    });
+
+    test('should capture error when onInfo throws', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      class ThrowingInfoComponent extends TestComponent {
+        public onInfo(): void {
+          throw new Error('info handler exploded');
+        }
+      }
+
+      await lifecycle.registerComponent(
+        new ThrowingInfoComponent(logger, { name: 'comp1' }),
+      );
+
+      await lifecycle.startAllComponents();
+      const result = await lifecycle.triggerInfo();
+
+      expect(result.results).toHaveLength(1);
+      expect(result.results[0].called).toBe(true);
+      expect(result.results[0].error?.message).toBe('info handler exploded');
+      expect(result.results[0].code).toBe('error');
+      expect(result.code).toBe('error');
     });
   });
 
