@@ -2468,14 +2468,27 @@ if (shutdownResult.stalledComponents.length > 0) {
 
 ```typescript
 class ServerComponent extends BaseComponent {
+  // Stored so concurrent callers (e.g. onShutdownForce) join the same
+  // in-flight promise rather than starting a second concurrent close.
   private stopPromise: Promise<void> | null = null;
 
   async stop() {
-    // Return the same promise if stop is already running.
-    // This lets onShutdownForce safely call this.stop() without starting
-    // a second concurrent close.
+    // Return the same promise if stop is already running, so concurrent callers
+    // (including onShutdownForce) join the in-flight operation
+    // instead of starting a second concurrent close.
     if (this.stopPromise) return this.stopPromise;
-    this.stopPromise = this.server.close(); // waits for keep-alive connections
+
+    this.stopPromise = (async () => {
+      try {
+        await this.server.close(); // waits for keep-alive connections to drain
+      } finally {
+        // Runs on both success and error. Without this, a thrown error would leave
+        // stopPromise pointing at a rejected promise forever. Since there's no catch,
+        // errors still propagate normally to any caller awaiting this promise.
+        this.stopPromise = null;
+      }
+    })();
+
     return this.stopPromise;
   }
 
