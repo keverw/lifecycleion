@@ -794,7 +794,7 @@ export interface UnregisterOptions {
  * Options for starting all components
  */
 export interface StartupOptions {
-  /** Allow start even if stalled components exist (default: false) */
+  /** Allow bulk startup to proceed by skipping stalled components (default: false) */
   ignoreStalledComponents?: boolean;
   /** Global timeout for entire startup process in milliseconds (default: constructor's startupTimeoutMS) */
   timeoutMS?: number;

@@ -78,6 +78,7 @@ A comprehensive lifecycle orchestration system that manages startup, shutdown, a
   - [4. Leverage Events for Monitoring](#4-leverage-events-for-monitoring)
   - [5. Validate Before Production](#5-validate-before-production)
   - [6. Use Single LifecycleManager Instance](#6-use-single-lifecyclemanager-instance)
+  - [7. Make Component Startup Idempotent and Coordinate with Shutdown](#7-make-component-startup-idempotent-and-coordinate-with-shutdown)
 - [Known Limitations](#known-limitations)
   - [1. Timeouts Do Not Force-Cancel Work](#1-timeouts-do-not-force-cancel-work)
   - [2. Stalled Promises Can Retain Memory](#2-stalled-promises-can-retain-memory)
@@ -113,7 +114,9 @@ bun add lifecycleion
 
 ### 1. Create Your Components
 
-Components extend `BaseComponent` and implement lifecycle methods:
+Components extend `BaseComponent` and implement lifecycle methods.
+
+**Production Note:** For simple or stateless components, implementing standard `start()` and `stop()` methods is sufficient. For production servers and long-running services, you should implement the **idempotency pattern** (using a `startPromise`, a `stopPromise`, and explicit start/stop coordination) to prevent race conditions. See [Best Practice #7](#7-make-component-startup-idempotent-and-coordinate-with-shutdown) for details.
 
 ```typescript
 import { BaseComponent } from 'lifecycleion/lifecycle-manager';
@@ -239,7 +242,7 @@ Components transition through these states:
 ```
 registered → starting → running → stopping → stopped
                   ↓                   ↓
-                  ↓ (timeout)         stalled (if stop times out)
+                  ↓ (timeout)         stalled (if shutdown fails)
                   ↓
             starting-timed-out (required component timeout)
                   ↓
@@ -313,15 +316,15 @@ if (result.failedOptionalComponents.length > 0) {
 **Stalled State Definition:**
 A component becomes "stalled" when:
 
-1. The graceful `stop()` method exceeds `shutdownGracefulTimeoutMS` timeout, AND
-2. Either `onShutdownForce()` is not implemented, OR `onShutdownForce()` also exceeds `shutdownForceTimeoutMS` timeout
+1. The graceful `stop()` method exceeds `shutdownGracefulTimeoutMS` or throws an error, AND
+2. Either `onShutdownForce()` is not implemented, OR `onShutdownForce()` also fails by timing out or throwing an error
 
 Once stalled, a component remains registered but:
 
 - `startAllComponents()` will fail unless you pass `ignoreStalledComponents: true` (which skips stalled components during bulk startup)
 - `startComponent(name)` will fail unless you pass `forceStalled: true` (which calls `start()` regardless of stalled state)
 
-To recover: unregister the component, retry via `stopAllComponents({ retryStalled: true })` (this escalates to the force phase and does not re-run `stop()`), or force start with the appropriate option (`ignoreStalledComponents` for bulk, `forceStalled` for individual).
+To recover: unregister the component, retry via `stopAllComponents({ retryStalled: true })` (this escalates to the force phase and does not re-run `stop()`), start non-stalled components via `startAllComponents({ ignoreStalledComponents: true })`, or force start an individual stalled component via `startComponent(name, { forceStalled: true })`. Force starting is only appropriate for components whose `start()` implementation rejects or otherwise protects against any still-running shutdown work from the previous run.
 
 **Automatic late resolution:** If `stop()` eventually completes after the graceful timeout (e.g., a server waiting on keep-alive connections), the manager automatically clears the stall and emits `component:stalled-resolved`. No manual retry is needed. The same applies to `onShutdownForce()`: if it eventually resolves after its own timeout, the stall is cleared automatically. If neither ever completes, the stall persists until you intervene.
 
@@ -429,12 +432,12 @@ The shutdown process has three phases:
 2. **Graceful Phase** (per-component timeout)
    - Calls `stop()` on each component in reverse dependency order
    - Components shut down cleanly
-   - Timeout triggers force phase for that component
+   - Timeout or error triggers force phase for that component
 
 3. **Force Phase** (per-component)
-   - Called if graceful `stop()` times out
+   - Called if graceful `stop()` times out or throws
    - Also called (skipping graceful) when retrying a previously stalled component via `retryStalled: true`
-   - Component is marked as `stalled` if force phase also times out or is not implemented
+   - Component is marked as `stalled` if force phase is not implemented, times out, or throws
    - Manager stops after the first stall by default (set `haltOnStall: false` to continue)
 
 ```typescript
@@ -675,7 +678,7 @@ startAllComponents(options?: StartupOptions): Promise<StartupResult>
 
 ```typescript
 interface StartupOptions {
-  ignoreStalledComponents?: boolean; // Allow startup despite stalled components
+  ignoreStalledComponents?: boolean; // Allow bulk startup to proceed by skipping stalled components
   timeoutMS?: number; // Total time budget for startup process (default: constructor's startupTimeoutMS)
 }
 ```
@@ -814,7 +817,7 @@ Timeouts operate at **two independent levels** - they don't compete, they're lay
 **2. Per-Component Timeouts (Individual Component)**
 
 - Each component's `shutdownGracefulTimeoutMS` (default 5s) and `shutdownForceTimeoutMS` (default 2s) control its individual shutdown phases
-- If exceeded: that component becomes stalled, but shutdown continues with next component (unless `haltOnStall: true`)
+- If the graceful phase exceeds its timeout or throws, and the force phase is unavailable or also fails, that component becomes stalled; shutdown continues with the next component unless `haltOnStall: true`
 
 **Example:**
 
@@ -1967,7 +1970,7 @@ onGracefulStopTimeout?(): void;
 // Optional: Called during global shutdown warning
 onShutdownWarning?(): Promise<void> | void;
 
-// Optional: Called for force shutdown if graceful shutdown times out
+// Optional: Called for force shutdown if graceful shutdown times out or throws
 onShutdownForce?(): Promise<void> | void;
 
 // Optional: Called if onShutdownForce() times out
@@ -2202,7 +2205,7 @@ lifecycle.on('lifecycle-manager:shutdown-completed', (data) => {
 - `component:stopping` - Component stop initiated
 - `component:stopped` - Component is now stopped. Emitted after normal manager-driven stop flows, after late stall resolution, and after `reportUnexpectedStop()` transitions a running component into the stopped state
 - `component:stop-failed` - Component stop failed
-- `component:stalled` - Component failed to stop (timeout)
+- `component:stalled` - Component failed to stop after graceful/force handling timed out or errored
 - `component:stalled-resolved` - Previously stalled component's `stop()` or `onShutdownForce()` promise eventually resolved on its own, and the stall was cleared automatically
 - `component:unexpected-stop` - Component reported stopping on its own via `reportUnexpectedStop()`. Payload includes `name` and an optional `error`. This event fires before the follow-up `component:stopped` event so listeners can react to the abnormal cause separately from the generic stopped-state transition
 
@@ -2459,12 +2462,19 @@ if (shutdownResult.stalledComponents.length > 0) {
     await lifecycle.unregisterComponent(stalled.name);
   }
 
-  // Option 2: Force restart (risky - acknowledge the risk)
+  // Option 2: Start non-stalled components while skipping stalled ones
   await lifecycle.startAllComponents({ ignoreStalledComponents: true });
+
+  // Option 3: Force restart an individual stalled component (risky - the
+  // component's start() must protect against any still-running shutdown work
+  // from the previous run)
+  await lifecycle.startComponent('server', { forceStalled: true });
 }
 ```
 
-**If `onShutdownForce()` should join the already-running `stop()`**, deduplicate the promise in `stop()` so that calling it again, or calling it from `onShutdownForce()`, simply awaits the same in-flight operation:
+`ignoreStalledComponents` does not force-start stalled components during bulk startup; it lets startup continue for non-stalled components and skips stalled entries. Forced starts use `startComponent(name, { forceStalled: true })` and are only safe when the component's `start()` implementation does not report success while its own previous `stop()` work is still active. For server-like components, reject `start()` while a `stopPromise` exists so the manager does not mark the component running while the old shutdown can still close its resources.
+
+**If `onShutdownForce()` should join the already-running `stop()`**, deduplicate the promise in `stop()` so that calling it again, or calling it from `onShutdownForce()`, simply awaits the same in-flight operation (Note: This example uses a simplified, idealized `this.server.close()` abstraction; for a complete, production-ready component that also coordinates startup and rejects start attempts while stopping, see [Best Practice #7](#7-make-component-startup-idempotent-and-coordinate-with-shutdown)):
 
 ```typescript
 class ServerComponent extends BaseComponent {
@@ -2496,16 +2506,16 @@ class ServerComponent extends BaseComponent {
     // Force-close open connections so server.close() in the in-flight stop()
     // can finish draining and resolve. Both ?. guards are needed: the outer one
     // handles server not yet assigned (e.g. start() failed), the inner one
-    // handles runtimes that don't expose closeAllConnections.
+    // handles runtimes that don't expose closeAllConnections. (Note: If coordinating
+    // with an active start(), you would also check/await that promise here.)
     this.server?.closeAllConnections?.();
-
-    // Join the original stop() — won't start a second close
+    // Wait for the stop() promise to resolve
     await this.stop();
   }
 }
 ```
 
-Alternatively, use `onGracefulStopTimeout()` to unblock `stop()` directly without needing `onShutdownForce()` at all:
+Alternatively, use `onGracefulStopTimeout()` to unblock `stop()` directly. When the graceful timeout is reached, the manager calls this hook and then proceeds with timeout handling, which may enter the force phase or mark the component stalled. If the hook unblocks the original `stop()` promise, the manager's late-resolution handling clears the stall automatically:
 
 ```typescript
 class ServerComponent extends BaseComponent {
@@ -2518,7 +2528,8 @@ class ServerComponent extends BaseComponent {
     // Force-closing connections unblocks server.close(), which lets stop() resolve.
     // Once stop() resolves, the manager auto-clears the stall via late resolution.
     // Both ?. guards are needed: the outer one handles server not yet assigned,
-    // the inner one handles runtimes that don't expose closeAllConnections.
+    // the inner one handles runtimes that don't expose closeAllConnections. (Note: If
+    // coordinating with an active start(), you would ensure startup settled first.)
     this.server?.closeAllConnections?.();
   }
 }
@@ -2647,6 +2658,109 @@ const lifecycle1 = new LifecycleManager({ logger });
 const lifecycle2 = new LifecycleManager({ logger });
 lifecycle1.attachSignals(); // Conflicts with lifecycle2
 ```
+
+### 7. Make Component Startup Idempotent and Coordinate with Shutdown
+
+For servers and long-running services, make `start()` idempotent by tracking an in-flight `startPromise`, and make `stop()` idempotent by tracking an in-flight `stopPromise`. Additionally, reject `start()` while `stop()` is in progress, and coordinate `stop()` so that it awaits any active `startPromise` before shutting down.
+
+This prevents race conditions such as a shutdown request arriving mid-boot, multiple callers starting the same server concurrently, or a force restart trying to reuse a server that is still shutting down. Starting while stopping should be treated as an error: the existing runtime is being torn down, so a new start attempt must wait until shutdown settles and can create a fresh runtime.
+
+```typescript
+class ServerComponent extends BaseComponent {
+  private server: Server | null = null;
+  private startPromise: Promise<void> | null = null;
+  private stopPromise: Promise<void> | null = null;
+
+  async start(): Promise<void> {
+    // Starting while shutdown is active is not a safe no-op: the manager could
+    // mark the component running while the old stop() is still draining.
+    if (this.stopPromise) {
+      throw new Error('Cannot start server while shutdown is in progress');
+    }
+
+    // Join an in-flight startup, or treat an already-started runtime as a no-op.
+    if (this.startPromise) {
+      return this.startPromise;
+    }
+
+    this.startPromise = (async () => {
+      try {
+        this.server = createServer();
+        await this.server.listen(3000);
+
+        this.logger.success('Server started');
+      } catch (error) {
+        // Reset startup state on failure so startup can be retried.
+        this.server = null;
+        this.startPromise = null;
+        throw error;
+      }
+    })();
+
+    return this.startPromise;
+  }
+
+  async stop(): Promise<void> {
+    if (this.stopPromise) {
+      return this.stopPromise;
+    }
+
+    this.stopPromise = (async () => {
+      try {
+        // Await active startup to settle before stopping, preventing orphaned
+        // listening sockets if shutdown is initiated mid-boot.
+        if (this.startPromise) {
+          try {
+            await this.startPromise;
+          } catch {
+            // Ignore startup errors since we are stopping anyway
+          }
+        }
+
+        // Keep a local reference so this stop attempt closes the same runtime
+        // even if component state changes while shutdown is in progress.
+        const server = this.server;
+        if (server) {
+          await server.close();
+        }
+
+        // Only clear the server reference after a successful stop. If stop()
+        // rejects, force shutdown still needs this.server to close connections.
+        this.server = null;
+        this.startPromise = null;
+      } finally {
+        // Runs on both success and error. Without this, a thrown error would leave
+        // stopPromise pointing at a rejected promise forever. Since there's no catch,
+        // errors still propagate normally to any caller awaiting this promise.
+        this.stopPromise = null;
+      }
+    })();
+
+    return this.stopPromise;
+  }
+
+  onGracefulStopTimeout(): void {
+    // Force-closing active connections can unblock the in-flight stop() above.
+    this.server?.closeAllConnections?.();
+  }
+
+  async onShutdownForce(): Promise<void> {
+    // If graceful close failed or timed out, keep using the same server handle and
+    // join the in-flight stop() promise instead of starting a second close.
+    this.server?.closeAllConnections?.();
+    await this.stop();
+  }
+}
+```
+
+**Cooperative Cancellation during Startup:** If your component's startup logic consists of multiple sequential async steps or supports native cancellation (like `AbortSignal`), you can manage cooperative cancellation yourself. To do this, create an `AbortController` for each startup attempt, store it as an instance property on your component, pass its `signal` to your startup operations (like database connections or fetch requests), and call `this.abortController.abort()` at the very beginning of your `stop()` method (or in `onStartupAborted()`). Because an aborted signal stays aborted permanently, create a fresh controller before each retry or restart. Because `stop()` is protected by the `stopPromise` guard, this abort will only ever be triggered once for each stop attempt. Awaiting the in-flight `startPromise` immediately after will then settle quickly due to the cancellation, preventing unnecessary shutdown delays. However, for standard single-step operations (like binding an HTTP server via `listen()`), awaiting the in-flight promise to settle and then immediately shutting it down remains the simplest and safest path.
+
+**Force-Closing Connections on Shutdown:** For servers using raw Node.js `http.Server`, active keep-alive connections will prevent the server from fully closing, causing `stop()` to stall. To handle this gracefully, you can implement either hook to run `this.server?.closeAllConnections?.()`:
+
+1. `onGracefulStopTimeout()`: Called when the graceful timeout is hit, letting you nudge the existing `stop()` promise to settle so the manager can clear the stall via late-resolution handling.
+2. `onShutdownForce()`: Called during the force shutdown phase. Awaiting `this.stop()` here (after force-closing) allows you to clean up and settle during the force escalation phase.
+
+See the [Stalled Component Recovery](#stalled-component-recovery) section for examples of how to implement these patterns.
 
 ## Known Limitations
 

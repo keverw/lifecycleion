@@ -4054,6 +4054,81 @@ describe('LifecycleManager - Bulk Operations', () => {
       expect(stoppedEvents).toHaveLength(0);
     }, 4000);
 
+    test('forceStalled start should fail when component rejects start during active stop', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      class RejectStartWhileStoppingComponent extends BaseComponent {
+        private stopPromise: Promise<void> | null = null;
+
+        constructor() {
+          super(logger, {
+            name: 'reject-start-while-stopping',
+            shutdownGracefulTimeoutMS: 1000,
+          });
+        }
+
+        public start(): void {
+          if (this.stopPromise) {
+            throw new Error('Cannot start while shutdown is in progress');
+          }
+        }
+
+        public async stop(): Promise<void> {
+          if (this.stopPromise) {
+            return this.stopPromise;
+          }
+
+          this.stopPromise = (async () => {
+            try {
+              await sleep(1500);
+            } finally {
+              this.stopPromise = null;
+            }
+          })();
+
+          return this.stopPromise;
+        }
+      }
+
+      await lifecycle.registerComponent(
+        new RejectStartWhileStoppingComponent(),
+      );
+      await lifecycle.startComponent('reject-start-while-stopping');
+
+      const stopPromise = lifecycle.stopComponent(
+        'reject-start-while-stopping',
+      );
+      await sleep(1100);
+
+      expect(
+        lifecycle.getComponentStatus('reject-start-while-stopping')?.state,
+      ).toBe('stalled');
+
+      const startResult = await lifecycle.startComponent(
+        'reject-start-while-stopping',
+        { forceStalled: true },
+      );
+      const stopResult = await stopPromise;
+
+      expect(startResult.success).toBe(false);
+      expect(startResult.code).toBe('unknown_error');
+      expect(startResult.reason).toBe(
+        'Cannot start while shutdown is in progress',
+      );
+      expect(stopResult.success).toBe(false);
+      expect(lifecycle.isComponentRunning('reject-start-while-stopping')).toBe(
+        false,
+      );
+      expect(
+        lifecycle.getComponentStatus('reject-start-while-stopping')?.state,
+      ).toBe('registered');
+      expect(lifecycle.getStalledComponentCount()).toBe(1);
+
+      await sleep(500);
+
+      expect(lifecycle.getStalledComponentCount()).toBe(0);
+    }, 4000);
+
     test('failed forceStalled start should still clear the old stall once stop resolves', async () => {
       const lifecycle = new LifecycleManager({ logger });
 
