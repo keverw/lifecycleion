@@ -45,10 +45,10 @@ A TypeScript HTTP client with a fluent request builder, request/response interce
 - [Enable and Disable](#enable-and-disable)
 - [Progress Events](#progress-events)
 - [Adapters](#adapters)
-  - [FetchAdapter (default)](#fetchadapter-default)
+  - [FetchAdapter (Default)](#fetchadapter-default)
   - [NodeAdapter](#nodeadapter)
   - [XHRAdapter](#xhradapter)
-  - [MockAdapter (testing)](#mockadapter-testing)
+  - [MockAdapter (Testing)](#mockadapter-testing)
 - [Streaming Responses](#streaming-responses)
 - [Builder Post-Send Accessors](#builder-post-send-accessors)
 - [Request State Values](#request-state-values)
@@ -879,7 +879,7 @@ Progress granularity depends on the adapter:
 
 ## Adapters
 
-### FetchAdapter (default)
+### FetchAdapter (Default)
 
 Uses the global `fetch()` API. Works in browsers, Node.js 18+, Bun, and Deno.
 
@@ -974,7 +974,7 @@ No configuration options. Adapter-level behavior is controlled through `HTTPClie
 
 Because browsers follow redirects silently, XHR cannot intercept them mid-flight. Instead, after the request completes, the adapter compares `xhr.responseURL` to the original URL to detect whether a redirect occurred. If one is detected the response carries `wasRedirectDetected: true` and an `HTTPClientError` with code `redirect_disabled`.
 
-### MockAdapter (testing)
+### MockAdapter (Testing)
 
 Route-based mock server for unit and integration tests. Routes match on **path only**. The domain in the URL is stripped before matching.
 

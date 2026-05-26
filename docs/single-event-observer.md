@@ -7,7 +7,7 @@ Subscriber errors are safely handled through `safeHandleCallback` and reported v
 <!-- toc -->
 
 - [Usage](#usage)
-- [Choosing a class](#choosing-a-class)
+- [Choosing a Class](#choosing-a-class)
 - [Behavior](#behavior)
 - [API](#api)
   - [SingleEventObserver](#singleeventobserver)
@@ -24,7 +24,7 @@ import {
 } from 'lifecycleion/single-event-observer';
 ```
 
-## Choosing a class
+## Choosing a Class
 
 - Use `SingleEventObserver<T>` when callers should be able to both subscribe and emit (`notify` is public).
 - Use `SingleEventObserverProtected<T>` when only your class should emit events (`notify` is protected).

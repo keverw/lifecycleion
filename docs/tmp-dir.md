@@ -12,7 +12,7 @@ Create uniquely named temporary directories and clean them up explicitly.
     - [initialize](#initialize)
     - [cleanup](#cleanup)
   - [TmpDirOptions](#tmpdiroptions)
-  - [Error classes](#error-classes)
+  - [Error Classes](#error-classes)
 
 <!-- tocstop -->
 
@@ -125,7 +125,7 @@ Notes:
 - `random12chars` uses upper/lowercase letters and digits.
 - Unknown option keys and invalid option value types are ignored. Invalid `baseDirectory` or `maxTries` values throw a configuration error.
 
-### Error classes
+### Error Classes
 
 | Class                                 | When it is thrown                                                                                 |
 | ------------------------------------- | ------------------------------------------------------------------------------------------------- |

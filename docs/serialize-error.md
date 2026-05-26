@@ -7,7 +7,7 @@ Useful for IPC, internal RPCs, and storing errors in a database (e.g. logging fa
 <!-- toc -->
 
 - [Usage](#usage)
-- [What it captures](#what-it-captures)
+- [What It Captures](#what-it-captures)
 - [API](#api)
   - [isErrorLike](#iserrorlike)
 - [RESTful API Error Guidelines](#restful-api-error-guidelines)
@@ -34,7 +34,7 @@ const restored = deserializeError(JSON.parse(json));
 throw restored;
 ```
 
-## What it captures
+## What It Captures
 
 - `name`, `message`, `stack` (the non-enumerable ones Error hides)
 - All own properties from Error subclasses (`errCode`, `statusCode`, whatever)

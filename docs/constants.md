@@ -7,7 +7,7 @@ Common string constants for whitespace, indentation, and Python-style character 
 - [Usage](#usage)
 - [API](#api)
   - [Whitespace & Formatting](#whitespace--formatting)
-  - [Character Sets (Python string-style)](#character-sets-python-string-style)
+  - [Character Sets (Python String-Style)](#character-sets-python-string-style)
 
 <!-- tocstop -->
 
@@ -46,7 +46,7 @@ import {
 | `DOUBLE_INDENT` | `'        '`     | Eight-space indentation (two indents) |
 | `SINGLE_QUOTE`  | `"'"`            | A single quote character              |
 
-### Character Sets (Python string-style)
+### Character Sets (Python String-Style)
 
 Inspired by Python's [`string`](https://docs.python.org/3/library/string.html) module.
 

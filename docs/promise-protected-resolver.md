@@ -11,7 +11,7 @@ A wrapper around a `Promise` that exposes `resolveOnce` and `rejectOnce` methods
   - [hasResolved](#hasresolved)
   - [resolveOnce](#resolveonce)
   - [rejectOnce](#rejectonce)
-  - [Example: Race between success and timeout](#example-race-between-success-and-timeout)
+  - [Example: Race Between Success and Timeout](#example-race-between-success-and-timeout)
 
 <!-- tocstop -->
 
@@ -102,7 +102,7 @@ try {
 }
 ```
 
-### Example: Race between success and timeout
+### Example: Race Between Success and Timeout
 
 ```typescript
 const resolver = new PromiseProtectedResolver<string>({

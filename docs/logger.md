@@ -31,7 +31,7 @@ A modern, flexible logging library with sink-based architecture, template string
     - [Worker Pool Example](#worker-pool-example)
     - [Key Points](#key-points)
   - [Setting Exit Callback After Construction](#setting-exit-callback-after-construction)
-- [Built-in Sinks](#built-in-sinks)
+- [Built-In Sinks](#built-in-sinks)
   - [ConsoleSink](#consolesink)
     - [Log Level Control](#log-level-control)
     - [Mute/Unmute Control](#muteunmute-control)
@@ -757,7 +757,7 @@ This approach avoids constructor ordering issues and allows components to refere
 - `isFirstExit` means the first exit request observed by the logger, not necessarily the first exit that has fully completed.
 - This method overwrites any existing `beforeExitCallback` (including one set in the Logger constructor).
 
-## Built-in Sinks
+## Built-In Sinks
 
 ### ConsoleSink
 

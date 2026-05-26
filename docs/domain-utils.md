@@ -6,9 +6,9 @@ Hardened helpers for normalizing and matching domains and origins used in CORS a
 
 - [Usage](#usage)
 - [Overview](#overview)
-- [Quick start](#quick-start)
-- [Wildcard semantics](#wildcard-semantics)
-- [Security hardening](#security-hardening)
+- [Quick Start](#quick-start)
+- [Wildcard Semantics](#wildcard-semantics)
+- [Security Hardening](#security-hardening)
 - [API](#api)
   - [normalizeDomain](#normalizedomain)
   - [safeParseURL](#safeparseurl)
@@ -29,18 +29,18 @@ Hardened helpers for normalizing and matching domains and origins used in CORS a
   - [getSubdomain](#getsubdomain)
   - [isApexDomain](#isapexdomain)
   - [Types](#types)
-- [Parsing Host headers](#parsing-host-headers)
-- [Configuration & validation](#configuration--validation)
-  - [Validate at startup](#validate-at-startup)
-- [End-to-end example](#end-to-end-example)
-- [Recommended defaults](#recommended-defaults)
-  - [Quick rules](#quick-rules)
-  - [Behavior notes](#behavior-notes)
-  - [Defaults by function](#defaults-by-function)
-  - [Global wildcard and credentials](#global-wildcard-and-credentials)
-  - [Operational guidance](#operational-guidance)
-- [Choose the right helper](#choose-the-right-helper)
-- [Common recipes](#common-recipes)
+- [Parsing Host Headers](#parsing-host-headers)
+- [Configuration & Validation](#configuration--validation)
+  - [Validate at Startup](#validate-at-startup)
+- [End-to-End Example](#end-to-end-example)
+- [Recommended Defaults](#recommended-defaults)
+  - [Quick Rules](#quick-rules)
+  - [Behavior Notes](#behavior-notes)
+  - [Defaults by Function](#defaults-by-function)
+  - [Global Wildcard and Credentials](#global-wildcard-and-credentials)
+  - [Operational Guidance](#operational-guidance)
+- [Choose the Right Helper](#choose-the-right-helper)
+- [Common Recipes](#common-recipes)
 
 <!-- tocstop -->
 
@@ -78,7 +78,7 @@ import {
 - Safer wildcard matching (rejects `*.com`, forbids partial-label wildcards, IP-tail guard)
 - Protocol-aware origin wildcards with scheme enforcement (e.g., `https://*`, `https://*.example.com`)
 
-## Quick start
+## Quick Start
 
 Pick a helper for your scenario and validate entries at startup:
 
@@ -102,7 +102,7 @@ const ok = matchesOriginList(
 );
 ```
 
-## Wildcard semantics
+## Wildcard Semantics
 
 - `*` matches exactly one label
 - `**` matches one-or-more labels when leftmost. In an interior position such as `a.**.example.com`, it matches zero-or-more labels. For example: `**.example.com` matches `api.example.com` but not `example.com` (1+ labels required), while `a.**.example.com` matches both `a.example.com` and `a.b.c.example.com` (0+ labels)
@@ -114,7 +114,7 @@ const ok = matchesOriginList(
   - `https://*` or `http://*` matches any origin with that scheme
   - `https://*.example.com` matches direct subdomains over HTTPS only
 
-## Security hardening
+## Security Hardening
 
 - Rejects partial-label wildcards (e.g., `ex*.example.com`)
 - Rejects invalid characters in patterns: ports, paths, fragments, brackets, userinfo, backslashes
@@ -393,7 +393,7 @@ isApexDomain('192.168.1.1'); // false (IP)
 - `WildcardKind`: `'none' | 'global' | 'protocol' | 'subdomain'`, returned by `validateConfigEntry`
 - `ValidationResult`: `{ valid: boolean; info?: string; wildcardKind: WildcardKind }`, returned by `validateConfigEntry`
 
-## Parsing Host headers
+## Parsing Host Headers
 
 Use `parseHostHeader` to safely parse HTTP Host headers into domain and port components:
 
@@ -426,13 +426,13 @@ const normalized = normalizeDomain(domain);
 
 The returned `domain` has brackets stripped so it can be passed directly to `normalizeDomain()` or `matchesDomainList()`.
 
-## Configuration & validation
+## Configuration & Validation
 
 - Validate configuration at startup with `validateConfigEntry` and reject misconfigurations early.
 - Prefer exact matches for credentials, enable wildcard credentials only when subdomains are strictly required and after validation.
 - For hot paths, pre-normalize/validate allowlists once and reuse them.
 
-### Validate at startup
+### Validate at Startup
 
 Validate every allowlist entry (domain/origin) at startup with `validateConfigEntry`. This ensures each entry is structurally safe before you pass it to matchers at runtime. Structural validity does not imply every matcher will honor every valid pattern: for example, credentials matching ignores protocol-only wildcards such as `https://*` and global `"*"`.
 
@@ -472,7 +472,7 @@ validateConfigEntry('null', 'origin');
 // { valid: true, wildcardKind: 'none' }
 ```
 
-## End-to-end example
+## End-to-End Example
 
 ```typescript
 import {
@@ -498,9 +498,9 @@ const ok = matchesOriginList(
 );
 ```
 
-## Recommended defaults
+## Recommended Defaults
 
-### Quick rules
+### Quick Rules
 
 - Domain vs Origin contexts differ: origins may include protocol wildcards, domains may not.
 - `matchesDomainList` allows `"*"` as match-all. If undesired, reject it at config time with `validateConfigEntry`.
@@ -511,7 +511,7 @@ const ok = matchesOriginList(
 - Protocol-only wildcards (e.g., `https://*`) are allowed by default in validation and respected by origin matching.
 - In domain context, entries with `://` are invalid, the validator returns info `"protocols are not allowed in domain context"`.
 
-### Behavior notes
+### Behavior Notes
 
 - Domain-only checks (`matchesDomainList`) reject origin-style entries (anything with `://`) by throwing. Use `matchesOriginList` for origin-style matching.
 - Origin matching:
@@ -529,7 +529,7 @@ const ok = matchesOriginList(
 - Credentials: prefer exact-only matching. Enable wildcard subdomains for credentials only when necessary and after pre-validation.
 - IPv6 zone IDs are intentionally rejected. Plain IPv6 literals such as `"::1"` and `"[2001:db8::1]"` remain supported.
 
-### Defaults by function
+### Defaults by Function
 
 - `validateConfigEntry(entry, "domain")`
   - Default: `allowGlobalWildcard: false`. Validate concrete domains and wildcard patterns only.
@@ -549,17 +549,17 @@ const ok = matchesOriginList(
 - `matchesCORSCredentialsList(origin, allowedOrigins, { allowWildcardSubdomains })`
   - Default: exact-only. When `allowWildcardSubdomains: true`, host subdomain wildcards are honored (e.g., `https://*.example.com`). Protocol-only wildcards like `https://*` and global `"*"` are still rejected. Always pre-validate entries.
 
-### Global wildcard and credentials
+### Global Wildcard and Credentials
 
 - Public, non-credential CORS: you may intentionally allow all origins by validating with `{ allowGlobalWildcard: true }` and including `"*"` in the allowlist.
 - Credentialed CORS: do not use `"*"`. Browsers reject `Access-Control-Allow-Origin: *` when credentials are involved. Prefer exact origins, or enable subdomain wildcards with care and pre-validation.
 
-### Operational guidance
+### Operational Guidance
 
 - No-Origin requests: keep `treatNoOriginAsAllowed: false` unless explicitly required.
 - Pre-validation: run `validateConfigEntry` on every entry at startup, fail fast on PSL/IP tails, partial-label wildcards, and URL-ish characters.
 
-## Choose the right helper
+## Choose the Right Helper
 
 - **CORS allowlist (non-credentials)**: `matchesOriginList(origin, allowedOrigins)`
   - Supports exact and wildcard origins (including protocol wildcards)
@@ -573,7 +573,7 @@ const ok = matchesOriginList(
 - **Low-level checks**: `matchesWildcardDomain`, `matchesWildcardOrigin`
   - For custom logic, prefer list helpers for most cases
 
-## Common recipes
+## Common Recipes
 
 Allow HTTPS subdomains, include the apex, and one exact partner origin, disallow global wildcard:
 

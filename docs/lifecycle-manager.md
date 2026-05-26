@@ -817,7 +817,7 @@ Timeouts operate at **two independent levels** - they don't compete, they're lay
 **2. Per-Component Timeouts (Individual Component)**
 
 - Each component's `shutdownGracefulTimeoutMS` (default 5s) and `shutdownForceTimeoutMS` (default 2s) control its individual shutdown phases
-- If the graceful phase exceeds its timeout or throws, and the force phase is unavailable or also fails, that component becomes stalled; shutdown continues with the next component unless `haltOnStall: true`
+- If the graceful phase exceeds its timeout or throws, and the force phase is unavailable or also fails, that component becomes stalled. Shutdown continues with the next component unless `haltOnStall: true`
 
 **Example:**
 
@@ -1977,7 +1977,7 @@ onShutdownForce?(): Promise<void> | void;
 onShutdownForceAborted?(): void;
 ```
 
-**Shutdown contract:** `stop()` should always eventually settle (resolve or reject) on every path. If you implement `onShutdownForce()`, it should also eventually settle. In many components, `onShutdownForce()` should not start a completely separate shutdown flow; instead, it should help the in-flight `stop()` finish or await the same underlying stop work.
+**Shutdown contract:** `stop()` should always eventually settle (resolve or reject) on every path. If you implement `onShutdownForce()`, it should also eventually settle. In many components, `onShutdownForce()` should not start a completely separate shutdown flow. Instead, it should help the in-flight `stop()` finish or await the same underlying stop work.
 
 **Important:** `onShutdownWarning()` is only fired during bulk shutdowns via `stopAllComponents()` or `restartAllComponents()`. Individual `stopComponent()` calls do NOT trigger the warning phase. There is no built-in "warning cleared" event, so if shutdown is canceled or stalls, reset any warning state on the next successful `start()` or via an app-specific signal.
 
@@ -2041,7 +2041,7 @@ getValue?<T>(key: string, from: string | null): ComponentValueResult<T>;
 
 ### Reporting Unexpected Stops
 
-If a component stops on its own — a crashed server, a lost database connection, a worker thread that exited — call `reportUnexpectedStop()` so the manager can update its state, emit `component:unexpected-stop`, and then emit the canonical `component:stopped` event for the resulting stopped state:
+If a component stops on its own, such as a crashed server, a lost database connection, or a worker thread that exited, call `reportUnexpectedStop()` so the manager can update its state, emit `component:unexpected-stop`, and then emit the canonical `component:stopped` event for the resulting stopped state:
 
 ```typescript
 class ServerComponent extends BaseComponent {
@@ -2082,7 +2082,7 @@ class ServerComponent extends BaseComponent {
 }
 ```
 
-The `component:unexpected-stop` event gives callers a single place to decide what to do — restart, escalate, or shut everything down. `component:stopped` follows immediately afterward so generic "component is now stopped" listeners still work for this path. If you call `stopAllComponents()` in response, the already-stopped component is skipped naturally (it's no longer running), and the rest of the shutdown proceeds in normal dependency order. The error passed to `reportUnexpectedStop()` is stored as `lastError` on the component's status and remains visible after shutdown. For async listeners registered in `start()`, prefer `getUnexpectedStopReporter()` as shown above so callbacks from an older run become a no-op after restart. `reportUnexpectedStop()` remains useful for immediate or synchronous detection paths. Both return `true` if the manager accepted the signal for the current run, otherwise `false`.
+The `component:unexpected-stop` event gives callers a single place to decide what to do, such as restart, escalate, or shut everything down. `component:stopped` follows immediately afterward so generic "component is now stopped" listeners still work for this path. If you call `stopAllComponents()` in response, the already-stopped component is skipped naturally (it's no longer running), and the rest of the shutdown proceeds in normal dependency order. The error passed to `reportUnexpectedStop()` is stored as `lastError` on the component's status and remains visible after shutdown. For async listeners registered in `start()`, prefer `getUnexpectedStopReporter()` as shown above so callbacks from an older run become a no-op after restart. `reportUnexpectedStop()` remains useful for immediate or synchronous detection paths. Both return `true` if the manager accepted the signal for the current run, otherwise `false`.
 
 If a component reports an unexpected stop while `startAllComponents()` is still in progress, the startup attempt is reconciled before completion: a required component causes bulk startup to fail with `code: 'component_unexpected_stop'` and triggers rollback of any later-started components, while a stopped optional component is recorded in `failedOptionalComponents` and startup continues.
 
@@ -2144,7 +2144,7 @@ class ApiComponent extends BaseComponent {
 **Available methods through `lifecycle`:**
 
 - **Event listeners**: `on()`, `once()`, `hasListener()`, `hasListeners()`, `listenerCount()`
-- **Component queries**: `hasComponent()`, `isComponentRunning()`, `getComponentStatus()`, `getComponentNames()`, `getRunningComponentNames()`, `getComponentCount()`, `getRunningComponentCount()`, `getStalledComponentCount()`, `getStoppedComponentCount()`, `getAllComponentStatuses()` — use `getSelfStatus()` (on `BaseComponent` directly) to query your own state without passing the name
+- **Component queries**: `hasComponent()`, `isComponentRunning()`, `getComponentStatus()`, `getComponentNames()`, `getRunningComponentNames()`, `getComponentCount()`, `getRunningComponentCount()`, `getStalledComponentCount()`, `getStoppedComponentCount()`, and `getAllComponentStatuses()`. Use `getSelfStatus()` (on `BaseComponent` directly) to query your own state without passing the name
 - **System state**: `getSystemState()`, `getStatus()`
 - **Stalled/stopped components**: `getStalledComponents()`, `getStalledComponentNames()`, `getStoppedComponentNames()`
 - **Dependency validation**: `validateDependencies()`, `getStartupOrder()`
@@ -2472,9 +2472,9 @@ if (shutdownResult.stalledComponents.length > 0) {
 }
 ```
 
-`ignoreStalledComponents` does not force-start stalled components during bulk startup; it lets startup continue for non-stalled components and skips stalled entries. Forced starts use `startComponent(name, { forceStalled: true })` and are only safe when the component's `start()` implementation does not report success while its own previous `stop()` work is still active. For server-like components, reject `start()` while a `stopPromise` exists so the manager does not mark the component running while the old shutdown can still close its resources.
+`ignoreStalledComponents` does not force-start stalled components during bulk startup. It lets startup continue for non-stalled components and skips stalled entries. Forced starts use `startComponent(name, { forceStalled: true })` and are only safe when the component's `start()` implementation does not report success while its own previous `stop()` work is still active. For server-like components, reject `start()` while a `stopPromise` exists so the manager does not mark the component running while the old shutdown can still close its resources.
 
-**If `onShutdownForce()` should join the already-running `stop()`**, deduplicate the promise in `stop()` so that calling it again, or calling it from `onShutdownForce()`, simply awaits the same in-flight operation (Note: This example uses a simplified, idealized `this.server.close()` abstraction; for a complete, production-ready component that also coordinates startup and rejects start attempts while stopping, see [Best Practice #7](#7-make-component-startup-idempotent-and-coordinate-with-shutdown)):
+**If `onShutdownForce()` should join the already-running `stop()`**, deduplicate the promise in `stop()` so that calling it again, or calling it from `onShutdownForce()`, simply awaits the same in-flight operation. Note: This example uses a simplified, idealized `this.server.close()` abstraction. For a complete, production-ready component that also coordinates startup and rejects start attempts while stopping, see [Best Practice #7](#7-make-component-startup-idempotent-and-coordinate-with-shutdown):
 
 ```typescript
 class ServerComponent extends BaseComponent {

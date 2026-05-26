@@ -6,17 +6,17 @@ Runtime-settable dev/production mode flag with auto-detection from CLI args or `
 
 - [Usage](#usage)
 - [Overview](#overview)
-- [Global key](#global-key)
+- [Global Key](#global-key)
 - [API](#api)
   - [`initDevMode(param?)`](#initdevmodeparam)
     - [Signatures](#signatures)
-    - [Detection strategies](#detection-strategies)
-    - [Strict mode](#strict-mode)
-    - [First-wins semantics](#first-wins-semantics)
+    - [Detection Strategies](#detection-strategies)
+    - [Strict Mode](#strict-mode)
+    - [First-Wins Semantics](#first-wins-semantics)
   - [`getDevMode(): boolean`](#getdevmode-boolean)
   - [`overrideDevMode(value: boolean | 'redetect')`](#overridedevmodevalue-boolean--redetect)
-- [HTML injection pattern](#html-injection-pattern)
-- [Why not `import.meta.env.DEV`?](#why-not-importmetaenvdev)
+- [HTML Injection Pattern](#html-injection-pattern)
+- [Why Not `import.meta.env.DEV`?](#why-not-importmetaenvdev)
 
 <!-- tocstop -->
 
@@ -39,7 +39,7 @@ Provides a runtime-settable global (`globalThis.__lifecycleion_is_dev__`) for si
 - Be **injected into HTML** so client-side code always matches the server
 - Avoid reliance on build-time constants like `import.meta.env.DEV`
 
-## Global key
+## Global Key
 
 ```
 globalThis.__lifecycleion_is_dev__
@@ -74,7 +74,7 @@ initDevMode();
 initDevMode({ detect: 'both' });
 ```
 
-#### Detection strategies
+#### Detection Strategies
 
 | Strategy     | Logic                                                                                             |
 | ------------ | ------------------------------------------------------------------------------------------------- |
@@ -82,7 +82,7 @@ initDevMode({ detect: 'both' });
 | `'node_env'` | `true` if `process.env.NODE_ENV === 'development'`                                                |
 | `'both'`     | cmd takes precedence when an explicit word is present and otherwise falls back to NODE_ENV        |
 
-#### Strict mode
+#### Strict Mode
 
 When `strict: true` is used with `detect: 'cmd'`, an error is thrown if neither `'dev'` nor `'prod'` is found in `process.argv`. This forces callers to be explicit about their intent.
 
@@ -91,7 +91,7 @@ When `strict: true` is used with `detect: 'cmd'`, an error is thrown if neither 
 initDevMode({ detect: 'cmd', strict: true });
 ```
 
-#### First-wins semantics
+#### First-Wins Semantics
 
 ```typescript
 initDevMode(true);
@@ -126,7 +126,7 @@ Use cases:
 - **SPA debugging**: Force dev mode in a production build
 - **Tools**: Override what HTML injection set
 
-## HTML injection pattern
+## HTML Injection Pattern
 
 Frameworks (like unirend) inject a synchronous inline script into rendered HTML:
 
@@ -142,7 +142,7 @@ This script:
 - Ensures the global is set before any application code calls `getDevMode()`
 - Makes client-side `initDevMode()` calls no-ops (first-wins)
 
-## Why not `import.meta.env.DEV`?
+## Why Not `import.meta.env.DEV`?
 
 `import.meta.env.DEV` is **statically replaced at build/transform time** by Vite's plugin system. It cannot be overridden at runtime. Additionally:
 

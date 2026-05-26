@@ -21,11 +21,11 @@ That internal `get()`-triggered sweep is throttled: it runs only after a success
   - [size](#size)
   - [byteSize](#bytesize)
 - [Examples](#examples)
-  - [Basic usage](#basic-usage)
+  - [Basic Usage](#basic-usage)
   - [With TTL](#with-ttl)
-  - [With size limits](#with-size-limits)
-  - [With change events](#with-change-events)
-- [Internal size calculation](#internal-size-calculation)
+  - [With Size Limits](#with-size-limits)
+  - [With Change Events](#with-change-events)
+- [Internal Size Calculation](#internal-size-calculation)
 
 <!-- tocstop -->
 
@@ -223,7 +223,7 @@ This tracks cached values only, not key sizes or container overhead, and should 
 
 ## Examples
 
-### Basic usage
+### Basic Usage
 
 ```typescript
 import { LRUCache } from 'lifecycleion/lru-cache';
@@ -259,7 +259,7 @@ cache.set('config:flags', { debug: false }, 0);
 cache.cleanupExpired();
 ```
 
-### With size limits
+### With Size Limits
 
 ```typescript
 // Limit by entry count and total byte size
@@ -274,7 +274,7 @@ const jsonCache = new LRUCache<string, object>(500, {
 });
 ```
 
-### With change events
+### With Change Events
 
 ```typescript
 import { LRUCache, type LRUCacheChangeEvent } from 'lifecycleion/lru-cache';
@@ -321,7 +321,7 @@ const cache = new LRUCache<string, string>(2, {
 });
 ```
 
-## Internal size calculation
+## Internal Size Calculation
 
 When no `sizeCalculator` is provided the cache uses a built-in estimator:
 

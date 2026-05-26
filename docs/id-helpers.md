@@ -11,7 +11,7 @@ Unified identifier generation, validation, and empty-ID utilities supporting Obj
   - [validateID](#validateid)
   - [emptyID](#emptyid)
   - [isEmptyID](#isemptyid)
-  - [IDHelpers (class)](#idhelpers-class)
+  - [IDHelpers (Class)](#idhelpers-class)
 - [Constants](#constants)
   - [IDENTIFIER_TYPES](#identifier_types)
 - [Types](#types)
@@ -109,7 +109,7 @@ isEmptyID('uuid4', empty); // true
 isEmptyID('uuid4', real); // false
 ```
 
-### IDHelpers (class)
+### IDHelpers (Class)
 
 A convenience class that wraps all the standalone functions with a fixed identifier type, so you don't have to pass the type each time.
 
