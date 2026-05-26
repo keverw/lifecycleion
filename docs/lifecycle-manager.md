@@ -2678,7 +2678,8 @@ class ServerComponent extends BaseComponent {
       throw new Error('Cannot start server while shutdown is in progress');
     }
 
-    // Join an in-flight startup, or treat an already-started runtime as a no-op.
+    // Return the same promise if start is already running, so concurrent callers
+    // join the in-flight operation instead of starting a second concurrent startup.
     if (this.startPromise) {
       return this.startPromise;
     }
