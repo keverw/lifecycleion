@@ -759,7 +759,7 @@ class ComponentB extends BaseComponent {
 // If global 60s expires while Component C is starting:
 // - Manager stops initiating new starts after timeout; current start may still run
 //   until its per-component timeout (if any) elapses
-// - Returns { timedOut: true, startedComponents: [...], ... }
+// - Returns { success: false, timedOut: true, code: 'startup_timeout', startedComponents: [...], ... }
 ```
 
 **More Examples:**
