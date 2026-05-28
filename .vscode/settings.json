@@ -10,5 +10,6 @@
   "files.autoSave": "afterDelay",
   "prettier.prettierPath": "./node_modules/prettier",
   "prettier.requireConfig": true,
-  "jestrunner.jestCommand": "bun test"
+  "jestrunner.jestCommand": "bun test",
+  "cSpell.words": ["lifecycleion"]
 }

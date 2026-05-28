@@ -620,12 +620,25 @@ type EventEmitterSurface = Pick<
 >;
 
 /**
+ * Public value lookup surface shared by LifecycleManager and component-scoped
+ * lifecycle references.
+ */
+export interface LifecycleValueProvider {
+  getValue<T = unknown>(
+    componentName: string,
+    key: string,
+    options?: GetValueOptions,
+  ): ValueResult<T>;
+}
+
+/**
  * Common lifecycle interface shared by LifecycleManager and ComponentLifecycle
  *
  * Keep in sync with public LifecycleManager API and ComponentLifecycle proxy.
  * Purpose: define the shared surface both expose to avoid drift across the two.
  */
-export interface LifecycleCommon extends EventEmitterSurface {
+export interface LifecycleCommon
+  extends EventEmitterSurface, LifecycleValueProvider {
   hasComponent(name: string): boolean;
   isComponentRunning(name: string): boolean;
   getComponentNames(): string[];
@@ -681,11 +694,6 @@ export interface LifecycleCommon extends EventEmitterSurface {
   ): Promise<BroadcastResult[]>;
   checkComponentHealth(name: string): Promise<HealthCheckResult>;
   checkAllHealth(): Promise<HealthReport>;
-  getValue<T = unknown>(
-    componentName: string,
-    key: string,
-    options?: GetValueOptions,
-  ): ValueResult<T>;
 }
 
 /**

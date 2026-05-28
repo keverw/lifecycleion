@@ -53,6 +53,7 @@ export type {
   ValueResult,
   ComponentValueResult,
   GetValueOptions,
+  LifecycleValueProvider,
   SystemState,
   RegisterOptions,
   UnregisterOptions,

@@ -79,6 +79,9 @@ A comprehensive lifecycle orchestration system that manages startup, shutdown, a
   - [5. Validate Before Production](#5-validate-before-production)
   - [6. Use Single LifecycleManager Instance](#6-use-single-lifecyclemanager-instance)
   - [7. Make Component Startup Idempotent and Coordinate with Shutdown](#7-make-component-startup-idempotent-and-coordinate-with-shutdown)
+  - [8. Safe Resource Sharing via Dynamic Wrappers](#8-safe-resource-sharing-via-dynamic-wrappers)
+    - [Step 1: The Resource Component](#step-1-the-resource-component)
+    - [Step 2: The Consumer Wrapper Helper](#step-2-the-consumer-wrapper-helper)
 - [Known Limitations](#known-limitations)
   - [1. Timeouts Do Not Force-Cancel Work](#1-timeouts-do-not-force-cancel-work)
   - [2. Stalled Promises Can Retain Memory](#2-stalled-promises-can-retain-memory)
@@ -213,7 +216,10 @@ lifecycle.registerComponent(new WebServerComponent(logger));
 const result = await lifecycle.startAllComponents();
 
 if (!result.success) {
-  logger.error('Failed to start application:', result.errors);
+  logger.error('Failed to start application', {
+    params: { errors: result.errors },
+  });
+
   process.exit(1);
 }
 
@@ -2275,7 +2281,7 @@ lifecycle.on('component:started', async (data) => {
   try {
     await logToDatabase(data);
   } catch (error) {
-    logger.error('Failed to log component start:', error);
+    logger.errorObject('Failed to log component start', error);
     // Can add custom recovery logic here
   }
 });
@@ -2762,6 +2768,705 @@ class ServerComponent extends BaseComponent {
 2. `onShutdownForce()`: Called during the force shutdown phase. Awaiting `this.stop()` here (after force-closing) allows you to clean up and settle during the force escalation phase.
 
 See the [Stalled Component Recovery](#stalled-component-recovery) section for examples of how to implement these patterns.
+
+### 8. Safe Resource Sharing via Dynamic Wrappers
+
+When sharing resources (such as a database connection pool, a Redis client, or an API client) via `getValue()`, consumers, whether they are other registered components (like background workers), web servers, or middleware, should avoid holding onto direct, long-lived references to the underlying resource. Doing so can cause issues if the provider component restarts, stops, or goes offline.
+
+Instead, the resource-providing component should manage the connection lifecycle and expose it via `getValue()`, while consumers use a **Wrapper** class that dynamically resolves the active resource on every call.
+
+#### Step 1: The Resource Component
+
+The component manages the database pool's lifecycle (creation, testing, and teardown). It can also implement logic to swap a live connection pool with zero downtime, or buffer replacement credentials for the next manager-driven startup when the pool is stopped or stopping.
+
+```typescript
+import {
+  BaseComponent,
+  type ComponentValueResult,
+} from 'lifecycleion/lifecycle-manager';
+import type { Logger } from 'lifecycleion/logger';
+import { Pool } from 'pg';
+import { ulid } from 'ulid';
+
+export interface DatabaseConfig {
+  // Required connection parameters
+  user: string;
+  host: string;
+  database: string;
+  password: string;
+  port: number;
+
+  // Optional pool configuration
+  max?: number;
+  min?: number;
+  idleTimeoutMillis?: number;
+  connectionTimeoutMillis?: number;
+}
+
+// Default pool configuration values (uses Millis to match pg native options)
+// See https://node-postgres.com/guides/pool-sizing for details on pool sizing
+const DEFAULT_POOL_CONFIG = {
+  max: 20, // Max number of clients in the pool
+  min: 2, // Min number of idle clients to keep in the pool
+  idleTimeoutMillis: 30000, // How long a client is allowed to remain idle before being closed
+  connectionTimeoutMillis: 2000, // How long to wait for a connection from the pool
+};
+
+const OLD_POOL_DRAIN_MS = 1000;
+
+export interface DatabasePoolRef {
+  pool: Pool;
+  poolID: string;
+}
+
+export interface DatabaseStatusRef {
+  connected: boolean;
+  poolID: string | null;
+  state: string;
+  hasPendingConfig: boolean;
+  totalConnections: number;
+  idleConnections: number;
+  waitingRequests: number;
+}
+
+class DatabaseConnectionManager extends BaseComponent {
+  private pool: Pool | null = null;
+  private poolID: string | null = null;
+  private config: DatabaseConfig;
+  private pendingConfig: DatabaseConfig | null = null;
+  private startPromise: Promise<void> | null = null;
+  private stopPromise: Promise<void> | null = null;
+  private configUpdateQueue: Promise<void> = Promise.resolve();
+  private retiredPools = new Set<Pool>();
+  private retiredPoolClosePromises = new Map<Pool, Promise<void>>();
+  private retiredPoolTimers = new Set<ReturnType<typeof setTimeout>>();
+
+  constructor(logger: Logger, config: DatabaseConfig) {
+    super(logger, {
+      name: 'database',
+    });
+
+    this.config = config;
+  }
+
+  async start(): Promise<void> {
+    // Starting while shutdown is active is not a safe no-op
+    if (this.stopPromise) {
+      throw new Error(
+        'Cannot start database connection manager while shutdown is in progress',
+      );
+    }
+
+    // Return the same promise if start is already running, so concurrent callers
+    // join the in-flight operation instead of starting a second concurrent startup.
+    if (this.startPromise) {
+      return this.startPromise;
+    }
+
+    this.startPromise = (async () => {
+      // A buffered config is only consumed by a manager-driven startup attempt.
+      const startupConfig = this.pendingConfig ?? this.config;
+
+      this.logger.info('Connecting to database and creating pool...', {
+        params: {
+          host: startupConfig.host,
+          database: startupConfig.database,
+        },
+      });
+
+      // Create initial pool with defaults merged with provided config
+      const poolConfig = {
+        ...DEFAULT_POOL_CONFIG,
+        ...startupConfig,
+      };
+
+      const pool = new Pool(poolConfig);
+
+      // Handle unexpected errors on idle clients (e.g. if the database server drops
+      // the socket, or if credentials rotate and connection attempts fail). This
+      // prevents idle errors from raising unhandled exceptions and crashing the process.
+      pool.on('error', (err) => {
+        this.logger.errorObject(
+          'Unexpected error on idle client in database pool',
+          err,
+        );
+      });
+
+      try {
+        // Verify connection by checking out a client and running a test query
+        const client = await pool.connect();
+
+        try {
+          await client.query('SELECT 1');
+        } finally {
+          client.release();
+        }
+
+        this.pool = pool;
+        this.poolID = ulid();
+
+        // Promote the startup config only after the replacement pool is verified.
+        this.config = startupConfig;
+        this.pendingConfig = null;
+        this.logger.success('Database pool successfully created and verified');
+      } catch (error) {
+        // Reset startup state on failure so startup can be retried
+        this.pool = null;
+        this.poolID = null;
+        this.startPromise = null;
+        await pool.end().catch(() => {});
+        throw error;
+      }
+    })();
+
+    return this.startPromise;
+  }
+
+  async stop(): Promise<void> {
+    if (this.stopPromise) {
+      return this.stopPromise;
+    }
+
+    this.stopPromise = (async () => {
+      try {
+        // Await active startup to settle before stopping, preventing orphaned pools
+        // if shutdown is initiated mid-boot.
+        if (this.startPromise) {
+          try {
+            await this.startPromise;
+          } catch {
+            // Ignore startup errors since we are stopping anyway
+          }
+        }
+
+        try {
+          // Wait for any in-flight config swap before closing the active pool.
+          await this.configUpdateQueue;
+        } catch {
+          // Ignore config update errors since we are stopping anyway
+        }
+
+        // Keep a local reference to close the pool gracefully.
+        // pool.end() is graceful: it waits for all checked-out clients to be released
+        // before resolving, but will hang if a client is leaked and never returned.
+        const pool = this.pool;
+        const retiredPools = [...this.retiredPools];
+
+        for (const timer of this.retiredPoolTimers) {
+          clearTimeout(timer);
+        }
+
+        this.retiredPoolTimers.clear();
+        this.retiredPools.clear();
+
+        if (pool) {
+          this.logger.info('Closing database pool connections...');
+          await pool.end();
+        }
+
+        for (const retiredPool of retiredPools) {
+          await this.closeRetiredPool(retiredPool);
+        }
+
+        // Only clear references after a successful close.
+        this.pool = null;
+        this.poolID = null;
+        this.startPromise = null;
+        this.logger.success('Database pool closed');
+      } finally {
+        // Runs on both success and error to prevent stopPromise pointing at a rejected
+        // promise forever. Errors still propagate normally to any awaiting caller.
+        this.stopPromise = null;
+      }
+    })();
+
+    return this.stopPromise;
+  }
+
+  /**
+   * Safely updates the database pool configuration.
+   */
+  async updateConfig(newConfig: DatabaseConfig) {
+    const runUpdate = async () => {
+      // Await active startup to settle before swapping configuration. If startup
+      // fails because credentials are stale, continue so the buffer path below
+      // can buffer replacement credentials for the next startup attempt.
+      if (this.startPromise) {
+        await this.startPromise.catch(() => {});
+      }
+
+      // If there is no stable live pool to swap, buffer the new config for the
+      // next manager-driven startup instead of mutating the active config.
+      if (this.stopPromise || !this.pool) {
+        this.pendingConfig = newConfig;
+
+        this.logger.info(
+          'Database pool configuration buffered for next start',
+          {
+            params: {
+              host: newConfig.host,
+              database: newConfig.database,
+            },
+          },
+        );
+
+        return;
+      }
+
+      const oldPool = this.pool;
+
+      // Create new pool with updated config and default pool settings
+      const updatedPoolConfig = {
+        ...DEFAULT_POOL_CONFIG,
+        ...newConfig,
+      };
+
+      const newPool = new Pool(updatedPoolConfig);
+
+      // Handle unexpected errors on idle clients (e.g. if connection drops or login details expire)
+      newPool.on('error', (err) => {
+        this.logger.errorObject(
+          'Unexpected error on idle client in database pool',
+          err,
+        );
+      });
+
+      try {
+        // Verify connection by checking out a client and running a test query
+        const client = await newPool.connect();
+
+        try {
+          await client.query('SELECT 1');
+        } finally {
+          client.release();
+        }
+
+        // Swap the references upon successful connection test
+        this.pool = newPool;
+        this.poolID = ulid();
+        this.config = newConfig;
+        this.pendingConfig = null;
+
+        this.logger.info('Database pool configuration updated', {
+          params: {
+            host: newConfig.host,
+            database: newConfig.database,
+          },
+        });
+
+        // Give requests that already captured the old pool a short drain window,
+        // then gracefully close the old pool in the background.
+        this.retiredPools.add(oldPool);
+
+        const timer = setTimeout(() => {
+          this.retiredPoolTimers.delete(timer);
+          void this.closeRetiredPool(oldPool);
+        }, OLD_POOL_DRAIN_MS);
+
+        this.retiredPoolTimers.add(timer);
+      } catch (error) {
+        // Clean up the new pool and keep using the old one
+        await newPool.end();
+        throw error;
+      }
+    };
+
+    // The promise chain is the queue: each update waits for the previous one
+    // before it starts, so overlapping calls cannot swap or close the same pool.
+    // Catching the prior update keeps one failure from blocking future updates.
+    const update = this.configUpdateQueue.catch(() => {}).then(runUpdate);
+    this.configUpdateQueue = update;
+
+    return update;
+  }
+
+  private closeRetiredPool(pool: Pool): Promise<void> {
+    const existingClose = this.retiredPoolClosePromises.get(pool);
+
+    if (existingClose) {
+      return existingClose;
+    }
+
+    const closePromise = pool
+      .end()
+      .catch((err) => {
+        this.logger.errorObject('Failed to close old database pool', err);
+      })
+      .finally(() => {
+        this.retiredPools.delete(pool);
+        this.retiredPoolClosePromises.delete(pool);
+      });
+
+    this.retiredPoolClosePromises.set(pool, closePromise);
+
+    return closePromise;
+  }
+
+  getValue<T = unknown>(
+    key: string,
+    from: string | null,
+  ): ComponentValueResult<T> {
+    const status = this.getSelfStatus();
+
+    if (key === 'pool') {
+      if (status?.state !== 'running' || !this.pool || !this.poolID) {
+        return { found: false, value: undefined };
+      }
+
+      const value: DatabasePoolRef = {
+        pool: this.pool,
+        poolID: this.poolID,
+      };
+
+      return {
+        found: true,
+        value: value as T,
+      };
+    } else if (key === 'status') {
+      const value: DatabaseStatusRef = {
+        connected: this.pool !== null,
+        poolID: this.poolID,
+        state: status?.state ?? 'unknown',
+        hasPendingConfig: this.pendingConfig !== null,
+        totalConnections: this.pool?.totalCount ?? 0,
+        idleConnections: this.pool?.idleCount ?? 0,
+        waitingRequests: this.pool?.waitingCount ?? 0,
+      };
+
+      return {
+        found: true,
+        value: value as T,
+      };
+    } else {
+      return { found: false, value: undefined };
+    }
+  }
+}
+```
+
+#### Step 2: The Consumer Wrapper Helper
+
+Consumers use a helper wrapper class to interact with the database. Instead of caching the connection pool, it queries the `DatabaseConnectionManager`'s shared value dynamically. The provider also exposes a `poolID` that changes every time a new pool is promoted, allowing the wrapper to retry client acquisition once when a request races with a pool swap without looping forever. In web applications, this helper is typically instantiated once and attached to the incoming request object (such as `req.db`) via middleware, making database operations safe and uniform across all handlers.
+
+In a larger app or monorepo, place shared value types like `DatabasePoolRef` and `DatabaseStatusRef` in a shared types file imported by both the component and its consumers. Unit test the wrapper behavior too, especially unavailable pools, pool-swap retry, non-replayed writes, and transaction rollback paths.
+
+```typescript
+import { safeHandleCallback } from 'lifecycleion/safe-handle-callback';
+import type { Pool, PoolClient, QueryResult, QueryResultRow } from 'pg';
+import type { LifecycleValueProvider } from 'lifecycleion/lifecycle-manager';
+
+export interface DatabasePoolRef {
+  pool: Pool;
+  poolID: string;
+}
+
+export interface DatabaseHelperOptions {
+  onPoolSwapRetry?: (details: {
+    mode: 'client' | 'query';
+    previousPoolID: string;
+    activePoolID: string;
+  }) => void | Promise<void>;
+}
+
+export interface TransactionResult<T> {
+  status: 'committed' | 'rolled_back';
+  value?: T;
+  error?: Error;
+}
+
+export class TransactionContext {
+  private committed = false;
+  private rolledBack = false;
+
+  constructor(private client: PoolClient) {}
+
+  /**
+   * Run a query within this transaction.
+   */
+  async query(text: string, params?: unknown[]) {
+    if (this.committed || this.rolledBack) {
+      throw new Error('Transaction has already completed');
+    }
+
+    return this.client.query(text, params);
+  }
+
+  /**
+   * Manually commit the transaction.
+   */
+  async commit() {
+    if (this.committed || this.rolledBack) {
+      throw new Error('Transaction has already completed');
+    }
+
+    await this.client.query('COMMIT');
+    this.committed = true;
+  }
+
+  /**
+   * Manually rollback the transaction.
+   */
+  async rollback() {
+    if (this.committed || this.rolledBack) {
+      throw new Error('Transaction has already completed');
+    }
+
+    await this.client.query('ROLLBACK');
+    this.rolledBack = true;
+  }
+
+  /**
+   * Check if the transaction has been manually finalized (committed or rolled back).
+   */
+  isCompleted() {
+    return this.committed || this.rolledBack;
+  }
+
+  /**
+   * Get the current status of the transaction.
+   */
+  getStatus(): 'pending' | 'committed' | 'rolled_back' {
+    if (this.committed) {
+      return 'committed';
+    } else if (this.rolledBack) {
+      return 'rolled_back';
+    } else {
+      return 'pending';
+    }
+  }
+}
+
+export class DatabaseHelper {
+  constructor(
+    private lifecycle: LifecycleValueProvider,
+    private options: DatabaseHelperOptions = {},
+  ) {
+    if (
+      options.onPoolSwapRetry !== undefined &&
+      typeof options.onPoolSwapRetry !== 'function'
+    ) {
+      throw new TypeError('onPoolSwapRetry must be a function');
+    }
+  }
+
+  /**
+   * Retrieves the active connection pool reference or throws a descriptive error.
+   */
+  private getPoolRefOrThrow(): DatabasePoolRef {
+    const result = this.lifecycle.getValue<DatabasePoolRef>('database', 'pool');
+
+    if (!result.found || !result.value) {
+      // Fetch the component status to provide a more specific error message
+      const statusResult = this.lifecycle.getValue<{ state: string }>(
+        'database',
+        'status',
+        { includeStopped: true, includeStalled: true },
+      );
+
+      const state = statusResult.value?.state ?? 'unknown';
+      throw new Error(
+        `Database connection is unavailable (manager state: ${state})`,
+      );
+    }
+
+    return result.value;
+  }
+
+  private shouldRetryAfterPoolSwap(error: unknown): boolean {
+    const retryableCodes = new Set([
+      // Node.js network/socket errors
+      'ECONNRESET',
+      'ECONNREFUSED',
+      'EPIPE',
+      'ETIMEDOUT',
+      'ENOTFOUND',
+      'EAI_AGAIN',
+      // PostgreSQL SQLSTATE connection exception class
+      '08000',
+      '08001',
+      '08003',
+      '08004',
+      '08006',
+      '08007',
+      '08P01',
+      // Server shutdown/restart conditions
+      '57P01',
+      '57P02',
+      '57P03',
+    ]);
+    const code =
+      typeof error === 'object' && error !== null && 'code' in error
+        ? String(error.code)
+        : null;
+    const message = error instanceof Error ? error.message : String(error);
+
+    return (
+      (code !== null && retryableCodes.has(code)) ||
+      message.includes('Cannot use a pool after calling end') ||
+      message.includes('Connection terminated unexpectedly') ||
+      message.includes('Client has encountered a connection error')
+    );
+  }
+
+  private async runOperationWithPoolSwapRetry(
+    mode: 'client',
+  ): Promise<PoolClient>;
+  private async runOperationWithPoolSwapRetry<
+    T extends QueryResultRow = QueryResultRow,
+  >(mode: 'query', text: string, params?: unknown[]): Promise<QueryResult<T>>;
+  private async runOperationWithPoolSwapRetry<
+    T extends QueryResultRow = QueryResultRow,
+  >(
+    mode: 'client' | 'query',
+    text?: string,
+    params?: unknown[],
+  ): Promise<PoolClient | QueryResult<T>> {
+    const poolRef = this.getPoolRefOrThrow();
+
+    const run = (ref: DatabasePoolRef) => {
+      switch (mode) {
+        case 'client':
+          return ref.pool.connect();
+
+        case 'query':
+          if (text === undefined) {
+            throw new Error('Query text is required');
+          }
+
+          return ref.pool.query<T>(text, params);
+
+        default:
+          throw new Error(`Unsupported database operation mode: ${mode}`);
+      }
+    };
+
+    try {
+      return await run(poolRef);
+    } catch (error) {
+      // Retry once only when a pool/connection lifecycle error races with a newer pool.
+      if (!this.shouldRetryAfterPoolSwap(error)) {
+        throw error;
+      }
+
+      const activePoolRef = this.lifecycle.getValue<DatabasePoolRef>(
+        'database',
+        'pool',
+      );
+      const activePoolID = activePoolRef.value?.poolID ?? null;
+
+      if (activePoolID === null || activePoolID === poolRef.poolID) {
+        throw error;
+      }
+
+      // Keep telemetry hook failures from interrupting the database operation.
+      if (this.options.onPoolSwapRetry) {
+        safeHandleCallback(
+          'DatabaseHelper onPoolSwapRetry',
+          this.options.onPoolSwapRetry,
+          {
+            mode,
+            previousPoolID: poolRef.poolID,
+            activePoolID,
+          },
+        );
+      }
+
+      const nextPoolRef = this.getPoolRefOrThrow();
+      return run(nextPoolRef);
+    }
+  }
+
+  /**
+   * Run a direct query against the pool.
+   * Use this for writes, mixed statements, or reads that should not be replayed.
+   * This method dynamically resolves the active pool but does not retry the SQL
+   * after it has been sent, because the client cannot always know whether
+   * PostgreSQL already ran it. Use runInTransaction() for multi-step atomic work.
+   */
+  async query<T extends QueryResultRow = QueryResultRow>(
+    text: string,
+    params?: unknown[],
+  ): Promise<QueryResult<T>> {
+    const poolRef = this.getPoolRefOrThrow();
+    return poolRef.pool.query<T>(text, params);
+  }
+
+  /**
+   * Run a read-only query that is safe to replay once during pool rotation.
+   * This method only accepts leading SELECT statements with no semicolons. It
+   * cannot prove that custom functions are side-effect-free, so only use it for
+   * reads your application considers safe to replay. For writes or reads that
+   * are not safe to replay, use query() so the SQL is never replayed
+   * automatically.
+   */
+  async readQuery<T extends QueryResultRow = QueryResultRow>(
+    text: string,
+    params?: unknown[],
+  ): Promise<QueryResult<T>> {
+    const normalizedQuery = text.trimStart().toLowerCase();
+
+    if (
+      !normalizedQuery.startsWith('select') ||
+      normalizedQuery.includes(';')
+    ) {
+      throw new Error('readQuery() only accepts replayable SELECT statements');
+    }
+
+    return this.runOperationWithPoolSwapRetry<T>('query', text, params);
+  }
+
+  /**
+   * Run a series of queries inside a transaction.
+   * Automatically starts a transaction and passes a TransactionContext to the callback.
+   * The callback MUST explicitly call tx.commit() or tx.rollback() before resolving.
+   * If it resolves without manual completion, the transaction is rolled back and an error is returned.
+   * If the callback throws an error, the transaction is rolled back and the error is returned.
+   * Returns a TransactionResult object detailing the status, return value, or caught error.
+   * Releases the client safely under all circumstances.
+   */
+  async runInTransaction<T>(
+    callback: (tx: TransactionContext) => Promise<T>,
+  ): Promise<TransactionResult<T>> {
+    const client = await this.runOperationWithPoolSwapRetry('client');
+    const tx = new TransactionContext(client);
+
+    try {
+      await client.query('BEGIN');
+      const result = await callback(tx);
+
+      // Force manual completion: if resolved without explicit commit/rollback, we rollback and throw
+      if (!tx.isCompleted()) {
+        await tx.rollback().catch(() => {});
+        throw new Error(
+          'Transaction was resolved without being explicitly committed or rolled back',
+        );
+      }
+
+      return {
+        status: tx.getStatus() as 'committed' | 'rolled_back',
+        value: result,
+      };
+    } catch (error) {
+      const err = error instanceof Error ? error : new Error(String(error));
+
+      // If not finalized yet, auto-rollback
+      if (!tx.isCompleted()) {
+        await tx.rollback().catch(() => {});
+        return { status: 'rolled_back', error: err };
+      }
+
+      // If already finalized (e.g. committed, but a subsequent step in the callback failed),
+      // return the correct transaction status along with the caught error.
+      return {
+        status: tx.getStatus() as 'committed' | 'rolled_back',
+        error: err,
+      };
+    } finally {
+      client.release();
+    }
+  }
+}
+```
 
 ## Known Limitations
 

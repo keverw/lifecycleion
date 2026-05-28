@@ -15,6 +15,7 @@
 - [0.0.11 (Apr 9, 2026)](#0011-apr-9-2026)
 - [0.0.12 (Apr 18, 2026)](#0012-apr-18-2026)
 - [0.0.13 (Apr 19, 2026)](#0013-apr-19-2026)
+- [0.0.14 (Apr 28, 2026)](#0014-apr-28-2026)
 - [Unreleased](#unreleased)
 
 <!-- tocstop -->
@@ -92,7 +93,7 @@
 - Repeated shutdown escalation now supports optional `armedAfterFailureMS` overrides so failed or stalled shutdown attempts can stay force-armed longer than the default derived post-failure window
 - LifecycleManager shutdown logs now distinguish between the normal first shutdown request, repeated shutdown requests still being tracked, and repeated-request escalation when the force threshold is reached
 
-## Unreleased
+## 0.0.14 (Apr 28, 2026)
 
 - LifecycleManager now detects when a stalled component's original `stop()` or `onShutdownForce()` promise eventually resolves and automatically transitions it from `stalled` to `stopped`, clearing the stall record and emitting a `component:stalled-resolved` event. A per-component stop generation token prevents a late-resolving promise from affecting a component that has already been restarted since stalling.
 - Docs now document the `stop()` promise-deduplication pattern as the recommended approach when `onShutdownForce()` should join an already-running `stop()`, and the `onGracefulStopTimeout()` pattern as an alternative for unblocking `stop()` without a concurrent second close.
@@ -100,3 +101,7 @@
 - If `reportUnexpectedStop()` fires during `startAllComponents()`, required components now fail the bulk startup with `code: 'component_unexpected_stop'` and trigger rollback of later-started components, while optional components are recorded in `failedOptionalComponents`.
 - Added `component:unexpected-stop` event (payload: `{ name, error? }`) emitted when a running component calls `reportUnexpectedStop()`, immediately before the follow-up `component:stopped` event.
 - BaseComponent now exposes a protected `getSelfStatus()` method that returns the component's own `ComponentStatus` from the manager without requiring the caller to pass the component name.
+
+## Unreleased
+
+- Added exported `LifecycleValueProvider` type for helpers that only need the shared-value `getValue()` surface, allowing the same helper to accept either a `LifecycleManager` or a component-scoped lifecycle reference.
