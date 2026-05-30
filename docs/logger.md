@@ -56,6 +56,7 @@ A modern, flexible logging library with sink-based architecture, template string
     - [Sink Error Handling](#sink-error-handling)
     - [Exit Behavior](#exit-behavior)
 - [EventEmitter Integration](#eventemitter-integration)
+  - [Exit Event Phases](#exit-event-phases)
 - [Custom Sinks](#custom-sinks)
 - [LogEntry Structure](#logentry-structure)
   - [Important Notes](#important-notes-1)
@@ -1270,11 +1271,18 @@ When a log includes an `exitCode`, the logger will:
 
 **Exit Code Validation:** The `exitCode` must be a valid number. Non-numeric values are silently ignored and will not trigger process exit.
 
-This means `callProcessExit: false` creates a "simulated exit" - the logger goes through the exit process (callbacks, state changes, closing sinks) but doesn't actually terminate the process. This is useful for:
+This means `callProcessExit: false` creates a "simulated exit" - the logger goes through the exit process (callbacks, state changes, closing sinks) but doesn't actually terminate the process. During a simulated exit, the logger still executes its entire exit sequence:
+
+- **Callback Hook Execution**: Calls the registered `beforeExitCallback` (e.g. to shut down component lifecycles).
+- **State Property Updates**: Sets `logger.didExit = true` and updates `logger.exitCode` (enabling clean unit/integration test assertions).
+- **Sink Cleanup**: Closes all registered sinks cleanly.
+- **Event Signaling**: Emits `'logger'` events (`exit-called` and `exit-process`), allowing external code to react to the exit intent.
+
+This is useful for:
 
 - **Testing**: Verify exit behavior without killing your test runner
 - **Browser environments**: No `process.exit()` available
-- **Custom exit handling**: Use `beforeExitCallback` to implement your own exit logic
+- **Custom exit handling**: Use `beforeExitCallback` to implement your own exit logic. See [docs/lifecycle-manager.md](lifecycle-manager.md#process-exit-design--rationale) for details on how `LifecycleManager` hooks into this mechanism to cleanly orchestrate component shutdowns.
 
 ## EventEmitter Integration
 
@@ -1305,6 +1313,13 @@ logger.on('logger', (event) => {
 logger.info('This will trigger an event');
 logger.error('Error event will be emitted');
 ```
+
+### Exit Event Phases
+
+When the logger handles an exit, it emits two distinct events representing different lifecycle phases:
+
+- **`exit-called`**: Emitted **immediately** when `logger.exit()` is called, _before_ any registered `beforeExitCallback` hooks (like component shutdowns) run. It indicates the exit sequence has been initiated, and includes an `isFirstExit: boolean` flag to track redundant exit calls.
+- **`exit-process`**: Emitted **after** all registered exit callbacks have settled and finished their work, just before the logger starts closing its sinks and optionally terminates the process (`callProcessExit: true`). It indicates the logger has finished pre-exit callback work and is proceeding into final sink cleanup.
 
 ## Custom Sinks
 

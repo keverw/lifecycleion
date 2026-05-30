@@ -43,6 +43,7 @@ A comprehensive lifecycle orchestration system that manages startup, shutdown, a
     - [Repeated Shutdown Request Policy](#repeated-shutdown-request-policy)
   - [Logger Integration](#logger-integration)
     - [`enableLoggerExitHook()`](#enableloggerexithook)
+    - [Process Exit Design & Rationale](#process-exit-design--rationale)
     - [Logger Requirements](#logger-requirements)
   - [Status and Query Methods](#status-and-query-methods)
     - [Component Existence and State](#component-existence-and-state)
@@ -1577,6 +1578,21 @@ logger.exit(0);
 - If `logger.exit()` is called while shutdown is already in progress, that exit call returns `{ action: 'wait' }` instead of exiting immediately.
 - The first such `logger.exit()` call is kept pending and allowed to proceed after the in-flight shutdown finishes.
 - Later duplicate `logger.exit()` calls during the same shutdown also return `{ action: 'wait' }`, but are otherwise ignored so they cannot override the pending exit code or exit early.
+
+#### Process Exit Design & Rationale
+
+By default, `LifecycleManager` does **not** call `process.exit()` during signal-triggered shutdowns (such as `SIGINT` or `SIGTERM`). Instead, it relies on the Node.js event loop naturally emptying once all components have stopped.
+
+This design choice has two primary benefits:
+
+- **Resource Leak Detection**: If a component's `stop()` method fails to clean up properly (e.g., leaves a database connection pool open, fails to close an HTTP server, or leaves an active interval running), the process will hang. This surfaces resource leaks during development and testing that would otherwise be masked by a forced exit.
+- **Multi-App Integration Testing**: In testing environments where multiple simulated application instances run in a single process, calling `process.exit()` in one manager would terminate the entire test runner. Leaving process termination to the host allows clean multi-lifecycle execution.
+
+If you want the process to exit automatically:
+
+- **Via signals**: Handle the exit explicitly in the application entrypoint by listening to the `lifecycle-manager:shutdown-completed` event (e.g., calling `logger.exit(0)` or `process.exit(0)`).
+- **Via logger hooks**: Enable logger exit hook integration (`enableLoggerExitHook: true`). When enabled, calling `logger.exit()` or logging a fatal error with `exitCode` will trigger `LifecycleManager` to stop all components first, and then delegate back to the logger to proceed with its configured exit behavior (respecting any overrides like `callProcessExit: false`). See [Exit Behavior in docs/logger.md](logger.md#exit-behavior) for details on configuring simulated exits.
+- **Via repeated signals (Ctrl+C escalation)**: Configure `repeatedShutdownRequestPolicy.onForceShutdown` to call `logger.exit(1)` or `process.exit(1)` when the threshold (like multiple Ctrl+C presses) is crossed.
 
 #### Logger Requirements
 
