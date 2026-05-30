@@ -5663,6 +5663,89 @@ describe('LifecycleManager - Bulk Operations', () => {
       expect(result.skippedDueToDependency).not.toContain('comp-b');
     });
 
+    test('should skip dependents and emit event when required dependency is stalled', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+      const events: Array<{ name: string; reason: string }> = [];
+
+      lifecycle.on('component:start-skipped', (data: any) => {
+        events.push(data);
+      });
+
+      await lifecycle.registerComponent(
+        new TestComponent(logger, { name: 'comp-a' }),
+      );
+      await lifecycle.registerComponent(
+        new TestComponent(logger, { name: 'comp-b', dependencies: ['comp-a'] }),
+      );
+
+      // Force mark comp-a as stalled
+      (lifecycle as any).stalledComponents.set('comp-a', {
+        name: 'comp-a',
+        stalledAt: Date.now(),
+        reason: 'Graceful stop timed out',
+        phase: 'graceful',
+      });
+
+      const result = await lifecycle.startAllComponents({
+        ignoreStalledComponents: true,
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.skippedDueToDependency).toContain('comp-b');
+      expect(result.startedComponents).not.toContain('comp-b');
+      expect(events).toHaveLength(1);
+      expect(events[0]).toEqual({
+        name: 'comp-b',
+        reason: 'Dependency "comp-a" is stalled',
+      });
+    });
+
+    test('should skip dependents transitively when a dependency is skipped', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+      const events: Array<{ name: string; reason: string }> = [];
+
+      lifecycle.on('component:start-skipped', (data: any) => {
+        events.push(data);
+      });
+
+      await lifecycle.registerComponent(
+        new TestComponent(logger, { name: 'comp-a' }),
+      );
+      await lifecycle.registerComponent(
+        new TestComponent(logger, { name: 'comp-b', dependencies: ['comp-a'] }),
+      );
+      await lifecycle.registerComponent(
+        new TestComponent(logger, { name: 'comp-c', dependencies: ['comp-b'] }),
+      );
+
+      // Force mark comp-a as stalled
+      (lifecycle as any).stalledComponents.set('comp-a', {
+        name: 'comp-a',
+        stalledAt: Date.now(),
+        reason: 'Graceful stop timed out',
+        phase: 'graceful',
+      });
+
+      const result = await lifecycle.startAllComponents({
+        ignoreStalledComponents: true,
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.skippedDueToDependency).toContain('comp-b');
+      expect(result.skippedDueToDependency).toContain('comp-c');
+      expect(result.startedComponents).not.toContain('comp-b');
+      expect(result.startedComponents).not.toContain('comp-c');
+      expect(events).toHaveLength(2);
+      expect(events).toContainEqual({
+        name: 'comp-b',
+        reason: 'Dependency "comp-a" is stalled',
+      });
+      expect(events).toContainEqual({
+        name: 'comp-c',
+        reason: 'Dependency "comp-b" was skipped',
+      });
+    });
+
     test('validateDependencies() should return valid when no issues', async () => {
       const lifecycle = new LifecycleManager({ logger });
 
