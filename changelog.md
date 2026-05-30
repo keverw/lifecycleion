@@ -16,7 +16,7 @@
 - [0.0.12 (Apr 18, 2026)](#0012-apr-18-2026)
 - [0.0.13 (Apr 19, 2026)](#0013-apr-19-2026)
 - [0.0.14 (Apr 28, 2026)](#0014-apr-28-2026)
-- [Unreleased](#unreleased)
+- [0.0.15 (May 29, 2026)](#0015-may-29-2026)
 
 <!-- tocstop -->
 
@@ -102,7 +102,7 @@
 - Added `component:unexpected-stop` event (payload: `{ name, error? }`) emitted when a running component calls `reportUnexpectedStop()`, immediately before the follow-up `component:stopped` event.
 - BaseComponent now exposes a protected `getSelfStatus()` method that returns the component's own `ComponentStatus` from the manager without requiring the caller to pass the component name.
 
-## Unreleased
+## 0.0.15 (May 29, 2026)
 
 - Added exported `LifecycleValueProvider` type for helpers that only need the shared-value `getValue()` surface, allowing the same helper to accept either a `LifecycleManager` or a component-scoped lifecycle reference.
 - Prevent registering a single component instance with multiple `LifecycleManager` instances simultaneously. Registration fails with `code: 'duplicate_instance'` and a descriptive message.
