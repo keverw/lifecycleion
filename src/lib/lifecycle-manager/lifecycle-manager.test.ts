@@ -507,6 +507,48 @@ describe('LifecycleManager - BaseComponent', () => {
       expect(result2.componentName).toBe('database-copy');
     });
 
+    test('registerComponent() should reject duplicate instance registered with another manager', async () => {
+      const lifecycleA = new LifecycleManager({ logger });
+      const lifecycleB = new LifecycleManager({ logger });
+      const component = new TestComponent(logger, { name: 'database' });
+
+      const resultA = await lifecycleA.registerComponent(component);
+      expect(resultA.success).toBe(true);
+
+      const resultB = await lifecycleB.registerComponent(component);
+      expect(resultB.success).toBe(false);
+      expect(resultB.registered).toBe(false);
+      expect(resultB.code).toBe('duplicate_instance');
+      expect(resultB.reason).toBe(
+        'Component instance is already registered with another lifecycle manager.',
+      );
+    });
+
+    test('unregisterComponent() should clear lifecycle reference and allow registration on another manager', async () => {
+      const lifecycleA = new LifecycleManager({ logger });
+      const lifecycleB = new LifecycleManager({ logger });
+      const component = new TestComponent(logger, { name: 'database' });
+
+      // Register with A
+      const resultA1 = await lifecycleA.registerComponent(component);
+      expect(resultA1.success).toBe(true);
+      expect((component as any).lifecycle).toBeDefined();
+
+      // Registering with B fails
+      const resultB1 = await lifecycleB.registerComponent(component);
+      expect(resultB1.success).toBe(false);
+
+      // Unregister from A
+      const unregResult = await lifecycleA.unregisterComponent('database');
+      expect(unregResult.success).toBe(true);
+      expect((component as any).lifecycle).toBeUndefined();
+
+      // Registering with B now succeeds
+      const resultB2 = await lifecycleB.registerComponent(component);
+      expect(resultB2.success).toBe(true);
+      expect((component as any).lifecycle).toBeDefined();
+    });
+
     test('insertComponentAt() should reject duplicate instance even if renamed', async () => {
       class RenamableComponent extends TestComponent {
         public rename(newName: string): void {

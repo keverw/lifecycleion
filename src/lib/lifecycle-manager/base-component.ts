@@ -104,6 +104,9 @@ export abstract class BaseComponent {
   private _unexpectedStopHandler?: (error?: Error) => boolean;
   /** @internal Incremented whenever the unexpected-stop handler is re-armed or cleared. */
   private _unexpectedStopGeneration = 0;
+  /** @internal Flag indicating whether this component is currently registered with a LifecycleManager */
+  private _isRegistered = false;
+
   /**
    * Create a new component
    *
@@ -165,6 +168,25 @@ export abstract class BaseComponent {
     this._unexpectedStopGeneration += 1;
     this._unexpectedStopHandler = undefined;
     this.reportUnexpectedStop = () => false;
+  }
+
+  /** @internal Called by LifecycleManager when registering the component. */
+  public _markRegistered(): void {
+    this._isRegistered = true;
+  }
+
+  /** @internal Called by LifecycleManager when unregistering the component. */
+  public _markUnregistered(): void {
+    this._isRegistered = false;
+
+    // Clear lifecycle to prevent stale calls and memory leaks
+    (this as unknown as { lifecycle?: ComponentLifecycleRef }).lifecycle =
+      undefined;
+  }
+
+  /** @internal Check if the component is registered with any LifecycleManager. */
+  public _isRegisteredWithManager(): boolean {
+    return this._isRegistered;
   }
 
   /**

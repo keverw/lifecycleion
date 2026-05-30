@@ -543,6 +543,12 @@ interface RegisterComponentResult {
 }
 ```
 
+**Registration Constraints:**
+
+- **Single Manager Binding**: A component instance can only be registered with one `LifecycleManager` at a time. Attempting to register a component instance that is already registered (either with the same manager under a different name, or with a different manager instance) will fail with `code: 'duplicate_instance'`.
+- **Unique Name Constraint**: The component name must be unique within a manager instance. Registering a component with a name that is already taken will fail with `code: 'duplicate_name'`.
+- **Bulk Operation Guard**: Registration/insertion is blocked while the manager is shutting down (`isShuttingDown = true`), failing with `code: 'shutdown_in_progress'`. During startup (`isStarting = true`), registration/insertion is only blocked when the new component is a required dependency of an already-registered component, failing with `code: 'startup_in_progress'`.
+
 **Example:**
 
 ```typescript
@@ -646,6 +652,7 @@ interface UnregisterOptions {
 
 - `forceStop` only applies when `stopIfRunning` is true (passes through to `stopComponent` as `allowStopWithRunningDependents`).
 - If a component is stalled and `stopIfRunning` is true, unregister is blocked.
+- Successfully unregistering a component automatically clears its `lifecycle` reference (setting it to `undefined`) and marks it as unregistered, which allows the same component instance to be registered again (either with the same manager or with a different one).
 
 **Returns:**
 

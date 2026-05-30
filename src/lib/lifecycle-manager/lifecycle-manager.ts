@@ -72,6 +72,7 @@ import {
   LIFECYCLE_MANAGER_MESSAGE_COMPONENT_NOT_RUNNING,
   LIFECYCLE_MANAGER_MESSAGE_COMPONENT_STALLED,
   LIFECYCLE_MANAGER_MESSAGE_DUPLICATE_COMPONENT_INSTANCE,
+  LIFECYCLE_MANAGER_MESSAGE_DUPLICATE_COMPONENT_INSTANCE_EXTERNAL,
   LIFECYCLE_MANAGER_MESSAGE_FORCE_SHUTDOWN_TIMED_OUT,
   LIFECYCLE_MANAGER_MESSAGE_GRACEFUL_SHUTDOWN_TIMED_OUT,
   LIFECYCLE_MANAGER_MESSAGE_REGISTER_REQUIRED_DEPENDENCY_DURING_STARTUP,
@@ -470,6 +471,7 @@ export class LifecycleManager
 
     // Clean up state
     component._clearUnexpectedStopHandler();
+    component._markUnregistered();
     this.componentStates.delete(name);
     this.componentTimestamps.delete(name);
     this.componentErrors.delete(name);
@@ -2603,6 +2605,7 @@ export class LifecycleManager
         this.logger.entity(componentName).warn('Invalid insertion position', {
           params: { position },
         });
+
         this.lifecycleEvents.componentRegistrationRejected({
           name: componentName,
           reason: 'invalid_position',
@@ -2631,6 +2634,7 @@ export class LifecycleManager
         this.logger
           .entity(componentName)
           .warn('Cannot register component during shutdown');
+
         this.lifecycleEvents.componentRegistrationRejected({
           name: componentName,
           reason: 'shutdown_in_progress',
@@ -2662,6 +2666,7 @@ export class LifecycleManager
           .warn(
             'Cannot register component during startup - it is a required dependency for other components',
           );
+
         this.lifecycleEvents.componentRegistrationRejected({
           name: componentName,
           reason: 'startup_in_progress',
@@ -2688,14 +2693,24 @@ export class LifecycleManager
       }
 
       // Check if component instance is already registered
-      if (this.hasComponentInstance(component)) {
+      if (component._isRegisteredWithManager()) {
+        const isRegisteredHere = this.hasComponentInstance(component);
+        const message = isRegisteredHere
+          ? LIFECYCLE_MANAGER_MESSAGE_DUPLICATE_COMPONENT_INSTANCE
+          : LIFECYCLE_MANAGER_MESSAGE_DUPLICATE_COMPONENT_INSTANCE_EXTERNAL;
+
         this.logger
           .entity(componentName)
-          .warn('Component instance already registered');
+          .warn(
+            isRegisteredHere
+              ? 'Component instance already registered'
+              : 'Component instance already registered with another lifecycle manager',
+          );
+
         this.lifecycleEvents.componentRegistrationRejected({
           name: componentName,
           reason: 'duplicate_instance',
-          message: LIFECYCLE_MANAGER_MESSAGE_DUPLICATE_COMPONENT_INSTANCE,
+          message,
           registrationIndexBefore,
           registrationIndexAfter: registrationIndexBefore,
           requestedPosition: isInsertAction
@@ -2710,7 +2725,7 @@ export class LifecycleManager
           targetComponentName,
           registrationIndexBefore,
           code: 'duplicate_instance',
-          reason: LIFECYCLE_MANAGER_MESSAGE_DUPLICATE_COMPONENT_INSTANCE,
+          reason: message,
           targetFound: undefined,
         });
       }
@@ -2878,6 +2893,7 @@ export class LifecycleManager
       // Assign lifecycle reference to component
       (component as unknown as { lifecycle: ComponentLifecycleRef }).lifecycle =
         new ComponentLifecycle(this, componentName, internalCallbacks);
+      component._markRegistered();
 
       // Initialize state
       this.componentStates.set(componentName, 'registered');

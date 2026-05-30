@@ -105,3 +105,5 @@
 ## Unreleased
 
 - Added exported `LifecycleValueProvider` type for helpers that only need the shared-value `getValue()` surface, allowing the same helper to accept either a `LifecycleManager` or a component-scoped lifecycle reference.
+- Prevent registering a single component instance with multiple `LifecycleManager` instances simultaneously. Registration fails with `code: 'duplicate_instance'` and a descriptive message.
+- Unregistering a component now automatically clears its `lifecycle` reference and marks it as unregistered, allowing it to be registered again.

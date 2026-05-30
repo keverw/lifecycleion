@@ -37,3 +37,5 @@ export const LIFECYCLE_MANAGER_MESSAGE_REGISTER_REQUIRED_DEPENDENCY_DURING_START
   'Cannot register component during startup when it is a required dependency for other components.';
 export const LIFECYCLE_MANAGER_MESSAGE_DUPLICATE_COMPONENT_INSTANCE =
   'Component instance is already registered.';
+export const LIFECYCLE_MANAGER_MESSAGE_DUPLICATE_COMPONENT_INSTANCE_EXTERNAL =
+  'Component instance is already registered with another lifecycle manager.';
