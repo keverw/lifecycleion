@@ -17,7 +17,7 @@
 - [0.0.13 (Apr 19, 2026)](#0013-apr-19-2026)
 - [0.0.14 (Apr 28, 2026)](#0014-apr-28-2026)
 - [0.0.15 (May 29, 2026)](#0015-may-29-2026)
-- [Unreleased](#unreleased)
+- [0.0.16 (June 9, 2026)](#0016-june-9-2026)
 
 <!-- tocstop -->
 
@@ -103,12 +103,12 @@
 - Added `component:unexpected-stop` event (payload: `{ name, error? }`) emitted when a running component calls `reportUnexpectedStop()`, immediately before the follow-up `component:stopped` event.
 - BaseComponent now exposes a protected `getSelfStatus()` method that returns the component's own `ComponentStatus` from the manager without requiring the caller to pass the component name.
 
-## Unreleased
-
-- `NodeAdapter` now accepts a top-level `ca` option (`string | Buffer | Array<string | Buffer>`) for trusting a private CA when connecting to internal HTTPS services, without requiring a client certificate. Previously the only way to supply a custom CA was through `mtls.ca`, which also required `cert` and `key`.
-
 ## 0.0.15 (May 29, 2026)
 
 - Added exported `LifecycleValueProvider` type for helpers that only need the shared-value `getValue()` surface, allowing the same helper to accept either a `LifecycleManager` or a component-scoped lifecycle reference.
 - Prevent registering a single component instance with multiple `LifecycleManager` instances simultaneously. Registration fails with `code: 'duplicate_instance'` and a descriptive message.
 - Unregistering a component now automatically clears its `lifecycle` reference and marks it as unregistered, allowing it to be registered again.
+
+## 0.0.16 (June 9, 2026)
+
+- `NodeAdapter` now accepts a top-level `ca` option (`string | Buffer | Array<string | Buffer>`) for trusting a private CA when connecting to internal HTTPS services, without requiring a client certificate. Previously the only way to supply a custom CA was through `mtls.ca`, which also required `cert` and `key`.
