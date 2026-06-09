@@ -69,6 +69,14 @@ export interface NodeAdapterConfig {
   };
 
   /**
+   * Trusted CA certificate(s) for verifying the server's TLS certificate.
+   * Use this when connecting to internal services that use a private CA not
+   * in the system trust store. Accepts PEM string, Buffer, or an array of
+   * either. Does not require a client certificate — use `mtls` for that.
+   */
+  ca?: string | Buffer | Array<string | Buffer>;
+
+  /**
    * Set to false to accept self-signed certificates in dev/test environments.
    * Defaults to true (Node.js default — rejects invalid certs).
    */
@@ -124,6 +132,10 @@ export class NodeAdapter implements HTTPAdapter {
 
     if (isHTTPS) {
       const httpsOptions = options as https.RequestOptions;
+
+      if (this._config.ca) {
+        httpsOptions.ca = this._config.ca;
+      }
 
       if (this._config.mtls) {
         // mTLS: present client cert. rejectUnauthorized stays true so the

@@ -20,6 +20,11 @@ import type {
 } from '../types';
 import { startTestServer } from '../test-helpers/test-server';
 import type { TestServer } from '../test-helpers/test-server';
+import {
+  startTlsTestServer,
+  getTestCACert,
+} from '../test-helpers/https-test-server';
+import type { TlsTestServer } from '../test-helpers/https-test-server';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -3240,5 +3245,75 @@ describe('NodeAdapter.send() — low-level contract', () => {
     for (let i = 0; i < 256; i++) {
       expect((res.body as Uint8Array)[i]).toBe(i % 256);
     }
+  });
+});
+
+describe('NodeAdapter — custom CA (ca option)', () => {
+  let tlsServer: TlsTestServer;
+
+  beforeAll(async () => {
+    tlsServer = await startTlsTestServer();
+  });
+
+  afterAll(async () => {
+    await tlsServer.stop();
+  });
+
+  test('succeeds when ca matches server certificate chain', async () => {
+    const client = new HTTPClient({
+      adapter: new NodeAdapter({ ca: getTestCACert() }),
+      baseURL: tlsServer.url,
+    });
+
+    const res = await client.get('/api/test').send<{ ok: boolean }>();
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ ok: true });
+  });
+
+  test('fails with network_error when no ca is provided (untrusted cert)', async () => {
+    const client = new HTTPClient({
+      adapter: new NodeAdapter(),
+      baseURL: tlsServer.url,
+    });
+
+    const res = await client.get('/api/test').send();
+
+    expect(res.isFailed).toBe(true);
+    expect(res.isNetworkError).toBe(true);
+  });
+
+  test('succeeds with rejectUnauthorized:false even without ca', async () => {
+    const client = new HTTPClient({
+      adapter: new NodeAdapter({ rejectUnauthorized: false }),
+      baseURL: tlsServer.url,
+    });
+
+    const res = await client.get('/api/test').send<{ ok: boolean }>();
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ ok: true });
+  });
+
+  test('ca as Buffer is accepted', async () => {
+    const client = new HTTPClient({
+      adapter: new NodeAdapter({ ca: Buffer.from(getTestCACert()) }),
+      baseURL: tlsServer.url,
+    });
+
+    const res = await client.get('/api/test').send<{ ok: boolean }>();
+
+    expect(res.status).toBe(200);
+  });
+
+  test('ca as array is accepted', async () => {
+    const client = new HTTPClient({
+      adapter: new NodeAdapter({ ca: [getTestCACert()] }),
+      baseURL: tlsServer.url,
+    });
+
+    const res = await client.get('/api/test').send<{ ok: boolean }>();
+
+    expect(res.status).toBe(200);
   });
 });

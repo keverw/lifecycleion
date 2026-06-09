@@ -17,6 +17,7 @@
 - [0.0.13 (Apr 19, 2026)](#0013-apr-19-2026)
 - [0.0.14 (Apr 28, 2026)](#0014-apr-28-2026)
 - [0.0.15 (May 29, 2026)](#0015-may-29-2026)
+- [Unreleased](#unreleased)
 
 <!-- tocstop -->
 
@@ -101,6 +102,10 @@
 - If `reportUnexpectedStop()` fires during `startAllComponents()`, required components now fail the bulk startup with `code: 'component_unexpected_stop'` and trigger rollback of later-started components, while optional components are recorded in `failedOptionalComponents`.
 - Added `component:unexpected-stop` event (payload: `{ name, error? }`) emitted when a running component calls `reportUnexpectedStop()`, immediately before the follow-up `component:stopped` event.
 - BaseComponent now exposes a protected `getSelfStatus()` method that returns the component's own `ComponentStatus` from the manager without requiring the caller to pass the component name.
+
+## Unreleased
+
+- `NodeAdapter` now accepts a top-level `ca` option (`string | Buffer | Array<string | Buffer>`) for trusting a private CA when connecting to internal HTTPS services, without requiring a client certificate. Previously the only way to supply a custom CA was through `mtls.ca`, which also required `cert` and `key`.
 
 ## 0.0.15 (May 29, 2026)
 

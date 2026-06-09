@@ -914,6 +914,21 @@ const client = new HTTPClient({
   baseURL: 'http://localhost', // host is ignored for routing; path still matters
 });
 
+// Custom CA — internal services that use a private certificate authority.
+// Accepts a PEM string, a Buffer, or an array of either (one CA per element).
+const client = new HTTPClient({
+  adapter: new NodeAdapter({ ca: fs.readFileSync('internal-ca.crt') }),
+  baseURL: 'https://internal.example.com',
+});
+
+// Multiple CAs — no need to concatenate into a bundle
+const client = new HTTPClient({
+  adapter: new NodeAdapter({
+    ca: [fs.readFileSync('internal-ca.crt'), fs.readFileSync('partner-ca.crt')],
+  }),
+  baseURL: 'https://internal.example.com',
+});
+
 // mTLS
 const client = new HTTPClient({
   adapter: new NodeAdapter({
@@ -938,6 +953,7 @@ const client = new HTTPClient({
 ```typescript
 interface NodeAdapterConfig {
   socketPath?: string; // Unix domain socket path
+  ca?: string | Buffer | Array<string | Buffer>; // Trusted CA cert(s) for servers using a private CA. Array allows multiple CAs without bundling. No client cert required — use mtls for that.
   mtls?: {
     cert: string | Buffer;
     key: string | Buffer;
