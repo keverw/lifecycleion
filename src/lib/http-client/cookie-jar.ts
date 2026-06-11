@@ -346,7 +346,7 @@ export class CookieJar {
 
     for (const cookie of data.cookies) {
       if (cookie.expires && !(cookie.expires instanceof Date)) {
-        cookie.expires = new Date(cookie.expires as unknown as string);
+        cookie.expires = new Date(cookie.expires);
       }
 
       this.setCookie(cookie);

@@ -36,7 +36,7 @@ class FakeXHR {
   public static instances: FakeXHR[] = [];
 
   public responseType: XMLHttpRequestResponseType =
-    '' as XMLHttpRequestResponseType;
+    '';
   public timeout = 0;
   public status = 0;
   public response: ArrayBuffer | null = null;

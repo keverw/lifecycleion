@@ -199,7 +199,7 @@ describe('HTTPRequestBuilder', () => {
   describe('send() forwards context correctly', () => {
     test('forwards method and path', async () => {
       const { sendFn, requireContext } = makeSendFn();
-      const builder = new HTTPRequestBuilder('POST', '/users', sendFn as any);
+      const builder = new HTTPRequestBuilder('POST', '/users', sendFn);
       await builder.send();
       expect(requireContext().method).toBe('POST');
       expect(requireContext().path).toBe('/users');
@@ -293,7 +293,7 @@ describe('HTTPRequestBuilder', () => {
   describe('constructor options', () => {
     test('applies options passed to constructor', async () => {
       const { sendFn, requireContext } = makeSendFn();
-      const builder = new HTTPRequestBuilder('GET', '/test', sendFn as any, {
+      const builder = new HTTPRequestBuilder('GET', '/test', sendFn, {
         headers: { 'x-init': 'yes' },
         timeout: 1000,
         label: 'init-label',
@@ -325,7 +325,7 @@ describe('HTTPRequestBuilder', () => {
 
     test('fluent headers() merge on top of constructor headers', async () => {
       const { sendFn, requireContext } = makeSendFn();
-      const builder = new HTTPRequestBuilder('GET', '/test', sendFn as any, {
+      const builder = new HTTPRequestBuilder('GET', '/test', sendFn, {
         headers: { 'x-init': 'yes' },
       });
 

@@ -18,6 +18,7 @@
 - [0.0.14 (Apr 28, 2026)](#0014-apr-28-2026)
 - [0.0.15 (May 29, 2026)](#0015-may-29-2026)
 - [0.0.16 (June 9, 2026)](#0016-june-9-2026)
+- [0.0.17 (June 10, 2026)](#0017-june-10-2026)
 
 <!-- tocstop -->
 
@@ -112,3 +113,7 @@
 ## 0.0.16 (June 9, 2026)
 
 - `NodeAdapter` now accepts a top-level `ca` option (`string | Buffer | Array<string | Buffer>`) for trusting a private CA when connecting to internal HTTPS services, without requiring a client certificate. Previously the only way to supply a custom CA was through `mtls.ca`, which also required `cert` and `key`.
+
+## 0.0.17 (June 10, 2026)
+
+- Updated dependencies to their latest compatible versions, including security fixes for `qs` (GHSA-q8mj-m7cp-5q26) and `uuid` (GHSA-w5hq-g745-h8pq). No API changes.

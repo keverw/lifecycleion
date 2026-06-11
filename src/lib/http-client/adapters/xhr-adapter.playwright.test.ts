@@ -140,7 +140,7 @@ afterAll(async () => {
   await browser?.close();
   await server?.stop();
   await tmpDir?.cleanup();
-});
+}, 30_000);
 
 // ---------------------------------------------------------------------------
 // XHRAdapter direct scenarios

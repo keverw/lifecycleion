@@ -214,7 +214,7 @@ export class MockAdapter implements HTTPAdapter {
     // the raw header is still available on req.headers.cookie.
     const query = qs.parse(queryString) as QueryObject;
     const cookies = parseCookieHeader(materializedHeaders['cookie']);
-    const match = this.router.find(method as Router.HTTPMethod, path);
+    const match = this.router.find(method, path);
     const params = (match?.params ?? {}) as Record<string, string>;
 
     const mockRequest: MockRequest = {

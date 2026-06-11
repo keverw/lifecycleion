@@ -26,8 +26,8 @@ function cloneInternal<T>(obj: T, seen: WeakMap<object, unknown>): T {
   }
 
   // Check for circular references
-  if (seen.has(obj as object)) {
-    return seen.get(obj as object) as T;
+  if (seen.has(obj)) {
+    return seen.get(obj) as T;
   }
 
   // Handle Date
@@ -99,7 +99,7 @@ function cloneInternal<T>(obj: T, seen: WeakMap<object, unknown>): T {
 
   // Handle plain objects
   const cloned: Record<string, unknown> = {};
-  seen.set(obj as object, cloned);
+  seen.set(obj, cloned);
 
   for (const key in obj) {
     if (Object.prototype.hasOwnProperty.call(obj, key)) {

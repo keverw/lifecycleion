@@ -19,9 +19,11 @@ function safeStringify(value: unknown): string {
       return '[Function]';
     case 'symbol':
       return value.toString();
-    default:
+    default: {
       // This should never happen, but satisfy the linter
-      return String(value as string | number | boolean);
+      const fallback = value as string | number | boolean;
+      return String(fallback);
+    }
   }
 }
 

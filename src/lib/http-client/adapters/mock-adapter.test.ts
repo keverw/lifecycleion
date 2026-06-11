@@ -855,7 +855,7 @@ describe('MockAdapter.send() — low-level contract', () => {
   test('awaitAbortable normalizes non-Error handler rejection to Error', async () => {
     adapter.routes.get('/fail-string', () => {
       // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
-      return Promise.reject('plain string rejection') as never;
+      return Promise.reject('plain string rejection');
     });
 
     const controller = new AbortController();
