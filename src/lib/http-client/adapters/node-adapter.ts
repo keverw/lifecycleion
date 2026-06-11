@@ -77,6 +77,21 @@ export interface NodeAdapterConfig {
   ca?: string | Buffer | Array<string | Buffer>;
 
   /**
+   * TLS server name (SNI) to send in the handshake and verify the server
+   * certificate against. Required when dialing by IP address but the server
+   * cert's SAN lists a DNS name — without this, TLS verification fails because
+   * the IP does not match the DNS SAN.
+   *
+   * Typical pattern when using a service registry:
+   *   baseURL: 'https://10.0.0.5:443'  ← IP from the registry (where bytes go)
+   *   servername: 'billing.internal'   ← DNS name on the cert (TLS identity)
+   *
+   * The Host header defaults to the baseURL hostname (the IP). If the backend
+   * routes by Host, also set defaultHeaders: { host: 'billing.internal' }.
+   */
+  servername?: string;
+
+  /**
    * Set to false to accept self-signed certificates in dev/test environments.
    * Defaults to true (Node.js default — rejects invalid certs).
    */
@@ -133,8 +148,14 @@ export class NodeAdapter implements HTTPAdapter {
     if (isHTTPS) {
       const httpsOptions = options as https.RequestOptions;
 
+      // custom CA trust store
       if (this._config.ca) {
         httpsOptions.ca = this._config.ca;
+      }
+
+      // SNI hostname — required when dialing by IP with a DNS-named cert
+      if (this._config.servername) {
+        httpsOptions.servername = this._config.servername;
       }
 
       if (this._config.mtls) {

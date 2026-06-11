@@ -22,6 +22,7 @@ import { startTestServer } from '../test-helpers/test-server';
 import type { TestServer } from '../test-helpers/test-server';
 import {
   startTlsTestServer,
+  startTlsTestServerDnsOnly,
   getTestCACert,
 } from '../test-helpers/https-test-server';
 import type { TlsTestServer } from '../test-helpers/https-test-server';
@@ -3315,5 +3316,46 @@ describe('NodeAdapter — custom CA (ca option)', () => {
     const res = await client.get('/api/test').send<{ ok: boolean }>();
 
     expect(res.status).toBe(200);
+  });
+});
+
+describe('NodeAdapter — servername option', () => {
+  // Uses a cert with only DNS:localhost SAN — no IP SAN. Dialing 127.0.0.1
+  // without servername fails because the IP doesn't match the DNS SAN.
+  let tlsServer: TlsTestServer;
+
+  beforeAll(async () => {
+    tlsServer = await startTlsTestServerDnsOnly();
+  });
+
+  afterAll(async () => {
+    await tlsServer.stop();
+  });
+
+  test('fails when dialing by IP without servername (IP not in cert SAN)', async () => {
+    const client = new HTTPClient({
+      adapter: new NodeAdapter({ ca: getTestCACert() }),
+      baseURL: tlsServer.url,
+    });
+
+    const res = await client.get('/api/test').send();
+
+    expect(res.isFailed).toBe(true);
+    expect(res.isNetworkError).toBe(true);
+  });
+
+  test('succeeds when servername matches the cert DNS SAN', async () => {
+    const client = new HTTPClient({
+      adapter: new NodeAdapter({
+        ca: getTestCACert(),
+        servername: 'localhost',
+      }),
+      baseURL: tlsServer.url,
+    });
+
+    const res = await client.get('/api/test').send<{ ok: boolean }>();
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ ok: true });
   });
 });

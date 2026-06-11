@@ -47,7 +47,7 @@ function extractErrorMessage(error: unknown): string {
     error !== undefined &&
     typeof error === 'object' &&
     'message' in error &&
-    typeof (error).message === 'string'
+    typeof error.message === 'string'
   ) {
     return (error as { message: string }).message;
   }
@@ -59,7 +59,7 @@ function extractErrorMessage(error: unknown): string {
     typeof error === 'object' &&
     'error' in error
   ) {
-    const nested = (error).error;
+    const nested = error.error;
 
     if (nested instanceof Error) {
       return nested.message;
@@ -68,7 +68,7 @@ function extractErrorMessage(error: unknown): string {
       nested !== undefined &&
       typeof nested === 'object' &&
       'message' in nested &&
-      typeof (nested).message === 'string'
+      typeof nested.message === 'string'
     ) {
       return (nested as { message: string }).message;
     } else {

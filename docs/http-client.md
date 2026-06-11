@@ -929,6 +929,28 @@ const client = new HTTPClient({
   baseURL: 'https://internal.example.com',
 });
 
+// Dialing by IP with a DNS-named cert (service registry pattern).
+//
+// When a service registry gives you an instance IP, connect directly to it —
+// Node.js skips DNS entirely when the target is an IP address. The server's
+// cert SAN is a DNS name, not the IP, so TLS verification fails unless you
+// tell Node which hostname to check the cert against via servername.
+//
+// Redirects are disabled by default, which is exactly what you want here —
+// an unexpected redirect from an internal service is a misconfiguration
+// worth surfacing, not silently following.
+//
+// The Host header defaults to the IP. If the backend routes by Host (e.g.
+// a virtual-hosted proxy in front of the service), also set:
+//   defaultHeaders: { host: 'billing.internal' }
+const client = new HTTPClient({
+  adapter: new NodeAdapter({
+    ca: fs.readFileSync('internal-ca.crt'),
+    servername: 'billing.internal', // cert SAN — TLS verifies against this name
+  }),
+  baseURL: 'https://10.0.0.5:443', // IP from the registry — where bytes go
+});
+
 // mTLS
 const client = new HTTPClient({
   adapter: new NodeAdapter({
@@ -954,6 +976,7 @@ const client = new HTTPClient({
 interface NodeAdapterConfig {
   socketPath?: string; // Unix domain socket path
   ca?: string | Buffer | Array<string | Buffer>; // Trusted CA cert(s) for servers using a private CA. Array allows multiple CAs without bundling. No client cert required — use mtls for that.
+  servername?: string; // TLS SNI hostname. Required when dialing by IP but the cert SAN is a DNS name — without it, TLS verification fails because the IP does not match the DNS SAN.
   mtls?: {
     cert: string | Buffer;
     key: string | Buffer;

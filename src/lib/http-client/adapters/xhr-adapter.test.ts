@@ -35,8 +35,7 @@ class FakeXHRUpload {
 class FakeXHR {
   public static instances: FakeXHR[] = [];
 
-  public responseType: XMLHttpRequestResponseType =
-    '';
+  public responseType: XMLHttpRequestResponseType = '';
   public timeout = 0;
   public status = 0;
   public response: ArrayBuffer | null = null;

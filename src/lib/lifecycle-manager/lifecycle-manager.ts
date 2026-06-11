@@ -5924,7 +5924,7 @@ export class LifecycleManager
       try {
         const handlerResult = handler();
         const handlerPromise: Promise<unknown> = isPromise(handlerResult)
-          ? (handlerResult)
+          ? handlerResult
           : Promise.resolve(handlerResult as unknown);
 
         const outcome: unknown =

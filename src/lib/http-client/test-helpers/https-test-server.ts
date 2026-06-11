@@ -7,8 +7,13 @@ import { execSync } from 'node:child_process';
 
 interface GeneratedCerts {
   caCert: string;
+  // Server cert with both DNS:localhost and IP:127.0.0.1 SANs
   serverCert: string;
   serverKey: string;
+  // Server cert with only DNS:localhost SAN — no IP. Used to test servername:
+  // dialing by IP without servername fails; with servername it succeeds.
+  serverCertDnsOnly: string;
+  serverKeyDnsOnly: string;
 }
 
 // Generated once per process and reused across test suites.
@@ -22,38 +27,54 @@ function generateCerts(): GeneratedCerts {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tls-test-'));
 
   try {
-    const sanCfg = path.join(dir, 'san.cnf');
+    const sanFull = path.join(dir, 'san-full.cnf');
+    const sanDnsOnly = path.join(dir, 'san-dns.cnf');
     fs.writeFileSync(
-      sanCfg,
+      sanFull,
       '[SAN]\nsubjectAltName=DNS:localhost,IP:127.0.0.1\n',
     );
+    fs.writeFileSync(sanDnsOnly, '[SAN]\nsubjectAltName=DNS:localhost\n');
+
+    const run = (cmd: string) => execSync(cmd, { stdio: 'pipe' });
+    const p = (name: string) => path.join(dir, name);
 
     // EC keys are near-instant to generate
-    execSync(
-      `openssl ecparam -genkey -name prime256v1 -noout -out "${path.join(dir, 'ca.key')}"`,
-      { stdio: 'pipe' },
+    run(
+      `openssl ecparam -genkey -name prime256v1 -noout -out "${p('ca.key')}"`,
     );
-    execSync(
-      `openssl req -new -x509 -days 1 -key "${path.join(dir, 'ca.key')}" -out "${path.join(dir, 'ca.crt')}" -subj "/CN=Test CA"`,
-      { stdio: 'pipe' },
+    run(
+      `openssl req -new -x509 -days 1 -key "${p('ca.key')}" -out "${p('ca.crt')}" -subj "/CN=Test CA"`,
     );
-    execSync(
-      `openssl ecparam -genkey -name prime256v1 -noout -out "${path.join(dir, 'server.key')}"`,
-      { stdio: 'pipe' },
+
+    // Server cert with IP SAN (for standard CA tests)
+    run(
+      `openssl ecparam -genkey -name prime256v1 -noout -out "${p('server.key')}"`,
     );
-    execSync(
-      `openssl req -new -key "${path.join(dir, 'server.key')}" -out "${path.join(dir, 'server.csr')}" -subj "/CN=localhost"`,
-      { stdio: 'pipe' },
+    run(
+      `openssl req -new -key "${p('server.key')}" -out "${p('server.csr')}" -subj "/CN=localhost"`,
     );
-    execSync(
-      `openssl x509 -req -days 1 -in "${path.join(dir, 'server.csr')}" -CA "${path.join(dir, 'ca.crt')}" -CAkey "${path.join(dir, 'ca.key')}" -CAcreateserial -out "${path.join(dir, 'server.crt')}" -extensions SAN -extfile "${sanCfg}"`,
-      { stdio: 'pipe' },
+    run(
+      `openssl x509 -req -days 1 -in "${p('server.csr')}" -CA "${p('ca.crt')}" -CAkey "${p('ca.key')}" -CAcreateserial -out "${p('server.crt')}" -extensions SAN -extfile "${sanFull}"`,
+    );
+
+    // Server cert with DNS-only SAN (for servername tests — no IP SAN means
+    // dialing by IP fails unless servername overrides the verification hostname)
+    run(
+      `openssl ecparam -genkey -name prime256v1 -noout -out "${p('server-dns.key')}"`,
+    );
+    run(
+      `openssl req -new -key "${p('server-dns.key')}" -out "${p('server-dns.csr')}" -subj "/CN=localhost"`,
+    );
+    run(
+      `openssl x509 -req -days 1 -in "${p('server-dns.csr')}" -CA "${p('ca.crt')}" -CAkey "${p('ca.key')}" -CAcreateserial -out "${p('server-dns.crt')}" -extensions SAN -extfile "${sanDnsOnly}"`,
     );
 
     cachedCerts = {
-      caCert: fs.readFileSync(path.join(dir, 'ca.crt'), 'utf8'),
-      serverCert: fs.readFileSync(path.join(dir, 'server.crt'), 'utf8'),
-      serverKey: fs.readFileSync(path.join(dir, 'server.key'), 'utf8'),
+      caCert: fs.readFileSync(p('ca.crt'), 'utf8'),
+      serverCert: fs.readFileSync(p('server.crt'), 'utf8'),
+      serverKey: fs.readFileSync(p('server.key'), 'utf8'),
+      serverCertDnsOnly: fs.readFileSync(p('server-dns.crt'), 'utf8'),
+      serverKeyDnsOnly: fs.readFileSync(p('server-dns.key'), 'utf8'),
     };
 
     return cachedCerts;
@@ -71,17 +92,10 @@ export interface TlsTestServer {
   stop: () => Promise<void>;
 }
 
-/**
- * Starts a minimal HTTPS server with a freshly generated self-signed CA.
- * The server responds to all requests with { ok: true }.
- * Use getTestCACert() as the `ca` option in NodeAdapterConfig to trust it.
- */
-export function startTlsTestServer(): Promise<TlsTestServer> {
-  const { serverCert, serverKey } = generateCerts();
-
+function startServer(cert: string, key: string): Promise<TlsTestServer> {
   return new Promise((resolve, reject) => {
     const server = https.createServer(
-      { cert: serverCert, key: serverKey },
+      { cert, key },
       (_req: http.IncomingMessage, res: http.ServerResponse) => {
         res.setHeader('content-type', 'application/json');
         res.writeHead(200);
@@ -102,4 +116,23 @@ export function startTlsTestServer(): Promise<TlsTestServer> {
       });
     });
   });
+}
+
+/**
+ * Starts a minimal HTTPS server whose cert has both DNS:localhost and
+ * IP:127.0.0.1 SANs. Use getTestCACert() as the `ca` option to trust it.
+ */
+export function startTlsTestServer(): Promise<TlsTestServer> {
+  const { serverCert, serverKey } = generateCerts();
+  return startServer(serverCert, serverKey);
+}
+
+/**
+ * Starts a minimal HTTPS server whose cert has only a DNS:localhost SAN —
+ * no IP SAN. Dialing by IP (127.0.0.1) without `servername` will fail TLS
+ * verification. Use this to test that `servername: 'localhost'` fixes it.
+ */
+export function startTlsTestServerDnsOnly(): Promise<TlsTestServer> {
+  const { serverCertDnsOnly, serverKeyDnsOnly } = generateCerts();
+  return startServer(serverCertDnsOnly, serverKeyDnsOnly);
 }
