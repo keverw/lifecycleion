@@ -19,6 +19,7 @@
 - [0.0.15 (May 29, 2026)](#0015-may-29-2026)
 - [0.0.16 (June 9, 2026)](#0016-june-9-2026)
 - [0.0.17 (June 10, 2026)](#0017-june-10-2026)
+- [0.0.18 (June 11, 2026)](#0018-june-11-2026)
 
 <!-- tocstop -->
 
@@ -118,6 +119,7 @@
 
 - Updated dependencies to their latest compatible versions, including security fixes for `qs` (GHSA-q8mj-m7cp-5q26) and `uuid` (GHSA-w5hq-g745-h8pq). No API changes.
 
-## 0.0.18 (Unreleased)
+## 0.0.18 (June 11, 2026)
 
 - `NodeAdapter` now accepts a `servername` option to set the TLS SNI hostname independently of the connection target. This is required when dialing by IP address (e.g. from a service registry) but the server certificate's SAN lists a DNS name — without it, TLS verification fails because the IP does not match the DNS SAN.
+- Updated dependencies (tr46 to 6.0.0) and (uuid to 14.0.0)
