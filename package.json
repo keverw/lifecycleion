@@ -228,6 +228,10 @@
     "type": "git",
     "url": "https://github.com/keverw/lifecycleion"
   },
+  "homepage": "https://github.com/keverw/lifecycleion#readme",
+  "bugs": {
+    "url": "https://github.com/keverw/lifecycleion/issues"
+  },
   "devDependencies": {
     "@eslint/js": "^9.39.4",
     "@playwright/test": "^1.60.0",
