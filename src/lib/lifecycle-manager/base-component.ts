@@ -322,9 +322,7 @@ export abstract class BaseComponent {
    * ```
    */
   public healthCheck?():
-    | Promise<boolean | ComponentHealthResult>
-    | boolean
-    | ComponentHealthResult;
+    Promise<boolean | ComponentHealthResult> | boolean | ComponentHealthResult;
 
   /**
    * Optional message handler for arbitrary component messaging

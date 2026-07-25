@@ -91,8 +91,7 @@ export interface LifecycleManagerEventMap {
     name: string;
     index: number | null;
     action:
-      | RegisterComponentResult['action']
-      | InsertComponentAtResult['action'];
+      RegisterComponentResult['action'] | InsertComponentAtResult['action'];
     registrationIndexBefore: number | null;
     registrationIndexAfter: number | null;
     startupOrder: string[];
@@ -367,8 +366,7 @@ export class LifecycleManagerEvents {
     name: string;
     index: number | null;
     action:
-      | RegisterComponentResult['action']
-      | InsertComponentAtResult['action'];
+      RegisterComponentResult['action'] | InsertComponentAtResult['action'];
     registrationIndexBefore: number | null;
     registrationIndexAfter: number | null;
     startupOrder: string[];

@@ -18,13 +18,7 @@ export enum LogLevel {
  * Log level types
  */
 export type LogType =
-  | 'error'
-  | 'info'
-  | 'warn'
-  | 'success'
-  | 'notice'
-  | 'debug'
-  | 'raw';
+  'error' | 'info' | 'warn' | 'success' | 'notice' | 'debug' | 'raw';
 
 /**
  * Maps a LogType to its corresponding LogLevel

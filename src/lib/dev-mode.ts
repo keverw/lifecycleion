@@ -5,9 +5,7 @@ const INIT_PARAM_KEY = '__lifecycleion_init_param__';
 
 type DevModeSource = 'cmd' | 'node_env' | 'both';
 type InitParam =
-  | boolean
-  | { detect: DevModeSource; strict?: boolean }
-  | undefined;
+  boolean | { detect: DevModeSource; strict?: boolean } | undefined;
 
 // Cast once at module level — avoids repeating the assertion in every function.
 const g = globalThis as typeof globalThis & Record<string, unknown>;

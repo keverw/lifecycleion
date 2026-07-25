@@ -20,6 +20,7 @@
 - [0.0.16 (June 9, 2026)](#0016-june-9-2026)
 - [0.0.17 (June 10, 2026)](#0017-june-10-2026)
 - [0.0.18 (June 11, 2026)](#0018-june-11-2026)
+- [0.0.19 (July 24, 2026)](#0019-july-24-2026)
 
 <!-- tocstop -->
 
@@ -123,3 +124,10 @@
 
 - `NodeAdapter` now accepts a `servername` option to set the TLS SNI hostname independently of the connection target. This is required when dialing by IP address (e.g. from a service registry) but the server certificate's SAN lists a DNS name — without it, TLS verification fails because the IP does not match the DNS SAN.
 - Updated dependencies (tr46 to 6.0.0) and (uuid to 14.0.0)
+
+## 0.0.19 (July 24, 2026)
+
+- Updated dependencies to their latest compatible versions, including a security fix for the direct dependency `find-my-way` (GHSA-c96f-x56v-gq3h, HTTP/2 DDoS) and transitive fixes for `qs` and `js-yaml`. Also bumped `tldts`, `string-width`, and `uuid`, plus dev tooling (`prettier`, `typescript-eslint`, `@playwright/test`, and others).
+- Added `overrides` to pin the vulnerable transitive dev dependencies `brace-expansion` (to 5.0.8) and `esbuild` (to 0.28.1), clearing the remaining `bun audit` advisories without upgrading eslint or tsup to breaking major versions. These only affect the build/lint toolchain, not the published package.
+- The pre-test Playwright check now launches a headless browser instead of only checking the full Chromium path, so a missing or stale `chrome-headless-shell` binary (e.g. after a Playwright version bump) fails fast with a clear message instead of surfacing as confusing test failures.
+- No API changes.

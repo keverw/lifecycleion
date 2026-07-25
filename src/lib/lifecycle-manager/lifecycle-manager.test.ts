@@ -11428,8 +11428,7 @@ describe('LifecycleManager - AutoStart & Registration Metadata', () => {
     test('should auto-start during bulk startup', async () => {
       const lifecycle = new LifecycleManager({ logger });
       let autoStartResult:
-        | Awaited<ReturnType<LifecycleManager['registerComponent']>>
-        | undefined;
+        Awaited<ReturnType<LifecycleManager['registerComponent']>> | undefined;
 
       class Component1 extends BaseComponent {
         constructor(logger: Logger) {

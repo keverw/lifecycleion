@@ -1060,8 +1060,7 @@ export interface ShutdownEscalationStatusEnabled {
  * Read-only snapshot of repeated shutdown escalation configuration and runtime state.
  */
 export type ShutdownEscalationStatus =
-  | ShutdownEscalationStatusDisabled
-  | ShutdownEscalationStatusEnabled;
+  ShutdownEscalationStatusDisabled | ShutdownEscalationStatusEnabled;
 
 /**
  * Context passed to repeated shutdown force handlers.

@@ -1,6 +1,5 @@
 export type RetryPolicyOptions =
-  | RetryPolicyOptionsStrategyFixed
-  | RetryPolicyOptionsStrategyExponential;
+  RetryPolicyOptionsStrategyFixed | RetryPolicyOptionsStrategyExponential;
 
 export type RetryPolicyValidated = Required<RetryPolicyOptions>;
 

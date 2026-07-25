@@ -153,8 +153,7 @@ export class LifecycleManager
   private shutdownToken = ulid();
   // Resolver for the first logger.exit() deferred during an already-running shutdown.
   private pendingLoggerExitResolve:
-    | ((result: BeforeExitResult) => void)
-    | null = null;
+    ((result: BeforeExitResult) => void) | null = null;
   private shutdownMethod: ShutdownMethod | null = null;
   private lastShutdownResult: ShutdownResult | null = null;
   private repeatedShutdownExpiryTimer: NodeJS.Timeout | null = null;

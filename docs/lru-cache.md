@@ -61,12 +61,7 @@ new LRUCache<K, V>(
 
 ```typescript
 type LRUCacheChangeReason =
-  | 'evict'
-  | 'expired'
-  | 'delete'
-  | 'clear'
-  | 'set'
-  | 'skip';
+  'evict' | 'expired' | 'delete' | 'clear' | 'set' | 'skip';
 
 type LRUCacheChangeEvent<K, V> =
   | {
