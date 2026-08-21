@@ -2,6 +2,7 @@ import { describe, expect, test, beforeAll, afterAll, spyOn } from 'bun:test';
 import crypto from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import * as http from 'node:http';
+import * as https from 'node:https';
 import { Writable } from 'node:stream';
 import { NodeAdapter } from './node-adapter';
 import type { NodeAdapterConfig } from './node-adapter';
@@ -23,6 +24,9 @@ import type { TestServer } from '../test-helpers/test-server';
 import {
   startTlsTestServer,
   startTlsTestServerDnsOnly,
+  startTlsTestServerWith,
+  getRevocationFixtures,
+  detectCRLEnforcement,
   getTestCACert,
 } from '../test-helpers/https-test-server';
 import type { TlsTestServer } from '../test-helpers/https-test-server';
@@ -3329,5 +3333,479 @@ describe('NodeAdapter — servername option', () => {
 
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ ok: true });
+  });
+});
+
+// Asked once, of this runtime, using the same fixtures the tests use. Bun
+// ignored `crl` entirely through 1.3.14 and implemented it in 1.4.0, so on an
+// older runtime these would pass for the wrong reason or fail for a reason
+// that is not ours. The normalization suite below is not gated — that part is
+// our code and has to hold everywhere.
+const doesRuntimeEnforceCRL = await detectCRLEnforcement();
+
+describe('NodeAdapter — crl option (enforcement)', () => {
+  const fixtures = getRevocationFixtures();
+
+  // Trust both roots so the unrelated one can be used to exercise bundles and
+  // CRL coverage without changing whether the chain itself validates.
+  const ca = [fixtures.caCert, fixtures.unrelatedCACert];
+
+  let revokedServer: TlsTestServer;
+  let goodServer: TlsTestServer;
+
+  beforeAll(async () => {
+    revokedServer = await startTlsTestServerWith(fixtures.revoked);
+    goodServer = await startTlsTestServerWith(fixtures.good);
+  });
+
+  afterAll(async () => {
+    await revokedServer.stop();
+    await goodServer.stop();
+  });
+
+  const get = async (config: NodeAdapterConfig, server: TlsTestServer) =>
+    new HTTPClient({
+      adapter: new NodeAdapter(config),
+      baseURL: server.url,
+    })
+      .get('/api/test')
+      .send();
+
+  test.skipIf(!doesRuntimeEnforceCRL)(
+    'a revoked certificate is rejected once its CRL is supplied',
+    async () => {
+      // Baseline first: without the CRL the certificate is perfectly valid, so
+      // the CRL is demonstrably what changes the outcome rather than some other
+      // property of this leaf.
+      const withoutCRL = await get({ ca }, revokedServer);
+
+      expect(withoutCRL.status).toBe(200);
+
+      const withCRL = await get(
+        { ca, crl: fixtures.crlRevoked },
+        revokedServer,
+      );
+
+      expect(withCRL.isFailed).toBe(true);
+      expect(withCRL.status).toBe(495);
+    },
+  );
+
+  test.skipIf(!doesRuntimeEnforceCRL)(
+    'a certificate that was not revoked still connects',
+    async () => {
+      const res = await get({ ca, crl: fixtures.crlRevoked }, goodServer);
+
+      expect(res.status).toBe(200);
+    },
+  );
+
+  test.skipIf(!doesRuntimeEnforceCRL)(
+    'a CRL listing nothing revokes nothing',
+    async () => {
+      const res = await get({ ca, crl: fixtures.crlEmpty }, revokedServer);
+
+      expect(res.status).toBe(200);
+    },
+  );
+
+  test.skipIf(!doesRuntimeEnforceCRL)(
+    'a concatenated CRL bundle is split, not truncated',
+    async () => {
+      // THE point of the option. Node reads only the first CRL of a PEM string,
+      // so this bundle — unrelated root first, the revoking CRL second — would
+      // enforce nothing and fail with UNABLE_TO_GET_CRL instead. Ordering is
+      // deliberate: putting the revoking CRL first would pass even unsplit.
+      const bundle = fixtures.unrelatedCRL + fixtures.crlRevoked;
+
+      const res = await get({ ca, crl: bundle }, revokedServer);
+
+      expect(res.status).toBe(495);
+    },
+  );
+
+  test.skipIf(!doesRuntimeEnforceCRL)(
+    'a bundle supplied as a Buffer still enforces',
+    async () => {
+      // The end-to-end counterpart of the normalization test: readFileSync
+      // without an encoding is the default way to load a bundle, and Node
+      // reads only its first CRL. Unrelated root first, so the revoking CRL is
+      // the one that would be lost.
+      const res = await get(
+        { ca, crl: Buffer.from(fixtures.unrelatedCRL + fixtures.crlRevoked) },
+        revokedServer,
+      );
+
+      expect(res.status).toBe(495);
+    },
+  );
+
+  test.skipIf(!doesRuntimeEnforceCRL)(
+    'a bundle INSIDE an array is split too',
+    async () => {
+      // The truncation is per string, not per argument, so an array element that
+      // is itself a bundle loses everything after its first CRL. A string in an
+      // array has to behave exactly like a string passed on its own.
+      const res = await get(
+        { ca, crl: [fixtures.unrelatedCRL + fixtures.crlRevoked] },
+        revokedServer,
+      );
+
+      expect(res.status).toBe(495);
+    },
+  );
+
+  test.skipIf(!doesRuntimeEnforceCRL)(
+    'an array of individual CRLs works unchanged',
+    async () => {
+      const res = await get(
+        { ca, crl: [fixtures.unrelatedCRL, fixtures.crlRevoked] },
+        revokedServer,
+      );
+
+      expect(res.status).toBe(495);
+    },
+  );
+
+  test.skipIf(!doesRuntimeEnforceCRL)(
+    'a single CRL and a Buffer are passed through',
+    async () => {
+      const asString = await get(
+        { ca, crl: fixtures.crlRevoked },
+        revokedServer,
+      );
+      const asBuffer = await get(
+        { ca, crl: Buffer.from(fixtures.crlRevoked) },
+        revokedServer,
+      );
+
+      expect(asString.status).toBe(495);
+      expect(asBuffer.status).toBe(495);
+    },
+  );
+
+  test.skipIf(!doesRuntimeEnforceCRL)(
+    'a chain with no covering CRL is refused, even unrevoked',
+    async () => {
+      // X509_V_FLAG_CRL_CHECK_ALL: supplying any CRL demands one for every
+      // element of the chain. This certificate was never revoked and its own
+      // root has a CRL available — it is refused because the CRL supplied covers
+      // a different root. Documented because it is an availability cliff, not a
+      // bug: a partial CRL set takes out every root it does not cover.
+      const res = await get({ ca, crl: fixtures.unrelatedCRL }, goodServer);
+
+      expect(res.isFailed).toBe(true);
+      expect(res.status).toBe(495);
+    },
+  );
+
+  test.skipIf(!doesRuntimeEnforceCRL)(
+    'the CRL is read per request, not captured at construction',
+    async () => {
+      // The refresh story depends on this: re-passing a CRL has to take effect
+      // without rebuilding the adapter, since a revocation set changes far more
+      // often than a client does.
+      const config: NodeAdapterConfig = { ca, crl: fixtures.crlEmpty };
+      const client = new HTTPClient({
+        adapter: new NodeAdapter(config),
+        baseURL: revokedServer.url,
+      });
+
+      expect((await client.get('/api/test').send()).status).toBe(200);
+
+      config.crl = fixtures.crlRevoked;
+
+      expect((await client.get('/api/test').send()).status).toBe(495);
+    },
+  );
+});
+
+describe('NodeAdapter — crl option (normalization)', () => {
+  // Not gated on the runtime. Whether a CRL is ENFORCED is the runtime's job;
+  // handing Node the shape it can actually read is ours, and that has to hold
+  // everywhere — including on a runtime that ignores the option entirely,
+  // where an enforcement test would pass for the wrong reason.
+  const fixtures = getRevocationFixtures();
+
+  const captureCRL = async (config: NodeAdapterConfig): Promise<unknown> => {
+    let captured: unknown;
+
+    const spy = spyOn(https, 'request').mockImplementation(((
+      options: https.RequestOptions,
+    ) => {
+      captured = options.crl;
+
+      // Minimal stand-in for ClientRequest: capture the options, then fail the
+      // request immediately so send() settles without a socket. Only the
+      // members the adapter actually touches are provided.
+      const req = new EventEmitter();
+      const stub = req as unknown as Record<string, unknown>;
+
+      stub.setHeader = () => {};
+      stub.getHeaders = () => ({});
+      stub.destroy = () => {};
+      stub.end = () => {
+        queueMicrotask(() =>
+          req.emit(
+            'error',
+            Object.assign(new Error('captured'), { code: 'ECONNRESET' }),
+          ),
+        );
+      };
+
+      return req as unknown as http.ClientRequest;
+    }) as unknown as typeof https.request);
+
+    try {
+      await new NodeAdapter(config).send({
+        requestURL: 'https://crl.test/api',
+        method: 'GET',
+        headers: {},
+      });
+    } finally {
+      spy.mockRestore();
+    }
+
+    return captured;
+  };
+
+  const countCRLs = (value: unknown): number => {
+    const blocks = (text: unknown) =>
+      typeof text === 'string'
+        ? (text.match(/-----BEGIN X509 CRL-----/g) ?? []).length
+        : 1;
+
+    return Array.isArray(value)
+      ? value.reduce<number>((total, entry) => total + blocks(entry), 0)
+      : blocks(value);
+  };
+
+  test('a two-CRL bundle becomes a two-element array', async () => {
+    const captured = await captureCRL({
+      crl: fixtures.unrelatedCRL + fixtures.crlRevoked,
+    });
+
+    expect(Array.isArray(captured)).toBe(true);
+    expect(captured).toHaveLength(2);
+    expect(countCRLs(captured)).toBe(2);
+  });
+
+  test('a bundle inside an array is flattened, not left truncated', async () => {
+    const captured = await captureCRL({
+      crl: [fixtures.unrelatedCRL + fixtures.crlRevoked, fixtures.crlEmpty],
+    });
+
+    // Two from the bundle plus the standalone one. Without the per-element
+    // split this stays length 2 and silently carries only two of the three.
+    expect(captured).toHaveLength(3);
+    expect(countCRLs(captured)).toBe(3);
+  });
+
+  test('a single CRL string is left exactly as it was', async () => {
+    const captured = await captureCRL({ crl: fixtures.crlRevoked });
+
+    // Not wrapped in an array: passing it through unchanged keeps Node's own
+    // error reporting intact for a malformed value rather than masking it.
+    expect(captured).toBe(fixtures.crlRevoked);
+  });
+
+  test('a PEM bundle in a Buffer is split, not truncated', async () => {
+    // fs.readFileSync('bundle.pem') without an encoding returns a Buffer, and
+    // that is the default way to load a file. Its contents are PEM like any
+    // other bundle, so Node reads only the first CRL from it — passing Buffers
+    // straight through would leave the most ordinary usage silently truncated.
+    const captured = await captureCRL({
+      crl: Buffer.from(fixtures.unrelatedCRL + fixtures.crlRevoked),
+    });
+
+    expect(Array.isArray(captured)).toBe(true);
+    expect(captured).toHaveLength(2);
+  });
+
+  test('a Buffer holding one CRL is handed back unchanged', async () => {
+    // Nothing to split, so return what the caller gave rather than a
+    // re-encoded copy.
+    const buffer = Buffer.from(fixtures.crlRevoked);
+    const captured = await captureCRL({ crl: buffer });
+
+    expect(captured).toBe(buffer);
+  });
+
+  test('a DER Buffer is passed through untouched', async () => {
+    // DER has no armour to look for and encodes exactly one CRL, so there is
+    // nothing to split. The question is PEM-or-DER, not string-or-Buffer.
+    const der = Buffer.from([0x30, 0x82, 0x01, 0x2a, 0x30, 0x81, 0xd1]);
+    const captured = await captureCRL({ crl: der });
+
+    expect(captured).toBe(der);
+  });
+
+  test('a Buffer bundle inside an array is split too', async () => {
+    const captured = await captureCRL({
+      crl: [Buffer.from(fixtures.unrelatedCRL + fixtures.crlRevoked)],
+    });
+
+    expect(captured).toHaveLength(2);
+  });
+
+  test('a damaged Buffer bundle is refused like a damaged string', async () => {
+    let rejection: unknown;
+
+    try {
+      await captureCRL({
+        crl: Buffer.from(`${fixtures.crlEmpty}\n-----BEGIN X509 CRL----\nQkJC`),
+      });
+    } catch (error) {
+      rejection = error;
+    }
+
+    expect((rejection as Error | undefined)?.message).toMatch(
+      /outside any complete/,
+    );
+  });
+
+  test('an array of single CRLs keeps its entries', async () => {
+    const captured = await captureCRL({
+      crl: [fixtures.crlRevoked, fixtures.unrelatedCRL],
+    });
+
+    expect(captured).toEqual([fixtures.crlRevoked, fixtures.unrelatedCRL]);
+  });
+
+  test('a string with no CRL armour at all is refused', async () => {
+    // Previously passed through so Node could reject it with
+    // ERR_CRYPTO_OPERATION_FAILED. It is still refused, just with a message
+    // that names the actual problem. A non-PEM string is never valid here —
+    // DER belongs in a Buffer, which skips this path entirely.
+    let rejection: unknown;
+
+    try {
+      await captureCRL({ crl: 'NOT-A-CRL' });
+    } catch (error) {
+      rejection = error;
+    }
+
+    expect((rejection as Error | undefined)?.message).toMatch(
+      /outside any complete/,
+    );
+  });
+
+  test('a truncated CRL in a bundle is refused, not dropped', async () => {
+    // Splitting returns only the COMPLETE blocks, so a cut-short entry would
+    // otherwise disappear and the caller would enforce a set they never
+    // supplied — with the intact CRLs still applied, which is what makes it
+    // silent. Passing the string through unsplit is no better: Node reads the
+    // first CRL and ignores the damage just as quietly.
+    const truncated =
+      fixtures.crlEmpty +
+      '-----BEGIN X509 CRL-----\nMIIBzzCCAXUCAQEwCgYIKoZIzj0EAwIw';
+
+    let rejection: unknown;
+
+    try {
+      await captureCRL({ crl: truncated });
+    } catch (error) {
+      rejection = error;
+    }
+
+    expect((rejection as Error | undefined)?.message).toMatch(
+      /outside any complete/,
+    );
+  });
+
+  test('a DAMAGED delimiter is refused, not just an exact one', async () => {
+    // The check cannot be a search for well-formed armour. A delimiter that
+    // lost or gained a hyphen still marks a CRL that was cut short, but it
+    // matches no exact-string search — so the entry would be dropped and the
+    // bundle would enforce silently with one CRL missing. Every one of these
+    // produced blocks.length === 1 and passed an exact-armour check.
+    const damaged = [
+      '----BEGIN X509 CRL-----\nQkJCQg==', // one hyphen short
+      '------BEGIN X509 CRL-----\nQkJCQg==', // one too many
+      '-----BEGIN X509 CRL----\nQkJCQg==', // clipped tail
+      '-----END X509 CRL-----', // footer with no header
+      '-----BEG1N X509 CRL-----\nQkJCQg==', // mangled keyword
+    ];
+
+    for (const suffix of damaged) {
+      let rejection: unknown;
+
+      try {
+        await captureCRL({ crl: `${fixtures.crlEmpty}\n${suffix}` });
+      } catch (error) {
+        rejection = error;
+      }
+
+      expect((rejection as Error | undefined)?.message).toMatch(
+        /outside any complete/,
+      );
+    }
+  });
+
+  test('a lone truncated CRL is refused too', async () => {
+    // No complete block at all, so nothing would be split — but the caller
+    // still handed over something broken, and saying so beats letting it
+    // through for Node to reject with a less specific error.
+    let rejection: unknown;
+
+    try {
+      await captureCRL({ crl: '-----BEGIN X509 CRL-----\nMIIBzzCCAXUCAQEw' });
+    } catch (error) {
+      rejection = error;
+    }
+
+    expect((rejection as Error | undefined)?.message).toMatch(
+      /outside any complete/,
+    );
+  });
+
+  test('anything outside a complete block is refused', async () => {
+    // The rule is exact: PEM blocks separated by whitespace, nothing else.
+    // Earlier heuristics tried to admit commentary while still catching a
+    // truncated CRL, and every narrowing swapped one failure for the other —
+    // an exact-armour search missed `----BEGIN`, any-triple-hyphen refused a
+    // Markdown rule, fused-hyphens refused an issuer CN of `ACME---Production`.
+    // A parser cannot tell prose from a half a CRL, so neither is accepted.
+    const rejected = [
+      '----BEGIN X509 CRL-----\nQkJCQg==', // one hyphen short
+      '------BEGIN X509 CRL-----\nQkJCQg==', // one too many
+      '-----BEGIN X509 CRL----\nQkJCQg==', // clipped tail
+      '-----BEG1N X509 CRL-----\nQkJCQg==', // mangled keyword
+      '-----END X509 CRL-----', // footer with no header
+      'QkJCQg==', // a body whose armour is gone entirely
+      'Certificate Revocation List (CRL):', // decoded `-text` header
+      '--- CRL export ---', // commentary
+    ];
+
+    for (const suffix of rejected) {
+      let rejection: unknown;
+
+      try {
+        await captureCRL({ crl: `${fixtures.crlEmpty}\n${suffix}` });
+      } catch (error) {
+        rejection = error;
+      }
+
+      expect((rejection as Error | undefined)?.message).toMatch(
+        /outside any complete/,
+      );
+    }
+  });
+
+  test('whitespace between and around blocks is fine', async () => {
+    // What every producer of a bundle actually emits: blocks separated by
+    // newlines, sometimes with trailing whitespace. This has to keep working
+    // or the exact rule would be useless.
+    const captured = await captureCRL({
+      crl: `\n  ${fixtures.crlEmpty}\n\n\t${fixtures.unrelatedCRL}\n  \n`,
+    });
+
+    expect(captured).toHaveLength(2);
+  });
+
+  test('no crl option means no crl in the request', async () => {
+    const captured = await captureCRL({});
+
+    expect(captured).toBeUndefined();
   });
 });

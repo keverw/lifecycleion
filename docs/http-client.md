@@ -982,11 +982,52 @@ interface NodeAdapterConfig {
     key: string | Buffer;
     ca?: string | Buffer | Array<string | Buffer>;
   };
+  crl?: string | Buffer | Array<string | Buffer>; // Certificate revocation list(s). A concatenated PEM bundle is split for you — see below.
   rejectUnauthorized?: boolean; // Default: true
 }
 ```
 
-TLS certificate errors resolve as status `495` (transport error, not retryable) rather than throwing, so they flow through the normal error path.
+TLS certificate errors resolve as status `495` (transport error, not retryable) rather than throwing, so they flow through the normal error path. That includes every revocation failure — `CERT_REVOKED`, `UNABLE_TO_GET_CRL`, `CRL_HAS_EXPIRED` and friends.
+
+#### Certificate revocation (`crl`)
+
+`crl` rejects a server certificate whose serial has been revoked, even though its chain and hostname still verify. A revoked certificate fails the handshake with `CERT_REVOKED`, surfacing as status `495`.
+
+```typescript
+const client = new HTTPClient({
+  adapter: new NodeAdapter({
+    ca: fs.readFileSync('ca.crt'),
+    crl: fs.readFileSync('crl.pem', 'utf8'), // one CRL, or a bundle of many
+  }),
+  baseURL: 'https://internal.example.com',
+});
+```
+
+The value is read and normalized on **every request**, so refreshing a revocation set means passing a new value. **Construct a new `NodeAdapter`** — that is the intended way, and it is cheap precisely because the adapter owns no connection pool, so there is nothing to release and nothing to leak. There is no update method, and none is needed. Mutating the config object you handed the adapter also takes effect, but rebuilding keeps the CRL and the client that uses it visibly in step. How often to refresh is yours to decide; the library has no timer.
+
+**Bundles are split for you.** A PEM string or Buffer holding several concatenated CRLs — what Apache's `SSLCARevocationFile`, nginx's `ssl_crl` and HAProxy's `crl-file` all expect, and what CA tooling exports — is split into the array Node requires. This includes Buffers: `fs.readFileSync('bundle.pem')` without an encoding returns one, and its contents are PEM like any other bundle, so it would otherwise be truncated exactly as a string would. Strings and Buffers nested inside an array are split too, so `[bundleOfTwo, oneMore]` contributes three CRLs rather than two. DER Buffers are passed through untouched — DER encodes exactly one CRL, so there is nothing to split.
+
+**Only PEM blocks and whitespace are accepted.** Anything else in the string — a truncated or corrupted CRL, a damaged delimiter, or decoded text from `openssl ... -text` — is refused with an error rather than split. The rule is exact rather than a best guess: a parser cannot tell a half-written CRL from a line of commentary, so admitting commentary would mean silently dropping the truncated entry and enforcing a revocation set you never supplied. Strip any annotation before passing a bundle here.
+
+**Do not put two CRLs for the same issuer in one bundle.** OpenSSL uses the **first** CRL it has for an issuer, not the newest — measured, a stale CRL followed by one revoking the server's certificate accepted the connection, while the same pair in the opposite order rejected it. Splitting does not change this; it is how CRL selection works. Supply exactly one current CRL per issuer.
+
+This exists because Node reads only the **first** CRL of a concatenated string and silently ignores the rest — unlike `ca`, which reads every certificate in a bundle:
+
+| passed as           | `ca`          | `crl` (raw Node)         |
+| ------------------- | ------------- | ------------------------ |
+| concatenated bundle | reads **all** | reads **only the first** |
+| array               | reads all     | reads all                |
+
+It is Node diverging from the library it links, not an OpenSSL limitation: `openssl verify -crl_check_all -CRLfile bundle.pem` correctly finds a CRL that sits second in the file. The failure mode is the reason this is worth handling for you — a truncated bundle reports `UNABLE_TO_GET_CRL`, which reads as "no CRL supplied" rather than "your bundle was cut short", and a bundle whose first entry happens to cover the root in use appears to work until the roster or export order changes.
+
+**Two things to plan for.** Both are fail-closed, so a stale or partial CRL never silently stops enforcing — but both can refuse healthy connections:
+
+- **Every certificate in the chain needs a covering CRL.** Node enables `X509_V_FLAG_CRL_CHECK_ALL`, so supplying a CRL for one root while connecting through another fails with `UNABLE_TO_GET_CRL` even when nothing was revoked. Cover every root the client talks to, or give the scoped CRL its own client. This makes adding a root an outage unless its CRL lands first.
+- **CRLs expire.** Past `nextUpdate` the handshake fails with `CRL_HAS_EXPIRED`, including for certificates that were never revoked. Either refresh well inside that window, or export with a `nextUpdate` far enough out that a stalled refresh cannot take you down.
+
+**No connection-pool handling is needed.** `crl` is part of Node's connection pool key, so changing it partitions the pool: a socket established under the old CRL is never reused for a request carrying the new one. Verified against a shared keepAlive agent — after a CRL update, the previously-good connection is rejected rather than reused.
+
+**Runtime support.** Bun ignored `crl` entirely through 1.3.14 — it accepted a revoked certificate with no error — and implemented it in 1.4.0, where it matches Node on every case tested, including malformed-CRL rejection, expiry, coverage, and pool partitioning. **Require Bun >= 1.4.0 if you depend on revocation.** This library's own enforcement tests probe the runtime and skip where `crl` is unsupported, rather than passing for the wrong reason; the bundle-splitting tests run everywhere, since that part is the library's job rather than the runtime's.
 
 ### XHRAdapter
 
