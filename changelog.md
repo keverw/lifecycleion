@@ -21,7 +21,7 @@
 - [0.0.17 (June 10, 2026)](#0017-june-10-2026)
 - [0.0.18 (June 11, 2026)](#0018-june-11-2026)
 - [0.0.19 (July 24, 2026)](#0019-july-24-2026)
-- [Unreleased](#unreleased)
+- [0.0.20 (Aug 21, 2026)](#0020-aug-21-2026)
 
 <!-- tocstop -->
 
@@ -133,7 +133,7 @@
 - The pre-test Playwright check now launches a headless browser instead of only checking the full Chromium path, so a missing or stale `chrome-headless-shell` binary (e.g. after a Playwright version bump) fails fast with a clear message instead of surfacing as confusing test failures.
 - No API changes.
 
-## Unreleased
+## 0.0.20 (Aug 21, 2026)
 
 - **Added `crl` to `NodeAdapterConfig`** — certificate revocation lists, so a server certificate whose serial has been revoked is rejected even though its chain and hostname still verify. Revocation failures resolve as status `495` like other TLS certificate errors. The value is read on every request, so refreshing a revocation set does not require rebuilding the adapter, and no connection-pool handling is needed: `crl` is part of Node's pool key, so changing it partitions the pool and a socket established under the old CRL is never reused under the new one.
 - **Concatenated CRL bundles are split for you.** Node reads only the **first** CRL of a concatenated PEM string and silently ignores the rest — unlike `ca`, which reads every certificate in a bundle. The bundle is the standard interchange format (Apache documents `SSLCARevocationFile` as "the concatenation of the various PEM-encoded CRL files"; nginx and HAProxy agree; `openssl verify -CRLfile` reads a whole bundle), so this is Node diverging from the library it links rather than an OpenSSL limitation. The adapter splits bundles on the RFC 7468 boundary, including strings nested inside an array, so `[bundleOfTwo, oneMore]` contributes three CRLs. This includes **Buffers**: `fs.readFileSync('bundle.pem')` without an encoding returns one and its contents are PEM like any other bundle, so passing Buffers straight through would leave the most ordinary way of loading a file silently truncated — measured, a bundle whose second CRL revoked the server's certificate accepted the connection as a Buffer and rejected it once split. DER Buffers pass through untouched, since DER encodes exactly one CRL. Note also that OpenSSL uses the **first** CRL it has for a given issuer rather than the newest, so a bundle must not contain two CRLs for the same issuer. Without this the failure is `UNABLE_TO_GET_CRL`, which reads as "no CRL supplied" rather than "your bundle was truncated" — and a bundle whose first entry happens to cover the root in use appears to work until the roster or export order changes.
@@ -142,3 +142,6 @@
 - **Bun compatibility note:** Bun ignored `crl` entirely through 1.3.14 — it accepted a revoked certificate with no error, no warning, and no throw on a malformed CRL, meaning the option was never read. The same was true of `minVersion`, `maxVersion`, and `secureProtocol`. All are fixed in Bun 1.4.0, which matches Node 25.9.0 on every case tested. **Require Bun >= 1.4.0 if you depend on these options for security.** The enforcement tests probe the runtime and skip where `crl` is unsupported rather than passing for the wrong reason; the bundle-splitting tests run everywhere.
 - Two caveats worth reading before enabling `crl`, both fail-closed and therefore safe, but both able to refuse healthy connections: every certificate in the chain needs a covering CRL (`X509_V_FLAG_CRL_CHECK_ALL`, so a partial CRL set refuses every root it does not cover, even unrevoked ones), and CRLs expire (`CRL_HAS_EXPIRED` blocks good certificates past `nextUpdate`). See `docs/http-client.md`.
 - Adapter contract types (`HTTPAdapter`, `AdapterRequest`, `AdapterResponse`, `AdapterType`, `AdapterProgressEvent`, `HTTPMethod`) are re-exported from the adapter subpaths, so code driving an adapter directly no longer has to import types from `lifecycleion/http-client`. Type-only, so nothing is added to the runtime bundle. The node subpath also re-exports the response-streaming types.
+- Pinned `@types/bun` to 1.3.14. `@types/bun` 1.4.0 declares `off`/`removeListener` overloads for its `memoryPressure` event directly on `NodeJS.Process`, which shadows the generic `EventEmitter` overloads that `@types/node` relies on being inherited, breaking `process.off('SIGINT', ...)` and every other signal detach at the type level. Types only, so no runtime or security impact.
+- Applied `brace-expansion` and `js-yaml` overrides to clear two high-severity advisories reaching the tree through ESLint's dev-only dependencies.
+- Dependency refresh within existing ranges: `find-my-way` 9.8.0, `tldts` 7.4.10, `uuid` 14.0.2, `@playwright/test` 1.62.1, and the `typescript-eslint` packages 8.67.0.
