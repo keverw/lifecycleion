@@ -1031,9 +1031,7 @@ function normalizeCRL(
  * holding DER — which has no armour to look for — is passed through untouched,
  * since DER encodes exactly one CRL and there is nothing to split.
  */
-function normalizeCRLEntry(
-  entry: string | Buffer,
-): string | Buffer | string[] {
+function normalizeCRLEntry(entry: string | Buffer): string | Buffer | string[] {
   if (typeof entry === 'string') {
     return splitCRLString(entry);
   }
