@@ -185,6 +185,10 @@
       "require": "./dist/lib/http-client-mock/index.cjs"
     }
   },
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "sideEffects": false,
   "files": [
     "dist"
   ],
@@ -226,7 +230,11 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/keverw/lifecycleion"
+    "url": "git+https://github.com/keverw/lifecycleion.git"
+  },
+  "homepage": "https://github.com/keverw/lifecycleion#readme",
+  "bugs": {
+    "url": "https://github.com/keverw/lifecycleion/issues"
   },
   "overrides": {
     "brace-expansion": "5.0.8",
