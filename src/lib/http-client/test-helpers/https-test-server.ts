@@ -83,6 +83,190 @@ function generateCerts(): GeneratedCerts {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Revocation fixtures (CRL tests)
+// ---------------------------------------------------------------------------
+
+export interface RevocationFixtures {
+  /** CA that issued both leaves below. */
+  caCert: string;
+  /** Leaf listed in crlRevoked. */
+  revoked: { cert: string; key: string };
+  /** Leaf from the same CA that was never revoked. */
+  good: { cert: string; key: string };
+  /** CRL from the issuing CA with nothing revoked yet. */
+  crlEmpty: string;
+  /** CRL from the issuing CA listing the `revoked` leaf. */
+  crlRevoked: string;
+  /** A second, unrelated root — used to test bundles and CRL coverage. */
+  unrelatedCACert: string;
+  /** The unrelated root's CRL. Covers nothing in the chains above. */
+  unrelatedCRL: string;
+}
+
+let cachedRevocation: RevocationFixtures | null = null;
+
+/**
+ * Builds a CA that can actually revoke, which the simple `x509 -req` flow
+ * above cannot: issuing a CRL needs `openssl ca` with its index/serial
+ * database. Generated once per process — it costs several openssl invocations.
+ */
+export function getRevocationFixtures(): RevocationFixtures {
+  if (cachedRevocation) {
+    return cachedRevocation;
+  }
+
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'crl-test-'));
+
+  try {
+    const run = (cmd: string) => execSync(cmd, { stdio: 'pipe', cwd: dir });
+    const p = (name: string) => path.join(dir, name);
+    const read = (name: string) => fs.readFileSync(p(name), 'utf8');
+
+    // `openssl ca` needs a config plus an index/serial/crlnumber database.
+    const makeCA = (slug: string, commonName: string) => {
+      fs.mkdirSync(p(`${slug}/newcerts`), { recursive: true });
+      fs.writeFileSync(p(`${slug}/index.txt`), '');
+      fs.writeFileSync(p(`${slug}/serial`), '1000\n');
+      fs.writeFileSync(p(`${slug}/crlnumber`), '1000\n');
+      fs.writeFileSync(
+        p(`${slug}.cnf`),
+        [
+          '[ ca ]',
+          'default_ca = CA_default',
+          '[ CA_default ]',
+          `dir = ./${slug}`,
+          'database = $dir/index.txt',
+          'new_certs_dir = $dir/newcerts',
+          'certificate = $dir/ca.crt',
+          'private_key = $dir/ca.key',
+          'serial = $dir/serial',
+          'crlnumber = $dir/crlnumber',
+          'default_md = sha256',
+          'default_days = 1',
+          'default_crl_days = 1',
+          'policy = policy_any',
+          'email_in_dn = no',
+          'unique_subject = no',
+          '[ policy_any ]',
+          'commonName = supplied',
+          '[ req ]',
+          'distinguished_name = req_dn',
+          '[ req_dn ]',
+          '[ SAN ]',
+          'subjectAltName = DNS:localhost,IP:127.0.0.1',
+          '',
+        ].join('\n'),
+      );
+      run(
+        `openssl ecparam -genkey -name prime256v1 -noout -out "${p(`${slug}/ca.key`)}"`,
+      );
+      run(
+        `openssl req -new -x509 -days 1 -key "${p(`${slug}/ca.key`)}" -out "${p(`${slug}/ca.crt`)}" -subj "/CN=${commonName}"`,
+      );
+    };
+
+    const issue = (slug: string, name: string) => {
+      run(
+        `openssl ecparam -genkey -name prime256v1 -noout -out "${p(`${name}.key`)}"`,
+      );
+      run(
+        `openssl req -new -key "${p(`${name}.key`)}" -out "${p(`${name}.csr`)}" -subj "/CN=localhost"`,
+      );
+      run(
+        `openssl ca -batch -config "${p(`${slug}.cnf`)}" -in "${p(`${name}.csr`)}" -out "${p(`${name}.crt`)}" -extensions SAN -extfile "${p(`${slug}.cnf`)}"`,
+      );
+      return { cert: read(`${name}.crt`), key: read(`${name}.key`) };
+    };
+
+    const gencrl = (slug: string, out: string) => {
+      run(`openssl ca -config "${p(`${slug}.cnf`)}" -gencrl -out "${p(out)}"`);
+      return read(out);
+    };
+
+    makeCA('issuer', 'Revocation Test CA');
+    makeCA('other', 'Unrelated Root');
+
+    const revoked = issue('issuer', 'revoked-leaf');
+    const good = issue('issuer', 'good-leaf');
+
+    // Snapshot a CRL before revoking, so tests can prove the CRL is what
+    // changes the outcome rather than merely being present.
+    const crlEmpty = gencrl('issuer', 'crl-empty.pem');
+
+    run(
+      `openssl ca -config "${p('issuer.cnf')}" -revoke "${p('revoked-leaf.crt')}"`,
+    );
+
+    const crlRevoked = gencrl('issuer', 'crl-revoked.pem');
+
+    cachedRevocation = {
+      caCert: read('issuer/ca.crt'),
+      revoked,
+      good,
+      crlEmpty,
+      crlRevoked,
+      unrelatedCACert: read('other/ca.crt'),
+      unrelatedCRL: gencrl('other', 'crl-other.pem'),
+    };
+
+    return cachedRevocation;
+  } finally {
+    fs.rmSync(dir, { recursive: true });
+  }
+}
+
+/**
+ * Whether THIS runtime actually enforces the `crl` option.
+ *
+ * Bun ignored `crl` entirely through 1.3.14 — it accepted a revoked
+ * certificate with no error — and implemented it in 1.4.0. Rather than gate on
+ * a version number, ask the runtime directly with the same fixtures the tests
+ * use, so the enforcement tests switch themselves on wherever `crl` works and
+ * a future regression shows up as skipped tests rather than green ones.
+ *
+ * Probing is not a substitute for testing our own behaviour: the normalization
+ * this adapter performs is asserted separately and runs everywhere.
+ */
+export async function detectCRLEnforcement(): Promise<boolean> {
+  const fixtures = getRevocationFixtures();
+  const server = await startTlsTestServerWith(fixtures.revoked);
+  const { hostname, port } = new URL(server.url);
+
+  try {
+    return await new Promise<boolean>((resolve) => {
+      const req = https.request(
+        {
+          host: hostname,
+          port: Number(port),
+          path: '/',
+          agent: false,
+          ca: fixtures.caCert,
+          crl: fixtures.crlRevoked,
+        },
+        (res) => {
+          res.resume();
+          // Connected to a revoked certificate: not enforcing.
+          res.on('end', () => resolve(false));
+        },
+      );
+
+      req.on('error', () => resolve(true));
+      req.end();
+    });
+  } finally {
+    await server.stop();
+  }
+}
+
+/** Starts an HTTPS server presenting a specific leaf — used by CRL tests. */
+export function startTlsTestServerWith(leaf: {
+  cert: string;
+  key: string;
+}): Promise<TlsTestServer> {
+  return startServer(leaf.cert, leaf.key);
+}
+
 export function getTestCACert(): string {
   return generateCerts().caCert;
 }

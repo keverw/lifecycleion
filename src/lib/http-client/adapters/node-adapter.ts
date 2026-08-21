@@ -92,6 +92,37 @@ export interface NodeAdapterConfig {
   servername?: string;
 
   /**
+   * Certificate revocation list(s), used to reject a server certificate whose
+   * serial has been revoked even though its chain and hostname still check out.
+   * A revoked certificate fails the handshake with `CERT_REVOKED`.
+   *
+   * Accepts whatever your CA tooling produced. A PEM string holding SEVERAL
+   * concatenated CRLs — the format Apache's `SSLCARevocationFile`, nginx's
+   * `ssl_crl` and HAProxy's `crl-file` all expect, and what `openssl ca
+   * -gencrl` output is usually assembled into — is split into the array Node
+   * requires. A single CRL, a DER `Buffer`, or an array you built yourself is
+   * passed through untouched.
+   *
+   * The split exists because Node reads only the FIRST CRL of a concatenated
+   * string and silently ignores the rest, unlike `ca`, which reads every
+   * certificate in a bundle. See docs/http-client.md.
+   *
+   * Two things to know before using this:
+   *
+   * - **Every certificate in the chain needs a covering CRL.** Node enables
+   *   `X509_V_FLAG_CRL_CHECK_ALL`, so supplying a CRL for one root while
+   *   connecting through another fails with `UNABLE_TO_GET_CRL` even when
+   *   nothing was revoked. Cover every root you talk to, or scope the client.
+   * - **CRLs expire.** Past `nextUpdate` the handshake fails with
+   *   `CRL_HAS_EXPIRED`, including for certificates that were never revoked.
+   *   Re-pass a fresh CRL before then; the refresh cadence is yours to own.
+   *
+   * Both failures are fail-closed, so a stale CRL never silently stops
+   * enforcing — but both can take out healthy connections.
+   */
+  crl?: string | Buffer | Array<string | Buffer>;
+
+  /**
    * Set to false to accept self-signed certificates in dev/test environments.
    * Defaults to true (Node.js default — rejects invalid certs).
    */
@@ -169,6 +200,10 @@ export class NodeAdapter implements HTTPAdapter {
         }
 
         httpsOptions.rejectUnauthorized = true;
+      }
+
+      if (this._config.crl !== undefined) {
+        httpsOptions.crl = normalizeCRL(this._config.crl);
       }
 
       if (this._config.rejectUnauthorized === false) {
@@ -917,6 +952,139 @@ async function streamResponseBody(
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+// Matches one PEM-armoured CRL. The armour is fixed by RFC 7468, so this is a
+// constant rather than an option — there is exactly one correct value for it.
+const PEM_CRL_HEADER = '-----BEGIN X509 CRL-----';
+
+const PEM_CRL_BLOCK = /-----BEGIN X509 CRL-----[\s\S]*?-----END X509 CRL-----/g;
+
+// Anything at all left over once every COMPLETE block has been removed.
+//
+// The rule is exact rather than a heuristic, and that is the point. Earlier
+// versions tried to tell a damaged CRL apart from a human-readable annotation
+// — first by searching for well-formed `-----BEGIN X509 CRL-----`, which
+// missed `----BEGIN` and a clipped tail; then by any triple hyphen, which
+// refused a Markdown rule; then by a hyphen run fused to text, which refused
+// an issuer CN of `ACME---Production`. Each narrowing traded a false negative
+// for a false positive, and a false negative here is a CRL dropped in silence.
+//
+// There is no line to draw, because a truncated CRL and a line of prose are
+// the same thing to a parser: bytes that are not a PEM block. So require that
+// there be none. Everything outside a complete block must be whitespace, which
+// makes the accepted input exactly "PEM blocks, in any order, separated by
+// whitespace" — what every producer of a CRL bundle emits by default.
+//
+// The cost is `openssl ca -gencrl -text` output, whose decoded header is not
+// whitespace. That is refused with an error saying so, which is a better
+// outcome than a rule that accepts it and, in the same breath, accepts a CRL
+// that was cut in half.
+const RESIDUE_OUTSIDE_PEM_BLOCKS = /\S/;
+
+/**
+ * Normalizes whatever the caller supplied as `crl` into the shape Node needs.
+ *
+ * Node reads only the FIRST CRL of a PEM string and silently ignores the rest
+ * — unlike `ca`, which reads every certificate in a bundle. The asymmetry is
+ * easy to miss because the failure is `UNABLE_TO_GET_CRL`, which reads as "no
+ * CRL supplied" rather than "your bundle was truncated", and because a bundle
+ * whose first entry happens to cover the root in use appears to work until the
+ * roster or the export order changes.
+ *
+ * The bundle is the standard interchange format — Apache documents
+ * `SSLCARevocationFile` as "the concatenation of the various PEM-encoded CRL
+ * files", nginx and HAProxy agree, and `openssl verify -CRLfile` reads a whole
+ * bundle — so callers reasonably hand one over. Splitting it here means they
+ * do not have to know about Node's divergence from the library it links.
+ *
+ * The truncation applies per STRING, not per argument, so an array is walked
+ * and each string element split in turn: `[bundleOfTwo, oneCrl]` would
+ * otherwise contribute one CRL where it should contribute three. A string
+ * inside an array is treated exactly like a string passed on its own.
+ *
+ * Anything that is not a multi-CRL string is returned untouched: a Buffer may
+ * be DER, and a string with zero or one match is passed through so Node
+ * reports its own error rather than having one masked here.
+ */
+function normalizeCRL(
+  crl: string | Buffer | Array<string | Buffer>,
+): string | Buffer | Array<string | Buffer> {
+  if (Array.isArray(crl)) {
+    return crl.flatMap((entry) => normalizeCRLEntry(entry));
+  }
+
+  return normalizeCRLEntry(crl);
+}
+
+/**
+ * One `crl` value — or one element of an array of them.
+ *
+ * Buffers cannot simply be passed through. `fs.readFileSync('bundle.pem')`
+ * without an encoding returns a Buffer, which is the DEFAULT way to load a
+ * file, and its contents are PEM text like any other bundle — so Node reads
+ * only its first CRL exactly as it would from a string. Measured: a stale CRL
+ * followed by one revoking the server's certificate accepted the connection as
+ * a Buffer, and rejected it once split.
+ *
+ * So the question is not "string or Buffer" but "PEM or DER". A Buffer holding
+ * PEM goes through the same splitting and validation as a string; a Buffer
+ * holding DER — which has no armour to look for — is passed through untouched,
+ * since DER encodes exactly one CRL and there is nothing to split.
+ */
+function normalizeCRLEntry(
+  entry: string | Buffer,
+): string | Buffer | string[] {
+  if (typeof entry === 'string') {
+    return splitCRLString(entry);
+  }
+
+  // latin1 is a byte-for-byte mapping, so PEM (which is ASCII) survives
+  // exactly and DER cannot be corrupted by the round trip — it is only being
+  // inspected, and is returned as the original Buffer either way.
+  const text = entry.toString('latin1');
+
+  if (!text.includes(PEM_CRL_HEADER)) {
+    return entry;
+  }
+
+  const split = splitCRLString(text);
+
+  // A single block stays a Buffer: it needed no splitting, so hand back what
+  // the caller gave rather than a re-encoded copy of it.
+  return Array.isArray(split) ? split : entry;
+}
+
+function splitCRLString(crl: string): string | string[] {
+  const blocks = crl.match(PEM_CRL_BLOCK) ?? [];
+
+  // Returning only the complete blocks would DISCARD whatever did not match,
+  // so a truncated or corrupted CRL in the bundle would vanish silently and
+  // the caller would enforce a set they did not supply. With the rest of the
+  // bundle still present, a stale-but-complete CRL for the same issuer stays
+  // in force while the newer, broken one is dropped.
+  //
+  // Passing the original string through instead does not help: Node reads its
+  // first CRL and ignores the remainder, so a bundle whose first entry is
+  // intact still swallows the damage without an error.
+  //
+  // So refuse anything that is not a complete block or whitespace.
+  const residue = crl.replace(PEM_CRL_BLOCK, '');
+
+  if (RESIDUE_OUTSIDE_PEM_BLOCKS.test(residue)) {
+    throw new Error(
+      'NodeAdapter: the `crl` value contains content outside any complete ' +
+        '-----BEGIN/END X509 CRL----- block. Only PEM CRL blocks separated ' +
+        'by whitespace are accepted, because a truncated CRL and a line of ' +
+        'commentary are indistinguishable — accepting the second would mean ' +
+        'silently dropping the first and enforcing an incomplete revocation ' +
+        'set. Common causes: a partial download, a clipped or mistyped ' +
+        'delimiter, or decoded text from `openssl ... -text`, which must be ' +
+        'stripped before the bundle is passed here.',
+    );
+  }
+
+  return blocks.length > 1 ? blocks : crl;
+}
 
 function normalizeResponseHeaders(
   headers: http.IncomingHttpHeaders,
