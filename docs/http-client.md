@@ -47,6 +47,7 @@ A TypeScript HTTP client with a fluent request builder, request/response interce
 - [Adapters](#adapters)
   - [FetchAdapter (Default)](#fetchadapter-default)
   - [NodeAdapter](#nodeadapter)
+    - [Certificate revocation (`crl`)](#certificate-revocation-crl)
   - [XHRAdapter](#xhradapter)
   - [MockAdapter (Testing)](#mockadapter-testing)
 - [Streaming Responses](#streaming-responses)
