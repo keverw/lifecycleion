@@ -88,20 +88,31 @@ function canDefineProperty(key: string | symbol): boolean {
  * @returns What the call did, or why it did nothing. See {@link GlobalEventTargetInstallResult}.
  */
 export function installGlobalEventTarget(): GlobalEventTargetInstallResult {
-  const presentCount = METHOD_NAMES.filter(
+  // A member is usable when it is callable, and occupied when it holds anything other
+  // than `undefined` — including values we cannot use, such as `null` or an object.
+  // Occupied-but-unusable is somebody else's doing and must not be overwritten; a plain
+  // `undefined` is treated as absent, since assigning `undefined` is the ordinary way to
+  // clear a global and is indistinguishable from never having set it.
+  const usableCount = METHOD_NAMES.filter(
     (name) => typeof globalRecord[name] === 'function',
   ).length;
 
-  if (presentCount === METHOD_NAMES.length) {
+  const occupiedCount = METHOD_NAMES.filter(
+    (name) => globalRecord[name] !== undefined,
+  ).length;
+
+  if (usableCount === METHOD_NAMES.length) {
     // Never overwrite an existing implementation, ours or the environment's.
     return globalRecord[INSTALLED_KEY] === true
       ? 'already-installed'
       : 'native';
   }
 
-  if (presentCount > 0) {
-    // Partial/incompatible surface: filling in the gaps would split listeners and
-    // dispatches across two unrelated targets, so leave the environment untouched.
+  if (occupiedCount > 0) {
+    // Partial/incompatible surface: some member exists but the set is unusable as a
+    // whole. Filling in the gaps would split listeners and dispatches across two
+    // unrelated targets, and clobbering what is there would destroy someone else's
+    // work — so leave the environment exactly as it is.
     return 'partial';
   }
 

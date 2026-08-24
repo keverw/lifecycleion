@@ -275,6 +275,58 @@ describe('global event target on the Node runtime', () => {
     });
   }, 30_000);
 
+  test('an existing non-callable member is preserved, not overwritten', async () => {
+    interface UnusableGlobalsFixtureResult {
+      installResult: string;
+      isPolyfilled: boolean;
+      isDispatchPreserved: boolean;
+      hasAddEventListener: boolean;
+      hasRemoveEventListener: boolean;
+      didThrow: boolean;
+      waitResult: { success: boolean; errorMessage: string | null };
+    }
+
+    const result =
+      await runFixtureJSON<UnusableGlobalsFixtureResult>('unusable-globals');
+
+    // `globalThis.dispatchEvent = null` is present, so the surface is somebody else's
+    // and stays untouched even though it cannot be used.
+    expect(result.installResult).toBe('partial');
+    expect(result.isPolyfilled).toBe(false);
+    expect(result.isDispatchPreserved).toBe(true);
+    expect(result.hasAddEventListener).toBe(false);
+    expect(result.hasRemoveEventListener).toBe(false);
+
+    // Reporting degrades quietly; the helpers still behave.
+    expect(result.didThrow).toBe(false);
+    expect(result.waitResult).toEqual({
+      success: false,
+      errorMessage: 'Unusable globals wait boom',
+    });
+  }, 30_000);
+
+  test('a member explicitly cleared to undefined counts as absent', async () => {
+    interface ClearedGlobalsFixtureResult {
+      installResult: string;
+      isPolyfilled: boolean;
+      messages: string[];
+    }
+
+    const result =
+      await runFixtureJSON<ClearedGlobalsFixtureResult>('cleared-globals');
+
+    // Assigning `undefined` is how a global gets cleared, and is indistinguishable from
+    // never having set it — so the polyfill installs and reporting works.
+    expect(result.installResult).toBe('already-installed');
+    expect(result.isPolyfilled).toBe(true);
+
+    expect(result.messages.length).toBe(1);
+    expect(result.messages[0]).toContain(
+      'Error in a callback clearedGlobalsCallback',
+    );
+    expect(result.messages[0]).toContain('Cleared globals boom');
+  }, 30_000);
+
   test('a non-extensible global object is handled instead of throwing', async () => {
     interface NonExtensibleFixtureResult {
       didImportThrow: boolean;

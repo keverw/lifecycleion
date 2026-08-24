@@ -56,14 +56,14 @@ const result = installGlobalEventTarget();
 
 **Returns:** one of
 
-| Result                | Meaning                                                                                            |
-| --------------------- | -------------------------------------------------------------------------------------------------- |
-| `'native'`            | The environment already provides all three methods (browser, Bun, Deno). Nothing was changed.      |
-| `'installed'`         | This call installed the polyfill.                                                                  |
-| `'already-installed'` | A previous call, or another copy of Lifecycleion, installed it. The same backing target is reused. |
-| `'partial'`           | Some but not all of the methods exist. Nothing was installed — see [Guarantees](#guarantees).      |
-| `'unsupported'`       | The methods are missing and there is no `EventTarget` constructor to back them with.               |
-| `'blocked'`           | The global object refused the definition (non-extensible, or a non-configurable property).         |
+| Result                | Meaning                                                                                                        |
+| --------------------- | -------------------------------------------------------------------------------------------------------------- |
+| `'native'`            | The environment already provides all three methods (browser, Bun, Deno). Nothing was changed.                  |
+| `'installed'`         | This call installed the polyfill.                                                                              |
+| `'already-installed'` | A previous call, or another copy of Lifecycleion, installed it. The same backing target is reused.             |
+| `'partial'`           | Some but not all of the methods are present and usable. Nothing was installed — see [Guarantees](#guarantees). |
+| `'unsupported'`       | The methods are missing and there is no `EventTarget` constructor to back them with.                           |
+| `'blocked'`           | The global object refused the definition (non-extensible, or a non-configurable property).                     |
 
 ### getGlobalEventTarget
 
@@ -95,9 +95,9 @@ if (isGlobalEventTargetAvailable()) {
 
 ## Guarantees
 
-- **Never overwrites.** If all three methods are already present — native or user-installed — the call is a no-op.
+- **Never overwrites.** If all three methods are already present — native or user-installed — the call is a no-op. Presence is judged independently of callability: a member holding a non-function value such as `globalThis.dispatchEvent = null` is somebody else's, so the call backs off with `'partial'` rather than clobbering it. The one exception is a member explicitly assigned `undefined`, which is how a global gets cleared and is indistinguishable from never having been set; that counts as absent.
 - **Idempotent.** Repeated calls, repeated module initialization, and multiple copies of Lifecycleion share one backing target via a `Symbol.for()` key, so listeners registered earlier keep working.
-- **No mixing.** If the environment has a partial or foreign surface (say, only `addEventListener`), nothing is installed. Filling in the gaps from a fresh target would send dispatches somewhere the existing listeners are not; degrading quietly is safer than reporting into the void. Reporting is skipped in that case, and the helpers still return their normal results.
+- **No mixing.** If the environment has a partial or foreign surface (say, only `addEventListener`, or a `dispatchEvent` that is not callable), nothing is installed. Filling in the gaps from a fresh target would send dispatches somewhere the existing listeners are not; degrading quietly is safer than reporting into the void. Reporting is skipped in that case, and the helpers still return their normal results.
 - **Never throws.** Installation runs during module initialization, so a throw would break the import of every dependent module. A non-extensible global (`Object.freeze(globalThis)` / `Object.preventExtensions(globalThis)`) or a non-configurable property is detected up front and returns `'blocked'`; if a definition is rejected anyway, anything already defined is rolled back so nothing is left half-installed.
 - **Non-enumerable.** Installed properties are defined with `Object.defineProperty` and do not show up in `Object.keys(globalThis)`.
 - **Bound.** Installed methods are bound to the backing target, so they work when destructured or passed around.
