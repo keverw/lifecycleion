@@ -31,17 +31,25 @@ function reportCallbackError(callbackName: string, error: Error): void {
     return;
   }
 
-  (
-    globalThis as unknown as {
-      dispatchEvent: (event: Event) => void;
-    }
-  ).dispatchEvent(
-    new ErrorEvent('reportError', {
-      error: new Error(
-        `Error in a callback ${callbackName}: ${DOUBLE_EOL}${errorToString(error)}`,
-      ),
-    }),
-  );
+  try {
+    (
+      globalThis as unknown as {
+        dispatchEvent: (event: Event) => void;
+      }
+    ).dispatchEvent(
+      new ErrorEvent('reportError', {
+        error: new Error(
+          `Error in a callback ${callbackName}: ${DOUBLE_EOL}${errorToString(error)}`,
+        ),
+      }),
+    );
+  } catch {
+    // The probe above passed, so this is an environment actively fighting us — a global
+    // that throws only on a later read, or a dispatch implementation that rejects the
+    // event. Reporting a failure must never manufacture a second one, and neither
+    // `safeHandleCallback` nor `safeHandleCallbackAndWait` may throw from this path.
+    // Listener errors do not surface here: EventTarget does not propagate them.
+  }
 }
 
 /**

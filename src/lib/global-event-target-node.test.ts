@@ -396,6 +396,34 @@ describe('global event target on the Node runtime', () => {
     });
   }, 30_000);
 
+  test('a throwing EventTarget accessor is handled instead of crashing', async () => {
+    interface HostileEventTargetFixtureResult {
+      didImportThrow: boolean;
+      installResult: string;
+      isPolyfilled: boolean;
+      wasGetterCalled: boolean;
+      didThrow: boolean;
+      waitResult: { success: boolean | null; errorMessage: string | null };
+    }
+
+    const result = await runFixtureJSON<HostileEventTargetFixtureResult>(
+      'hostile-event-target',
+    );
+
+    expect(result.didImportThrow).toBe(false);
+    expect(result.wasGetterCalled).toBe(true);
+
+    // A constructor that cannot be read is one that cannot back anything.
+    expect(result.installResult).toBe('unsupported');
+    expect(result.isPolyfilled).toBe(false);
+
+    expect(result.didThrow).toBe(false);
+    expect(result.waitResult).toEqual({
+      success: false,
+      errorMessage: 'Hostile EventTarget wait boom',
+    });
+  }, 30_000);
+
   test('logger.registerReportErrorListener works and logs callback failures', async () => {
     interface LoggerFixtureResult {
       isAvailable: boolean;

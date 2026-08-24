@@ -66,11 +66,30 @@ export type GlobalEventTargetInstallResult =
 const g = globalThis as typeof globalThis & Record<string, unknown>;
 
 function getState(): GlobalEventTargetState | undefined {
+  const value = readGlobal(GLOBAL_KEY);
+
+  return value === UNREADABLE
+    ? undefined
+    : (value as GlobalEventTargetState | undefined);
+}
+
+/** Returned by {@link readGlobal} when the read threw, so it cannot collide with a value. */
+const UNREADABLE = Symbol('lifecycleion.unreadable');
+
+/**
+ * Read a global without trusting it.
+ *
+ * A plain property read invokes any getter defined for it, and a getter is free to
+ * throw. Every read here runs during module initialization, so an unguarded one would
+ * crash the import of `safe-handle-callback` and everything downstream of it.
+ *
+ * @returns The value, or {@link UNREADABLE} if reading it threw.
+ */
+function readGlobal(name: string): unknown {
   try {
-    return g[GLOBAL_KEY] as GlobalEventTargetState | undefined;
+    return g[name];
   } catch {
-    // Reading a global can run an accessor, and an accessor can throw. See probeMember.
-    return undefined;
+    return UNREADABLE;
   }
 }
 
@@ -85,19 +104,10 @@ function getState(): GlobalEventTargetState | undefined {
  */
 type MemberState = 'usable' | 'occupied' | 'absent' | 'hostile';
 
-/**
- * Read one global event method without trusting it.
- *
- * A plain property read invokes any getter defined for it, and a getter is free to
- * throw. This runs during module initialization, so an unguarded read would crash the
- * import of `safe-handle-callback` and everything downstream of it.
- */
 function probeMember(name: string): MemberState {
-  let value: unknown;
+  const value = readGlobal(name);
 
-  try {
-    value = g[name];
-  } catch {
+  if (value === UNREADABLE) {
     return 'hostile';
   }
 
@@ -155,7 +165,12 @@ export function installGlobalEventTarget(): GlobalEventTargetInstallResult {
     return 'partial';
   }
 
-  if (typeof globalThis.EventTarget !== 'function') {
+  // Captured rather than read twice: the constructor is a global like any other, so it
+  // can be an accessor that throws, and re-reading it could yield something else.
+  const eventTargetConstructor = readGlobal('EventTarget');
+
+  if (typeof eventTargetConstructor !== 'function') {
+    // Covers UNREADABLE too: a constructor we cannot read is one we cannot use.
     return 'unsupported';
   }
 
@@ -188,7 +203,9 @@ export function installGlobalEventTarget(): GlobalEventTargetInstallResult {
 
   try {
     if (existingState === undefined) {
-      state = { target: new globalThis.EventTarget(), isInstalled: false };
+      const target = new (eventTargetConstructor as new () => EventTarget)();
+
+      state = { target, isInstalled: false };
 
       Object.defineProperty(g, GLOBAL_KEY, {
         value: state,
