@@ -62,6 +62,7 @@ export default defineConfig({
     'src/lib/domain-utils/domain-utils.ts',
     'src/lib/error-to-string.ts',
     'src/lib/event-emitter.ts',
+    'src/lib/global-event-target.ts',
     'src/lib/id-helpers.ts',
     'src/lib/is-function.ts',
     'src/lib/is-number.ts',
