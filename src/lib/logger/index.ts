@@ -1,6 +1,10 @@
 import { EventEmitter } from '../event-emitter';
 import { ms } from '../unix-time-helpers';
 import { safeHandleCallbackAndWait } from '../safe-handle-callback';
+import {
+  installGlobalEventTarget,
+  isGlobalEventTargetAvailable,
+} from '../global-event-target';
 import { CurlyBrackets } from '../curly-brackets';
 import { isNumber } from '../is-number';
 import { isPromise } from '../is-promise';
@@ -256,6 +260,10 @@ export class Logger extends EventEmitter {
       return 'already_registered';
     }
 
+    // Node.js needs the global event methods supplied before listeners can be
+    // registered; idempotent and a no-op where they already exist.
+    installGlobalEventTarget();
+
     if (!this.isReportErrorAvailable()) {
       return 'not_available';
     }
@@ -308,19 +316,16 @@ export class Logger extends EventEmitter {
   }
 
   /**
-   * Check if the global event primitives used for `reportError` dispatch are available.
+   * Check if the global event primitives used for `reportError` dispatch are available:
+   * the `EventTarget` methods on `globalThis` plus the `ErrorEvent` constructor.
+   *
+   * On Node.js the event methods are supplied by Lifecycleion's `global-event-target`
+   * polyfill, which is installed when this module is imported.
    *
    * @returns 'true' if the required global event primitives are available, 'false' otherwise.
    */
   public isReportErrorAvailable(): boolean {
-    const globalRecord = globalThis as Record<string, unknown>;
-
-    return (
-      typeof globalRecord.addEventListener === 'function' &&
-      typeof globalRecord.removeEventListener === 'function' &&
-      typeof globalRecord.dispatchEvent === 'function' &&
-      typeof globalRecord.ErrorEvent === 'function'
-    );
+    return isGlobalEventTargetAvailable();
   }
 
   /**

@@ -2,14 +2,55 @@ import { errorToString } from './error-to-string';
 import { isPromise } from './is-promise';
 import { isFunction } from './is-function';
 import { DOUBLE_EOL } from './constants';
+import { installGlobalEventTarget } from './global-event-target';
+
+// Node.js has a global `ErrorEvent` constructor (Node 25+) but does not make `globalThis`
+// an EventTarget, so the global event methods must be supplied before anything can be
+// dispatched or listened for. No-op in browsers, Bun, and Deno.
+installGlobalEventTarget();
 
 /**
- * Safely handles a callback function by catching any errors and reporting them
- * using the global `reportError` event (supported in Node.js 25+, Bun, Deno, and browsers).
+ * Report a callback failure using Lifecycleion's `'reportError'` convention: an `ErrorEvent`
+ * dispatched through `globalThis.dispatchEvent()`.
+ *
+ * Silently does nothing when the environment provides neither native nor polyfilled global
+ * event primitives (see `global-event-target`).
+ */
+function reportCallbackError(callbackName: string, error: Error): void {
+  const globalRecord = globalThis as unknown as Record<string, unknown>;
+
+  if (
+    typeof globalRecord.dispatchEvent !== 'function' ||
+    typeof globalRecord.ErrorEvent !== 'function'
+  ) {
+    return;
+  }
+
+  (
+    globalThis as unknown as {
+      dispatchEvent: (event: Event) => void;
+    }
+  ).dispatchEvent(
+    new ErrorEvent('reportError', {
+      error: new Error(
+        `Error in a callback ${callbackName}: ${DOUBLE_EOL}${errorToString(error)}`,
+      ),
+    }),
+  );
+}
+
+/**
+ * Safely handles a callback function by catching any errors and reporting them via
+ * Lifecycleion's `'reportError'` reporting convention, built from web-standard primitives
+ * (`ErrorEvent` + global `EventTarget` methods).
  * This function can seamlessly handle both synchronous and asynchronous (Promise-based) callback functions.
  *
  * Errors are dispatched as ErrorEvent objects with type 'reportError' via `globalThis.dispatchEvent()`.
  * You can listen for these errors using `globalThis.addEventListener('reportError', handler)`.
+ *
+ * Browsers, Bun, and Deno expose these globals natively. Node.js provides `ErrorEvent` (Node 25+)
+ * but not the global event methods, so importing this module installs them via a shared
+ * `EventTarget` (see `global-event-target`) without overwriting existing implementations.
  *
  * This function is a "fire-and-forget" type of function, meaning it doesn't wait
  * for the callback to complete and doesn't return any result or error. If you need
@@ -28,24 +69,7 @@ export function safeHandleCallback(
   ...args: unknown[]
 ): void {
   const handleError = (error: Error): void => {
-    // Dispatch error using the standard reportError event API
-    // Supported in Node.js 25+, Bun, Deno, and browsers
-    if (
-      typeof (globalThis as Record<string, unknown>).dispatchEvent ===
-      'function'
-    ) {
-      (
-        globalThis as unknown as {
-          dispatchEvent: (event: Event) => void;
-        }
-      ).dispatchEvent(
-        new ErrorEvent('reportError', {
-          error: new Error(
-            `Error in a callback ${callbackName}: ${DOUBLE_EOL}${errorToString(error)}`,
-          ),
-        }),
-      );
-    }
+    reportCallbackError(callbackName, error);
   };
 
   if (isFunction(callback)) {
@@ -76,13 +100,18 @@ interface CallbackResult<T> {
 }
 
 /**
- * Safely handles a callback function by catching any errors and reporting them
- * using the global `reportError` event (supported in Node.js 25+, Bun, Deno, and browsers).
+ * Safely handles a callback function by catching any errors and reporting them via
+ * Lifecycleion's `'reportError'` reporting convention, built from web-standard primitives
+ * (`ErrorEvent` + global `EventTarget` methods).
  * This function can seamlessly handle both synchronous and asynchronous (Promise-based) callback
  * functions, and it waits for the callback to complete before returning the result or an error.
  *
  * Errors are dispatched as ErrorEvent objects with type 'reportError' via `globalThis.dispatchEvent()`.
  * You can listen for these errors using `globalThis.addEventListener('reportError', handler)`.
+ *
+ * Browsers, Bun, and Deno expose these globals natively. Node.js provides `ErrorEvent` (Node 25+)
+ * but not the global event methods, so importing this module installs them via a shared
+ * `EventTarget` (see `global-event-target`) without overwriting existing implementations.
  *
  * @param {string} callbackName - The name of the callback function, used for error reporting.
  * @param {unknown} callback - The callback function to be executed. It can be either a
@@ -98,24 +127,7 @@ export async function safeHandleCallbackAndWait<T>(
   ...args: unknown[]
 ): Promise<CallbackResult<T>> {
   const handleError = (error: Error): CallbackResult<T> => {
-    // Dispatch error using the standard reportError event API
-    // Supported in Node.js 25+, Bun, Deno, and browsers
-    if (
-      typeof (globalThis as Record<string, unknown>).dispatchEvent ===
-      'function'
-    ) {
-      (
-        globalThis as unknown as {
-          dispatchEvent: (event: Event) => void;
-        }
-      ).dispatchEvent(
-        new ErrorEvent('reportError', {
-          error: new Error(
-            `Error in a callback ${callbackName}: ${DOUBLE_EOL}${errorToString(error)}`,
-          ),
-        }),
-      );
-    }
+    reportCallbackError(callbackName, error);
 
     return { success: false, error };
   };

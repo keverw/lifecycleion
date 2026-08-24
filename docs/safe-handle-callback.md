@@ -1,6 +1,6 @@
 # safe-handle-callback
 
-Safely execute sync or async callbacks with automatic error reporting via browser-style `reportError` / `ErrorEvent` globals.
+Safely execute sync or async callbacks with automatic error reporting via Lifecycleion's `'reportError'` convention, built from web-standard primitives (`ErrorEvent` + the global `EventTarget` methods).
 
 <!-- toc -->
 
@@ -8,6 +8,7 @@ Safely execute sync or async callbacks with automatic error reporting via browse
 - [API](#api)
   - [safeHandleCallback](#safehandlecallback)
   - [safeHandleCallbackAndWait](#safehandlecallbackandwait)
+- [Runtime support](#runtime-support)
 
 <!-- tocstop -->
 
@@ -24,7 +25,7 @@ import {
 
 ### safeHandleCallback
 
-Fire-and-forget wrapper that executes a callback (sync or async) and reports any errors via `globalThis.dispatchEvent` using browser-style `reportError` / `ErrorEvent` globals. This is supported in Bun, Deno, modern browsers, and Node.js 25+. Does not return a value or wait for async completion.
+Fire-and-forget wrapper that executes a callback (sync or async) and reports any errors as an `ErrorEvent` dispatched through `globalThis.dispatchEvent` under the `'reportError'` event type. Works in Bun, Deno, modern browsers, and Node.js 25+ (see [Runtime support](#runtime-support)). Does not return a value or wait for async completion.
 
 ```typescript
 safeHandleCallback('onData', myCallback, arg1, arg2);
@@ -64,3 +65,11 @@ if (result.success) {
 
 - `success: true` - callback completed without throwing, and `value` holds the return value
 - `success: false` - callback threw or was not a function, and `error` holds the caught error
+
+## Runtime support
+
+`'reportError'` is Lifecycleion's own reporting convention, assembled from web-standard primitives: an `ErrorEvent` dispatched through the `EventTarget` methods on the global object. It is not itself a web-standard API.
+
+Browsers, Bun, and Deno expose those primitives on `globalThis` natively. Node.js is a partial case: the `ErrorEvent` constructor is a global as of Node 25, but `globalThis` is still not an `EventTarget`, so `addEventListener` / `removeEventListener` / `dispatchEvent` are missing. Lifecycleion supplies that missing surface — importing this module installs the three methods, backed by one shared `EventTarget`, without ever overwriting an existing implementation. See [global-event-target](./global-event-target.md) for the details and guarantees.
+
+Node 25+ is the supported floor (`engines.node`), so `ErrorEvent` itself is never polyfilled. If an environment somehow provides neither the native nor the polyfilled primitives, reporting is skipped: errors are still caught, and `safeHandleCallbackAndWait` still returns its structured failure.

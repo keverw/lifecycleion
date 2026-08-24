@@ -1,6 +1,6 @@
 {
   "name": "lifecycleion",
-  "version": "0.0.20",
+  "version": "0.0.21",
   "type": "module",
   "description": "A collection of foundational TypeScript utilities for managing application lifecycle, logging, retries, events, and common programming patterns",
   "exports": {
@@ -53,6 +53,11 @@
       "types": "./dist/lib/error-to-string.d.ts",
       "import": "./dist/lib/error-to-string.js",
       "require": "./dist/lib/error-to-string.cjs"
+    },
+    "./global-event-target": {
+      "types": "./dist/lib/global-event-target.d.ts",
+      "import": "./dist/lib/global-event-target.js",
+      "require": "./dist/lib/global-event-target.cjs"
     },
     "./event-emitter": {
       "types": "./dist/lib/event-emitter.d.ts",
