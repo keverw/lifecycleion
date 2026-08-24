@@ -45,7 +45,7 @@ bun add lifecycleion
 
 For Node.js runtimes, Lifecycleion currently targets `Node >=25`. Some libraries, including `safe-handle-callback`, `logger`'s `reportError` listener, and `lru-cache`'s `onChange`, report errors using Lifecycleion's `'reportError'` convention: an `ErrorEvent` dispatched through the global `EventTarget` methods. Those are web-standard primitives (the `'reportError'` event type itself is Lifecycleion's convention, not a web standard), and browsers, Bun, and Deno expose them on `globalThis` natively.
 
-Node.js is a partial case: `ErrorEvent` is native in Node 25+, but `globalThis` is still not an `EventTarget`, so Lifecycleion supplies the missing global event methods itself — automatically, and without overwriting native or user-installed implementations. See [global-event-target](./docs/global-event-target.md).
+Node.js is a partial case: `ErrorEvent` is native in Node 25+, but `globalThis` is still not an `EventTarget`, so Lifecycleion automatically supplies the missing global event methods without overwriting native or user-installed implementations. See [global-event-target](./docs/global-event-target.md).
 
 ## Quick Example
 

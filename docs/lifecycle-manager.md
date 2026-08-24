@@ -79,7 +79,7 @@ A comprehensive lifecycle orchestration system that manages startup, shutdown, a
   - [4. Leverage Events for Monitoring](#4-leverage-events-for-monitoring)
   - [5. Validate Before Production](#5-validate-before-production)
   - [6. Use Single LifecycleManager Instance](#6-use-single-lifecyclemanager-instance)
-  - [7. Make Component Startup Idempotent and Coordinate with Shutdown](#7-make-component-startup-idempotent-and-coordinate-with-shutdown)
+  - [7. Make Component Startup Idempotent and Coordinate With Shutdown](#7-make-component-startup-idempotent-and-coordinate-with-shutdown)
   - [8. Safe Resource Sharing via Dynamic Wrappers](#8-safe-resource-sharing-via-dynamic-wrappers)
     - [Step 1: The Resource Component](#step-1-the-resource-component)
     - [Step 2: The Consumer Wrapper Helper](#step-2-the-consumer-wrapper-helper)
@@ -2688,7 +2688,7 @@ const lifecycle2 = new LifecycleManager({ logger });
 lifecycle1.attachSignals(); // Conflicts with lifecycle2
 ```
 
-### 7. Make Component Startup Idempotent and Coordinate with Shutdown
+### 7. Make Component Startup Idempotent and Coordinate With Shutdown
 
 For servers and long-running services, make `start()` idempotent by tracking an in-flight `startPromise`, and make `stop()` idempotent by tracking an in-flight `stopPromise`. Additionally, reject `start()` while `stop()` is in progress, and coordinate `stop()` so that it awaits any active `startPromise` before shutting down.
 

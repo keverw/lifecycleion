@@ -13,7 +13,7 @@ A modern, flexible logging library with sink-based architecture, template string
     - [Log Level Use Cases](#log-level-use-cases)
     - [Per-Sink Filtering](#per-sink-filtering)
   - [Exit Codes](#exit-codes)
-  - [Template Strings with Parameters](#template-strings-with-parameters)
+  - [Template Strings With Parameters](#template-strings-with-parameters)
     - [Nested Object Support](#nested-object-support)
   - [Redaction of Sensitive Data](#redaction-of-sensitive-data)
     - [Nested Object Redaction](#nested-object-redaction)
@@ -27,7 +27,7 @@ A modern, flexible logging library with sink-based architecture, template string
   - [Service Loggers](#service-loggers)
   - [Entity Loggers](#entity-loggers)
     - [Game Engine Example](#game-engine-example)
-    - [Session Management with UUIDs](#session-management-with-uuids)
+    - [Session Management With UUIDs](#session-management-with-uuids)
     - [Worker Pool Example](#worker-pool-example)
     - [Key Points](#key-points)
   - [Setting Exit Callback After Construction](#setting-exit-callback-after-construction)
@@ -275,7 +275,7 @@ logger.error('Non-fatal error'); // Process continues
 - The exit code is included in the `LogEntry` that sinks receive, so custom sinks can see when a log will trigger an exit
 - The `exitCode` must be a valid number. Non-numeric values are ignored and won't trigger exit
 
-### Template Strings with Parameters
+### Template Strings With Parameters
 
 ```typescript
 const logger = new Logger({
@@ -663,7 +663,7 @@ enemy.info('Enemy spawned at {{x}}, {{y}}', {
 // Output: [scripting] [objects/enemy-goblin-15] Enemy spawned at 100, 200
 ```
 
-#### Session Management with UUIDs
+#### Session Management With UUIDs
 
 Entity names can be anything - including UUIDs for unique session tracking:
 

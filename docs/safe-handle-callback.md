@@ -8,7 +8,7 @@ Safely execute sync or async callbacks with automatic error reporting via Lifecy
 - [API](#api)
   - [safeHandleCallback](#safehandlecallback)
   - [safeHandleCallbackAndWait](#safehandlecallbackandwait)
-- [Runtime support](#runtime-support)
+- [Runtime Support](#runtime-support)
 
 <!-- tocstop -->
 
@@ -66,10 +66,10 @@ if (result.success) {
 - `success: true` - callback completed without throwing, and `value` holds the return value
 - `success: false` - callback threw or was not a function, and `error` holds the caught error
 
-## Runtime support
+## Runtime Support
 
 `'reportError'` is Lifecycleion's own reporting convention, assembled from web-standard primitives: an `ErrorEvent` dispatched through the `EventTarget` methods on the global object. It is not itself a web-standard API.
 
-Browsers, Bun, and Deno expose those primitives on `globalThis` natively. Node.js is a partial case: the `ErrorEvent` constructor is a global as of Node 25, but `globalThis` is still not an `EventTarget`, so `addEventListener` / `removeEventListener` / `dispatchEvent` are missing. Lifecycleion supplies that missing surface — importing this module installs the three methods, backed by one shared `EventTarget`, without ever overwriting an existing implementation. See [global-event-target](./global-event-target.md) for the details and guarantees.
+Browsers, Bun, and Deno expose those primitives on `globalThis` natively. Node.js is a partial case: the `ErrorEvent` constructor is a global as of Node 25, but `globalThis` is still not an `EventTarget`, so `addEventListener` / `removeEventListener` / `dispatchEvent` are missing. Lifecycleion supplies that missing surface. Importing this module installs the three methods, backed by one shared `EventTarget`, without ever overwriting an existing implementation. See [global-event-target](./global-event-target.md) for the details and guarantees.
 
 Node 25+ is the supported floor (`engines.node`), so `ErrorEvent` itself is never polyfilled. If an environment somehow provides neither the native nor the polyfilled primitives, reporting is skipped: errors are still caught, and `safeHandleCallbackAndWait` still returns its structured failure.
