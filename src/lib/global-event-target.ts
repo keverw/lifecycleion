@@ -66,7 +66,46 @@ export type GlobalEventTargetInstallResult =
 const g = globalThis as typeof globalThis & Record<string, unknown>;
 
 function getState(): GlobalEventTargetState | undefined {
-  return g[GLOBAL_KEY] as GlobalEventTargetState | undefined;
+  try {
+    return g[GLOBAL_KEY] as GlobalEventTargetState | undefined;
+  } catch {
+    // Reading a global can run an accessor, and an accessor can throw. See probeMember.
+    return undefined;
+  }
+}
+
+/**
+ * What a global event method currently holds.
+ *
+ * - `usable` - a callable value.
+ * - `occupied` - present, but something we cannot use (`null`, an object, ...).
+ * - `absent` - `undefined`, which is indistinguishable from never having been set.
+ * - `hostile` - reading it threw, so the property is an accessor belonging to somebody
+ *   else. It cannot be probed, and must not be touched.
+ */
+type MemberState = 'usable' | 'occupied' | 'absent' | 'hostile';
+
+/**
+ * Read one global event method without trusting it.
+ *
+ * A plain property read invokes any getter defined for it, and a getter is free to
+ * throw. This runs during module initialization, so an unguarded read would crash the
+ * import of `safe-handle-callback` and everything downstream of it.
+ */
+function probeMember(name: string): MemberState {
+  let value: unknown;
+
+  try {
+    value = g[name];
+  } catch {
+    return 'hostile';
+  }
+
+  if (typeof value === 'function') {
+    return 'usable';
+  }
+
+  return value === undefined ? 'absent' : 'occupied';
 }
 
 /**
@@ -97,29 +136,22 @@ function canDefineProperty(key: string): boolean {
  * @returns What the call did, or why it did nothing. See {@link GlobalEventTargetInstallResult}.
  */
 export function installGlobalEventTarget(): GlobalEventTargetInstallResult {
-  // A member is usable when it is callable, and occupied when it holds anything other
-  // than `undefined` — including values we cannot use, such as `null` or an object.
   // Occupied-but-unusable is somebody else's doing and must not be overwritten; a plain
   // `undefined` is treated as absent, since assigning `undefined` is the ordinary way to
   // clear a global and is indistinguishable from never having set it.
-  const usableCount = METHOD_NAMES.filter(
-    (name) => typeof g[name] === 'function',
-  ).length;
+  const members = METHOD_NAMES.map((name) => probeMember(name));
 
-  const occupiedCount = METHOD_NAMES.filter(
-    (name) => g[name] !== undefined,
-  ).length;
-
-  if (usableCount === METHOD_NAMES.length) {
+  if (members.every((member) => member === 'usable')) {
     // Never overwrite an existing implementation, ours or the environment's.
     return getState()?.isInstalled === true ? 'already-installed' : 'native';
   }
 
-  if (occupiedCount > 0) {
+  if (members.some((member) => member !== 'absent')) {
     // Partial/incompatible surface: some member exists but the set is unusable as a
     // whole. Filling in the gaps would split listeners and dispatches across two
     // unrelated targets, and clobbering what is there would destroy someone else's
-    // work — so leave the environment exactly as it is.
+    // work — so leave the environment exactly as it is. A `hostile` member lands here
+    // too: it cannot be read, so it certainly cannot be replaced safely.
     return 'partial';
   }
 
@@ -224,7 +256,7 @@ export function isGlobalEventTargetPolyfilled(): boolean {
  */
 export function isGlobalEventTargetAvailable(): boolean {
   return (
-    METHOD_NAMES.every((name) => typeof g[name] === 'function') &&
-    typeof g.ErrorEvent === 'function'
+    METHOD_NAMES.every((name) => probeMember(name) === 'usable') &&
+    probeMember('ErrorEvent') === 'usable'
   );
 }

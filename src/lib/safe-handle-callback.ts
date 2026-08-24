@@ -2,7 +2,10 @@ import { errorToString } from './error-to-string';
 import { isPromise } from './is-promise';
 import { isFunction } from './is-function';
 import { DOUBLE_EOL } from './constants';
-import { installGlobalEventTarget } from './global-event-target';
+import {
+  installGlobalEventTarget,
+  isGlobalEventTargetAvailable,
+} from './global-event-target';
 
 // Node.js has a global `ErrorEvent` constructor (Node 25+) but does not make `globalThis`
 // an EventTarget, so the global event methods must be supplied before anything can be
@@ -22,12 +25,9 @@ function reportCallbackError(callbackName: string, error: Error): void {
   // top-level call, so a failure can never be swallowed for a packaging reason.
   installGlobalEventTarget();
 
-  const globalRecord = globalThis as unknown as Record<string, unknown>;
-
-  if (
-    typeof globalRecord.dispatchEvent !== 'function' ||
-    typeof globalRecord.ErrorEvent !== 'function'
-  ) {
+  // Probed rather than read directly: a global can be an accessor that throws, and this
+  // runs on an error path that must not raise one of its own.
+  if (!isGlobalEventTargetAvailable()) {
     return;
   }
 

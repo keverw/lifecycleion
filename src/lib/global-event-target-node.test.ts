@@ -364,6 +364,38 @@ describe('global event target on the Node runtime', () => {
     });
   }, 30_000);
 
+  test('a throwing accessor on a global is probed without crashing', async () => {
+    interface HostileGlobalsFixtureResult {
+      didImportThrow: boolean;
+      installResult: string;
+      isPolyfilled: boolean;
+      wasGetterCalled: boolean;
+      isAccessorPreserved: boolean;
+      didThrow: boolean;
+      waitResult: { success: boolean | null; errorMessage: string | null };
+    }
+
+    const result =
+      await runFixtureJSON<HostileGlobalsFixtureResult>('hostile-globals');
+
+    // Reading the global runs the getter, and this happens during module init — an
+    // unguarded probe would take the import down with it.
+    expect(result.didImportThrow).toBe(false);
+    expect(result.wasGetterCalled).toBe(true);
+
+    // Unreadable means unreplaceable: treat it as somebody else's surface.
+    expect(result.installResult).toBe('partial');
+    expect(result.isPolyfilled).toBe(false);
+    expect(result.isAccessorPreserved).toBe(true);
+
+    // Reporting degrades quietly; the helpers still behave.
+    expect(result.didThrow).toBe(false);
+    expect(result.waitResult).toEqual({
+      success: false,
+      errorMessage: 'Hostile globals wait boom',
+    });
+  }, 30_000);
+
   test('logger.registerReportErrorListener works and logs callback failures', async () => {
     interface LoggerFixtureResult {
       isAvailable: boolean;
