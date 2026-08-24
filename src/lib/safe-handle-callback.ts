@@ -17,6 +17,11 @@ installGlobalEventTarget();
  * event primitives (see `global-event-target`).
  */
 function reportCallbackError(callbackName: string, error: Error): void {
+  // Also installed at module load, above. Repeating it here costs a few typeof checks on
+  // an error path and makes reporting independent of whether a bundler kept that
+  // top-level call, so a failure can never be swallowed for a packaging reason.
+  installGlobalEventTarget();
+
   const globalRecord = globalThis as unknown as Record<string, unknown>;
 
   if (

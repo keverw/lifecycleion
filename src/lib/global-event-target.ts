@@ -25,8 +25,15 @@
 /** Shared backing target, keyed so multiple package copies reuse one instance. */
 const TARGET_KEY = Symbol.for('lifecycleion.globalEventTarget.target');
 
-/** Marker recording that the global methods came from this polyfill. */
-const INSTALLED_KEY = Symbol.for('lifecycleion.globalEventTarget.installed');
+/**
+ * The exact function identities this polyfill installed.
+ *
+ * A boolean marker would outlive the methods it describes: an application that replaces
+ * the globals after installation would still be reported as polyfilled, and the backing
+ * target nothing dispatches to would still be handed out. Comparing identities makes the
+ * answer reflect what is actually installed right now.
+ */
+const METHODS_KEY = Symbol.for('lifecycleion.globalEventTarget.methods');
 
 const METHOD_NAMES = [
   'addEventListener',
@@ -58,7 +65,25 @@ export type GlobalEventTargetInstallResult =
 
 type GlobalRecord = Record<string | symbol, unknown>;
 
+type InstalledMethods = Record<string, unknown>;
+
 const globalRecord = globalThis as unknown as GlobalRecord;
+
+/**
+ * Whether every global event method is still the exact function this polyfill installed.
+ *
+ * False once the environment never needed the polyfill, and false again the moment an
+ * application swaps any of the methods out from under it.
+ */
+function areInstalledMethodsActive(): boolean {
+  const installed = globalRecord[METHODS_KEY] as InstalledMethods | undefined;
+
+  if (installed === undefined) {
+    return false;
+  }
+
+  return METHOD_NAMES.every((name) => globalRecord[name] === installed[name]);
+}
 
 /**
  * Whether a property can be defined on the global object without throwing.
@@ -102,10 +127,9 @@ export function installGlobalEventTarget(): GlobalEventTargetInstallResult {
   ).length;
 
   if (usableCount === METHOD_NAMES.length) {
-    // Never overwrite an existing implementation, ours or the environment's.
-    return globalRecord[INSTALLED_KEY] === true
-      ? 'already-installed'
-      : 'native';
+    // Never overwrite an existing implementation, ours or the environment's. Whose it is
+    // is decided by identity, not by a marker that a later replacement would leave stale.
+    return areInstalledMethodsActive() ? 'already-installed' : 'native';
   }
 
   if (occupiedCount > 0) {
@@ -123,8 +147,8 @@ export function installGlobalEventTarget(): GlobalEventTargetInstallResult {
   // Preflight every property before touching anything, so a frozen or sealed global
   // object leaves with nothing half-installed — and, more importantly, without throwing
   // out of the module initialization that calls this.
-  const isDefinable = [...METHOD_NAMES, TARGET_KEY, INSTALLED_KEY].every(
-    (key) => canDefineProperty(key),
+  const isDefinable = [...METHOD_NAMES, TARGET_KEY, METHODS_KEY].every((key) =>
+    canDefineProperty(key),
   );
 
   if (!isDefinable) {
@@ -161,22 +185,27 @@ export function installGlobalEventTarget(): GlobalEventTargetInstallResult {
     }
 
     const boundTarget = target as EventTarget;
+    const installed: InstalledMethods = {};
 
     for (const name of METHOD_NAMES) {
+      const method = (
+        boundTarget[name] as (...args: unknown[]) => unknown
+      ).bind(boundTarget);
+
       Object.defineProperty(globalRecord, name, {
-        value: (boundTarget[name] as (...args: unknown[]) => unknown).bind(
-          boundTarget,
-        ),
+        value: method,
         enumerable: false,
         writable: true,
         configurable: true,
       });
 
+      installed[name] = method;
       defined.push(name);
     }
 
-    Object.defineProperty(globalRecord, INSTALLED_KEY, {
-      value: true,
+    // Recorded last, so the identities are only published once all three are in place.
+    Object.defineProperty(globalRecord, METHODS_KEY, {
+      value: installed,
       enumerable: false,
       writable: false,
       configurable: true,
@@ -199,6 +228,13 @@ export function installGlobalEventTarget(): GlobalEventTargetInstallResult {
  *          environments, or environments where installation was skipped).
  */
 export function getGlobalEventTarget(): EventTarget | null {
+  // Only meaningful while the methods we installed are the ones in use: once they are
+  // replaced, the backing target no longer receives anything and handing it out would
+  // point callers at a dead end.
+  if (!areInstalledMethodsActive()) {
+    return null;
+  }
+
   const target = globalRecord[TARGET_KEY];
 
   return typeof globalThis.EventTarget === 'function' &&
@@ -208,10 +244,11 @@ export function getGlobalEventTarget(): EventTarget | null {
 }
 
 /**
- * Whether the global event methods currently in place were installed by this polyfill.
+ * Whether the global event methods currently in place are the ones this polyfill
+ * installed. Becomes `false` again if an application later replaces them.
  */
 export function isGlobalEventTargetPolyfilled(): boolean {
-  return globalRecord[INSTALLED_KEY] === true;
+  return areInstalledMethodsActive();
 }
 
 /**

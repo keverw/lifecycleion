@@ -31,7 +31,9 @@ typeof globalThis.removeEventListener; // 'undefined'
 
 Lifecycleion supplies the missing global event methods, backing them with a single shared `EventTarget`. Node 25+ is the supported floor (see `engines.node`), so `ErrorEvent` itself is never polyfilled.
 
-Nothing needs to be wired up by hand: importing `lifecycleion/safe-handle-callback` or `lifecycleion/logger` installs it. This module is exported for the cases where you want to inspect or control that explicitly.
+Nothing needs to be wired up by hand: importing `lifecycleion/safe-handle-callback` or `lifecycleion/logger` installs it. Both are listed in the package's `sideEffects`, so a bundler will not drop that installation — including for a bare `import 'lifecycleion/safe-handle-callback'`. Everything else in the package stays side-effect-free and fully tree-shakeable. Reporting also re-runs the install on its own error path, so a failure can never be swallowed for a packaging reason.
+
+This module is exported for the cases where you want to inspect or control installation explicitly.
 
 ## Usage
 
@@ -97,6 +99,7 @@ if (isGlobalEventTargetAvailable()) {
 
 - **Never overwrites.** If all three methods are already present — native or user-installed — the call is a no-op. Presence is judged independently of callability: a member holding a non-function value such as `globalThis.dispatchEvent = null` is somebody else's, so the call backs off with `'partial'` rather than clobbering it. The one exception is a member explicitly assigned `undefined`, which is how a global gets cleared and is indistinguishable from never having been set; that counts as absent.
 - **Idempotent.** Repeated calls, repeated module initialization, and multiple copies of Lifecycleion share one backing target via a `Symbol.for()` key, so listeners registered earlier keep working.
+- **Honest about what is in force.** Ownership is tracked by the installed function identities, not by a flag. If an application replaces the global methods after installation, `installGlobalEventTarget()` reports `'native'`, `isGlobalEventTargetPolyfilled()` returns `false`, and `getGlobalEventTarget()` returns `null` rather than a backing target nothing dispatches to any more.
 - **No mixing.** If the environment has a partial or foreign surface (say, only `addEventListener`, or a `dispatchEvent` that is not callable), nothing is installed. Filling in the gaps from a fresh target would send dispatches somewhere the existing listeners are not; degrading quietly is safer than reporting into the void. Reporting is skipped in that case, and the helpers still return their normal results.
 - **Never throws.** Installation runs during module initialization, so a throw would break the import of every dependent module. A non-extensible global (`Object.freeze(globalThis)` / `Object.preventExtensions(globalThis)`) or a non-configurable property is detected up front and returns `'blocked'`; if a definition is rejected anyway, anything already defined is rolled back so nothing is left half-installed.
 - **Non-enumerable.** Installed properties are defined with `Object.defineProperty` and do not show up in `Object.keys(globalThis)`.

@@ -193,7 +193,12 @@
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",
-  "sideEffects": false,
+  "sideEffects": [
+    "./dist/lib/safe-handle-callback.js",
+    "./dist/lib/safe-handle-callback.cjs",
+    "./dist/lib/logger/index.js",
+    "./dist/lib/logger/index.cjs"
+  ],
   "files": [
     "dist"
   ],
