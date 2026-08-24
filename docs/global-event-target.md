@@ -63,6 +63,7 @@ const result = installGlobalEventTarget();
 | `'already-installed'` | A previous call, or another copy of Lifecycleion, installed it. The same backing target is reused. |
 | `'partial'`           | Some but not all of the methods exist. Nothing was installed — see [Guarantees](#guarantees).      |
 | `'unsupported'`       | The methods are missing and there is no `EventTarget` constructor to back them with.               |
+| `'blocked'`           | The global object refused the definition (non-extensible, or a non-configurable property).         |
 
 ### getGlobalEventTarget
 
@@ -97,6 +98,7 @@ if (isGlobalEventTargetAvailable()) {
 - **Never overwrites.** If all three methods are already present — native or user-installed — the call is a no-op.
 - **Idempotent.** Repeated calls, repeated module initialization, and multiple copies of Lifecycleion share one backing target via a `Symbol.for()` key, so listeners registered earlier keep working.
 - **No mixing.** If the environment has a partial or foreign surface (say, only `addEventListener`), nothing is installed. Filling in the gaps from a fresh target would send dispatches somewhere the existing listeners are not; degrading quietly is safer than reporting into the void. Reporting is skipped in that case, and the helpers still return their normal results.
+- **Never throws.** Installation runs during module initialization, so a throw would break the import of every dependent module. A non-extensible global (`Object.freeze(globalThis)` / `Object.preventExtensions(globalThis)`) or a non-configurable property is detected up front and returns `'blocked'`; if a definition is rejected anyway, anything already defined is rolled back so nothing is left half-installed.
 - **Non-enumerable.** Installed properties are defined with `Object.defineProperty` and do not show up in `Object.keys(globalThis)`.
 - **Bound.** Installed methods are bound to the backing target, so they work when destructured or passed around.
 - **Browser and Bun behavior is unchanged.**

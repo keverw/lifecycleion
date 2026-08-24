@@ -275,6 +275,43 @@ describe('global event target on the Node runtime', () => {
     });
   }, 30_000);
 
+  test('a non-extensible global object is handled instead of throwing', async () => {
+    interface NonExtensibleFixtureResult {
+      didImportThrow: boolean;
+      installResult: string;
+      isPolyfilled: boolean;
+      hasAddEventListener: boolean;
+      hasRemoveEventListener: boolean;
+      hasDispatchEvent: boolean;
+      ownSymbols: string[];
+      didThrow: boolean;
+      waitResult: { success: boolean | null; errorMessage: string | null };
+    }
+
+    const result = await runFixtureJSON<NonExtensibleFixtureResult>(
+      'non-extensible-globals',
+    );
+
+    // Installation happens during module init, so throwing here would break the import
+    // of safe-handle-callback and every module that depends on it.
+    expect(result.didImportThrow).toBe(false);
+    expect(result.installResult).toBe('blocked');
+    expect(result.isPolyfilled).toBe(false);
+
+    // Nothing half-installed, not even the backing target.
+    expect(result.hasAddEventListener).toBe(false);
+    expect(result.hasRemoveEventListener).toBe(false);
+    expect(result.hasDispatchEvent).toBe(false);
+    expect(result.ownSymbols).toEqual([]);
+
+    // Reporting degrades quietly; the helpers still behave.
+    expect(result.didThrow).toBe(false);
+    expect(result.waitResult).toEqual({
+      success: false,
+      errorMessage: 'Sealed globals wait boom',
+    });
+  }, 30_000);
+
   test('logger.registerReportErrorListener works and logs callback failures', async () => {
     interface LoggerFixtureResult {
       isAvailable: boolean;

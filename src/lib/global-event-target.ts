@@ -45,13 +45,39 @@ const METHOD_NAMES = [
  *   dispatch to a different target than listeners registered through it.
  * - `unsupported` - the methods are missing and there is no `EventTarget` constructor
  *   to back them with.
+ * - `blocked` - the global object refused the definition (it is non-extensible, or one of
+ *   the properties already exists and is non-configurable). Nothing was installed.
  */
 export type GlobalEventTargetInstallResult =
-  'native' | 'installed' | 'already-installed' | 'partial' | 'unsupported';
+  | 'native'
+  | 'installed'
+  | 'already-installed'
+  | 'partial'
+  | 'unsupported'
+  | 'blocked';
 
 type GlobalRecord = Record<string | symbol, unknown>;
 
 const globalRecord = globalThis as unknown as GlobalRecord;
+
+/**
+ * Whether a property can be defined on the global object without throwing.
+ *
+ * `Object.defineProperty` throws on a non-extensible target when the property does not
+ * already exist, and on any target when an existing property is non-configurable and
+ * cannot be redefined. Both are possible after `Object.freeze(globalThis)` or
+ * `Object.preventExtensions(globalThis)`, and this function runs during module
+ * initialization — a throw here would break the import of every dependent module.
+ */
+function canDefineProperty(key: string | symbol): boolean {
+  const descriptor = Object.getOwnPropertyDescriptor(globalRecord, key);
+
+  if (descriptor === undefined) {
+    return Object.isExtensible(globalRecord);
+  }
+
+  return descriptor.configurable === true;
+}
 
 /**
  * Install `addEventListener`, `removeEventListener`, and `dispatchEvent` on `globalThis`
@@ -83,38 +109,74 @@ export function installGlobalEventTarget(): GlobalEventTargetInstallResult {
     return 'unsupported';
   }
 
+  // Preflight every property before touching anything, so a frozen or sealed global
+  // object leaves with nothing half-installed — and, more importantly, without throwing
+  // out of the module initialization that calls this.
+  const isDefinable = [...METHOD_NAMES, TARGET_KEY, INSTALLED_KEY].every(
+    (key) => canDefineProperty(key),
+  );
+
+  if (!isDefinable) {
+    return 'blocked';
+  }
+
   let target = globalRecord[TARGET_KEY] as EventTarget | undefined;
+  const hasExistingTarget = target instanceof globalThis.EventTarget;
+  const defined: (string | symbol)[] = [];
 
-  if (!(target instanceof globalThis.EventTarget)) {
-    target = new globalThis.EventTarget();
+  /** Undo a partial installation when a later definition is rejected after all. */
+  const rollback = (): void => {
+    for (const key of defined) {
+      try {
+        Reflect.deleteProperty(globalRecord, key);
+      } catch {
+        // Nothing better to do here: the property could not be defined *or* removed.
+      }
+    }
+  };
 
-    Object.defineProperty(globalRecord, TARGET_KEY, {
-      value: target,
+  try {
+    if (!hasExistingTarget) {
+      target = new globalThis.EventTarget();
+
+      Object.defineProperty(globalRecord, TARGET_KEY, {
+        value: target,
+        enumerable: false,
+        writable: false,
+        configurable: true,
+      });
+
+      defined.push(TARGET_KEY);
+    }
+
+    const boundTarget = target as EventTarget;
+
+    for (const name of METHOD_NAMES) {
+      Object.defineProperty(globalRecord, name, {
+        value: (boundTarget[name] as (...args: unknown[]) => unknown).bind(
+          boundTarget,
+        ),
+        enumerable: false,
+        writable: true,
+        configurable: true,
+      });
+
+      defined.push(name);
+    }
+
+    Object.defineProperty(globalRecord, INSTALLED_KEY, {
+      value: true,
       enumerable: false,
       writable: false,
       configurable: true,
     });
+  } catch {
+    // The preflight passed but a definition was still rejected (an exotic global object,
+    // a Proxy trap, a host restriction). Leave nothing behind and report no install.
+    rollback();
+
+    return 'blocked';
   }
-
-  const boundTarget = target;
-
-  for (const name of METHOD_NAMES) {
-    Object.defineProperty(globalRecord, name, {
-      value: (boundTarget[name] as (...args: unknown[]) => unknown).bind(
-        boundTarget,
-      ),
-      enumerable: false,
-      writable: true,
-      configurable: true,
-    });
-  }
-
-  Object.defineProperty(globalRecord, INSTALLED_KEY, {
-    value: true,
-    enumerable: false,
-    writable: false,
-    configurable: true,
-  });
 
   return 'installed';
 }
