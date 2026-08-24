@@ -1003,8 +1003,14 @@ const RESIDUE_OUTSIDE_PEM_BLOCKS = /\S/;
  * inside an array is treated exactly like a string passed on its own.
  *
  * Anything that is not a multi-CRL string is returned untouched: a Buffer may
- * be DER, and a string with zero or one match is passed through so Node
+ * be DER, and a string with exactly one match is passed through so Node
  * reports its own error rather than having one masked here.
+ *
+ * A string with NO complete block does not reach that pass-through: unless it
+ * is entirely whitespace, the residue check below throws. That is the case a
+ * caller hits when a download truncated to nothing or a path pointed at a file
+ * with no CRL in it, and the explicit error names the problem where Node would
+ * only report `UNABLE_TO_GET_CRL` at handshake time.
  */
 function normalizeCRL(
   crl: string | Buffer | Array<string | Buffer>,
