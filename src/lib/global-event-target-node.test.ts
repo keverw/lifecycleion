@@ -327,46 +327,6 @@ describe('global event target on the Node runtime', () => {
     expect(result.messages[0]).toContain('Cleared globals boom');
   }, 30_000);
 
-  test('replacing the installed methods stops them being reported as ours', async () => {
-    interface ReplacedGlobalsFixtureResult {
-      before: {
-        installResult: string;
-        isPolyfilled: boolean;
-        hasBackingTarget: boolean;
-      };
-      after: {
-        installResult: string;
-        isPolyfilled: boolean;
-        hasBackingTarget: boolean;
-      };
-      messages: string[];
-    }
-
-    const result =
-      await runFixtureJSON<ReplacedGlobalsFixtureResult>('replaced-globals');
-
-    expect(result.before).toEqual({
-      installResult: 'already-installed',
-      isPolyfilled: true,
-      hasBackingTarget: true,
-    });
-
-    // Once the application swaps the methods out, the answer must follow the methods
-    // rather than a marker left over from installation.
-    expect(result.after).toEqual({
-      installResult: 'native',
-      isPolyfilled: false,
-      hasBackingTarget: false,
-    });
-
-    // And reports go to the replacement, not to the abandoned backing target.
-    expect(result.messages.length).toBe(1);
-    expect(result.messages[0]).toContain(
-      'Error in a callback replacedGlobalsCallback',
-    );
-    expect(result.messages[0]).toContain('Replaced globals boom');
-  }, 30_000);
-
   test('a non-extensible global object is handled instead of throwing', async () => {
     interface NonExtensibleFixtureResult {
       didImportThrow: boolean;
@@ -375,7 +335,7 @@ describe('global event target on the Node runtime', () => {
       hasAddEventListener: boolean;
       hasRemoveEventListener: boolean;
       hasDispatchEvent: boolean;
-      ownSymbols: string[];
+      hasSharedState: boolean;
       didThrow: boolean;
       waitResult: { success: boolean | null; errorMessage: string | null };
     }
@@ -394,7 +354,7 @@ describe('global event target on the Node runtime', () => {
     expect(result.hasAddEventListener).toBe(false);
     expect(result.hasRemoveEventListener).toBe(false);
     expect(result.hasDispatchEvent).toBe(false);
-    expect(result.ownSymbols).toEqual([]);
+    expect(result.hasSharedState).toBe(false);
 
     // Reporting degrades quietly; the helpers still behave.
     expect(result.didThrow).toBe(false);

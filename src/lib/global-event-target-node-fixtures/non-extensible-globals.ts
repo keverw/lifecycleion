@@ -63,9 +63,8 @@ process.stdout.write(
     hasRemoveEventListener:
       typeof globalRecord.removeEventListener === 'function',
     hasDispatchEvent: typeof globalRecord.dispatchEvent === 'function',
-    ownSymbols: Object.getOwnPropertySymbols(globalThis)
-      .map((symbol) => symbol.toString())
-      .filter((description) => description.includes('lifecycleion')),
+    hasSharedState:
+      globalRecord.__lifecycleion_global_event_target__ !== undefined,
     didThrow,
     waitResult: { success: didWaitSucceed, errorMessage: waitMessage },
   }),
