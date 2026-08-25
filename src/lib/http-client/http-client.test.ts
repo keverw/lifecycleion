@@ -1273,10 +1273,16 @@ describe('HTTPClient — response-stream abort marker', () => {
   // The marker is the only thing standing between an arbitrary thrown value and
   // both the terminal stream-error branch and the cookie jar, so it is trusted
   // only when an adapter set it to exactly `true`.
-  function makeThrowingAdapter(error: Error): HTTPAdapter {
+  // Throws rather than rejecting, so the parameter can stay `unknown`: what an
+  // adapter hands back is not always an Error, and that is part of what these
+  // tests cover.
+  function makeThrowingAdapter(error: unknown): HTTPAdapter {
     return {
       getType: () => 'mock' as const,
-      send: (): Promise<AdapterResponse> => Promise.reject(error),
+      send: (): Promise<AdapterResponse> =>
+        Promise.resolve().then(() => {
+          throw error;
+        }),
     };
   }
 
@@ -1353,6 +1359,31 @@ describe('HTTPClient — response-stream abort marker', () => {
     expect(response.isStreamError).toBe(true);
     expect(response.status).toBe(503);
     expect(jar.getCookieHeaderString('http://api.test/next')).toBe('stale=1');
+  });
+
+  test('a tagged non-Error still routes, and its cause is normalized', async () => {
+    const jar = new CookieJar();
+    const client = new HTTPClient({
+      // Nothing obliges an adapter to reject with an Error, and the marker is
+      // readable on any object — so the branch has to survive one that is not.
+      adapter: makeThrowingAdapter({
+        [RESPONSE_STREAM_ABORT_FLAG]: true,
+        ...staleMetadata,
+      }),
+      baseURL: 'http://api.test',
+      cookieJar: jar,
+    });
+
+    const builder = client.get('/x');
+    const response = await builder.send();
+
+    expect(response.isStreamError).toBe(true);
+    expect(response.status).toBe(503);
+    expect(jar.getCookieHeaderString('http://api.test/next')).toBe('stale=1');
+
+    // The cause slots are typed `Error`, so the raw value must not reach them.
+    expect(builder.error?.code).toBe('stream_response_error');
+    expect(builder.error?.cause).toBeInstanceOf(Error);
   });
 });
 
