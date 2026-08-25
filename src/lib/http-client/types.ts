@@ -140,12 +140,17 @@ export interface AdapterResponse {
    */
   isStreamed?: boolean;
   /**
-   * Set by NodeAdapter when response-body delivery fails after headers arrive
-   * (for example buffered-download truncation, writable errors, or upstream
-   * response-stream errors). The client treats this as a terminal stream
-   * failure: isStreamError: true. The real HTTP status is preserved (not
-   * zeroed) so observers can tell the server responded but body delivery still
-   * failed locally/in-flight.
+   * Set when response-body delivery fails after headers arrive — buffered
+   * download truncation, writable errors, upstream response-stream errors. Any
+   * adapter that can observe headers before the body fails is expected to
+   * report it; NodeAdapter, FetchAdapter and MockAdapter all do, and the client
+   * also synthesizes it for a per-attempt timeout that strikes mid-body.
+   * XHRAdapter cannot, because `XMLHttpRequest` zeroes the status on error and
+   * leaves no evidence headers ever arrived.
+   *
+   * The client treats this as a terminal stream failure: isStreamError: true.
+   * The real HTTP status is preserved (not zeroed) so observers can tell the
+   * server responded but body delivery still failed locally/in-flight.
    *
    * For replay decisions this groups with a real response, **not** with a
    * transport failure, despite both meaning "no usable body". Headers arrived,
@@ -297,7 +302,11 @@ export interface AttemptEndEvent {
    * would misdescribe why the request stopped.
    *
    * - `adapter_veto` — the adapter reported `isRetryable: false`, meaning no
-   *   attempt can succeed (a rejected TLS certificate, say).
+   *   attempt can succeed. Not produced by the built-in adapters: they set that
+   *   flag only for a rejected TLS certificate and pair it with `495`, which is
+   *   not a retryable status, so the status ends the request before the veto is
+   *   consulted. Reachable from a custom adapter that vetoes a status the
+   *   client would otherwise retry.
    * - `stream_error` — the response body failed after headers arrived, so the
    *   server received the request and the outcome is unknown.
    * - `non_idempotent_method` — a `POST` or `PATCH` with no proof the request

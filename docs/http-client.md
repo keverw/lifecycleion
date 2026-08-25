@@ -1148,6 +1148,8 @@ interface MockResponse {
   contentType?: 'json' | 'text' | 'binary'; // Overrides auto-detection
   delay?: number; // Millisecond delay for this response
   cookies?: Record<string, string | MockCookieOptions | null>;
+  streamError?: boolean | 'stream_write_error' | 'stream_response_error'; // Simulate a body failure after headers arrived
+  transportError?: boolean | MockTransportErrorOptions; // Simulate a failure with no response at all
 }
 ```
 
@@ -1317,7 +1319,7 @@ A body-byte count cannot supply the proof in either direction: an empty-body req
 
 `XHRAdapter` sets neither. It never sets `wasDefinitelyNotSent`, because it has no way to prove non-delivery: upload progress events are suppressed for cross-origin requests that CORS does not grant access to, and such a request is still delivered — the browser blocks the response, not the request — so the absence of progress is not evidence that nothing was sent. It does not set `isRetryable: false` in its place either, since that flag blocks a retry for every method: inferring it from upload progress would stop retrying an idempotent `PUT` after an ordinary network error, and would override `retryNonIdempotentMethods` even when the caller has stated the replay is safe.
 
-`FetchAdapter` sets neither, because `fetch` exposes no upload progress or byte accounting. A failure there is indistinguishable from one where nothing was sent.
+`FetchAdapter` never sets `wasDefinitelyNotSent`, because `fetch` exposes no upload progress or byte accounting, so a failure there is indistinguishable from one where nothing was sent. It sets `isRetryable: false` only for the TLS case below, exactly as `NodeAdapter` does.
 
 `MockAdapter` can simulate any of it via `transportError`, so the replay rules are testable without a socket. It delivers no response at all — no body, headers, cookies, or terminal progress — and accepts the signals a real adapter would attach:
 
@@ -1331,10 +1333,18 @@ adapter.routes.post('/orders', () => ({
 // Delivery unknown — a POST is not replayed, an idempotent GET still is
 adapter.routes.post('/orders', () => ({ status: 200, transportError: true }));
 
-// Nothing should retry this, whatever the method (a TLS failure)
+// Nothing should retry this, whatever the method. The default status 0 is
+// retryable, so the veto is what stops it — pair it with a non-retryable
+// status like 495 and the status alone ends the request, proving nothing.
 adapter.routes.get('/secure', () => ({
   status: 200,
-  transportError: { status: 495, isRetryable: false },
+  transportError: { isRetryable: false },
+}));
+
+// A diagnostic status, as adapters preserve for TLS failures
+adapter.routes.get('/bad-cert', () => ({
+  status: 200,
+  transportError: { status: 495 },
 }));
 ```
 
@@ -1357,6 +1367,8 @@ Since the client treats anything other than `false` as retryable, an unset value
 | `non_idempotent_method` | A `POST` or `PATCH` with no proof of non-delivery                         |
 
 It is absent when a retry was scheduled, when no policy is configured, when the policy has no attempts left, or when the status was never retryable in the first place — in those cases nothing was suppressed, so naming a cause would misdescribe why the request stopped.
+
+`adapter_veto` does not occur with the built-in adapters. Both set `isRetryable: false` only for a rejected TLS certificate, and pair it with `495`, which is not a retryable status — so the status ends the request before the veto is consulted, and nothing was suppressed to report. It is reachable only from a custom adapter that vetoes a status the client would otherwise retry.
 
 ```typescript
 await client
@@ -1526,6 +1538,7 @@ From `lifecycleion/http-client-mock`:
 MockAdapter;
 (MockAdapterConfig, MockAdapterRoutes, MockRequest, MockResponse);
 (MockRouteHandler, MockFormData, MockCookieOptions);
+MockTransportErrorOptions;
 ```
 
 ## Exported Constants
