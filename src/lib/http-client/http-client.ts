@@ -1721,11 +1721,25 @@ export class BaseHTTPClient {
           };
         }
 
-        if (isAbortError(error) && isResponseStreamAbortError(error)) {
-          // This branch reaches the client as a thrown AbortError rather than a
+        if (isResponseStreamAbortError(error)) {
+          // The marker is the gate, not the error's `name`. An adapter tags the
+          // throw whenever the attempt signal aborted mid-body, and the rejection
+          // it hands back is whatever the runtime produced — undici surfaces a
+          // timeout during the body read as `TypeError: terminated`, not as an
+          // AbortError. Requiring the name here dropped the tagged status and
+          // headers on the floor and let a post-header failure reach the generic
+          // network path as a retryable `status: 0`.
+          //
+          // This branch reaches the client as a thrown error rather than a
           // resolved AdapterResponse, so it misses the suppression bookkeeping
           // done on that path — but it still ends as a stream failure, and a
           // caller asking why their retry stopped deserves the same answer.
+
+          // Normalized once for the cause slots below: the tag no longer implies
+          // an `Error`, since a runtime may reject the body read with anything.
+          const streamCause =
+            error instanceof Error ? error : new Error(String(error));
+
           const streamSuppressionReason = (
             status: number,
           ): 'stream_error' | undefined =>
@@ -1783,7 +1797,7 @@ export class BaseHTTPClient {
                 body: null,
                 isStreamError: true,
                 streamErrorCode: 'stream_response_error',
-                errorCause: error,
+                errorCause: streamCause,
                 effectiveRequestHeaders:
                   getEffectiveRequestHeadersFromError(error),
               },
@@ -1797,7 +1811,7 @@ export class BaseHTTPClient {
               wasTimeout: true,
               isRetriesExhausted: false,
               errorCode: 'stream_response_error',
-              adapterCause: error,
+              adapterCause: streamCause,
             };
           }
 
@@ -1822,7 +1836,7 @@ export class BaseHTTPClient {
               body: null,
               isStreamError: true,
               streamErrorCode: 'stream_response_error',
-              errorCause: error,
+              errorCause: streamCause,
               effectiveRequestHeaders:
                 getEffectiveRequestHeadersFromError(error),
             },
@@ -1836,7 +1850,7 @@ export class BaseHTTPClient {
             wasTimeout: isTimedOut,
             isRetriesExhausted: false,
             errorCode: 'stream_response_error',
-            adapterCause: error,
+            adapterCause: streamCause,
           };
         }
 
