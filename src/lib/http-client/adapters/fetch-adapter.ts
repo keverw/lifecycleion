@@ -233,26 +233,30 @@ function markResponseStreamAbort(
   headers: Record<string, string | string[]>,
 ): unknown {
   // Per the Fetch Standard the rejection is the signal's abort reason verbatim,
-  // so `abort('stop')` rejects with the string itself. A primitive has nowhere
-  // to carry the metadata, and returning it untagged sends the client down its
-  // early cancellation path — where the response headers, and any Set-Cookie on
-  // them, are dropped. Wrapping gives the tag somewhere to live.
+  // so `abort('stop')` rejects with the string itself, and `abort(err)` rejects
+  // with that very object. Returning it untagged sends the client down its early
+  // cancellation path, where the response headers — and any Set-Cookie on them —
+  // are dropped.
   //
-  // Nothing caller-visible is lost: the cancellation reason is read from the
-  // signal rather than from this error, and the original value is kept as
-  // `cause`.
-  const tagged =
-    error instanceof Error
-      ? error
-      : Object.assign(new Error('Request aborted'), {
-          name: 'AbortError',
-          cause: error,
-        });
+  // Always a fresh object, never the reason itself. A signal hands the same
+  // reason to every consumer, so writing the metadata onto it would let two
+  // requests sharing one controller overwrite each other's status and headers,
+  // and store one response's cookies under the other's URL. A frozen reason
+  // would throw here outright.
+  //
+  // `name` is copied because the client routes on it: a genuine AbortError must
+  // still reach the branch that turns a post-header timeout into a stream
+  // failure, while a caller's plain Error must still read as a cancellation.
+  const original = error instanceof Error ? error : undefined;
+  const tagged = new Error(original?.message ?? 'Request aborted');
+
+  tagged.name = original?.name ?? 'AbortError';
 
   Object.assign(tagged, {
     [RESPONSE_STREAM_ABORT_FLAG]: true,
     streamAbortStatus: status,
     streamAbortHeaders: headers,
+    cause: error,
   });
 
   return tagged;

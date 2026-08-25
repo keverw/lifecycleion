@@ -9,6 +9,7 @@ import {
 import { FetchAdapter } from './fetch-adapter';
 import { HTTPClient } from '../http-client';
 import { startTestServer, type TestServer } from '../test-helpers/test-server';
+import { RESPONSE_STREAM_ABORT_FLAG } from '../consts';
 
 let server: TestServer;
 const decoder = new TextDecoder();
@@ -831,6 +832,28 @@ describe('FetchAdapter TLS certificate failures', () => {
 });
 
 describe('FetchAdapter aborts while reading the body', () => {
+  /** Hangs the body read, then rejects with the signal's reason verbatim. */
+  function stubBodyRejectingWithReason(headers: Record<string, string> = {}) {
+    (globalThis as any).fetch = (_url: string, init?: RequestInit) =>
+      Promise.resolve({
+        status: 200,
+        type: 'default',
+        headers: new Headers(headers),
+        arrayBuffer: () =>
+          new Promise((_resolve, reject) => {
+            // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- rejecting with the abort reason is the behaviour under test
+            const fail = () => reject(init?.signal?.reason);
+
+            if (init?.signal?.aborted) {
+              fail();
+              return;
+            }
+
+            init?.signal?.addEventListener('abort', fail, { once: true });
+          }),
+      });
+  }
+
   /** Resolves headers, then hangs the body read until the signal aborts. */
   function stubHangingBody(status: number, headers: Record<string, string>) {
     (globalThis as any).fetch = (_url: string, init?: RequestInit) =>
@@ -988,6 +1011,55 @@ describe('FetchAdapter aborts while reading the body', () => {
     expect(jar.getCookieHeaderString('http://api.test/next')).toBe(
       'session=abc123',
     );
+  }, 15_000);
+
+  test('never writes metadata onto the shared abort reason', async () => {
+    const controller = new AbortController();
+    const sharedReason = new Error('stop');
+
+    stubBodyRejectingWithReason({ 'content-type': 'application/json' });
+
+    const pending = new FetchAdapter().send({
+      requestURL: 'http://api.test/slow-body',
+      method: 'GET',
+      headers: {},
+      signal: controller.signal,
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    controller.abort(sharedReason);
+
+    await pending.catch(() => undefined);
+
+    // A signal hands the same reason to every consumer, so tagging it in place
+    // would let concurrent requests overwrite each other's response metadata.
+    expect(RESPONSE_STREAM_ABORT_FLAG in sharedReason).toBe(false);
+    expect('streamAbortHeaders' in sharedReason).toBe(false);
+  }, 15_000);
+
+  test('survives a frozen abort reason', async () => {
+    const controller = new AbortController();
+
+    stubBodyRejectingWithReason({ 'content-type': 'application/json' });
+
+    const pending = new FetchAdapter().send({
+      requestURL: 'http://api.test/slow-body',
+      method: 'GET',
+      headers: {},
+      signal: controller.signal,
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    controller.abort(Object.freeze(new Error('frozen')));
+
+    // Writing to a frozen reason would throw a TypeError out of send().
+    const thrown = await pending.then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+
+    expect(thrown).toBeInstanceOf(Error);
+    expect((thrown as Error).message).toBe('frozen');
   }, 15_000);
 
   test('a caller cancellation is still a cancellation', async () => {
