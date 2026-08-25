@@ -128,8 +128,21 @@ export class FetchAdapter implements HTTPAdapter {
         );
       }
 
+      // Redirect detection is reported the same way as on the success path: the
+      // headers arrived, so a 3xx here still knows where it was pointing, and a
+      // truncated body must not lose the target an intact one would report.
+      const detectedRedirectURL = resolveDetectedRedirectURL(
+        requestURL,
+        response.status,
+        responseHeadersForBody,
+      );
+
       return {
         status: response.status,
+        wasRedirectDetected:
+          detectedRedirectURL !== undefined ||
+          REDIRECT_STATUS_CODES.has(response.status),
+        ...(detectedRedirectURL ? { detectedRedirectURL } : {}),
         headers: responseHeadersForBody,
         body: null,
         isStreamError: true,

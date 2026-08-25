@@ -687,6 +687,33 @@ describe('FetchAdapter body-stream failures', () => {
     expect(response.isStreamError).toBe(true);
   });
 
+  test('a truncated 3xx still reports where it was pointing', async () => {
+    // Not covered by stubTruncatedBody: this one needs a Location header. The
+    // headers arrived before the body failed, so the redirect target is known
+    // just as well as on an intact 3xx — and a caller running with
+    // followRedirects disabled reads it off the response to decide what to do.
+    (globalThis as any).fetch = () =>
+      Promise.resolve({
+        status: 302,
+        type: 'default',
+        headers: new Headers({ location: '/next' }),
+        arrayBuffer: () => Promise.reject(new Error('terminated')),
+      });
+
+    const response = await adapter.send({
+      requestURL: 'https://local.test/start',
+      method: 'GET',
+      headers: {},
+    });
+
+    expect(response.status).toBe(302);
+    expect(response.isStreamError).toBe(true);
+
+    // Resolved against the request URL, exactly as the intact path resolves it.
+    expect(response.wasRedirectDetected).toBe(true);
+    expect(response.detectedRedirectURL).toBe('https://local.test/next');
+  });
+
   test('wraps a non-Error rejection in an Error', async () => {
     stubTruncatedBody(200, 'socket hang up');
 
