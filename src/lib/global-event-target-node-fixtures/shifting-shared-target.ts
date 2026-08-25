@@ -3,8 +3,11 @@
  *
  * The state object lives on a global, so `target` is a field anything can own,
  * and reading it runs somebody else's getter. Validating it once and then
- * binding the three global methods to a *later* read is the gap this covers:
- * the bind is the read that matters, so it is the read that has to check out.
+ * taking the three global methods from a *later* read is the gap this covers:
+ * the read the methods come from is the one that has to check out.
+ *
+ * This one fails at the re-read of `target` itself. A target that survives that
+ * far and then fails at the bind is covered by `hostile-bind-shared-target`.
  *
  * This getter passes the validation probe and then throws on every read after
  * it. Binding from an unguarded re-read would let that throw escape into the

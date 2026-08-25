@@ -487,10 +487,12 @@ describe('global event target on the Node runtime', () => {
 
     expect(result.didImportThrow).toBe(false);
 
-    // The bind is the read that matters, so it re-validates. A target that no
-    // longer vouches for itself is absent, not fatal: installation proceeds with
-    // a fresh one instead of letting the throw roll back the methods already
-    // defined and report 'blocked'.
+    // The re-read is the one the globals are taken from, so it re-validates. A
+    // target that no longer vouches for itself is absent, not fatal:
+    // installation proceeds with a fresh one instead of letting the throw roll
+    // back the methods already defined and report 'blocked'. (This getter fails
+    // at the `readStateTarget` re-read; the sibling test below covers a target
+    // that survives that far and fails at the bind.)
     expect(result.installResult).toBe('installed');
     expect(result.isPolyfilled).toBe(true);
     expect(result.hasBackingTarget).toBe(true);
@@ -499,5 +501,62 @@ describe('global event target on the Node runtime', () => {
     // And the three methods are wired to one working target, not to whatever the
     // second read happened to produce.
     expect(result.didReceiveEvent).toBe(true);
+  }, 30_000);
+
+  test('a shared target whose bind returns a non-function is not installed', async () => {
+    interface HostileBindFixtureResult {
+      didImportThrow: boolean;
+      installResult: string;
+      isPolyfilled: boolean;
+      didReceiveEvent: boolean;
+      didCallThrow: boolean;
+      isAddEventListenerCallable: boolean;
+    }
+
+    const result = await runFixtureJSON<HostileBindFixtureResult>(
+      'hostile-bind-shared-target',
+    );
+
+    expect(result.didImportThrow).toBe(false);
+
+    // `bind` is an ordinary property and this one returns 42 without throwing,
+    // so every cheaper check passes. Only inspecting the result catches it —
+    // and it must, because installing a non-callable over methods that were
+    // absent is worse than not installing at all.
+    expect(result.installResult).toBe('installed');
+    expect(result.isAddEventListenerCallable).toBe(true);
+    expect(result.didCallThrow).toBe(false);
+
+    // Fell back to a fresh target rather than the poisoned one, and that target
+    // actually works end to end.
+    expect(result.isPolyfilled).toBe(true);
+    expect(result.didReceiveEvent).toBe(true);
+  }, 30_000);
+
+  test('an EventTarget constructor with useless instances reports unsupported', async () => {
+    interface UselessConstructorFixtureResult {
+      didImportThrow: boolean;
+      installResult: string;
+      isPolyfilled: boolean;
+      areAnyMethodsDefined: boolean;
+      isStateKeyDefined: boolean;
+    }
+
+    const result = await runFixtureJSON<UselessConstructorFixtureResult>(
+      'useless-event-target-constructor',
+    );
+
+    expect(result.didImportThrow).toBe(false);
+
+    // The constructor is callable, so the probe passes — but its instances have
+    // none of the three methods, so there is nothing to back an install with.
+    // 'unsupported', not 'blocked': the global object never refused anything,
+    // because nothing was ever offered to it.
+    expect(result.installResult).toBe('unsupported');
+    expect(result.isPolyfilled).toBe(false);
+
+    // And nothing is left behind — no half-defined method, no state key.
+    expect(result.areAnyMethodsDefined).toBe(false);
+    expect(result.isStateKeyDefined).toBe(false);
   }, 30_000);
 });

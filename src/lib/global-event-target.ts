@@ -49,8 +49,9 @@ interface GlobalEventTargetState {
  * - `partial` - the environment provides some but not all of the methods; nothing was
  *   installed, because mixing a foreign implementation with a polyfilled one would
  *   dispatch to a different target than listeners registered through it.
- * - `unsupported` - the methods are missing and there is no `EventTarget` constructor
- *   to back them with.
+ * - `unsupported` - the methods are missing and there is nothing to back them with:
+ *   either no `EventTarget` constructor at all, or one whose instances cannot
+ *   service the three methods.
  * - `blocked` - the global object refused the definition (it is non-extensible, or one of
  *   the properties already exists and is non-configurable). Nothing was installed.
  */
@@ -127,9 +128,9 @@ function asUsableTarget(value: unknown): EventTarget | null {
  * trustworthy than a second read of the other.
  *
  * `null` means this target cannot back an install — a method that is missing,
- * that stopped being callable, or whose read (or `bind`) threw. That is a
- * reason to look elsewhere for a target, never a reason to fail: the caller
- * falls back to a fresh one.
+ * that stopped being callable, whose read (or `bind`) threw, or whose `bind`
+ * returned something that is not a function. That is a reason to look elsewhere
+ * for a target, never a reason to fail: the caller falls back to a fresh one.
  *
  * @returns The bound methods by name, or `null` if any of them could not be taken.
  */
@@ -145,12 +146,26 @@ function bindTargetMethods(
       return null;
     }
 
+    let boundMethod: unknown;
+
     try {
-      bound[name] = (method as (...args: unknown[]) => unknown).bind(target);
+      boundMethod = (method as (...args: unknown[]) => unknown).bind(target);
     } catch {
       // `bind` is itself a property read on somebody else's function.
       return null;
     }
+
+    // What `bind` handed back is checked, not assumed. `bind` is an ordinary
+    // property on the method, so a hostile target can replace it with something
+    // that returns a non-function without ever throwing. Guarding only the throw
+    // would install that value on the global object and report `'installed'`,
+    // leaving `globalThis.addEventListener` set to a non-callable — strictly
+    // worse than not installing, since the methods started out absent.
+    if (typeof boundMethod !== 'function') {
+      return null;
+    }
+
+    bound[name] = boundMethod as (...args: unknown[]) => unknown;
   }
 
   return bound;
