@@ -564,7 +564,7 @@ export class BaseHTTPClient {
             requestID,
             false,
             'interceptor_error',
-            error instanceof Error ? error : new Error(String(error)),
+            normalizeError(error),
           );
 
           callbacks.setError(normalizedError);
@@ -901,8 +901,7 @@ export class BaseHTTPClient {
               });
 
               errorCode = 'interceptor_error';
-              adapterCause =
-                error instanceof Error ? error : new Error(String(error));
+              adapterCause = normalizeError(error);
 
               break;
             }
@@ -998,7 +997,7 @@ export class BaseHTTPClient {
           requestID,
           false,
           'request_setup_error',
-          error instanceof Error ? error : new Error(String(error)),
+          normalizeError(error),
         );
 
         callbacks.setAttemptCount(completedAttemptCount);
@@ -1386,8 +1385,7 @@ export class BaseHTTPClient {
             wasTimeout: false,
             isRetriesExhausted: false,
             errorCode: 'interceptor_error',
-            adapterCause:
-              error instanceof Error ? error : new Error(String(error)),
+            adapterCause: normalizeError(error),
           };
         }
 
@@ -1649,10 +1647,12 @@ export class BaseHTTPClient {
           });
         }
 
-        const responseCause: Error | undefined =
-          adapterResponse.errorCause instanceof Error
-            ? adapterResponse.errorCause
-            : undefined;
+        const responseCauseValue = adapterResponse.errorCause;
+        const responseCause: Error | undefined = asErrorValue(
+          responseCauseValue,
+        )
+          ? responseCauseValue
+          : undefined;
 
         const streamErrorCode = adapterResponse.isStreamError
           ? (adapterResponse.streamErrorCode ?? 'stream_write_error')
@@ -1737,8 +1737,7 @@ export class BaseHTTPClient {
 
           // Normalized once for the cause slots below: the tag no longer implies
           // an `Error`, since a runtime may reject the body read with anything.
-          const streamCause =
-            error instanceof Error ? error : new Error(String(error));
+          const streamCause = normalizeError(error);
 
           const streamSuppressionReason = (
             status: number,
@@ -1889,14 +1888,10 @@ export class BaseHTTPClient {
             } else {
               // AbortError without our timeout flag — treat as non-retryable cancel.
               // This path includes StreamResponseFactory returning null / { cancel: true }.
-              const factoryCancelValue =
-                error !== null &&
-                typeof error === 'object' &&
-                STREAM_FACTORY_CANCEL_KEY in error
-                  ? (error as Record<string, unknown>)[
-                      STREAM_FACTORY_CANCEL_KEY
-                    ]
-                  : undefined;
+              const factoryCancelValue = readObjectMember(
+                error,
+                STREAM_FACTORY_CANCEL_KEY,
+              );
               const factoryCancelReason =
                 typeof factoryCancelValue === 'string'
                   ? factoryCancelValue
@@ -1953,8 +1948,7 @@ export class BaseHTTPClient {
             errorCode: isStreamFactoryError
               ? 'stream_setup_error'
               : 'interceptor_error',
-            adapterCause:
-              error instanceof Error ? error : new Error(String(error)),
+            adapterCause: normalizeError(error),
           };
         }
 
@@ -1971,7 +1965,7 @@ export class BaseHTTPClient {
             !NON_IDEMPOTENT_METHODS.has(sentRequest.method))
         ) {
           const { shouldRetry, delayMS } = policy.shouldRetry(
-            error instanceof Error ? error : new Error(String(error)),
+            normalizeError(error),
           );
           const nextRetryAt = shouldRetry ? Date.now() + delayMS : undefined;
 
@@ -2006,7 +2000,7 @@ export class BaseHTTPClient {
               requestID,
               false,
               'adapter_error',
-              error instanceof Error ? error : new Error(String(error)),
+              normalizeError(error),
             );
 
             await this._runErrorObservers(
@@ -2068,8 +2062,7 @@ export class BaseHTTPClient {
           wasTimeout: didTimeoutThisAttempt,
           isRetriesExhausted,
           errorCode: 'adapter_error',
-          adapterCause:
-            error instanceof Error ? error : new Error(String(error)),
+          adapterCause: normalizeError(error),
         };
       }
     }
@@ -2571,7 +2564,8 @@ export class BaseHTTPClient {
     }
 
     const controller = new AbortController();
-    const abort = (signal: AbortSignal) => controller.abort(signal.reason);
+    const abort = (signal: AbortSignal) =>
+      controller.abort(readObjectMember(signal, 'reason'));
 
     if (a.aborted) {
       abort(a);
@@ -2693,7 +2687,29 @@ function cloneBodyValue(body: unknown): unknown {
 }
 
 function isAbortError(err: unknown): err is Error {
-  return err instanceof Error && err.name === 'AbortError';
+  return asErrorValue(err) && readObjectMember(err, 'name') === 'AbortError';
+}
+
+/** Check Error identity without trusting a Proxy's prototype trap. */
+function asErrorValue(value: unknown): value is Error {
+  try {
+    return value instanceof Error;
+  } catch {
+    return false;
+  }
+}
+
+/** Normalize any rejected/thrown value without allowing its coercion to throw. */
+function normalizeError(value: unknown): Error {
+  if (asErrorValue(value)) {
+    return value;
+  }
+
+  try {
+    return new Error(String(value));
+  } catch {
+    return new Error('Unknown error');
+  }
 }
 
 /**
@@ -2714,23 +2730,14 @@ function sentRequestForNonRetryableAdapterCallbackError(
 }
 
 function isNonRetryableClientCallbackError(err: unknown): boolean {
-  return Boolean(
-    err &&
-    typeof err === 'object' &&
-    NON_RETRYABLE_HTTP_CLIENT_CALLBACK_ERROR_FLAG in err &&
-    (
-      err as Record<
-        typeof NON_RETRYABLE_HTTP_CLIENT_CALLBACK_ERROR_FLAG,
-        boolean | undefined
-      >
-    )[NON_RETRYABLE_HTTP_CLIENT_CALLBACK_ERROR_FLAG] === true,
+  return (
+    readObjectMember(err, NON_RETRYABLE_HTTP_CLIENT_CALLBACK_ERROR_FLAG) ===
+    true
   );
 }
 
 function isStreamFactoryClientCallbackError(err: unknown): boolean {
-  return (
-    err !== null && typeof err === 'object' && STREAM_FACTORY_ERROR_FLAG in err
-  );
+  return readObjectMember(err, STREAM_FACTORY_ERROR_FLAG) === true;
 }
 
 function sentRequestForObservedAdapterError(
@@ -2753,20 +2760,70 @@ function sentRequestForObservedAdapterError(
 function getEffectiveRequestHeadersFromError(
   error: unknown,
 ): Record<string, string | string[]> | undefined {
+  return snapshotHeaderRecord(
+    readObjectMember(error, 'effectiveRequestHeaders'),
+  );
+}
+
+/**
+ * Read a member from a value supplied by an adapter or runtime.
+ *
+ * Rejected values are not necessarily ordinary `Error` instances: they may be
+ * proxies, abort reasons, or errors decorated by third-party adapters. Both a
+ * property getter and a Proxy `get` trap can throw, so classifiers must treat an
+ * unreadable member as absent rather than let that second error replace the one
+ * they are trying to normalize.
+ */
+function readObjectMember(source: unknown, key: string): unknown {
   if (
-    error &&
-    typeof error === 'object' &&
-    'effectiveRequestHeaders' in error &&
-    (error as { effectiveRequestHeaders?: unknown }).effectiveRequestHeaders
+    (typeof source !== 'object' && typeof source !== 'function') ||
+    source === null
   ) {
-    return (
-      error as {
-        effectiveRequestHeaders: Record<string, string | string[]>;
-      }
-    ).effectiveRequestHeaders;
+    return undefined;
   }
 
-  return undefined;
+  try {
+    return (source as Record<string, unknown>)[key];
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Validate and copy an adapter-provided header record into a plain object.
+ *
+ * Copying is part of the safety boundary: merely checking that the outer value
+ * is an object would leave later `Object.entries` calls exposed to throwing
+ * getters or Proxy traps. A malformed or unreadable record carries no usable
+ * evidence and is therefore treated as absent.
+ */
+function snapshotHeaderRecord(
+  value: unknown,
+): Record<string, string | string[]> | undefined {
+  if (typeof value !== 'object' || value === null) {
+    return undefined;
+  }
+
+  try {
+    const snapshot: Record<string, string | string[]> = {};
+
+    for (const [name, headerValue] of Object.entries(value)) {
+      if (typeof headerValue === 'string') {
+        snapshot[name] = headerValue;
+      } else if (
+        Array.isArray(headerValue) &&
+        headerValue.every((item) => typeof item === 'string')
+      ) {
+        snapshot[name] = [...headerValue];
+      } else {
+        return undefined;
+      }
+    }
+
+    return snapshot;
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -2784,15 +2841,7 @@ function getEffectiveRequestHeadersFromError(
  * failure. Unreadable is treated as untagged.
  */
 function hasAdapterMarker(err: unknown, flag: string): boolean {
-  if (err === null || typeof err !== 'object') {
-    return false;
-  }
-
-  try {
-    return (err as Record<string, unknown>)[flag] === true;
-  } catch {
-    return false;
-  }
+  return readObjectMember(err, flag) === true;
 }
 
 /**
@@ -2814,25 +2863,23 @@ function isXHRBrowserTimeout(err: unknown): boolean {
 function getResponseStreamAbortInfo(
   err: unknown,
 ): { status: number; headers: Record<string, string | string[]> } | undefined {
-  if (
-    !err ||
-    typeof err !== 'object' ||
-    !('streamAbortStatus' in err) ||
-    !('streamAbortHeaders' in err)
-  ) {
+  const status = readObjectMember(err, 'streamAbortStatus');
+
+  if (typeof status !== 'number') {
     return undefined;
   }
 
-  const status = (err as { streamAbortStatus?: unknown }).streamAbortStatus;
-  const headers = (err as { streamAbortHeaders?: unknown }).streamAbortHeaders;
+  const headers = snapshotHeaderRecord(
+    readObjectMember(err, 'streamAbortHeaders'),
+  );
 
-  if (typeof status !== 'number' || !headers || typeof headers !== 'object') {
+  if (headers === undefined) {
     return undefined;
   }
 
   return {
     status,
-    headers: headers as Record<string, string | string[]>,
+    headers,
   };
 }
 
@@ -2842,5 +2889,7 @@ function getResponseStreamAbortInfo(
  * AbortError reason set by the runtime when no explicit reason is provided.
  */
 function getSignalCancelReason(signal: AbortSignal): string | undefined {
-  return typeof signal.reason === 'string' ? signal.reason : undefined;
+  const reason = readObjectMember(signal, 'reason');
+
+  return typeof reason === 'string' ? reason : undefined;
 }

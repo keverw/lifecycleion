@@ -14,7 +14,10 @@ import {
   DEFAULT_REQUEST_ATTEMPT_HEADER,
   DEFAULT_REQUEST_ID_HEADER,
   DEFAULT_USER_AGENT,
+  NON_RETRYABLE_HTTP_CLIENT_CALLBACK_ERROR_FLAG,
   RESPONSE_STREAM_ABORT_FLAG,
+  STREAM_FACTORY_CANCEL_KEY,
+  STREAM_FACTORY_ERROR_FLAG,
   XHR_BROWSER_TIMEOUT_FLAG,
 } from './consts';
 import { MockAdapter } from './adapters/mock-adapter';
@@ -985,6 +988,26 @@ describe('HTTPClient — cancellation', () => {
     expect(builder.error?.cancelReason).toBeUndefined();
   });
 
+  test('a throwing AbortSignal reason getter cannot replace cancellation', async () => {
+    const client = makeClient();
+    const controller = new AbortController();
+
+    Object.defineProperty(controller.signal, 'reason', {
+      configurable: true,
+      get: () => {
+        throw new Error('reason getter');
+      },
+    });
+    controller.abort('hidden');
+
+    const builder = client.get('/api/slow').signal(controller.signal);
+    const response = await builder.send();
+
+    expect(response.isCancelled).toBe(true);
+    expect(builder.error?.code).toBe('cancelled');
+    expect(builder.error?.cancelReason).toBeUndefined();
+  });
+
   test('pre-aborted AbortSignal short-circuits before interceptors and adapter dispatch', async () => {
     let adapterCalls = 0;
     let interceptorCalls = 0;
@@ -1343,6 +1366,120 @@ describe('HTTPClient — adapter marker flags', () => {
     expect(jar.getCookiesFor('http://api.test/')).toHaveLength(0);
   });
 
+  test('a throwing Error.name getter does not escape abort classification', async () => {
+    const hostile = new Error('adapter failed');
+    Object.defineProperty(hostile, 'name', {
+      get(): never {
+        throw new Error('hostile name getter');
+      },
+    });
+
+    const builder = new HTTPClient({
+      adapter: makeThrowingAdapter(hostile),
+    }).get('https://example.com/x');
+    const response = await builder.send();
+
+    expect(response.isCancelled).toBe(false);
+    expect(builder.error?.code).toBe('adapter_error');
+    expect(builder.error?.cause).toBe(hostile);
+  });
+
+  test('a hostile Proxy rejection cannot escape error normalization', async () => {
+    const hostile = new Proxy(
+      {},
+      {
+        get(): never {
+          throw new Error('hostile get trap');
+        },
+        getPrototypeOf(): never {
+          throw new Error('hostile prototype trap');
+        },
+      },
+    );
+    const builder = new HTTPClient({
+      adapter: makeThrowingAdapter(hostile),
+    }).get('https://example.com/x');
+    const response = await builder.send();
+
+    expect(response.isCancelled).toBe(false);
+    expect(builder.error?.code).toBe('adapter_error');
+    expect(builder.error?.cause?.message).toBe('Unknown error');
+  });
+
+  test('throwing stream metadata getters cannot replace a caller cancellation', async () => {
+    const hostileFields = [
+      'streamAbortStatus',
+      'streamAbortHeaders',
+      'effectiveRequestHeaders',
+    ] as const;
+
+    for (const hostileField of hostileFields) {
+      const controller = new AbortController();
+      const abortError = Object.assign(new Error('Request aborted'), {
+        name: 'AbortError',
+        [RESPONSE_STREAM_ABORT_FLAG]: true,
+        streamAbortStatus: 200,
+        streamAbortHeaders: {},
+      });
+
+      Object.defineProperty(abortError, hostileField, {
+        get(): never {
+          throw new Error(`hostile ${hostileField} getter`);
+        },
+        configurable: true,
+      });
+
+      const adapter: HTTPAdapter = {
+        getType: () => 'mock',
+        send: (): Promise<AdapterResponse> => {
+          controller.abort('stop');
+          return Promise.reject(abortError);
+        },
+      };
+      const client = new HTTPClient({ adapter });
+      const builder = client
+        .get('https://example.com/x')
+        .signal(controller.signal);
+      const response = await builder.send();
+
+      // Metadata is supplementary. A getter failure must not replace the
+      // already-settled cancellation with request_setup_error.
+      expect(response.isCancelled).toBe(true);
+      expect(builder.error?.code).toBe('cancelled');
+      expect(builder.error?.cancelReason).toBe('stop');
+    }
+  });
+
+  test('throwing getters inside stream header metadata are treated as absent', async () => {
+    const hostileHeaders = {};
+    Object.defineProperty(hostileHeaders, 'set-cookie', {
+      enumerable: true,
+      get(): never {
+        throw new Error('hostile header getter');
+      },
+    });
+
+    const tagged = Object.assign(new Error('body aborted'), {
+      name: 'AbortError',
+      [RESPONSE_STREAM_ABORT_FLAG]: true,
+      streamAbortStatus: 503,
+      streamAbortHeaders: hostileHeaders,
+    });
+    const client = new HTTPClient({
+      adapter: makeThrowingAdapter(tagged),
+      baseURL: 'http://api.test',
+      cookieJar: new CookieJar(),
+    });
+    const builder = client.get('/x');
+    const response = await builder.send();
+
+    // The marker still identifies a post-header abort, but unreadable evidence
+    // cannot supply a trustworthy status/header pair.
+    expect(response.isStreamError).toBe(true);
+    expect(response.status).toBe(0);
+    expect(builder.error?.code).toBe('stream_response_error');
+  });
+
   test('a marker set to true is trusted, keeping the real status and its cookies', async () => {
     const jar = new CookieJar();
     const client = new HTTPClient({
@@ -1424,6 +1561,66 @@ describe('HTTPClient — adapter marker flags', () => {
 
     expect(response.isCancelled).toBe(true);
     expect(response.isTimeout).toBe(false);
+  });
+
+  test('throwing callback marker getters stay on the normalized error path', async () => {
+    const hostileNonRetryable = new Error('adapter failed');
+    Object.defineProperty(
+      hostileNonRetryable,
+      NON_RETRYABLE_HTTP_CLIENT_CALLBACK_ERROR_FLAG,
+      {
+        get(): never {
+          throw new Error('hostile non-retryable marker');
+        },
+      },
+    );
+
+    const ordinaryBuilder = new HTTPClient({
+      adapter: makeThrowingAdapter(hostileNonRetryable),
+    }).get('https://example.com/x');
+    await ordinaryBuilder.send();
+
+    expect(ordinaryBuilder.error?.code).toBe('adapter_error');
+    expect(ordinaryBuilder.error?.cause).toBe(hostileNonRetryable);
+
+    const hostileFactoryMarker = Object.assign(new Error('callback failed'), {
+      [NON_RETRYABLE_HTTP_CLIENT_CALLBACK_ERROR_FLAG]: true,
+    });
+    Object.defineProperty(hostileFactoryMarker, STREAM_FACTORY_ERROR_FLAG, {
+      get(): never {
+        throw new Error('hostile stream-factory marker');
+      },
+    });
+
+    const callbackBuilder = new HTTPClient({
+      adapter: makeThrowingAdapter(hostileFactoryMarker),
+    }).get('https://example.com/x');
+    await callbackBuilder.send();
+
+    expect(callbackBuilder.error?.code).toBe('interceptor_error');
+    expect(callbackBuilder.error?.cause).toBe(hostileFactoryMarker);
+  });
+
+  test('a throwing stream-cancel reason getter does not escape AbortError handling', async () => {
+    const abortError = Object.assign(new Error('factory cancelled'), {
+      name: 'AbortError',
+    });
+    Object.defineProperty(abortError, STREAM_FACTORY_CANCEL_KEY, {
+      get(): never {
+        throw new Error('hostile cancel-reason getter');
+      },
+    });
+
+    const client = new HTTPClient({
+      adapter: makeThrowingAdapter(abortError),
+      timeout: 0,
+    });
+    const builder = client.get('https://example.com/x');
+    const response = await builder.send();
+
+    expect(response.isCancelled).toBe(true);
+    expect(builder.error?.code).toBe('cancelled');
+    expect(builder.error?.cancelReason).toBeUndefined();
   });
 });
 

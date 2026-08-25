@@ -533,9 +533,12 @@ function buildRoutes(
 }
 
 function isDuplicateRouteRegistrationError(error: unknown): error is Error {
+  const message = readObjectMember(error, 'message');
+
   return (
-    error instanceof Error &&
-    error.message.includes('already declared for route')
+    isErrorValue(error) &&
+    typeof message === 'string' &&
+    message.includes('already declared for route')
   );
 }
 
@@ -798,10 +801,45 @@ function awaitAbortable<T>(
         signal.removeEventListener('abort', onAbort);
         // Preserve real handler failures, only normalize non-Error rejections
         // so promise rejection values stay lint-safe and predictable.
-        reject(error instanceof Error ? error : new Error(String(error)));
+        reject(normalizeError(error));
       },
     );
   });
+}
+
+function readObjectMember(source: unknown, key: string): unknown {
+  if (
+    source === null ||
+    (typeof source !== 'object' && typeof source !== 'function')
+  ) {
+    return undefined;
+  }
+
+  try {
+    return (source as Record<string, unknown>)[key];
+  } catch {
+    return undefined;
+  }
+}
+
+function isErrorValue(value: unknown): value is Error {
+  try {
+    return value instanceof Error;
+  } catch {
+    return false;
+  }
+}
+
+function normalizeError(value: unknown): Error {
+  if (isErrorValue(value)) {
+    return value;
+  }
+
+  try {
+    return new Error(String(value));
+  } catch {
+    return new Error('Unknown error');
+  }
 }
 
 /**

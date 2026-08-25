@@ -149,6 +149,21 @@ describe('isTLSCertificateError cause handling', () => {
     expect(isTLSCertificateError(hostile)).toBe(false);
   });
 
+  test('survives a cause Proxy whose prototype trap throws', () => {
+    const hostileCause = new Proxy(new Error('inner'), {
+      getPrototypeOf(): never {
+        throw new Error('hostile prototype trap');
+      },
+    });
+    const wrapper = new Error('fetch failed') as Error & { cause?: unknown };
+    wrapper.cause = hostileCause;
+
+    // `instanceof Error` consults [[GetPrototypeOf]], so it needs the same
+    // containment as an ordinary throwing field getter.
+    expect(() => isTLSCertificateError(wrapper)).not.toThrow();
+    expect(isTLSCertificateError(wrapper)).toBe(false);
+  });
+
   test('still classifies the error itself when its cause getter throws', () => {
     const hostile = makeError('bad cert', 'CERT_HAS_EXPIRED');
 

@@ -360,6 +360,26 @@ describe('FetchAdapter', () => {
     });
   });
 
+  test('a throwing error name getter cannot escape fetch failure handling', async () => {
+    const hostile = new Error('fetch failed');
+    Object.defineProperty(hostile, 'name', {
+      get(): never {
+        throw new Error('hostile name getter');
+      },
+    });
+    (globalThis as any).fetch = () => Promise.reject(hostile);
+
+    const response = await new FetchAdapter().send({
+      requestURL: 'https://local.test/users',
+      method: 'GET',
+      headers: {},
+    });
+
+    expect(response.status).toBe(0);
+    expect(response.isTransportError).toBe(true);
+    expect(response.errorCause).toBe(hostile);
+  });
+
   test('rethrows AbortError unchanged', () => {
     (globalThis as any).fetch = () => {
       throw new DOMException('aborted', 'AbortError');
@@ -753,6 +773,49 @@ describe('FetchAdapter body-stream failures', () => {
         signal: controller.signal,
       }),
     ).rejects.toThrow('Request aborted');
+  });
+
+  test('body abort tagging survives throwing Error metadata getters', async () => {
+    const controller = new AbortController();
+    const hostile = new Error('ignored');
+
+    for (const field of ['name', 'message']) {
+      Object.defineProperty(hostile, field, {
+        get(): never {
+          throw new Error(`hostile ${field} getter`);
+        },
+      });
+    }
+
+    (globalThis as any).fetch = () =>
+      Promise.resolve({
+        status: 200,
+        type: 'default',
+        headers: new Headers(),
+        arrayBuffer: () => {
+          controller.abort();
+          return Promise.reject(hostile);
+        },
+      });
+
+    const thrown = await adapter
+      .send({
+        requestURL: 'http://api.test/api/test',
+        method: 'GET',
+        headers: {},
+        signal: controller.signal,
+      })
+      .then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+
+    expect(thrown).toBeInstanceOf(Error);
+    expect((thrown as Error).name).toBe('AbortError');
+    expect((thrown as Error).message).toBe('Request aborted');
+    expect(
+      (thrown as Record<string, unknown>)[RESPONSE_STREAM_ABORT_FLAG],
+    ).toBe(true);
   });
 
   test('a complete 206 Partial Content body is not a stream error', async () => {

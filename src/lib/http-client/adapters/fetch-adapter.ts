@@ -37,8 +37,7 @@ export class FetchAdapter implements HTTPAdapter {
         throw error; // preserve cancellation / timeout classification
       }
 
-      const normalizedError =
-        error instanceof Error ? error : new Error(String(error));
+      const normalizedError = normalizeError(error);
 
       // TLS certificate failures → 495, matching NodeAdapter. A rejected
       // certificate is deterministic: the same request against the same server
@@ -150,7 +149,7 @@ export class FetchAdapter implements HTTPAdapter {
         // distinguish a local write failure from an upstream stream failure.
         // Everything reaching here is an upstream/transfer failure.
         streamErrorCode: 'stream_response_error',
-        errorCause: error instanceof Error ? error : new Error(String(error)),
+        errorCause: normalizeError(error),
       };
     }
 
@@ -194,7 +193,44 @@ async function readResponseBody(
 }
 
 function isAbortError(error: unknown): boolean {
-  return error instanceof Error && error.name === 'AbortError';
+  const normalized = asError(error);
+
+  return (
+    normalized !== undefined &&
+    readObjectMember(normalized, 'name') === 'AbortError'
+  );
+}
+
+/** Return an Error value without letting a Proxy prototype trap escape. */
+function asError(value: unknown): Error | undefined {
+  try {
+    return value instanceof Error ? value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function normalizeError(value: unknown): Error {
+  const existing = asError(value);
+
+  if (existing !== undefined) {
+    return existing;
+  }
+
+  try {
+    return new Error(String(value));
+  } catch {
+    return new Error('Unknown error');
+  }
+}
+
+/** Guard error members for the same reason adapter marker reads are guarded. */
+function readObjectMember(source: object, key: string): unknown {
+  try {
+    return (source as Record<string, unknown>)[key];
+  } catch {
+    return undefined;
+  }
 }
 
 function materializeFetchHeaders(
@@ -267,10 +303,16 @@ function markResponseStreamAbort(
   // `name` is copied because the client routes on it: a genuine AbortError must
   // still reach the branch that turns a post-header timeout into a stream
   // failure, while a caller's plain Error must still read as a cancellation.
-  const original = error instanceof Error ? error : undefined;
-  const tagged = new Error(original?.message ?? 'Request aborted');
+  const original = asError(error);
+  const originalMessage =
+    original === undefined ? undefined : readObjectMember(original, 'message');
+  const originalName =
+    original === undefined ? undefined : readObjectMember(original, 'name');
+  const tagged = new Error(
+    typeof originalMessage === 'string' ? originalMessage : 'Request aborted',
+  );
 
-  tagged.name = original?.name ?? 'AbortError';
+  tagged.name = typeof originalName === 'string' ? originalName : 'AbortError';
 
   Object.assign(tagged, {
     [RESPONSE_STREAM_ABORT_FLAG]: true,

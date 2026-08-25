@@ -330,7 +330,9 @@ export class NodeAdapter implements HTTPAdapter {
               // signal so any cleanup listeners wired in the factory run, then throw
               // AbortError so the client's cancel path takes over (isCancelled: true).
               const cancelReason =
-                writable !== null ? writable.reason : undefined;
+                writable !== null
+                  ? readObjectMember(writable, 'reason')
+                  : undefined;
 
               streamAbort.abort();
               req.destroy();
@@ -552,7 +554,7 @@ export class NodeAdapter implements HTTPAdapter {
             );
           });
         })().catch((error: unknown) => {
-          reject(error instanceof Error ? error : new Error(String(error)));
+          reject(normalizeError(error));
         });
       });
 
@@ -740,8 +742,7 @@ export class NodeAdapter implements HTTPAdapter {
                 isTransportError: true,
                 headers: {},
                 body: null,
-                errorCause:
-                  error instanceof Error ? error : new Error(String(error)),
+                errorCause: normalizeError(error),
               },
             );
           });
@@ -779,8 +780,7 @@ export class NodeAdapter implements HTTPAdapter {
                 isTransportError: true,
                 headers: {},
                 body: null,
-                errorCause:
-                  error instanceof Error ? error : new Error(String(error)),
+                errorCause: normalizeError(error),
               },
             );
           });
@@ -895,7 +895,7 @@ async function streamResponseBody(
       } catch (error) {
         settle({
           code: 'stream_write_error',
-          cause: error instanceof Error ? error : new Error(String(error)),
+          cause: normalizeError(error),
         });
         return;
       }
@@ -937,7 +937,7 @@ async function streamResponseBody(
       } catch (error) {
         settle({
           code: 'stream_write_error',
-          cause: error instanceof Error ? error : new Error(String(error)),
+          cause: normalizeError(error),
         });
       }
     };
@@ -1222,7 +1222,7 @@ const PRE_CONNECTION_ERROR_CODES: ReadonlySet<string> = new Set([
 
 /** Whether an error proves the request never left for a connected peer. */
 function isPreConnectionError(error: unknown): boolean {
-  const code = (error as { code?: unknown } | null)?.code;
+  const code = readObjectMember(error, 'code');
 
   return typeof code === 'string' && PRE_CONNECTION_ERROR_CODES.has(code);
 }
@@ -1242,7 +1242,7 @@ function markStreamFactoryError(
   req: http.ClientRequest,
   fallbackHeaders: Record<string, string | string[]>,
 ): Error {
-  const normalized = error instanceof Error ? error : new Error(String(error));
+  const normalized = normalizeError(error);
   const tagged = normalized as Error &
     Partial<
       Record<typeof NON_RETRYABLE_HTTP_CLIENT_CALLBACK_ERROR_FLAG, boolean>
@@ -1288,9 +1288,41 @@ function markResponseStreamAbortError(
 }
 
 function isStreamResponseCancel(value: unknown): value is StreamResponseCancel {
-  return (
-    value !== null &&
-    typeof value === 'object' &&
-    (value as StreamResponseCancel).cancel === true
-  );
+  return readObjectMember(value, 'cancel') === true;
+}
+
+/** Read replaceable/runtime-owned metadata without letting a getter escape. */
+function readObjectMember(source: unknown, key: string): unknown {
+  if (
+    source === null ||
+    (typeof source !== 'object' && typeof source !== 'function')
+  ) {
+    return undefined;
+  }
+
+  try {
+    return (source as Record<string, unknown>)[key];
+  } catch {
+    return undefined;
+  }
+}
+
+function isErrorValue(value: unknown): value is Error {
+  try {
+    return value instanceof Error;
+  } catch {
+    return false;
+  }
+}
+
+function normalizeError(value: unknown): Error {
+  if (isErrorValue(value)) {
+    return value;
+  }
+
+  try {
+    return new Error(String(value));
+  } catch {
+    return new Error('Unknown error');
+  }
 }

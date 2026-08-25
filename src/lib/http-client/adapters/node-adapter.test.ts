@@ -1637,6 +1637,42 @@ describe('NodeAdapter.send() — unit branches without server', () => {
     }
   });
 
+  test('a throwing transport code getter resolves conservatively', async () => {
+    const transportError = new Error('socket failed');
+    Object.defineProperty(transportError, 'code', {
+      get(): never {
+        throw new Error('hostile code getter');
+      },
+    });
+
+    const req = new MockClientRequest();
+    const requestSpy = spyOn(http, 'request').mockImplementation(
+      (_options, _callback) => {
+        queueMicrotask(() => {
+          req.emit('error', transportError);
+        });
+        return req as unknown as http.ClientRequest;
+      },
+    );
+
+    try {
+      const response = await new NodeAdapter().send({
+        requestURL: 'http://example.test/data',
+        method: 'GET',
+        headers: {},
+      });
+
+      // An unreadable code supplies no proof that the request was never sent,
+      // but it must still settle through the ordinary transport-error path.
+      expect(response.status).toBe(0);
+      expect(response.isTransportError).toBe(true);
+      expect(response.wasDefinitelyNotSent).toBe(false);
+      expect(response.errorCause).toBe(transportError);
+    } finally {
+      requestSpy.mockRestore();
+    }
+  });
+
   test('HTTPClient treats transport-marked 495 responses as failed requests', async () => {
     const certError = Object.assign(new Error('certificate has expired'), {
       code: 'CERT_HAS_EXPIRED',

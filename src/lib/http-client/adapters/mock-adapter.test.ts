@@ -875,6 +875,32 @@ describe('MockAdapter.send() — low-level contract', () => {
     expect(res.status).toBe(500);
   });
 
+  test('awaitAbortable settles when rejection inspection traps throw', async () => {
+    const hostile = new Proxy(Object.create(null) as object, {
+      get: () => {
+        throw new Error('get trap');
+      },
+      getPrototypeOf: () => {
+        throw new Error('prototype trap');
+      },
+    });
+
+    adapter.routes.get('/fail-proxy', () => {
+      // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
+      return Promise.reject(hostile);
+    });
+
+    const controller = new AbortController();
+    const response = await adapter.send(
+      makeAdapterRequest({
+        requestURL: '/fail-proxy',
+        signal: controller.signal,
+      }),
+    );
+
+    expect(response.status).toBe(500);
+  });
+
   test('repeated cookie headers are materialized with cookie delimiters', async () => {
     let seenCookies: Record<string, string> | undefined;
 

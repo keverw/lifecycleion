@@ -63,7 +63,16 @@ export function isTLSCertificateError(error: Error): boolean {
   // classification.
   const cause = readMember(error, 'cause');
 
-  return cause instanceof Error ? isTLSCertificateErrorSelf(cause) : false;
+  return isErrorValue(cause) ? isTLSCertificateErrorSelf(cause) : false;
+}
+
+/** Check Error identity without trusting a Proxy's prototype trap. */
+function isErrorValue(value: unknown): value is Error {
+  try {
+    return value instanceof Error;
+  } catch {
+    return false;
+  }
 }
 
 /**
