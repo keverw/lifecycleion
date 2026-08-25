@@ -896,6 +896,56 @@ describe('FetchAdapter aborts while reading the body', () => {
     expect(response.isFailed).toBe(true);
   }, 15_000);
 
+  test('a string abort reason keeps the response headers and its reason', async () => {
+    const { CookieJar } = await import('../cookie-jar');
+    const jar = new CookieJar();
+    const controller = new AbortController();
+
+    (globalThis as any).fetch = (_url: string, init?: RequestInit) =>
+      Promise.resolve({
+        status: 200,
+        type: 'default',
+        headers: new Headers({ 'set-cookie': 'session=abc123; Path=/' }),
+        arrayBuffer: () =>
+          new Promise((_resolve, reject) => {
+            // Per the Fetch Standard the rejection is the abort reason itself,
+            // so this is a bare string rather than an AbortError.
+            // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- rejecting with a non-Error is the behaviour under test
+            const fail = () => reject(init?.signal?.reason);
+
+            if (init?.signal?.aborted) {
+              fail();
+              return;
+            }
+
+            init?.signal?.addEventListener('abort', fail, { once: true });
+          }),
+      });
+
+    const client = new HTTPClient({
+      adapter: new FetchAdapter(),
+      baseURL: 'http://api.test',
+      cookieJar: jar,
+    });
+
+    const builder = client.get('/slow-body').signal(controller.signal);
+    const pending = builder.send();
+
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    controller.abort('stop');
+
+    const response = await pending;
+
+    // Cancelled, with the caller's own reason preserved...
+    expect(response.isCancelled).toBe(true);
+    expect(builder.error?.cancelReason).toBe('stop');
+
+    // ...and the headers still arrived, so the cookie belongs in the jar.
+    expect(jar.getCookieHeaderString('http://api.test/next')).toBe(
+      'session=abc123',
+    );
+  }, 15_000);
+
   test('a caller cancellation is still a cancellation', async () => {
     const controller = new AbortController();
 

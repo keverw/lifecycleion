@@ -232,15 +232,28 @@ function markResponseStreamAbort(
   status: number,
   headers: Record<string, string | string[]>,
 ): unknown {
-  if (!(error instanceof Error)) {
-    return error;
-  }
+  // Per the Fetch Standard the rejection is the signal's abort reason verbatim,
+  // so `abort('stop')` rejects with the string itself. A primitive has nowhere
+  // to carry the metadata, and returning it untagged sends the client down its
+  // early cancellation path — where the response headers, and any Set-Cookie on
+  // them, are dropped. Wrapping gives the tag somewhere to live.
+  //
+  // Nothing caller-visible is lost: the cancellation reason is read from the
+  // signal rather than from this error, and the original value is kept as
+  // `cause`.
+  const tagged =
+    error instanceof Error
+      ? error
+      : Object.assign(new Error('Request aborted'), {
+          name: 'AbortError',
+          cause: error,
+        });
 
-  Object.assign(error, {
+  Object.assign(tagged, {
     [RESPONSE_STREAM_ABORT_FLAG]: true,
     streamAbortStatus: status,
     streamAbortHeaders: headers,
   });
 
-  return error;
+  return tagged;
 }
