@@ -1671,6 +1671,23 @@ export class BaseHTTPClient {
       } catch (error) {
         clearTimeout(timeoutID);
 
+        // Before any classification: if the adapter attached the response it had
+        // already received, the Set-Cookie on those headers belongs in the jar.
+        //
+        // This sits ahead of the branches rather than inside one because the
+        // same cookies were lost three times over, each in a different arm — the
+        // throw path had no ingestion at all, then the cancellation branch
+        // returned above it, then a primitive abort reason routed around it.
+        // Every arm below reaches this point, so there is no fourth way past it.
+        const abortedResponse = getResponseStreamAbortInfo(error);
+
+        if (cookieJar && abortedResponse) {
+          cookieJar.processResponseHeaders(
+            abortedResponse.headers,
+            sentRequest.requestURL,
+          );
+        }
+
         // When abort(string) is called, fetch() rejects with the string itself (per Fetch spec),
         // not an AbortError. Check cancelSignal.aborted first so string-reason cancels are caught.
         if (cancelSignal.aborted && !isAbortError(error)) {
@@ -1697,21 +1714,6 @@ export class BaseHTTPClient {
         }
 
         if (isAbortError(error) && isResponseStreamAbortError(error)) {
-          const streamedAbort = getResponseStreamAbortInfo(error);
-
-          // Same reasoning as the resolve path, and it applies before the
-          // cancellation check below rather than after: headers arrived, so any
-          // Set-Cookie on them belongs in the jar. A caller aborting the body
-          // read does not un-receive the headers, and browsers keep those
-          // cookies too — dropping them would make the jar depend on when the
-          // caller lost interest.
-          if (cookieJar && streamedAbort) {
-            cookieJar.processResponseHeaders(
-              streamedAbort.headers,
-              sentRequest.requestURL,
-            );
-          }
-
           // This branch reaches the client as a thrown AbortError rather than a
           // resolved AdapterResponse, so it misses the suppression bookkeeping
           // done on that path — but it still ends as a stream failure, and a
@@ -1751,9 +1753,9 @@ export class BaseHTTPClient {
             };
           }
 
-          if (isTimedOut && streamedAbort) {
+          if (isTimedOut && abortedResponse) {
             const suppressedReason = streamSuppressionReason(
-              streamedAbort.status,
+              abortedResponse.status,
             );
 
             emitAttemptEnd({
@@ -1763,13 +1765,13 @@ export class BaseHTTPClient {
                 : {}),
               nextRetryDelayMS: undefined,
               nextRetryAt: undefined,
-              status: streamedAbort.status,
+              status: abortedResponse.status,
             });
 
             return {
               adapterResponse: {
-                status: streamedAbort.status,
-                headers: streamedAbort.headers,
+                status: abortedResponse.status,
+                headers: abortedResponse.headers,
                 body: null,
                 isStreamError: true,
                 streamErrorCode: 'stream_response_error',
@@ -1792,7 +1794,7 @@ export class BaseHTTPClient {
           }
 
           const fallbackSuppressedReason = streamSuppressionReason(
-            streamedAbort?.status ?? 0,
+            abortedResponse?.status ?? 0,
           );
 
           emitAttemptEnd({
@@ -1802,13 +1804,13 @@ export class BaseHTTPClient {
               : {}),
             nextRetryDelayMS: undefined,
             nextRetryAt: undefined,
-            status: streamedAbort?.status ?? 0,
+            status: abortedResponse?.status ?? 0,
           });
 
           return {
             adapterResponse: {
-              status: streamedAbort?.status ?? 0,
-              headers: streamedAbort?.headers ?? {},
+              status: abortedResponse?.status ?? 0,
+              headers: abortedResponse?.headers ?? {},
               body: null,
               isStreamError: true,
               streamErrorCode: 'stream_response_error',

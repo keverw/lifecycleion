@@ -946,6 +946,50 @@ describe('FetchAdapter aborts while reading the body', () => {
     );
   }, 15_000);
 
+  test('an Error abort reason keeps the response headers too', async () => {
+    const { CookieJar } = await import('../cookie-jar');
+    const jar = new CookieJar();
+    const controller = new AbortController();
+
+    (globalThis as any).fetch = (_url: string, init?: RequestInit) =>
+      Promise.resolve({
+        status: 200,
+        type: 'default',
+        headers: new Headers({ 'set-cookie': 'session=abc123; Path=/' }),
+        arrayBuffer: () =>
+          new Promise((_resolve, reject) => {
+            // An abort reason may be an Error whose name is not 'AbortError'.
+            // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- signal.reason is untyped; this test aborts with a real Error
+            const fail = () => reject(init?.signal?.reason);
+
+            if (init?.signal?.aborted) {
+              fail();
+              return;
+            }
+
+            init?.signal?.addEventListener('abort', fail, { once: true });
+          }),
+      });
+
+    const client = new HTTPClient({
+      adapter: new FetchAdapter(),
+      baseURL: 'http://api.test',
+      cookieJar: jar,
+    });
+
+    const pending = client.get('/slow-body').signal(controller.signal).send();
+
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    controller.abort(new Error('stop'));
+
+    const response = await pending;
+
+    expect(response.isCancelled).toBe(true);
+    expect(jar.getCookieHeaderString('http://api.test/next')).toBe(
+      'session=abc123',
+    );
+  }, 15_000);
+
   test('a caller cancellation is still a cancellation', async () => {
     const controller = new AbortController();
 
