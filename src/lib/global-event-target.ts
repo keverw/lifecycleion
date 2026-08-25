@@ -50,8 +50,9 @@ interface GlobalEventTargetState {
  *   installed, because mixing a foreign implementation with a polyfilled one would
  *   dispatch to a different target than listeners registered through it.
  * - `unsupported` - the methods are missing and there is nothing to back them with:
- *   either no `EventTarget` constructor at all, or one whose instances cannot
- *   service the three methods.
+ *   either no `EventTarget` constructor at all, or one that cannot produce an
+ *   instance able to service the three methods (it throws, or hands back
+ *   something unusable).
  * - `blocked` - the global object refused the definition (it is non-extensible, or one of
  *   the properties already exists and is non-configurable). Nothing was installed.
  */
@@ -365,7 +366,20 @@ export function installGlobalEventTarget(): GlobalEventTargetInstallResult {
 
   try {
     if (existingState === undefined || reusableMethods === null) {
-      const target = new (eventTargetConstructor as new () => EventTarget)();
+      let target: EventTarget;
+
+      try {
+        target = new (eventTargetConstructor as new () => EventTarget)();
+      } catch {
+        // The constructor read from the global object cannot produce an
+        // instance at all (a shim exposing `EventTarget` as non-constructible
+        // throws here), so there is nothing to back the methods with. Reported
+        // the same way as a constructor whose instances are unusable: nothing
+        // was ever offered to the global object, so `'blocked'` would be the
+        // wrong story, and nothing has been defined yet to undo.
+        return 'unsupported';
+      }
+
       const freshMethods = bindTargetMethods(target);
 
       if (freshMethods === null) {
