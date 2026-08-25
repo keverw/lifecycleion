@@ -2769,10 +2769,33 @@ function getEffectiveRequestHeadersFromError(
   return undefined;
 }
 
+/**
+ * Whether an adapter explicitly tagged this throw as a response-stream abort.
+ *
+ * The value must be exactly `true`, not merely present. Presence alone would let
+ * an ordinary adapter error carrying the flag as `false` — or as anything else —
+ * take the terminal stream-error branch, and, if stale `streamAbortStatus` and
+ * `streamAbortHeaders` fields rode along, have that response's Set-Cookie written
+ * to the jar. This gate is what stands between an arbitrary thrown value and
+ * both of those.
+ *
+ * The read is guarded because the error is whatever a runtime, a library, or a
+ * caller's abort reason produced, so its accessors are not ours to rely on: a
+ * throwing getter here would escape the classifier that exists to normalize the
+ * failure. Unreadable is treated as untagged.
+ */
 function isResponseStreamAbortError(err: unknown): boolean {
-  return (
-    err !== null && typeof err === 'object' && RESPONSE_STREAM_ABORT_FLAG in err
-  );
+  if (err === null || typeof err !== 'object') {
+    return false;
+  }
+
+  try {
+    return (
+      (err as Record<string, unknown>)[RESPONSE_STREAM_ABORT_FLAG] === true
+    );
+  } catch {
+    return false;
+  }
 }
 
 function isXHRBrowserTimeout(err: unknown): boolean {
