@@ -726,7 +726,23 @@ export class BaseHTTPClient {
                 body: null,
               },
               requestID,
+              // Provably false here: a cancel settles with no adapter response
+              // at all, and this branch is guarded on having one.
               wasCancelled: false,
+              // Hardcoded, including when a per-attempt timeout struck mid-body
+              // on the 3xx itself. A timeout is incidental here: the request
+              // ends at the redirect either way, so what the caller acts on is
+              // that redirects are disabled and where this one pointed, and
+              // `redirect_disabled` says exactly that.
+              //
+              // Passing the attempt's real `wasTimeout` would not change this
+              // on its own — the synthetic status-0 response below routes
+              // through a `_buildResponse` branch that fixes `isTimeout` at
+              // `false`. Making it stick would mean flipping that shared
+              // branch, and then `_normalizeError` reclassifies the failure
+              // from `redirect_disabled` to `timeout`, making the error code
+              // depend on whether the body happened to finish. That is a worse
+              // contract, so the flag stays false and stays documented.
               wasTimeout: false,
               adapterType: this._adapter.getType(),
               initialURL: finalRequest.requestURL,

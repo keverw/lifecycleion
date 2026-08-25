@@ -3409,6 +3409,19 @@ describe('HTTPClient — redirect', () => {
     expect(builder.error?.code).toBe('redirect_disabled');
     expect(res.wasRedirectDetected).toBe(true);
     expect(res.detectedRedirectURL).toBe('https://example.com/next');
+
+    // Deliberate, and worth pinning because it surprises: a timeout DID fire
+    // mid-body, and the identical failure with following enabled reports
+    // isTimeout: true and code 'stream_response_error'. Here the timeout is
+    // incidental — the request ends at the redirect either way — so the code
+    // stays 'redirect_disabled'. Reporting the timeout instead would make the
+    // classification depend on whether the body happened to finish.
+    expect(res.isTimeout).toBe(false);
+
+    // Same reason the status is synthetic: every disabled redirect reports
+    // status 0 and no stream error, intact ones included.
+    expect(res.status).toBe(0);
+    expect(res.isStreamError).toBe(false);
   });
 
   test('still reports redirect_disabled for a truncated 3xx when following is off', async () => {
