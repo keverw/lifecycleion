@@ -1620,6 +1620,41 @@ describe('retrySuppressedReason', () => {
     expect(reasons).toEqual([undefined, undefined]);
   });
 
+  test('is reported after a redirect hop that spent no retry budget', async () => {
+    const adapter = new MockAdapter();
+    let targetAttempts = 0;
+
+    adapter.routes.post('/start', () => ({
+      status: 307,
+      headers: { location: 'http://api.test/target' },
+    }));
+
+    adapter.routes.post('/target', () => {
+      targetAttempts++;
+      return { status: 503 };
+    });
+
+    const client = new HTTPClient({
+      adapter,
+      baseURL: 'http://api.test',
+      retryPolicy: { strategy: 'fixed', maxRetryAttempts: 1, delayMS: 1 },
+      followRedirects: true,
+    });
+
+    const reasons: Array<string | undefined> = [];
+
+    await client
+      .post('/start')
+      .onAttemptEnd((e) => reasons.push(e.retrySuppressedReason))
+      .send();
+
+    // The redirect hop advanced the attempt counter without calling
+    // shouldRetry, so the retry budget is untouched — a retry really was
+    // available on the second hop, and the method rule is what blocked it.
+    expect(targetAttempts).toBe(1);
+    expect(reasons.at(-1)).toBe('non_idempotent_method');
+  });
+
   test('is absent when the status was never retryable', async () => {
     const adapter = new MockAdapter();
     adapter.routes.post('/thing', () => ({ status: 404 }));

@@ -1212,16 +1212,27 @@ export class BaseHTTPClient {
     const redirectHistory = params.redirectHistory ?? [];
     const cookieJar = params.cookieJar ?? null;
     /**
-     * Whether the policy still has an attempt left at this point.
+     * Whether the policy still has a retry left at this point.
      *
-     * Derived from the attempt counter rather than `policy.areAttemptsExhausted`,
-     * which lags: it counts an attempt only once that attempt's error has been
-     * reported through `shouldRetry`, and every suppressed path short-circuits
-     * before that call. `maxRetryAttempts` counts retries after the first try,
-     * so attempt N has one available exactly while N <= maxRetryAttempts.
+     * Counted from retries the policy has actually spent, not from the attempt
+     * number. Those differ: the attempt counter advances on every redirect hop
+     * as well, while a hop spends no budget — a redirect status never reaches
+     * `shouldRetry`. Using the attempt number would report a `POST` after a
+     * `307` as having no retry to suppress when one was plainly available.
+     *
+     * `policy.areAttemptsExhausted` is not usable here either. It lags by one,
+     * counting an attempt only once that attempt's error has been reported
+     * through `shouldRetry`, and every suppressed path short-circuits before
+     * that call — so on the final attempt it still reads "available". A
+     * query-only `shouldRetry` has the same lag, for the same reason.
+     *
+     * Each `shouldRetry` call records one error, and every call before this
+     * point returned true or the request would have stopped there, so the
+     * recorded count is the number of retries consumed — across redirect hops
+     * too, since they share one policy instance.
      */
-    const isRetryAvailable = (attempt: number): boolean =>
-      policy !== null && attempt <= policy.maxRetryAttempts;
+    const isRetryAvailable = (): boolean =>
+      policy !== null && policy.errors.length < policy.maxRetryAttempts;
 
     // Per-request wins over client config; unset means the safe default.
     const allowNonIdempotentRetry =
@@ -1545,7 +1556,7 @@ export class BaseHTTPClient {
         // status alone would have allowed one — otherwise nothing was
         // suppressed and there is nothing to explain.
         const retrySuppressedReason =
-          isRetryAvailable(attemptNumber) &&
+          isRetryAvailable() &&
           RETRYABLE_STATUS_CODES.has(adapterResponse.status) &&
           !cancelSignal.aborted
             ? adapterResponse.isRetryable === false
@@ -1686,6 +1697,21 @@ export class BaseHTTPClient {
         }
 
         if (isAbortError(error) && isResponseStreamAbortError(error)) {
+          const streamedAbort = getResponseStreamAbortInfo(error);
+
+          // Same reasoning as the resolve path, and it applies before the
+          // cancellation check below rather than after: headers arrived, so any
+          // Set-Cookie on them belongs in the jar. A caller aborting the body
+          // read does not un-receive the headers, and browsers keep those
+          // cookies too — dropping them would make the jar depend on when the
+          // caller lost interest.
+          if (cookieJar && streamedAbort) {
+            cookieJar.processResponseHeaders(
+              streamedAbort.headers,
+              sentRequest.requestURL,
+            );
+          }
+
           // This branch reaches the client as a thrown AbortError rather than a
           // resolved AdapterResponse, so it misses the suppression bookkeeping
           // done on that path — but it still ends as a stream failure, and a
@@ -1693,7 +1719,7 @@ export class BaseHTTPClient {
           const streamSuppressionReason = (
             status: number,
           ): 'stream_error' | undefined =>
-            isRetryAvailable(attemptNumber) &&
+            isRetryAvailable() &&
             RETRYABLE_STATUS_CODES.has(status) &&
             !cancelSignal.aborted
               ? 'stream_error'
@@ -1723,21 +1749,6 @@ export class BaseHTTPClient {
                 ? { cancelReason: signalReason }
                 : {}),
             };
-          }
-
-          const streamedAbort = getResponseStreamAbortInfo(error);
-
-          // Same reasoning as the resolve path: headers arrived, so any
-          // Set-Cookie on them applies to follow-up requests the way browsers
-          // and curl treat cookies from error responses. This branch throws
-          // rather than resolving, so it misses that call — but it reconstructs
-          // the real headers below, and dropping cookies here would make the
-          // jar depend on whether a failure resolved or threw.
-          if (cookieJar && streamedAbort) {
-            cookieJar.processResponseHeaders(
-              streamedAbort.headers,
-              sentRequest.requestURL,
-            );
           }
 
           if (isTimedOut && streamedAbort) {
@@ -2009,7 +2020,7 @@ export class BaseHTTPClient {
           // A throw carries no adapter response, so the only thing that can have
           // suppressed a policy-eligible retry here is the method rule.
           const isSuppressedByMethod =
-            isRetryAvailable(attemptNumber) &&
+            isRetryAvailable() &&
             !cancelSignal.aborted &&
             !allowNonIdempotentRetry &&
             NON_IDEMPOTENT_METHODS.has(sentRequest.method);

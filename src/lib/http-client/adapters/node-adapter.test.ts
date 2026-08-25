@@ -377,6 +377,47 @@ describe('post-header stream aborts report why the retry stopped', () => {
     );
   });
 
+  test('stores Set-Cookie even when the caller cancelled', async () => {
+    const jar = new CookieJar();
+    const controller = new AbortController();
+
+    // Cancel at the moment the body read fails, so the headers have already
+    // been received and attached — a pre-aborted signal never reaches the
+    // adapter at all.
+    const adapter: HTTPAdapter = {
+      getType: () => 'node',
+      send: (): Promise<AdapterResponse> => {
+        controller.abort();
+
+        const abortError = new Error(
+          'Request aborted during response streaming',
+        );
+        abortError.name = 'AbortError';
+        Object.assign(abortError, {
+          [RESPONSE_STREAM_ABORT_FLAG]: true,
+          streamAbortStatus: 200,
+          streamAbortHeaders: { 'set-cookie': 'session=abc123; Path=/' },
+        });
+
+        return Promise.reject(abortError);
+      },
+    };
+
+    const client = new HTTPClient({ adapter, cookieJar: jar });
+
+    const res = await client
+      .get('https://example.com/download')
+      .signal(controller.signal)
+      .send();
+
+    // Aborting the body read does not un-receive the headers, and browsers
+    // keep these cookies too.
+    expect(res.isCancelled).toBe(true);
+    expect(jar.getCookieHeaderString('https://example.com/next')).toBe(
+      'session=abc123',
+    );
+  });
+
   test('is absent with no retry policy, since nothing was suppressed', async () => {
     const client = new HTTPClient({ adapter: abortingAdapter() });
 
