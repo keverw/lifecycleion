@@ -317,7 +317,18 @@ export function installGlobalEventTarget(): GlobalEventTargetInstallResult {
     // place. Kept inside the guarded block because the state object may be
     // shared, and a frozen one or a throwing setter must not escape as an
     // exception from module initialization.
-    state.isInstalled = true;
+    //
+    // Skipped when the flag already reads `true`: assigning to a non-writable
+    // property throws in strict mode even when the value is unchanged (only
+    // `Object.defineProperty` exempts a same-value write, not `Set`). A frozen
+    // state left by another copy that already installed would otherwise fail
+    // here and roll back the three methods just defined — reporting `blocked`
+    // and leaving the global with no event methods, when the shared target was
+    // valid and correctly wired up. A frozen state still reading `false` keeps
+    // failing, as it must: nothing can record that install.
+    if (readMember(state, 'isInstalled') !== true) {
+      state.isInstalled = true;
+    }
   } catch {
     // The preflight passed but a definition or the state write was still rejected
     // (an exotic global object, a Proxy trap, a host restriction, frozen shared
