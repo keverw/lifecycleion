@@ -444,4 +444,30 @@ describe('global event target on the Node runtime', () => {
     expect(result.logs[0].type).toBe('error');
     expect(result.logs[0].message).toContain('Uncaught exception');
   }, 30_000);
+
+  test('frozen shared state does not crash the install', async () => {
+    interface FrozenSharedStateFixtureResult {
+      didImportThrow: boolean;
+      installResult: string;
+      isPolyfilled: boolean;
+      isStateUnchanged: boolean;
+      areMethodsRolledBack: boolean;
+    }
+
+    const result = await runFixtureJSON<FrozenSharedStateFixtureResult>(
+      'frozen-shared-state',
+    );
+
+    // The state object is shared and may be frozen by another holder. Flipping
+    // isInstalled on it throws in strict mode, and this happens during module
+    // init — after the three methods have already been defined.
+    expect(result.didImportThrow).toBe(false);
+
+    // Nothing half-installed: the methods it defined are rolled back, and the
+    // state it could not write to is left exactly as found.
+    expect(result.installResult).toBe('blocked');
+    expect(result.isPolyfilled).toBe(false);
+    expect(result.isStateUnchanged).toBe(true);
+    expect(result.areMethodsRolledBack).toBe(true);
+  }, 30_000);
 });

@@ -3,7 +3,12 @@ import { MockAdapter } from './mock-adapter';
 import type { MockFormData } from './mock-adapter';
 import { HTTPClient } from '../http-client';
 import { CookieJar } from '../cookie-jar';
-import type { AdapterRequest } from '../types';
+import type {
+  AdapterRequest,
+  AdapterResponse,
+  AdapterType,
+  HTTPAdapter,
+} from '../types';
 import type { Cookie } from '../cookie-jar';
 
 function makeCookie(
@@ -892,5 +897,747 @@ describe('MockAdapter.send() — low-level contract', () => {
       session: 'abc123',
       theme: 'dark',
     });
+  });
+});
+
+describe('MockAdapter streamError', () => {
+  let adapter: MockAdapter;
+
+  beforeEach(() => {
+    adapter = new MockAdapter();
+  });
+
+  test('emits isStreamError with the real status and a null body', async () => {
+    adapter.routes.get('/truncated', () => ({
+      status: 200,
+      body: { hello: 'world' },
+      streamError: true,
+    }));
+
+    const res = await adapter.send(
+      makeAdapterRequest({ requestURL: '/truncated' }),
+    );
+
+    expect(res.status).toBe(200);
+    expect(res.isStreamError).toBe(true);
+    expect(res.streamErrorCode).toBe('stream_response_error');
+    // The handler's body is discarded — a real post-header failure loses it.
+    expect(res.body).toBeNull();
+    expect(res.errorCause).toBeInstanceOf(Error);
+  });
+
+  test('keeps the content-type the server would have sent', async () => {
+    adapter.routes.get('/truncated', () => ({
+      status: 200,
+      body: { hello: 'world' },
+      streamError: true,
+    }));
+
+    const res = await adapter.send(
+      makeAdapterRequest({ requestURL: '/truncated' }),
+    );
+
+    // The failure strikes after headers arrived, so a real response would have
+    // carried Content-Type. Inferring it from the discarded body would drop it.
+    expect(res.headers['content-type']).toBe('application/json');
+    expect(res.body).toBeNull();
+  });
+
+  test('honours an explicit contentType on a stream error', async () => {
+    adapter.routes.get('/truncated', () => ({
+      status: 200,
+      body: 'plain text',
+      contentType: 'text',
+      streamError: true,
+    }));
+
+    const res = await adapter.send(
+      makeAdapterRequest({ requestURL: '/truncated' }),
+    );
+
+    expect(res.headers['content-type']).toBe('text/plain');
+  });
+
+  test('sets no content-type when there was no body to begin with', async () => {
+    adapter.routes.get('/truncated', () => ({
+      status: 204,
+      streamError: true,
+    }));
+
+    const res = await adapter.send(
+      makeAdapterRequest({ requestURL: '/truncated' }),
+    );
+
+    // A 204 never carries a body, so there is no header to preserve.
+    expect(res.headers['content-type']).toBeUndefined();
+  });
+
+  test('accepts an explicit stream error code', async () => {
+    adapter.routes.get('/truncated', () => ({
+      status: 200,
+      streamError: 'stream_write_error',
+    }));
+
+    const res = await adapter.send(
+      makeAdapterRequest({ requestURL: '/truncated' }),
+    );
+
+    expect(res.streamErrorCode).toBe('stream_write_error');
+  });
+
+  test('streamError: false behaves like an ordinary response', async () => {
+    adapter.routes.get('/fine', () => ({
+      status: 200,
+      body: { hello: 'world' },
+      streamError: false,
+    }));
+
+    const res = await adapter.send(makeAdapterRequest({ requestURL: '/fine' }));
+
+    expect(res.isStreamError).toBeUndefined();
+    expect(res.body).not.toBeNull();
+  });
+
+  test('reports no terminal download progress for a stream error', async () => {
+    adapter.routes.get('/truncated', () => ({
+      status: 200,
+      body: { hello: 'world' },
+      streamError: true,
+    }));
+
+    const uploadEvents: Array<{ progress: number }> = [];
+    const downloadEvents: Array<{ progress: number }> = [];
+
+    await adapter.send(
+      makeAdapterRequest({
+        requestURL: '/truncated',
+        onUploadProgress: (e) => uploadEvents.push(e),
+        onDownloadProgress: (e) => downloadEvents.push(e),
+      }),
+    );
+
+    // Real adapters fail the body read before emitting terminal download
+    // progress, so a `progress: 1` here would report a completed download for a
+    // body that never arrived.
+    expect(uploadEvents.at(-1)?.progress).toBe(1);
+    expect(downloadEvents).toEqual([]);
+  });
+
+  test('preserves headers and a non-2xx status', async () => {
+    adapter.routes.get('/truncated', () => ({
+      status: 503,
+      headers: { 'x-trace': 'abc123' },
+      streamError: true,
+    }));
+
+    const res = await adapter.send(
+      makeAdapterRequest({ requestURL: '/truncated' }),
+    );
+
+    expect(res.status).toBe(503);
+    expect(res.headers['x-trace']).toBe('abc123');
+    expect(res.isStreamError).toBe(true);
+  });
+
+  test('HTTPClient surfaces it as a terminal, non-retried failure', async () => {
+    let attempts = 0;
+
+    adapter.routes.get('/truncated', () => {
+      attempts++;
+      return { status: 200, streamError: true };
+    });
+
+    const client = new HTTPClient({
+      adapter,
+      baseURL: 'http://api.test',
+      retryPolicy: { strategy: 'fixed', maxRetryAttempts: 3, delayMS: 1 },
+    });
+
+    const res = await client.get('/truncated').send();
+
+    expect(attempts).toBe(1);
+    expect(res.isStreamError).toBe(true);
+    expect(res.status).toBe(200);
+    expect(res.isFailed).toBe(true);
+  });
+});
+
+describe('non-idempotent retry safety', () => {
+  const policy = {
+    strategy: 'fixed' as const,
+    maxRetryAttempts: 3,
+    delayMS: 1,
+  };
+
+  function countingAdapter(status: number) {
+    const adapter = new MockAdapter();
+    const state = { attempts: 0 };
+
+    const handler = () => {
+      state.attempts++;
+      return { status };
+    };
+
+    adapter.routes.post('/thing', handler);
+    adapter.routes.patch('/thing', handler);
+    adapter.routes.put('/thing', handler);
+    adapter.routes.delete('/thing', handler);
+    adapter.routes.get('/thing', handler);
+
+    return { adapter, state };
+  }
+
+  test('does not retry POST on a retryable status by default', async () => {
+    const { adapter, state } = countingAdapter(500);
+    const client = new HTTPClient({
+      adapter,
+      baseURL: 'http://api.test',
+      retryPolicy: policy,
+    });
+
+    // A 500 means the handler ran and may have committed — the strongest
+    // possible evidence that replay is unsafe.
+    const res = await client.post('/thing').send();
+
+    expect(state.attempts).toBe(1);
+    expect(res.status).toBe(500);
+  });
+
+  test('does not retry PATCH by default', async () => {
+    const { adapter, state } = countingAdapter(503);
+    const client = new HTTPClient({
+      adapter,
+      baseURL: 'http://api.test',
+      retryPolicy: policy,
+    });
+
+    await client.patch('/thing').send();
+
+    expect(state.attempts).toBe(1);
+  });
+
+  test('still retries idempotent methods', async () => {
+    for (const method of ['get', 'put', 'delete'] as const) {
+      const { adapter, state } = countingAdapter(503);
+      const client = new HTTPClient({
+        adapter,
+        baseURL: 'http://api.test',
+        retryPolicy: policy,
+      });
+
+      await client[method]('/thing').send();
+
+      // PUT and DELETE mutate but are idempotent, so replay is safe.
+      expect(state.attempts).toBe(4);
+    }
+  });
+
+  test('retries POST when the client opts in', async () => {
+    const { adapter, state } = countingAdapter(503);
+    const client = new HTTPClient({
+      adapter,
+      baseURL: 'http://api.test',
+      retryPolicy: policy,
+      retryNonIdempotentMethods: true,
+    });
+
+    await client.post('/thing').send();
+
+    expect(state.attempts).toBe(4);
+  });
+
+  test('per-request opt-in overrides the client config', async () => {
+    const { adapter, state } = countingAdapter(503);
+    const client = new HTTPClient({
+      adapter,
+      baseURL: 'http://api.test',
+      retryPolicy: policy,
+    });
+
+    await client.post('/thing').retryNonIdempotentMethods(true).send();
+
+    expect(state.attempts).toBe(4);
+  });
+
+  test('per-request opt-out overrides an opted-in client', async () => {
+    const { adapter, state } = countingAdapter(503);
+    const client = new HTTPClient({
+      adapter,
+      baseURL: 'http://api.test',
+      retryPolicy: policy,
+      retryNonIdempotentMethods: true,
+    });
+
+    await client.post('/thing').retryNonIdempotentMethods(false).send();
+
+    expect(state.attempts).toBe(1);
+  });
+});
+
+describe('non-idempotent retry on transport failures', () => {
+  const policy = {
+    strategy: 'fixed' as const,
+    maxRetryAttempts: 2,
+    delayMS: 1,
+  };
+
+  /** Resolves a transport failure, optionally proving nothing was sent. */
+  class TransportFailureAdapter implements HTTPAdapter {
+    public attempts = 0;
+
+    constructor(private readonly wasDefinitelyNotSent?: boolean) {}
+
+    public getType(): AdapterType {
+      return 'mock';
+    }
+
+    public send(_request: AdapterRequest): Promise<AdapterResponse> {
+      this.attempts++;
+
+      return Promise.resolve({
+        status: 0,
+        isTransportError: true,
+        ...(this.wasDefinitelyNotSent !== undefined
+          ? { wasDefinitelyNotSent: this.wasDefinitelyNotSent }
+          : {}),
+        headers: {},
+        body: null,
+        errorCause: new Error('connection refused'),
+      });
+    }
+  }
+
+  test('retries POST when the adapter proves nothing was sent', async () => {
+    const adapter = new TransportFailureAdapter(true);
+    const client = new HTTPClient({
+      adapter,
+      baseURL: 'http://api.test',
+      retryPolicy: policy,
+    });
+
+    await client.post('/thing').send();
+
+    // wasDefinitelyNotSent is positive evidence no request bytes left the
+    // process, so replay cannot double-apply.
+    expect(adapter.attempts).toBe(3);
+  });
+
+  test('an isRetryable hint alone does not unlock a POST retry', async () => {
+    class HintOnlyAdapter implements HTTPAdapter {
+      public attempts = 0;
+
+      public getType(): AdapterType {
+        return 'mock';
+      }
+
+      public send(_request: AdapterRequest): Promise<AdapterResponse> {
+        this.attempts++;
+
+        // A custom adapter may set isRetryable: true to mean "transient, worth
+        // another go" without knowing whether bytes were sent. That is a hint,
+        // not proof, and must not authorize replaying a write.
+        return Promise.resolve({
+          status: 0,
+          isTransportError: true,
+          isRetryable: true,
+          headers: {},
+          body: null,
+        });
+      }
+    }
+
+    const adapter = new HintOnlyAdapter();
+    const client = new HTTPClient({
+      adapter,
+      baseURL: 'http://api.test',
+      retryPolicy: policy,
+    });
+
+    await client.post('/thing').send();
+
+    expect(adapter.attempts).toBe(1);
+  });
+
+  test('does not retry POST when the adapter cannot tell', async () => {
+    const adapter = new TransportFailureAdapter();
+    const client = new HTTPClient({
+      adapter,
+      baseURL: 'http://api.test',
+      retryPolicy: policy,
+    });
+
+    await client.post('/thing').send();
+
+    // Absence of evidence is not evidence of absence.
+    expect(adapter.attempts).toBe(1);
+  });
+
+  test('a real response is never unlocked by isRetryable: true', async () => {
+    class MisreportingAdapter implements HTTPAdapter {
+      public attempts = 0;
+
+      public getType(): AdapterType {
+        return 'mock';
+      }
+
+      public send(_request: AdapterRequest): Promise<AdapterResponse> {
+        this.attempts++;
+
+        // A 500 with isRetryable: true. The flag says "safe as far as I know",
+        // which is only evidence of non-delivery when nothing came back — here
+        // the server answered, so the handler ran.
+        return Promise.resolve({
+          status: 500,
+          isRetryable: true,
+          headers: {},
+          body: null,
+        });
+      }
+    }
+
+    const adapter = new MisreportingAdapter();
+    const client = new HTTPClient({
+      adapter,
+      baseURL: 'http://api.test',
+      retryPolicy: policy,
+    });
+
+    await client.post('/thing').send();
+
+    expect(adapter.attempts).toBe(1);
+  });
+
+  test('retries GET regardless of what the adapter reports', async () => {
+    const adapter = new TransportFailureAdapter();
+    const client = new HTTPClient({
+      adapter,
+      baseURL: 'http://api.test',
+      retryPolicy: policy,
+    });
+
+    await client.get('/thing').send();
+
+    expect(adapter.attempts).toBe(3);
+  });
+});
+
+describe('non-idempotent gate across redirect hops', () => {
+  const policy = {
+    strategy: 'fixed' as const,
+    maxRetryAttempts: 2,
+    delayMS: 1,
+  };
+
+  test('a 303 rewrites POST to GET, and that hop is retried', async () => {
+    const adapter = new MockAdapter();
+    let targetAttempts = 0;
+
+    adapter.routes.post('/start', () => ({
+      status: 303,
+      headers: { location: 'http://api.test/target' },
+    }));
+
+    adapter.routes.get('/target', () => {
+      targetAttempts++;
+      return { status: 503 };
+    });
+
+    const client = new HTTPClient({
+      adapter,
+      baseURL: 'http://api.test',
+      retryPolicy: policy,
+      followRedirects: true,
+    });
+
+    await client.post('/start').send();
+
+    // The gate reads the method of the attempt actually being sent, so once a
+    // 303 has rewritten it to GET the hop is ordinary idempotent traffic.
+    expect(targetAttempts).toBe(3);
+  });
+
+  test('a 307 preserves POST, and that hop is not retried', async () => {
+    const adapter = new MockAdapter();
+    let targetAttempts = 0;
+
+    adapter.routes.post('/start', () => ({
+      status: 307,
+      headers: { location: 'http://api.test/target' },
+    }));
+
+    adapter.routes.post('/target', () => {
+      targetAttempts++;
+      return { status: 503 };
+    });
+
+    const client = new HTTPClient({
+      adapter,
+      baseURL: 'http://api.test',
+      retryPolicy: policy,
+      followRedirects: true,
+    });
+
+    await client.post('/start').send();
+
+    // 307 keeps the method and body, so the protection has to survive the hop.
+    expect(targetAttempts).toBe(1);
+  });
+});
+
+describe('MockAdapter transportError', () => {
+  const policy = {
+    strategy: 'fixed' as const,
+    maxRetryAttempts: 2,
+    delayMS: 1,
+  };
+
+  function makeClient(adapter: MockAdapter) {
+    return new HTTPClient({
+      adapter,
+      baseURL: 'http://api.test',
+      retryPolicy: policy,
+    });
+  }
+
+  test('delivers no response at all', async () => {
+    const adapter = new MockAdapter();
+
+    adapter.routes.get('/down', () => ({
+      status: 200,
+      body: { never: 'delivered' },
+      headers: { 'x-trace': 'abc' },
+      cookies: { session: 'nope' },
+      transportError: true,
+    }));
+
+    const downloadEvents: Array<{ progress: number }> = [];
+
+    const res = await adapter.send(
+      makeAdapterRequest({
+        requestURL: '/down',
+        onDownloadProgress: (e) => downloadEvents.push(e),
+      }),
+    );
+
+    expect(res.status).toBe(0);
+    expect(res.isTransportError).toBe(true);
+    expect(res.body).toBeNull();
+    expect(res.headers).toEqual({});
+    expect(downloadEvents).toEqual([]);
+    expect(res.errorCause).toBeInstanceOf(Error);
+  });
+
+  test('proof of non-delivery authorizes replaying a POST', async () => {
+    const adapter = new MockAdapter();
+    let attempts = 0;
+
+    adapter.routes.post('/thing', () => {
+      attempts++;
+      return {
+        status: 200,
+        transportError: { wasDefinitelyNotSent: true },
+      };
+    });
+
+    await makeClient(adapter).post('/thing').send();
+
+    expect(attempts).toBe(3);
+  });
+
+  test('without that proof a POST is not replayed', async () => {
+    const adapter = new MockAdapter();
+    let attempts = 0;
+
+    adapter.routes.post('/thing', () => {
+      attempts++;
+      return { status: 200, transportError: true };
+    });
+
+    await makeClient(adapter).post('/thing').send();
+
+    expect(attempts).toBe(1);
+  });
+
+  test('an idempotent GET retries without any proof', async () => {
+    const adapter = new MockAdapter();
+    let attempts = 0;
+
+    adapter.routes.get('/thing', () => {
+      attempts++;
+      return { status: 200, transportError: true };
+    });
+
+    await makeClient(adapter).get('/thing').send();
+
+    expect(attempts).toBe(3);
+  });
+
+  test('isRetryable: false stops every method, and keeps a diagnostic status', async () => {
+    const adapter = new MockAdapter();
+    let attempts = 0;
+
+    adapter.routes.get('/tls', () => {
+      attempts++;
+      return {
+        status: 200,
+        transportError: { status: 495, isRetryable: false },
+      };
+    });
+
+    const res = await makeClient(adapter).get('/tls').send();
+
+    expect(attempts).toBe(1);
+    expect(res.status).toBe(495);
+  });
+});
+
+describe('retrySuppressedReason', () => {
+  const policy = {
+    strategy: 'fixed' as const,
+    maxRetryAttempts: 2,
+    delayMS: 1,
+  };
+
+  test('names the method rule when a POST is blocked', async () => {
+    const adapter = new MockAdapter();
+    adapter.routes.post('/thing', () => ({ status: 503 }));
+
+    const client = new HTTPClient({
+      adapter,
+      baseURL: 'http://api.test',
+      retryPolicy: policy,
+    });
+
+    const reasons: Array<string | undefined> = [];
+
+    await client
+      .post('/thing')
+      .onAttemptEnd((e) => reasons.push(e.retrySuppressedReason))
+      .send();
+
+    // Without this the caller sees only willRetry: false and has to guess.
+    expect(reasons).toEqual(['non_idempotent_method']);
+  });
+
+  test('names the stream failure', async () => {
+    const adapter = new MockAdapter();
+    adapter.routes.get('/thing', () => ({
+      status: 503,
+      streamError: true,
+    }));
+
+    const client = new HTTPClient({
+      adapter,
+      baseURL: 'http://api.test',
+      retryPolicy: policy,
+    });
+
+    const reasons: Array<string | undefined> = [];
+
+    await client
+      .get('/thing')
+      .onAttemptEnd((e) => reasons.push(e.retrySuppressedReason))
+      .send();
+
+    expect(reasons).toEqual(['stream_error']);
+  });
+
+  test('names an adapter veto', async () => {
+    const adapter = new MockAdapter();
+    adapter.routes.get('/thing', () => ({
+      status: 200,
+      transportError: { isRetryable: false },
+    }));
+
+    const client = new HTTPClient({
+      adapter,
+      baseURL: 'http://api.test',
+      retryPolicy: policy,
+    });
+
+    const reasons: Array<string | undefined> = [];
+
+    await client
+      .get('/thing')
+      .onAttemptEnd((e) => reasons.push(e.retrySuppressedReason))
+      .send();
+
+    expect(reasons).toEqual(['adapter_veto']);
+  });
+
+  test('is absent when a retry actually happens', async () => {
+    const adapter = new MockAdapter();
+    adapter.routes.get('/thing', () => ({ status: 503 }));
+
+    const client = new HTTPClient({
+      adapter,
+      baseURL: 'http://api.test',
+      retryPolicy: policy,
+    });
+
+    const reasons: Array<string | undefined> = [];
+
+    await client
+      .get('/thing')
+      .onAttemptEnd((e) => reasons.push(e.retrySuppressedReason))
+      .send();
+
+    // Retried twice, then exhausted — nothing suppressed it at any point.
+    expect(reasons).toEqual([undefined, undefined, undefined]);
+  });
+
+  test('is absent once the policy has no attempts left', async () => {
+    const adapter = new MockAdapter();
+    adapter.routes.get('/thing', () => ({
+      status: 503,
+      streamError: true,
+    }));
+
+    const client = new HTTPClient({
+      adapter,
+      baseURL: 'http://api.test',
+      retryPolicy: { strategy: 'fixed', maxRetryAttempts: 1, delayMS: 1 },
+    });
+
+    const reasons: Array<string | undefined> = [];
+
+    // Burn the single retry on a plain 503 first, so the stream failure lands
+    // on an attempt where no retry was available to suppress.
+    let call = 0;
+    adapter.routes.clear();
+    adapter.routes.get('/thing', () => {
+      call++;
+      return call === 1 ? { status: 503 } : { status: 503, streamError: true };
+    });
+
+    await client
+      .get('/thing')
+      .onAttemptEnd((e) => reasons.push(e.retrySuppressedReason))
+      .send();
+
+    // First attempt retried, so nothing suppressed. Second had the budget
+    // already spent — naming a cause would misdescribe why it stopped.
+    expect(reasons).toEqual([undefined, undefined]);
+  });
+
+  test('is absent when the status was never retryable', async () => {
+    const adapter = new MockAdapter();
+    adapter.routes.post('/thing', () => ({ status: 404 }));
+
+    const client = new HTTPClient({
+      adapter,
+      baseURL: 'http://api.test',
+      retryPolicy: policy,
+    });
+
+    const reasons: Array<string | undefined> = [];
+
+    await client
+      .post('/thing')
+      .onAttemptEnd((e) => reasons.push(e.retrySuppressedReason))
+      .send();
+
+    // A 404 is not retryable for any method, so nothing was suppressed.
+    expect(reasons).toEqual([undefined]);
   });
 });

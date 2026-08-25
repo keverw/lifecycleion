@@ -15,7 +15,39 @@ const CERT_ERROR_CODES = new Set([
  * treated as non-retryable transport errors by NodeAdapter.
  */
 export function isTLSCertificateError(error: Error): boolean {
-  const code = (error as NodeJS.ErrnoException).code ?? '';
+  if (isTLSCertificateErrorSelf(error)) {
+    return true;
+  }
+
+  // `fetch` reports a TLS failure differently depending on the runtime: Bun puts
+  // the OpenSSL code on the rejected error itself, while Node wraps it as
+  // `TypeError: fetch failed` and hangs the real error off `cause`. Checking the
+  // error and exactly one cause link covers both without the callers needing to
+  // know which they are on.
+  //
+  // Exactly one link, not a walk: `cause` is attacker- or library-controlled and
+  // may point back at its own error, so recursing would hang or overflow instead
+  // of returning a transport error. Nothing in either runtime nests deeper.
+  //
+  // In a browser there is nothing to follow — a TLS failure surfaces as an
+  // opaque `TypeError` with no code and no cause — so this stays a server-side
+  // classification.
+  const cause = readMember(error, 'cause');
+
+  return cause instanceof Error ? isTLSCertificateErrorSelf(cause) : false;
+}
+
+/**
+ * Classify a single error, without consulting its `cause`.
+ *
+ * Every field is read through {@link readMember}. The error is whatever a
+ * runtime, a library, or a caller's mocked `fetch` rejected with, so its
+ * accessors are not this module's to rely on — and see {@link readMember} for
+ * what an escaping throw would cost here.
+ */
+function isTLSCertificateErrorSelf(error: Error): boolean {
+  const rawCode = readMember(error, 'code');
+  const code = typeof rawCode === 'string' ? rawCode : '';
 
   if (CERT_ERROR_CODES.has(code)) {
     return true;
@@ -42,7 +74,29 @@ export function isTLSCertificateError(error: Error): boolean {
     return true;
   }
 
-  return /certificate|self signed|unable to verify|altname/i.test(
-    error.message,
-  );
+  const message = readMember(error, 'message');
+
+  return typeof message === 'string'
+    ? /certificate|self signed|unable to verify|altname/i.test(message)
+    : false;
+}
+
+/**
+ * Read a field off an error without trusting it.
+ *
+ * Reading a property runs its getter, and a getter can throw. This classifier
+ * runs inside adapter error handling — FetchAdapter's catch, and NodeAdapter's
+ * `error` listener — where an escaping throw would replace a normalized
+ * `status: 0` transport response with the getter's own error, or surface as an
+ * unhandled one. Unreadable is treated as absent.
+ *
+ * Applied to every field rather than only to `cause`: the outer error is no more
+ * this module's own than the one hanging off it.
+ */
+function readMember(error: object, key: string): unknown {
+  try {
+    return (error as Record<string, unknown>)[key];
+  } catch {
+    return undefined;
+  }
 }

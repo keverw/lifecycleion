@@ -50,6 +50,7 @@ export class HTTPRequestBuilder<T = unknown> {
   private _timeout?: number;
   private _signal?: AbortSignal;
   private _retryPolicy?: RetryPolicyOptions | null;
+  private _retryNonIdempotentMethods?: boolean;
   private _label?: string;
   private _onUploadProgress?: (event: HTTPProgressEvent) => void;
   private _onDownloadProgress?: (event: HTTPProgressEvent) => void;
@@ -154,6 +155,16 @@ export class HTTPRequestBuilder<T = unknown> {
   public retryPolicy(options: RetryPolicyOptions | null): this {
     this._assertNotSent('retryPolicy');
     this._retryPolicy = options;
+    return this;
+  }
+
+  /**
+   * Allow or forbid retrying this request when its method is not idempotent
+   * (`POST`, `PATCH`). Overrides the client config for this request only.
+   */
+  public retryNonIdempotentMethods(allow: boolean): this {
+    this._assertNotSent('retryNonIdempotentMethods');
+    this._retryNonIdempotentMethods = allow;
     return this;
   }
 
@@ -317,6 +328,7 @@ export class HTTPRequestBuilder<T = unknown> {
         timeout: this._timeout,
         signal: this._signal,
         retryPolicy: this._retryPolicy,
+        retryNonIdempotentMethods: this._retryNonIdempotentMethods,
         label: this._label,
         onUploadProgress: this._onUploadProgress,
         onDownloadProgress: this._onDownloadProgress,
@@ -395,6 +407,10 @@ export class HTTPRequestBuilder<T = unknown> {
     // Retry behavior — null explicitly disables retrying
     if (opts.retryPolicy !== undefined) {
       this.retryPolicy(opts.retryPolicy);
+    }
+
+    if (opts.retryNonIdempotentMethods !== undefined) {
+      this.retryNonIdempotentMethods(opts.retryNonIdempotentMethods);
     }
 
     // Tracking label for cancel/list filtering

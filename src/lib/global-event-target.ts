@@ -68,9 +68,74 @@ const g = globalThis as typeof globalThis & Record<string, unknown>;
 function getState(): GlobalEventTargetState | undefined {
   const value = readGlobal(GLOBAL_KEY);
 
-  return value === UNREADABLE
+  return value === UNREADABLE ? undefined : asUsableState(value);
+}
+
+/**
+ * Narrow a value found at {@link GLOBAL_KEY} to state this module can reuse.
+ *
+ * The value comes from a shared global, so it may be anything: another copy of
+ * Lifecycleion, a stub left by a test, or an object built to misbehave. It is
+ * validated rather than trusted, and every field is read through
+ * {@link readMember} because reading a property runs its getter and a getter can
+ * throw. A value that does not check out is treated as absent, so installation
+ * proceeds and replaces it — this key is Lifecycleion's own namespace, and an
+ * unusable value in it is not somebody else's working implementation.
+ */
+function asUsableState(value: unknown): GlobalEventTargetState | undefined {
+  if (typeof value !== 'object' || value === null) {
+    return undefined;
+  }
+
+  return asUsableTarget(readMember(value, 'target')) === null
     ? undefined
-    : (value as GlobalEventTargetState | undefined);
+    : (value as GlobalEventTargetState);
+}
+
+/**
+ * Narrow a value read from the `target` field to a usable backing target.
+ *
+ * Applied on every read rather than once, because the field belongs to an
+ * object this module does not own: a getter is free to return a real
+ * `EventTarget` the first time and something else the next, so validating once
+ * and trusting later reads would let a value that is not an `EventTarget` out
+ * through an API typed as returning one.
+ */
+function asUsableTarget(value: unknown): EventTarget | null {
+  if (typeof value !== 'object' || value === null) {
+    return null;
+  }
+
+  // A usable backing target is one that can actually service all three methods.
+  for (const name of METHOD_NAMES) {
+    if (typeof readMember(value, name) !== 'function') {
+      return null;
+    }
+  }
+
+  return value as EventTarget;
+}
+
+/** Whether shared state records a completed install by this module. */
+function isStateInstalled(state: GlobalEventTargetState | undefined): boolean {
+  return state !== undefined && readMember(state, 'isInstalled') === true;
+}
+
+/**
+ * The backing target from shared state, or `null` when there is none to vouch for.
+ *
+ * {@link asUsableState} already validated this field, but it returns the original
+ * object rather than a copy — so this is a fresh read of a property that is still
+ * somebody else's, and it is re-validated rather than assumed to have held still.
+ */
+function readStateTarget(
+  state: GlobalEventTargetState | undefined,
+): EventTarget | null {
+  if (state === undefined) {
+    return null;
+  }
+
+  return asUsableTarget(readMember(state, 'target'));
 }
 
 /** Returned by {@link readGlobal} when the read threw, so it cannot collide with a value. */
@@ -88,6 +153,20 @@ const UNREADABLE = Symbol('lifecycleion.unreadable');
 function readGlobal(name: string): unknown {
   try {
     return g[name];
+  } catch {
+    return UNREADABLE;
+  }
+}
+
+/**
+ * Read a property from an object that may be hostile, without trusting it.
+ *
+ * Same reasoning as {@link readGlobal}, applied one level in: the shared state
+ * object is reachable by anyone, so its accessors are not ours to rely on.
+ */
+function readMember(source: object, key: string): unknown {
+  try {
+    return (source as Record<string, unknown>)[key];
   } catch {
     return UNREADABLE;
   }
@@ -153,7 +232,7 @@ export function installGlobalEventTarget(): GlobalEventTargetInstallResult {
 
   if (members.every((member) => member === 'usable')) {
     // Never overwrite an existing implementation, ours or the environment's.
-    return getState()?.isInstalled === true ? 'already-installed' : 'native';
+    return isStateInstalled(getState()) ? 'already-installed' : 'native';
   }
 
   if (members.some((member) => member !== 'absent')) {
@@ -233,16 +312,20 @@ export function installGlobalEventTarget(): GlobalEventTargetInstallResult {
 
       defined.push(name);
     }
+
+    // Flipped last, so the state only claims an install once all three are in
+    // place. Kept inside the guarded block because the state object may be
+    // shared, and a frozen one or a throwing setter must not escape as an
+    // exception from module initialization.
+    state.isInstalled = true;
   } catch {
-    // The preflight passed but a definition was still rejected (an exotic global object,
-    // a Proxy trap, a host restriction). Leave nothing behind and report no install.
+    // The preflight passed but a definition or the state write was still rejected
+    // (an exotic global object, a Proxy trap, a host restriction, frozen shared
+    // state). Leave nothing behind and report no install.
     rollback();
 
     return 'blocked';
   }
-
-  // Flipped last, so the state only claims an install once all three are in place.
-  state.isInstalled = true;
 
   return 'installed';
 }
@@ -254,7 +337,7 @@ export function installGlobalEventTarget(): GlobalEventTargetInstallResult {
  *          environments, or environments where installation was skipped).
  */
 export function getGlobalEventTarget(): EventTarget | null {
-  return getState()?.target ?? null;
+  return readStateTarget(getState());
 }
 
 /**
@@ -264,7 +347,7 @@ export function getGlobalEventTarget(): EventTarget | null {
  * replaces the global methods afterwards does not reset this.
  */
 export function isGlobalEventTargetPolyfilled(): boolean {
-  return getState()?.isInstalled === true;
+  return isStateInstalled(getState());
 }
 
 /**

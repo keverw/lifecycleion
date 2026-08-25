@@ -86,3 +86,145 @@ describe('isTLSCertificateError', () => {
     ).toBe(false);
   });
 });
+
+describe('isTLSCertificateError cause handling', () => {
+  test('classifies a wrapped cause, as Node reports it from fetch', () => {
+    // Node rejects with `TypeError: fetch failed` and hangs the real error off
+    // `cause`; Bun puts the code on the error itself.
+    const wrapper = new TypeError('fetch failed') as TypeError & {
+      cause?: unknown;
+    };
+    wrapper.cause = makeError(
+      'unable to verify the first certificate',
+      'UNABLE_TO_VERIFY_LEAF_SIGNATURE',
+    );
+
+    expect(isTLSCertificateError(wrapper)).toBe(true);
+  });
+
+  test('terminates on a self-referential cause', () => {
+    const looping = makeError('boom') as Error & { cause?: unknown };
+    looping.cause = looping;
+
+    // `cause` is library- or attacker-controlled, so a walk would hang or
+    // overflow here instead of returning a plain transport error.
+    expect(isTLSCertificateError(looping)).toBe(false);
+  });
+
+  test('terminates on a cause cycle between two errors', () => {
+    const first = makeError('first') as Error & { cause?: unknown };
+    const second = makeError('second') as Error & { cause?: unknown };
+    first.cause = second;
+    second.cause = first;
+
+    expect(isTLSCertificateError(first)).toBe(false);
+  });
+
+  test('does not look past a single cause link', () => {
+    const inner = makeError('bad cert', 'CERT_HAS_EXPIRED');
+    const middle = makeError('middle') as Error & { cause?: unknown };
+    const outer = makeError('outer') as Error & { cause?: unknown };
+    middle.cause = inner;
+    outer.cause = middle;
+
+    // One link is what both runtimes need; going deeper is what makes cycles
+    // reachable, so nesting beyond that is deliberately not classified.
+    expect(isTLSCertificateError(middle)).toBe(true);
+    expect(isTLSCertificateError(outer)).toBe(false);
+  });
+
+  test('survives a throwing cause getter', () => {
+    const hostile = new Error('boom');
+
+    Object.defineProperty(hostile, 'cause', {
+      get(): never {
+        throw new Error('hostile cause getter');
+      },
+      configurable: true,
+    });
+
+    // This runs inside adapter error handling, so an escaping throw would
+    // replace a normalized transport response with the getter's own error.
+    expect(() => isTLSCertificateError(hostile)).not.toThrow();
+    expect(isTLSCertificateError(hostile)).toBe(false);
+  });
+
+  test('still classifies the error itself when its cause getter throws', () => {
+    const hostile = makeError('bad cert', 'CERT_HAS_EXPIRED');
+
+    Object.defineProperty(hostile, 'cause', {
+      get(): never {
+        throw new Error('hostile cause getter');
+      },
+      configurable: true,
+    });
+
+    expect(isTLSCertificateError(hostile)).toBe(true);
+  });
+
+  test('survives a cause whose own fields throw', () => {
+    const hostileCause = new Error('inner');
+
+    for (const field of ['code', 'message']) {
+      Object.defineProperty(hostileCause, field, {
+        get(): never {
+          throw new Error(`hostile ${field} getter`);
+        },
+        configurable: true,
+      });
+    }
+
+    const wrapper = new TypeError('fetch failed') as TypeError & {
+      cause?: unknown;
+    };
+    wrapper.cause = hostileCause;
+
+    // Guarding the `cause` read alone is not enough — the error it returns is
+    // just as untrusted, and its fields are read next.
+    expect(() => isTLSCertificateError(wrapper)).not.toThrow();
+    expect(isTLSCertificateError(wrapper)).toBe(false);
+  });
+
+  test('survives an outer error whose own fields throw', () => {
+    const hostile = new Error('outer');
+
+    for (const field of ['code', 'message']) {
+      Object.defineProperty(hostile, field, {
+        get(): never {
+          throw new Error(`hostile ${field} getter`);
+        },
+        configurable: true,
+      });
+    }
+
+    expect(() => isTLSCertificateError(hostile)).not.toThrow();
+    expect(isTLSCertificateError(hostile)).toBe(false);
+  });
+
+  test('classifies a valid cause even when the outer fields throw', () => {
+    const wrapper = new Error('outer');
+
+    Object.defineProperty(wrapper, 'message', {
+      get(): never {
+        throw new Error('hostile message getter');
+      },
+      configurable: true,
+    });
+
+    Object.defineProperty(wrapper, 'cause', {
+      value: makeError('bad cert', 'CERT_HAS_EXPIRED'),
+      configurable: true,
+    });
+
+    // Degrading must not mean giving up: an unreadable field is skipped, not
+    // treated as a verdict.
+    expect(isTLSCertificateError(wrapper)).toBe(true);
+  });
+
+  test('ignores a non-Error cause', () => {
+    const withStringCause = makeError('boom') as Error & { cause?: unknown };
+    withStringCause.cause = 'CERT_HAS_EXPIRED';
+
+    expect(isTLSCertificateError(withStringCause)).toBe(false);
+  });
+});

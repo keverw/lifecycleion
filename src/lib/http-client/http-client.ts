@@ -33,10 +33,12 @@ import {
   STREAM_FACTORY_ERROR_FLAG,
   XHR_BROWSER_TIMEOUT_FLAG,
   RETRYABLE_STATUS_CODES,
+  NON_IDEMPOTENT_METHODS,
   REDIRECT_STATUS_CODES,
   DEFAULT_MAX_REDIRECTS,
 } from './consts';
 import type {
+  AttemptEndEvent,
   HTTPClientConfig,
   HTTPMethod,
   HTTPResponse,
@@ -85,6 +87,7 @@ export class BaseHTTPClient {
       | 'includeAttemptHeader'
       | 'followRedirects'
       | 'maxRedirects'
+      | 'retryNonIdempotentMethods'
     >
   > &
     HTTPClientConfig;
@@ -122,6 +125,7 @@ export class BaseHTTPClient {
       timeout: config.timeout ?? DEFAULT_TIMEOUT_MS,
       cookieJar: config.cookieJar,
       retryPolicy: config.retryPolicy,
+      retryNonIdempotentMethods: config.retryNonIdempotentMethods ?? false,
       includeRequestID: config.includeRequestID ?? false,
       includeAttemptHeader: config.includeAttemptHeader ?? false,
       userAgent: config.userAgent,
@@ -1207,12 +1211,61 @@ export class BaseHTTPClient {
     const startAttempt = params.startAttemptNumber ?? 1;
     const redirectHistory = params.redirectHistory ?? [];
     const cookieJar = params.cookieJar ?? null;
+    /**
+     * Whether the policy still has an attempt left at this point.
+     *
+     * Derived from the attempt counter rather than `policy.areAttemptsExhausted`,
+     * which lags: it counts an attempt only once that attempt's error has been
+     * reported through `shouldRetry`, and every suppressed path short-circuits
+     * before that call. `maxRetryAttempts` counts retries after the first try,
+     * so attempt N has one available exactly while N <= maxRetryAttempts.
+     */
+    const isRetryAvailable = (attempt: number): boolean =>
+      policy !== null && attempt <= policy.maxRetryAttempts;
+
+    // Per-request wins over client config; unset means the safe default.
+    const allowNonIdempotentRetry =
+      options.retryNonIdempotentMethods ??
+      this._config.retryNonIdempotentMethods;
     let attemptNumber = startAttempt - 1;
     let isRetriesExhausted = false;
 
     while (true) {
       attemptNumber++;
       const isRetry = attemptNumber > startAttempt;
+
+      /**
+       * Emit the attempt-end event, filling in everything that is the same at
+       * every exit.
+       *
+       * There are fourteen places an attempt can end, and each used to build
+       * this object by hand — so adding a field meant remembering all fourteen,
+       * and `retrySuppressedReason` was in fact missed at three of them. Callers
+       * now pass only what actually differs between one ending and another.
+       */
+      const emitAttemptEnd = (outcome: {
+        willRetry: boolean;
+        status: number;
+        nextRetryDelayMS?: number;
+        nextRetryAt?: number;
+        retrySuppressedReason?: AttemptEndEvent['retrySuppressedReason'];
+      }): void => {
+        options.onAttemptEnd?.({
+          attemptNumber,
+          isRetry,
+          nextRetryDelayMS: undefined,
+          nextRetryAt: undefined,
+          ...outcome,
+          requestID,
+          initialURL,
+          ...(hopContext
+            ? {
+                hopNumber: hopContext.hopNumber,
+                redirect: hopContext.redirect,
+              }
+            : {}),
+        });
+      };
 
       // Only set the start timestamp on the very first attempt of the entire
       // request (attempt 1). Redirect hops reuse the original start time.
@@ -1301,21 +1354,11 @@ export class BaseHTTPClient {
         } catch (error) {
           clearTimeout(timeoutID);
 
-          options.onAttemptEnd?.({
-            attemptNumber,
-            isRetry,
+          emitAttemptEnd({
             willRetry: false,
             nextRetryDelayMS: undefined,
             nextRetryAt: undefined,
             status: 0,
-            requestID,
-            initialURL,
-            ...(hopContext
-              ? {
-                  hopNumber: hopContext.hopNumber,
-                  redirect: hopContext.redirect,
-                }
-              : {}),
           });
 
           // Terminal failure — no further attempts. _execute notifies error observers
@@ -1340,21 +1383,11 @@ export class BaseHTTPClient {
         if ('cancel' in retryIntercept) {
           clearTimeout(timeoutID);
 
-          options.onAttemptEnd?.({
-            attemptNumber,
-            isRetry,
+          emitAttemptEnd({
             willRetry: false,
             nextRetryDelayMS: undefined,
             nextRetryAt: undefined,
             status: 0,
-            requestID,
-            initialURL,
-            ...(hopContext
-              ? {
-                  hopNumber: hopContext.hopNumber,
-                  redirect: hopContext.redirect,
-                }
-              : {}),
           });
 
           return {
@@ -1467,21 +1500,11 @@ export class BaseHTTPClient {
           adapterResponse.status === 0 &&
           !this._config.followRedirects
         ) {
-          options.onAttemptEnd?.({
-            attemptNumber,
-            isRetry,
+          emitAttemptEnd({
             willRetry: false,
             nextRetryDelayMS: undefined,
             nextRetryAt: undefined,
             status: 0,
-            requestID,
-            initialURL,
-            ...(hopContext
-              ? {
-                  hopNumber: hopContext.hopNumber,
-                  redirect: hopContext.redirect,
-                }
-              : {}),
           });
 
           return {
@@ -1495,12 +1518,52 @@ export class BaseHTTPClient {
           };
         }
 
+        // A non-idempotent method may only be replayed on a transport outcome
+        // where the adapter proves no request bytes reached the server.
+        //
+        // That proof is `wasDefinitelyNotSent`, not `isRetryable`. The latter is
+        // a retry hint whose contract only ever defined `false`, so an adapter
+        // may set it `true` to mean "generally worth another attempt" without
+        // claiming anything about delivery — reading it as proof would replay a
+        // write after an ambiguous failure.
+        //
+        // The transport-outcome requirement is not redundant either. On a real
+        // response delivery is already settled the other way: the server
+        // answered, so the handler ran and may have committed.
+        //
+        // Adapters that cannot tell report nothing, which is treated as unsafe.
+        const isTransportOutcome =
+          adapterResponse.isTransportError === true ||
+          adapterResponse.status === 0;
+
+        const isMethodReplayable =
+          allowNonIdempotentRetry ||
+          !NON_IDEMPOTENT_METHODS.has(sentRequest.method) ||
+          (isTransportOutcome && adapterResponse.wasDefinitelyNotSent === true);
+
+        // Why a retry did not happen, for observers. Only meaningful when the
+        // status alone would have allowed one — otherwise nothing was
+        // suppressed and there is nothing to explain.
+        const retrySuppressedReason =
+          isRetryAvailable(attemptNumber) &&
+          RETRYABLE_STATUS_CODES.has(adapterResponse.status) &&
+          !cancelSignal.aborted
+            ? adapterResponse.isRetryable === false
+              ? ('adapter_veto' as const)
+              : adapterResponse.isStreamError
+                ? ('stream_error' as const)
+                : !isMethodReplayable
+                  ? ('non_idempotent_method' as const)
+                  : undefined
+            : undefined;
+
         // Check if should retry based on status code.
         // Stream failures are terminal even when status is retryable (e.g. 0).
         if (
           policy &&
           adapterResponse.isRetryable !== false &&
           !adapterResponse.isStreamError &&
+          isMethodReplayable &&
           RETRYABLE_STATUS_CODES.has(adapterResponse.status) &&
           !cancelSignal.aborted
         ) {
@@ -1515,21 +1578,11 @@ export class BaseHTTPClient {
             callbacks.setState('waiting_for_retry');
           }
 
-          options.onAttemptEnd?.({
-            attemptNumber,
-            isRetry,
+          emitAttemptEnd({
             willRetry: shouldRetry,
             nextRetryDelayMS: shouldRetry ? delayMS : undefined,
             nextRetryAt,
             status: adapterResponse.status,
-            requestID,
-            initialURL,
-            ...(hopContext
-              ? {
-                  hopNumber: hopContext.hopNumber,
-                  redirect: hopContext.redirect,
-                }
-              : {}),
           });
 
           if (shouldRetry) {
@@ -1576,21 +1629,12 @@ export class BaseHTTPClient {
 
           isRetriesExhausted = true;
         } else {
-          options.onAttemptEnd?.({
-            attemptNumber,
-            isRetry,
+          emitAttemptEnd({
             willRetry: false,
+            ...(retrySuppressedReason ? { retrySuppressedReason } : {}),
             nextRetryDelayMS: undefined,
             nextRetryAt: undefined,
             status: adapterResponse.status,
-            requestID,
-            initialURL,
-            ...(hopContext
-              ? {
-                  hopNumber: hopContext.hopNumber,
-                  redirect: hopContext.redirect,
-                }
-              : {}),
           });
         }
 
@@ -1619,21 +1663,11 @@ export class BaseHTTPClient {
         // When abort(string) is called, fetch() rejects with the string itself (per Fetch spec),
         // not an AbortError. Check cancelSignal.aborted first so string-reason cancels are caught.
         if (cancelSignal.aborted && !isAbortError(error)) {
-          options.onAttemptEnd?.({
-            attemptNumber,
-            isRetry,
+          emitAttemptEnd({
             willRetry: false,
             nextRetryDelayMS: undefined,
             nextRetryAt: undefined,
             status: 0,
-            requestID,
-            initialURL,
-            ...(hopContext
-              ? {
-                  hopNumber: hopContext.hopNumber,
-                  redirect: hopContext.redirect,
-                }
-              : {}),
           });
 
           const signalReason = getSignalCancelReason(cancelSignal);
@@ -1652,22 +1686,25 @@ export class BaseHTTPClient {
         }
 
         if (isAbortError(error) && isResponseStreamAbortError(error)) {
+          // This branch reaches the client as a thrown AbortError rather than a
+          // resolved AdapterResponse, so it misses the suppression bookkeeping
+          // done on that path — but it still ends as a stream failure, and a
+          // caller asking why their retry stopped deserves the same answer.
+          const streamSuppressionReason = (
+            status: number,
+          ): 'stream_error' | undefined =>
+            isRetryAvailable(attemptNumber) &&
+            RETRYABLE_STATUS_CODES.has(status) &&
+            !cancelSignal.aborted
+              ? 'stream_error'
+              : undefined;
+
           if (cancelSignal.aborted) {
-            options.onAttemptEnd?.({
-              attemptNumber,
-              isRetry,
+            emitAttemptEnd({
               willRetry: false,
               nextRetryDelayMS: undefined,
               nextRetryAt: undefined,
               status: 0,
-              requestID,
-              initialURL,
-              ...(hopContext
-                ? {
-                    hopNumber: hopContext.hopNumber,
-                    redirect: hopContext.redirect,
-                  }
-                : {}),
             });
 
             const signalReason = getSignalCancelReason(cancelSignal);
@@ -1690,22 +1727,32 @@ export class BaseHTTPClient {
 
           const streamedAbort = getResponseStreamAbortInfo(error);
 
+          // Same reasoning as the resolve path: headers arrived, so any
+          // Set-Cookie on them applies to follow-up requests the way browsers
+          // and curl treat cookies from error responses. This branch throws
+          // rather than resolving, so it misses that call — but it reconstructs
+          // the real headers below, and dropping cookies here would make the
+          // jar depend on whether a failure resolved or threw.
+          if (cookieJar && streamedAbort) {
+            cookieJar.processResponseHeaders(
+              streamedAbort.headers,
+              sentRequest.requestURL,
+            );
+          }
+
           if (isTimedOut && streamedAbort) {
-            options.onAttemptEnd?.({
-              attemptNumber,
-              isRetry,
+            const suppressedReason = streamSuppressionReason(
+              streamedAbort.status,
+            );
+
+            emitAttemptEnd({
               willRetry: false,
+              ...(suppressedReason
+                ? { retrySuppressedReason: suppressedReason }
+                : {}),
               nextRetryDelayMS: undefined,
               nextRetryAt: undefined,
               status: streamedAbort.status,
-              requestID,
-              initialURL,
-              ...(hopContext
-                ? {
-                    hopNumber: hopContext.hopNumber,
-                    redirect: hopContext.redirect,
-                  }
-                : {}),
             });
 
             return {
@@ -1733,21 +1780,18 @@ export class BaseHTTPClient {
             };
           }
 
-          options.onAttemptEnd?.({
-            attemptNumber,
-            isRetry,
+          const fallbackSuppressedReason = streamSuppressionReason(
+            streamedAbort?.status ?? 0,
+          );
+
+          emitAttemptEnd({
             willRetry: false,
+            ...(fallbackSuppressedReason
+              ? { retrySuppressedReason: fallbackSuppressedReason }
+              : {}),
             nextRetryDelayMS: undefined,
             nextRetryAt: undefined,
             status: streamedAbort?.status ?? 0,
-            requestID,
-            initialURL,
-            ...(hopContext
-              ? {
-                  hopNumber: hopContext.hopNumber,
-                  redirect: hopContext.redirect,
-                }
-              : {}),
           });
 
           return {
@@ -1778,21 +1822,11 @@ export class BaseHTTPClient {
         if (isAbortError(error)) {
           // User/parent cancellation — never retry (even if a timeout fired in the same window).
           if (cancelSignal.aborted) {
-            options.onAttemptEnd?.({
-              attemptNumber,
-              isRetry,
+            emitAttemptEnd({
               willRetry: false,
               nextRetryDelayMS: undefined,
               nextRetryAt: undefined,
               status: 0,
-              requestID,
-              initialURL,
-              ...(hopContext
-                ? {
-                    hopNumber: hopContext.hopNumber,
-                    redirect: hopContext.redirect,
-                  }
-                : {}),
             });
 
             const signalReason = getSignalCancelReason(cancelSignal);
@@ -1833,21 +1867,11 @@ export class BaseHTTPClient {
                   ? factoryCancelValue
                   : undefined;
 
-              options.onAttemptEnd?.({
-                attemptNumber,
-                isRetry,
+              emitAttemptEnd({
                 willRetry: false,
                 nextRetryDelayMS: undefined,
                 nextRetryAt: undefined,
                 status: 0,
-                requestID,
-                initialURL,
-                ...(hopContext
-                  ? {
-                      hopNumber: hopContext.hopNumber,
-                      redirect: hopContext.redirect,
-                    }
-                  : {}),
               });
 
               return {
@@ -1870,21 +1894,11 @@ export class BaseHTTPClient {
           isNonRetryableClientCallbackError(error);
 
         if (isNonRetryableClientCallbackFailure) {
-          options.onAttemptEnd?.({
-            attemptNumber,
-            isRetry,
+          emitAttemptEnd({
             willRetry: false,
             nextRetryDelayMS: undefined,
             nextRetryAt: undefined,
             status: 0,
-            requestID,
-            initialURL,
-            ...(hopContext
-              ? {
-                  hopNumber: hopContext.hopNumber,
-                  redirect: hopContext.redirect,
-                }
-              : {}),
           });
 
           const isStreamFactoryError =
@@ -1909,8 +1923,18 @@ export class BaseHTTPClient {
           };
         }
 
-        // Network / adapter / per-attempt timeout — retry if policy allows
-        if (policy && !cancelSignal.aborted) {
+        // Network / adapter / per-attempt timeout — retry if policy allows.
+        //
+        // A throw carries no adapter response, so there is no evidence either
+        // way about delivery. For a non-idempotent method that means no retry:
+        // a per-attempt timeout in particular says the request was sent and the
+        // answer never came back, which is the case most likely to double-apply.
+        if (
+          policy &&
+          !cancelSignal.aborted &&
+          (allowNonIdempotentRetry ||
+            !NON_IDEMPOTENT_METHODS.has(sentRequest.method))
+        ) {
           const { shouldRetry, delayMS } = policy.shouldRetry(
             error instanceof Error ? error : new Error(String(error)),
           );
@@ -1922,21 +1946,11 @@ export class BaseHTTPClient {
             callbacks.setState('waiting_for_retry');
           }
 
-          options.onAttemptEnd?.({
-            attemptNumber,
-            isRetry,
+          emitAttemptEnd({
             willRetry: shouldRetry,
             nextRetryDelayMS: shouldRetry ? delayMS : undefined,
             nextRetryAt,
             status: 0,
-            requestID,
-            initialURL,
-            ...(hopContext
-              ? {
-                  hopNumber: hopContext.hopNumber,
-                  redirect: hopContext.redirect,
-                }
-              : {}),
           });
 
           if (shouldRetry) {
@@ -1992,21 +2006,22 @@ export class BaseHTTPClient {
 
           isRetriesExhausted = true;
         } else {
-          options.onAttemptEnd?.({
-            attemptNumber,
-            isRetry,
+          // A throw carries no adapter response, so the only thing that can have
+          // suppressed a policy-eligible retry here is the method rule.
+          const isSuppressedByMethod =
+            isRetryAvailable(attemptNumber) &&
+            !cancelSignal.aborted &&
+            !allowNonIdempotentRetry &&
+            NON_IDEMPOTENT_METHODS.has(sentRequest.method);
+
+          emitAttemptEnd({
             willRetry: false,
+            ...(isSuppressedByMethod
+              ? { retrySuppressedReason: 'non_idempotent_method' as const }
+              : {}),
             nextRetryDelayMS: undefined,
             nextRetryAt: undefined,
             status: 0,
-            requestID,
-            initialURL,
-            ...(hopContext
-              ? {
-                  hopNumber: hopContext.hopNumber,
-                  redirect: hopContext.redirect,
-                }
-              : {}),
           });
         }
 

@@ -3642,7 +3642,14 @@ describe('HTTPClient — phase-aware interceptors', () => {
       },
     };
 
-    const client = new HTTPClient({ adapter, followRedirects: true });
+    // This test is about retry-phase interceptors, not replay safety — POST is
+    // used because body rewrites are the point, so it opts in to retrying a
+    // non-idempotent method.
+    const client = new HTTPClient({
+      adapter,
+      followRedirects: true,
+      retryNonIdempotentMethods: true,
+    });
     client.addRequestInterceptor(
       (req) => ({
         ...req,

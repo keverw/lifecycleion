@@ -228,7 +228,6 @@ export class NodeAdapter implements HTTPAdapter {
           }
         | undefined;
       let isStreamFactoryPending = false;
-      let uploadedBodyBytes = 0;
 
       // Deduplication guard — Node's upload path can reach 100% from multiple
       // sources (final drain callback and the upload-complete signal). Once
@@ -244,7 +243,6 @@ export class NodeAdapter implements HTTPAdapter {
           didFireUpload100 = true;
         }
 
-        uploadedBodyBytes = Math.max(uploadedBodyBytes, event.loaded);
         request.onUploadProgress?.(event);
       };
 
@@ -591,7 +589,27 @@ export class NodeAdapter implements HTTPAdapter {
           return;
         }
 
-        const isRetryableTransportError = uploadedBodyBytes === 0;
+        // Only `wasDefinitelyNotSent` is claimed here, and only a transport
+        // error code can supply it.
+        //
+        // `isRetryable: false` is deliberately not used alongside it. That flag
+        // blocks a retry for every method, so deriving it from upload progress
+        // would stop retrying an idempotent PUT after an ordinary socket error —
+        // precisely the case a retry is most likely to fix — and would override
+        // retryNonIdempotentMethods where the caller has stated a replay is
+        // safe. Whether a partly-sent request may be replayed is the client's
+        // method rule to answer, and withholding the proof is what answers it.
+        // A body-byte count cannot, in either direction: an empty-body POST
+        // writes headers and nothing else, so the counter stays at 0 even after
+        // the server acted on the request, and the counter tracks bytes handed
+        // to the stream rather than bytes on the wire, so it can be non-zero for
+        // a connection that was never established.
+        //
+        // The error code is also the one signal that behaves the same on Node
+        // and Bun: `socket.bytesWritten` is unimplemented under Bun and
+        // `socket.connecting` reports the wrong value there, so either would
+        // silently claim "nothing sent" for a request already received.
+        const wasDefinitelyNotSent = isPreConnectionError(error);
 
         // All other transport errors (ECONNREFUSED, ENOTFOUND, etc.) → status 0
         resolveAdapterResponse(
@@ -602,7 +620,7 @@ export class NodeAdapter implements HTTPAdapter {
           {
             status: 0,
             isTransportError: true,
-            isRetryable: isRetryableTransportError,
+            wasDefinitelyNotSent,
             headers: {},
             body: null,
             errorCause: error,
@@ -713,9 +731,13 @@ export class NodeAdapter implements HTTPAdapter {
               request.requestURL,
               request.headers,
               {
+                // No isRetryable veto: a body-write failure only reaches here
+                // for a request that has one, so vetoing every method would
+                // stop retrying an idempotent PUT or DELETE. Delivery is
+                // unproven rather than disproven, so nothing is claimed and the
+                // client's method rule decides.
                 status: 0,
                 isTransportError: true,
-                isRetryable: false,
                 headers: {},
                 body: null,
                 errorCause:
@@ -748,9 +770,13 @@ export class NodeAdapter implements HTTPAdapter {
               request.requestURL,
               request.headers,
               {
+                // No isRetryable veto: a body-write failure only reaches here
+                // for a request that has one, so vetoing every method would
+                // stop retrying an idempotent PUT or DELETE. Delivery is
+                // unproven rather than disproven, so nothing is claimed and the
+                // client's method rule decides.
                 status: 0,
                 isTransportError: true,
-                isRetryable: false,
                 headers: {},
                 body: null,
                 errorCause:
@@ -1166,6 +1192,39 @@ function removeWritableListener(
   };
 
   removable.off?.(event, listener);
+}
+
+/**
+ * Transport error codes that mean no connection was ever established, so no
+ * request bytes can have reached the server.
+ *
+ * Anything not listed here — `ECONNRESET`, `EPIPE`, `ETIMEDOUT`, a bare socket
+ * hang up — is treated as possible delivery. That asymmetry is deliberate: this
+ * set gates whether a non-idempotent request may be replayed, so an unrecognized
+ * code must fall on the side of "may already have been applied".
+ *
+ * `EHOSTUNREACH` and `ENETUNREACH` are deliberately absent even though they read
+ * like connect-time failures: an ICMP unreachable arriving for an established
+ * connection is reported on that connection with the same code, so seeing one
+ * does not rule out a request that was already written and received.
+ *
+ * Verified to match on both Node and Bun: a refused connection reports
+ * `ECONNREFUSED` on both, and a connection dropped after the request was written
+ * reports `ECONNRESET` on both. (Bun reports `ECONNREFUSED` for DNS failures
+ * where Node reports `ENOTFOUND`; both are in this set, so the verdict agrees.)
+ */
+const PRE_CONNECTION_ERROR_CODES: ReadonlySet<string> = new Set([
+  'ECONNREFUSED',
+  'ENOTFOUND',
+  'EAI_AGAIN',
+  'EADDRNOTAVAIL',
+]);
+
+/** Whether an error proves the request never left for a connected peer. */
+function isPreConnectionError(error: unknown): boolean {
+  const code = (error as { code?: unknown } | null)?.code;
+
+  return typeof code === 'string' && PRE_CONNECTION_ERROR_CODES.has(code);
 }
 
 function makeResponseStreamError(message: string, cause?: Error): Error {
