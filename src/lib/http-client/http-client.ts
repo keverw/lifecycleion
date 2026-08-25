@@ -2770,38 +2770,45 @@ function getEffectiveRequestHeadersFromError(
 }
 
 /**
- * Whether an adapter explicitly tagged this throw as a response-stream abort.
+ * Whether an adapter explicitly tagged a thrown value with one of the client's
+ * marker flags.
  *
- * The value must be exactly `true`, not merely present. Presence alone would let
- * an ordinary adapter error carrying the flag as `false` — or as anything else —
- * take the terminal stream-error branch, and, if stale `streamAbortStatus` and
- * `streamAbortHeaders` fields rode along, have that response's Set-Cookie written
- * to the jar. This gate is what stands between an arbitrary thrown value and
- * both of those.
+ * The value must be exactly `true`, not merely present. Presence alone lets an
+ * ordinary error carrying the flag as `false` — or as anything else — reach a
+ * branch meant for a tag an adapter deliberately set. Every adapter that sets
+ * one of these writes the literal `true`, so nothing is lost by asking for it.
  *
- * The read is guarded because the error is whatever a runtime, a library, or a
+ * The read is guarded because the value is whatever a runtime, a library, or a
  * caller's abort reason produced, so its accessors are not ours to rely on: a
  * throwing getter here would escape the classifier that exists to normalize the
  * failure. Unreadable is treated as untagged.
  */
-function isResponseStreamAbortError(err: unknown): boolean {
+function hasAdapterMarker(err: unknown, flag: string): boolean {
   if (err === null || typeof err !== 'object') {
     return false;
   }
 
   try {
-    return (
-      (err as Record<string, unknown>)[RESPONSE_STREAM_ABORT_FLAG] === true
-    );
+    return (err as Record<string, unknown>)[flag] === true;
   } catch {
     return false;
   }
 }
 
+/**
+ * Whether an adapter tagged this throw as a response-stream abort.
+ *
+ * The strictest of the markers to get wrong: it gates both the terminal
+ * stream-error branch and, ahead of it, writing that response's `Set-Cookie`
+ * into the jar from `streamAbortHeaders` that rode along on the same value.
+ */
+function isResponseStreamAbortError(err: unknown): boolean {
+  return hasAdapterMarker(err, RESPONSE_STREAM_ABORT_FLAG);
+}
+
+/** Whether XHRAdapter tagged this throw as a browser-fired request timeout. */
 function isXHRBrowserTimeout(err: unknown): boolean {
-  return (
-    err !== null && typeof err === 'object' && XHR_BROWSER_TIMEOUT_FLAG in err
-  );
+  return hasAdapterMarker(err, XHR_BROWSER_TIMEOUT_FLAG);
 }
 
 function getResponseStreamAbortInfo(

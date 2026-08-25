@@ -15,6 +15,7 @@ import {
   DEFAULT_REQUEST_ID_HEADER,
   DEFAULT_USER_AGENT,
   RESPONSE_STREAM_ABORT_FLAG,
+  XHR_BROWSER_TIMEOUT_FLAG,
 } from './consts';
 import { MockAdapter } from './adapters/mock-adapter';
 import type {
@@ -1269,10 +1270,11 @@ describe('HTTPClient — cancel reason via AbortError-throwing adapters', () => 
   });
 });
 
-describe('HTTPClient — response-stream abort marker', () => {
-  // The marker is the only thing standing between an arbitrary thrown value and
-  // both the terminal stream-error branch and the cookie jar, so it is trusted
-  // only when an adapter set it to exactly `true`.
+describe('HTTPClient — adapter marker flags', () => {
+  // A marker is the only thing standing between an arbitrary thrown value and a
+  // branch meant for a tag an adapter deliberately set — for the stream-abort
+  // one, that branch also writes to the cookie jar. So a marker is trusted only
+  // when it reads exactly `true`, which is what every adapter writes.
   // Throws rather than rejecting, so the parameter can stay `unknown`: what an
   // adapter hands back is not always an Error, and that is part of what these
   // tests cover.
@@ -1384,6 +1386,44 @@ describe('HTTPClient — response-stream abort marker', () => {
     // The cause slots are typed `Error`, so the raw value must not reach them.
     expect(builder.error?.code).toBe('stream_response_error');
     expect(builder.error?.cause).toBeInstanceOf(Error);
+  });
+
+  test('the XHR browser-timeout marker turns a bare AbortError into a timeout', async () => {
+    const client = new HTTPClient({
+      // What XHRAdapter throws when the browser fires its own hard timeout: an
+      // AbortError, indistinguishable from a cancel without the marker.
+      adapter: makeThrowingAdapter(
+        Object.assign(new Error('Request aborted'), {
+          name: 'AbortError',
+          [XHR_BROWSER_TIMEOUT_FLAG]: true,
+        }),
+      ),
+      baseURL: 'http://api.test',
+      timeout: 0,
+    });
+
+    const response = await client.get('/x').send();
+
+    expect(response.isTimeout).toBe(true);
+    expect(response.isCancelled).toBe(false);
+  });
+
+  test('an XHR browser-timeout marker set to false stays a cancel', async () => {
+    const client = new HTTPClient({
+      adapter: makeThrowingAdapter(
+        Object.assign(new Error('Request aborted'), {
+          name: 'AbortError',
+          [XHR_BROWSER_TIMEOUT_FLAG]: false,
+        }),
+      ),
+      baseURL: 'http://api.test',
+      timeout: 0,
+    });
+
+    const response = await client.get('/x').send();
+
+    expect(response.isCancelled).toBe(true);
+    expect(response.isTimeout).toBe(false);
   });
 });
 
