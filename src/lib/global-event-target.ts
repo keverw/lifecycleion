@@ -322,9 +322,38 @@ export function installGlobalEventTarget(): GlobalEventTargetInstallResult {
   const existingState = getState();
   const defined: string[] = [];
 
+  // The state key as found, so a rollback can put back what was there.
+  //
+  // This call cannot be the first to throw: the preflight above already read
+  // this exact descriptor through `canDefineProperty`, so an object hostile
+  // enough to reject the read has already returned `'blocked'`.
+  const priorStateDescriptor = Object.getOwnPropertyDescriptor(g, GLOBAL_KEY);
+
   /** Undo a partial installation when a later definition is rejected after all. */
   const rollback = (): void => {
     for (const key of defined) {
+      // The state key may have held somebody else's object, which this call
+      // overwrote with a fresh one. Deleting it is not an undo there — it would
+      // leave a failed install having destroyed that object as a side effect,
+      // the one thing rollback exists to prevent. The original descriptor goes
+      // back instead, so the environment is left as found, unusable state and
+      // all: judging it is this function's business only when an install
+      // actually goes through.
+      //
+      // Restored in place rather than deleted first. Whatever rejected the
+      // definition that brought us here may well have sealed the global object,
+      // and re-adding a key to a non-extensible object throws — while
+      // redefining a configurable one that never left is always allowed.
+      if (key === GLOBAL_KEY && priorStateDescriptor !== undefined) {
+        try {
+          Object.defineProperty(g, GLOBAL_KEY, priorStateDescriptor);
+        } catch {
+          // Nothing better to do here: the original could not be put back.
+        }
+
+        continue;
+      }
+
       try {
         Reflect.deleteProperty(g, key);
       } catch {

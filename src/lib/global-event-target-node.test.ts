@@ -559,4 +559,42 @@ describe('global event target on the Node runtime', () => {
     expect(result.areAnyMethodsDefined).toBe(false);
     expect(result.isStateKeyDefined).toBe(false);
   }, 30_000);
+
+  test('a rejected install restores the state object it replaced', async () => {
+    interface RollbackRestoresStateFixtureResult {
+      didImportThrow: boolean;
+      installResult: string;
+      isPolyfilled: boolean;
+      isStatePresent: boolean;
+      isSameStateObject: boolean;
+      isStateContentUnchanged: boolean;
+      areAnyMethodsDefined: boolean;
+      isGlobalSealed: boolean;
+      didConstructorRun: boolean;
+    }
+
+    const result = await runFixtureJSON<RollbackRestoresStateFixtureResult>(
+      'rollback-restores-state',
+    );
+
+    expect(result.didImportThrow).toBe(false);
+
+    // The fixture seals the global from inside the EventTarget constructor —
+    // the one piece of caller-controlled code that runs after the preflight and
+    // before the first method is defined. Without that the path is unreachable.
+    expect(result.isGlobalSealed).toBe(true);
+    expect(result.didConstructorRun).toBe(true);
+
+    expect(result.installResult).toBe('blocked');
+    expect(result.isPolyfilled).toBe(false);
+    expect(result.areAnyMethodsDefined).toBe(false);
+
+    // The point of the test: rollback restores the state object it overwrote.
+    // Deleting it would mean a failed install destroyed another copy's object
+    // as a side effect — the one thing rollback exists to prevent. Identity is
+    // asserted, not just presence.
+    expect(result.isStatePresent).toBe(true);
+    expect(result.isSameStateObject).toBe(true);
+    expect(result.isStateContentUnchanged).toBe(true);
+  }, 30_000);
 });
