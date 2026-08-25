@@ -76,12 +76,10 @@ function getState(): GlobalEventTargetState | undefined {
  * Narrow a value found at {@link GLOBAL_KEY} to state this module can reuse.
  *
  * The value comes from a shared global, so it may be anything: another copy of
- * Lifecycleion, a stub left by a test, or an object built to misbehave. It is
- * validated rather than trusted, and every field is read through
- * {@link readMember} because reading a property runs its getter and a getter can
- * throw. A value that does not check out is treated as absent, so installation
- * proceeds and replaces it — this key is Lifecycleion's own namespace, and an
- * unusable value in it is not somebody else's working implementation.
+ * Lifecycleion, a test stub, or an object built to misbehave. Every field is read
+ * through {@link readMember}, since a getter can throw. A value that does not
+ * check out is treated as absent, so installation replaces it — this key is
+ * Lifecycleion's own namespace.
  */
 function asUsableState(value: unknown): GlobalEventTargetState | undefined {
   if (typeof value !== 'object' || value === null) {
@@ -96,11 +94,9 @@ function asUsableState(value: unknown): GlobalEventTargetState | undefined {
 /**
  * Narrow a value read from the `target` field to a usable backing target.
  *
- * Applied on every read rather than once, because the field belongs to an
- * object this module does not own: a getter is free to return a real
- * `EventTarget` the first time and something else the next, so validating once
- * and trusting later reads would let a value that is not an `EventTarget` out
- * through an API typed as returning one.
+ * Applied on every read rather than once: the field belongs to an object this
+ * module does not own, so a getter may return a real `EventTarget` the first time
+ * and something else the next.
  */
 function asUsableTarget(value: unknown): EventTarget | null {
   if (typeof value !== 'object' || value === null) {
@@ -121,18 +117,14 @@ function asUsableTarget(value: unknown): EventTarget | null {
  * Read the three methods off a candidate target and bind them, in one pass.
  *
  * The values installed on the global object come from here rather than from a
- * later `target[name]` in the definition loop, which would be the same
- * validate-once-use-a-later-read gap {@link asUsableTarget} exists to close,
- * moved one level in. The methods belong to an object this module does not own
- * just as much as the `target` field does, so a second read of one is no more
- * trustworthy than a second read of the other.
+ * later `target[name]` in the definition loop — that would reopen the
+ * validate-once-use-a-later-read gap {@link asUsableTarget} closes, one level in.
  *
- * `null` means this target cannot back an install — a method that is missing,
- * that stopped being callable, whose read (or `bind`) threw, or whose `bind`
- * returned something that is not a function. That is a reason to look elsewhere
- * for a target, never a reason to fail: the caller falls back to a fresh one.
+ * `null` means this target cannot back an install: a method missing, no longer
+ * callable, whose read or `bind` threw, or whose `bind` returned a non-function.
+ * The caller falls back to a fresh target rather than failing.
  *
- * @returns The bound methods by name, or `null` if any of them could not be taken.
+ * @returns The bound methods by name, or `null` if any could not be taken.
  */
 function bindTargetMethods(
   target: EventTarget,
@@ -155,12 +147,11 @@ function bindTargetMethods(
       return null;
     }
 
-    // What `bind` handed back is checked, not assumed. `bind` is an ordinary
-    // property on the method, so a hostile target can replace it with something
-    // that returns a non-function without ever throwing. Guarding only the throw
-    // would install that value on the global object and report `'installed'`,
-    // leaving `globalThis.addEventListener` set to a non-callable — strictly
-    // worse than not installing, since the methods started out absent.
+    // What `bind` handed back is checked, not assumed: `bind` is an ordinary
+    // property, so a hostile target can replace it with something that returns a
+    // non-function without throwing. Guarding only the throw would leave
+    // `globalThis.addEventListener` set to a non-callable and report
+    // `'installed'` — worse than not installing, since the methods were absent.
     if (typeof boundMethod !== 'function') {
       return null;
     }
@@ -179,9 +170,8 @@ function isStateInstalled(state: GlobalEventTargetState | undefined): boolean {
 /**
  * The backing target from shared state, or `null` when there is none to vouch for.
  *
- * {@link asUsableState} already validated this field, but it returns the original
- * object rather than a copy — so this is a fresh read of a property that is still
- * somebody else's, and it is re-validated rather than assumed to have held still.
+ * {@link asUsableState} validated this field but returns the original object, so
+ * this is a fresh read of somebody else's property and is re-validated.
  */
 function readStateTarget(
   state: GlobalEventTargetState | undefined,
@@ -214,10 +204,9 @@ function readGlobal(name: string): unknown {
 }
 
 /**
- * Read a property from an object that may be hostile, without trusting it.
- *
- * Same reasoning as {@link readGlobal}, applied one level in: the shared state
- * object is reachable by anyone, so its accessors are not ours to rely on.
+ * Read a property from an object that may be hostile, without trusting it. Same
+ * reasoning as {@link readGlobal}, one level in: the shared state object is
+ * reachable by anyone, so its accessors are not ours to rely on.
  */
 function readMember(source: object, key: string): unknown {
   try {
@@ -332,18 +321,15 @@ export function installGlobalEventTarget(): GlobalEventTargetInstallResult {
   /** Undo a partial installation when a later definition is rejected after all. */
   const rollback = (): void => {
     for (const key of defined) {
-      // The state key may have held somebody else's object, which this call
-      // overwrote with a fresh one. Deleting it is not an undo there — it would
-      // leave a failed install having destroyed that object as a side effect,
-      // the one thing rollback exists to prevent. The original descriptor goes
-      // back instead, so the environment is left as found, unusable state and
-      // all: judging it is this function's business only when an install
-      // actually goes through.
+      // The state key may have held somebody else's object that this call
+      // overwrote. Deleting it is not an undo there — a failed install would have
+      // destroyed that object as a side effect, the one thing rollback exists to
+      // prevent — so the original descriptor goes back instead.
       //
-      // Restored in place rather than deleted first. Whatever rejected the
-      // definition that brought us here may well have sealed the global object,
-      // and re-adding a key to a non-extensible object throws — while
-      // redefining a configurable one that never left is always allowed.
+      // Restored in place rather than deleted first: whatever rejected the
+      // definition may have sealed the global object, and re-adding a key to a
+      // non-extensible object throws, while redefining a configurable one that
+      // never left is always allowed.
       if (key === GLOBAL_KEY && priorStateDescriptor !== undefined) {
         try {
           Object.defineProperty(g, GLOBAL_KEY, priorStateDescriptor);
@@ -362,17 +348,13 @@ export function installGlobalEventTarget(): GlobalEventTargetInstallResult {
     }
   };
 
-  // Re-read `target` rather than reusing the value {@link asUsableState} saw,
-  // and take the three methods off it in the same pass. The field and the
-  // methods on it belong to an object this module does not own, so a getter is
-  // free to return a real `EventTarget` when it is probed and something else —
-  // or nothing at all — on the next read. These are the values the globals are
-  // actually bound to, so these are the reads that have to validate; trusting
-  // the earlier probe would bind them to something that never passed a check.
+  // Re-read `target` rather than reusing what `asUsableState` saw, and take the
+  // three methods off it in the same pass. These are the values the globals are
+  // actually bound to, so these are the reads that have to validate; trusting the
+  // earlier probe would bind them to something that never passed a check.
   //
-  // A target that no longer vouches for itself is treated the same way an
-  // unusable state object is: as absent, so installation proceeds with a fresh
-  // one. Nothing is orphaned by that — a target that cannot service the three
+  // A target that no longer vouches for itself is treated as absent, so a fresh
+  // one is made. Nothing is orphaned: a target that cannot service the three
   // methods never had listeners registered through this module.
   const reusableTarget = readStateTarget(existingState);
   const reusableMethods =
@@ -423,18 +405,15 @@ export function installGlobalEventTarget(): GlobalEventTargetInstallResult {
     }
 
     // Flipped last, so the state only claims an install once all three are in
-    // place. Kept inside the guarded block because the state object may be
-    // shared, and a frozen one or a throwing setter must not escape as an
-    // exception from module initialization.
+    // place, and inside the guarded block because a shared state object may be
+    // frozen or have a throwing setter, which must not escape module init.
     //
-    // Skipped when the flag already reads `true`: assigning to a non-writable
-    // property throws in strict mode even when the value is unchanged (only
-    // `Object.defineProperty` exempts a same-value write, not `Set`). A frozen
-    // state left by another copy that already installed would otherwise fail
-    // here and roll back the three methods just defined — reporting `blocked`
-    // and leaving the global with no event methods, when the shared target was
-    // valid and correctly wired up. A frozen state still reading `false` keeps
-    // failing, as it must: nothing can record that install.
+    // Skipped when the flag already reads `true`: a non-writable property throws
+    // on assignment in strict mode even for a same-value write. Otherwise a
+    // frozen state left by a copy that already installed would roll back the
+    // three methods just defined and report `blocked`, leaving the global with no
+    // event methods. A frozen state still reading `false` keeps failing, as it
+    // must: nothing can record that install.
     if (readMember(state, 'isInstalled') !== true) {
       state.isInstalled = true;
     }

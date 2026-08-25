@@ -40,14 +40,9 @@ export class FetchAdapter implements HTTPAdapter {
       const normalizedError = normalizeError(error);
 
       // TLS certificate failures → 495, matching NodeAdapter. A rejected
-      // certificate is deterministic: the same request against the same server
-      // will fail identically, so retrying only burns the policy's attempts.
-      // Without this the failure arrives as `status: 0`, which is retryable.
-      //
-      // Server runtimes only. Bun exposes the OpenSSL code on the error and
-      // Node hangs it off `cause`, both of which are recognized; a browser
-      // reports an opaque `TypeError` with neither, so this cannot fire there
-      // and such a failure keeps the ordinary transport-error shape.
+      // certificate fails identically every time, and `status: 0` is retryable.
+      // Server runtimes only: Bun puts the OpenSSL code on the error and Node
+      // hangs it off `cause`, while a browser reports an opaque `TypeError`.
       if (isTLSCertificateError(normalizedError)) {
         return {
           status: 495,
@@ -99,26 +94,16 @@ export class FetchAdapter implements HTTPAdapter {
     try {
       rawBody = await readResponseBody(method, response);
     } catch (error) {
-      // Headers already arrived, so the server responded and the status is
-      // real — the body transfer is what failed (peer reset mid-body, premature
-      // close, short read against Content-Length). Resolve with isStreamError
-      // and the real status rather than throwing, which would land on the
-      // client's generic network-error path as status 0 and be eligible for
-      // retry. The request reached the server, so replay is not safe.
+      // Headers already arrived, so the status is real and the body transfer is
+      // what failed. Resolve with isStreamError rather than throwing, which would
+      // land on the client's generic network path as a retryable status 0.
       //
-      // An abort here is re-thrown rather than resolved, so a cancellation stays
-      // a cancellation. But `signal` is the client's composite attempt signal,
-      // aborted for a per-attempt timeout as much as for a caller cancel, and
-      // this adapter cannot tell the two apart — only the client knows which
-      // fired.
-      //
-      // So the error carries the response metadata out with it, the way
-      // NodeAdapter tags its response-stream aborts. The client already sorts
-      // it: a caller cancel resolves as cancelled, while a timeout that struck
-      // after headers becomes a stream error with the real status. Rethrowing
-      // bare would lose the status and headers and leave an otherwise terminal
-      // post-header failure eligible for retry — the same fetch-versus-Node
-      // divergence this adapter's buffered path was fixed for.
+      // An abort is re-thrown so a cancellation stays a cancellation, but
+      // `signal` is the composite attempt signal — this adapter cannot tell a
+      // per-attempt timeout from a caller cancel. So the response metadata rides
+      // out with the error, the way NodeAdapter tags its aborts, and the client
+      // sorts it: cancel stays cancelled, a post-header timeout becomes a
+      // terminal stream error with the real status.
       if (isAbortError(error) || signal?.aborted) {
         throw markResponseStreamAbort(
           error,
@@ -269,40 +254,27 @@ function materializeFetchHeaders(
 }
 
 /**
- * Tag an abort thrown while reading the body with the response already
- * received, matching what NodeAdapter attaches to its response-stream aborts.
+ * Tag an abort thrown while reading the body with the response already received,
+ * matching what NodeAdapter attaches to its response-stream aborts. The client
+ * decides what the abort meant; this only makes the evidence survive the throw.
  *
- * Headers had arrived by the time the read started, so the status is real and
- * worth carrying out. The client decides what the abort meant; this only makes
- * sure the evidence survives the throw.
- *
- * Unlike NodeAdapter this omits `effectiveRequestHeaders`, here and everywhere
- * else in this adapter. `fetch` exposes no view of the final wire headers —
- * Host, Content-Length, and Accept-Encoding are added below the API, and in a
- * browser they are forbidden header names JS may not read. Echoing the request's
- * own headers back would claim a proof this adapter does not have, and the field
- * means the headers actually sent.
+ * `effectiveRequestHeaders` is omitted throughout this adapter: `fetch` exposes
+ * no view of the final wire headers, and echoing the request's own back would
+ * claim a proof it does not have.
  */
 function markResponseStreamAbort(
   error: unknown,
   status: number,
   headers: Record<string, string | string[]>,
 ): unknown {
-  // Per the Fetch Standard the rejection is the signal's abort reason verbatim,
-  // so `abort('stop')` rejects with the string itself, and `abort(err)` rejects
-  // with that very object. Returning it untagged sends the client down its early
-  // cancellation path, where the response headers — and any Set-Cookie on them —
-  // are dropped.
+  // Per the Fetch Standard the rejection is the abort reason verbatim, so
+  // returning it untagged sends the client down its early cancellation path and
+  // drops the response headers, Set-Cookie included.
   //
-  // Always a fresh object, never the reason itself. A signal hands the same
-  // reason to every consumer, so writing the metadata onto it would let two
-  // requests sharing one controller overwrite each other's status and headers,
-  // and store one response's cookies under the other's URL. A frozen reason
-  // would throw here outright.
-  //
-  // `name` is copied because the client routes on it: a genuine AbortError must
-  // still reach the branch that turns a post-header timeout into a stream
-  // failure, while a caller's plain Error must still read as a cancellation.
+  // Always a fresh object, never the reason itself: a signal hands the same
+  // reason to every consumer, so two requests sharing one controller would
+  // overwrite each other's status and headers (and a frozen reason would throw).
+  // `name` is copied because the client routes on it.
   const original = asError(error);
   const originalMessage =
     original === undefined ? undefined : readObjectMember(original, 'message');

@@ -96,27 +96,22 @@ export interface MockResponse {
    * Simulate a response-body failure that happens **after** headers arrive, so
    * consumers can test the `isStreamError` branch without a real socket.
    *
-   * The mock still reports `status`, `headers`, and cookies as given — matching
-   * a real post-header failure, where the status is known and only the body is
-   * lost — but `body` resolves as `null` regardless of what the handler set,
-   * and the response carries `isStreamError: true`. `HTTPClient` treats it as
-   * terminal and will not retry it.
+   * `status`, `headers` and cookies are reported as given, but `body` resolves as
+   * `null` whatever the handler set and the response carries
+   * `isStreamError: true`, which `HTTPClient` treats as terminal.
    *
-   * Pass `true` for the default `'stream_response_error'`, or name the code
-   * explicitly to exercise a specific `HTTPClientError.code`.
+   * Pass `true` for the default `'stream_response_error'`, or name the code.
    */
   streamError?: boolean | 'stream_write_error' | 'stream_response_error';
   /**
    * Simulate a failure that produced **no response at all** — a refused
    * connection, a name that did not resolve, a socket dropped before headers.
    *
-   * Nothing about the handler's response is delivered: no body, no headers, no
-   * cookies, and no terminal progress events, matching a real transport failure.
-   * The response carries `isTransportError: true`.
+   * Nothing from the handler's response is delivered: no body, headers, cookies,
+   * or terminal progress. The response carries `isTransportError: true`.
    *
    * Pass `true` for a plain `status: 0` failure, or an object to exercise the
-   * replay signals a real adapter would attach. Those are what the client's
-   * retry rules consult, so this is how a consumer tests them without a socket:
+   * replay signals a real adapter would attach:
    *
    * ```ts
    * // Proven undelivered — a POST may be replayed
@@ -395,21 +390,17 @@ export class MockAdapter implements HTTPAdapter {
       ? null
       : serializeResponseBody(mockResponse);
 
-    // A simulated stream error loses the body — but it strikes after headers
-    // arrived, so the headers the server sent still stand, Content-Type
-    // included. Header inference below reads `intendedBody` for that reason:
-    // deriving it from what survives would drop a header a real response had.
+    // A simulated stream error loses the body, but it strikes after headers
+    // arrived, so the headers still stand — Content-Type included. Header
+    // inference below reads `intendedBody` for that reason.
     const responseBody = streamErrorCode !== undefined ? null : intendedBody;
 
     // Signal upload complete, then report download size based on serialised body.
     request.onUploadProgress?.({ loaded: 1, total: 1, progress: 1 });
 
-    // A simulated stream error reports no terminal download progress. Real
-    // adapters fail the body read before that point — NodeAdapter resolves from
-    // the response-stream error handlers and FetchAdapter returns from its body
-    // catch — so emitting `progress: 1` here would signal a completed download
-    // for a body that never arrived, and progress-based tests would not match
-    // production.
+    // A simulated stream error reports no terminal download progress: real
+    // adapters fail the body read before that point, so `progress: 1` here would
+    // signal a completed download for a body that never arrived.
     if (streamErrorCode === undefined) {
       request.onDownloadProgress?.({
         loaded: responseBody?.length ?? 0,

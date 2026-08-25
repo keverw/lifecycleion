@@ -726,23 +726,14 @@ export class BaseHTTPClient {
                 body: null,
               },
               requestID,
-              // Provably false here: a cancel settles with no adapter response
-              // at all, and this branch is guarded on having one.
+              // Provably false: a cancel settles with no adapter response, and
+              // this branch is guarded on having one.
               wasCancelled: false,
-              // Hardcoded, including when a per-attempt timeout struck mid-body
-              // on the 3xx itself. A timeout is incidental here: the request
-              // ends at the redirect either way, so what the caller acts on is
-              // that redirects are disabled and where this one pointed, and
-              // `redirect_disabled` says exactly that.
-              //
-              // Passing the attempt's real `wasTimeout` would not change this
-              // on its own — the synthetic status-0 response below routes
-              // through a `_buildResponse` branch that fixes `isTimeout` at
-              // `false`. Making it stick would mean flipping that shared
-              // branch, and then `_normalizeError` reclassifies the failure
-              // from `redirect_disabled` to `timeout`, making the error code
-              // depend on whether the body happened to finish. That is a worse
-              // contract, so the flag stays false and stays documented.
+              // Hardcoded even when a per-attempt timeout struck mid-body. The
+              // request ends at the redirect either way, so `redirect_disabled`
+              // is the outcome the caller acts on; surfacing the timeout would
+              // reclassify the error code on whether the body happened to
+              // finish. See docs/http-client.md.
               wasTimeout: false,
               adapterType: this._adapter.getType(),
               initialURL: finalRequest.requestURL,
@@ -756,24 +747,11 @@ export class BaseHTTPClient {
 
           // --- Follow redirects (301, 302, 303, 307, 308) ---
           //
-          // A stream failure is terminal, and that has to hold for a 3xx too.
-          // The Location header survived — the body is what failed — so it is
-          // tempting to follow anyway, and following is exactly what makes the
-          // failure vanish: the hop continues, a healthy destination answers
-          // 200, and the attempt that failed is no longer the one being
-          // reported. A per-attempt timeout that struck mid-body is the case
-          // that stings, since `wasTimeout` is carried on the attempt result
-          // and a later hop overwrites it with its own.
-          //
-          // Falling through to the terminal path below loses nothing: it builds
-          // from this response, so the real 3xx status, `wasRedirectDetected`,
-          // and `detectedRedirectURL` are all reported — the caller still learns
-          // where it pointed, alongside the stream error and the timeout.
-          //
-          // The `followRedirects: false` branch above deliberately does not have
-          // this guard. It follows nothing, and it already reports a truncated
-          // 3xx exactly as it reports an intact one, which is what that branch
-          // exists to do.
+          // A stream failure is terminal, and that holds for a 3xx too: following
+          // would make the failure vanish, since a healthy destination answers 200
+          // and overwrites the failed attempt's `wasTimeout`. The terminal path
+          // below builds from this response, so the real 3xx status,
+          // `wasRedirectDetected` and `detectedRedirectURL` are all still reported.
           if (
             this._config.followRedirects &&
             adapterResponse &&
@@ -1250,22 +1228,10 @@ export class BaseHTTPClient {
     /**
      * Whether the policy still has a retry left at this point.
      *
-     * Counted from retries the policy has actually spent, not from the attempt
-     * number. Those differ: the attempt counter advances on every redirect hop
-     * as well, while a hop spends no budget — a redirect status never reaches
-     * `shouldRetry`. Using the attempt number would report a `POST` after a
-     * `307` as having no retry to suppress when one was plainly available.
-     *
-     * `policy.areAttemptsExhausted` is not usable here either. It lags by one,
-     * counting an attempt only once that attempt's error has been reported
-     * through `shouldRetry`, and every suppressed path short-circuits before
-     * that call — so on the final attempt it still reads "available". A
-     * query-only `shouldRetry` has the same lag, for the same reason.
-     *
-     * Each `shouldRetry` call records one error, and every call before this
-     * point returned true or the request would have stopped there, so the
-     * recorded count is the number of retries consumed — across redirect hops
-     * too, since they share one policy instance.
+     * Counted from retries actually spent, not from the attempt number, which
+     * also advances on redirect hops that spend no budget. `areAttemptsExhausted`
+     * lags by one — it counts an attempt only once `shouldRetry` has reported its
+     * error, and every suppressed path short-circuits before that call.
      */
     const isRetryAvailable = (): boolean =>
       policy !== null && policy.errors.length < policy.maxRetryAttempts;
@@ -1283,12 +1249,8 @@ export class BaseHTTPClient {
 
       /**
        * Emit the attempt-end event, filling in everything that is the same at
-       * every exit.
-       *
-       * There are fourteen places an attempt can end, and each used to build
-       * this object by hand — so adding a field meant remembering all fourteen,
-       * and `retrySuppressedReason` was in fact missed at three of them. Callers
-       * now pass only what actually differs between one ending and another.
+       * every exit. Callers pass only what differs between one ending and
+       * another, so a new field cannot be missed at one of the fourteen exits.
        */
       const emitAttemptEnd = (outcome: {
         willRetry: boolean;
@@ -1565,19 +1527,11 @@ export class BaseHTTPClient {
         }
 
         // A non-idempotent method may only be replayed on a transport outcome
-        // where the adapter proves no request bytes reached the server.
-        //
-        // That proof is `wasDefinitelyNotSent`, not `isRetryable`. The latter is
-        // a retry hint whose contract only ever defined `false`, so an adapter
-        // may set it `true` to mean "generally worth another attempt" without
-        // claiming anything about delivery — reading it as proof would replay a
-        // write after an ambiguous failure.
-        //
-        // The transport-outcome requirement is not redundant either. On a real
-        // response delivery is already settled the other way: the server
-        // answered, so the handler ran and may have committed.
-        //
-        // Adapters that cannot tell report nothing, which is treated as unsafe.
+        // where the adapter proves no request bytes reached the server. The proof
+        // is `wasDefinitelyNotSent`, not `isRetryable` — that flag only ever
+        // defined `false`, so `true` claims nothing about delivery. On a real
+        // response delivery is settled the other way: the server answered, so the
+        // handler may have committed. Silence is treated as unsafe.
         const isTransportOutcome =
           adapterResponse.isTransportError === true ||
           adapterResponse.status === 0;
@@ -1710,18 +1664,11 @@ export class BaseHTTPClient {
 
         // Before any classification: if the adapter attached the response it had
         // already received, the Set-Cookie on those headers belongs in the jar.
+        // Placed ahead of the branches so no arm can return past it.
         //
-        // This sits ahead of the branches rather than inside one because the
-        // same cookies were lost three times over, each in a different arm — the
-        // throw path had no ingestion at all, then the cancellation branch
-        // returned above it, then a primitive abort reason routed around it.
-        // Every arm below reaches this point, so there is no fourth way past it.
-        //
-        // The marker is required, not just the shape. `getResponseStreamAbortInfo`
-        // only checks that the two metadata fields are present and well-typed,
-        // which any thrown error could satisfy by coincidence or by design —
-        // and this writes to the cookie jar. Only an abort an adapter explicitly
-        // tagged is trusted, which is the same gate the branch below applies.
+        // The marker is required, not just the shape — any thrown error could
+        // satisfy `getResponseStreamAbortInfo` by coincidence, and this writes to
+        // the cookie jar. Same gate the branch below applies.
         const abortedResponse = isResponseStreamAbortError(error)
           ? getResponseStreamAbortInfo(error)
           : undefined;
@@ -1759,21 +1706,13 @@ export class BaseHTTPClient {
         }
 
         if (isResponseStreamAbortError(error)) {
-          // The marker is the gate, not the error's `name`. An adapter tags the
-          // throw whenever the attempt signal aborted mid-body, and the rejection
-          // it hands back is whatever the runtime produced — undici surfaces a
-          // timeout during the body read as `TypeError: terminated`, not as an
-          // AbortError. Requiring the name here dropped the tagged status and
-          // headers on the floor and let a post-header failure reach the generic
-          // network path as a retryable `status: 0`.
+          // The marker is the gate, not the error's `name`: undici surfaces a
+          // timeout during the body read as `TypeError: terminated`, and requiring
+          // the name dropped the tagged status and headers, letting a post-header
+          // failure reach the generic network path as a retryable `status: 0`.
           //
-          // This branch reaches the client as a thrown error rather than a
-          // resolved AdapterResponse, so it misses the suppression bookkeeping
-          // done on that path — but it still ends as a stream failure, and a
-          // caller asking why their retry stopped deserves the same answer.
-
-          // Normalized once for the cause slots below: the tag no longer implies
-          // an `Error`, since a runtime may reject the body read with anything.
+          // Normalized once for the cause slots below, since the tag no longer
+          // implies an `Error`.
           const streamCause = normalizeError(error);
 
           const streamSuppressionReason = (
@@ -1788,17 +1727,11 @@ export class BaseHTTPClient {
           /**
            * Redirect metadata for a response the client rebuilds itself.
            *
-           * A truncated `3xx` still knows where it pointed: `Location` arrived
-           * with the rest of the headers, and only the body failed. Adapters
-           * already resolve this for a stream error they *resolve*; the two
-           * returns below rebuild the response from the tag on a throw instead,
-           * so they have to resolve it themselves or the field is simply
-           * missing.
-           *
-           * Load-bearing now that a stream error is terminal for a `3xx`:
-           * nothing downstream follows the hop any more, so this is the only
-           * thing left that tells the caller where it was headed. Mirrors what
-           * FetchAdapter reports on its own post-header failure path.
+           * A truncated `3xx` still knows where it pointed — `Location` arrived
+           * with the headers. Adapters resolve this for a stream error they
+           * *resolve*; the returns below rebuild from the tag on a throw, so they
+           * must resolve it too. Load-bearing now that a stream error is terminal
+           * for a `3xx` and nothing downstream follows the hop.
            */
           const redirectFieldsFor = (
             status: number,
@@ -2034,11 +1967,8 @@ export class BaseHTTPClient {
         }
 
         // Network / adapter / per-attempt timeout — retry if policy allows.
-        //
-        // A throw carries no adapter response, so there is no evidence either
-        // way about delivery. For a non-idempotent method that means no retry:
-        // a per-attempt timeout in particular says the request was sent and the
-        // answer never came back, which is the case most likely to double-apply.
+        // A throw carries no adapter response, so delivery is unproven; for a
+        // non-idempotent method that means no retry.
         if (
           policy &&
           !cancelSignal.aborted &&
@@ -2649,13 +2579,9 @@ export class BaseHTTPClient {
     /**
      * Mirror one source signal's abort onto the composed one.
      *
-     * An unreadable reason degrades to `undefined`, and that is already the
-     * right outcome: `abort(undefined)` is not a way to pin the reason to
-     * `undefined`. Both the spec and every runtime normalize an `undefined`
-     * reason to a freshly minted `AbortError` DOMException, so this is exactly
-     * what a bare `abort()` produces — verified on Node and Bun, and locked in
-     * by 'an unreadable abort reason yields the platform default'. Branching on
-     * the read would add a second path to reach the same state.
+     * An unreadable reason degrades to `undefined`, which is already correct:
+     * spec and runtimes normalize that to a fresh `AbortError` DOMException,
+     * exactly what a bare `abort()` produces.
      */
     const abort = (signal: AbortSignal) =>
       controller.abort(readObjectMember(signal, 'reason'));
@@ -2861,11 +2787,9 @@ function getEffectiveRequestHeadersFromError(
 /**
  * Read a member from a value supplied by an adapter or runtime.
  *
- * Rejected values are not necessarily ordinary `Error` instances: they may be
- * proxies, abort reasons, or errors decorated by third-party adapters. Both a
- * property getter and a Proxy `get` trap can throw, so classifiers must treat an
- * unreadable member as absent rather than let that second error replace the one
- * they are trying to normalize.
+ * Rejected values may be proxies, abort reasons, or decorated errors, and both a
+ * getter and a Proxy trap can throw. An unreadable member is treated as absent so
+ * that second error cannot replace the one being normalized.
  */
 function readObjectMember(source: unknown, key: string): unknown {
   if (
@@ -2885,10 +2809,9 @@ function readObjectMember(source: unknown, key: string): unknown {
 /**
  * Validate and copy an adapter-provided header record into a plain object.
  *
- * Copying is part of the safety boundary: merely checking that the outer value
- * is an object would leave later `Object.entries` calls exposed to throwing
- * getters or Proxy traps. A malformed or unreadable record carries no usable
- * evidence and is therefore treated as absent.
+ * Copying is part of the safety boundary: checking the outer value alone would
+ * leave later reads exposed to throwing getters. A malformed or unreadable record
+ * is treated as absent.
  */
 function snapshotHeaderRecord(
   value: unknown,
@@ -2923,15 +2846,9 @@ function snapshotHeaderRecord(
  * Whether an adapter explicitly tagged a thrown value with one of the client's
  * marker flags.
  *
- * The value must be exactly `true`, not merely present. Presence alone lets an
- * ordinary error carrying the flag as `false` — or as anything else — reach a
- * branch meant for a tag an adapter deliberately set. Every adapter that sets
- * one of these writes the literal `true`, so nothing is lost by asking for it.
- *
- * The read is guarded because the value is whatever a runtime, a library, or a
- * caller's abort reason produced, so its accessors are not ours to rely on: a
- * throwing getter here would escape the classifier that exists to normalize the
- * failure. Unreadable is treated as untagged.
+ * Exactly `true`, not merely present: presence alone lets an error carrying the
+ * flag as `false` reach a branch meant for a deliberate tag. Every adapter writes
+ * the literal `true`. The read is guarded; unreadable is untagged.
  */
 function hasAdapterMarker(err: unknown, flag: string): boolean {
   return readObjectMember(err, flag) === true;
@@ -2940,9 +2857,8 @@ function hasAdapterMarker(err: unknown, flag: string): boolean {
 /**
  * Whether an adapter tagged this throw as a response-stream abort.
  *
- * The strictest of the markers to get wrong: it gates both the terminal
- * stream-error branch and, ahead of it, writing that response's `Set-Cookie`
- * into the jar from `streamAbortHeaders` that rode along on the same value.
+ * Gates both the terminal stream-error branch and writing that response's
+ * `Set-Cookie` into the jar, so it is the strictest marker to get wrong.
  */
 function isResponseStreamAbortError(err: unknown): boolean {
   return hasAdapterMarker(err, RESPONSE_STREAM_ABORT_FLAG);
