@@ -1664,9 +1664,12 @@ describe('NodeAdapter.send() — unit branches without server', () => {
 
       // An unreadable code supplies no proof that the request was never sent,
       // but it must still settle through the ordinary transport-error path.
+      // Unproven is reported by omitting the field, never as `false` — the
+      // contract is that absence means "not known".
       expect(response.status).toBe(0);
       expect(response.isTransportError).toBe(true);
-      expect(response.wasDefinitelyNotSent).toBe(false);
+      expect(response.wasDefinitelyNotSent).toBeUndefined();
+      expect('wasDefinitelyNotSent' in response).toBe(false);
       expect(response.errorCause).toBe(transportError);
     } finally {
       requestSpy.mockRestore();
@@ -3439,8 +3442,10 @@ describe('NodeAdapter via HTTPClient', () => {
 
       // Zero body bytes were written — there was no body — yet the headers
       // reached the server, so the request may already have been acted on.
-      // A body-byte counter would have called this safe to replay.
-      expect(res.wasDefinitelyNotSent).toBe(false);
+      // A body-byte counter would have called this safe to replay. Absent
+      // rather than `false`: nothing here proves delivery either way.
+      expect(res.wasDefinitelyNotSent).toBeUndefined();
+      expect('wasDefinitelyNotSent' in res).toBe(false);
 
       // And nothing claims the stronger "unsafe for every method" verdict: a
       // reset says nothing about replaying an idempotent request.

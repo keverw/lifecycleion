@@ -1281,6 +1281,77 @@ describe('HTTPClient — cancel reason via AbortError-throwing adapters', () => 
     }
   });
 
+  test('an unreadable abort reason yields the platform default', async () => {
+    // A reason whose getter throws is read as `undefined` and forwarded as
+    // such. That is the correct end state, not a degradation: `abort(undefined)`
+    // does not pin the reason to `undefined` — the spec normalizes it to a
+    // freshly minted AbortError, the same value a bare `abort()` produces. This
+    // pins that down, so nobody "fixes" the guarded read into forwarding a
+    // sentinel or a reason the source signal never had.
+    let observedReason: unknown = 'not captured';
+
+    const adapter: HTTPAdapter = {
+      getType: () => 'mock',
+      send: async (request: AdapterRequest): Promise<AdapterResponse> => {
+        await new Promise<void>((resolve) => {
+          request.signal?.addEventListener('abort', () => {
+            observedReason = request.signal?.reason;
+            resolve();
+          });
+        });
+
+        const error = new Error('Aborted');
+        error.name = 'AbortError';
+        throw error;
+      },
+    };
+
+    const client = new HTTPClient({ adapter });
+    const controller = new AbortController();
+    const originalAnyDescriptor = Object.getOwnPropertyDescriptor(
+      AbortSignal,
+      'any',
+    );
+
+    // Force the manual composition path — AbortSignal.any does its own
+    // propagation and never consults this code.
+    Object.defineProperty(AbortSignal, 'any', {
+      value: undefined,
+      configurable: true,
+    });
+
+    try {
+      const builder = client
+        .get('https://example.com/slow')
+        .signal(controller.signal);
+      const promise = builder.send();
+
+      setTimeout(() => {
+        // A reason nobody can read: the getter throws on every access.
+        Object.defineProperty(controller.signal, 'reason', {
+          get: () => {
+            throw new Error('reason is not readable');
+          },
+          configurable: true,
+        });
+        controller.abort();
+      }, 10);
+
+      const res = await promise;
+
+      expect(res.isCancelled).toBe(true);
+      // The composed signal carries a real AbortError, never a bare `undefined`
+      // and never a stand-in of the client's own invention.
+      expect(observedReason).toBeInstanceOf(Error);
+      expect((observedReason as Error).name).toBe('AbortError');
+      expect(builder.error?.cancelReason).toBeUndefined();
+    } finally {
+      if (originalAnyDescriptor) {
+        Object.defineProperty(AbortSignal, 'any', originalAnyDescriptor);
+      }
+    }
+  });
+
   test('no cancelReason when cancel called without reason via AbortError-throwing adapter', async () => {
     const { adapter } = makeAbortErrorAdapter();
     const client = new HTTPClient({ adapter });

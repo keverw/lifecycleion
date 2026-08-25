@@ -611,6 +611,12 @@ export class NodeAdapter implements HTTPAdapter {
         // and Bun: `socket.bytesWritten` is unimplemented under Bun and
         // `socket.connecting` reports the wrong value there, so either would
         // silently claim "nothing sent" for a request already received.
+        // Set only when proven, never as `false`. The field's contract is that
+        // absence means "not known", so an explicit `false` would read as a
+        // negative proof — "known to have been sent" — which is a claim this
+        // has no way to make. The client only ever tests for `=== true`, so the
+        // two are identical to it; they are not identical to a human reading a
+        // log line or an adapter author copying the shape.
         const wasDefinitelyNotSent = isPreConnectionError(error);
 
         // All other transport errors (ECONNREFUSED, ENOTFOUND, etc.) → status 0
@@ -622,7 +628,7 @@ export class NodeAdapter implements HTTPAdapter {
           {
             status: 0,
             isTransportError: true,
-            wasDefinitelyNotSent,
+            ...(wasDefinitelyNotSent ? { wasDefinitelyNotSent: true } : {}),
             headers: {},
             body: null,
             errorCause: error,

@@ -2629,6 +2629,18 @@ export class BaseHTTPClient {
     }
 
     const controller = new AbortController();
+
+    /**
+     * Mirror one source signal's abort onto the composed one.
+     *
+     * An unreadable reason degrades to `undefined`, and that is already the
+     * right outcome: `abort(undefined)` is not a way to pin the reason to
+     * `undefined`. Both the spec and every runtime normalize an `undefined`
+     * reason to a freshly minted `AbortError` DOMException, so this is exactly
+     * what a bare `abort()` produces — verified on Node and Bun, and locked in
+     * by 'an unreadable abort reason yields the platform default'. Branching on
+     * the read would add a second path to reach the same state.
+     */
     const abort = (signal: AbortSignal) =>
       controller.abort(readObjectMember(signal, 'reason'));
 
