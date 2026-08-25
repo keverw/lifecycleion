@@ -19,6 +19,7 @@ import {
   parseContentType,
   resolveAbsoluteURL,
   resolveAbsoluteURLForRuntime,
+  resolveDetectedRedirectURL,
   scalarHeader,
   serializeBody,
 } from './utils';
@@ -738,9 +739,29 @@ export class BaseHTTPClient {
           }
 
           // --- Follow redirects (301, 302, 303, 307, 308) ---
+          //
+          // A stream failure is terminal, and that has to hold for a 3xx too.
+          // The Location header survived — the body is what failed — so it is
+          // tempting to follow anyway, and following is exactly what makes the
+          // failure vanish: the hop continues, a healthy destination answers
+          // 200, and the attempt that failed is no longer the one being
+          // reported. A per-attempt timeout that struck mid-body is the case
+          // that stings, since `wasTimeout` is carried on the attempt result
+          // and a later hop overwrites it with its own.
+          //
+          // Falling through to the terminal path below loses nothing: it builds
+          // from this response, so the real 3xx status, `wasRedirectDetected`,
+          // and `detectedRedirectURL` are all reported — the caller still learns
+          // where it pointed, alongside the stream error and the timeout.
+          //
+          // The `followRedirects: false` branch above deliberately does not have
+          // this guard. It follows nothing, and it already reports a truncated
+          // 3xx exactly as it reports an intact one, which is what that branch
+          // exists to do.
           if (
             this._config.followRedirects &&
             adapterResponse &&
+            !adapterResponse.isStreamError &&
             REDIRECT_STATUS_CODES.has(adapterResponse.status)
           ) {
             hopCount++;
@@ -1748,6 +1769,42 @@ export class BaseHTTPClient {
               ? 'stream_error'
               : undefined;
 
+          /**
+           * Redirect metadata for a response the client rebuilds itself.
+           *
+           * A truncated `3xx` still knows where it pointed: `Location` arrived
+           * with the rest of the headers, and only the body failed. Adapters
+           * already resolve this for a stream error they *resolve*; the two
+           * returns below rebuild the response from the tag on a throw instead,
+           * so they have to resolve it themselves or the field is simply
+           * missing.
+           *
+           * Load-bearing now that a stream error is terminal for a `3xx`:
+           * nothing downstream follows the hop any more, so this is the only
+           * thing left that tells the caller where it was headed. Mirrors what
+           * FetchAdapter reports on its own post-header failure path.
+           */
+          const redirectFieldsFor = (
+            status: number,
+            headers: Record<string, string | string[]>,
+          ): Pick<
+            AdapterResponse,
+            'wasRedirectDetected' | 'detectedRedirectURL'
+          > => {
+            const detectedRedirectURL = resolveDetectedRedirectURL(
+              sentRequest.requestURL,
+              status,
+              headers,
+            );
+
+            return {
+              wasRedirectDetected:
+                detectedRedirectURL !== undefined ||
+                REDIRECT_STATUS_CODES.has(status),
+              ...(detectedRedirectURL ? { detectedRedirectURL } : {}),
+            };
+          };
+
           if (cancelSignal.aborted) {
             emitAttemptEnd({
               willRetry: false,
@@ -1792,6 +1849,10 @@ export class BaseHTTPClient {
             return {
               adapterResponse: {
                 status: abortedResponse.status,
+                ...redirectFieldsFor(
+                  abortedResponse.status,
+                  abortedResponse.headers,
+                ),
                 headers: abortedResponse.headers,
                 body: null,
                 isStreamError: true,
@@ -1828,10 +1889,14 @@ export class BaseHTTPClient {
             status: abortedResponse?.status ?? 0,
           });
 
+          const fallbackStatus = abortedResponse?.status ?? 0;
+          const fallbackHeaders = abortedResponse?.headers ?? {};
+
           return {
             adapterResponse: {
-              status: abortedResponse?.status ?? 0,
-              headers: abortedResponse?.headers ?? {},
+              status: fallbackStatus,
+              ...redirectFieldsFor(fallbackStatus, fallbackHeaders),
+              headers: fallbackHeaders,
               body: null,
               isStreamError: true,
               streamErrorCode: 'stream_response_error',

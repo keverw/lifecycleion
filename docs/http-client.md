@@ -1288,6 +1288,8 @@ A transport failure is not by itself a licence to replay. `status: 0` means no u
 
 Treating a stream error as a transport failure is the mistake worth guarding against: the superficial resemblance is strong, but it inverts the replay decision. `HTTPClient` already applies this internally — a stream error is never retried, even though its status might otherwise be retryable.
 
+Terminal means terminal for a `3xx` too: a redirect whose body failed is **not** followed, even with `followRedirects: true`. The `Location` header survived, so following would work — and that is the problem, because the hop would continue, a healthy destination would answer `200`, and the failure would be gone from the result. A per-attempt timeout that struck mid-body is the case that stings, since a later hop reports its own `isTimeout`. Nothing is lost by stopping: the response reports the real `3xx` status alongside `isStreamError`, with `wasRedirectDetected` and `detectedRedirectURL` still telling you where it pointed.
+
 Two things deliberately do **not** set the flag. A caller's own `AbortSignal` firing classifies as `isCancelled` (or `isTimeout`), since that is your decision rather than a network fault. A failure with no headers at all — connection refused, DNS, TLS rejection — is a plain transport failure, because no status was ever received for the flag to qualify.
 
 #### Adapter Support
@@ -1368,7 +1370,7 @@ Since the client treats anything other than `false` as retryable, an unset value
 
 It is absent when a retry was scheduled, when no policy is configured, when the policy has no attempts left, or when the status was never retryable in the first place — in those cases nothing was suppressed, so naming a cause would misdescribe why the request stopped.
 
-`adapter_veto` does not occur with the built-in adapters. Both set `isRetryable: false` only for a rejected TLS certificate, and pair it with `495`, which is not a retryable status — so the status ends the request before the veto is consulted, and nothing was suppressed to report. It is reachable only from a custom adapter that vetoes a status the client would otherwise retry.
+`adapter_veto` does not occur with a real transport. `NodeAdapter` and `FetchAdapter` set `isRetryable: false` only for a rejected TLS certificate, and pair it with `495`, which is not a retryable status — so the status ends the request before the veto is consulted, and nothing was suppressed to report. It is reachable from `MockAdapter` via `transportError: { isRetryable: false }`, whose default `status: 0` _is_ retryable (that is what the [`/secure` example above](#failures-before-a-response) exercises), and from a custom adapter that vetoes a status the client would otherwise retry.
 
 ```typescript
 await client

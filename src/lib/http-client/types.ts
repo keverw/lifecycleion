@@ -302,11 +302,13 @@ export interface AttemptEndEvent {
    * would misdescribe why the request stopped.
    *
    * - `adapter_veto` — the adapter reported `isRetryable: false`, meaning no
-   *   attempt can succeed. Not produced by the built-in adapters: they set that
-   *   flag only for a rejected TLS certificate and pair it with `495`, which is
-   *   not a retryable status, so the status ends the request before the veto is
-   *   consulted. Reachable from a custom adapter that vetoes a status the
-   *   client would otherwise retry.
+   *   attempt can succeed. No real transport produces it: `NodeAdapter` and
+   *   `FetchAdapter` set that flag only for a rejected TLS certificate and pair
+   *   it with `495`, which is not a retryable status, so the status ends the
+   *   request before the veto is consulted. It is reachable from `MockAdapter`
+   *   via `transportError: { isRetryable: false }`, whose default `status: 0`
+   *   is retryable, and from a custom adapter that vetoes a status the client
+   *   would otherwise retry.
    * - `stream_error` — the response body failed after headers arrived, so the
    *   server received the request and the outcome is unknown.
    * - `non_idempotent_method` — a `POST` or `PATCH` with no proof the request

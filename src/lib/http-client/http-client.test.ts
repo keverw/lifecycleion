@@ -3190,6 +3190,187 @@ describe('HTTPClient — redirect', () => {
     ]);
     expect(errorCodes).toEqual(['redirect_loop']);
   });
+
+  test('does not follow a 3xx whose body failed after headers arrived', async () => {
+    const requestedPaths: string[] = [];
+
+    const adapter: HTTPAdapter = {
+      getType: () => 'node',
+      send: (request: AdapterRequest): Promise<AdapterResponse> => {
+        requestedPaths.push(new URL(request.requestURL).pathname);
+
+        if (requestedPaths.length === 1) {
+          return Promise.resolve({
+            status: 302,
+            wasRedirectDetected: true,
+            detectedRedirectURL: 'https://example.com/next',
+            headers: { location: '/next' },
+            body: null,
+            isStreamError: true,
+            streamErrorCode: 'stream_response_error',
+            errorCause: new Error('terminated'),
+          });
+        }
+
+        return Promise.resolve({
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+          body: new TextEncoder().encode('{"ok":true}'),
+        });
+      },
+    };
+
+    const client = new HTTPClient({
+      adapter,
+      baseURL: 'https://example.com',
+      followRedirects: true,
+    });
+
+    const builder = client.get('/start');
+    const res = await builder.send();
+
+    // The healthy destination must never be reached — following it would have
+    // resolved a terminal stream failure as a 200.
+    expect(requestedPaths).toEqual(['/start']);
+    expect(res.status).toBe(302);
+    expect(res.isStreamError).toBe(true);
+    expect(res.isFailed).toBe(true);
+    expect(res.wasRedirectFollowed).toBe(false);
+    // The Location header survived the truncation, so the target is still reported.
+    expect(res.wasRedirectDetected).toBe(true);
+    expect(res.detectedRedirectURL).toBe('https://example.com/next');
+    expect(builder.error?.code).toBe('stream_response_error');
+  });
+
+  test('keeps isTimeout on a 3xx truncated by a per-attempt timeout', async () => {
+    let callCount = 0;
+
+    const adapter: HTTPAdapter = {
+      getType: () => 'node',
+      send: async (request: AdapterRequest): Promise<AdapterResponse> => {
+        callCount++;
+
+        if (callCount === 1) {
+          // Headers arrived, then the attempt signal fired mid-body — the shape
+          // adapters hand back for a timeout that strikes during the body read.
+          await new Promise<void>((resolve) => {
+            request.signal?.addEventListener('abort', () => {
+              resolve();
+            });
+          });
+
+          const error = new Error('Request aborted during response streaming');
+          error.name = 'AbortError';
+
+          throw Object.assign(error, {
+            [RESPONSE_STREAM_ABORT_FLAG]: true,
+            streamAbortStatus: 302,
+            streamAbortHeaders: { location: '/next' },
+          });
+        }
+
+        return {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+          body: new TextEncoder().encode('{"ok":true}'),
+        };
+      },
+    };
+
+    const client = new HTTPClient({
+      adapter,
+      baseURL: 'https://example.com',
+      followRedirects: true,
+      timeout: 25,
+    });
+
+    const builder = client.get('/start');
+    const res = await builder.send();
+
+    expect(callCount).toBe(1);
+    expect(res.status).toBe(302);
+    expect(res.isStreamError).toBe(true);
+    // The whole point: a followed hop would have reported its own isTimeout.
+    expect(res.isTimeout).toBe(true);
+    expect(res.isFailed).toBe(true);
+    expect(res.wasRedirectFollowed).toBe(false);
+    // Nothing follows the hop any more, so the rebuilt response is the only
+    // thing left that can say where it pointed. The client resolves it from the
+    // headers the adapter tagged onto the throw.
+    expect(res.wasRedirectDetected).toBe(true);
+    expect(res.detectedRedirectURL).toBe('https://example.com/next');
+    expect(builder.error?.code).toBe('stream_response_error');
+  });
+
+  test('reports the redirect target of a truncated 3xx when following is off', async () => {
+    const adapter: HTTPAdapter = {
+      getType: () => 'node',
+      send: async (request: AdapterRequest): Promise<AdapterResponse> => {
+        await new Promise<void>((resolve) => {
+          request.signal?.addEventListener('abort', () => {
+            resolve();
+          });
+        });
+
+        const error = new Error('Request aborted during response streaming');
+        error.name = 'AbortError';
+
+        throw Object.assign(error, {
+          [RESPONSE_STREAM_ABORT_FLAG]: true,
+          streamAbortStatus: 302,
+          streamAbortHeaders: { location: '/next' },
+        });
+      },
+    };
+
+    const client = new HTTPClient({
+      adapter,
+      baseURL: 'https://example.com',
+      followRedirects: false,
+      timeout: 25,
+    });
+
+    const builder = client.get('/start');
+    const res = await builder.send();
+
+    // redirect_disabled hardcodes wasRedirectDetected, so without the resolved
+    // target this branch reported "there was a redirect" and no destination.
+    expect(builder.error?.code).toBe('redirect_disabled');
+    expect(res.wasRedirectDetected).toBe(true);
+    expect(res.detectedRedirectURL).toBe('https://example.com/next');
+  });
+
+  test('still reports redirect_disabled for a truncated 3xx when following is off', async () => {
+    const adapter: HTTPAdapter = {
+      getType: () => 'node',
+      send: (_request: AdapterRequest): Promise<AdapterResponse> =>
+        Promise.resolve({
+          status: 302,
+          wasRedirectDetected: true,
+          detectedRedirectURL: 'https://example.com/next',
+          headers: { location: '/next' },
+          body: null,
+          isStreamError: true,
+          streamErrorCode: 'stream_response_error',
+          errorCause: new Error('terminated'),
+        }),
+    };
+
+    const client = new HTTPClient({
+      adapter,
+      baseURL: 'https://example.com',
+      followRedirects: false,
+    });
+
+    const builder = client.get('/start');
+    const res = await builder.send();
+
+    // That branch follows nothing, so it reports a truncated 3xx exactly as it
+    // reports an intact one.
+    expect(builder.error?.code).toBe('redirect_disabled');
+    expect(res.wasRedirectDetected).toBe(true);
+    expect(res.detectedRedirectURL).toBe('https://example.com/next');
+  });
 });
 
 describe('HTTPClient — sub-clients', () => {

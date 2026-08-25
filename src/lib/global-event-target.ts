@@ -116,6 +116,46 @@ function asUsableTarget(value: unknown): EventTarget | null {
   return value as EventTarget;
 }
 
+/**
+ * Read the three methods off a candidate target and bind them, in one pass.
+ *
+ * The values installed on the global object come from here rather than from a
+ * later `target[name]` in the definition loop, which would be the same
+ * validate-once-use-a-later-read gap {@link asUsableTarget} exists to close,
+ * moved one level in. The methods belong to an object this module does not own
+ * just as much as the `target` field does, so a second read of one is no more
+ * trustworthy than a second read of the other.
+ *
+ * `null` means this target cannot back an install — a method that is missing,
+ * that stopped being callable, or whose read (or `bind`) threw. That is a
+ * reason to look elsewhere for a target, never a reason to fail: the caller
+ * falls back to a fresh one.
+ *
+ * @returns The bound methods by name, or `null` if any of them could not be taken.
+ */
+function bindTargetMethods(
+  target: EventTarget,
+): Record<string, (...args: unknown[]) => unknown> | null {
+  const bound: Record<string, (...args: unknown[]) => unknown> = {};
+
+  for (const name of METHOD_NAMES) {
+    const method = readMember(target, name);
+
+    if (typeof method !== 'function') {
+      return null;
+    }
+
+    try {
+      bound[name] = (method as (...args: unknown[]) => unknown).bind(target);
+    } catch {
+      // `bind` is itself a property read on somebody else's function.
+      return null;
+    }
+  }
+
+  return bound;
+}
+
 /** Whether shared state records a completed install by this module. */
 function isStateInstalled(state: GlobalEventTargetState | undefined): boolean {
   return state !== undefined && readMember(state, 'isInstalled') === true;
@@ -278,13 +318,39 @@ export function installGlobalEventTarget(): GlobalEventTargetInstallResult {
     }
   };
 
+  // Re-read `target` rather than reusing the value {@link asUsableState} saw,
+  // and take the three methods off it in the same pass. The field and the
+  // methods on it belong to an object this module does not own, so a getter is
+  // free to return a real `EventTarget` when it is probed and something else —
+  // or nothing at all — on the next read. These are the values the globals are
+  // actually bound to, so these are the reads that have to validate; trusting
+  // the earlier probe would bind them to something that never passed a check.
+  //
+  // A target that no longer vouches for itself is treated the same way an
+  // unusable state object is: as absent, so installation proceeds with a fresh
+  // one. Nothing is orphaned by that — a target that cannot service the three
+  // methods never had listeners registered through this module.
+  const reusableTarget = readStateTarget(existingState);
+  const reusableMethods =
+    reusableTarget === null ? null : bindTargetMethods(reusableTarget);
+
   let state: GlobalEventTargetState;
+  let methods: Record<string, (...args: unknown[]) => unknown>;
 
   try {
-    if (existingState === undefined) {
+    if (existingState === undefined || reusableMethods === null) {
       const target = new (eventTargetConstructor as new () => EventTarget)();
+      const freshMethods = bindTargetMethods(target);
+
+      if (freshMethods === null) {
+        // The constructor read from the global object produced something that
+        // cannot service the three methods, so there is nothing to back them
+        // with. Nothing has been defined yet, so there is nothing to undo.
+        return 'unsupported';
+      }
 
       state = { target, isInstalled: false };
+      methods = freshMethods;
 
       Object.defineProperty(g, GLOBAL_KEY, {
         value: state,
@@ -298,13 +364,12 @@ export function installGlobalEventTarget(): GlobalEventTargetInstallResult {
       // Another copy of Lifecycleion already made the target; reuse it so listeners
       // registered through it keep working.
       state = existingState;
+      methods = reusableMethods;
     }
-
-    const { target } = state;
 
     for (const name of METHOD_NAMES) {
       Object.defineProperty(g, name, {
-        value: (target[name] as (...args: unknown[]) => unknown).bind(target),
+        value: methods[name],
         enumerable: false,
         writable: true,
         configurable: true,

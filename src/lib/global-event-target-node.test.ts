@@ -470,4 +470,34 @@ describe('global event target on the Node runtime', () => {
     expect(result.isStateUnchanged).toBe(true);
     expect(result.areMethodsRolledBack).toBe(true);
   }, 30_000);
+
+  test('a shared target that goes bad after validation does not block the install', async () => {
+    interface ShiftingSharedTargetFixtureResult {
+      didImportThrow: boolean;
+      installResult: string;
+      isPolyfilled: boolean;
+      hasBackingTarget: boolean;
+      didReceiveEvent: boolean;
+      areMethodsInstalled: boolean;
+    }
+
+    const result = await runFixtureJSON<ShiftingSharedTargetFixtureResult>(
+      'shifting-shared-target',
+    );
+
+    expect(result.didImportThrow).toBe(false);
+
+    // The bind is the read that matters, so it re-validates. A target that no
+    // longer vouches for itself is absent, not fatal: installation proceeds with
+    // a fresh one instead of letting the throw roll back the methods already
+    // defined and report 'blocked'.
+    expect(result.installResult).toBe('installed');
+    expect(result.isPolyfilled).toBe(true);
+    expect(result.hasBackingTarget).toBe(true);
+    expect(result.areMethodsInstalled).toBe(true);
+
+    // And the three methods are wired to one working target, not to whatever the
+    // second read happened to produce.
+    expect(result.didReceiveEvent).toBe(true);
+  }, 30_000);
 });
