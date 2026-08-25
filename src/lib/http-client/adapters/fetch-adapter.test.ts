@@ -919,6 +919,46 @@ describe('FetchAdapter aborts while reading the body', () => {
     expect(response.isFailed).toBe(true);
   }, 15_000);
 
+  test('a per-attempt timeout is terminal even when the rejection is not an AbortError', async () => {
+    let attempts = 0;
+
+    (globalThis as any).fetch = (_url: string, init?: RequestInit) => {
+      attempts++;
+      return Promise.resolve({
+        status: 503,
+        type: 'default',
+        headers: new Headers({ 'content-type': 'application/json' }),
+        arrayBuffer: () =>
+          new Promise((_resolve, reject) => {
+            // undici surfaces a timeout during the body read this way: the
+            // signal aborts, but what comes back is a TypeError, not an
+            // AbortError. The adapter tags it all the same, and the marker —
+            // not the name — is what the client routes on.
+            init?.signal?.addEventListener('abort', () => {
+              reject(new TypeError('terminated'));
+            });
+          }),
+      });
+    };
+
+    const client = new HTTPClient({
+      adapter: new FetchAdapter(),
+      baseURL: 'http://api.test',
+      timeout: 40,
+      retryPolicy: { strategy: 'fixed', maxRetryAttempts: 2, delayMS: 1 },
+    });
+
+    const response = await client.get('/slow-body').send();
+
+    // Requiring the name here dropped the tagged status and headers and let
+    // the throw reach the generic network path as a retryable status 0 — so
+    // the request was replayed twice against a server that had answered.
+    expect(attempts).toBe(1);
+    expect(response.status).toBe(503);
+    expect(response.isStreamError).toBe(true);
+    expect(response.isTimeout).toBe(true);
+  }, 15_000);
+
   test('a string abort reason keeps the response headers and its reason', async () => {
     const { CookieJar } = await import('../cookie-jar');
     const jar = new CookieJar();

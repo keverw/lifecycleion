@@ -14,6 +14,7 @@ import {
   DEFAULT_REQUEST_ATTEMPT_HEADER,
   DEFAULT_REQUEST_ID_HEADER,
   DEFAULT_USER_AGENT,
+  RESPONSE_STREAM_ABORT_FLAG,
 } from './consts';
 import { MockAdapter } from './adapters/mock-adapter';
 import type {
@@ -1265,6 +1266,93 @@ describe('HTTPClient — cancel reason via AbortError-throwing adapters', () => 
     await promise;
 
     expect(builder.error?.cancelReason).toBeUndefined();
+  });
+});
+
+describe('HTTPClient — response-stream abort marker', () => {
+  // The marker is the only thing standing between an arbitrary thrown value and
+  // both the terminal stream-error branch and the cookie jar, so it is trusted
+  // only when an adapter set it to exactly `true`.
+  function makeThrowingAdapter(error: Error): HTTPAdapter {
+    return {
+      getType: () => 'mock' as const,
+      send: (): Promise<AdapterResponse> => Promise.reject(error),
+    };
+  }
+
+  /** Response metadata of the kind a genuine tagged abort carries. */
+  const staleMetadata = {
+    streamAbortStatus: 503,
+    streamAbortHeaders: { 'set-cookie': ['stale=1; Path=/'] },
+  };
+
+  test('a marker set to false is not a stream abort, and its cookies are not stored', async () => {
+    const jar = new CookieJar();
+    const client = new HTTPClient({
+      adapter: makeThrowingAdapter(
+        Object.assign(new Error('boom'), {
+          [RESPONSE_STREAM_ABORT_FLAG]: false,
+          ...staleMetadata,
+        }),
+      ),
+      baseURL: 'http://api.test',
+      cookieJar: jar,
+    });
+
+    const response = await client.get('/x').send();
+
+    // Testing for the property rather than its value classified an ordinary
+    // adapter error as a terminal stream failure, and filed the Set-Cookie it
+    // happened to carry under this request's URL.
+    expect(response.isStreamError).toBe(false);
+    expect(response.status).toBe(0);
+    expect(jar.getCookiesFor('http://api.test/')).toHaveLength(0);
+  });
+
+  test('a marker whose getter throws is treated as untagged', async () => {
+    const hostile = new Error('boom');
+
+    Object.defineProperty(hostile, RESPONSE_STREAM_ABORT_FLAG, {
+      get() {
+        throw new Error('nope');
+      },
+    });
+    Object.assign(hostile, staleMetadata);
+
+    const jar = new CookieJar();
+    const client = new HTTPClient({
+      adapter: makeThrowingAdapter(hostile),
+      baseURL: 'http://api.test',
+      cookieJar: jar,
+    });
+
+    // An unguarded read would let the getter escape the classifier that exists
+    // to normalize the failure.
+    const response = await client.get('/x').send();
+
+    expect(response.isStreamError).toBe(false);
+    expect(response.status).toBe(0);
+    expect(jar.getCookiesFor('http://api.test/')).toHaveLength(0);
+  });
+
+  test('a marker set to true is trusted, keeping the real status and its cookies', async () => {
+    const jar = new CookieJar();
+    const client = new HTTPClient({
+      adapter: makeThrowingAdapter(
+        Object.assign(new Error('boom'), {
+          [RESPONSE_STREAM_ABORT_FLAG]: true,
+          ...staleMetadata,
+        }),
+      ),
+      baseURL: 'http://api.test',
+      cookieJar: jar,
+    });
+
+    const response = await client.get('/x').send();
+
+    expect(response.isStreamError).toBe(true);
+    expect(response.status).toBe(503);
+    expect(jar.getCookieHeaderString('http://api.test/next')).toBe('stale=1');
   });
 });
 
