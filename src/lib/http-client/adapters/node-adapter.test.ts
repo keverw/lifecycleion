@@ -418,6 +418,32 @@ describe('post-header stream aborts report why the retry stopped', () => {
     );
   });
 
+  test('ignores stream metadata on an error that was never tagged', async () => {
+    const jar = new CookieJar();
+
+    const adapter: HTTPAdapter = {
+      getType: () => 'node',
+      send: (): Promise<AdapterResponse> => {
+        // Shaped like a tagged response abort, but carrying no marker. Any
+        // adapter error could hold these fields by coincidence, and this path
+        // writes to the cookie jar.
+        const untagged = new Error('ordinary adapter failure');
+        Object.assign(untagged, {
+          streamAbortStatus: 200,
+          streamAbortHeaders: { 'set-cookie': 'injected=evil; Path=/' },
+        });
+
+        return Promise.reject(untagged);
+      },
+    };
+
+    const client = new HTTPClient({ adapter, cookieJar: jar });
+
+    await client.get('https://example.com/thing').send();
+
+    expect(jar.getCookieHeaderString('https://example.com/next')).toBe('');
+  });
+
   test('is absent with no retry policy, since nothing was suppressed', async () => {
     const client = new HTTPClient({ adapter: abortingAdapter() });
 

@@ -1679,7 +1679,15 @@ export class BaseHTTPClient {
         // throw path had no ingestion at all, then the cancellation branch
         // returned above it, then a primitive abort reason routed around it.
         // Every arm below reaches this point, so there is no fourth way past it.
-        const abortedResponse = getResponseStreamAbortInfo(error);
+        //
+        // The marker is required, not just the shape. `getResponseStreamAbortInfo`
+        // only checks that the two metadata fields are present and well-typed,
+        // which any thrown error could satisfy by coincidence or by design —
+        // and this writes to the cookie jar. Only an abort an adapter explicitly
+        // tagged is trusted, which is the same gate the branch below applies.
+        const abortedResponse = isResponseStreamAbortError(error)
+          ? getResponseStreamAbortInfo(error)
+          : undefined;
 
         if (cookieJar && abortedResponse) {
           cookieJar.processResponseHeaders(
