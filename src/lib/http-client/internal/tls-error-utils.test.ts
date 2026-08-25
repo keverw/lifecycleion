@@ -221,6 +221,87 @@ describe('isTLSCertificateError cause handling', () => {
     expect(isTLSCertificateError(wrapper)).toBe(true);
   });
 
+  test('classifies verification codes the code rules do not name', () => {
+    // OpenSSL exposes far more verification failures than CERT_ERROR_CODES
+    // lists, and none of these match any code rule: not the set, not the CRL
+    // token, not the ERR_TLS_/ERR_SSL_ prefixes. The message fallback is the
+    // only thing that catches them, which is exactly why it cannot be skipped
+    // for every error that merely carries a code. All are permanent.
+    const uncodedByRule: Array<[string, string]> = [
+      ['certificate not trusted', 'CERT_UNTRUSTED'],
+      ['certificate rejected', 'CERT_REJECTED'],
+      ['certificate signature failure', 'CERT_SIGNATURE_FAILURE'],
+      ['certificate is not yet valid', 'CERT_NOT_YET_VALID'],
+      ['certificate chain too long', 'CERT_CHAIN_TOO_LONG'],
+      ['unable to get issuer certificate', 'UNABLE_TO_GET_ISSUER_CERT'],
+      [
+        "unable to decrypt certificate's signature",
+        'UNABLE_TO_DECRYPT_CERT_SIGNATURE',
+      ],
+      [
+        "Hostname/IP does not match certificate's altnames",
+        'HOSTNAME_MISMATCH',
+      ],
+      ['invalid CA certificate', 'INVALID_CA'],
+    ];
+
+    for (const [message, code] of uncodedByRule) {
+      expect(isTLSCertificateError(makeError(message, code))).toBe(true);
+    }
+  });
+
+  test('a transport code outranks certificate wording in its message', () => {
+    // Node interpolates the hostname into these messages, so a host named
+    // `certificates.*` put /certificate/ in the message of an ordinary DNS
+    // blip. Classifying that as a certificate failure meant 495 with
+    // isRetryable: false — a veto that holds for every method, turning the
+    // most transient error there is into a permanent one.
+    const transportFailures: Array<[string, string]> = [
+      ['getaddrinfo EAI_AGAIN certificates.internal.corp', 'EAI_AGAIN'],
+      [
+        'connect ECONNREFUSED certificate-authority.internal:443',
+        'ECONNREFUSED',
+      ],
+      ['getaddrinfo ENOTFOUND self-signed-certs.example.com', 'ENOTFOUND'],
+      ['socket hang up', 'ECONNRESET'],
+    ];
+
+    for (const [message, code] of transportFailures) {
+      expect(isTLSCertificateError(makeError(message, code))).toBe(false);
+    }
+  });
+
+  test('a transport code on the cause does not veto a cert error on the outer', () => {
+    // Each link is classified on its own, so suppressing the fallback for one
+    // must not suppress it for the other.
+    const wrapped = makeError('unable to verify the first certificate');
+
+    (wrapped as Error & { cause?: unknown }).cause = makeError(
+      'getaddrinfo EAI_AGAIN api.example.com',
+      'EAI_AGAIN',
+    );
+
+    expect(isTLSCertificateError(wrapped)).toBe(true);
+  });
+
+  test('does not treat CRLF codes as CRL codes', () => {
+    // CRL is matched as an underscore-delimited token, so the one word that
+    // shares its prefix by accident cannot claim a permanent cert verdict.
+    // These are framing errors — connection problems, and retryable.
+    for (const code of [
+      'ERR_INVALID_CRLF',
+      'ERR_CRLF_EXPECTED',
+      'CHARACTER_CRLF',
+    ]) {
+      expect(isTLSCertificateError(makeError('bad framing', code))).toBe(false);
+    }
+
+    // The plural form is still a CRL code.
+    expect(
+      isTLSCertificateError(makeError('no CRLs included', 'NO_CRLS_INCLUDED')),
+    ).toBe(true);
+  });
+
   test('ignores a non-Error cause', () => {
     const withStringCause = makeError('boom') as Error & { cause?: unknown };
     withStringCause.cause = 'CERT_HAS_EXPIRED';

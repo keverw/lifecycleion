@@ -10,6 +10,35 @@ const CERT_ERROR_CODES = new Set([
   'CERT_REVOKED',
 ]);
 
+/** `CRL` or `CRLS` as an underscore-delimited token, anywhere in a code. */
+const CRL_CODE_PATTERN = /(?:^|_)CRLS?(?:_|$)/;
+
+/**
+ * Codes that name a DNS or socket failure, and so settle the question on their
+ * own: whatever the message says, the connection is what failed.
+ *
+ * Consulted only to suppress the message fallback — see the use site. This is
+ * deliberately not the same set as NodeAdapter's `PRE_CONNECTION_ERROR_CODES`,
+ * which answers a different question (did any request bytes reach the server?)
+ * and so must stay conservative in the opposite direction. A code belongs here
+ * whenever it proves the failure was not about a certificate, whether or not a
+ * connection was established.
+ */
+const TRANSPORT_ERROR_CODES = new Set([
+  'ENOTFOUND',
+  'EAI_AGAIN',
+  'ECONNREFUSED',
+  'ECONNRESET',
+  'ECONNABORTED',
+  'ETIMEDOUT',
+  'EPIPE',
+  'EHOSTUNREACH',
+  'EHOSTDOWN',
+  'ENETUNREACH',
+  'ENETDOWN',
+  'EADDRNOTAVAIL',
+]);
+
 /**
  * Best-effort classification for TLS certificate failures that should be
  * treated as non-retryable transport errors by NodeAdapter.
@@ -63,7 +92,14 @@ function isTLSCertificateErrorSelf(error: Error): boolean {
   // instead. The message fallback below does not catch them: 'CRL has expired'
   // and "format error in CRL's lastUpdate field" contain none of the words it
   // looks for, so without this they resolve as status 0 rather than 495.
-  if (code.includes('CRL')) {
+  //
+  // Matched as an underscore-delimited token rather than as a substring, which
+  // costs nothing and closes the one word that shares the prefix by accident:
+  // CRLF. No error code uses it today, but header and framing errors are
+  // exactly the place a runtime or library would mint one, and such a failure
+  // is a connection problem — the opposite of a permanent certificate verdict.
+  // The plural is allowed for NO_CRLS_INCLUDED.
+  if (CRL_CODE_PATTERN.test(code)) {
     return true;
   }
 
@@ -74,6 +110,33 @@ function isTLSCertificateErrorSelf(error: Error): boolean {
     return true;
   }
 
+  // A code that names a transport failure is authoritative, so the message is
+  // never consulted for one.
+  //
+  // The message test below is a last resort, and it runs against a string the
+  // runtime built — which, for a DNS or connect failure, has the hostname
+  // interpolated into it. `getaddrinfo EAI_AGAIN certificates.internal.corp`
+  // matches /certificate/ on the host's name alone, and any deployment calling
+  // a `certificates.*` or `certificate-authority.*` host would have had every
+  // DNS blip resolve as 495 with `isRetryable: false` — a veto that holds for
+  // every method, turning the most ordinary transient failure into a permanent
+  // one. Retrying a genuine certificate failure a few times wastes
+  // milliseconds; refusing to retry a DNS blip is the error class retries exist
+  // for.
+  //
+  // Only the fallback is suppressed. The code checks above still run first, so
+  // a code that genuinely names a certificate problem is unaffected — and this
+  // set contains none of them.
+  if (TRANSPORT_ERROR_CODES.has(code)) {
+    return false;
+  }
+
+  // Reached with either no code at all or a code the checks above do not
+  // recognize. The second case is why this fallback cannot simply be dropped
+  // for any error carrying a code: OpenSSL has far more verification failures
+  // than are listed above (CERT_UNTRUSTED, CERT_REJECTED, HOSTNAME_MISMATCH,
+  // UNABLE_TO_GET_ISSUER_CERT, INVALID_CA, …), none of which match the code
+  // rules, and all of which are permanent. The message is what catches them.
   const message = readMember(error, 'message');
 
   return typeof message === 'string'

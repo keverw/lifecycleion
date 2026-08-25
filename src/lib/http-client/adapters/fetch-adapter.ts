@@ -226,6 +226,13 @@ function materializeFetchHeaders(
  * Headers had arrived by the time the read started, so the status is real and
  * worth carrying out. The client decides what the abort meant; this only makes
  * sure the evidence survives the throw.
+ *
+ * Unlike NodeAdapter this omits `effectiveRequestHeaders`, here and everywhere
+ * else in this adapter. `fetch` exposes no view of the final wire headers —
+ * Host, Content-Length, and Accept-Encoding are added below the API, and in a
+ * browser they are forbidden header names JS may not read. Echoing the request's
+ * own headers back would claim a proof this adapter does not have, and the field
+ * means the headers actually sent.
  */
 function markResponseStreamAbort(
   error: unknown,
