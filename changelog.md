@@ -22,7 +22,7 @@
 - [0.0.18 (June 11, 2026)](#0018-june-11-2026)
 - [0.0.19 (July 24, 2026)](#0019-july-24-2026)
 - [0.0.20 (Aug 21, 2026)](#0020-aug-21-2026)
-- [0.0.21 (Unreleased)](#0021-unreleased)
+- [0.0.21 (Aug 25, 2026)](#0021-aug-25-2026)
 
 <!-- tocstop -->
 
@@ -147,7 +147,7 @@
 - Applied `brace-expansion` and `js-yaml` overrides to clear two high-severity advisories reaching the tree through ESLint's dev-only dependencies.
 - Dependency refresh within existing ranges: `find-my-way` 9.8.0, `tldts` 7.4.10, `uuid` 14.0.2, `@playwright/test` 1.62.1, and the `typescript-eslint` packages 8.67.0.
 
-## 0.0.21 (Unreleased)
+## 0.0.21 (Aug 25, 2026)
 
 - **Fixed callback error reporting on Node.js.** `safeHandleCallback()` and `safeHandleCallbackAndWait()` report failures by dispatching an `ErrorEvent` of type `'reportError'` through `globalThis.dispatchEvent()`. Node 25 added a global `ErrorEvent` constructor but did **not** make `globalThis` an `EventTarget`, so `dispatchEvent`, `addEventListener`, and `removeEventListener` are all `undefined` there. This meant callback errors were caught and then silently dropped on Node. The existing tests missed this because they run under Bun, which provides the browser-style global event methods. The same gap made `logger.registerReportErrorListener()` return `'not_available'` on Node.
 - **Added [global-event-target](./docs/global-event-target.md)** (`lifecycleion/global-event-target`), a conservative polyfill that supplies the missing global event methods, backed by a single shared `EventTarget`. It installs only when all three methods are absent, so native and user-installed implementations are never overwritten. It is idempotent, keeping the backing target and install flag in one shared object on `globalThis` (`__lifecycleion_global_event_target__`, the same style as `dev-mode` and `process-signal-manager`) so repeated initialization and multiple copies of the package share it. Installed properties are non-enumerable and bound to the backing target. A partial or foreign surface (some methods present, others missing or present but not callable, such as `globalThis.dispatchEvent = null`) is deliberately left alone rather than mixing methods from unrelated targets or clobbering a value the application put there. A member explicitly assigned `undefined` counts as absent, since that is how a global gets cleared. Reporting is skipped there, and the helpers still return their normal results. Because installation runs during module initialization, it never throws. A non-extensible global object (`Object.freeze(globalThis)`) or a non-configurable property returns `'blocked'`, and every global it reads, including the three methods and the `EventTarget` constructor, goes through one guarded read, since reading a global runs its getter and a getter can throw. A throwing accessor is reported as `'partial'` (or `'unsupported'` for the constructor) rather than crashing the import. The reporting path is likewise throw-proof. It can drop a report, but never raise an error while reporting one rather than breaking the import of `safe-handle-callback` and everything downstream of it. A definition rejected despite that preflight is rolled back so nothing is left half-installed. Importing `lifecycleion/safe-handle-callback` or `lifecycleion/logger` installs it, so for most users this is transparent. Browser and Bun behavior is unchanged, and `ErrorEvent` is never polyfilled. Node 25+ is the supported floor and provides it natively.
