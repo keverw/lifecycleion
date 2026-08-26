@@ -634,7 +634,7 @@ Status `0` covers adapter-level "no real HTTP response" conditions (network unre
 
 ### Method Safety
 
-A retryable status is necessary but not sufficient. `POST` and `PATCH` — the methods RFC 9110 does not define as idempotent — are **not** retried by default, because a status like `500` means the server responded, so the handler ran and may have committed. `PUT` and `DELETE` are unaffected: both mutate, but repeating either leaves the resource in the same state, which is what makes replay safe.
+A retryable status is necessary but not sufficient. `POST` and `PATCH`, the methods RFC 9110 does not define as idempotent, are **not** retried by default, because a status like `500` means the server responded, so the handler ran and may have committed. `PUT` and `DELETE` are unaffected: both mutate, but repeating either leaves the resource in the same state, which is what makes replay safe.
 
 Set `retryNonIdempotentMethods: true` on the client, or `.retryNonIdempotentMethods(true)` per request, when writes are guarded by an idempotency key. See [Non-Idempotent Methods](#non-idempotent-methods) for the full rules, including how transport failures are treated.
 
@@ -1273,7 +1273,7 @@ Once headers have arrived and the factory has been called, any mid-stream failur
 
 ### Stream Errors and Replay
 
-`isStreamError` is not limited to streamed responses. It is also set when a buffered response body fails after headers arrive — a peer reset mid-body, a premature close, or fewer bytes than a declared `Content-Length`. The real HTTP status is preserved in every case, so a truncated `200` still reports `200`, not `0`.
+`isStreamError` is not limited to streamed responses. It is also set when a buffered response body fails after headers arrive, such as from a peer reset mid-body, a premature close, or fewer bytes than a declared `Content-Length`. The real HTTP status is preserved in every case, so a truncated `200` still reports `200`, not `0`.
 
 For deciding whether a request may be resent, a stream error groups with a **real response**, not with a transport failure, even though both leave you without a usable body:
 
@@ -1284,15 +1284,15 @@ For deciding whether a request may be resent, a stream error groups with a **rea
 | `isStreamError`, real status                  | Yes, and it may have committed | No — the outcome is unknown            |
 | `5xx` with an intact body                     | Yes, and it may have committed | No — the outcome is unknown            |
 
-A transport failure is not by itself a licence to replay. `status: 0` means no usable response came back, which is not the same as the request never arriving — a connection dropped after the request was written looks identical from here. Only an adapter that can name the cause (a refused connection, a name that did not resolve) can turn that into proof.
+A transport failure is not by itself a licence to replay. `status: 0` means no usable response came back, which is not the same as the request never arriving. A connection dropped after the request was written looks identical from here. Only an adapter that can name the cause (a refused connection, a name that did not resolve) can turn that into proof.
 
-Treating a stream error as a transport failure is the mistake worth guarding against: the superficial resemblance is strong, but it inverts the replay decision. `HTTPClient` already applies this internally — a stream error is never retried, even though its status might otherwise be retryable.
+Treating a stream error as a transport failure is the mistake worth guarding against: the superficial resemblance is strong, but it inverts the replay decision. `HTTPClient` already applies this internally. A stream error is never retried, even though its status might otherwise be retryable.
 
-Terminal means terminal for a `3xx` too: a redirect whose body failed is **not** followed, even with `followRedirects: true`. The `Location` header survived, so following would work — and that is the problem, because the hop would continue, a healthy destination would answer `200`, and the failure would be gone from the result. A per-attempt timeout that struck mid-body is the case that stings, since a later hop reports its own `isTimeout`. Nothing is lost by stopping: the response reports the real `3xx` status alongside `isStreamError`, with `wasRedirectDetected` and `detectedRedirectURL` still telling you where it pointed.
+Terminal means terminal for a `3xx` too: a redirect whose body failed is **not** followed, even with `followRedirects: true`. The `Location` header survived, so following would work, and that is the problem, because the hop would continue, a healthy destination would answer `200`, and the failure would be gone from the result. A per-attempt timeout that struck mid-body is the case that stings, since a later hop reports its own `isTimeout`. Nothing is lost by stopping: the response reports the real `3xx` status alongside `isStreamError`, with `wasRedirectDetected` and `detectedRedirectURL` still telling you where it pointed.
 
-With `followRedirects: false` the same truncated `3xx` reports differently, and deliberately so. That path is not about following — the request ends at the redirect whether or not the body arrived — so it reports what it reports for _every_ disabled redirect: `redirect_disabled`, `status: 0`, `isStreamError: false`, and `wasRedirectDetected` / `detectedRedirectURL` pointing at the target. A per-attempt timeout that struck mid-body is not surfaced there either: `isTimeout` stays `false`, because the timeout is incidental to an outcome that was already decided by the config. Reading `isTimeout` to mean "a timeout occurred somewhere" rather than "a timeout is why this failed" will surprise you here.
+With `followRedirects: false` the same truncated `3xx` reports differently, and deliberately so. That path is not about following. The request ends at the redirect whether or not the body arrived, so it reports what it reports for _every_ disabled redirect: `redirect_disabled`, `status: 0`, `isStreamError: false`, and `wasRedirectDetected` / `detectedRedirectURL` pointing at the target. A per-attempt timeout that struck mid-body is not surfaced there either: `isTimeout` stays `false`, because the timeout is incidental to an outcome that was already decided by the config. Reading `isTimeout` to mean "a timeout occurred somewhere" rather than "a timeout is why this failed" will surprise you here.
 
-Two things deliberately do **not** set the flag. A caller's own `AbortSignal` firing classifies as `isCancelled` (or `isTimeout`), since that is your decision rather than a network fault. A failure with no headers at all — connection refused, DNS, TLS rejection — is a plain transport failure, because no status was ever received for the flag to qualify.
+Two things deliberately do **not** set the flag. A caller's own `AbortSignal` firing classifies as `isCancelled` (or `isTimeout`), since that is your decision rather than a network fault. A failure with no headers at all, such as a connection refusal, DNS failure, or TLS rejection, is a plain transport failure, because no status was ever received for the flag to qualify.
 
 #### Adapter Support
 
@@ -1305,27 +1305,27 @@ Two things deliberately do **not** set the flag. A caller's own `AbortSignal` fi
 
 `FetchAdapter` is not limited to server runtimes here. Headers have already arrived when the body read starts, so the status is readable in a browser exactly as it is under Node or Bun, and a truncated body rejects the same way.
 
-A per-attempt timeout that fires _during_ the body read counts as a post-header failure too, and is reported with the real status rather than as a plain timeout. The adapter cannot tell that abort apart from a caller cancellation — both arrive on the same signal — so it carries the response metadata out with the error and the client decides: a cancellation stays `isCancelled`, a timeout becomes a terminal stream failure.
+A per-attempt timeout that fires _during_ the body read counts as a post-header failure too, and is reported with the real status rather than as a plain timeout. The adapter cannot tell that abort apart from a caller cancellation because both arrive on the same signal, so it carries the response metadata out with the error and the client decides: a cancellation stays `isCancelled`, a timeout becomes a terminal stream failure.
 
-`XHRAdapter` is the one real gap, and it is a spec-level limitation rather than a browser inconsistency: setting the error flag sets the response to a network error, which forces `status` to `0`. There is no surviving signal that headers ever arrived, so a mid-body truncation is indistinguishable from a connection refused. It arrives as an ordinary transport failure (`status: 0`, `isStreamError: false`), which for an **idempotent** method is eligible for retry — so a truncated `GET` is silently re-fetched where `NodeAdapter` and `FetchAdapter` would report the real status and stop.
+`XHRAdapter` is the one real gap, and it is a spec-level limitation rather than a browser inconsistency: setting the error flag sets the response to a network error, which forces `status` to `0`. There is no surviving signal that headers ever arrived, so a mid-body truncation is indistinguishable from a connection refused. It arrives as an ordinary transport failure (`status: 0`, `isStreamError: false`), which for an **idempotent** method is eligible for retry, so a truncated `GET` is silently re-fetched where `NodeAdapter` and `FetchAdapter` would report the real status and stop.
 
-A non-idempotent write is not replayed there, but only because `XHRAdapter` never supplies `wasDefinitelyNotSent`, so the default rule blocks it for want of proof — not because the truncation was recognized. Enable `retryNonIdempotentMethods` and that protection is gone, since nothing distinguishes this failure from a connection that was refused. Browser code performing non-idempotent writes should prefer `FetchAdapter` where replay safety matters.
+A non-idempotent write is not replayed there, but only because `XHRAdapter` never supplies `wasDefinitelyNotSent`, so the default rule blocks it for want of proof, not because the truncation was recognized. Enable `retryNonIdempotentMethods` and that protection is gone, since nothing distinguishes this failure from a connection that was refused. Browser code performing non-idempotent writes should prefer `FetchAdapter` where replay safety matters.
 
 #### Failures Before a Response
 
 The same replay question applies to a failure with no response at all, where `isStreamError` cannot help because no headers ever arrived. Adapters answer it with two separate signals: `isRetryable: false` suppresses a retry the status alone would allow, and `wasDefinitelyNotSent: true` proves the request never reached the server.
 
-`NodeAdapter` sets `wasDefinitelyNotSent` from the transport error code, treating only codes that prove no connection was established (`ECONNREFUSED`, `ENOTFOUND`, and similar) as replayable; anything else — `ECONNRESET`, `EPIPE`, `ETIMEDOUT`, `EHOSTUNREACH`, `ENETUNREACH`, a bare socket hang up — is possible delivery. The two unreachable codes are on that side despite reading like connect-time failures, because an ICMP unreachable arriving for an established connection is reported on that connection with the same code. Unproven is reported by leaving the field off rather than by setting it to `false`: the contract is that absence means "not known", so an explicit `false` would read as a proof of delivery no adapter is in a position to give.
+`NodeAdapter` sets `wasDefinitelyNotSent` from the transport error code, treating only codes that prove no connection was established (`ECONNREFUSED`, `ENOTFOUND`, and similar) as replayable. Anything else, including `ECONNRESET`, `EPIPE`, `ETIMEDOUT`, `EHOSTUNREACH`, `ENETUNREACH`, or a bare socket hang up, is possible delivery. The two unreachable codes are on that side despite reading like connect-time failures, because an ICMP unreachable arriving for an established connection is reported on that connection with the same code. Unproven is reported by leaving the field off rather than by setting it to `false`: the contract is that absence means "not known", so an explicit `false` would read as a proof of delivery no adapter is in a position to give.
 
-It does not pair that with `isRetryable: false`. Whether a partly-sent request may be replayed is the method question, and withholding the proof already answers it — a blanket veto would additionally stop retrying an idempotent `PUT` after an ordinary socket error, which is the case a retry is most likely to fix.
+It does not pair that with `isRetryable: false`. Whether a partly-sent request may be replayed is the method question, and withholding the proof already answers it. A blanket veto would additionally stop retrying an idempotent `PUT` after an ordinary socket error, which is the case a retry is most likely to fix.
 
 A body-byte count cannot supply the proof in either direction: an empty-body request writes headers and nothing else, so the counter stays at `0` even after the server acted on it, and the counter tracks bytes handed to the stream rather than bytes on the wire, so it can be non-zero for a connection that was never established.
 
-`XHRAdapter` sets neither. It never sets `wasDefinitelyNotSent`, because it has no way to prove non-delivery: upload progress events are suppressed for cross-origin requests that CORS does not grant access to, and such a request is still delivered — the browser blocks the response, not the request — so the absence of progress is not evidence that nothing was sent. It does not set `isRetryable: false` in its place either, since that flag blocks a retry for every method: inferring it from upload progress would stop retrying an idempotent `PUT` after an ordinary network error, and would override `retryNonIdempotentMethods` even when the caller has stated the replay is safe.
+`XHRAdapter` sets neither. It never sets `wasDefinitelyNotSent`, because it has no way to prove non-delivery: upload progress events are suppressed for cross-origin requests that CORS does not grant access to, and such a request is still delivered. The browser blocks the response, not the request, so the absence of progress is not evidence that nothing was sent. It does not set `isRetryable: false` in its place either, since that flag blocks a retry for every method: inferring it from upload progress would stop retrying an idempotent `PUT` after an ordinary network error, and would override `retryNonIdempotentMethods` even when the caller has stated the replay is safe.
 
 `FetchAdapter` never sets `wasDefinitelyNotSent`, because `fetch` exposes no upload progress or byte accounting, so a failure there is indistinguishable from one where nothing was sent. It sets `isRetryable: false` only for the TLS case below, exactly as `NodeAdapter` does.
 
-`MockAdapter` can simulate any of it via `transportError`, so the replay rules are testable without a socket. It delivers no response at all — no body, headers, cookies, or terminal progress — and accepts the signals a real adapter would attach:
+`MockAdapter` can simulate any of it via `transportError`, so the replay rules are testable without a socket. It delivers no response data at all, meaning no body, headers, cookies, or terminal progress, and accepts the signals a real adapter would attach:
 
 ```typescript
 // Proven undelivered — a POST may be replayed
@@ -1352,13 +1352,13 @@ adapter.routes.get('/bad-cert', () => ({
 }));
 ```
 
-So the `POST`/`PATCH` transport-failure exception is, today, a `NodeAdapter` capability. In a browser those writes are simply not retried after a transport failure, which is the safe outcome — just a stricter one than a runtime with real evidence can offer.
+So the `POST`/`PATCH` transport-failure exception is, today, a `NodeAdapter` capability. In a browser those writes are simply not retried after a transport failure, which is the safe outcome, just a stricter one than a runtime with real evidence can offer.
 
 Since the client treats anything other than `false` as retryable, an unset value means "not known to be unsafe", not "known to be safe". Callers that must not double-apply a write should not infer permission to replay from its absence.
 
-`isRetryable` is a hint about whether another attempt is worth making, and its contract only assigns meaning to `false` — an adapter may set it `true` for a failure it considers transient without knowing whether the request was delivered. Replaying a non-idempotent request needs a stronger statement, so adapters make it separately via `wasDefinitelyNotSent: true`, which claims only one thing: no request bytes reached the server. A custom adapter that sets `isRetryable: true` alone will not unlock a `POST` retry.
+`isRetryable` is a hint about whether another attempt is worth making, and its contract only assigns meaning to `false`. An adapter may set it `true` for a failure it considers transient without knowing whether the request was delivered. Replaying a non-idempotent request needs a stronger statement, so adapters make it separately via `wasDefinitelyNotSent: true`, which claims only one thing: no request bytes reached the server. A custom adapter that sets `isRetryable: true` alone will not unlock a `POST` retry.
 
-`isRetryable: false` is now reserved for failures that no method should retry because another attempt cannot succeed, not for ones that merely might have been delivered. A rejected TLS certificate is the example: both `NodeAdapter` and `FetchAdapter` resolve those as `495` with `isRetryable: false`, since the same request against the same server fails identically every time. On `FetchAdapter` this is a server-runtime classification — Bun puts the OpenSSL code on the error and Node hangs it off `cause`, while a browser reports an opaque `TypeError` with neither, so a browser TLS failure keeps the ordinary transport-error shape.
+`isRetryable: false` is now reserved for failures that no method should retry because another attempt cannot succeed, not for ones that merely might have been delivered. A rejected TLS certificate is the example: both `NodeAdapter` and `FetchAdapter` resolve those as `495` with `isRetryable: false`, since the same request against the same server fails identically every time. On `FetchAdapter` this is a server-runtime classification. Bun puts the OpenSSL code on the error and Node hangs it off `cause`, while a browser reports an opaque `TypeError` with neither, so a browser TLS failure keeps the ordinary transport-error shape.
 
 #### Why a Retry Did Not Happen
 
@@ -1370,9 +1370,9 @@ Since the client treats anything other than `false` as retryable, an unset value
 | `stream_error`          | The body failed after headers arrived, so the server received the request |
 | `non_idempotent_method` | A `POST` or `PATCH` with no proof of non-delivery                         |
 
-It is absent when a retry was scheduled, when no policy is configured, when the policy has no attempts left, or when the status was never retryable in the first place — in those cases nothing was suppressed, so naming a cause would misdescribe why the request stopped.
+It is absent when a retry was scheduled, when no policy is configured, when the policy has no attempts left, or when the status was never retryable in the first place. In those cases nothing was suppressed, so naming a cause would misdescribe why the request stopped.
 
-`adapter_veto` does not occur with a real transport. `NodeAdapter` and `FetchAdapter` set `isRetryable: false` only for a rejected TLS certificate, and pair it with `495`, which is not a retryable status — so the status ends the request before the veto is consulted, and nothing was suppressed to report. It is reachable from `MockAdapter` via `transportError: { isRetryable: false }`, whose default `status: 0` _is_ retryable (that is what the [`/secure` example above](#failures-before-a-response) exercises), and from a custom adapter that vetoes a status the client would otherwise retry.
+`adapter_veto` does not occur with a real transport. `NodeAdapter` and `FetchAdapter` set `isRetryable: false` only for a rejected TLS certificate, and pair it with `495`, which is not a retryable status, so the status ends the request before the veto is consulted, and nothing was suppressed to report. It is reachable from `MockAdapter` via `transportError: { isRetryable: false }`, whose default `status: 0` _is_ retryable (that is what the [`/secure` example above](#failures-before-a-response) exercises), and from a custom adapter that vetoes a status the client would otherwise retry.
 
 ```typescript
 await client
@@ -1387,12 +1387,12 @@ await client
 
 #### Non-Idempotent Methods
 
-Adapter evidence answers "did this reach the server?". The request method answers a different question — "does it matter if it arrives twice?" — and the client uses both.
+Adapter evidence answers "did this reach the server?". The request method answers a different question, "does it matter if it arrives twice?" The client uses both.
 
 `POST` and `PATCH` are the methods RFC 9110 does not define as idempotent, so replaying one may apply the same change twice. By default `HTTPClient` will not retry them:
 
-- **After a real HTTP response**, never. A retryable status like `500` is not evidence of a failed delivery — it is the opposite, since the server responded, so the handler ran and may have committed.
-- **After a transport failure**, only when the adapter reports `wasDefinitelyNotSent: true` — proof that no request bytes reached the server. An adapter that cannot tell reports nothing, which is treated as unsafe. The transport condition is part of the rule: on a real response delivery is already settled the other way, so nothing can unlock a replay there.
+- **After a real HTTP response**, never. A retryable status like `500` is not evidence of a failed delivery. It is the opposite, since the server responded, so the handler ran and may have committed.
+- **After a transport failure**, only when the adapter reports `wasDefinitelyNotSent: true`, proving that no request bytes reached the server. An adapter that cannot tell reports nothing, which is treated as unsafe. The transport condition is part of the rule: on a real response delivery is already settled the other way, so nothing can unlock a replay there.
 - **After a thrown adapter error** (including a per-attempt timeout), never. There is no response to draw evidence from, and a timeout in particular means the request was sent and the answer never came back.
 
 `PUT` and `DELETE` are _not_ affected, even though they mutate. Both are idempotent by definition: repeating one leaves the resource in the same state as doing it once, which is exactly what makes replay safe.
