@@ -58,14 +58,14 @@ const result = installGlobalEventTarget();
 
 **Returns:** one of
 
-| Result                | Meaning                                                                                                                    |
-| --------------------- | -------------------------------------------------------------------------------------------------------------------------- |
-| `'native'`            | The environment already provides all three methods (browser, Bun, Deno). Nothing was changed.                              |
-| `'installed'`         | This call installed the polyfill.                                                                                          |
-| `'already-installed'` | A previous call, or another copy of Lifecycleion, installed it. The same backing target is reused.                         |
-| `'partial'`           | The three methods are not all absent, but are not all usable either. Nothing was installed. See [Guarantees](#guarantees). |
-| `'unsupported'`       | The methods are missing and there is no `EventTarget` constructor to back them with.                                       |
-| `'blocked'`           | The global object refused the definition (non-extensible, or a non-configurable property).                                 |
+| Result                | Meaning                                                                                                                                     |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| `'native'`            | The environment already provides all three methods (browser, Bun, Deno). Nothing was changed.                                               |
+| `'installed'`         | This call installed the polyfill.                                                                                                           |
+| `'already-installed'` | A previous call, or another copy of Lifecycleion, installed it. The same backing target is reused.                                          |
+| `'partial'`           | The three methods are not all absent, but are not all usable either. Nothing was installed. See [Guarantees](#guarantees).                  |
+| `'unsupported'`       | The methods are missing and there is nothing to back them with: no `EventTarget` constructor, or one that cannot produce a usable instance. |
+| `'blocked'`           | The global object refused the definition (non-extensible, or a non-configurable property).                                                  |
 
 ### getGlobalEventTarget
 
