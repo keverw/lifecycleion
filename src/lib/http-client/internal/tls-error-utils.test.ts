@@ -85,6 +85,17 @@ describe('isTLSCertificateError', () => {
       isTLSCertificateError(makeError('connect ECONNREFUSED 127.0.0.1:443')),
     ).toBe(false);
   });
+
+  test('does not misclassify Undici transport failures', () => {
+    expect(
+      isTLSCertificateError(
+        makeError(
+          'Connect Timeout Error (attempted address: certificates.internal:443)',
+          'UND_ERR_CONNECT_TIMEOUT',
+        ),
+      ),
+    ).toBe(false);
+  });
 });
 
 describe('isTLSCertificateError cause handling', () => {

@@ -14,8 +14,9 @@ const CERT_ERROR_CODES = new Set([
 const CRL_CODE_PATTERN = /(?:^|_)CRLS?(?:_|$)/;
 
 /**
- * Codes that name a DNS or socket failure, so whatever the message says, the
- * connection is what failed. Consulted only to suppress the message fallback.
+ * Node system error codes that name a DNS or socket failure, so whatever the
+ * message says, the connection is what failed. Consulted only to suppress the
+ * message fallback.
  *
  * Deliberately not NodeAdapter's `PRE_CONNECTION_ERROR_CODES`, which answers a
  * different question (did any bytes reach the server?) and must stay
@@ -35,6 +36,14 @@ const TRANSPORT_ERROR_CODES = new Set([
   'ENETDOWN',
   'EADDRNOTAVAIL',
 ]);
+
+/**
+ * Node's built-in `fetch` is backed by Undici, which uses its own `UND_ERR_*`
+ * namespace for transport and protocol failures instead of the system codes
+ * above. Keep the namespaces separate so this does not imply NodeAdapter —
+ * which uses `node:http` / `node:https` — emits Undici errors too.
+ */
+const UNDICI_TRANSPORT_ERROR_PREFIX = 'UND_ERR_';
 
 /**
  * Best-effort classification for TLS certificate failures that should be
@@ -113,7 +122,10 @@ function isTLSCertificateErrorSelf(error: Error): boolean {
   // blip resolve as a permanent 495 with `isRetryable: false`.
   //
   // Only the fallback is suppressed; the code checks above still run first.
-  if (TRANSPORT_ERROR_CODES.has(code)) {
+  if (
+    TRANSPORT_ERROR_CODES.has(code) ||
+    code.startsWith(UNDICI_TRANSPORT_ERROR_PREFIX)
+  ) {
     return false;
   }
 
