@@ -560,6 +560,39 @@ describe('global event target on the Node runtime', () => {
     expect(result.isStateKeyDefined).toBe(false);
   }, 30_000);
 
+  test('an EventTarget constructor that throws reports unsupported', async () => {
+    interface ThrowingConstructorFixtureResult {
+      didImportThrow: boolean;
+      didConstructorRun: boolean;
+      installResult: string;
+      isPolyfilled: boolean;
+      areAnyMethodsDefined: boolean;
+      isStateKeyDefined: boolean;
+    }
+
+    const result = await runFixtureJSON<ThrowingConstructorFixtureResult>(
+      'throwing-event-target-constructor',
+    );
+
+    // The throw must not escape the install and take module init with it.
+    expect(result.didImportThrow).toBe(false);
+
+    // It really was the construction that failed, not the probe refusing a
+    // constructor it never called.
+    expect(result.didConstructorRun).toBe(true);
+
+    // Same verdict as a constructor with useless instances: callable, but it
+    // cannot produce anything to back the three methods with. 'unsupported',
+    // not 'blocked' — the throw lands before the first defineProperty, so the
+    // global object was never asked for anything and never refused.
+    expect(result.installResult).toBe('unsupported');
+    expect(result.isPolyfilled).toBe(false);
+
+    // And nothing is left behind — no half-defined method, no state key.
+    expect(result.areAnyMethodsDefined).toBe(false);
+    expect(result.isStateKeyDefined).toBe(false);
+  }, 30_000);
+
   test('a rejected install restores the state object it replaced', async () => {
     interface RollbackRestoresStateFixtureResult {
       didImportThrow: boolean;
