@@ -1248,6 +1248,38 @@ describe('non-idempotent retry on transport failures', () => {
     expect(adapter.attempts).toBe(3);
   });
 
+  test('does not treat a bare status 0 response as a transport outcome', async () => {
+    class StatusZeroAdapter implements HTTPAdapter {
+      public attempts = 0;
+
+      public getType(): AdapterType {
+        return 'mock';
+      }
+
+      public send(_request: AdapterRequest): Promise<AdapterResponse> {
+        this.attempts++;
+
+        return Promise.resolve({
+          status: 0,
+          wasDefinitelyNotSent: true,
+          headers: {},
+          body: null,
+        });
+      }
+    }
+
+    const adapter = new StatusZeroAdapter();
+    const client = new HTTPClient({
+      adapter,
+      baseURL: 'http://api.test',
+      retryPolicy: policy,
+    });
+
+    await client.post('/thing').send();
+
+    expect(adapter.attempts).toBe(1);
+  });
+
   test('an isRetryable hint alone does not unlock a POST retry', async () => {
     class HintOnlyAdapter implements HTTPAdapter {
       public attempts = 0;

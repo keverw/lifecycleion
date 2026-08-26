@@ -1532,9 +1532,7 @@ export class BaseHTTPClient {
         // defined `false`, so `true` claims nothing about delivery. On a real
         // response delivery is settled the other way: the server answered, so the
         // handler may have committed. Silence is treated as unsafe.
-        const isTransportOutcome =
-          adapterResponse.isTransportError === true ||
-          adapterResponse.status === 0;
+        const isTransportOutcome = adapterResponse.isTransportError === true;
 
         const isMethodReplayable =
           allowNonIdempotentRetry ||
