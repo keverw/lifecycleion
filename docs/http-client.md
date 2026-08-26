@@ -126,7 +126,7 @@ interface HTTPClientConfig {
   timeout?: number; // Default: 30,000 ms; <= 0 disables the per-attempt timeout
   cookieJar?: CookieJar | null; // Cookie management (null disables)
   retryPolicy?: RetryPolicyOptions; // Retry strategy (disabled by default)
-  retryNonIdempotentMethods?: boolean; // Default: false — allow retrying POST/PATCH. See Non-Idempotent Methods
+  retryNonIdempotentMethods?: boolean; // Default: false — do not retry POST/PATCH. See Non-Idempotent Methods
   includeRequestID?: boolean; // Default: false — sends x-local-client-request-id header
   includeAttemptHeader?: boolean; // Default: false — sends x-local-client-request-attempt header with the 1-based attempt number as a decimal string. The counter is global across redirect hops: attempt 2 on a redirect hop follows attempt 1 on the initial request, not reset per hop.
   userAgent?: string; // Auto-set to 'lifecycleion-http-client' for NodeAdapter and MockAdapter, and for FetchAdapter on server runtimes. Browsers block this header — constructor throws if set with FetchAdapter or XHRAdapter in a browser.
