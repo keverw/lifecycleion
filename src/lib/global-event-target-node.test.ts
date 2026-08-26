@@ -444,4 +444,190 @@ describe('global event target on the Node runtime', () => {
     expect(result.logs[0].type).toBe('error');
     expect(result.logs[0].message).toContain('Uncaught exception');
   }, 30_000);
+
+  test('frozen shared state does not crash the install', async () => {
+    interface FrozenSharedStateFixtureResult {
+      didImportThrow: boolean;
+      installResult: string;
+      isPolyfilled: boolean;
+      isStateUnchanged: boolean;
+      areMethodsRolledBack: boolean;
+    }
+
+    const result = await runFixtureJSON<FrozenSharedStateFixtureResult>(
+      'frozen-shared-state',
+    );
+
+    // The state object is shared and may be frozen by another holder. Flipping
+    // isInstalled on it throws in strict mode, and this happens during module
+    // init — after the three methods have already been defined.
+    expect(result.didImportThrow).toBe(false);
+
+    // Nothing half-installed: the methods it defined are rolled back, and the
+    // state it could not write to is left exactly as found.
+    expect(result.installResult).toBe('blocked');
+    expect(result.isPolyfilled).toBe(false);
+    expect(result.isStateUnchanged).toBe(true);
+    expect(result.areMethodsRolledBack).toBe(true);
+  }, 30_000);
+
+  test('a shared target that goes bad after validation does not block the install', async () => {
+    interface ShiftingSharedTargetFixtureResult {
+      didImportThrow: boolean;
+      installResult: string;
+      isPolyfilled: boolean;
+      hasBackingTarget: boolean;
+      didReceiveEvent: boolean;
+      areMethodsInstalled: boolean;
+    }
+
+    const result = await runFixtureJSON<ShiftingSharedTargetFixtureResult>(
+      'shifting-shared-target',
+    );
+
+    expect(result.didImportThrow).toBe(false);
+
+    // The re-read is the one the globals are taken from, so it re-validates. A
+    // target that no longer vouches for itself is absent, not fatal:
+    // installation proceeds with a fresh one instead of letting the throw roll
+    // back the methods already defined and report 'blocked'. (This getter fails
+    // at the `readStateTarget` re-read; the sibling test below covers a target
+    // that survives that far and fails at the bind.)
+    expect(result.installResult).toBe('installed');
+    expect(result.isPolyfilled).toBe(true);
+    expect(result.hasBackingTarget).toBe(true);
+    expect(result.areMethodsInstalled).toBe(true);
+
+    // And the three methods are wired to one working target, not to whatever the
+    // second read happened to produce.
+    expect(result.didReceiveEvent).toBe(true);
+  }, 30_000);
+
+  test('a shared target whose bind returns a non-function is not installed', async () => {
+    interface HostileBindFixtureResult {
+      didImportThrow: boolean;
+      installResult: string;
+      isPolyfilled: boolean;
+      didReceiveEvent: boolean;
+      didCallThrow: boolean;
+      isAddEventListenerCallable: boolean;
+    }
+
+    const result = await runFixtureJSON<HostileBindFixtureResult>(
+      'hostile-bind-shared-target',
+    );
+
+    expect(result.didImportThrow).toBe(false);
+
+    // `bind` is an ordinary property and this one returns 42 without throwing,
+    // so every cheaper check passes. Only inspecting the result catches it —
+    // and it must, because installing a non-callable over methods that were
+    // absent is worse than not installing at all.
+    expect(result.installResult).toBe('installed');
+    expect(result.isAddEventListenerCallable).toBe(true);
+    expect(result.didCallThrow).toBe(false);
+
+    // Fell back to a fresh target rather than the poisoned one, and that target
+    // actually works end to end.
+    expect(result.isPolyfilled).toBe(true);
+    expect(result.didReceiveEvent).toBe(true);
+  }, 30_000);
+
+  test('an EventTarget constructor with useless instances reports unsupported', async () => {
+    interface UselessConstructorFixtureResult {
+      didImportThrow: boolean;
+      installResult: string;
+      isPolyfilled: boolean;
+      areAnyMethodsDefined: boolean;
+      isStateKeyDefined: boolean;
+    }
+
+    const result = await runFixtureJSON<UselessConstructorFixtureResult>(
+      'useless-event-target-constructor',
+    );
+
+    expect(result.didImportThrow).toBe(false);
+
+    // The constructor is callable, so the probe passes — but its instances have
+    // none of the three methods, so there is nothing to back an install with.
+    // 'unsupported', not 'blocked': the global object never refused anything,
+    // because nothing was ever offered to it.
+    expect(result.installResult).toBe('unsupported');
+    expect(result.isPolyfilled).toBe(false);
+
+    // And nothing is left behind — no half-defined method, no state key.
+    expect(result.areAnyMethodsDefined).toBe(false);
+    expect(result.isStateKeyDefined).toBe(false);
+  }, 30_000);
+
+  test('an EventTarget constructor that throws reports unsupported', async () => {
+    interface ThrowingConstructorFixtureResult {
+      didImportThrow: boolean;
+      didConstructorRun: boolean;
+      installResult: string;
+      isPolyfilled: boolean;
+      areAnyMethodsDefined: boolean;
+      isStateKeyDefined: boolean;
+    }
+
+    const result = await runFixtureJSON<ThrowingConstructorFixtureResult>(
+      'throwing-event-target-constructor',
+    );
+
+    // The throw must not escape the install and take module init with it.
+    expect(result.didImportThrow).toBe(false);
+
+    // It really was the construction that failed, not the probe refusing a
+    // constructor it never called.
+    expect(result.didConstructorRun).toBe(true);
+
+    // Same verdict as a constructor with useless instances: callable, but it
+    // cannot produce anything to back the three methods with. 'unsupported',
+    // not 'blocked' — the throw lands before the first defineProperty, so the
+    // global object was never asked for anything and never refused.
+    expect(result.installResult).toBe('unsupported');
+    expect(result.isPolyfilled).toBe(false);
+
+    // And nothing is left behind — no half-defined method, no state key.
+    expect(result.areAnyMethodsDefined).toBe(false);
+    expect(result.isStateKeyDefined).toBe(false);
+  }, 30_000);
+
+  test('a rejected install restores the state object it replaced', async () => {
+    interface RollbackRestoresStateFixtureResult {
+      didImportThrow: boolean;
+      installResult: string;
+      isPolyfilled: boolean;
+      isStatePresent: boolean;
+      isSameStateObject: boolean;
+      isStateContentUnchanged: boolean;
+      areAnyMethodsDefined: boolean;
+      isGlobalSealed: boolean;
+      didConstructorRun: boolean;
+    }
+
+    const result = await runFixtureJSON<RollbackRestoresStateFixtureResult>(
+      'rollback-restores-state',
+    );
+
+    expect(result.didImportThrow).toBe(false);
+
+    // The fixture seals the global from inside the EventTarget constructor —
+    // the one piece of caller-controlled code that runs after the preflight and
+    // before the first method is defined. Without that the path is unreachable.
+    expect(result.isGlobalSealed).toBe(true);
+    expect(result.didConstructorRun).toBe(true);
+
+    expect(result.installResult).toBe('blocked');
+    expect(result.isPolyfilled).toBe(false);
+    expect(result.areAnyMethodsDefined).toBe(false);
+
+    // The point of the test: rollback restores the state object it overwrote.
+    // Deleting it would mean a failed install destroyed another copy's object
+    // as a side effect — the one thing rollback exists to prevent. Identity is
+    // asserted, not just presence.
+    expect(result.isStatePresent).toBe(true);
+    expect(result.isSameStateObject).toBe(true);
+    expect(result.isStateContentUnchanged).toBe(true);
+  }, 30_000);
 });

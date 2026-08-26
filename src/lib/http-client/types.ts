@@ -81,12 +81,30 @@ export interface AdapterResponse {
    */
   isTransportError?: boolean;
   /**
-   * Set to `false` when the adapter knows the request/response progressed far
-   * enough that replay is unsafe, even if `status` would normally be retried
-   * by the client (for example a mid-upload socket write failure after some
-   * bytes may already have left the process).
+   * Set to `false` when no attempt can succeed, whatever the method — a rejected
+   * TLS certificate, say. Honoured for every method, and it overrides
+   * `retryNonIdempotentMethods`.
+   *
+   * Do **not** set it for a failure that merely might have been delivered, such
+   * as one that struck mid-upload: that vetoes retries for methods where replay
+   * is safe by definition. Report
+   * {@link AdapterResponse.wasDefinitelyNotSent} instead, or report nothing.
+   *
+   * Only `false` carries meaning. `true` is a hint, and never authorizes
+   * replaying a non-idempotent request.
    */
   isRetryable?: boolean;
+  /**
+   * Set to `true` only when the adapter can prove no request bytes reached the
+   * server — a refused connection, a name that did not resolve. Absence means
+   * "not known", never "known to be safe".
+   *
+   * Deliberately separate from {@link AdapterResponse.isRetryable}, which is a
+   * hint that says nothing about delivery. The client uses this to decide whether
+   * a `POST` or `PATCH` may be retried after a transport failure, and ignores it
+   * when a real response came back.
+   */
+  wasDefinitelyNotSent?: boolean;
   /**
    * Final request headers actually used by the adapter after adapter-local
    * mutations (for example multipart Content-Type/Content-Length added by the
@@ -111,12 +129,19 @@ export interface AdapterResponse {
    */
   isStreamed?: boolean;
   /**
-   * Set by NodeAdapter when response-body delivery fails after headers arrive
-   * (for example buffered-download truncation, writable errors, or upstream
-   * response-stream errors). The client treats this as a terminal stream
-   * failure: isStreamError: true. The real HTTP status is preserved (not
-   * zeroed) so observers can tell the server responded but body delivery still
-   * failed locally/in-flight.
+   * Set when response-body delivery fails after headers arrive — buffered
+   * download truncation, writable errors, upstream response-stream errors.
+   * NodeAdapter, FetchAdapter and MockAdapter all report it, and the client
+   * synthesizes it for a per-attempt timeout that strikes mid-body. XHRAdapter
+   * cannot: `XMLHttpRequest` zeroes the status on error.
+   *
+   * The client treats this as a terminal stream failure. The real HTTP status is
+   * preserved (not zeroed) so observers can tell the server responded but body
+   * delivery still failed.
+   *
+   * For replay decisions this groups with a real response, **not** with a
+   * transport failure: headers arrived, so the server processed the request and
+   * may have committed it, the same thing a 500 tells you.
    */
   isStreamError?: boolean;
   /**
@@ -252,6 +277,24 @@ export interface AttemptEndEvent {
   attemptNumber: number;
   isRetry: boolean;
   willRetry: boolean;
+  /**
+   * Why no retry happened, when a retry was genuinely available to suppress — a
+   * policy is configured, it has attempts left, and the status alone would have
+   * allowed one. Absent otherwise, since nothing was suppressed.
+   *
+   * - `adapter_veto` — the adapter reported `isRetryable: false`. Not produced by
+   *   a real transport, which pairs that flag with the non-retryable `495`;
+   *   reachable from `MockAdapter` and custom adapters.
+   * - `stream_error` — the body failed after headers arrived, so the server
+   *   received the request and the outcome is unknown.
+   * - `non_idempotent_method` — a `POST` or `PATCH` with no proof the request
+   *   went undelivered. Set `retryNonIdempotentMethods` to allow it.
+   *
+   * Exists so a suppressed retry is self-explaining: `willRetry: false` alone is
+   * indistinguishable from a policy declining.
+   */
+  retrySuppressedReason?:
+    'adapter_veto' | 'stream_error' | 'non_idempotent_method';
   /** Present only when a retry has been scheduled after this attempt. */
   nextRetryDelayMS?: number;
   /** Epoch ms for the scheduled retry, when a retry has been scheduled. */
@@ -283,6 +326,20 @@ export interface HTTPClientConfig {
   timeout?: number;
   cookieJar?: CookieJar | null;
   retryPolicy?: RetryPolicyOptions;
+  /**
+   * Whether a retry policy may replay `POST` and `PATCH`, the methods RFC 9110
+   * does not define as idempotent. Defaults to `false`.
+   *
+   * When `false`, such a request is never retried after a real HTTP response —
+   * a 500 still means the handler ran and may have committed — and after a
+   * transport failure only when the adapter reports
+   * {@link AdapterResponse.wasDefinitelyNotSent}. A bare transport failure is not
+   * enough, and neither is `isRetryable: true`.
+   *
+   * Set to `true` when writes are guarded by an idempotency key or are naturally
+   * safe to repeat. Idempotent methods are unaffected either way.
+   */
+  retryNonIdempotentMethods?: boolean;
   includeRequestID?: boolean;
   includeAttemptHeader?: boolean;
   userAgent?: string;
@@ -312,6 +369,11 @@ export interface HTTPRequestOptions {
   timeout?: number;
   signal?: AbortSignal;
   retryPolicy?: RetryPolicyOptions | null;
+  /**
+   * Per-request override for {@link HTTPClientConfig.retryNonIdempotentMethods}.
+   * Falls back to the client config when omitted.
+   */
+  retryNonIdempotentMethods?: boolean;
   label?: string;
   onUploadProgress?: (event: HTTPProgressEvent) => void;
   onDownloadProgress?: (event: HTTPProgressEvent) => void;

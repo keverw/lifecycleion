@@ -228,7 +228,6 @@ export class NodeAdapter implements HTTPAdapter {
           }
         | undefined;
       let isStreamFactoryPending = false;
-      let uploadedBodyBytes = 0;
 
       // Deduplication guard — Node's upload path can reach 100% from multiple
       // sources (final drain callback and the upload-complete signal). Once
@@ -244,7 +243,6 @@ export class NodeAdapter implements HTTPAdapter {
           didFireUpload100 = true;
         }
 
-        uploadedBodyBytes = Math.max(uploadedBodyBytes, event.loaded);
         request.onUploadProgress?.(event);
       };
 
@@ -332,7 +330,9 @@ export class NodeAdapter implements HTTPAdapter {
               // signal so any cleanup listeners wired in the factory run, then throw
               // AbortError so the client's cancel path takes over (isCancelled: true).
               const cancelReason =
-                writable !== null ? writable.reason : undefined;
+                writable !== null
+                  ? readObjectMember(writable, 'reason')
+                  : undefined;
 
               streamAbort.abort();
               req.destroy();
@@ -554,7 +554,7 @@ export class NodeAdapter implements HTTPAdapter {
             );
           });
         })().catch((error: unknown) => {
-          reject(error instanceof Error ? error : new Error(String(error)));
+          reject(normalizeError(error));
         });
       });
 
@@ -591,7 +591,22 @@ export class NodeAdapter implements HTTPAdapter {
           return;
         }
 
-        const isRetryableTransportError = uploadedBodyBytes === 0;
+        // Only `wasDefinitelyNotSent` is claimed here, and only the transport
+        // error code can supply it. No `isRetryable: false` alongside: that flag
+        // blocks every method, so it would stop retrying an idempotent PUT after
+        // an ordinary socket error and override retryNonIdempotentMethods.
+        // Whether a partly-sent request may be replayed is the client's method
+        // rule to answer, and withholding the proof is what answers it.
+        //
+        // A body-byte count cannot supply it in either direction: an empty-body
+        // POST writes headers and nothing else, and the counter tracks bytes
+        // handed to the stream rather than bytes on the wire. The error code is
+        // also the only signal that behaves the same on Node and Bun, where
+        // `socket.bytesWritten` and `socket.connecting` are unreliable.
+        //
+        // Set only when proven, never as `false` — absence means "not known", so
+        // an explicit `false` would read as proof of delivery.
+        const wasDefinitelyNotSent = isPreConnectionError(error);
 
         // All other transport errors (ECONNREFUSED, ENOTFOUND, etc.) → status 0
         resolveAdapterResponse(
@@ -602,7 +617,7 @@ export class NodeAdapter implements HTTPAdapter {
           {
             status: 0,
             isTransportError: true,
-            isRetryable: isRetryableTransportError,
+            ...(wasDefinitelyNotSent ? { wasDefinitelyNotSent: true } : {}),
             headers: {},
             body: null,
             errorCause: error,
@@ -713,13 +728,14 @@ export class NodeAdapter implements HTTPAdapter {
               request.requestURL,
               request.headers,
               {
+                // No isRetryable veto: that would stop retrying an idempotent
+                // PUT or DELETE. Delivery is unproven rather than disproven, so
+                // nothing is claimed and the client's method rule decides.
                 status: 0,
                 isTransportError: true,
-                isRetryable: false,
                 headers: {},
                 body: null,
-                errorCause:
-                  error instanceof Error ? error : new Error(String(error)),
+                errorCause: normalizeError(error),
               },
             );
           });
@@ -748,13 +764,14 @@ export class NodeAdapter implements HTTPAdapter {
               request.requestURL,
               request.headers,
               {
+                // No isRetryable veto: that would stop retrying an idempotent
+                // PUT or DELETE. Delivery is unproven rather than disproven, so
+                // nothing is claimed and the client's method rule decides.
                 status: 0,
                 isTransportError: true,
-                isRetryable: false,
                 headers: {},
                 body: null,
-                errorCause:
-                  error instanceof Error ? error : new Error(String(error)),
+                errorCause: normalizeError(error),
               },
             );
           });
@@ -869,7 +886,7 @@ async function streamResponseBody(
       } catch (error) {
         settle({
           code: 'stream_write_error',
-          cause: error instanceof Error ? error : new Error(String(error)),
+          cause: normalizeError(error),
         });
         return;
       }
@@ -911,7 +928,7 @@ async function streamResponseBody(
       } catch (error) {
         settle({
           code: 'stream_write_error',
-          cause: error instanceof Error ? error : new Error(String(error)),
+          cause: normalizeError(error),
         });
       }
     };
@@ -1168,6 +1185,31 @@ function removeWritableListener(
   removable.off?.(event, listener);
 }
 
+/**
+ * Transport error codes that mean no connection was ever established, so no
+ * request bytes can have reached the server. Anything else — `ECONNRESET`,
+ * `EPIPE`, `ETIMEDOUT`, a bare socket hang up — is treated as possible delivery,
+ * since an unrecognized code must fall on the side of "may already have been
+ * applied".
+ *
+ * `EHOSTUNREACH` and `ENETUNREACH` are absent despite reading like connect-time
+ * failures: an ICMP unreachable for an established connection is reported on that
+ * connection with the same code. Verified to agree on both Node and Bun.
+ */
+const PRE_CONNECTION_ERROR_CODES: ReadonlySet<string> = new Set([
+  'ECONNREFUSED',
+  'ENOTFOUND',
+  'EAI_AGAIN',
+  'EADDRNOTAVAIL',
+]);
+
+/** Whether an error proves the request never left for a connected peer. */
+function isPreConnectionError(error: unknown): boolean {
+  const code = readObjectMember(error, 'code');
+
+  return typeof code === 'string' && PRE_CONNECTION_ERROR_CODES.has(code);
+}
+
 function makeResponseStreamError(message: string, cause?: Error): Error {
   const error = new Error(message);
 
@@ -1183,7 +1225,7 @@ function markStreamFactoryError(
   req: http.ClientRequest,
   fallbackHeaders: Record<string, string | string[]>,
 ): Error {
-  const normalized = error instanceof Error ? error : new Error(String(error));
+  const normalized = normalizeError(error);
   const tagged = normalized as Error &
     Partial<
       Record<typeof NON_RETRYABLE_HTTP_CLIENT_CALLBACK_ERROR_FLAG, boolean>
@@ -1229,9 +1271,41 @@ function markResponseStreamAbortError(
 }
 
 function isStreamResponseCancel(value: unknown): value is StreamResponseCancel {
-  return (
-    value !== null &&
-    typeof value === 'object' &&
-    (value as StreamResponseCancel).cancel === true
-  );
+  return readObjectMember(value, 'cancel') === true;
+}
+
+/** Read replaceable/runtime-owned metadata without letting a getter escape. */
+function readObjectMember(source: unknown, key: string): unknown {
+  if (
+    source === null ||
+    (typeof source !== 'object' && typeof source !== 'function')
+  ) {
+    return undefined;
+  }
+
+  try {
+    return (source as Record<string, unknown>)[key];
+  } catch {
+    return undefined;
+  }
+}
+
+function isErrorValue(value: unknown): value is Error {
+  try {
+    return value instanceof Error;
+  } catch {
+    return false;
+  }
+}
+
+function normalizeError(value: unknown): Error {
+  if (isErrorValue(value)) {
+    return value;
+  }
+
+  try {
+    return new Error(String(value));
+  } catch {
+    return new Error('Unknown error');
+  }
 }

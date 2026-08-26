@@ -1,5 +1,6 @@
 import { extractFetchHeaders, resolveDetectedRedirectURL } from '../utils';
-import { REDIRECT_STATUS_CODES } from '../consts';
+import { isTLSCertificateError } from '../internal/tls-error-utils';
+import { REDIRECT_STATUS_CODES, RESPONSE_STREAM_ABORT_FLAG } from '../consts';
 import type {
   HTTPAdapter,
   AdapterRequest,
@@ -36,12 +37,29 @@ export class FetchAdapter implements HTTPAdapter {
         throw error; // preserve cancellation / timeout classification
       }
 
+      const normalizedError = normalizeError(error);
+
+      // TLS certificate failures → 495, matching NodeAdapter. A rejected
+      // certificate fails identically every time, and `status: 0` is retryable.
+      // Server runtimes only: Bun puts the OpenSSL code on the error and Node
+      // hangs it off `cause`, while a browser reports an opaque `TypeError`.
+      if (isTLSCertificateError(normalizedError)) {
+        return {
+          status: 495,
+          isTransportError: true,
+          isRetryable: false,
+          headers: {},
+          body: null,
+          errorCause: normalizedError,
+        };
+      }
+
       return {
         status: 0,
         isTransportError: true,
         headers: {},
         body: null,
-        errorCause: error instanceof Error ? error : new Error(String(error)),
+        errorCause: normalizedError,
       };
     }
 
@@ -69,7 +87,56 @@ export class FetchAdapter implements HTTPAdapter {
     // Fire 100% upload + download progress (fetch has no real per-chunk progress)
     request.onUploadProgress?.({ loaded: 1, total: 1, progress: 1 });
 
-    const rawBody = await readResponseBody(method, response);
+    const responseHeadersForBody = extractFetchHeaders(response.headers);
+
+    let rawBody: Uint8Array | null;
+
+    try {
+      rawBody = await readResponseBody(method, response);
+    } catch (error) {
+      // Headers already arrived, so the status is real and the body transfer is
+      // what failed. Resolve with isStreamError rather than throwing, which would
+      // land on the client's generic network path as a retryable status 0.
+      //
+      // An abort is re-thrown so a cancellation stays a cancellation, but
+      // `signal` is the composite attempt signal — this adapter cannot tell a
+      // per-attempt timeout from a caller cancel. So the response metadata rides
+      // out with the error, the way NodeAdapter tags its aborts, and the client
+      // sorts it: cancel stays cancelled, a post-header timeout becomes a
+      // terminal stream error with the real status.
+      if (isAbortError(error) || signal?.aborted) {
+        throw markResponseStreamAbort(
+          error,
+          response.status,
+          responseHeadersForBody,
+        );
+      }
+
+      // Redirect detection is reported the same way as on the success path: the
+      // headers arrived, so a 3xx here still knows where it was pointing, and a
+      // truncated body must not lose the target an intact one would report.
+      const detectedRedirectURL = resolveDetectedRedirectURL(
+        requestURL,
+        response.status,
+        responseHeadersForBody,
+      );
+
+      return {
+        status: response.status,
+        wasRedirectDetected:
+          detectedRedirectURL !== undefined ||
+          REDIRECT_STATUS_CODES.has(response.status),
+        ...(detectedRedirectURL ? { detectedRedirectURL } : {}),
+        headers: responseHeadersForBody,
+        body: null,
+        isStreamError: true,
+        // fetch buffers the body for us, so there is no per-chunk delivery to
+        // distinguish a local write failure from an upstream stream failure.
+        // Everything reaching here is an upstream/transfer failure.
+        streamErrorCode: 'stream_response_error',
+        errorCause: normalizeError(error),
+      };
+    }
 
     request.onDownloadProgress?.({
       loaded: rawBody?.length ?? 0,
@@ -77,7 +144,7 @@ export class FetchAdapter implements HTTPAdapter {
       progress: 1,
     });
 
-    const responseHeaders = extractFetchHeaders(response.headers);
+    const responseHeaders = responseHeadersForBody;
     const detectedRedirectURL = resolveDetectedRedirectURL(
       requestURL,
       response.status,
@@ -111,7 +178,44 @@ async function readResponseBody(
 }
 
 function isAbortError(error: unknown): boolean {
-  return error instanceof Error && error.name === 'AbortError';
+  const normalized = asError(error);
+
+  return (
+    normalized !== undefined &&
+    readObjectMember(normalized, 'name') === 'AbortError'
+  );
+}
+
+/** Return an Error value without letting a Proxy prototype trap escape. */
+function asError(value: unknown): Error | undefined {
+  try {
+    return value instanceof Error ? value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function normalizeError(value: unknown): Error {
+  const existing = asError(value);
+
+  if (existing !== undefined) {
+    return existing;
+  }
+
+  try {
+    return new Error(String(value));
+  } catch {
+    return new Error('Unknown error');
+  }
+}
+
+/** Guard error members for the same reason adapter marker reads are guarded. */
+function readObjectMember(source: object, key: string): unknown {
+  try {
+    return (source as Record<string, unknown>)[key];
+  } catch {
+    return undefined;
+  }
 }
 
 function materializeFetchHeaders(
@@ -147,4 +251,47 @@ function materializeFetchHeaders(
   }
 
   return materialized;
+}
+
+/**
+ * Tag an abort thrown while reading the body with the response already received,
+ * matching what NodeAdapter attaches to its response-stream aborts. The client
+ * decides what the abort meant; this only makes the evidence survive the throw.
+ *
+ * `effectiveRequestHeaders` is omitted throughout this adapter: `fetch` exposes
+ * no view of the final wire headers, and echoing the request's own back would
+ * claim a proof it does not have.
+ */
+function markResponseStreamAbort(
+  error: unknown,
+  status: number,
+  headers: Record<string, string | string[]>,
+): unknown {
+  // Per the Fetch Standard the rejection is the abort reason verbatim, so
+  // returning it untagged sends the client down its early cancellation path and
+  // drops the response headers, Set-Cookie included.
+  //
+  // Always a fresh object, never the reason itself: a signal hands the same
+  // reason to every consumer, so two requests sharing one controller would
+  // overwrite each other's status and headers (and a frozen reason would throw).
+  // `name` is copied because the client routes on it.
+  const original = asError(error);
+  const originalMessage =
+    original === undefined ? undefined : readObjectMember(original, 'message');
+  const originalName =
+    original === undefined ? undefined : readObjectMember(original, 'name');
+  const tagged = new Error(
+    typeof originalMessage === 'string' ? originalMessage : 'Request aborted',
+  );
+
+  tagged.name = typeof originalName === 'string' ? originalName : 'AbortError';
+
+  Object.assign(tagged, {
+    [RESPONSE_STREAM_ABORT_FLAG]: true,
+    streamAbortStatus: status,
+    streamAbortHeaders: headers,
+    cause: error,
+  });
+
+  return tagged;
 }

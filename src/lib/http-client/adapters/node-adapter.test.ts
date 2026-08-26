@@ -7,6 +7,7 @@ import { Writable } from 'node:stream';
 import { NodeAdapter } from './node-adapter';
 import type { NodeAdapterConfig } from './node-adapter';
 import { HTTPClient } from '../http-client';
+import { CookieJar } from '../cookie-jar';
 import {
   NON_RETRYABLE_HTTP_CLIENT_CALLBACK_ERROR_FLAG,
   RESPONSE_STREAM_ABORT_FLAG,
@@ -283,6 +284,177 @@ describe('NodeAdapter observer request headers', () => {
     expect(res.isFailed).toBe(true);
     expect(res.isStreamError).toBe(true);
     expect(builder.error?.code).toBe('stream_response_error');
+  });
+});
+
+describe('post-header stream aborts report why the retry stopped', () => {
+  const policy = {
+    strategy: 'fixed' as const,
+    maxRetryAttempts: 2,
+    delayMS: 1,
+  };
+
+  /** Rejects the way NodeAdapter does when a stream aborts after headers. */
+  function abortingAdapter(metadata?: {
+    status: number;
+    headers: Record<string, string | string[]>;
+  }): HTTPAdapter {
+    return {
+      getType: () => 'node',
+      send: (): Promise<AdapterResponse> => {
+        const abortError = new Error(
+          'Request aborted during response streaming',
+        );
+        abortError.name = 'AbortError';
+        Object.assign(abortError, {
+          [RESPONSE_STREAM_ABORT_FLAG]: true,
+          ...(metadata
+            ? {
+                streamAbortStatus: metadata.status,
+                streamAbortHeaders: metadata.headers,
+              }
+            : {}),
+        });
+
+        return Promise.reject(abortError);
+      },
+    };
+  }
+
+  test('names the stream failure when no metadata came back', async () => {
+    const client = new HTTPClient({
+      adapter: abortingAdapter(),
+      retryPolicy: policy,
+    });
+
+    const reasons: Array<string | undefined> = [];
+
+    await client
+      .get('https://example.com/download')
+      .onAttemptEnd((e) => reasons.push(e.retrySuppressedReason))
+      .send();
+
+    // This path throws out of the adapter rather than resolving a response, so
+    // it misses the suppression bookkeeping the resolved path does — but it is
+    // still a stream failure, and status 0 would otherwise be retryable.
+    expect(reasons).toEqual(['stream_error']);
+  });
+
+  test('names the stream failure when a real status came back', async () => {
+    const client = new HTTPClient({
+      adapter: abortingAdapter({ status: 500, headers: {} }),
+      retryPolicy: policy,
+    });
+
+    const reasons: Array<string | undefined> = [];
+
+    const res = await client
+      .get('https://example.com/download')
+      .onAttemptEnd((e) => reasons.push(e.retrySuppressedReason))
+      .send();
+
+    expect(res.status).toBe(500);
+    expect(reasons).toEqual(['stream_error']);
+  });
+
+  test('stores Set-Cookie from the response that then aborted', async () => {
+    const jar = new CookieJar();
+
+    const client = new HTTPClient({
+      adapter: abortingAdapter({
+        status: 200,
+        headers: { 'set-cookie': 'session=abc123; Path=/' },
+      }),
+      cookieJar: jar,
+    });
+
+    await client.get('https://example.com/download').send();
+
+    // Headers arrived, so a real response carried this cookie. Dropping it
+    // would make the jar depend on whether the failure resolved or threw.
+    expect(jar.getCookieHeaderString('https://example.com/next')).toBe(
+      'session=abc123',
+    );
+  });
+
+  test('stores Set-Cookie even when the caller cancelled', async () => {
+    const jar = new CookieJar();
+    const controller = new AbortController();
+
+    // Cancel at the moment the body read fails, so the headers have already
+    // been received and attached — a pre-aborted signal never reaches the
+    // adapter at all.
+    const adapter: HTTPAdapter = {
+      getType: () => 'node',
+      send: (): Promise<AdapterResponse> => {
+        controller.abort();
+
+        const abortError = new Error(
+          'Request aborted during response streaming',
+        );
+        abortError.name = 'AbortError';
+        Object.assign(abortError, {
+          [RESPONSE_STREAM_ABORT_FLAG]: true,
+          streamAbortStatus: 200,
+          streamAbortHeaders: { 'set-cookie': 'session=abc123; Path=/' },
+        });
+
+        return Promise.reject(abortError);
+      },
+    };
+
+    const client = new HTTPClient({ adapter, cookieJar: jar });
+
+    const res = await client
+      .get('https://example.com/download')
+      .signal(controller.signal)
+      .send();
+
+    // Aborting the body read does not un-receive the headers, and browsers
+    // keep these cookies too.
+    expect(res.isCancelled).toBe(true);
+    expect(jar.getCookieHeaderString('https://example.com/next')).toBe(
+      'session=abc123',
+    );
+  });
+
+  test('ignores stream metadata on an error that was never tagged', async () => {
+    const jar = new CookieJar();
+
+    const adapter: HTTPAdapter = {
+      getType: () => 'node',
+      send: (): Promise<AdapterResponse> => {
+        // Shaped like a tagged response abort, but carrying no marker. Any
+        // adapter error could hold these fields by coincidence, and this path
+        // writes to the cookie jar.
+        const untagged = new Error('ordinary adapter failure');
+        Object.assign(untagged, {
+          streamAbortStatus: 200,
+          streamAbortHeaders: { 'set-cookie': 'injected=evil; Path=/' },
+        });
+
+        return Promise.reject(untagged);
+      },
+    };
+
+    const client = new HTTPClient({ adapter, cookieJar: jar });
+
+    await client.get('https://example.com/thing').send();
+
+    expect(jar.getCookieHeaderString('https://example.com/next')).toBe('');
+  });
+
+  test('is absent with no retry policy, since nothing was suppressed', async () => {
+    const client = new HTTPClient({ adapter: abortingAdapter() });
+
+    const reasons: Array<string | undefined> = [];
+
+    await client
+      .get('https://example.com/download')
+      .onAttemptEnd((e) => reasons.push(e.retrySuppressedReason))
+      .send();
+
+    expect(reasons).toEqual([undefined]);
   });
 });
 
@@ -831,7 +1003,7 @@ describe('NodeAdapter.send() — unit branches without server', () => {
     }
   });
 
-  test('FormData serialization write failure resolves status 0 and disables retry', async () => {
+  test('FormData serialization write failure resolves status 0 without a replay claim', async () => {
     const req = new MockClientRequest((_data, callback) => {
       callback?.(new Error('write failed'));
       return true;
@@ -854,7 +1026,11 @@ describe('NodeAdapter.send() — unit branches without server', () => {
 
       expect(res.status).toBe(0);
       expect(res.isTransportError).toBe(true);
-      expect(res.isRetryable).toBe(false);
+      // Neither replay signal: delivery is unproven rather than disproven, so
+      // the client's method rule decides. A blanket veto here would also stop
+      // retrying an idempotent PUT or DELETE.
+      expect(res.isRetryable).toBeUndefined();
+      expect(res.wasDefinitelyNotSent).toBeUndefined();
       expect(res.errorCause?.message).toBe('write failed');
       expect(req.destroyed).toBe(true);
       expect(req.headers['content-type']).toContain('multipart/form-data');
@@ -916,7 +1092,7 @@ describe('NodeAdapter.send() — unit branches without server', () => {
     }
   });
 
-  test('chunked string body write failure resolves status 0 and disables retry', async () => {
+  test('chunked string body write failure resolves status 0 without a replay claim', async () => {
     const req = new MockClientRequest((_data, callback) => {
       callback?.(new Error('write failed'));
       return true;
@@ -935,7 +1111,11 @@ describe('NodeAdapter.send() — unit branches without server', () => {
 
       expect(res.status).toBe(0);
       expect(res.isTransportError).toBe(true);
-      expect(res.isRetryable).toBe(false);
+      // Neither replay signal: delivery is unproven rather than disproven, so
+      // the client's method rule decides. A blanket veto here would also stop
+      // retrying an idempotent PUT or DELETE.
+      expect(res.isRetryable).toBeUndefined();
+      expect(res.wasDefinitelyNotSent).toBeUndefined();
       expect(res.errorCause?.message).toBe('write failed');
       expect(req.destroyed).toBe(true);
     } finally {
@@ -1457,6 +1637,45 @@ describe('NodeAdapter.send() — unit branches without server', () => {
     }
   });
 
+  test('a throwing transport code getter resolves conservatively', async () => {
+    const transportError = new Error('socket failed');
+    Object.defineProperty(transportError, 'code', {
+      get(): never {
+        throw new Error('hostile code getter');
+      },
+    });
+
+    const req = new MockClientRequest();
+    const requestSpy = spyOn(http, 'request').mockImplementation(
+      (_options, _callback) => {
+        queueMicrotask(() => {
+          req.emit('error', transportError);
+        });
+        return req as unknown as http.ClientRequest;
+      },
+    );
+
+    try {
+      const response = await new NodeAdapter().send({
+        requestURL: 'http://example.test/data',
+        method: 'GET',
+        headers: {},
+      });
+
+      // An unreadable code supplies no proof that the request was never sent,
+      // but it must still settle through the ordinary transport-error path.
+      // Unproven is reported by omitting the field, never as `false` — the
+      // contract is that absence means "not known".
+      expect(response.status).toBe(0);
+      expect(response.isTransportError).toBe(true);
+      expect(response.wasDefinitelyNotSent).toBeUndefined();
+      expect('wasDefinitelyNotSent' in response).toBe(false);
+      expect(response.errorCause).toBe(transportError);
+    } finally {
+      requestSpy.mockRestore();
+    }
+  });
+
   test('HTTPClient treats transport-marked 495 responses as failed requests', async () => {
     const certError = Object.assign(new Error('certificate has expired'), {
       code: 'CERT_HAS_EXPIRED',
@@ -1668,6 +1887,132 @@ describe('NodeAdapter.send() — unit branches without server', () => {
       expect(response.isFailed).toBe(true);
       expect(builder.error?.code).toBe('network_error');
       expect(builder.error?.cause?.message).toBe('write failed');
+    } finally {
+      requestSpy.mockRestore();
+    }
+  });
+
+  test('an idempotent PUT is retried after a body-write failure', async () => {
+    let requestCalls = 0;
+    const requestSpy = spyOn(http, 'request').mockImplementation(
+      (_options, callback) => {
+        requestCalls++;
+
+        if (requestCalls > 1) {
+          const req = new MockClientRequest();
+          const res = new MockIncomingMessage(200, {
+            'content-type': 'application/json',
+          });
+          const cb = callback as
+            ((res: http.IncomingMessage) => void) | undefined;
+
+          queueMicrotask(() => {
+            cb?.(res as unknown as http.IncomingMessage);
+            queueMicrotask(() => {
+              res.emit('data', Buffer.from('{"ok":true}'));
+              res.emit('end');
+            });
+          });
+
+          return req as unknown as http.ClientRequest;
+        }
+
+        const req = new MockClientRequest((_data, writeCallback) => {
+          writeCallback?.(new Error('write failed'));
+          return false;
+        });
+
+        return req as unknown as http.ClientRequest;
+      },
+    );
+
+    try {
+      const client = new HTTPClient({
+        adapter: new NodeAdapter(),
+        retryPolicy: { strategy: 'fixed', maxRetryAttempts: 1, delayMS: 1 },
+      });
+
+      const response = await client
+        .put('http://example.test/doc')
+        .text('payload')
+        .send();
+
+      // PUT is idempotent, so a half-written body is no reason to stop trying —
+      // a blanket veto here used to suppress this.
+      expect(requestCalls).toBe(2);
+      expect(response.status).toBe(200);
+    } finally {
+      requestSpy.mockRestore();
+    }
+  });
+
+  test('a pre-connection error is replayable despite buffered upload progress', async () => {
+    let requestCalls = 0;
+    const requestSpy = spyOn(http, 'request').mockImplementation(
+      (_options, callback) => {
+        requestCalls++;
+
+        if (requestCalls > 1) {
+          const req = new MockClientRequest();
+          const res = new MockIncomingMessage(200, {
+            'content-type': 'application/json',
+          });
+          const cb = callback as
+            ((res: http.IncomingMessage) => void) | undefined;
+
+          queueMicrotask(() => {
+            cb?.(res as unknown as http.IncomingMessage);
+            queueMicrotask(() => {
+              res.emit('data', Buffer.from('{"ok":true}'));
+              res.emit('end');
+            });
+          });
+
+          return req as unknown as http.ClientRequest;
+        }
+
+        let didEmitError = false;
+        const req = new MockClientRequest((_data, writeCallback) => {
+          // Body bytes are accepted by the stream before any connection
+          // exists, so the upload counter moves even though nothing reached
+          // the wire.
+          writeCallback?.(null);
+
+          if (!didEmitError) {
+            didEmitError = true;
+            queueMicrotask(() => {
+              req.emit(
+                'error',
+                Object.assign(new Error('connect ECONNREFUSED'), {
+                  code: 'ECONNREFUSED',
+                }),
+              );
+            });
+          }
+
+          return true;
+        });
+
+        return req as unknown as http.ClientRequest;
+      },
+    );
+
+    try {
+      const client = new HTTPClient({
+        adapter: new NodeAdapter(),
+        retryPolicy: { strategy: 'fixed', maxRetryAttempts: 1, delayMS: 1 },
+      });
+
+      const response = await client
+        .post('http://example.test/upload')
+        .text('payload')
+        .retryNonIdempotentMethods(true)
+        .send();
+
+      // The error code proves nothing was delivered, so the buffered-upload
+      // veto must not fire and cancel the retry it authorized.
+      expect(requestCalls).toBe(2);
+      expect(response.status).toBe(200);
     } finally {
       requestSpy.mockRestore();
     }
@@ -3020,6 +3365,108 @@ describe('NodeAdapter via HTTPClient', () => {
     expect(res.isNetworkError).toBe(true);
     expect(res.isFailed).toBe(true);
     expect(builder.error?.cause?.message).toMatch(/ECONNREFUSED/i);
+  });
+
+  test('a GET is still retried after a connection reset', async () => {
+    const net = await import('node:net');
+
+    let connections = 0;
+    const server = net.createServer((socket) => {
+      connections++;
+
+      if (connections === 1) {
+        socket.on('data', () => socket.destroy());
+        return;
+      }
+
+      socket.on('data', () => {
+        socket.end(
+          'HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 11\r\n\r\n{"ok":true}',
+        );
+      });
+    });
+
+    await new Promise<void>((done) => {
+      server.listen(0, '127.0.0.1', done);
+    });
+
+    const { port } = server.address() as { port: number };
+
+    try {
+      const client = new HTTPClient({
+        adapter: new NodeAdapter(),
+        baseURL: `http://127.0.0.1:${port}`,
+        retryPolicy: { strategy: 'fixed', maxRetryAttempts: 2, delayMS: 1 },
+      });
+
+      const res = await client.get('/thing').send();
+
+      // A reset mid-flight says nothing about replay safety for an idempotent
+      // method — repeating a GET is always safe, so the retry must survive.
+      expect(connections).toBe(2);
+      expect(res.status).toBe(200);
+    } finally {
+      server.close();
+    }
+  });
+
+  test('an empty-body POST whose headers reached the server is not replayable', async () => {
+    const net = await import('node:net');
+
+    // A raw TCP server so the connection can be killed the moment the request
+    // arrives — Bun.serve gives no handle on the socket.
+    const server = net.createServer((socket) => {
+      socket.on('data', () => {
+        // The request line and headers have landed; the server has it. Die
+        // before answering.
+        socket.destroy();
+      });
+    });
+
+    await new Promise<void>((done) => {
+      server.listen(0, '127.0.0.1', done);
+    });
+
+    const { port } = server.address() as { port: number };
+
+    try {
+      const res = await new NodeAdapter().send({
+        requestURL: `http://127.0.0.1:${port}/thing`,
+        method: 'POST',
+        headers: {},
+        body: null,
+      });
+
+      expect(res.status).toBe(0);
+      expect(res.isTransportError).toBe(true);
+
+      // Zero body bytes were written — there was no body — yet the headers
+      // reached the server, so the request may already have been acted on.
+      // A body-byte counter would have called this safe to replay. Absent
+      // rather than `false`: nothing here proves delivery either way.
+      expect(res.wasDefinitelyNotSent).toBeUndefined();
+      expect('wasDefinitelyNotSent' in res).toBe(false);
+
+      // And nothing claims the stronger "unsafe for every method" verdict: a
+      // reset says nothing about replaying an idempotent request.
+      expect(res.isRetryable).toBeUndefined();
+    } finally {
+      server.close();
+    }
+  });
+
+  test('a refused connection is still replayable', async () => {
+    // Port 1 is refused at the TCP level, so nothing was ever written.
+    const res = await new NodeAdapter().send({
+      requestURL: 'http://localhost:1/thing',
+      method: 'POST',
+      headers: {},
+      body: 'payload',
+    });
+
+    expect(res.status).toBe(0);
+    expect(res.isTransportError).toBe(true);
+    expect(res.wasDefinitelyNotSent).toBe(true);
   });
 
   // --- query params ---

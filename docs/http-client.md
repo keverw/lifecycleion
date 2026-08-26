@@ -28,6 +28,7 @@ A TypeScript HTTP client with a fluent request builder, request/response interce
 - [Phase Model](#phase-model)
 - [Retry Policy](#retry-policy)
   - [Retryable Status Codes](#retryable-status-codes)
+  - [Method Safety](#method-safety)
   - [Per-Request Override](#per-request-override)
 - [Cookie Jar](#cookie-jar)
   - [CookieJar API](#cookiejar-api)
@@ -51,6 +52,11 @@ A TypeScript HTTP client with a fluent request builder, request/response interce
   - [XHRAdapter](#xhradapter)
   - [MockAdapter (Testing)](#mockadapter-testing)
 - [Streaming Responses](#streaming-responses)
+  - [Stream Errors and Replay](#stream-errors-and-replay)
+    - [Adapter Support](#adapter-support)
+    - [Failures Before a Response](#failures-before-a-response)
+    - [Why a Retry Did Not Happen](#why-a-retry-did-not-happen)
+    - [Non-Idempotent Methods](#non-idempotent-methods)
 - [Builder Post-Send Accessors](#builder-post-send-accessors)
 - [Request State Values](#request-state-values)
 - [Headers](#headers)
@@ -120,6 +126,7 @@ interface HTTPClientConfig {
   timeout?: number; // Default: 30,000 ms; <= 0 disables the per-attempt timeout
   cookieJar?: CookieJar | null; // Cookie management (null disables)
   retryPolicy?: RetryPolicyOptions; // Retry strategy (disabled by default)
+  retryNonIdempotentMethods?: boolean; // Default: false — do not retry POST/PATCH. See Non-Idempotent Methods
   includeRequestID?: boolean; // Default: false — sends x-local-client-request-id header
   includeAttemptHeader?: boolean; // Default: false — sends x-local-client-request-attempt header with the 1-based attempt number as a decimal string. The counter is global across redirect hops: attempt 2 on a redirect hop follows attempt 1 on the initial request, not reset per hop.
   userAgent?: string; // Auto-set to 'lifecycleion-http-client' for NodeAdapter and MockAdapter, and for FetchAdapter on server runtimes. Browsers block this header — constructor throws if set with FetchAdapter or XHRAdapter in a browser.
@@ -191,6 +198,7 @@ const builder = client
   .json({ name: 'Alice' }) // sets a JSON body; content-type is inferred during request materialization
   .timeout(5_000) // per-request timeout override
   .retryPolicy({ strategy: 'fixed', maxRetryAttempts: 2, delayMS: 1000 }) // per-request retry override
+  .retryNonIdempotentMethods(true) // POST is not retried by default; safe here because of the idempotency key
   .label('create-user') // non-empty grouping label for cancel/list filtering
   .params({ source: 'web' }) // appended to query string
   .onUploadProgress((e) => console.log(e))
@@ -266,7 +274,7 @@ interface HTTPResponse<T = unknown> {
   requestID: string;
   adapterType: AdapterType;
   isStreamed: boolean; // Body was piped to a StreamResponseFactory; body is null
-  isStreamError: boolean; // Body delivery failed after headers arrived
+  isStreamError: boolean; // Body delivery failed after headers arrived; see Stream Errors and Replay
 }
 ```
 
@@ -624,6 +632,12 @@ Status `0` covers adapter-level "no real HTTP response" conditions (network unre
 
 4xx responses other than 408 and 429 are **not** retried.
 
+### Method Safety
+
+A retryable status is necessary but not sufficient. `POST` and `PATCH`, the methods RFC 9110 does not define as idempotent, are **not** retried by default, because a status like `500` means the server responded, so the handler ran and may have committed. `PUT` and `DELETE` are unaffected: both mutate, but repeating either leaves the resource in the same state, which is what makes replay safe.
+
+Set `retryNonIdempotentMethods: true` on the client, or `.retryNonIdempotentMethods(true)` per request, when writes are guarded by an idempotency key. See [Non-Idempotent Methods](#non-idempotent-methods) for the full rules, including how transport failures are treated.
+
 ### Per-Request Override
 
 ```typescript
@@ -634,7 +648,15 @@ await client
   .send();
 
 // Disable retries for one request (even if the client has a default policy)
-await client.post('/payments').retryPolicy(null).send();
+await client.get('/expensive-report').retryPolicy(null).send();
+
+// A POST is already not retried by default — opt in only when the write is
+// safe to repeat, for example when guarded by an idempotency key
+await client
+  .post('/payments')
+  .headers({ 'idempotency-key': key })
+  .retryNonIdempotentMethods(true)
+  .send();
 ```
 
 ## Cookie Jar
@@ -1126,6 +1148,8 @@ interface MockResponse {
   contentType?: 'json' | 'text' | 'binary'; // Overrides auto-detection
   delay?: number; // Millisecond delay for this response
   cookies?: Record<string, string | MockCookieOptions | null>;
+  streamError?: boolean | 'stream_write_error' | 'stream_response_error'; // Simulate a body failure after headers arrived
+  transportError?: boolean | MockTransportErrorOptions; // Simulate a failure with no response at all
 }
 ```
 
@@ -1247,6 +1271,164 @@ When streaming is active on a retry attempt (before headers arrive), the factory
 
 Once headers have arrived and the factory has been called, any mid-stream failure (`isStreamError: true`) is not retried because the response was already committed at the HTTP level. If the factory throws, that produces a `stream_setup_error` and is also not retried, since it indicates a local problem, such as failing to open a file, rather than a transient server issue.
 
+### Stream Errors and Replay
+
+`isStreamError` is not limited to streamed responses. It is also set when a buffered response body fails after headers arrive, such as from a peer reset mid-body, a premature close, or fewer bytes than a declared `Content-Length`. The real HTTP status is preserved in every case, so a truncated `200` still reports `200`, not `0`.
+
+For deciding whether a request may be resent, a stream error groups with a **real response**, not with a transport failure, even though both leave you without a usable body:
+
+| Outcome                                       | Did the server receive it?     | Safe to replay a non-idempotent write? |
+| --------------------------------------------- | ------------------------------ | -------------------------------------- |
+| Transport failure with `wasDefinitelyNotSent` | No — no connection was made    | Yes — nothing could have been applied  |
+| Transport failure, delivery not proven        | Unknown                        | No — it may have arrived               |
+| `isStreamError`, real status                  | Yes, and it may have committed | No — the outcome is unknown            |
+| `5xx` with an intact body                     | Yes, and it may have committed | No — the outcome is unknown            |
+
+A transport failure is not by itself a licence to replay. `status: 0` means no usable response came back, which is not the same as the request never arriving. A connection dropped after the request was written looks identical from here. Only an adapter that can name the cause (a refused connection, a name that did not resolve) can turn that into proof.
+
+Treating a stream error as a transport failure is the mistake worth guarding against: the superficial resemblance is strong, but it inverts the replay decision. `HTTPClient` already applies this internally. A stream error is never retried, even though its status might otherwise be retryable.
+
+Terminal means terminal for a `3xx` too: a redirect whose body failed is **not** followed, even with `followRedirects: true`. The `Location` header survived, so following would work, and that is the problem, because the hop would continue, a healthy destination would answer `200`, and the failure would be gone from the result. A per-attempt timeout that struck mid-body is the case that stings, since a later hop reports its own `isTimeout`. Nothing is lost by stopping: the response reports the real `3xx` status alongside `isStreamError`, with `wasRedirectDetected` and `detectedRedirectURL` still telling you where it pointed.
+
+With `followRedirects: false` the same truncated `3xx` reports differently, and deliberately so. That path is not about following. The request ends at the redirect whether or not the body arrived, so it reports what it reports for _every_ disabled redirect: `redirect_disabled`, `status: 0`, `isStreamError: false`, and `wasRedirectDetected` / `detectedRedirectURL` pointing at the target. A per-attempt timeout that struck mid-body is not surfaced there either: `isTimeout` stays `false`, because the timeout is incidental to an outcome that was already decided by the config. Reading `isTimeout` to mean "a timeout occurred somewhere" rather than "a timeout is why this failed" will surprise you here.
+
+Two things deliberately do **not** set the flag. A caller's own `AbortSignal` firing classifies as `isCancelled` (or `isTimeout`), since that is your decision rather than a network fault. A failure with no headers at all, such as a connection refusal, DNS failure, or TLS rejection, is a plain transport failure, because no status was ever received for the flag to qualify.
+
+#### Adapter Support
+
+| Adapter        | `isStreamError` | Notes                                                                                                                                               |
+| -------------- | --------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `NodeAdapter`  | Full            | Streamed and buffered bodies; distinguishes `stream_write_error` from `stream_response_error`                                                       |
+| `FetchAdapter` | Buffered bodies | Server runtimes and browsers alike; always reports `stream_response_error` — `fetch` buffers the body, so there is no per-chunk delivery to inspect |
+| `MockAdapter`  | Simulated       | Opt in per response with `streamError: true`, or name the code explicitly                                                                           |
+| `XHRAdapter`   | Not reported    | `XMLHttpRequest` discards the status on a network error, leaving nothing to qualify                                                                 |
+
+`FetchAdapter` is not limited to server runtimes here. Headers have already arrived when the body read starts, so the status is readable in a browser exactly as it is under Node or Bun, and a truncated body rejects the same way.
+
+A per-attempt timeout that fires _during_ the body read counts as a post-header failure too, and is reported with the real status rather than as a plain timeout. The adapter cannot tell that abort apart from a caller cancellation because both arrive on the same signal, so it carries the response metadata out with the error and the client decides: a cancellation stays `isCancelled`, a timeout becomes a terminal stream failure.
+
+`XHRAdapter` is the one real gap, and it is a spec-level limitation rather than a browser inconsistency: setting the error flag sets the response to a network error, which forces `status` to `0`. There is no surviving signal that headers ever arrived, so a mid-body truncation is indistinguishable from a connection refused. It arrives as an ordinary transport failure (`status: 0`, `isStreamError: false`), which for an **idempotent** method is eligible for retry, so a truncated `GET` is silently re-fetched where `NodeAdapter` and `FetchAdapter` would report the real status and stop.
+
+A non-idempotent write is not replayed there, but only because `XHRAdapter` never supplies `wasDefinitelyNotSent`, so the default rule blocks it for want of proof, not because the truncation was recognized. Enable `retryNonIdempotentMethods` and that protection is gone, since nothing distinguishes this failure from a connection that was refused. Browser code performing non-idempotent writes should prefer `FetchAdapter` where replay safety matters.
+
+#### Failures Before a Response
+
+The same replay question applies to a failure with no response at all, where `isStreamError` cannot help because no headers ever arrived. Adapters answer it with two separate signals: `isRetryable: false` suppresses a retry the status alone would allow, and `wasDefinitelyNotSent: true` proves the request never reached the server.
+
+`NodeAdapter` sets `wasDefinitelyNotSent` from the transport error code, treating only codes that prove no connection was established (`ECONNREFUSED`, `ENOTFOUND`, and similar) as replayable. Anything else, including `ECONNRESET`, `EPIPE`, `ETIMEDOUT`, `EHOSTUNREACH`, `ENETUNREACH`, or a bare socket hang up, is possible delivery. The two unreachable codes are on that side despite reading like connect-time failures, because an ICMP unreachable arriving for an established connection is reported on that connection with the same code. Unproven is reported by leaving the field off rather than by setting it to `false`: the contract is that absence means "not known", so an explicit `false` would read as a proof of delivery no adapter is in a position to give.
+
+It does not pair that with `isRetryable: false`. Whether a partly-sent request may be replayed is the method question, and withholding the proof already answers it. A blanket veto would additionally stop retrying an idempotent `PUT` after an ordinary socket error, which is the case a retry is most likely to fix.
+
+A body-byte count cannot supply the proof in either direction: an empty-body request writes headers and nothing else, so the counter stays at `0` even after the server acted on it, and the counter tracks bytes handed to the stream rather than bytes on the wire, so it can be non-zero for a connection that was never established.
+
+`XHRAdapter` sets neither. It never sets `wasDefinitelyNotSent`, because it has no way to prove non-delivery: upload progress events are suppressed for cross-origin requests that CORS does not grant access to, and such a request is still delivered. The browser blocks the response, not the request, so the absence of progress is not evidence that nothing was sent. It does not set `isRetryable: false` in its place either, since that flag blocks a retry for every method: inferring it from upload progress would stop retrying an idempotent `PUT` after an ordinary network error, and would override `retryNonIdempotentMethods` even when the caller has stated the replay is safe.
+
+`FetchAdapter` never sets `wasDefinitelyNotSent`, because `fetch` exposes no upload progress or byte accounting, so a failure there is indistinguishable from one where nothing was sent. It sets `isRetryable: false` only for the TLS case below, exactly as `NodeAdapter` does.
+
+`MockAdapter` can simulate any of it via `transportError`, so the replay rules are testable without a socket. It delivers no response data at all, meaning no body, headers, cookies, or terminal progress, and accepts the signals a real adapter would attach:
+
+```typescript
+// Proven undelivered — a POST may be replayed
+adapter.routes.post('/orders', () => ({
+  status: 200,
+  transportError: { wasDefinitelyNotSent: true },
+}));
+
+// Delivery unknown — a POST is not replayed, an idempotent GET still is
+adapter.routes.post('/orders', () => ({ status: 200, transportError: true }));
+
+// Nothing should retry this, whatever the method. The default status 0 is
+// retryable, so the veto is what stops it — pair it with a non-retryable
+// status like 495 and the status alone ends the request, proving nothing.
+adapter.routes.get('/secure', () => ({
+  status: 200,
+  transportError: { isRetryable: false },
+}));
+
+// A diagnostic status, as adapters preserve for TLS failures
+adapter.routes.get('/bad-cert', () => ({
+  status: 200,
+  transportError: { status: 495 },
+}));
+```
+
+So the `POST`/`PATCH` transport-failure exception is, today, a `NodeAdapter` capability. In a browser those writes are simply not retried after a transport failure, which is the safe outcome, just a stricter one than a runtime with real evidence can offer.
+
+Since the client treats anything other than `false` as retryable, an unset value means "not known to be unsafe", not "known to be safe". Callers that must not double-apply a write should not infer permission to replay from its absence.
+
+`isRetryable` is a hint about whether another attempt is worth making, and its contract only assigns meaning to `false`. An adapter may set it `true` for a failure it considers transient without knowing whether the request was delivered. Replaying a non-idempotent request needs a stronger statement, so adapters make it separately via `wasDefinitelyNotSent: true`, which claims only one thing: no request bytes reached the server. A custom adapter that sets `isRetryable: true` alone will not unlock a `POST` retry.
+
+`isRetryable: false` is now reserved for failures that no method should retry because another attempt cannot succeed, not for ones that merely might have been delivered. A rejected TLS certificate is the example: both `NodeAdapter` and `FetchAdapter` resolve those as `495` with `isRetryable: false`, since the same request against the same server fails identically every time. On `FetchAdapter` this is a server-runtime classification. Bun puts the OpenSSL code on the error and Node hangs it off `cause`, while a browser reports an opaque `TypeError` with neither, so a browser TLS failure keeps the ordinary transport-error shape.
+
+#### Why a Retry Did Not Happen
+
+`willRetry: false` on an `onAttemptEnd` event does not say whether a retry was declined by the policy or suppressed by a safety rule. When the status alone would have allowed one, `retrySuppressedReason` names which rule stopped it:
+
+| Value                   | Meaning                                                                   |
+| ----------------------- | ------------------------------------------------------------------------- |
+| `adapter_veto`          | The adapter reported `isRetryable: false` — no attempt can succeed        |
+| `stream_error`          | The body failed after headers arrived, so the server received the request |
+| `non_idempotent_method` | A `POST` or `PATCH` with no proof of non-delivery                         |
+
+It is absent when a retry was scheduled, when no policy is configured, when the policy has no attempts left, or when the status was never retryable in the first place. In those cases nothing was suppressed, so naming a cause would misdescribe why the request stopped.
+
+`adapter_veto` does not occur with a real transport. `NodeAdapter` and `FetchAdapter` set `isRetryable: false` only for a rejected TLS certificate, and pair it with `495`, which is not a retryable status, so the status ends the request before the veto is consulted, and nothing was suppressed to report. It is reachable from `MockAdapter` via `transportError: { isRetryable: false }`, whose default `status: 0` _is_ retryable (that is what the [`/secure` example above](#failures-before-a-response) exercises), and from a custom adapter that vetoes a status the client would otherwise retry.
+
+```typescript
+await client
+  .post('/orders')
+  .onAttemptEnd((event) => {
+    if (event.retrySuppressedReason === 'non_idempotent_method') {
+      // Set retryNonIdempotentMethods once the write carries an idempotency key
+    }
+  })
+  .send();
+```
+
+#### Non-Idempotent Methods
+
+Adapter evidence answers "did this reach the server?". The request method answers a different question, "does it matter if it arrives twice?" The client uses both.
+
+`POST` and `PATCH` are the methods RFC 9110 does not define as idempotent, so replaying one may apply the same change twice. By default `HTTPClient` will not retry them:
+
+- **After a real HTTP response**, never. A retryable status like `500` is not evidence of a failed delivery. It is the opposite, since the server responded, so the handler ran and may have committed.
+- **After a transport failure**, only when the adapter reports `wasDefinitelyNotSent: true`, proving that no request bytes reached the server. An adapter that cannot tell reports nothing, which is treated as unsafe. The transport condition is part of the rule: on a real response delivery is already settled the other way, so nothing can unlock a replay there.
+- **After a thrown adapter error** (including a per-attempt timeout), never. There is no response to draw evidence from, and a timeout in particular means the request was sent and the answer never came back.
+
+`PUT` and `DELETE` are _not_ affected, even though they mutate. Both are idempotent by definition: repeating one leaves the resource in the same state as doing it once, which is exactly what makes replay safe.
+
+Opt in when writes are guarded by an idempotency key, or are naturally safe to repeat:
+
+```typescript
+// For every request from this client
+const client = new HTTPClient({
+  adapter,
+  retryPolicy: { strategy: 'exponential', maxRetryAttempts: 3 },
+  retryNonIdempotentMethods: true,
+});
+
+// Or per request, overriding the client config either way
+await client.post('/orders').json(order).retryNonIdempotentMethods(true).send();
+```
+
+This only ever _removes_ retries relative to the retry policy. It never introduces one, and it does nothing unless a retry policy is active.
+
+`MockAdapter` reports the status, headers, and cookies you set while forcing `body` to `null`, so the branch can be tested without a real socket:
+
+```typescript
+adapter.routes.post('/orders', () => ({
+  status: 200,
+  body: { id: 1 }, // discarded — a real post-header failure loses the body
+  streamError: true,
+}));
+
+const response = await client.post('/orders').send();
+// response.status         === 200
+// response.isStreamError  === true
+// response.body           === null
+// response.isFailed       === true, and the request was not retried
+```
+
 ## Builder Post-Send Accessors
 
 After calling `.send()`, the builder exposes live state:
@@ -1360,6 +1542,7 @@ From `lifecycleion/http-client-mock`:
 MockAdapter;
 (MockAdapterConfig, MockAdapterRoutes, MockRequest, MockResponse);
 (MockRouteHandler, MockFormData, MockCookieOptions);
+MockTransportErrorOptions;
 ```
 
 ## Exported Constants

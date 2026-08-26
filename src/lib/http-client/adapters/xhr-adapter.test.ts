@@ -442,6 +442,70 @@ describe('XHRAdapter', () => {
     expect(response.errorCause).toBeInstanceOf(Error);
   });
 
+  test('leaves both replay signals unset after an upload progressed', async () => {
+    const adapter = new XHRAdapter();
+    const promise = adapter.send({
+      requestURL: 'https://api.test/data',
+      method: 'PUT',
+      headers: {},
+      body: 'payload',
+    });
+
+    lastXHR.simulateUploadProgress(64, 128);
+    lastXHR.simulateError();
+
+    const response = await promise;
+
+    expect(response.status).toBe(0);
+    expect(response.isTransportError).toBe(true);
+    // `isRetryable: false` blocks a retry for every method, so it is not
+    // inferred from upload progress — an idempotent PUT stays retryable after
+    // an ordinary network error.
+    expect(response.isRetryable).toBeUndefined();
+    expect(response.wasDefinitelyNotSent).toBeUndefined();
+  });
+
+  test('leaves both replay signals unset after a completed zero-byte upload', async () => {
+    const adapter = new XHRAdapter();
+    const promise = adapter.send({
+      requestURL: 'https://api.test/data',
+      method: 'POST',
+      headers: {},
+      body: '',
+    });
+
+    // upload.load fires with loaded: 0 for an empty request body, so neither
+    // the byte count nor completion says anything usable about delivery.
+    lastXHR.simulateUploadLoad();
+    lastXHR.simulateError();
+
+    const response = await promise;
+
+    expect(response.isRetryable).toBeUndefined();
+    expect(response.wasDefinitelyNotSent).toBeUndefined();
+  });
+
+  test('never claims non-delivery when no upload progress was observed', async () => {
+    const adapter = new XHRAdapter();
+    const promise = adapter.send({
+      requestURL: 'https://api.test/data',
+      method: 'POST',
+      headers: {},
+      body: 'payload',
+    });
+
+    lastXHR.simulateError();
+
+    const response = await promise;
+
+    // Upload progress is suppressed for cross-origin requests CORS does not
+    // grant access to, and such a request may still have been delivered.
+    // Absence of progress is not evidence that nothing was sent, so this
+    // adapter never claims replay safety.
+    expect(response.wasDefinitelyNotSent).toBeUndefined();
+    expect(response.isRetryable).toBeUndefined();
+  });
+
   test('rejects with AbortError on timeout', () => {
     const adapter = new XHRAdapter();
     const promise = adapter.send({
@@ -990,6 +1054,45 @@ describe('XHRAdapter', () => {
         (globalThis as Record<string, unknown>).document = originalDocument;
       }
     }
+  });
+
+  test('falls back to string comparison when the URLs cannot be parsed', async () => {
+    const adapter = new XHRAdapter();
+    const promise = adapter.send({
+      // Not parseable as a URL, so redirect detection cannot normalize either
+      // side and compares the raw strings instead.
+      requestURL: 'not a url at all',
+      method: 'GET',
+      headers: {},
+    });
+
+    lastXHR.status = 200;
+    lastXHR.response = textBody('ok');
+    lastXHR.responseURL = 'not a url at all';
+    lastXHR.simulateLoad();
+
+    const response = await promise;
+
+    expect(response.wasRedirectDetected).toBeUndefined();
+    expect(response.status).toBe(200);
+  });
+
+  test('detects a redirect by string comparison when URLs cannot be parsed', async () => {
+    const adapter = new XHRAdapter();
+    const promise = adapter.send({
+      requestURL: 'not a url at all',
+      method: 'GET',
+      headers: {},
+    });
+
+    lastXHR.status = 200;
+    lastXHR.response = textBody('ok');
+    lastXHR.responseURL = 'a different unparseable value';
+    lastXHR.simulateLoad();
+
+    const response = await promise;
+
+    expect(response.wasRedirectDetected).toBe(true);
   });
 
   test('returns empty headers object when getAllResponseHeaders returns empty string', async () => {

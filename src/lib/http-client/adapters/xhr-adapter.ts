@@ -260,6 +260,15 @@ export class XHRAdapter implements HTTPAdapter {
       // connection, CORS rejection). It never fires for HTTP error status codes
       // (4xx, 5xx) — those arrive on the load event with a real status.
       xhr.addEventListener('error', () => {
+        // Neither replay signal is set here, on purpose. This adapter can never
+        // prove non-delivery: upload progress is suppressed for cross-origin
+        // requests CORS does not grant access to, and those are still delivered —
+        // the browser blocks the response, not the request. The omission is what
+        // keeps a `POST` from being replayed by default.
+        //
+        // `isRetryable: false` does not stand in for it: that flag blocks every
+        // method, so it would stop retrying an idempotent `PUT` after an ordinary
+        // network error and override `retryNonIdempotentMethods`.
         resolve({
           status: 0,
           isTransportError: true,

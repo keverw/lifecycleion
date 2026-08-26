@@ -19,6 +19,7 @@ import {
   parseContentType,
   resolveAbsoluteURL,
   resolveAbsoluteURLForRuntime,
+  resolveDetectedRedirectURL,
   scalarHeader,
   serializeBody,
 } from './utils';
@@ -33,10 +34,12 @@ import {
   STREAM_FACTORY_ERROR_FLAG,
   XHR_BROWSER_TIMEOUT_FLAG,
   RETRYABLE_STATUS_CODES,
+  NON_IDEMPOTENT_METHODS,
   REDIRECT_STATUS_CODES,
   DEFAULT_MAX_REDIRECTS,
 } from './consts';
 import type {
+  AttemptEndEvent,
   HTTPClientConfig,
   HTTPMethod,
   HTTPResponse,
@@ -85,6 +88,7 @@ export class BaseHTTPClient {
       | 'includeAttemptHeader'
       | 'followRedirects'
       | 'maxRedirects'
+      | 'retryNonIdempotentMethods'
     >
   > &
     HTTPClientConfig;
@@ -122,6 +126,7 @@ export class BaseHTTPClient {
       timeout: config.timeout ?? DEFAULT_TIMEOUT_MS,
       cookieJar: config.cookieJar,
       retryPolicy: config.retryPolicy,
+      retryNonIdempotentMethods: config.retryNonIdempotentMethods ?? false,
       includeRequestID: config.includeRequestID ?? false,
       includeAttemptHeader: config.includeAttemptHeader ?? false,
       userAgent: config.userAgent,
@@ -560,7 +565,7 @@ export class BaseHTTPClient {
             requestID,
             false,
             'interceptor_error',
-            error instanceof Error ? error : new Error(String(error)),
+            normalizeError(error),
           );
 
           callbacks.setError(normalizedError);
@@ -721,7 +726,14 @@ export class BaseHTTPClient {
                 body: null,
               },
               requestID,
+              // Provably false: a cancel settles with no adapter response, and
+              // this branch is guarded on having one.
               wasCancelled: false,
+              // Hardcoded even when a per-attempt timeout struck mid-body. The
+              // request ends at the redirect either way, so `redirect_disabled`
+              // is the outcome the caller acts on; surfacing the timeout would
+              // reclassify the error code on whether the body happened to
+              // finish. See docs/http-client.md.
               wasTimeout: false,
               adapterType: this._adapter.getType(),
               initialURL: finalRequest.requestURL,
@@ -734,9 +746,16 @@ export class BaseHTTPClient {
           }
 
           // --- Follow redirects (301, 302, 303, 307, 308) ---
+          //
+          // A stream failure is terminal, and that holds for a 3xx too: following
+          // would make the failure vanish, since a healthy destination answers 200
+          // and overwrites the failed attempt's `wasTimeout`. The terminal path
+          // below builds from this response, so the real 3xx status,
+          // `wasRedirectDetected` and `detectedRedirectURL` are all still reported.
           if (
             this._config.followRedirects &&
             adapterResponse &&
+            !adapterResponse.isStreamError &&
             REDIRECT_STATUS_CODES.has(adapterResponse.status)
           ) {
             hopCount++;
@@ -897,8 +916,7 @@ export class BaseHTTPClient {
               });
 
               errorCode = 'interceptor_error';
-              adapterCause =
-                error instanceof Error ? error : new Error(String(error));
+              adapterCause = normalizeError(error);
 
               break;
             }
@@ -994,7 +1012,7 @@ export class BaseHTTPClient {
           requestID,
           false,
           'request_setup_error',
-          error instanceof Error ? error : new Error(String(error)),
+          normalizeError(error),
         );
 
         callbacks.setAttemptCount(completedAttemptCount);
@@ -1207,12 +1225,56 @@ export class BaseHTTPClient {
     const startAttempt = params.startAttemptNumber ?? 1;
     const redirectHistory = params.redirectHistory ?? [];
     const cookieJar = params.cookieJar ?? null;
+    /**
+     * Whether the policy still has a retry left at this point.
+     *
+     * Counted from retries actually spent, not from the attempt number, which
+     * also advances on redirect hops that spend no budget. `areAttemptsExhausted`
+     * lags by one — it counts an attempt only once `shouldRetry` has reported its
+     * error, and every suppressed path short-circuits before that call.
+     */
+    const isRetryAvailable = (): boolean =>
+      policy !== null && policy.errors.length < policy.maxRetryAttempts;
+
+    // Per-request wins over client config; unset means the safe default.
+    const allowNonIdempotentRetry =
+      options.retryNonIdempotentMethods ??
+      this._config.retryNonIdempotentMethods;
     let attemptNumber = startAttempt - 1;
     let isRetriesExhausted = false;
 
     while (true) {
       attemptNumber++;
       const isRetry = attemptNumber > startAttempt;
+
+      /**
+       * Emit the attempt-end event, filling in everything that is the same at
+       * every exit. Callers pass only what differs between one ending and
+       * another, so a new field cannot be missed at one of the fourteen exits.
+       */
+      const emitAttemptEnd = (outcome: {
+        willRetry: boolean;
+        status: number;
+        nextRetryDelayMS?: number;
+        nextRetryAt?: number;
+        retrySuppressedReason?: AttemptEndEvent['retrySuppressedReason'];
+      }): void => {
+        options.onAttemptEnd?.({
+          attemptNumber,
+          isRetry,
+          nextRetryDelayMS: undefined,
+          nextRetryAt: undefined,
+          ...outcome,
+          requestID,
+          initialURL,
+          ...(hopContext
+            ? {
+                hopNumber: hopContext.hopNumber,
+                redirect: hopContext.redirect,
+              }
+            : {}),
+        });
+      };
 
       // Only set the start timestamp on the very first attempt of the entire
       // request (attempt 1). Redirect hops reuse the original start time.
@@ -1301,21 +1363,11 @@ export class BaseHTTPClient {
         } catch (error) {
           clearTimeout(timeoutID);
 
-          options.onAttemptEnd?.({
-            attemptNumber,
-            isRetry,
+          emitAttemptEnd({
             willRetry: false,
             nextRetryDelayMS: undefined,
             nextRetryAt: undefined,
             status: 0,
-            requestID,
-            initialURL,
-            ...(hopContext
-              ? {
-                  hopNumber: hopContext.hopNumber,
-                  redirect: hopContext.redirect,
-                }
-              : {}),
           });
 
           // Terminal failure — no further attempts. _execute notifies error observers
@@ -1332,29 +1384,18 @@ export class BaseHTTPClient {
             wasTimeout: false,
             isRetriesExhausted: false,
             errorCode: 'interceptor_error',
-            adapterCause:
-              error instanceof Error ? error : new Error(String(error)),
+            adapterCause: normalizeError(error),
           };
         }
 
         if ('cancel' in retryIntercept) {
           clearTimeout(timeoutID);
 
-          options.onAttemptEnd?.({
-            attemptNumber,
-            isRetry,
+          emitAttemptEnd({
             willRetry: false,
             nextRetryDelayMS: undefined,
             nextRetryAt: undefined,
             status: 0,
-            requestID,
-            initialURL,
-            ...(hopContext
-              ? {
-                  hopNumber: hopContext.hopNumber,
-                  redirect: hopContext.redirect,
-                }
-              : {}),
           });
 
           return {
@@ -1467,21 +1508,11 @@ export class BaseHTTPClient {
           adapterResponse.status === 0 &&
           !this._config.followRedirects
         ) {
-          options.onAttemptEnd?.({
-            attemptNumber,
-            isRetry,
+          emitAttemptEnd({
             willRetry: false,
             nextRetryDelayMS: undefined,
             nextRetryAt: undefined,
             status: 0,
-            requestID,
-            initialURL,
-            ...(hopContext
-              ? {
-                  hopNumber: hopContext.hopNumber,
-                  redirect: hopContext.redirect,
-                }
-              : {}),
           });
 
           return {
@@ -1495,12 +1526,42 @@ export class BaseHTTPClient {
           };
         }
 
+        // A non-idempotent method may only be replayed on a transport outcome
+        // where the adapter proves no request bytes reached the server. The proof
+        // is `wasDefinitelyNotSent`, not `isRetryable` — that flag only ever
+        // defined `false`, so `true` claims nothing about delivery. On a real
+        // response delivery is settled the other way: the server answered, so the
+        // handler may have committed. Silence is treated as unsafe.
+        const isTransportOutcome = adapterResponse.isTransportError === true;
+
+        const isMethodReplayable =
+          allowNonIdempotentRetry ||
+          !NON_IDEMPOTENT_METHODS.has(sentRequest.method) ||
+          (isTransportOutcome && adapterResponse.wasDefinitelyNotSent === true);
+
+        // Why a retry did not happen, for observers. Only meaningful when the
+        // status alone would have allowed one — otherwise nothing was
+        // suppressed and there is nothing to explain.
+        const retrySuppressedReason =
+          isRetryAvailable() &&
+          RETRYABLE_STATUS_CODES.has(adapterResponse.status) &&
+          !cancelSignal.aborted
+            ? adapterResponse.isRetryable === false
+              ? ('adapter_veto' as const)
+              : adapterResponse.isStreamError
+                ? ('stream_error' as const)
+                : !isMethodReplayable
+                  ? ('non_idempotent_method' as const)
+                  : undefined
+            : undefined;
+
         // Check if should retry based on status code.
         // Stream failures are terminal even when status is retryable (e.g. 0).
         if (
           policy &&
           adapterResponse.isRetryable !== false &&
           !adapterResponse.isStreamError &&
+          isMethodReplayable &&
           RETRYABLE_STATUS_CODES.has(adapterResponse.status) &&
           !cancelSignal.aborted
         ) {
@@ -1515,21 +1576,11 @@ export class BaseHTTPClient {
             callbacks.setState('waiting_for_retry');
           }
 
-          options.onAttemptEnd?.({
-            attemptNumber,
-            isRetry,
+          emitAttemptEnd({
             willRetry: shouldRetry,
             nextRetryDelayMS: shouldRetry ? delayMS : undefined,
             nextRetryAt,
             status: adapterResponse.status,
-            requestID,
-            initialURL,
-            ...(hopContext
-              ? {
-                  hopNumber: hopContext.hopNumber,
-                  redirect: hopContext.redirect,
-                }
-              : {}),
           });
 
           if (shouldRetry) {
@@ -1576,28 +1627,21 @@ export class BaseHTTPClient {
 
           isRetriesExhausted = true;
         } else {
-          options.onAttemptEnd?.({
-            attemptNumber,
-            isRetry,
+          emitAttemptEnd({
             willRetry: false,
+            ...(retrySuppressedReason ? { retrySuppressedReason } : {}),
             nextRetryDelayMS: undefined,
             nextRetryAt: undefined,
             status: adapterResponse.status,
-            requestID,
-            initialURL,
-            ...(hopContext
-              ? {
-                  hopNumber: hopContext.hopNumber,
-                  redirect: hopContext.redirect,
-                }
-              : {}),
           });
         }
 
-        const responseCause: Error | undefined =
-          adapterResponse.errorCause instanceof Error
-            ? adapterResponse.errorCause
-            : undefined;
+        const responseCauseValue = adapterResponse.errorCause;
+        const responseCause: Error | undefined = asErrorValue(
+          responseCauseValue,
+        )
+          ? responseCauseValue
+          : undefined;
 
         const streamErrorCode = adapterResponse.isStreamError
           ? (adapterResponse.streamErrorCode ?? 'stream_write_error')
@@ -1616,24 +1660,32 @@ export class BaseHTTPClient {
       } catch (error) {
         clearTimeout(timeoutID);
 
+        // Before any classification: if the adapter attached the response it had
+        // already received, the Set-Cookie on those headers belongs in the jar.
+        // Placed ahead of the branches so no arm can return past it.
+        //
+        // The marker is required, not just the shape — any thrown error could
+        // satisfy `getResponseStreamAbortInfo` by coincidence, and this writes to
+        // the cookie jar. Same gate the branch below applies.
+        const abortedResponse = isResponseStreamAbortError(error)
+          ? getResponseStreamAbortInfo(error)
+          : undefined;
+
+        if (cookieJar && abortedResponse) {
+          cookieJar.processResponseHeaders(
+            abortedResponse.headers,
+            sentRequest.requestURL,
+          );
+        }
+
         // When abort(string) is called, fetch() rejects with the string itself (per Fetch spec),
         // not an AbortError. Check cancelSignal.aborted first so string-reason cancels are caught.
         if (cancelSignal.aborted && !isAbortError(error)) {
-          options.onAttemptEnd?.({
-            attemptNumber,
-            isRetry,
+          emitAttemptEnd({
             willRetry: false,
             nextRetryDelayMS: undefined,
             nextRetryAt: undefined,
             status: 0,
-            requestID,
-            initialURL,
-            ...(hopContext
-              ? {
-                  hopNumber: hopContext.hopNumber,
-                  redirect: hopContext.redirect,
-                }
-              : {}),
           });
 
           const signalReason = getSignalCancelReason(cancelSignal);
@@ -1651,23 +1703,61 @@ export class BaseHTTPClient {
           };
         }
 
-        if (isAbortError(error) && isResponseStreamAbortError(error)) {
+        if (isResponseStreamAbortError(error)) {
+          // The marker is the gate, not the error's `name`: undici surfaces a
+          // timeout during the body read as `TypeError: terminated`, and requiring
+          // the name dropped the tagged status and headers, letting a post-header
+          // failure reach the generic network path as a retryable `status: 0`.
+          //
+          // Normalized once for the cause slots below, since the tag no longer
+          // implies an `Error`.
+          const streamCause = normalizeError(error);
+
+          const streamSuppressionReason = (
+            status: number,
+          ): 'stream_error' | undefined =>
+            isRetryAvailable() &&
+            RETRYABLE_STATUS_CODES.has(status) &&
+            !cancelSignal.aborted
+              ? 'stream_error'
+              : undefined;
+
+          /**
+           * Redirect metadata for a response the client rebuilds itself.
+           *
+           * A truncated `3xx` still knows where it pointed — `Location` arrived
+           * with the headers. Adapters resolve this for a stream error they
+           * *resolve*; the returns below rebuild from the tag on a throw, so they
+           * must resolve it too. Load-bearing now that a stream error is terminal
+           * for a `3xx` and nothing downstream follows the hop.
+           */
+          const redirectFieldsFor = (
+            status: number,
+            headers: Record<string, string | string[]>,
+          ): Pick<
+            AdapterResponse,
+            'wasRedirectDetected' | 'detectedRedirectURL'
+          > => {
+            const detectedRedirectURL = resolveDetectedRedirectURL(
+              sentRequest.requestURL,
+              status,
+              headers,
+            );
+
+            return {
+              wasRedirectDetected:
+                detectedRedirectURL !== undefined ||
+                REDIRECT_STATUS_CODES.has(status),
+              ...(detectedRedirectURL ? { detectedRedirectURL } : {}),
+            };
+          };
+
           if (cancelSignal.aborted) {
-            options.onAttemptEnd?.({
-              attemptNumber,
-              isRetry,
+            emitAttemptEnd({
               willRetry: false,
               nextRetryDelayMS: undefined,
               nextRetryAt: undefined,
               status: 0,
-              requestID,
-              initialURL,
-              ...(hopContext
-                ? {
-                    hopNumber: hopContext.hopNumber,
-                    redirect: hopContext.redirect,
-                  }
-                : {}),
             });
 
             const signalReason = getSignalCancelReason(cancelSignal);
@@ -1688,34 +1778,33 @@ export class BaseHTTPClient {
             };
           }
 
-          const streamedAbort = getResponseStreamAbortInfo(error);
+          if (isTimedOut && abortedResponse) {
+            const suppressedReason = streamSuppressionReason(
+              abortedResponse.status,
+            );
 
-          if (isTimedOut && streamedAbort) {
-            options.onAttemptEnd?.({
-              attemptNumber,
-              isRetry,
+            emitAttemptEnd({
               willRetry: false,
+              ...(suppressedReason
+                ? { retrySuppressedReason: suppressedReason }
+                : {}),
               nextRetryDelayMS: undefined,
               nextRetryAt: undefined,
-              status: streamedAbort.status,
-              requestID,
-              initialURL,
-              ...(hopContext
-                ? {
-                    hopNumber: hopContext.hopNumber,
-                    redirect: hopContext.redirect,
-                  }
-                : {}),
+              status: abortedResponse.status,
             });
 
             return {
               adapterResponse: {
-                status: streamedAbort.status,
-                headers: streamedAbort.headers,
+                status: abortedResponse.status,
+                ...redirectFieldsFor(
+                  abortedResponse.status,
+                  abortedResponse.headers,
+                ),
+                headers: abortedResponse.headers,
                 body: null,
                 isStreamError: true,
                 streamErrorCode: 'stream_response_error',
-                errorCause: error,
+                errorCause: streamCause,
                 effectiveRequestHeaders:
                   getEffectiveRequestHeadersFromError(error),
               },
@@ -1729,35 +1818,36 @@ export class BaseHTTPClient {
               wasTimeout: true,
               isRetriesExhausted: false,
               errorCode: 'stream_response_error',
-              adapterCause: error,
+              adapterCause: streamCause,
             };
           }
 
-          options.onAttemptEnd?.({
-            attemptNumber,
-            isRetry,
+          const fallbackSuppressedReason = streamSuppressionReason(
+            abortedResponse?.status ?? 0,
+          );
+
+          emitAttemptEnd({
             willRetry: false,
+            ...(fallbackSuppressedReason
+              ? { retrySuppressedReason: fallbackSuppressedReason }
+              : {}),
             nextRetryDelayMS: undefined,
             nextRetryAt: undefined,
-            status: streamedAbort?.status ?? 0,
-            requestID,
-            initialURL,
-            ...(hopContext
-              ? {
-                  hopNumber: hopContext.hopNumber,
-                  redirect: hopContext.redirect,
-                }
-              : {}),
+            status: abortedResponse?.status ?? 0,
           });
+
+          const fallbackStatus = abortedResponse?.status ?? 0;
+          const fallbackHeaders = abortedResponse?.headers ?? {};
 
           return {
             adapterResponse: {
-              status: streamedAbort?.status ?? 0,
-              headers: streamedAbort?.headers ?? {},
+              status: fallbackStatus,
+              ...redirectFieldsFor(fallbackStatus, fallbackHeaders),
+              headers: fallbackHeaders,
               body: null,
               isStreamError: true,
               streamErrorCode: 'stream_response_error',
-              errorCause: error,
+              errorCause: streamCause,
               effectiveRequestHeaders:
                 getEffectiveRequestHeadersFromError(error),
             },
@@ -1771,28 +1861,18 @@ export class BaseHTTPClient {
             wasTimeout: isTimedOut,
             isRetriesExhausted: false,
             errorCode: 'stream_response_error',
-            adapterCause: error,
+            adapterCause: streamCause,
           };
         }
 
         if (isAbortError(error)) {
           // User/parent cancellation — never retry (even if a timeout fired in the same window).
           if (cancelSignal.aborted) {
-            options.onAttemptEnd?.({
-              attemptNumber,
-              isRetry,
+            emitAttemptEnd({
               willRetry: false,
               nextRetryDelayMS: undefined,
               nextRetryAt: undefined,
               status: 0,
-              requestID,
-              initialURL,
-              ...(hopContext
-                ? {
-                    hopNumber: hopContext.hopNumber,
-                    redirect: hopContext.redirect,
-                  }
-                : {}),
             });
 
             const signalReason = getSignalCancelReason(cancelSignal);
@@ -1820,34 +1900,20 @@ export class BaseHTTPClient {
             } else {
               // AbortError without our timeout flag — treat as non-retryable cancel.
               // This path includes StreamResponseFactory returning null / { cancel: true }.
-              const factoryCancelValue =
-                error !== null &&
-                typeof error === 'object' &&
-                STREAM_FACTORY_CANCEL_KEY in error
-                  ? (error as Record<string, unknown>)[
-                      STREAM_FACTORY_CANCEL_KEY
-                    ]
-                  : undefined;
+              const factoryCancelValue = readObjectMember(
+                error,
+                STREAM_FACTORY_CANCEL_KEY,
+              );
               const factoryCancelReason =
                 typeof factoryCancelValue === 'string'
                   ? factoryCancelValue
                   : undefined;
 
-              options.onAttemptEnd?.({
-                attemptNumber,
-                isRetry,
+              emitAttemptEnd({
                 willRetry: false,
                 nextRetryDelayMS: undefined,
                 nextRetryAt: undefined,
                 status: 0,
-                requestID,
-                initialURL,
-                ...(hopContext
-                  ? {
-                      hopNumber: hopContext.hopNumber,
-                      redirect: hopContext.redirect,
-                    }
-                  : {}),
               });
 
               return {
@@ -1870,21 +1936,11 @@ export class BaseHTTPClient {
           isNonRetryableClientCallbackError(error);
 
         if (isNonRetryableClientCallbackFailure) {
-          options.onAttemptEnd?.({
-            attemptNumber,
-            isRetry,
+          emitAttemptEnd({
             willRetry: false,
             nextRetryDelayMS: undefined,
             nextRetryAt: undefined,
             status: 0,
-            requestID,
-            initialURL,
-            ...(hopContext
-              ? {
-                  hopNumber: hopContext.hopNumber,
-                  redirect: hopContext.redirect,
-                }
-              : {}),
           });
 
           const isStreamFactoryError =
@@ -1904,15 +1960,21 @@ export class BaseHTTPClient {
             errorCode: isStreamFactoryError
               ? 'stream_setup_error'
               : 'interceptor_error',
-            adapterCause:
-              error instanceof Error ? error : new Error(String(error)),
+            adapterCause: normalizeError(error),
           };
         }
 
-        // Network / adapter / per-attempt timeout — retry if policy allows
-        if (policy && !cancelSignal.aborted) {
+        // Network / adapter / per-attempt timeout — retry if policy allows.
+        // A throw carries no adapter response, so delivery is unproven; for a
+        // non-idempotent method that means no retry.
+        if (
+          policy &&
+          !cancelSignal.aborted &&
+          (allowNonIdempotentRetry ||
+            !NON_IDEMPOTENT_METHODS.has(sentRequest.method))
+        ) {
           const { shouldRetry, delayMS } = policy.shouldRetry(
-            error instanceof Error ? error : new Error(String(error)),
+            normalizeError(error),
           );
           const nextRetryAt = shouldRetry ? Date.now() + delayMS : undefined;
 
@@ -1922,21 +1984,11 @@ export class BaseHTTPClient {
             callbacks.setState('waiting_for_retry');
           }
 
-          options.onAttemptEnd?.({
-            attemptNumber,
-            isRetry,
+          emitAttemptEnd({
             willRetry: shouldRetry,
             nextRetryDelayMS: shouldRetry ? delayMS : undefined,
             nextRetryAt,
             status: 0,
-            requestID,
-            initialURL,
-            ...(hopContext
-              ? {
-                  hopNumber: hopContext.hopNumber,
-                  redirect: hopContext.redirect,
-                }
-              : {}),
           });
 
           if (shouldRetry) {
@@ -1957,7 +2009,7 @@ export class BaseHTTPClient {
               requestID,
               false,
               'adapter_error',
-              error instanceof Error ? error : new Error(String(error)),
+              normalizeError(error),
             );
 
             await this._runErrorObservers(
@@ -1992,21 +2044,22 @@ export class BaseHTTPClient {
 
           isRetriesExhausted = true;
         } else {
-          options.onAttemptEnd?.({
-            attemptNumber,
-            isRetry,
+          // A throw carries no adapter response, so the only thing that can have
+          // suppressed a policy-eligible retry here is the method rule.
+          const isSuppressedByMethod =
+            isRetryAvailable() &&
+            !cancelSignal.aborted &&
+            !allowNonIdempotentRetry &&
+            NON_IDEMPOTENT_METHODS.has(sentRequest.method);
+
+          emitAttemptEnd({
             willRetry: false,
+            ...(isSuppressedByMethod
+              ? { retrySuppressedReason: 'non_idempotent_method' as const }
+              : {}),
             nextRetryDelayMS: undefined,
             nextRetryAt: undefined,
             status: 0,
-            requestID,
-            initialURL,
-            ...(hopContext
-              ? {
-                  hopNumber: hopContext.hopNumber,
-                  redirect: hopContext.redirect,
-                }
-              : {}),
           });
         }
 
@@ -2018,8 +2071,7 @@ export class BaseHTTPClient {
           wasTimeout: didTimeoutThisAttempt,
           isRetriesExhausted,
           errorCode: 'adapter_error',
-          adapterCause:
-            error instanceof Error ? error : new Error(String(error)),
+          adapterCause: normalizeError(error),
         };
       }
     }
@@ -2521,7 +2573,16 @@ export class BaseHTTPClient {
     }
 
     const controller = new AbortController();
-    const abort = (signal: AbortSignal) => controller.abort(signal.reason);
+
+    /**
+     * Mirror one source signal's abort onto the composed one.
+     *
+     * An unreadable reason degrades to `undefined`, which is already correct:
+     * spec and runtimes normalize that to a fresh `AbortError` DOMException,
+     * exactly what a bare `abort()` produces.
+     */
+    const abort = (signal: AbortSignal) =>
+      controller.abort(readObjectMember(signal, 'reason'));
 
     if (a.aborted) {
       abort(a);
@@ -2643,7 +2704,29 @@ function cloneBodyValue(body: unknown): unknown {
 }
 
 function isAbortError(err: unknown): err is Error {
-  return err instanceof Error && err.name === 'AbortError';
+  return asErrorValue(err) && readObjectMember(err, 'name') === 'AbortError';
+}
+
+/** Check Error identity without trusting a Proxy's prototype trap. */
+function asErrorValue(value: unknown): value is Error {
+  try {
+    return value instanceof Error;
+  } catch {
+    return false;
+  }
+}
+
+/** Normalize any rejected/thrown value without allowing its coercion to throw. */
+function normalizeError(value: unknown): Error {
+  if (asErrorValue(value)) {
+    return value;
+  }
+
+  try {
+    return new Error(String(value));
+  } catch {
+    return new Error('Unknown error');
+  }
 }
 
 /**
@@ -2664,23 +2747,14 @@ function sentRequestForNonRetryableAdapterCallbackError(
 }
 
 function isNonRetryableClientCallbackError(err: unknown): boolean {
-  return Boolean(
-    err &&
-    typeof err === 'object' &&
-    NON_RETRYABLE_HTTP_CLIENT_CALLBACK_ERROR_FLAG in err &&
-    (
-      err as Record<
-        typeof NON_RETRYABLE_HTTP_CLIENT_CALLBACK_ERROR_FLAG,
-        boolean | undefined
-      >
-    )[NON_RETRYABLE_HTTP_CLIENT_CALLBACK_ERROR_FLAG] === true,
+  return (
+    readObjectMember(err, NON_RETRYABLE_HTTP_CLIENT_CALLBACK_ERROR_FLAG) ===
+    true
   );
 }
 
 function isStreamFactoryClientCallbackError(err: unknown): boolean {
-  return (
-    err !== null && typeof err === 'object' && STREAM_FACTORY_ERROR_FLAG in err
-  );
+  return readObjectMember(err, STREAM_FACTORY_ERROR_FLAG) === true;
 }
 
 function sentRequestForObservedAdapterError(
@@ -2703,56 +2777,116 @@ function sentRequestForObservedAdapterError(
 function getEffectiveRequestHeadersFromError(
   error: unknown,
 ): Record<string, string | string[]> | undefined {
+  return snapshotHeaderRecord(
+    readObjectMember(error, 'effectiveRequestHeaders'),
+  );
+}
+
+/**
+ * Read a member from a value supplied by an adapter or runtime.
+ *
+ * Rejected values may be proxies, abort reasons, or decorated errors, and both a
+ * getter and a Proxy trap can throw. An unreadable member is treated as absent so
+ * that second error cannot replace the one being normalized.
+ */
+function readObjectMember(source: unknown, key: string): unknown {
   if (
-    error &&
-    typeof error === 'object' &&
-    'effectiveRequestHeaders' in error &&
-    (error as { effectiveRequestHeaders?: unknown }).effectiveRequestHeaders
+    (typeof source !== 'object' && typeof source !== 'function') ||
+    source === null
   ) {
-    return (
-      error as {
-        effectiveRequestHeaders: Record<string, string | string[]>;
-      }
-    ).effectiveRequestHeaders;
+    return undefined;
   }
 
-  return undefined;
+  try {
+    return (source as Record<string, unknown>)[key];
+  } catch {
+    return undefined;
+  }
 }
 
+/**
+ * Validate and copy an adapter-provided header record into a plain object.
+ *
+ * Copying is part of the safety boundary: checking the outer value alone would
+ * leave later reads exposed to throwing getters. A malformed or unreadable record
+ * is treated as absent.
+ */
+function snapshotHeaderRecord(
+  value: unknown,
+): Record<string, string | string[]> | undefined {
+  if (typeof value !== 'object' || value === null) {
+    return undefined;
+  }
+
+  try {
+    const snapshot: Record<string, string | string[]> = {};
+
+    for (const [name, headerValue] of Object.entries(value)) {
+      if (typeof headerValue === 'string') {
+        snapshot[name] = headerValue;
+      } else if (
+        Array.isArray(headerValue) &&
+        headerValue.every((item) => typeof item === 'string')
+      ) {
+        snapshot[name] = [...headerValue];
+      } else {
+        return undefined;
+      }
+    }
+
+    return snapshot;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Whether an adapter explicitly tagged a thrown value with one of the client's
+ * marker flags.
+ *
+ * Exactly `true`, not merely present: presence alone lets an error carrying the
+ * flag as `false` reach a branch meant for a deliberate tag. Every adapter writes
+ * the literal `true`. The read is guarded; unreadable is untagged.
+ */
+function hasAdapterMarker(err: unknown, flag: string): boolean {
+  return readObjectMember(err, flag) === true;
+}
+
+/**
+ * Whether an adapter tagged this throw as a response-stream abort.
+ *
+ * Gates both the terminal stream-error branch and writing that response's
+ * `Set-Cookie` into the jar, so it is the strictest marker to get wrong.
+ */
 function isResponseStreamAbortError(err: unknown): boolean {
-  return (
-    err !== null && typeof err === 'object' && RESPONSE_STREAM_ABORT_FLAG in err
-  );
+  return hasAdapterMarker(err, RESPONSE_STREAM_ABORT_FLAG);
 }
 
+/** Whether XHRAdapter tagged this throw as a browser-fired request timeout. */
 function isXHRBrowserTimeout(err: unknown): boolean {
-  return (
-    err !== null && typeof err === 'object' && XHR_BROWSER_TIMEOUT_FLAG in err
-  );
+  return hasAdapterMarker(err, XHR_BROWSER_TIMEOUT_FLAG);
 }
 
 function getResponseStreamAbortInfo(
   err: unknown,
 ): { status: number; headers: Record<string, string | string[]> } | undefined {
-  if (
-    !err ||
-    typeof err !== 'object' ||
-    !('streamAbortStatus' in err) ||
-    !('streamAbortHeaders' in err)
-  ) {
+  const status = readObjectMember(err, 'streamAbortStatus');
+
+  if (typeof status !== 'number') {
     return undefined;
   }
 
-  const status = (err as { streamAbortStatus?: unknown }).streamAbortStatus;
-  const headers = (err as { streamAbortHeaders?: unknown }).streamAbortHeaders;
+  const headers = snapshotHeaderRecord(
+    readObjectMember(err, 'streamAbortHeaders'),
+  );
 
-  if (typeof status !== 'number' || !headers || typeof headers !== 'object') {
+  if (headers === undefined) {
     return undefined;
   }
 
   return {
     status,
-    headers: headers as Record<string, string | string[]>,
+    headers,
   };
 }
 
@@ -2762,5 +2896,7 @@ function getResponseStreamAbortInfo(
  * AbortError reason set by the runtime when no explicit reason is provided.
  */
 function getSignalCancelReason(signal: AbortSignal): string | undefined {
-  return typeof signal.reason === 'string' ? signal.reason : undefined;
+  const reason = readObjectMember(signal, 'reason');
+
+  return typeof reason === 'string' ? reason : undefined;
 }

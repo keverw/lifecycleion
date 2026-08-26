@@ -58,14 +58,14 @@ const result = installGlobalEventTarget();
 
 **Returns:** one of
 
-| Result                | Meaning                                                                                                       |
-| --------------------- | ------------------------------------------------------------------------------------------------------------- |
-| `'native'`            | The environment already provides all three methods (browser, Bun, Deno). Nothing was changed.                 |
-| `'installed'`         | This call installed the polyfill.                                                                             |
-| `'already-installed'` | A previous call, or another copy of Lifecycleion, installed it. The same backing target is reused.            |
-| `'partial'`           | Some but not all of the methods are present and usable. Nothing was installed. See [Guarantees](#guarantees). |
-| `'unsupported'`       | The methods are missing and there is no `EventTarget` constructor to back them with.                          |
-| `'blocked'`           | The global object refused the definition (non-extensible, or a non-configurable property).                    |
+| Result                | Meaning                                                                                                                                     |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| `'native'`            | The environment already provides all three methods (browser, Bun, Deno). Nothing was changed.                                               |
+| `'installed'`         | This call installed the polyfill.                                                                                                           |
+| `'already-installed'` | A previous call, or another copy of Lifecycleion, installed it. The same backing target is reused.                                          |
+| `'partial'`           | The three methods are not all absent, but are not all usable either. Nothing was installed. See [Guarantees](#guarantees).                  |
+| `'unsupported'`       | The methods are missing and there is nothing to back them with: no `EventTarget` constructor, or one that cannot produce a usable instance. |
+| `'blocked'`           | The global object refused the definition (non-extensible, or a non-configurable property).                                                  |
 
 ### getGlobalEventTarget
 
@@ -102,6 +102,9 @@ if (isGlobalEventTargetAvailable()) {
 - **Reports what was installed.** `isGlobalEventTargetPolyfilled()` describes the install, not what is callable at this instant: an application that replaces the global methods afterwards does not reset it.
 - **No mixing.** If the environment has a partial or foreign surface (say, only `addEventListener`, a `dispatchEvent` that is not callable, or one defined as a throwing accessor), nothing is installed. Filling in the gaps from a fresh target would send dispatches somewhere the existing listeners are not. Degrading quietly is safer than reporting into the void. Reporting is skipped in that case, and the helpers still return their normal results.
 - **Never throws.** Installation runs during module initialization, so a throw would break the import of every dependent module. A non-extensible global (`Object.freeze(globalThis)` / `Object.preventExtensions(globalThis)`) or a non-configurable property is detected up front and returns `'blocked'`. If a definition is rejected anyway, anything already defined is rolled back so nothing is left half-installed. Probing is guarded too. **Every** global this module reads, including the three methods and the `EventTarget` constructor, goes through one guarded read, because reading a global runs its getter and a getter can throw. An unreadable method is unreplaceable, so the call returns `'partial'` and leaves the accessor alone. An unreadable `EventTarget` returns `'unsupported'`, since a constructor that cannot be read cannot back anything.
+
+  The shared state object gets the same treatment, one level in. It is reachable by anything on the global object, so its fields are read through the same guarded reader rather than trusted, and its shape is validated before reuse: a value that is not an object, or whose `target` cannot service all three methods, is treated as absent and replaced. That key is Lifecycleion's own namespace, so an unusable value in it is not somebody else's working implementation. Writing back to it is guarded as well because another holder may have frozen it, and flipping `isInstalled` on a frozen object throws in strict mode, after the three methods have already been defined. That write happens inside the guarded block, so a rejection rolls the methods back and returns `'blocked'` rather than escaping as an exception.
+
 - **Non-enumerable.** Installed properties are defined with `Object.defineProperty` and do not show up in `Object.keys(globalThis)`.
 - **Bound.** Installed methods are bound to the backing target, so they work when destructured or passed around.
 - **Browser and Bun behavior is unchanged.**

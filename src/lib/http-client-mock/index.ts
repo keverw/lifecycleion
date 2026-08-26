@@ -7,6 +7,7 @@ export type {
   MockRouteHandler,
   MockFormData,
   MockCookieOptions,
+  MockTransportErrorOptions,
 } from '../http-client/adapters/mock-adapter';
 
 /**

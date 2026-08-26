@@ -14,6 +14,11 @@ import {
   DEFAULT_REQUEST_ATTEMPT_HEADER,
   DEFAULT_REQUEST_ID_HEADER,
   DEFAULT_USER_AGENT,
+  NON_RETRYABLE_HTTP_CLIENT_CALLBACK_ERROR_FLAG,
+  RESPONSE_STREAM_ABORT_FLAG,
+  STREAM_FACTORY_CANCEL_KEY,
+  STREAM_FACTORY_ERROR_FLAG,
+  XHR_BROWSER_TIMEOUT_FLAG,
 } from './consts';
 import { MockAdapter } from './adapters/mock-adapter';
 import type {
@@ -983,6 +988,26 @@ describe('HTTPClient — cancellation', () => {
     expect(builder.error?.cancelReason).toBeUndefined();
   });
 
+  test('a throwing AbortSignal reason getter cannot replace cancellation', async () => {
+    const client = makeClient();
+    const controller = new AbortController();
+
+    Object.defineProperty(controller.signal, 'reason', {
+      configurable: true,
+      get: () => {
+        throw new Error('reason getter');
+      },
+    });
+    controller.abort('hidden');
+
+    const builder = client.get('/api/slow').signal(controller.signal);
+    const response = await builder.send();
+
+    expect(response.isCancelled).toBe(true);
+    expect(builder.error?.code).toBe('cancelled');
+    expect(builder.error?.cancelReason).toBeUndefined();
+  });
+
   test('pre-aborted AbortSignal short-circuits before interceptors and adapter dispatch', async () => {
     let adapterCalls = 0;
     let interceptorCalls = 0;
@@ -1256,6 +1281,77 @@ describe('HTTPClient — cancel reason via AbortError-throwing adapters', () => 
     }
   });
 
+  test('an unreadable abort reason yields the platform default', async () => {
+    // A reason whose getter throws is read as `undefined` and forwarded as
+    // such. That is the correct end state, not a degradation: `abort(undefined)`
+    // does not pin the reason to `undefined` — the spec normalizes it to a
+    // freshly minted AbortError, the same value a bare `abort()` produces. This
+    // pins that down, so nobody "fixes" the guarded read into forwarding a
+    // sentinel or a reason the source signal never had.
+    let observedReason: unknown = 'not captured';
+
+    const adapter: HTTPAdapter = {
+      getType: () => 'mock',
+      send: async (request: AdapterRequest): Promise<AdapterResponse> => {
+        await new Promise<void>((resolve) => {
+          request.signal?.addEventListener('abort', () => {
+            observedReason = request.signal?.reason;
+            resolve();
+          });
+        });
+
+        const error = new Error('Aborted');
+        error.name = 'AbortError';
+        throw error;
+      },
+    };
+
+    const client = new HTTPClient({ adapter });
+    const controller = new AbortController();
+    const originalAnyDescriptor = Object.getOwnPropertyDescriptor(
+      AbortSignal,
+      'any',
+    );
+
+    // Force the manual composition path — AbortSignal.any does its own
+    // propagation and never consults this code.
+    Object.defineProperty(AbortSignal, 'any', {
+      value: undefined,
+      configurable: true,
+    });
+
+    try {
+      const builder = client
+        .get('https://example.com/slow')
+        .signal(controller.signal);
+      const promise = builder.send();
+
+      setTimeout(() => {
+        // A reason nobody can read: the getter throws on every access.
+        Object.defineProperty(controller.signal, 'reason', {
+          get: () => {
+            throw new Error('reason is not readable');
+          },
+          configurable: true,
+        });
+        controller.abort();
+      }, 10);
+
+      const res = await promise;
+
+      expect(res.isCancelled).toBe(true);
+      // The composed signal carries a real AbortError, never a bare `undefined`
+      // and never a stand-in of the client's own invention.
+      expect(observedReason).toBeInstanceOf(Error);
+      expect((observedReason as Error).name).toBe('AbortError');
+      expect(builder.error?.cancelReason).toBeUndefined();
+    } finally {
+      if (originalAnyDescriptor) {
+        Object.defineProperty(AbortSignal, 'any', originalAnyDescriptor);
+      }
+    }
+  });
+
   test('no cancelReason when cancel called without reason via AbortError-throwing adapter', async () => {
     const { adapter } = makeAbortErrorAdapter();
     const client = new HTTPClient({ adapter });
@@ -1264,6 +1360,337 @@ describe('HTTPClient — cancel reason via AbortError-throwing adapters', () => 
     setTimeout(() => builder.cancel(), 10);
     await promise;
 
+    expect(builder.error?.cancelReason).toBeUndefined();
+  });
+});
+
+describe('HTTPClient — adapter marker flags', () => {
+  // A marker is the only thing standing between an arbitrary thrown value and a
+  // branch meant for a tag an adapter deliberately set — for the stream-abort
+  // one, that branch also writes to the cookie jar. So a marker is trusted only
+  // when it reads exactly `true`, which is what every adapter writes.
+  // Throws rather than rejecting, so the parameter can stay `unknown`: what an
+  // adapter hands back is not always an Error, and that is part of what these
+  // tests cover.
+  function makeThrowingAdapter(error: unknown): HTTPAdapter {
+    return {
+      getType: () => 'mock' as const,
+      send: (): Promise<AdapterResponse> =>
+        Promise.resolve().then(() => {
+          throw error;
+        }),
+    };
+  }
+
+  /** Response metadata of the kind a genuine tagged abort carries. */
+  const staleMetadata = {
+    streamAbortStatus: 503,
+    streamAbortHeaders: { 'set-cookie': ['stale=1; Path=/'] },
+  };
+
+  test('a marker set to false is not a stream abort, and its cookies are not stored', async () => {
+    const jar = new CookieJar();
+    const client = new HTTPClient({
+      adapter: makeThrowingAdapter(
+        Object.assign(new Error('boom'), {
+          [RESPONSE_STREAM_ABORT_FLAG]: false,
+          ...staleMetadata,
+        }),
+      ),
+      baseURL: 'http://api.test',
+      cookieJar: jar,
+    });
+
+    const response = await client.get('/x').send();
+
+    // Testing for the property rather than its value classified an ordinary
+    // adapter error as a terminal stream failure, and filed the Set-Cookie it
+    // happened to carry under this request's URL.
+    expect(response.isStreamError).toBe(false);
+    expect(response.status).toBe(0);
+    expect(jar.getCookiesFor('http://api.test/')).toHaveLength(0);
+  });
+
+  test('a marker whose getter throws is treated as untagged', async () => {
+    const hostile = new Error('boom');
+
+    Object.defineProperty(hostile, RESPONSE_STREAM_ABORT_FLAG, {
+      get() {
+        throw new Error('nope');
+      },
+    });
+    Object.assign(hostile, staleMetadata);
+
+    const jar = new CookieJar();
+    const client = new HTTPClient({
+      adapter: makeThrowingAdapter(hostile),
+      baseURL: 'http://api.test',
+      cookieJar: jar,
+    });
+
+    // An unguarded read would let the getter escape the classifier that exists
+    // to normalize the failure.
+    const response = await client.get('/x').send();
+
+    expect(response.isStreamError).toBe(false);
+    expect(response.status).toBe(0);
+    expect(jar.getCookiesFor('http://api.test/')).toHaveLength(0);
+  });
+
+  test('a throwing Error.name getter does not escape abort classification', async () => {
+    const hostile = new Error('adapter failed');
+    Object.defineProperty(hostile, 'name', {
+      get(): never {
+        throw new Error('hostile name getter');
+      },
+    });
+
+    const builder = new HTTPClient({
+      adapter: makeThrowingAdapter(hostile),
+    }).get('https://example.com/x');
+    const response = await builder.send();
+
+    expect(response.isCancelled).toBe(false);
+    expect(builder.error?.code).toBe('adapter_error');
+    expect(builder.error?.cause).toBe(hostile);
+  });
+
+  test('a hostile Proxy rejection cannot escape error normalization', async () => {
+    const hostile = new Proxy(
+      {},
+      {
+        get(): never {
+          throw new Error('hostile get trap');
+        },
+        getPrototypeOf(): never {
+          throw new Error('hostile prototype trap');
+        },
+      },
+    );
+    const builder = new HTTPClient({
+      adapter: makeThrowingAdapter(hostile),
+    }).get('https://example.com/x');
+    const response = await builder.send();
+
+    expect(response.isCancelled).toBe(false);
+    expect(builder.error?.code).toBe('adapter_error');
+    expect(builder.error?.cause?.message).toBe('Unknown error');
+  });
+
+  test('throwing stream metadata getters cannot replace a caller cancellation', async () => {
+    const hostileFields = [
+      'streamAbortStatus',
+      'streamAbortHeaders',
+      'effectiveRequestHeaders',
+    ] as const;
+
+    for (const hostileField of hostileFields) {
+      const controller = new AbortController();
+      const abortError = Object.assign(new Error('Request aborted'), {
+        name: 'AbortError',
+        [RESPONSE_STREAM_ABORT_FLAG]: true,
+        streamAbortStatus: 200,
+        streamAbortHeaders: {},
+      });
+
+      Object.defineProperty(abortError, hostileField, {
+        get(): never {
+          throw new Error(`hostile ${hostileField} getter`);
+        },
+        configurable: true,
+      });
+
+      const adapter: HTTPAdapter = {
+        getType: () => 'mock',
+        send: (): Promise<AdapterResponse> => {
+          controller.abort('stop');
+          return Promise.reject(abortError);
+        },
+      };
+      const client = new HTTPClient({ adapter });
+      const builder = client
+        .get('https://example.com/x')
+        .signal(controller.signal);
+      const response = await builder.send();
+
+      // Metadata is supplementary. A getter failure must not replace the
+      // already-settled cancellation with request_setup_error.
+      expect(response.isCancelled).toBe(true);
+      expect(builder.error?.code).toBe('cancelled');
+      expect(builder.error?.cancelReason).toBe('stop');
+    }
+  });
+
+  test('throwing getters inside stream header metadata are treated as absent', async () => {
+    const hostileHeaders = {};
+    Object.defineProperty(hostileHeaders, 'set-cookie', {
+      enumerable: true,
+      get(): never {
+        throw new Error('hostile header getter');
+      },
+    });
+
+    const tagged = Object.assign(new Error('body aborted'), {
+      name: 'AbortError',
+      [RESPONSE_STREAM_ABORT_FLAG]: true,
+      streamAbortStatus: 503,
+      streamAbortHeaders: hostileHeaders,
+    });
+    const client = new HTTPClient({
+      adapter: makeThrowingAdapter(tagged),
+      baseURL: 'http://api.test',
+      cookieJar: new CookieJar(),
+    });
+    const builder = client.get('/x');
+    const response = await builder.send();
+
+    // The marker still identifies a post-header abort, but unreadable evidence
+    // cannot supply a trustworthy status/header pair.
+    expect(response.isStreamError).toBe(true);
+    expect(response.status).toBe(0);
+    expect(builder.error?.code).toBe('stream_response_error');
+  });
+
+  test('a marker set to true is trusted, keeping the real status and its cookies', async () => {
+    const jar = new CookieJar();
+    const client = new HTTPClient({
+      adapter: makeThrowingAdapter(
+        Object.assign(new Error('boom'), {
+          [RESPONSE_STREAM_ABORT_FLAG]: true,
+          ...staleMetadata,
+        }),
+      ),
+      baseURL: 'http://api.test',
+      cookieJar: jar,
+    });
+
+    const response = await client.get('/x').send();
+
+    expect(response.isStreamError).toBe(true);
+    expect(response.status).toBe(503);
+    expect(jar.getCookieHeaderString('http://api.test/next')).toBe('stale=1');
+  });
+
+  test('a tagged non-Error still routes, and its cause is normalized', async () => {
+    const jar = new CookieJar();
+    const client = new HTTPClient({
+      // Nothing obliges an adapter to reject with an Error, and the marker is
+      // readable on any object — so the branch has to survive one that is not.
+      adapter: makeThrowingAdapter({
+        [RESPONSE_STREAM_ABORT_FLAG]: true,
+        ...staleMetadata,
+      }),
+      baseURL: 'http://api.test',
+      cookieJar: jar,
+    });
+
+    const builder = client.get('/x');
+    const response = await builder.send();
+
+    expect(response.isStreamError).toBe(true);
+    expect(response.status).toBe(503);
+    expect(jar.getCookieHeaderString('http://api.test/next')).toBe('stale=1');
+
+    // The cause slots are typed `Error`, so the raw value must not reach them.
+    expect(builder.error?.code).toBe('stream_response_error');
+    expect(builder.error?.cause).toBeInstanceOf(Error);
+  });
+
+  test('the XHR browser-timeout marker turns a bare AbortError into a timeout', async () => {
+    const client = new HTTPClient({
+      // What XHRAdapter throws when the browser fires its own hard timeout: an
+      // AbortError, indistinguishable from a cancel without the marker.
+      adapter: makeThrowingAdapter(
+        Object.assign(new Error('Request aborted'), {
+          name: 'AbortError',
+          [XHR_BROWSER_TIMEOUT_FLAG]: true,
+        }),
+      ),
+      baseURL: 'http://api.test',
+      timeout: 0,
+    });
+
+    const response = await client.get('/x').send();
+
+    expect(response.isTimeout).toBe(true);
+    expect(response.isCancelled).toBe(false);
+  });
+
+  test('an XHR browser-timeout marker set to false stays a cancel', async () => {
+    const client = new HTTPClient({
+      adapter: makeThrowingAdapter(
+        Object.assign(new Error('Request aborted'), {
+          name: 'AbortError',
+          [XHR_BROWSER_TIMEOUT_FLAG]: false,
+        }),
+      ),
+      baseURL: 'http://api.test',
+      timeout: 0,
+    });
+
+    const response = await client.get('/x').send();
+
+    expect(response.isCancelled).toBe(true);
+    expect(response.isTimeout).toBe(false);
+  });
+
+  test('throwing callback marker getters stay on the normalized error path', async () => {
+    const hostileNonRetryable = new Error('adapter failed');
+    Object.defineProperty(
+      hostileNonRetryable,
+      NON_RETRYABLE_HTTP_CLIENT_CALLBACK_ERROR_FLAG,
+      {
+        get(): never {
+          throw new Error('hostile non-retryable marker');
+        },
+      },
+    );
+
+    const ordinaryBuilder = new HTTPClient({
+      adapter: makeThrowingAdapter(hostileNonRetryable),
+    }).get('https://example.com/x');
+    await ordinaryBuilder.send();
+
+    expect(ordinaryBuilder.error?.code).toBe('adapter_error');
+    expect(ordinaryBuilder.error?.cause).toBe(hostileNonRetryable);
+
+    const hostileFactoryMarker = Object.assign(new Error('callback failed'), {
+      [NON_RETRYABLE_HTTP_CLIENT_CALLBACK_ERROR_FLAG]: true,
+    });
+    Object.defineProperty(hostileFactoryMarker, STREAM_FACTORY_ERROR_FLAG, {
+      get(): never {
+        throw new Error('hostile stream-factory marker');
+      },
+    });
+
+    const callbackBuilder = new HTTPClient({
+      adapter: makeThrowingAdapter(hostileFactoryMarker),
+    }).get('https://example.com/x');
+    await callbackBuilder.send();
+
+    expect(callbackBuilder.error?.code).toBe('interceptor_error');
+    expect(callbackBuilder.error?.cause).toBe(hostileFactoryMarker);
+  });
+
+  test('a throwing stream-cancel reason getter does not escape AbortError handling', async () => {
+    const abortError = Object.assign(new Error('factory cancelled'), {
+      name: 'AbortError',
+    });
+    Object.defineProperty(abortError, STREAM_FACTORY_CANCEL_KEY, {
+      get(): never {
+        throw new Error('hostile cancel-reason getter');
+      },
+    });
+
+    const client = new HTTPClient({
+      adapter: makeThrowingAdapter(abortError),
+      timeout: 0,
+    });
+    const builder = client.get('https://example.com/x');
+    const response = await builder.send();
+
+    expect(response.isCancelled).toBe(true);
+    expect(builder.error?.code).toBe('cancelled');
     expect(builder.error?.cancelReason).toBeUndefined();
   });
 });
@@ -2834,6 +3261,200 @@ describe('HTTPClient — redirect', () => {
     ]);
     expect(errorCodes).toEqual(['redirect_loop']);
   });
+
+  test('does not follow a 3xx whose body failed after headers arrived', async () => {
+    const requestedPaths: string[] = [];
+
+    const adapter: HTTPAdapter = {
+      getType: () => 'node',
+      send: (request: AdapterRequest): Promise<AdapterResponse> => {
+        requestedPaths.push(new URL(request.requestURL).pathname);
+
+        if (requestedPaths.length === 1) {
+          return Promise.resolve({
+            status: 302,
+            wasRedirectDetected: true,
+            detectedRedirectURL: 'https://example.com/next',
+            headers: { location: '/next' },
+            body: null,
+            isStreamError: true,
+            streamErrorCode: 'stream_response_error',
+            errorCause: new Error('terminated'),
+          });
+        }
+
+        return Promise.resolve({
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+          body: new TextEncoder().encode('{"ok":true}'),
+        });
+      },
+    };
+
+    const client = new HTTPClient({
+      adapter,
+      baseURL: 'https://example.com',
+      followRedirects: true,
+    });
+
+    const builder = client.get('/start');
+    const res = await builder.send();
+
+    // The healthy destination must never be reached — following it would have
+    // resolved a terminal stream failure as a 200.
+    expect(requestedPaths).toEqual(['/start']);
+    expect(res.status).toBe(302);
+    expect(res.isStreamError).toBe(true);
+    expect(res.isFailed).toBe(true);
+    expect(res.wasRedirectFollowed).toBe(false);
+    // The Location header survived the truncation, so the target is still reported.
+    expect(res.wasRedirectDetected).toBe(true);
+    expect(res.detectedRedirectURL).toBe('https://example.com/next');
+    expect(builder.error?.code).toBe('stream_response_error');
+  });
+
+  test('keeps isTimeout on a 3xx truncated by a per-attempt timeout', async () => {
+    let callCount = 0;
+
+    const adapter: HTTPAdapter = {
+      getType: () => 'node',
+      send: async (request: AdapterRequest): Promise<AdapterResponse> => {
+        callCount++;
+
+        if (callCount === 1) {
+          // Headers arrived, then the attempt signal fired mid-body — the shape
+          // adapters hand back for a timeout that strikes during the body read.
+          await new Promise<void>((resolve) => {
+            request.signal?.addEventListener('abort', () => {
+              resolve();
+            });
+          });
+
+          const error = new Error('Request aborted during response streaming');
+          error.name = 'AbortError';
+
+          throw Object.assign(error, {
+            [RESPONSE_STREAM_ABORT_FLAG]: true,
+            streamAbortStatus: 302,
+            streamAbortHeaders: { location: '/next' },
+          });
+        }
+
+        return {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+          body: new TextEncoder().encode('{"ok":true}'),
+        };
+      },
+    };
+
+    const client = new HTTPClient({
+      adapter,
+      baseURL: 'https://example.com',
+      followRedirects: true,
+      timeout: 25,
+    });
+
+    const builder = client.get('/start');
+    const res = await builder.send();
+
+    expect(callCount).toBe(1);
+    expect(res.status).toBe(302);
+    expect(res.isStreamError).toBe(true);
+    // The whole point: a followed hop would have reported its own isTimeout.
+    expect(res.isTimeout).toBe(true);
+    expect(res.isFailed).toBe(true);
+    expect(res.wasRedirectFollowed).toBe(false);
+    // Nothing follows the hop any more, so the rebuilt response is the only
+    // thing left that can say where it pointed. The client resolves it from the
+    // headers the adapter tagged onto the throw.
+    expect(res.wasRedirectDetected).toBe(true);
+    expect(res.detectedRedirectURL).toBe('https://example.com/next');
+    expect(builder.error?.code).toBe('stream_response_error');
+  });
+
+  test('reports the redirect target of a truncated 3xx when following is off', async () => {
+    const adapter: HTTPAdapter = {
+      getType: () => 'node',
+      send: async (request: AdapterRequest): Promise<AdapterResponse> => {
+        await new Promise<void>((resolve) => {
+          request.signal?.addEventListener('abort', () => {
+            resolve();
+          });
+        });
+
+        const error = new Error('Request aborted during response streaming');
+        error.name = 'AbortError';
+
+        throw Object.assign(error, {
+          [RESPONSE_STREAM_ABORT_FLAG]: true,
+          streamAbortStatus: 302,
+          streamAbortHeaders: { location: '/next' },
+        });
+      },
+    };
+
+    const client = new HTTPClient({
+      adapter,
+      baseURL: 'https://example.com',
+      followRedirects: false,
+      timeout: 25,
+    });
+
+    const builder = client.get('/start');
+    const res = await builder.send();
+
+    // redirect_disabled hardcodes wasRedirectDetected, so without the resolved
+    // target this branch reported "there was a redirect" and no destination.
+    expect(builder.error?.code).toBe('redirect_disabled');
+    expect(res.wasRedirectDetected).toBe(true);
+    expect(res.detectedRedirectURL).toBe('https://example.com/next');
+
+    // Deliberate, and worth pinning because it surprises: a timeout DID fire
+    // mid-body, and the identical failure with following enabled reports
+    // isTimeout: true and code 'stream_response_error'. Here the timeout is
+    // incidental — the request ends at the redirect either way — so the code
+    // stays 'redirect_disabled'. Reporting the timeout instead would make the
+    // classification depend on whether the body happened to finish.
+    expect(res.isTimeout).toBe(false);
+
+    // Same reason the status is synthetic: every disabled redirect reports
+    // status 0 and no stream error, intact ones included.
+    expect(res.status).toBe(0);
+    expect(res.isStreamError).toBe(false);
+  });
+
+  test('still reports redirect_disabled for a truncated 3xx when following is off', async () => {
+    const adapter: HTTPAdapter = {
+      getType: () => 'node',
+      send: (_request: AdapterRequest): Promise<AdapterResponse> =>
+        Promise.resolve({
+          status: 302,
+          wasRedirectDetected: true,
+          detectedRedirectURL: 'https://example.com/next',
+          headers: { location: '/next' },
+          body: null,
+          isStreamError: true,
+          streamErrorCode: 'stream_response_error',
+          errorCause: new Error('terminated'),
+        }),
+    };
+
+    const client = new HTTPClient({
+      adapter,
+      baseURL: 'https://example.com',
+      followRedirects: false,
+    });
+
+    const builder = client.get('/start');
+    const res = await builder.send();
+
+    // That branch follows nothing, so it reports a truncated 3xx exactly as it
+    // reports an intact one.
+    expect(builder.error?.code).toBe('redirect_disabled');
+    expect(res.wasRedirectDetected).toBe(true);
+    expect(res.detectedRedirectURL).toBe('https://example.com/next');
+  });
 });
 
 describe('HTTPClient — sub-clients', () => {
@@ -3642,7 +4263,14 @@ describe('HTTPClient — phase-aware interceptors', () => {
       },
     };
 
-    const client = new HTTPClient({ adapter, followRedirects: true });
+    // This test is about retry-phase interceptors, not replay safety — POST is
+    // used because body rewrites are the point, so it opts in to retrying a
+    // non-idempotent method.
+    const client = new HTTPClient({
+      adapter,
+      followRedirects: true,
+      retryNonIdempotentMethods: true,
+    });
     client.addRequestInterceptor(
       (req) => ({
         ...req,

@@ -92,6 +92,54 @@ export interface MockResponse {
    *   the same identity (name + path + domain) and typically `maxAge: 0`
    */
   cookies?: Record<string, string | MockCookieOptions | null>;
+  /**
+   * Simulate a response-body failure that happens **after** headers arrive, so
+   * consumers can test the `isStreamError` branch without a real socket.
+   *
+   * `status`, `headers` and cookies are reported as given, but `body` resolves as
+   * `null` whatever the handler set and the response carries
+   * `isStreamError: true`, which `HTTPClient` treats as terminal.
+   *
+   * Pass `true` for the default `'stream_response_error'`, or name the code.
+   */
+  streamError?: boolean | 'stream_write_error' | 'stream_response_error';
+  /**
+   * Simulate a failure that produced **no response at all** — a refused
+   * connection, a name that did not resolve, a socket dropped before headers.
+   *
+   * Nothing from the handler's response is delivered: no body, headers, cookies,
+   * or terminal progress. The response carries `isTransportError: true`.
+   *
+   * Pass `true` for a plain `status: 0` failure, or an object to exercise the
+   * replay signals a real adapter would attach:
+   *
+   * ```ts
+   * // Proven undelivered — a POST may be replayed
+   * { status: 200, transportError: { wasDefinitelyNotSent: true } }
+   *
+   * // Delivery unknown — a POST is not replayed
+   * { status: 200, transportError: true }
+   *
+   * // Nothing should retry this, whatever the method (a TLS failure)
+   * { status: 200, transportError: { status: 495, isRetryable: false } }
+   * ```
+   */
+  transportError?: boolean | MockTransportErrorOptions;
+}
+
+/** Shape of a simulated transport failure. See {@link MockResponse.transportError}. */
+export interface MockTransportErrorOptions {
+  /**
+   * Diagnostic status to preserve, as adapters do for TLS failures (`495`).
+   * Defaults to `0`, the ordinary "no response" status.
+   */
+  status?: number;
+  /** Proof no request bytes reached the server. Authorizes replaying a write. */
+  wasDefinitelyNotSent?: boolean;
+  /** Set `false` for a failure no method should retry. */
+  isRetryable?: boolean;
+  /** Message for the generated `errorCause`. */
+  message?: string;
 }
 
 export type MockRouteHandler = (
@@ -304,20 +352,62 @@ export class MockAdapter implements HTTPAdapter {
       throwAbortError();
     }
 
-    // HEAD / 204 / 304 never expose a body to consumers, even if the handler
-    // returned one. This keeps the mock transport aligned with real HTTP.
-    const responseBody = shouldOmitResponseBody(method, mockResponse.status)
+    // A simulated transport failure never produced a response, so it returns
+    // before any of the response-shaped work below — no body, no headers, no
+    // cookies, and no terminal progress, exactly as a real one delivers none.
+    if (mockResponse.transportError) {
+      const options: MockTransportErrorOptions =
+        mockResponse.transportError === true ? {} : mockResponse.transportError;
+
+      return {
+        status: options.status ?? 0,
+        isTransportError: true,
+        ...(options.isRetryable !== undefined
+          ? { isRetryable: options.isRetryable }
+          : {}),
+        ...(options.wasDefinitelyNotSent !== undefined
+          ? { wasDefinitelyNotSent: options.wasDefinitelyNotSent }
+          : {}),
+        headers: {},
+        body: null,
+        errorCause: new Error(
+          options.message ??
+            'Mock transport error (MockResponse.transportError)',
+        ),
+      };
+    }
+
+    // A simulated post-header body failure loses the body the same way a real
+    // one does, so the handler's body is never serialized.
+    const streamErrorCode = resolveMockStreamErrorCode(
+      mockResponse.streamError,
+    );
+
+    // What the server would have put on the wire. HEAD / 204 / 304 never expose
+    // a body to consumers, even if the handler returned one. This keeps the mock
+    // transport aligned with real HTTP.
+    const intendedBody = shouldOmitResponseBody(method, mockResponse.status)
       ? null
       : serializeResponseBody(mockResponse);
+
+    // A simulated stream error loses the body, but it strikes after headers
+    // arrived, so the headers still stand — Content-Type included. Header
+    // inference below reads `intendedBody` for that reason.
+    const responseBody = streamErrorCode !== undefined ? null : intendedBody;
 
     // Signal upload complete, then report download size based on serialised body.
     request.onUploadProgress?.({ loaded: 1, total: 1, progress: 1 });
 
-    request.onDownloadProgress?.({
-      loaded: responseBody?.length ?? 0,
-      total: responseBody?.length ?? 0,
-      progress: 1,
-    });
+    // A simulated stream error reports no terminal download progress: real
+    // adapters fail the body read before that point, so `progress: 1` here would
+    // signal a completed download for a body that never arrived.
+    if (streamErrorCode === undefined) {
+      request.onDownloadProgress?.({
+        loaded: responseBody?.length ?? 0,
+        total: responseBody?.length ?? 0,
+        progress: 1,
+      });
+    }
 
     // --- 7. Build response headers ---
     const responseHeaders: AdapterResponse['headers'] = {
@@ -348,7 +438,7 @@ export class MockAdapter implements HTTPAdapter {
     // Binary responses are intentionally skipped — content-type for binary is
     // format-specific (image/png, application/pdf, etc.) so the handler is
     // responsible for setting it via `headers` when it matters.
-    if (!hasHeader(responseHeaders, 'content-type') && responseBody !== null) {
+    if (!hasHeader(responseHeaders, 'content-type') && intendedBody !== null) {
       const ct =
         mockResponse.contentType ?? inferContentType(mockResponse.body);
 
@@ -374,11 +464,34 @@ export class MockAdapter implements HTTPAdapter {
       ...(detectedRedirectURL ? { detectedRedirectURL } : {}),
       headers: normalizedResponseHeaders,
       body: responseBody,
+      ...(streamErrorCode !== undefined
+        ? {
+            isStreamError: true,
+            streamErrorCode,
+            errorCause: new Error(
+              'Mock response stream error (MockResponse.streamError)',
+            ),
+          }
+        : {}),
     };
   }
 }
 
 // --- Helpers ---
+
+/**
+ * Normalizes `MockResponse.streamError` to a `streamErrorCode`, or `undefined`
+ * when no post-header body failure was requested.
+ */
+function resolveMockStreamErrorCode(
+  streamError: MockResponse['streamError'],
+): AdapterResponse['streamErrorCode'] {
+  if (streamError === undefined || streamError === false) {
+    return undefined;
+  }
+
+  return streamError === true ? 'stream_response_error' : streamError;
+}
 
 function buildRoutes(
   router: Router.Instance<Router.HTTPVersion.V1>,
@@ -411,9 +524,12 @@ function buildRoutes(
 }
 
 function isDuplicateRouteRegistrationError(error: unknown): error is Error {
+  const message = readObjectMember(error, 'message');
+
   return (
-    error instanceof Error &&
-    error.message.includes('already declared for route')
+    isErrorValue(error) &&
+    typeof message === 'string' &&
+    message.includes('already declared for route')
   );
 }
 
@@ -676,10 +792,45 @@ function awaitAbortable<T>(
         signal.removeEventListener('abort', onAbort);
         // Preserve real handler failures, only normalize non-Error rejections
         // so promise rejection values stay lint-safe and predictable.
-        reject(error instanceof Error ? error : new Error(String(error)));
+        reject(normalizeError(error));
       },
     );
   });
+}
+
+function readObjectMember(source: unknown, key: string): unknown {
+  if (
+    source === null ||
+    (typeof source !== 'object' && typeof source !== 'function')
+  ) {
+    return undefined;
+  }
+
+  try {
+    return (source as Record<string, unknown>)[key];
+  } catch {
+    return undefined;
+  }
+}
+
+function isErrorValue(value: unknown): value is Error {
+  try {
+    return value instanceof Error;
+  } catch {
+    return false;
+  }
+}
+
+function normalizeError(value: unknown): Error {
+  if (isErrorValue(value)) {
+    return value;
+  }
+
+  try {
+    return new Error(String(value));
+  } catch {
+    return new Error('Unknown error');
+  }
 }
 
 /**
