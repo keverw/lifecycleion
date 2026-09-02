@@ -109,7 +109,7 @@ A bare name is taken literally, so a name that is not a valid path segment still
 
 A dotted or bracketed entry is treated as ambiguous and both readings are covered, the same way the logger's `redactedKeys` does: `'user.password'` masks the nested `additionalInfo.user.password` _and_ a literal key spelled `'user.password'`, when either exists.
 
-Masking **fails closed**. If `sensitiveFieldNames` is present but is not a usable list of strings - a comma-joined string, a `Set`, a non-string entry, or an accessor that throws - the caller has asked for masking and this cannot tell what for, so `additionalInfo` is dropped wholesale and replaced with `*** (sensitiveFieldNames unreadable)` rather than rendered in the clear. An entry that parses but resolves to nothing is not this case: it masks nothing, exactly as an unmatched `redactedKeys` entry redacts nothing.
+Masking **fails closed** when the _list itself_ is unusable. A comma-joined string, a `Set`, a non-string entry, or an accessor that throws all mean the caller asked for masking and this cannot tell what for, so `additionalInfo` is dropped wholesale and replaced with `*** (sensitiveFieldNames unreadable)` rather than rendered in the clear. This does **not** extend to an individual entry: one that does not parse, or that parses but matches nothing, simply masks nothing and leaves the other entries working, exactly as an unmatched `redactedKeys` entry redacts nothing in the logger.
 
 ## Never throws
 

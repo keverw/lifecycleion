@@ -206,6 +206,29 @@ describe('errorToString', () => {
       expect(rendered).toContain('diagnostic');
     });
 
+    it('should mask nothing for an entry the path grammar rejects', () => {
+      // An unquoted segment must be `\w+`, so `user.password-hash` does not parse. The
+      // logger's `redactedKeys` behaves the same way, and neither warns - pinned here so
+      // the documented footgun cannot drift into a silent change either direction.
+      const unquoted = render(
+        { user: { 'password-hash': SECRET }, keep: 'diagnostic' },
+        ['user.password-hash'],
+      );
+
+      expect(unquoted).toContain(SECRET);
+      // A rejected entry is not the fail-closed case: other fields keep rendering and
+      // `additionalInfo` is not dropped wholesale.
+      expect(unquoted).toContain('diagnostic');
+      expect(unquoted).not.toContain('sensitiveFieldNames unreadable');
+
+      // The quoted form is the fix.
+      expect(
+        render({ user: { 'password-hash': SECRET } }, [
+          'user["password-hash"]',
+        ]),
+      ).not.toContain(SECRET);
+    });
+
     it('should mask a key spelled literally like a path', () => {
       // Matches the logger: a dotted entry is ambiguous, so both readings are covered.
       expect(

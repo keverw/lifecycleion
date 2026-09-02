@@ -459,6 +459,8 @@ logger.info('User login attempt', {
 
 A bare name therefore addresses a top-level key only: `redactedKeys: ['password']` masks `params.password` and leaves `params.user.password` rendered. Name the path to reach it.
 
+Inside a path, an unquoted segment must be `\w+`, so a hyphenated or spaced name nested deeper must be quoted. `redactedKeys: ['user.password-hash']` does not parse and redacts **nothing**; write `redactedKeys: ['user["password-hash"]']`. The same goes for any entry the grammar rejects, including a trailing dot and the unsupported wildcard form. Nothing warns you, so prefer the quoted form whenever a segment is not plain `\w+`.
+
 [`errorToString`](./error-to-string.md#additional-info--sensitive-fields) uses this same syntax for the `sensitiveFieldNames` list it reads off an error, so one mental model covers both. The two agree on bare names, dotted paths, array indexes, and quoted bracket keys; they differ only in what happens when the list itself is unusable, where `errorToString` drops `additionalInfo` wholesale.
 
 #### Custom Redaction Function
