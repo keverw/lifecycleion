@@ -80,6 +80,35 @@ function describeResourceTarget(target: unknown): string | undefined {
   return `Failed to load ${tagName}`;
 }
 
+/**
+ * Coerce whatever a handler threw or rejected with into an `Error`.
+ *
+ * `throw` accepts any value and a promise can reject with any value, so a failure path
+ * must not assume it was handed an `Error`. Reading `.message` off `null` raises a
+ * `TypeError` of its own, and on this path that one escapes through `emit()` and out of
+ * whichever log call emitted the event.
+ */
+function toError(value: unknown): Error {
+  let description: string;
+
+  try {
+    if (value instanceof Error) {
+      return value;
+    }
+
+    description = typeof value === 'string' ? value : String(value);
+  } catch {
+    // Both steps run code this module does not own: `instanceof` walks a prototype
+    // chain, which a revoked `Proxy` makes throw, and `String()` invokes
+    // `toString`/`Symbol.toPrimitive`, which are ordinary properties.
+    description = 'unknown value';
+  }
+
+  // The value itself is kept as the cause: the description is lossy, and for a value
+  // whose `toString` threw it carries nothing at all.
+  return new Error(`Non-error value thrown: ${description}`, { cause: value });
+}
+
 export class Logger extends EventEmitter {
   public readonly isLoggerClass = true;
 
@@ -191,7 +220,7 @@ export class Logger extends EventEmitter {
    *
    * **Error Handling:** If the callback throws an error or rejects, the logger will
    * proceed with exit anyway to prevent the process from hanging. The error will be
-   * reported via the global `reportError` event.
+   * reported on the standard global `'error'` channel.
    *
    * @param callback - Function to call before process exit (receives exitCode and isFirstExit).
    *                   Must return BeforeExitResult indicating whether to proceed with exit or wait.
@@ -380,13 +409,20 @@ export class Logger extends EventEmitter {
       // failure is a plain `Event` with neither, so a value is always synthesized
       // rather than logging `undefined`.
       const reported: unknown = errorEvent.error;
+
+      // Emptiness is checked, not just `undefined`: `ErrorEvent`'s `message` defaults to
+      // `''`, so a plain `new ErrorEvent('error')` would satisfy `??` and produce an
+      // `Error` with no message at all instead of reaching the description below.
+      const message: string | undefined =
+        typeof errorEvent.message === 'string' && errorEvent.message.length > 0
+          ? errorEvent.message
+          : undefined;
+
       const error =
         reported instanceof Error
           ? reported
           : new Error(
-              resource ??
-                errorEvent.message ??
-                'Unknown error reported by an error event',
+              resource ?? message ?? 'Unknown error reported by an error event',
             );
 
       this._isHandlingReportedError = true;
@@ -521,7 +557,7 @@ export class Logger extends EventEmitter {
           try {
             await sink.close();
           } catch (error) {
-            this.handleSinkError(error as Error, 'close', sink);
+            this.handleSinkError(error, 'close', sink);
           }
         }
       }),
@@ -652,12 +688,12 @@ export class Logger extends EventEmitter {
         // Handle async errors from sinks that return promises
         if (isPromise(result)) {
           result.catch((error: unknown) => {
-            this.handleSinkError(error as Error, 'write', sink);
+            this.handleSinkError(error, 'write', sink);
           });
         }
       } catch (error) {
         // Handle sync errors
-        this.handleSinkError(error as Error, 'write', sink);
+        this.handleSinkError(error, 'write', sink);
       }
     }
 
@@ -691,11 +727,16 @@ export class Logger extends EventEmitter {
    */
   protected override handleEventHandlerFailure(
     event: string,
-    error: Error,
+    error: unknown,
   ): void {
+    // Normalized rather than trusted: a handler is free to `throw null` or reject with a
+    // string, and reading `.message` off that directly would throw a `TypeError` out of
+    // the log call that emitted the event.
+    const cause = toError(error);
+
     const failure = new Error(
-      `Error in a logger event handler for ${event}: ${error.message}`,
-      { cause: error },
+      `Error in a logger event handler for ${event}: ${cause.message}`,
+      { cause },
     );
 
     // Not routed through `onSinkError`: that callback is handed the sink that failed, and
@@ -719,23 +760,29 @@ export class Logger extends EventEmitter {
    * Handle sink errors by calling the onSinkError callback or falling back to console.error
    */
   private handleSinkError(
-    error: Error,
+    error: unknown,
     context: 'write' | 'close',
     sink: LogSink,
   ): void {
+    // Normalized rather than trusted, for the same reason as a failing event handler: a
+    // sink is user-supplied and free to throw or reject with any value, and reading
+    // `.message` off `null` would throw a `TypeError` out of the log call that wrote to
+    // it. Normalizing here also makes `onSinkError`'s declared `Error` parameter honest.
+    const failure = toError(error);
+
     if (this.onSinkError) {
       try {
-        this.onSinkError(error, context, sink);
+        this.onSinkError(failure, context, sink);
       } catch {
         // Ignore errors in the error handler to prevent infinite loops
         // eslint-disable-next-line no-console
-        console.error(`Error in onSinkError handler: ${error.message}`);
+        console.error(`Error in onSinkError handler: ${failure.message}`);
       }
     } else {
       // Fallback to console.error
       // eslint-disable-next-line no-console
       console.error(
-        `Error ${context === 'write' ? 'writing to' : 'closing'} sink: ${error.message}`,
+        `Error ${context === 'write' ? 'writing to' : 'closing'} sink: ${failure.message}`,
       );
     }
   }

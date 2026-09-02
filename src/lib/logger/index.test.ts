@@ -778,6 +778,27 @@ describe('Logger', () => {
       }
     });
 
+    test('describes an error event that carries neither an error nor a message', () => {
+      // `ErrorEvent.message` defaults to `''`, not `undefined`, so a `??` chain would
+      // accept the empty string and log an `Error` with no message at all.
+      const sink = new ArraySink();
+      const emptyLogger = new Logger({ sinks: [sink], callProcessExit: false });
+
+      emptyLogger.registerReportErrorListener();
+
+      try {
+        globalThis.dispatchEvent(new ErrorEvent('error', { cancelable: true }));
+      } finally {
+        emptyLogger.unregisterReportErrorListener();
+      }
+
+      expect(sink.logs.length).toBe(1);
+      expect(sink.logs[0].error).toBeInstanceOf(Error);
+      expect((sink.logs[0].error as Error).message).toBe(
+        'Unknown error reported by an error event',
+      );
+    });
+
     test('cancels the event by default so the error is not also consoled', () => {
       logger.registerReportErrorListener();
 
@@ -889,6 +910,117 @@ describe('Logger', () => {
       expect(seen.length).toBe(1);
       expect(seen[0].event).toBe('logger');
       expect(seen[0].message).toContain('handler boom');
+    });
+
+    test('survives a logger handler that throws a non-Error value', () => {
+      // `throw` accepts any value. Reading `.message` off it unguarded raised a
+      // `TypeError` that escaped `emit()` and out of the log call itself, so a handler
+      // throwing `null` took down every `logger.*()` call, not just its own report.
+      const thrown: unknown[] = [
+        null,
+        undefined,
+        'boom',
+        42,
+        {
+          toString(): string {
+            throw new Error('hostile toString');
+          },
+        },
+      ];
+
+      const methods = [
+        'info',
+        'error',
+        'warn',
+        'success',
+        'notice',
+        'debug',
+        'raw',
+      ] as const;
+
+      for (const value of thrown) {
+        for (const method of methods) {
+          const seen: Array<{ message: string; cause: unknown }> = [];
+          const nonErrorLogger = new Logger({
+            sinks: [new ArraySink()],
+            callProcessExit: false,
+            onEventHandlerError: (error) => {
+              seen.push({ message: error.message, cause: error.cause });
+            },
+          });
+
+          nonErrorLogger.on('logger', () => {
+            throw value;
+          });
+
+          expect(() => {
+            nonErrorLogger[method]('kick it off');
+          }).not.toThrow();
+
+          expect(seen.length).toBe(1);
+          expect(seen[0].message).toContain('Non-error value thrown');
+          // The value actually thrown survives, reachable through the wrapper. The
+          // description is lossy — for the hostile-`toString` case it is just
+          // 'unknown value' — so the cause is the only way back to it.
+          expect((seen[0].cause as Error).cause).toBe(value);
+        }
+      }
+    });
+
+    test('survives a thrown value whose prototype chain cannot be walked', () => {
+      // `instanceof` is not a safe read either: it walks a prototype chain, and a
+      // revoked `Proxy` throws on any operation. Guarding only `String()` left this
+      // crashing out of the log call.
+      const { proxy, revoke } = Proxy.revocable({}, {});
+
+      revoke();
+
+      const seen: string[] = [];
+      const proxyLogger = new Logger({
+        sinks: [new ArraySink()],
+        callProcessExit: false,
+        onEventHandlerError: (error) => {
+          seen.push(error.message);
+        },
+      });
+
+      proxyLogger.on('logger', () => {
+        // eslint-disable-next-line @typescript-eslint/only-throw-error -- the point of the test
+        throw proxy;
+      });
+
+      expect(() => {
+        proxyLogger.info('kick it off');
+      }).not.toThrow();
+
+      expect(seen.length).toBe(1);
+      expect(seen[0]).toContain('Non-error value thrown: unknown value');
+    });
+
+    test('survives a logger handler that rejects with a non-Error value', async () => {
+      const seen: string[] = [];
+      const rejectingLogger = new Logger({
+        sinks: [new ArraySink()],
+        callProcessExit: false,
+        onEventHandlerError: (error) => {
+          seen.push(error.message);
+        },
+      });
+
+      rejectingLogger.on('logger', async () => {
+        await Promise.resolve();
+
+        // eslint-disable-next-line @typescript-eslint/only-throw-error -- the point of the test
+        throw null;
+      });
+
+      rejectingLogger.info('kick it off');
+
+      // The rejection is reported, not left as an unhandled rejection.
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      expect(seen.length).toBe(1);
+      expect(seen[0]).toContain('Non-error value thrown: null');
     });
 
     test('falls back to the console when onEventHandlerError itself throws', () => {
@@ -1180,6 +1312,64 @@ describe('Logger', () => {
       expect(errors.length).toBe(1);
       expect(errors[0].error.message).toBe('Sync write error');
       expect(errors[0].context).toBe('write');
+    });
+
+    test('survives a sink that throws a non-Error value', () => {
+      // Sinks are user-supplied, so `write()` can throw anything. Reading `.message` off
+      // it unguarded raised a `TypeError` that escaped out of the log call itself.
+      const errors: Array<{ message: string; cause: unknown }> = [];
+      const nonErrorSink = {
+        write: (): void => {
+          // eslint-disable-next-line @typescript-eslint/only-throw-error -- the point of the test
+          throw null;
+        },
+      };
+
+      const nonErrorLogger = new Logger({
+        sinks: [nonErrorSink],
+        callProcessExit: false,
+        onSinkError: (error, context) => {
+          errors.push({ message: error.message, cause: error.cause });
+          expect(context).toBe('write');
+        },
+      });
+
+      expect(() => {
+        nonErrorLogger.info('Test message');
+      }).not.toThrow();
+
+      expect(errors.length).toBe(1);
+      // `onSinkError` declares an `Error` parameter, so it is handed a real one.
+      expect(errors[0].message).toBe('Non-error value thrown: null');
+      expect(errors[0].cause).toBe(null);
+    });
+
+    test('survives a sink that rejects with a non-Error value', async () => {
+      const errors: string[] = [];
+      const rejectingSink = {
+        write: async (): Promise<void> => {
+          await sleep(1);
+
+          // eslint-disable-next-line @typescript-eslint/only-throw-error -- the point of the test
+          throw undefined;
+        },
+      };
+
+      const rejectingLogger = new Logger({
+        sinks: [rejectingSink],
+        callProcessExit: false,
+        onSinkError: (error) => {
+          errors.push(error.message);
+        },
+      });
+
+      rejectingLogger.info('Test message');
+
+      // Reported, not left as an unhandled rejection.
+      await sleep(20);
+
+      expect(errors.length).toBe(1);
+      expect(errors[0]).toBe('Non-error value thrown: undefined');
     });
 
     test('should handle asynchronous errors from sinks via rejected promises', async () => {

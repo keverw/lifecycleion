@@ -133,7 +133,7 @@ export class EventEmitterProtected {
 
     for (const callback of callbacks) {
       const handleFailure = (error: unknown): void => {
-        this.handleEventHandlerFailure(event, error as Error);
+        this.handleEventHandlerFailure(event, error);
       };
 
       if (!isFunction(callback)) {
@@ -166,9 +166,11 @@ export class EventEmitterProtected {
    * itself. `Logger` overrides this for that reason.
    *
    * @param event The event whose handler failed.
-   * @param error The error thrown or the rejection reason.
+   * @param error The error thrown or the rejection reason. Typed `unknown` because
+   *              `throw` and promise rejection both accept any value, so an override
+   *              must not assume an `Error`.
    */
-  protected handleEventHandlerFailure(event: string, error: Error): void {
+  protected handleEventHandlerFailure(event: string, error: unknown): void {
     reportCallbackError(`event handler for ${event}`, error);
   }
 }

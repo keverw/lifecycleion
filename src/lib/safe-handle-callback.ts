@@ -158,8 +158,14 @@ function reportToHost(error: Error): void {
  * way `safeHandleCallback` does — and so a caller that must *not* use this channel, such
  * as `Logger` reporting failures of its own `'logger'` handlers, has something concrete to
  * opt out of.
+ *
+ * `error` is `unknown`: `throw` and promise rejection both accept any value, and
+ * `errorToString` renders whatever it is given.
  */
-export function reportCallbackError(callbackName: string, error: Error): void {
+export function reportCallbackError(
+  callbackName: string,
+  error: unknown,
+): void {
   reportToHost(
     new Error(
       `Error in a callback ${callbackName}: ${DOUBLE_EOL}${errorToString(error)}`,
@@ -197,7 +203,7 @@ export function safeHandleCallback(
   callback: unknown,
   ...args: unknown[]
 ): void {
-  const handleError = (error: Error): void => {
+  const handleError = (error: unknown): void => {
     reportCallbackError(callbackName, error);
   };
 
@@ -208,12 +214,10 @@ export function safeHandleCallback(
 
       if (isPromise(result)) {
         // Fire-and-forget async callback
-        result.catch((error: unknown) => {
-          handleError(error as Error);
-        });
+        result.catch(handleError);
       }
     } catch (error) {
-      handleError(error as Error);
+      handleError(error);
     }
   } else {
     handleError(
@@ -255,10 +259,10 @@ export async function safeHandleCallbackAndWait<T>(
   callback: unknown,
   ...args: unknown[]
 ): Promise<CallbackResult<T>> {
-  const handleError = (error: Error): CallbackResult<T> => {
+  const handleError = (error: unknown): CallbackResult<T> => {
     reportCallbackError(callbackName, error);
 
-    return { success: false, error };
+    return { success: false, error: error as Error };
   };
 
   if (isFunction(callback)) {
@@ -275,7 +279,7 @@ export async function safeHandleCallbackAndWait<T>(
         return { success: true, value: result as T };
       }
     } catch (error) {
-      return handleError(error as Error);
+      return handleError(error);
     }
   } else {
     return handleError(
