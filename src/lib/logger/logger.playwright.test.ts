@@ -111,6 +111,7 @@ browserScenarios(
     'captureResourceErrors logs a failed image with a tag',
     'reported callback errors are untagged and still captured',
     'a component CustomEvent named error is left alone',
+    'a synthetic plain error event on a resource element is left alone',
     'an element error event naming no resource is left alone',
     'unregister detaches the capturing listener',
   ],

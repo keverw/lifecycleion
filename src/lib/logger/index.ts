@@ -79,8 +79,11 @@ function isElementTarget(event: Event): boolean {
  *
  * Classification is deliberately narrow, because a capturing listener on the global
  * object sees *every* `'error'` event dispatched anywhere in the document, not just
- * resource failures. Two things are required beyond an element target:
+ * resource failures. Three things are required beyond an element target:
  *
+ * - The event must be trusted. Only the user agent dispatches a genuine load failure;
+ *   anything an application sends through `dispatchEvent()` is untrusted without
+ *   exception, and is that application's own signal.
  * - The event must be a plain `Event`. An `ErrorEvent` carries its own error, and a
  *   `CustomEvent` is an application's own signal — a component that dispatches
  *   `new CustomEvent('error', { cancelable: true })` on itself and branches on the
@@ -108,8 +111,27 @@ function describeResourceTarget(event: Event): string | undefined {
     return undefined;
   }
 
+  // A real resource failure comes from the user agent, which is the only dispatcher that
+  // can produce a trusted event: `dispatchEvent()` leaves `isTrusted` `false` always. A
+  // wrapper component re-announcing a failure — `<my-video src="...">` doing
+  // `this.dispatchEvent(new Event('error'))` — is an element target, a bare `Event`, and
+  // names a resource, so it satisfies every other test here while never having failed a
+  // load this listener saw. Describing it would log a load failure that did not happen,
+  // and cancelling it would change the answer its dispatcher branches on.
+  //
+  // Read through the guard, and compared against `true` rather than coerced: the event is
+  // whatever was dispatched, so `isTrusted` may be an accessor that throws or a plain
+  // property set to anything at all.
+  if (readEventProperty(event, 'isTrusted') !== true) {
+    return undefined;
+  }
+
   // A real resource failure is a bare `Event`. Anything richer belongs to whoever
-  // dispatched it; claiming and cancelling it would change their semantics.
+  // dispatched it; claiming and cancelling it would change their semantics. Kept
+  // alongside the trust check rather than replaced by it: the trust check rules out
+  // everything the *page* dispatched, and this rules out a trusted event that carries its
+  // own payload — an `ErrorEvent` the user agent aimed at an element describes itself
+  // better than this function could.
   try {
     if (
       (typeof ErrorEvent === 'function' && event instanceof ErrorEvent) ||

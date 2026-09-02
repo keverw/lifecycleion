@@ -126,6 +126,39 @@ async function runTests(): Promise<void> {
     browserExpect(sink.logs.length).toBe(0);
   });
 
+  await test('a synthetic plain error event on a resource element is left alone', async () => {
+    // The narrowest miss: an element target, a bare `Event` (not a `CustomEvent`), and a
+    // real `href` — every structural test for a resource failure passes. Only `isTrusted`
+    // separates it from a genuine failed load, so a component announcing its own 'error'
+    // must not be described as a failed load or have its cancellation answer changed.
+    //
+    // An anchor rather than an `<img src>`: setting `src` starts a real load whose own
+    // trusted failure event would land in this sink and mask the result. `href` is a
+    // reflected IDL property, so it reads back as a string and fetches nothing.
+    const sink = new ArraySink();
+    const logger = new Logger({ sinks: [sink], callProcessExit: false });
+
+    logger.registerReportErrorListener('Uncaught exception', {
+      captureResourceErrors: true,
+    });
+
+    const widget = document.createElement('a');
+
+    widget.href = '/status-signal';
+    document.body.appendChild(widget);
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const wasNotCancelled = widget.dispatchEvent(
+      new Event('error', { cancelable: true, bubbles: false }),
+    );
+
+    logger.unregisterReportErrorListener();
+
+    browserExpect(wasNotCancelled).toBe(true);
+    browserExpect(sink.logs.length).toBe(0);
+  });
+
   await test('an element error event naming no resource is left alone', async () => {
     // Being an element is not enough either: with no src/href/currentSrc nothing was
     // loaded, so there is no failed load to describe or claim.

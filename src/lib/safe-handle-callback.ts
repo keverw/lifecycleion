@@ -122,7 +122,7 @@ function dispatchErrorEvent(error: Error): DispatchOutcome {
  * output a native `reportError()` produces when no listener cancels the event.
  */
 function reportToHost(error: Error): void {
-  // Also installed at module load, below. Repeating it here costs a few typeof checks on
+  // Also installed at module load, above. Repeating it here costs a few typeof checks on
   // an error path and makes reporting independent of whether a bundler kept that
   // top-level call, so a failure can never be swallowed for a packaging reason.
   installGlobalEventTarget();
