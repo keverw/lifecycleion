@@ -5,9 +5,14 @@
  * during module initialization, so an unguarded probe would crash the import rather than
  * degrade — the same failure mode as the sealed global in `non-extensible-globals`.
  */
+import { captureConsoleError } from './capture-console-error';
 
 // Only dynamic imports below (the globals must be set up first), so make this a module.
 export {};
+
+// `safe-handle-callback` writes an unclaimed report to `console.error`; the harness
+// treats any stderr output as a crash, so it is collected and reported instead.
+const consoleErrors = captureConsoleError();
 
 let getterCallCount = 0;
 
@@ -60,6 +65,7 @@ try {
 
 process.stdout.write(
   JSON.stringify({
+    consoleErrors,
     didImportThrow,
     installResult,
     isPolyfilled,

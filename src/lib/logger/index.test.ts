@@ -2,6 +2,7 @@ import { describe, expect, test, beforeEach, spyOn } from 'bun:test';
 import { Logger } from './index';
 import { ArraySink } from './sinks/array';
 import { sleep } from '../sleep';
+import { safeHandleCallback } from '../safe-handle-callback';
 
 describe('Logger', () => {
   let arraySink: ArraySink;
@@ -775,6 +776,222 @@ describe('Logger', () => {
         (globalThis as Record<string, unknown>).reportError =
           originalReportError;
       }
+    });
+
+    test('cancels the event by default so the error is not also consoled', () => {
+      logger.registerReportErrorListener();
+
+      // Dispatched against the real global EventTarget: a stubbed dispatchEvent would
+      // return whatever the stub chose and would pass even without `cancelable: true`.
+      const wasNotCancelled = globalThis.dispatchEvent(
+        new ErrorEvent('error', {
+          error: new Error('Cancelled by the logger'),
+          cancelable: true,
+        }),
+      );
+
+      logger.unregisterReportErrorListener();
+
+      expect(wasNotCancelled).toBe(false);
+    });
+
+    test('leaves the event uncancelled when preventDefault is opted out', () => {
+      logger.registerReportErrorListener('Uncaught exception', {
+        preventDefault: false,
+      });
+
+      const wasNotCancelled = globalThis.dispatchEvent(
+        new ErrorEvent('error', {
+          error: new Error('Left for the console'),
+          cancelable: true,
+        }),
+      );
+
+      logger.unregisterReportErrorListener();
+
+      expect(wasNotCancelled).toBe(true);
+    });
+
+    test('logs an error event that carries only a message', () => {
+      const sink = new ArraySink();
+      const messageOnlyLogger = new Logger({
+        sinks: [sink],
+        callProcessExit: false,
+      });
+
+      messageOnlyLogger.registerReportErrorListener();
+
+      // Resource-load failures and some uncaught browser errors arrive with no `error`
+      // object at all, which must not log as `undefined`.
+      globalThis.dispatchEvent(
+        new ErrorEvent('error', {
+          message: 'Script error.',
+          cancelable: true,
+        }),
+      );
+
+      messageOnlyLogger.unregisterReportErrorListener();
+
+      expect(sink.logs.length).toBe(1);
+      expect(sink.logs[0].message).toContain('Script error.');
+    });
+
+    test('stops claiming reports once the logger is closed', async () => {
+      const sink = new ArraySink();
+      const closingLogger = new Logger({
+        sinks: [sink],
+        callProcessExit: false,
+      });
+
+      closingLogger.registerReportErrorListener();
+
+      await closingLogger.close();
+
+      expect(closingLogger.isReportErrorListenerRegistered()).toBe(false);
+
+      // A closed logger's handleLog is a no-op, so cancelling would leave the error with
+      // nowhere to go: not a sink, and not the console either.
+      const consoled: unknown[] = [];
+      const originalConsoleError = console.error;
+      console.error = (...args: unknown[]): void => {
+        consoled.push(args[0]);
+      };
+
+      try {
+        safeHandleCallback('afterCloseCallback', () => {
+          throw new Error('After close boom');
+        });
+      } finally {
+        console.error = originalConsoleError;
+      }
+
+      expect(sink.logs.length).toBe(0);
+      expect(consoled.length).toBe(1);
+      expect((consoled[0] as Error).message).toContain('After close boom');
+    });
+
+    test('routes logger handler failures to onEventHandlerError', () => {
+      const seen: Array<{ message: string; event: string }> = [];
+      const handlerLogger = new Logger({
+        sinks: [new ArraySink()],
+        callProcessExit: false,
+        onEventHandlerError: (error, event) => {
+          seen.push({ message: error.message, event });
+        },
+      });
+
+      handlerLogger.on('logger', () => {
+        throw new Error('handler boom');
+      });
+
+      handlerLogger.info('kick it off');
+
+      expect(seen.length).toBe(1);
+      expect(seen[0].event).toBe('logger');
+      expect(seen[0].message).toContain('handler boom');
+    });
+
+    test('falls back to the console when onEventHandlerError itself throws', () => {
+      const consoled: unknown[] = [];
+      const throwingLogger = new Logger({
+        sinks: [new ArraySink()],
+        callProcessExit: false,
+        onEventHandlerError: () => {
+          throw new Error('reporter boom');
+        },
+      });
+
+      throwingLogger.on('logger', () => {
+        throw new Error('handler boom');
+      });
+
+      const originalConsoleError = console.error;
+      console.error = (...args: unknown[]): void => {
+        consoled.push(args[0]);
+      };
+
+      try {
+        throwingLogger.info('kick it off');
+      } finally {
+        console.error = originalConsoleError;
+      }
+
+      // The reporter failing must not lose the original, nor turn one failure into a loop.
+      expect(consoled.length).toBe(1);
+      expect(String(consoled[0])).toContain('handler boom');
+    });
+
+    test('does not cycle when an async logger event handler rejects', async () => {
+      const sink = new ArraySink();
+      const cyclingLogger = new Logger({
+        sinks: [sink],
+        callProcessExit: false,
+      });
+
+      cyclingLogger.registerReportErrorListener();
+
+      let handlerCalls = 0;
+
+      // An async rejection is reported in a later microtask, so it is not re-entrant and
+      // the listener's guard cannot see it. Before the failure of a logger handler was
+      // kept off the global channel, this cycled without bound: log, emit, reject,
+      // report, log again.
+      cyclingLogger.on('logger', async () => {
+        handlerCalls++;
+
+        await Promise.resolve();
+
+        throw new Error('async handler boom');
+      });
+
+      const originalConsoleError = console.error;
+      console.error = (): void => {};
+
+      try {
+        cyclingLogger.info('kick it off');
+
+        await sleep(50);
+      } finally {
+        console.error = originalConsoleError;
+        cyclingLogger.unregisterReportErrorListener();
+      }
+
+      expect(handlerCalls).toBe(1);
+    });
+
+    test('does not recurse when a logger event handler throws', () => {
+      const sink = new ArraySink();
+      const recursiveLogger = new Logger({
+        sinks: [sink],
+        callProcessExit: false,
+      });
+
+      recursiveLogger.registerReportErrorListener();
+
+      let handlerCalls = 0;
+
+      // Logging emits a 'logger' event, EventEmitter wraps handlers in
+      // safeHandleCallback, and that reports on the same 'error' channel this listener
+      // is on. Without the re-entrancy guard one log call recurses until the stack
+      // gives out.
+      recursiveLogger.on('logger', () => {
+        handlerCalls++;
+
+        throw new Error('handler boom');
+      });
+
+      const originalConsoleError = console.error;
+      console.error = (): void => {};
+
+      try {
+        recursiveLogger.info('kick it off');
+      } finally {
+        console.error = originalConsoleError;
+        recursiveLogger.unregisterReportErrorListener();
+      }
+
+      // Bounded: the log itself, plus the one report the guard turns away.
+      expect(handlerCalls).toBeLessThan(10);
     });
 
     test('should register reportError listener', () => {

@@ -118,9 +118,9 @@ describe('EventEmitter', () => {
 
   test('error handling in event handlers', () => {
     const emitter = new EventEmitter();
-    const errorHandler = mock(() => {});
+    const errorHandler = mock((event: Event) => event.preventDefault());
 
-    globalThis.addEventListener('reportError', errorHandler);
+    globalThis.addEventListener('error', errorHandler);
 
     emitter.on('test', () => {
       throw new Error('Test error');
@@ -133,14 +133,14 @@ describe('EventEmitter', () => {
     expect(errorEvent.error.message).toContain('event handler for test');
     expect(errorEvent.error.message).toContain('Test error');
 
-    globalThis.removeEventListener('reportError', errorHandler);
+    globalThis.removeEventListener('error', errorHandler);
   });
 
   test('error handling in async event handlers', async () => {
     const emitter = new EventEmitter();
-    const errorHandler = mock(() => {});
+    const errorHandler = mock((event: Event) => event.preventDefault());
 
-    globalThis.addEventListener('reportError', errorHandler);
+    globalThis.addEventListener('error', errorHandler);
 
     emitter.on('test', () => {
       return Promise.reject(new Error('Test error'));
@@ -154,7 +154,7 @@ describe('EventEmitter', () => {
     expect(errorEvent.error.message).toContain('event handler for test');
     expect(errorEvent.error.message).toContain('Test error');
 
-    globalThis.removeEventListener('reportError', errorHandler);
+    globalThis.removeEventListener('error', errorHandler);
   });
 
   test('hasListener with regular subscription', () => {
@@ -212,9 +212,9 @@ describe('EventEmitterProtected', () => {
     }
 
     const emitter = new MyEmitter();
-    const errorHandler = mock(() => {});
+    const errorHandler = mock((event: Event) => event.preventDefault());
 
-    globalThis.addEventListener('reportError', errorHandler);
+    globalThis.addEventListener('error', errorHandler);
 
     emitter.on('test', () => {
       throw new Error('Protected error');
@@ -227,7 +227,7 @@ describe('EventEmitterProtected', () => {
     expect(errorEvent.error.message).toContain('event handler for test');
     expect(errorEvent.error.message).toContain('Protected error');
 
-    globalThis.removeEventListener('reportError', errorHandler);
+    globalThis.removeEventListener('error', errorHandler);
   });
 
   test('all subscription methods work with protected emitter', () => {

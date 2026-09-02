@@ -1,6 +1,6 @@
 # global-event-target
 
-Conservative polyfill that gives `globalThis` the `EventTarget` methods on Node.js, so Lifecycleion's `'reportError'` reporting convention works there.
+Conservative polyfill that gives `globalThis` the `EventTarget` methods on Node.js, so error reporting on the standard `'error'` event channel works there.
 
 <!-- toc -->
 
@@ -17,7 +17,7 @@ Conservative polyfill that gives `globalThis` the `EventTarget` methods on Node.
 
 ## Why This Exists
 
-`safe-handle-callback` and `logger` report errors with Lifecycleion's `'reportError'` convention: an `ErrorEvent` dispatched through `globalThis.dispatchEvent()`, observed with `globalThis.addEventListener('reportError', handler)`. The `ErrorEvent` constructor and the `EventTarget` methods are web-standard primitives. The `'reportError'` event type itself is Lifecycleion's own convention, not a web standard.
+`safe-handle-callback` and `logger` report errors as an `ErrorEvent` of the standard `'error'` type, dispatched through `globalThis.dispatchEvent()` and observed with `globalThis.addEventListener('error', handler)`. See [the reporting pattern](./safe-handle-callback.md#the-reporting-pattern) for the full fall-back order and the details that are easy to get wrong.
 
 Browsers, Bun, and Deno expose all of these on the global object. Node.js does not. As of Node 25 the `ErrorEvent` constructor **is** a global, but `globalThis` is still **not** an `EventTarget`:
 
@@ -87,11 +87,11 @@ if (isGlobalEventTargetPolyfilled()) {
 
 ### isGlobalEventTargetAvailable
 
-Whether `globalThis` exposes everything the `'reportError'` convention needs: the three `EventTarget` methods plus the `ErrorEvent` constructor. This is what `logger.isReportErrorAvailable()` reports.
+Whether `globalThis` exposes everything error reporting needs: the three `EventTarget` methods plus the `ErrorEvent` constructor. This is what `logger.isReportErrorAvailable()` reports.
 
 ```typescript
 if (isGlobalEventTargetAvailable()) {
-  globalThis.addEventListener('reportError', handler);
+  globalThis.addEventListener('error', handler);
 }
 ```
 

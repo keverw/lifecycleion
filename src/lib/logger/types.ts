@@ -124,6 +124,19 @@ export interface LoggerOptions {
     context: 'write' | 'close',
     sink: LogSink,
   ) => void;
+
+  /**
+   * Handle a failure thrown or rejected by one of this logger's own `'logger'` event
+   * handlers. Defaults to `console.error`.
+   *
+   * These cannot be logged: logging emits a `'logger'` event, so reporting a handler's
+   * failure through the logger would emit again and cycle without end. They are kept off
+   * the global `'error'` channel for the same reason. If this callback itself throws, the
+   * failure falls back to `console.error`.
+   *
+   * Do not call this logger's own log methods from here.
+   */
+  onEventHandlerError?: (error: Error, event: string) => void;
 }
 
 /**

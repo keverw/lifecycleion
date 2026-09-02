@@ -784,7 +784,7 @@ All callbacks are wrapped with `safeHandleCallback()`, which:
 
 - Catches synchronous errors
 - Catches asynchronous promise rejections
-- Reports errors via the global `reportError` event (supported in Node.js 25+, Bun, Deno, and browsers)
+- Reports errors on the global `'error'` event channel (supported in Node.js 25+, Bun, Deno, and browsers)
 - Prevents uncaught exceptions from crashing the process
 
 ```typescript
@@ -795,8 +795,8 @@ const manager = new ProcessSignalManager({
   },
 });
 
-// Listen for errors globally using the standard reportError event
-globalThis.addEventListener('reportError', (event) => {
+// Listen for errors globally on the standard 'error' channel
+globalThis.addEventListener('error', (event) => {
   console.error('Callback error:', event.error);
 });
 

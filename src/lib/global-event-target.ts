@@ -1,12 +1,12 @@
 /**
  * Global event target polyfill.
  *
- * Some Lifecycleion libraries (`safe-handle-callback`, `logger`) report errors using
- * Lifecycleion's `'reportError'` convention: an `ErrorEvent` dispatched through
- * `globalThis.dispatchEvent()` and observed with `globalThis.addEventListener('reportError', ...)`.
+ * Some Lifecycleion libraries (`safe-handle-callback`, `logger`) report errors on the
+ * standard global `'error'` channel: an `ErrorEvent` dispatched through
+ * `globalThis.dispatchEvent()` and observed with `globalThis.addEventListener('error', ...)`.
  *
- * Browsers, Bun, and Deno expose the `EventTarget` methods on the global object, so the
- * convention works there out of the box. Node.js does not: as of Node 25 the `ErrorEvent`
+ * Browsers, Bun, and Deno expose the `EventTarget` methods on the global object, so this
+ * works there out of the box. Node.js does not: as of Node 25 the `ErrorEvent`
  * constructor is a global, but `globalThis` is still not an `EventTarget`, so
  * `globalThis.addEventListener` / `removeEventListener` / `dispatchEvent` are all `undefined`.
  *
@@ -464,8 +464,8 @@ export function isGlobalEventTargetPolyfilled(): boolean {
 }
 
 /**
- * Whether `globalThis` exposes everything Lifecycleion's `'reportError'` convention needs:
- * the three `EventTarget` methods plus the `ErrorEvent` constructor.
+ * Whether `globalThis` exposes everything error reporting needs: the three `EventTarget`
+ * methods plus the `ErrorEvent` constructor.
  */
 export function isGlobalEventTargetAvailable(): boolean {
   return (

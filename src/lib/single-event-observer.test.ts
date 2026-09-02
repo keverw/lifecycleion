@@ -68,8 +68,8 @@ describe('SingleEventObserver', () => {
       throw new Error('Test error');
     });
 
-    const errorHandler = mock();
-    globalThis.addEventListener('reportError', errorHandler);
+    const errorHandler = mock((event: Event) => event.preventDefault());
+    globalThis.addEventListener('error', errorHandler);
 
     observer.subscribe(errorCallback);
 
@@ -82,6 +82,6 @@ describe('SingleEventObserver', () => {
     expect(errorCallback).toHaveBeenCalledWith(data);
     expect(errorHandler).toHaveBeenCalled();
 
-    globalThis.removeEventListener('reportError', errorHandler);
+    globalThis.removeEventListener('error', errorHandler);
   });
 });

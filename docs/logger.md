@@ -54,7 +54,9 @@ A modern, flexible logging library with sink-based architecture, template string
   - [Options for Log Methods](#options-for-log-methods)
   - [Logger Configuration](#logger-configuration)
     - [Sink Error Handling](#sink-error-handling)
+      - [Where errors go when the logger cannot log them](#where-errors-go-when-the-logger-cannot-log-them)
     - [Exit Behavior](#exit-behavior)
+- [Capturing Reported Errors](#capturing-reported-errors)
 - [EventEmitter Integration](#eventemitter-integration)
   - [Exit Event Phases](#exit-event-phases)
 - [Custom Sinks](#custom-sinks)
@@ -1180,8 +1182,8 @@ logger.exitCode: number
 logger.isPendingExit: boolean
 logger.hasExitedOrPending: boolean
 
-// Report error listener
-logger.registerReportErrorListener(prefix?)
+// Global 'error' event listener
+logger.registerReportErrorListener(prefix?, options?)
 logger.unregisterReportErrorListener()
 logger.isReportErrorListenerRegistered(): boolean
 logger.isReportErrorAvailable(): boolean
@@ -1217,6 +1219,7 @@ interface LoggerOptions {
     context: 'write' | 'close',
     sink: LogSink,
   ) => void; // Handle sink errors (default: console.error)
+  onEventHandlerError?: (error: Error, event: string) => void; // Handle failures of this logger's own event handlers (default: console.error)
 }
 
 interface BeforeExitResult {
@@ -1247,6 +1250,35 @@ const logger = new Logger({
 });
 ```
 
+##### Where errors go when the logger cannot log them
+
+Some failures cannot be written to the sinks, because the sinks are either the thing that failed or the thing that would fail again. Those go to a callback you provide, and to `console.error` when you provide none — never back into the logger:
+
+| Failure                                                                                         | Goes to                                                              |
+| ----------------------------------------------------------------------------------------------- | -------------------------------------------------------------------- |
+| A sink throws on `write` or `close`                                                             | `onSinkError`, or `console.error` if you did not provide one         |
+| Your `onSinkError` itself throws                                                                | `console.error`                                                      |
+| A `'logger'` event handler of this logger throws or rejects                                     | `onEventHandlerError`, or `console.error` if you did not provide one |
+| Your `onEventHandlerError` itself throws                                                        | `console.error`                                                      |
+| A new error is reported while `registerReportErrorListener()` is still logging the previous one | `console.error`                                                      |
+
+The third row is the one that would otherwise loop: logging emits a `'logger'` event, so reporting that handler's failure through the logger would emit again. It gets its own callback rather than `onSinkError` because no sink was involved, and there would be nothing honest to pass as that callback's `sink` argument:
+
+```typescript
+const logger = new Logger({
+  sinks: [new FileSink({ logDir: './logs', basename: 'app' })],
+  onEventHandlerError: (error, event) => {
+    // error: the failure, with the original on `error.cause`
+    // event: the event whose handler failed, e.g. 'logger'
+    metrics.increment('logger.handler_failure');
+  },
+});
+```
+
+Everything else — errors reported by other Lifecycleion modules, and by your own code using [the reporting pattern](./safe-handle-callback.md#the-reporting-pattern) — reaches your sinks normally through `registerReportErrorListener()`.
+
+> Do not call this logger's own log methods from inside `onSinkError` or `onEventHandlerError`. If the sink is what failed, logging from the handler asks the same sink to write again; and logging from `onEventHandlerError` re-emits the very event whose handler just failed.
+
 This allows you to:
 
 - Log errors to a monitoring service
@@ -1263,7 +1295,7 @@ When a log includes an `exitCode`, the logger will:
    - Callback must return `{ action: 'proceed' }` to continue with exit
    - Or return `{ action: 'wait' }` to prevent exit (e.g., shutdown already in progress)
    - **IMPORTANT:** If the callback throws an error or rejects, the exit process proceeds automatically to prevent the application from hanging
-   - Errors from the callback are reported via the global `'reportError'` event when the required browser-style event primitives are available
+   - Errors from the callback are reported on the global `'error'` event channel when the required browser-style event primitives are available
    - Design your callback to handle errors internally if you need guaranteed cleanup
 2. Set `logger.didExit = true` and `logger.exitCode = <code>`
 3. Close all sinks
@@ -1283,6 +1315,76 @@ This is useful for:
 - **Testing**: Verify exit behavior without killing your test runner
 - **Browser environments**: No `process.exit()` available
 - **Custom exit handling**: Use `beforeExitCallback` to implement your own exit logic. See [docs/lifecycle-manager.md](lifecycle-manager.md#process-exit-design--rationale) for details on how `LifecycleManager` hooks into this mechanism to cleanly orchestrate component shutdowns.
+
+## Capturing Reported Errors
+
+Lifecycleion catches errors thrown by callbacks you hand it — event handlers, `onChange`, lifecycle hooks — so one bad callback cannot break an operation. Those errors are reported on the standard global `'error'` event channel rather than rethrown, which means that without a listener they are only written to the console.
+
+`registerReportErrorListener()` attaches that listener and routes what it hears into this logger's sinks:
+
+```typescript
+const result = logger.registerReportErrorListener();
+// 'success' | 'already_registered' | 'not_available'
+```
+
+One call covers the whole process: the listener sits on `globalThis`, so it captures reports from every Lifecycleion module in the application, no per-instance wiring. Each error is logged through `errorObject(prefix, error)` and also emitted as a `'logger'` event with `{ eventType: 'uncaughtException', error }`.
+
+**Parameters:**
+
+- `prefix` - Prefix for the logged message. Default `'Uncaught exception'`.
+- `options.preventDefault` - Whether to cancel the event. Default `true`.
+
+**About `preventDefault`:** the listener claims each error by default, which stops `safe-handle-callback` from also writing it to the console and, in browsers, suppresses the browser's own console line. Since the error is already going to your sinks, that avoids logging it twice. Pass `preventDefault: false` to log to the sinks _and_ leave the error for the console:
+
+```typescript
+logger.registerReportErrorListener('Uncaught exception', {
+  preventDefault: false,
+});
+```
+
+**Scope:** this listens on the platform `'error'` channel, so in a browser it also receives genuine uncaught script errors — not just Lifecycleion's own callback reports. Those can arrive with no `error` object; the event's `message` is logged instead. With the default `preventDefault: true`, the console line for that traffic is suppressed as well.
+
+Resource-load failures (a broken `<img>` or `<script>` tag) are **not** included by default. Those `error` events fire on the element and do not bubble, so a global listener registered without capture never sees them — they behave exactly as they would with no logger involved: the element's own handlers run and the browser reports the failed request in the console.
+
+Set `captureResourceErrors: true` to take them as well:
+
+```typescript
+logger.registerReportErrorListener('Uncaught exception', {
+  captureResourceErrors: true,
+});
+```
+
+The listener then registers with capture, so it sees element `error` events on the way down. A resource failure is a plain `Event` with no `error` and usually no `message`, so it is described from the failing element instead — `Failed to load IMG: /logo.png` — and tagged `'resource'`.
+
+Expect volume: every broken asset becomes a log entry, and on a page with flaky third-party resources that adds up. **Filter them in your sinks** — the tag is there so a custom sink can route them somewhere quieter or drop them entirely:
+
+```typescript
+class AppSink implements LogSink {
+  write(entry: LogEntry): void {
+    if (entry.tags?.includes('resource')) {
+      return; // or send to a separate, lower-priority destination
+    }
+
+    // ...
+  }
+}
+```
+
+Lifecycleion's own reports and uncaught script errors are untagged, so filtering on `'resource'` never drops them. Off Node and Bun this option does nothing: nothing dispatches element events there.
+
+**Closing:** `close()` unregisters the listener. A closed logger's log methods are no-ops, so a listener left registered would claim reports it cannot record — and, cancelling them by default, stop them reaching the console either.
+
+**Feedback loops:** logging emits a `'logger'` event, and a failing event handler is normally reported on this same channel — so a `'logger'` handler that fails would feed itself, forever. `Logger` therefore reports failures of its own `'logger'` handlers to the `onEventHandlerError` option — or to `console.error` when there is none — rather than to the `'error'` channel. Handlers on other Lifecycleion emitters are unaffected and still reach your sinks. As a backstop, the listener also ignores any report that arrives while it is still logging the previous one — a sink that dispatches an error of its own mid-write, say — so that error goes to the console instead of back through the sinks.
+
+Teardown and inspection:
+
+```typescript
+logger.unregisterReportErrorListener(); // 'success' | 'not_registered'
+logger.isReportErrorListenerRegistered(); // boolean
+logger.isReportErrorAvailable(); // boolean — are the global event primitives present?
+```
+
+`'not_available'` means the global object exposes neither native nor polyfilled event methods. See [global-event-target](./global-event-target.md); on Node.js, Lifecycleion installs them for you.
 
 ## EventEmitter Integration
 

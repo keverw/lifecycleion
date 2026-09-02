@@ -56,7 +56,7 @@ new LRUCache<K, V>(
 - `options.defaultTtl`: (Optional) Default time-to-live in milliseconds for all cache entries. Must be a non-negative finite number. `0` disables expiration by default. Invalid values throw `RangeError`.
 - `options.maxSize`: (Optional) Maximum total size in bytes for all cache entries combined. Must be a positive integer byte count. Invalid values throw `RangeError`.
 - `options.sizeCalculator`: (Optional) Custom function to calculate the size of a value. If provided, it must be a function. It must return a non-negative integer byte count or byte estimate. A non-function `sizeCalculator` throws `TypeError`, and an invalid return value throws `RangeError`.
-- `options.onChange`: (Optional) Callback invoked after cache mutations. If provided, it must be a function. Sync and async callbacks are supported. Errors are reported via the global `'reportError'` event rather than propagating. A non-function `onChange` throws `TypeError`.
+- `options.onChange`: (Optional) Callback invoked after cache mutations. If provided, it must be a function. Sync and async callbacks are supported. Errors are reported on the global `'error'` event channel rather than propagating. A non-function `onChange` throws `TypeError`.
 - `options.onChangeReasons`: (Optional) Array of change reasons that should trigger `onChange`. If provided, it must be an array containing only valid change reasons. Invalid values throw `TypeError` or `RangeError`.
 
 ```typescript

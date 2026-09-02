@@ -146,23 +146,23 @@ Removes event listeners.
 
 ## Error Handling
 
-The emitter automatically catches and reports errors from both synchronous and asynchronous event handlers using the global `'reportError'` event mechanism:
+The emitter automatically catches and reports errors from both synchronous and asynchronous event handlers on the global `'error'` event channel:
 
 ```typescript
 // Listen for errors
-globalThis.addEventListener('reportError', (event) => {
+globalThis.addEventListener('error', (event) => {
   console.error('Event handler error:', event.error);
 });
 
 // Sync error handling
 emitter.on('test', () => {
   throw new Error('Something went wrong');
-}); // Error will be caught and reported via reportError event
+}); // Error will be caught and reported on the 'error' channel
 
 // Async error handling
 emitter.on('test', async () => {
   throw new Error('Async error');
-}); // Promise rejection will be caught and reported via reportError event
+}); // Promise rejection will be caught and reported on the 'error' channel
 ```
 
 The error messages include the event name and detailed error information, making debugging easier.

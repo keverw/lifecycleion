@@ -6,7 +6,9 @@
  * This provides basic event handling functionality with type safety and memory management.
  */
 
-import { safeHandleCallback } from './safe-handle-callback';
+import { reportCallbackError } from './safe-handle-callback';
+import { isFunction } from './is-function';
+import { isPromise } from './is-promise';
 
 type EventCallback<T = unknown> = (data: T) => void | Promise<void>;
 
@@ -124,11 +126,50 @@ export class EventEmitterProtected {
    */
   protected emit<T = unknown>(event: string, data?: T): void {
     const callbacks = this.events.get(event);
-    if (callbacks) {
-      for (const callback of callbacks) {
-        safeHandleCallback(`event handler for ${event}`, callback, data);
+
+    if (!callbacks) {
+      return;
+    }
+
+    for (const callback of callbacks) {
+      const handleFailure = (error: unknown): void => {
+        this.handleEventHandlerFailure(event, error as Error);
+      };
+
+      if (!isFunction(callback)) {
+        handleFailure(
+          new Error(`Callback provided for event ${event} is not a function`),
+        );
+
+        continue;
+      }
+
+      try {
+        const result = (callback as (value?: T) => unknown)(data);
+
+        if (isPromise(result)) {
+          // Fire-and-forget: a rejection is reported, never awaited.
+          result.catch(handleFailure);
+        }
+      } catch (error) {
+        handleFailure(error);
       }
     }
+  }
+
+  /**
+   * Report a failure thrown (or rejected) by one of this emitter's handlers.
+   *
+   * The default reports it on the standard global `'error'` channel, exactly as
+   * `safeHandleCallback` would. It is overridable because that channel is not always safe
+   * to use: an emitter whose own events are logged can feed its handler failures back into
+   * itself. `Logger` overrides this for that reason.
+   *
+   * @param event The event whose handler failed.
+   * @param error The error thrown or the rejection reason.
+   */
+  protected handleEventHandlerFailure(event: string, error: Error): void {
+    reportCallbackError(`event handler for ${event}`, error);
   }
 }
 

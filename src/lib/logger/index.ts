@@ -26,6 +26,60 @@ import { LoggerService } from './logger-service';
 /**
  * Main Logger class with sink-based architecture and EventEmitter support
  */
+/**
+ * Describe an `'error'` event target when it is a failed page resource.
+ *
+ * A resource failure (a broken `<img>`, `<script>`, `<link>`, media element) fires an
+ * `'error'` event *on the element*, which does not bubble — only a listener registered
+ * with `capture: true` sees it. It is a plain `Event`: no `error`, and usually no
+ * `message`, so the target is the only place a useful description can come from.
+ *
+ * An uncaught script error targets the global object instead and is a real `ErrorEvent`,
+ * which is what distinguishes the two.
+ *
+ * Every read is guarded: the target is a DOM object belonging to the page, so an
+ * accessor on it may throw, and this runs on an error path that must not raise one of
+ * its own.
+ *
+ * @returns A description such as `Failed to load IMG: /logo.png`, or `undefined` when
+ *          the target is not a resource element.
+ */
+function describeResourceTarget(target: unknown): string | undefined {
+  if (
+    target === null ||
+    target === undefined ||
+    (target as unknown) === globalThis ||
+    typeof target !== 'object'
+  ) {
+    return undefined;
+  }
+
+  const read = (key: string): unknown => {
+    try {
+      return (target as Record<string, unknown>)[key];
+    } catch {
+      return undefined;
+    }
+  };
+
+  const tagName = read('tagName');
+
+  if (typeof tagName !== 'string') {
+    // Not an element, so not a resource failure this can describe.
+    return undefined;
+  }
+
+  for (const key of ['src', 'href', 'currentSrc']) {
+    const url = read(key);
+
+    if (typeof url === 'string' && url.length > 0) {
+      return `Failed to load ${tagName}: ${url}`;
+    }
+  }
+
+  return `Failed to load ${tagName}`;
+}
+
 export class Logger extends EventEmitter {
   public readonly isLoggerClass = true;
 
@@ -41,6 +95,7 @@ export class Logger extends EventEmitter {
     context: 'write' | 'close',
     sink: LogSink,
   ) => void;
+  private onEventHandlerError?: (error: Error, event: string) => void;
 
   private _didExit = false;
   private _exitCode: number = 0;
@@ -49,7 +104,9 @@ export class Logger extends EventEmitter {
   private _closed = false;
 
   private _reportErrorListenerRegistered = false;
+  private _isHandlingReportedError = false;
   private _reportErrorListener: ((event: Event) => void) | null = null;
+  private _reportErrorListenerCapture = false;
 
   constructor(options: LoggerOptions = {}) {
     super();
@@ -59,6 +116,7 @@ export class Logger extends EventEmitter {
     this.callProcessExit = options.callProcessExit ?? true;
     this.beforeExitCallback = options.beforeExitCallback;
     this.onSinkError = options.onSinkError;
+    this.onEventHandlerError = options.onEventHandlerError;
   }
 
   public get didExit(): boolean {
@@ -241,13 +299,32 @@ export class Logger extends EventEmitter {
   }
 
   /**
-   * Registers a listener for the 'reportError' event.
+   * Registers a listener for the standard global `'error'` event, so errors reported by
+   * Lifecycleion's callback safety net (`safe-handle-callback`) are logged to this
+   * logger's sinks instead of being lost.
+   *
+   * The listener observes the platform channel, so in browsers it also sees genuine
+   * uncaught script errors. Those can arrive without an `error` property; the event's
+   * `message` is used instead. Resource-load failures are not included by default: those
+   * `error` events fire on the element and do not bubble, so a non-capturing global
+   * listener never sees them. Set `captureResourceErrors` to register with capture and
+   * take them too.
+   *
+   * By default the listener calls `preventDefault()` on every event it handles, which
+   * claims the report: `safe-handle-callback` skips its `console.error` fall-through, and
+   * the browser suppresses its own console line. Pass `preventDefault: false` to log to
+   * the sinks *and* let the error reach the console as well.
    *
    * If the listener is already registered, it returns 'already_registered'.
-   * If 'globalThis.reportError' is not available, it returns 'not_available'.
+   * If the required global event primitives are unavailable, it returns 'not_available'.
    * Otherwise, it registers the listener and returns 'success'.
    *
    * @param prefix - The prefix to use when logging the error object. Default is 'Uncaught exception'.
+   * @param options - `preventDefault` (default `true`): whether to cancel the event so the
+   *                  error is not also written to the console. `captureResourceErrors`
+   *                  (default `false`): register with capture so browser resource-load
+   *                  failures are logged too, described from the failing element and
+   *                  tagged `'resource'` so a sink can route or drop them.
    * @returns 'success' if the listener is registered successfully,
    *          'already_registered' if the listener is already registered,
    *          'not_available' if the required global event primitives are not available.
@@ -255,6 +332,10 @@ export class Logger extends EventEmitter {
 
   public registerReportErrorListener(
     prefix: string = 'Uncaught exception',
+    options: {
+      preventDefault?: boolean;
+      captureResourceErrors?: boolean;
+    } = {},
   ): 'success' | 'already_registered' | 'not_available' {
     if (this._reportErrorListenerRegistered) {
       return 'already_registered';
@@ -268,23 +349,81 @@ export class Logger extends EventEmitter {
       return 'not_available';
     }
 
+    const shouldPreventDefault = options.preventDefault !== false;
+    const useCapture = options.captureResourceErrors === true;
+
     this._reportErrorListener = (event: Event): void => {
+      // Re-entrancy guard. Logging goes through `handleLog`, which writes to the sinks
+      // and emits a `'logger'` event; a `'logger'` handler that throws is itself wrapped
+      // in `safeHandleCallback`, which reports on this very channel. Without this flag
+      // that is an unbounded loop: one `logger.info()` call recursed until the stack
+      // gave out. A report that arrives while this listener is still logging is left
+      // uncancelled and unlogged here, so `safe-handle-callback`'s console fall-through
+      // reports it once instead of feeding it back through the sinks.
+      if (this._isHandlingReportedError) {
+        return;
+      }
+
+      // A closed logger cannot record anything: `handleLog` returns early, so logging
+      // here is a no-op. Cancelling the event as well would leave the error with nowhere
+      // to go at all, since the cancel is what suppresses the console fall-through.
+      // `close()` unregisters this listener, so reaching here means a close raced with a
+      // report already in flight.
+      if (this._closed) {
+        return;
+      }
+
       const errorEvent = event as ErrorEvent;
-      this.errorObject(prefix, errorEvent.error);
-      this.emit('logger', {
-        eventType: 'uncaughtException',
-        error: errorEvent.error as unknown,
-      });
+      const resource = describeResourceTarget(event.target);
+
+      // Uncaught errors can carry a message but no `error` object, and a resource
+      // failure is a plain `Event` with neither, so a value is always synthesized
+      // rather than logging `undefined`.
+      const reported: unknown = errorEvent.error;
+      const error =
+        reported instanceof Error
+          ? reported
+          : new Error(
+              resource ??
+                errorEvent.message ??
+                'Unknown error reported by an error event',
+            );
+
+      this._isHandlingReportedError = true;
+
+      try {
+        // Tagged so a custom sink can route or drop resource noise; see the logger docs.
+        this.errorObject(
+          prefix,
+          error,
+          resource === undefined ? undefined : { tags: ['resource'] },
+        );
+        this.emit('logger', {
+          eventType: 'uncaughtException',
+          error,
+        });
+      } finally {
+        // Cleared in `finally` so a sink or handler that throws its way out cannot leave
+        // the listener permanently deaf.
+        this._isHandlingReportedError = false;
+      }
+
+      if (shouldPreventDefault) {
+        // Only meaningful because the event is dispatched with `cancelable: true`;
+        // `preventDefault()` on an uncancelable event is a silent no-op.
+        event.preventDefault();
+      }
     };
 
-    globalThis.addEventListener('reportError', this._reportErrorListener);
+    globalThis.addEventListener('error', this._reportErrorListener, useCapture);
+    this._reportErrorListenerCapture = useCapture;
     this._reportErrorListenerRegistered = true;
 
     return 'success';
   }
 
   /**
-   * Unregister the listener for the 'reportError' event.
+   * Unregister the global `'error'` event listener.
    *
    * If the listener is not registered, it returns 'not_registered'.
    * Otherwise, it unregister the listener and returns 'success'.
@@ -298,16 +437,23 @@ export class Logger extends EventEmitter {
       return 'not_registered';
     }
 
-    globalThis.removeEventListener('reportError', this._reportErrorListener);
+    // The capture flag has to match the one used to register, or the listener is not
+    // the one being removed and stays attached.
+    globalThis.removeEventListener(
+      'error',
+      this._reportErrorListener,
+      this._reportErrorListenerCapture,
+    );
 
     this._reportErrorListener = null;
     this._reportErrorListenerRegistered = false;
+    this._reportErrorListenerCapture = false;
 
     return 'success';
   }
 
   /**
-   * Check if the 'reportError' event listener is registered
+   * Check if the global `'error'` event listener is registered
    *
    * @returns 'true' if the listener is registered, 'false' otherwise.
    */
@@ -316,7 +462,7 @@ export class Logger extends EventEmitter {
   }
 
   /**
-   * Check if the global event primitives used for `reportError` dispatch are available:
+   * Check if the global event primitives used for error reporting are available:
    * the `EventTarget` methods on `globalThis` plus the `ErrorEvent` constructor.
    *
    * On Node.js the event methods are supplied by Lifecycleion's `global-event-target`
@@ -361,6 +507,12 @@ export class Logger extends EventEmitter {
    */
   public async close(): Promise<void> {
     this._closed = true;
+
+    // Give up the global listener rather than holding one that can no longer log: a
+    // closed logger's `handleLog` is a no-op, so staying registered would claim reports
+    // it cannot record and, with the default `preventDefault`, stop anything else from
+    // reporting them either.
+    this.unregisterReportErrorListener();
 
     // Close all sinks
     await Promise.all(
@@ -521,6 +673,46 @@ export class Logger extends EventEmitter {
     if (isNumber(exitCode)) {
       this.exit(exitCode);
     }
+  }
+
+  /**
+   * Report a failure from one of this logger's own `'logger'` event handlers.
+   *
+   * Deliberately does **not** use the standard `'error'` channel the base class uses.
+   * Logging emits a `'logger'` event, so a handler failure reported on that channel is
+   * logged, which emits again, which fails again: with a handler that reliably fails
+   * (an async one that always rejects is the clearest case) that is an unbounded cycle
+   * rather than a stack overflow, so no re-entrancy guard can catch it. Reporting these to the
+   * console instead breaks the edge that closes the loop, and matches the fall-back a
+   * failing sink already gets.
+   *
+   * Failures from handlers on *other* Lifecycleion emitters are unaffected and still
+   * reach this logger's sinks through `registerReportErrorListener()`.
+   */
+  protected override handleEventHandlerFailure(
+    event: string,
+    error: Error,
+  ): void {
+    const failure = new Error(
+      `Error in a logger event handler for ${event}: ${error.message}`,
+      { cause: error },
+    );
+
+    // Not routed through `onSinkError`: that callback is handed the sink that failed, and
+    // no sink is involved here, so there would be nothing honest to pass.
+    if (this.onEventHandlerError) {
+      try {
+        this.onEventHandlerError(failure, event);
+
+        return;
+      } catch {
+        // Fall through to the console, as `handleSinkError` does for its own callback.
+        // A handler for failures must not be able to turn one into two.
+      }
+    }
+
+    // eslint-disable-next-line no-console -- reporting this any other way reopens the loop
+    console.error(failure.message);
   }
 
   /**
