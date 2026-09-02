@@ -1,5 +1,6 @@
 import type { NestedKeyValueEntry } from './ascii-tables/key-value-ascii-table';
 import { KeyValueASCIITable } from './ascii-tables/key-value-ascii-table';
+import { getPathParts } from './internal/path-utils';
 
 /**
  * Read a property off a value without trusting it.
@@ -9,19 +10,52 @@ import { KeyValueASCIITable } from './ascii-tables/key-value-ascii-table';
  * This module runs on reporting paths that must not raise an error of their own, so an
  * unreadable member is treated as absent.
  */
-/** Whether a value is usable as a list of field names. */
-function isStringArray(value: unknown): value is string[] {
+/**
+ * Parse `sensitiveFieldNames` into path segments, using the same syntax as the logger's
+ * `redactedKeys`: a bare name is a top-level key, and `user.password` / `items[0].token`
+ * / quoted bracket keys address one exact location.
+ *
+ * @returns One segment list per entry, or `null` when the value is not a usable list of
+ *          paths - which callers must treat as a reason to mask everything rather than
+ *          to mask nothing.
+ */
+function parseSensitivePaths(value: unknown): string[][] | null {
   try {
     if (!Array.isArray(value)) {
-      return false;
+      return null;
     }
 
-    return (value as unknown[]).every(
-      (item: unknown) => typeof item === 'string',
-    );
+    const paths: string[][] = [];
+
+    for (const entry of value as unknown[]) {
+      if (typeof entry !== 'string') {
+        return null;
+      }
+
+      const parts = getPathParts(entry);
+
+      if (parts === null || parts.length === 0) {
+        // A malformed entry means the caller asked for masking somewhere this cannot
+        // locate. Failing open here would render the value it names in the clear.
+        return null;
+      }
+
+      paths.push(parts);
+    }
+
+    return paths;
   } catch {
-    return false;
+    return null;
   }
+}
+
+/** Whether `path` is exactly one of the sensitive paths. */
+function isSensitivePath(sensitive: string[][], path: string[]): boolean {
+  return sensitive.some(
+    (candidate) =>
+      candidate.length === path.length &&
+      candidate.every((part, index) => part === path[index]),
+  );
 }
 
 function readMember(value: Record<string, unknown>, key: string): unknown {
@@ -92,7 +126,7 @@ function errorToASCIITable(
   error: unknown,
   maxRowLength: number,
   seen: WeakSet<object>,
-  inheritedSensitive: string[],
+  inheritedSensitive: string[][],
 ): KeyValueASCIITable {
   const table = new KeyValueASCIITable({
     tableWidth: maxRowLength,
@@ -128,17 +162,18 @@ function errorToASCIITable(
     if (additionalInfo && typeof additionalInfo === 'object') {
       const rawSensitive = readMember(err, 'sensitiveFieldNames');
 
-      // Fails closed, like redaction does. A `sensitiveFieldNames` that is present but
-      // not a usable string array — a comma-joined string, a `Set`, or an accessor that
-      // threw and read back as `undefined` — means the caller asked for masking and this
-      // cannot tell which names. Rendering everything in the clear would be the one
-      // unacceptable answer, so `additionalInfo` is dropped wholesale instead.
-      const hasUnusableSensitiveList =
-        rawSensitive !== undefined &&
-        rawSensitive !== null &&
-        !isStringArray(rawSensitive);
+      const ownPaths =
+        rawSensitive === undefined || rawSensitive === null
+          ? []
+          : parseSensitivePaths(rawSensitive);
 
-      if (hasUnusableSensitiveList) {
+      // Fails closed, like the logger's redaction does. A `sensitiveFieldNames` that is
+      // present but not a usable list of paths — a comma-joined string, a `Set`, a
+      // malformed entry, or an accessor that threw and read back as `undefined` — means
+      // the caller asked for masking somewhere this cannot locate. Rendering everything
+      // in the clear would be the one unacceptable answer, so `additionalInfo` is
+      // dropped wholesale instead.
+      if (ownPaths === null) {
         table.addRow('AdditionalInfo', '*** (sensitiveFieldNames unreadable)');
 
         const stackOnly = readMember(err, 'stack');
@@ -150,13 +185,10 @@ function errorToASCIITable(
         return table;
       }
 
-      // Unioned with the enclosing error's list rather than replacing it: an error nested
-      // inside another's `additionalInfo` must not be able to un-mask a name its parent
-      // marked sensitive.
-      const sensitiveFieldNames = [
-        ...inheritedSensitive,
-        ...(isStringArray(rawSensitive) ? rawSensitive : []),
-      ];
+      // An error nested in another's `additionalInfo` starts a fresh root for paths, so
+      // the parent's entries address it as a whole rather than reaching inside it. Its
+      // own list covers its own contents.
+      const sensitivePaths = [...inheritedSensitive, ...ownPaths];
 
       const info = additionalInfo as Record<string, unknown>;
 
@@ -171,20 +203,16 @@ function errorToASCIITable(
       }
 
       for (const key of keys) {
-        if (sensitiveFieldNames.includes(key)) {
+        if (isSensitivePath(sensitivePaths, [key])) {
           table.addRow(`AdditionalInfo.${key}`, '***');
         } else {
           const value = readMember(info, key);
 
           table.addRow(
             `AdditionalInfo.${key}`,
-            stringifyValue(
-              value,
-              table,
-              maxRowLength,
-              seen,
-              sensitiveFieldNames,
-            ),
+            stringifyValue(value, table, maxRowLength, seen, sensitivePaths, [
+              key,
+            ]),
           );
         }
       }
@@ -205,7 +233,8 @@ function stringifyValue(
   table: KeyValueASCIITable,
   maxRowLength: number,
   seen: WeakSet<object>,
-  sensitive: string[],
+  sensitive: string[][],
+  path: string[],
 ): string | KeyValueASCIITable | NestedKeyValueEntry[] {
   if (typeof value === 'string') {
     return value;
@@ -231,7 +260,14 @@ function stringifyValue(
   }
 
   try {
-    return stringifyValueInner(value, table, maxRowLength, seen, sensitive);
+    return stringifyValueInner(
+      value,
+      table,
+      maxRowLength,
+      seen,
+      sensitive,
+      path,
+    );
   } finally {
     if (isTracked) {
       seen.delete(value);
@@ -244,7 +280,8 @@ function stringifyValueInner(
   table: KeyValueASCIITable,
   maxRowLength: number,
   seen: WeakSet<object>,
-  sensitive: string[],
+  sensitive: string[][],
+  path: string[],
 ): string | KeyValueASCIITable | NestedKeyValueEntry[] {
   let arrayValue: unknown[] | null;
 
@@ -260,13 +297,18 @@ function stringifyValueInner(
   if (arrayValue !== null) {
     // Handle arrays differently
     return arrayValue
-      .map((item) => {
+      .map((item, index) => {
+        if (isSensitivePath(sensitive, [...path, String(index)])) {
+          return '***';
+        }
+
         const result = stringifyValue(
           item,
           table,
           maxRowLength,
           seen,
           sensitive,
+          [...path, String(index)],
         );
         // Convert complex types to strings for joining
         if (typeof result === 'string') {
@@ -289,7 +331,9 @@ function stringifyValueInner(
     }
 
     if (isError) {
-      return errorToASCIITable(value, maxRowLength - 4, seen, sensitive);
+      // A nested error starts a fresh path root; the parent's entries address it as a
+      // whole, which is handled by the caller before recursing here.
+      return errorToASCIITable(value, maxRowLength - 4, seen, []);
     } else {
       // Handle objects differently
       let ownEntries: [string, unknown][];
@@ -300,14 +344,17 @@ function stringifyValueInner(
         ownEntries = [];
       }
 
-      // Masking applies at every depth. Matching only the top level of `additionalInfo`
-      // would render `additionalInfo.user.password` in the clear while the caller had
-      // named `password` sensitive, which is the one thing this list exists to prevent.
+      // Matched by path, exactly as the logger's `redactedKeys` does: a bare name in
+      // `sensitiveFieldNames` addresses a top-level key of `additionalInfo`, and reaching
+      // a nested value takes a path such as `user.password` or `items[0].token`.
       const entries: NestedKeyValueEntry[] = ownEntries.map(([key, val]) => ({
         key,
-        value: sensitive.includes(key)
+        value: isSensitivePath(sensitive, [...path, key])
           ? '***'
-          : stringifyValue(val, table, maxRowLength - 4, seen, sensitive),
+          : stringifyValue(val, table, maxRowLength - 4, seen, sensitive, [
+              ...path,
+              key,
+            ]),
       }));
 
       return entries;

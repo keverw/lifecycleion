@@ -510,6 +510,8 @@ does on the success path; only `entry.redactedParams` and the rendered `message`
 substituted. A sink that wants to detect the condition should compare against the exported
 constant rather than hard-coding the literal.
 
+The guarantee is about redaction _failing_: a key that this attempts to redact never keeps its original value. It is not a guarantee that every sensitive value is found. A `redactedKeys` entry that does not resolve to anything in `params` redacts nothing and is skipped, exactly as it always was, so a typo such as `'password.'` silently protects nothing. A dotted entry is treated as ambiguous and both readings are covered: `'user.password'` redacts the nested `params.user.password` _and_ a literal key spelled `'user.password'`, when either exists.
+
 ### Tags for Categorization and Filtering
 
 Tags allow you to categorize and filter log entries for better organization and querying:

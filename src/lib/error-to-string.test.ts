@@ -113,7 +113,11 @@ describe('errorToString', () => {
     ).toMatchSnapshot();
   });
   describe('sensitiveFieldNames masking', () => {
-    const render = (info: unknown, names: string[]): string => {
+    // Same path syntax as the logger's `redactedKeys`: a bare name is a top-level key of
+    // `additionalInfo`, and reaching a nested value takes a path.
+    const SECRET = 'hunter2secret';
+
+    const render = (info: unknown, names: unknown): string => {
       const error = Object.assign(new Error('auth failed'), {
         additionalInfo: info,
         sensitiveFieldNames: names,
@@ -122,54 +126,60 @@ describe('errorToString', () => {
       return errorToString(error);
     };
 
-    it('should mask a nested sensitive field, not just a top-level one', () => {
-      expect(
-        render({ user: { password: 'hunter2' } }, ['password']),
-      ).not.toContain('hunter2');
+    it('should mask a top-level key named by a bare name', () => {
+      expect(render({ password: SECRET }, ['password'])).not.toContain(SECRET);
     });
 
-    it('should mask a sensitive field at any depth', () => {
-      expect(render({ a: { b: { token: 'sek' } } }, ['token'])).not.toContain(
-        'sek',
+    it('should NOT mask a nested key from a bare name', () => {
+      // Matches `redactedKeys`: a bare name addresses the top level only.
+      expect(render({ user: { password: SECRET } }, ['password'])).toContain(
+        SECRET,
       );
     });
 
-    it('should mask a sensitive field inside an array', () => {
+    it('should mask a nested key named by a path', () => {
       expect(
-        render({ list: [{ password: 'p1' }] }, ['password']),
-      ).not.toContain('p1');
+        render({ user: { password: SECRET } }, ['user.password']),
+      ).not.toContain(SECRET);
     });
 
-    it('should leave non-sensitive nested values alone', () => {
+    it('should mask through an array index', () => {
+      expect(
+        render({ items: [{ token: SECRET }] }, ['items[0].token']),
+      ).not.toContain(SECRET);
+    });
+
+    it('should mask a deep path', () => {
+      expect(render({ a: { b: { c: SECRET } } }, ['a.b.c'])).not.toContain(
+        SECRET,
+      );
+    });
+
+    it('should leave non-sensitive values alone', () => {
       expect(render({ user: { name: 'alice' } }, ['password'])).toContain(
         'alice',
       );
     });
 
-    it('should fail closed when sensitiveFieldNames is not a usable list', () => {
-      // A comma-joined string is a plausible caller mistake. The caller asked for
-      // masking and this cannot tell which names, so nothing is rendered in the clear.
-      for (const names of ['password,token', new Set(['password']), 42]) {
-        const error = Object.assign(new Error('auth failed'), {
-          additionalInfo: { password: 'hunter2' },
-          sensitiveFieldNames: names,
-        });
-
-        expect(errorToString(error)).not.toContain('hunter2');
+    it('should fail closed when the list is not usable', () => {
+      // A comma-joined string, a Set, a non-string entry, and a malformed path all mean
+      // the caller asked for masking somewhere this cannot locate.
+      for (const names of [
+        'password,token',
+        new Set(['password']),
+        [42],
+        ['a.'],
+      ]) {
+        expect(render({ password: SECRET }, names)).not.toContain(SECRET);
       }
     });
 
-    it('should apply the outer list inside a nested error', () => {
-      // A nested error must not be able to un-mask a name its parent marked sensitive.
+    it('should mask a nested error as a whole when the path names it', () => {
       const inner = Object.assign(new Error('inner'), {
-        additionalInfo: { password: 'nested-secret' },
-      });
-      const outer = Object.assign(new Error('outer'), {
-        additionalInfo: { cause: inner },
-        sensitiveFieldNames: ['password'],
+        additionalInfo: { password: SECRET },
       });
 
-      expect(errorToString(outer)).not.toContain('nested-secret');
+      expect(render({ cause: inner }, ['cause']).includes(SECRET)).toBe(false);
     });
   });
 

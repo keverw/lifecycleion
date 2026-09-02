@@ -163,6 +163,19 @@ export function applyRedaction(
           const redactedValue = redactFn(key, stringifyTemplateValue(value));
           setNestedValue(redactedParams, key, redactedValue);
         }
+
+        // Also redact a key spelled exactly like the path, when one exists.
+        // `{ 'user.password': 'secret' }` names one literal key, not a nested one, and
+        // the path walk looks for `params.user.password` - so without this the caller
+        // redacts the only spelling they have and the value still renders in the clear.
+        // Both are covered rather than one or the other: the entry is ambiguous, and
+        // leaving either reading unredacted is the outcome redaction exists to prevent.
+        if (key in params) {
+          redactedParams[key] = redactFn(
+            key,
+            stringifyTemplateValue(params[key]),
+          );
+        }
       } else {
         // Top-level key
         if (key in params) {

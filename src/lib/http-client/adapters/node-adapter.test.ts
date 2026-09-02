@@ -459,6 +459,62 @@ describe('post-header stream aborts report why the retry stopped', () => {
 });
 
 describe('NodeAdapter streamResponse factory failures', () => {
+  test('a frozen error from the factory is still classified as non-retryable', async () => {
+    // `markStreamFactoryError` tags the error in place so the caller keeps its identity.
+    // A frozen error refuses that assignment in strict mode, and falling through untagged
+    // is the damaging outcome: the client reads both flags to classify a stream setup
+    // failure as non-retryable, so without them the request lands in the generic retry
+    // arm and the factory is invoked a second time.
+    const net = await import('node:net');
+
+    const server = net.createServer((socket) => {
+      socket.on('data', () => {
+        socket.end(
+          'HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: 4\r\n\r\nbody',
+        );
+      });
+    });
+
+    await new Promise<void>((done) => {
+      server.listen(0, '127.0.0.1', done);
+    });
+
+    const { port } = server.address() as { port: number };
+
+    let factoryCalls = 0;
+
+    try {
+      const client = new HTTPClient({
+        adapter: new NodeAdapter(),
+        baseURL: `http://127.0.0.1:${port}`,
+        retryPolicy: { strategy: 'fixed', maxRetryAttempts: 2, delayMS: 1 },
+      });
+
+      const builder = client.get('/frozen').streamResponse(() => {
+        factoryCalls++;
+
+        const frozen: Error = Object.freeze(
+          new Error('frozen factory failure'),
+        );
+
+        throw frozen;
+      });
+
+      const res = await builder.send();
+
+      expect(res.isFailed).toBe(true);
+      expect(builder.error?.code).toBe('stream_setup_error');
+      // The whole point: not retried.
+      expect(factoryCalls).toBe(1);
+      // The original survives on the carrier's cause.
+      expect(builder.error?.cause?.message).toContain('frozen factory failure');
+    } finally {
+      await new Promise<void>((done) => {
+        server.close(() => done());
+      });
+    }
+  });
+
   test('streamResponse on other adapters becomes request_setup_error', async () => {
     const adapter: HTTPAdapter = {
       getType: () => 'mock',

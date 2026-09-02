@@ -371,6 +371,34 @@ describe('defaultRedactFunction', () => {
   });
 });
 
+describe('applyRedaction - ambiguous dotted keys', () => {
+  // A dotted entry can name either a nested path or one literal key. Both readings are
+  // redacted, because leaving either in the clear is the outcome redaction prevents.
+
+  test('redacts a key spelled literally like the path', () => {
+    const result = applyRedaction({ 'user.password': 'hunter2' }, [
+      'user.password',
+    ]);
+
+    expect(result['user.password']).not.toBe('hunter2');
+  });
+
+  test('redacts both readings when both exist', () => {
+    const result = applyRedaction({ 'a.b': 'hunter2', a: { b: 'hunter2' } }, [
+      'a.b',
+    ]);
+
+    expect(result['a.b']).not.toBe('hunter2');
+    expect((result['a'] as Record<string, unknown>)['b']).not.toBe('hunter2');
+  });
+
+  test('still skips a path that names nothing', () => {
+    expect(applyRedaction({ other: 'safe' }, ['x.y'])).toEqual({
+      other: 'safe',
+    });
+  });
+});
+
 describe('applyRedaction - fail closed', () => {
   // Redaction runs user code (`redactFunction`) over caller-supplied values on a path
   // that must not throw. When any of it fails, the one unacceptable outcome is leaving

@@ -81,23 +81,31 @@ console.log(errorToString(err));
 // AdditionalInfo.user  → alice
 ```
 
-Masking applies at **every depth**, not just the top level of `additionalInfo`. A name is matched against the key wherever it appears - nested in a sub-object, inside an array, or in the `additionalInfo` of an error nested within this one:
+`sensitiveFieldNames` uses the **same path syntax as the logger's [`redactedKeys`](./logger.md#redaction-of-sensitive-data)**, so one mental model covers both. A bare name addresses a top-level key of `additionalInfo`; reaching a nested value takes a path, and array indexes and quoted bracket keys work the same way:
 
 ```typescript
 const err = new Error('auth failed');
 (err as any).additionalInfo = {
+  apiKey: 'sk_12345',
   user: { password: 'hunter2' },
-  ids: [{ token: 'abc' }],
+  items: [{ token: 'abc' }],
 };
-(err as any).sensitiveFieldNames = ['password', 'token'];
+(err as any).sensitiveFieldNames = [
+  'apiKey',
+  'user.password',
+  'items[0].token',
+];
 
+// AdditionalInfo.apiKey → ***
 // AdditionalInfo.user   → password: ***
-// AdditionalInfo.ids    → token: ***
+// AdditionalInfo.items  → token: ***
 ```
 
-An error nested inside another's `additionalInfo` inherits the outer error's list in addition to its own, so a nested error cannot un-mask a name its parent marked sensitive.
+A bare name does **not** match at depth. `sensitiveFieldNames: ['password']` masks `additionalInfo.password` and leaves `additionalInfo.user.password` rendered, exactly as `redactedKeys: ['password']` does in the logger. Name the path to reach it.
 
-Masking **fails closed**. If `sensitiveFieldNames` is present but not a usable array of strings - a comma-joined string, a `Set`, or an accessor that throws - the caller has asked for masking without saying which names, so `additionalInfo` is dropped wholesale and replaced with `*** (sensitiveFieldNames unreadable)` rather than rendered in the clear.
+An error nested inside another's `additionalInfo` starts a fresh path root: the outer error's entries address it as a whole (`['cause']` masks the nested error entirely), and the nested error's own `sensitiveFieldNames` covers its own contents.
+
+Masking **fails closed**. If `sensitiveFieldNames` is present but is not a usable list of paths - a comma-joined string, a `Set`, a non-string entry, a malformed path such as `'a.'`, or an accessor that throws - the caller has asked for masking somewhere this cannot locate, so `additionalInfo` is dropped wholesale and replaced with `*** (sensitiveFieldNames unreadable)` rather than rendered in the clear.
 
 ## Never throws
 
