@@ -162,16 +162,61 @@ describe('errorToString', () => {
     });
 
     it('should fail closed when the list is not usable', () => {
-      // A comma-joined string, a Set, a non-string entry, and a malformed path all mean
-      // the caller asked for masking somewhere this cannot locate.
-      for (const names of [
-        'password,token',
-        new Set(['password']),
-        [42],
-        ['a.'],
-      ]) {
-        expect(render({ password: SECRET }, names)).not.toContain(SECRET);
+      // Asserted on the positive marker, not just the absence of the secret: the
+      // top-level backstop also returns a string with no secret in it, so
+      // `not.toContain` alone passes even when the guard under test is removed.
+      for (const names of ['password,token', new Set(['password']), [42]]) {
+        const rendered = render({ password: SECRET }, names);
+
+        expect(rendered).toContain('*** (sensitiveFieldNames unreadable)');
+        expect(rendered).not.toContain(SECRET);
       }
+    });
+
+    it('should fail closed when sensitiveFieldNames cannot be read', () => {
+      // A throwing accessor reads back as `undefined` through an ordinary guarded read,
+      // which is indistinguishable from absent - and absent means "mask nothing".
+      const error = new Error('auth failed');
+
+      Object.defineProperty(error, 'additionalInfo', {
+        value: { password: SECRET },
+        enumerable: true,
+      });
+      Object.defineProperty(error, 'sensitiveFieldNames', {
+        get() {
+          throw new Error('boom');
+        },
+      });
+
+      const rendered = errorToString(error);
+
+      expect(rendered).toContain('*** (sensitiveFieldNames unreadable)');
+      expect(rendered).not.toContain(SECRET);
+    });
+
+    it('should mask a bare name that is not a valid path segment', () => {
+      // `getPathParts` only accepts `\w+` unquoted, so `password-hash` does not parse -
+      // but the logger masks it fine through its top-level branch, and so must this.
+      const rendered = render({ 'password-hash': SECRET, keep: 'diagnostic' }, [
+        'password-hash',
+      ]);
+
+      expect(rendered).not.toContain(SECRET);
+      // The rest of additionalInfo must survive, not be dropped wholesale.
+      expect(rendered).toContain('diagnostic');
+    });
+
+    it('should mask a key spelled literally like a path', () => {
+      // Matches the logger: a dotted entry is ambiguous, so both readings are covered.
+      expect(
+        render({ 'user.password': SECRET }, ['user.password']),
+      ).not.toContain(SECRET);
+
+      expect(
+        render({ 'user.password': SECRET, user: { password: SECRET } }, [
+          'user.password',
+        ]),
+      ).not.toContain(SECRET);
     });
 
     it('should mask a nested error as a whole when the path names it', () => {

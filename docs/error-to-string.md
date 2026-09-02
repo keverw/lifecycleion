@@ -105,7 +105,11 @@ A bare name does **not** match at depth. `sensitiveFieldNames: ['password']` mas
 
 An error nested inside another's `additionalInfo` starts a fresh path root: the outer error's entries address it as a whole (`['cause']` masks the nested error entirely), and the nested error's own `sensitiveFieldNames` covers its own contents.
 
-Masking **fails closed**. If `sensitiveFieldNames` is present but is not a usable list of paths - a comma-joined string, a `Set`, a non-string entry, a malformed path such as `'a.'`, or an accessor that throws - the caller has asked for masking somewhere this cannot locate, so `additionalInfo` is dropped wholesale and replaced with `*** (sensitiveFieldNames unreadable)` rather than rendered in the clear.
+A bare name is taken literally, so a name that is not a valid path segment still works: `sensitiveFieldNames: ['password-hash']` masks `additionalInfo['password-hash']`. Inside a path, an unquoted segment must be `\w+`, so a hyphenated name nested deeper needs quoting: `user["password-hash"]`.
+
+A dotted or bracketed entry is treated as ambiguous and both readings are covered, the same way the logger's `redactedKeys` does: `'user.password'` masks the nested `additionalInfo.user.password` _and_ a literal key spelled `'user.password'`, when either exists.
+
+Masking **fails closed**. If `sensitiveFieldNames` is present but is not a usable list of strings - a comma-joined string, a `Set`, a non-string entry, or an accessor that throws - the caller has asked for masking and this cannot tell what for, so `additionalInfo` is dropped wholesale and replaced with `*** (sensitiveFieldNames unreadable)` rather than rendered in the clear. An entry that parses but resolves to nothing is not this case: it masks nothing, exactly as an unmatched `redactedKeys` entry redacts nothing.
 
 ## Never throws
 

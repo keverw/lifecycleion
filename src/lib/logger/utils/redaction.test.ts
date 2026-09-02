@@ -400,6 +400,38 @@ describe('applyRedaction - ambiguous dotted keys', () => {
 });
 
 describe('applyRedaction - fail closed', () => {
+  test('a literal dotted key still fails closed when redaction throws', () => {
+    // The catch writes through `setNestedValue`, which re-parses the key as a path and
+    // finds none - so without the literal-slot write the clone's original survives.
+    const result = applyRedaction(
+      { 'user.password': 'hunter2' },
+      ['user.password'],
+      () => {
+        throw new Error('redactor blew up');
+      },
+    );
+
+    expect(result['user.password']).toBe(REDACTION_FAILED_MARKER);
+  });
+
+  test('a literal dotted key fails closed with the default redactFunction', () => {
+    // No user code involved: a value whose `toString` throws fails inside
+    // `stringifyTemplateValue` on the success path and lands in the same catch.
+    const result = applyRedaction(
+      {
+        'user.password': {
+          toString(): string {
+            throw new Error('no');
+          },
+          secret: 'hunter2',
+        },
+      },
+      ['user.password'],
+    );
+
+    expect(JSON.stringify(result)).not.toContain('hunter2');
+  });
+
   // Redaction runs user code (`redactFunction`) over caller-supplied values on a path
   // that must not throw. When any of it fails, the one unacceptable outcome is leaving
   // the original value in place, so a failure marks the key instead.

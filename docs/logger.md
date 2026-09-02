@@ -457,6 +457,10 @@ logger.info('User login attempt', {
 
 **Note:** Redaction paths are exact matches. Dot notation, array indexes, and quoted bracket keys like `users[0]["password-hash"]` are supported, but wildcard selectors such as `users[*].password` are not.
 
+A bare name therefore addresses a top-level key only: `redactedKeys: ['password']` masks `params.password` and leaves `params.user.password` rendered. Name the path to reach it.
+
+[`errorToString`](./error-to-string.md#additional-info--sensitive-fields) uses this same syntax for the `sensitiveFieldNames` list it reads off an error, so one mental model covers both. The two agree on bare names, dotted paths, array indexes, and quoted bracket keys; they differ only in what happens when the list itself is unusable, where `errorToString` drops `additionalInfo` wholesale.
+
 #### Custom Redaction Function
 
 You can customize how values are masked at the logger level:

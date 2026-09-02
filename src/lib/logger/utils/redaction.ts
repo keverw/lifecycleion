@@ -187,6 +187,15 @@ export function applyRedaction(
       }
     } catch {
       try {
+        // The literal slot first, and unconditionally: `setNestedValue` re-parses `key`
+        // as a path, so for a key spelled `'user.password'` it finds no such path, writes
+        // nothing, and the deep clone's original value survives in the clear. That is
+        // reachable without any user code at all - a value whose `toString` throws makes
+        // `stringifyTemplateValue` fail on the success path above and land here.
+        if (key in redactedParams) {
+          redactedParams[key] = REDACTION_FAILED_MARKER;
+        }
+
         setNestedValue(redactedParams, key, REDACTION_FAILED_MARKER);
       } catch {
         // The path cannot even be written. Drop every param rather than return a copy

@@ -32,15 +32,29 @@ function parseSensitivePaths(value: unknown): string[][] | null {
         return null;
       }
 
-      const parts = getPathParts(entry);
+      const hasPathSyntax = entry.includes('.') || entry.includes('[');
 
-      if (parts === null || parts.length === 0) {
-        // A malformed entry means the caller asked for masking somewhere this cannot
-        // locate. Failing open here would render the value it names in the clear.
-        return null;
+      if (!hasPathSyntax) {
+        // A bare name is a top-level key and is taken literally, without going through
+        // the path grammar. `getPathParts` only accepts `\w+` for an unquoted segment,
+        // so a perfectly ordinary name like `password-hash` fails to parse — and the
+        // logger's `redactedKeys` masks it happily via its own top-level branch.
+        paths.push([entry]);
+
+        continue;
       }
 
-      paths.push(parts);
+      // An entry with path syntax is ambiguous: it can name a nested location or one
+      // literal key spelled that way. Both readings are covered, matching what
+      // `applyRedaction` does, since leaving either unmasked is the outcome this list
+      // exists to prevent.
+      paths.push([entry]);
+
+      const parts = getPathParts(entry);
+
+      if (parts !== null && parts.length > 0) {
+        paths.push(parts);
+      }
     }
 
     return paths;
@@ -63,6 +77,25 @@ function readMember(value: Record<string, unknown>, key: string): unknown {
     return value[key];
   } catch {
     return undefined;
+  }
+}
+
+/**
+ * Returned by {@link readMemberOrThrew} when the read itself threw, which is not the same
+ * as the member being absent. `sensitiveFieldNames` must tell them apart: absent means
+ * nothing to mask, unreadable means the caller asked for masking and this cannot tell
+ * what, which has to fail closed.
+ */
+const READ_THREW = Symbol('read-threw');
+
+function readMemberOrThrew(
+  value: Record<string, unknown>,
+  key: string,
+): unknown {
+  try {
+    return value[key];
+  } catch {
+    return READ_THREW;
   }
 }
 
@@ -160,19 +193,22 @@ function errorToASCIITable(
     const additionalInfo = readMember(err, 'additionalInfo');
 
     if (additionalInfo && typeof additionalInfo === 'object') {
-      const rawSensitive = readMember(err, 'sensitiveFieldNames');
+      const rawSensitive = readMemberOrThrew(err, 'sensitiveFieldNames');
 
       const ownPaths =
         rawSensitive === undefined || rawSensitive === null
           ? []
-          : parseSensitivePaths(rawSensitive);
+          : parseSensitivePaths(
+              rawSensitive === READ_THREW ? undefined : rawSensitive,
+            );
 
-      // Fails closed, like the logger's redaction does. A `sensitiveFieldNames` that is
-      // present but not a usable list of paths — a comma-joined string, a `Set`, a
-      // malformed entry, or an accessor that threw and read back as `undefined` — means
-      // the caller asked for masking somewhere this cannot locate. Rendering everything
-      // in the clear would be the one unacceptable answer, so `additionalInfo` is
-      // dropped wholesale instead.
+      // Fails closed. A `sensitiveFieldNames` that is present but is not a usable list
+      // of strings — a comma-joined string, a `Set`, a non-string entry, or an accessor
+      // that threw — means the caller asked for masking and this cannot tell what for.
+      // Rendering everything in the clear would be the one unacceptable answer, so
+      // `additionalInfo` is dropped wholesale instead. An entry that parses but resolves
+      // to nothing is not this case: it masks nothing, exactly as the logger's
+      // `redactedKeys` does.
       if (ownPaths === null) {
         table.addRow('AdditionalInfo', '*** (sensitiveFieldNames unreadable)');
 
