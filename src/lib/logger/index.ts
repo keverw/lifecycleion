@@ -386,6 +386,9 @@ export class Logger extends EventEmitter {
    * the sinks *and* let the error reach the console as well.
    *
    * If the listener is already registered, it returns 'already_registered'.
+   * If the logger has been closed, it returns 'closed' and registers nothing: `close()`
+   * unregisters the listener and `_closed` is never cleared, so a listener attached after
+   * that point could never log or claim anything and would simply stay on `globalThis`.
    * If the required global event primitives are unavailable, it returns 'not_available'.
    * Otherwise, it registers the listener and returns 'success'.
    *
@@ -397,6 +400,7 @@ export class Logger extends EventEmitter {
    *                  tagged `'resource'` so a sink can route or drop them.
    * @returns 'success' if the listener is registered successfully,
    *          'already_registered' if the listener is already registered,
+   *          'closed' if the logger has been closed,
    *          'not_available' if the required global event primitives are not available.
    */
 
@@ -406,9 +410,16 @@ export class Logger extends EventEmitter {
       preventDefault?: boolean;
       captureResourceErrors?: boolean;
     } = {},
-  ): 'success' | 'already_registered' | 'not_available' {
+  ): 'success' | 'already_registered' | 'closed' | 'not_available' {
     if (this._reportErrorListenerRegistered) {
       return 'already_registered';
+    }
+
+    // A closed logger can never log again — `_closed` is never cleared — so a listener
+    // registered now would sit on `globalThis` forever doing nothing, keeping this logger
+    // and its sinks alive and telling the caller 'success' while capturing nothing.
+    if (this._closed) {
+      return 'closed';
     }
 
     // Node.js needs the global event methods supplied before listeners can be

@@ -1324,7 +1324,7 @@ Lifecycleion catches errors thrown by callbacks you hand it — event handlers, 
 
 ```typescript
 const result = logger.registerReportErrorListener();
-// 'success' | 'already_registered' | 'not_available'
+// 'success' | 'already_registered' | 'closed' | 'not_available'
 ```
 
 One call covers the whole process: the listener sits on `globalThis`, so it captures reports from every Lifecycleion module in the application, no per-instance wiring. Each error is logged through `errorObject(prefix, error)` and also emitted as a `'logger'` event with `{ eventType: 'uncaughtException', error }`.
@@ -1372,9 +1372,9 @@ class AppSink implements LogSink {
 }
 ```
 
-Lifecycleion's own reports and uncaught script errors are untagged, so filtering on `'resource'` never drops them. Off Node and Bun this option does nothing: nothing dispatches element events there.
+Lifecycleion's own reports and uncaught script errors are untagged, so filtering on `'resource'` never drops them. On Node and Bun this option does nothing: there is no document, so nothing dispatches element events there.
 
-**Closing:** `close()` unregisters the listener. A closed logger's log methods are no-ops, so a listener left registered would claim reports it cannot record — and, cancelling them by default, stop them reaching the console either.
+**Closing:** `close()` unregisters the listener. A closed logger's log methods are no-ops, so a listener left registered would claim reports it cannot record — and, cancelling them by default, stop them reaching the console either. A logger cannot be reopened, so registering after `close()` returns `'closed'` and attaches nothing rather than leaving an inert listener on `globalThis`.
 
 **Feedback loops:** logging emits a `'logger'` event, and a failing event handler is normally reported on this same channel — so a `'logger'` handler that fails would feed itself, forever. `Logger` therefore reports failures of its own `'logger'` handlers to the `onEventHandlerError` option — or to `console.error` when there is none — rather than to the `'error'` channel. Handlers on other Lifecycleion emitters are unaffected and still reach your sinks. As a backstop, the listener also ignores any report that arrives while it is still logging the previous one — a sink that dispatches an error of its own mid-write, say — so that error goes to the console instead of back through the sinks.
 

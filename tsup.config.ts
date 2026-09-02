@@ -82,6 +82,7 @@ export default defineConfig({
     'src/lib/sleep.ts',
     'src/lib/strings.ts',
     'src/lib/tmp-dir.ts',
+    'src/lib/to-error.ts',
     'src/lib/serialize-error/index.ts',
     'src/lib/unix-time-helpers.ts',
     'src/lib/http-client/index.ts',

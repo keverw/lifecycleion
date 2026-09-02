@@ -1274,6 +1274,18 @@ describe('Logger', () => {
       expect(logger.isReportErrorListenerRegistered()).toBe(false);
     });
 
+    test('should return closed and attach nothing after close()', async () => {
+      await logger.close();
+
+      const result = logger.registerReportErrorListener();
+
+      // A logger is never reopened, so a listener registered here could never log or
+      // cancel anything — it would just sit on globalThis keeping the logger and its
+      // sinks alive while reporting 'success' to a caller capturing nothing.
+      expect(result).toBe('closed');
+      expect(logger.isReportErrorListenerRegistered()).toBe(false);
+    });
+
     test('should check if reportError is available', () => {
       const isAvailable = logger.isReportErrorAvailable();
 
