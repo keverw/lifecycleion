@@ -2288,6 +2288,9 @@ Event handlers are **fire-and-forget** - they do not block lifecycle operations.
 // Listen for event handler errors
 globalThis.addEventListener('error', (event) => {
   if (event instanceof ErrorEvent) {
+    // Claim the report, so it is not written to the console as well
+    event.preventDefault();
+
     console.error('Event handler error:', event.error.message);
     // error.message includes context: "Error in a callback event handler for component:started"
   }

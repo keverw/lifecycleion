@@ -151,6 +151,9 @@ The emitter automatically catches and reports errors from both synchronous and a
 ```typescript
 // Listen for errors
 globalThis.addEventListener('error', (event) => {
+  // Claim the report, so it is not written to the console as well
+  event.preventDefault();
+
   console.error('Event handler error:', event.error);
 });
 

@@ -44,7 +44,8 @@ Errors are dispatched as `ErrorEvent` objects of type `'error'`. Listen for them
 
 ```typescript
 globalThis.addEventListener('error', (event) => {
-  // Claim the report: without this the error is also written to the console.
+  // Claim the report: suppresses lifecycleion's console fall-through, and
+  // the browser's own console line for a genuine uncaught error
   event.preventDefault();
 
   console.error(event.error);
@@ -118,13 +119,15 @@ function reportToHost(error: Error): void {
 }
 ```
 
-Three details are load-bearing:
+Four details are load-bearing:
 
 **Dispatch comes first, not `reportError()`.** The WHATWG "report an exception" algorithm suggests reaching for `globalThis.reportError()` first, and in browsers that does dispatch an `'error'` event. Other runtimes do not follow it: on Bun 1.3.14 `globalThis.reportError()` exists but writes to stderr without notifying a single `addEventListener('error', ...)` listener, and it sets the process exit code to 1 as a side effect. A `reportError()`-first order would therefore make reports invisible to listeners on Bun, and would let a failed callback turn a clean run into a failing one. Dispatch-first reaches listeners on browsers, Bun, and Node alike.
 
 **`cancelable: true` is required, not decorative.** `EventInit.cancelable` defaults to `false`, and `preventDefault()` on an uncancelable event is a silent no-op that leaves `dispatchEvent()` returning `true` no matter what a listener does. Without it, a consumer cannot claim the report and the console fall-through fires every time.
 
-**Classify a failed dispatch as unclaimed, not unavailable.** If `dispatchEvent()` itself throws, the event was still handed over and listeners may have run, so fall through to the console rather than on to `reportError()`. Only a failure to _construct_ the event means nothing was dispatched. (A throwing listener is not what reaches this path: per spec those are reported out of band without propagating, and Bun and browsers both honour that. An exotic or hostile `dispatchEvent` that rejects the event outright is.)
+**Classify a failed dispatch as unclaimed, not unavailable.** If `dispatchEvent()` itself throws, the event was still handed over and listeners may have run, so fall through to the console rather than on to `reportError()`. Only a failure to _construct_ the event means nothing was dispatched. (A throwing listener is not what reaches this path: per spec a listener's exception does not propagate back into `dispatchEvent`, and browsers, Bun and Node all honour that. An exotic or hostile `dispatchEvent` that rejects the event outright is.)
+
+**A listener that throws still takes the process down.** "Does not propagate" is not the same as "is harmless". A browser reports the exception to the console and carries on, but outside a browser the runtime treats it as uncaught: measured on Bun 1.3.14 and Node 25.9.0, a listener that throws exits the process with code 1 while `dispatchEvent()` still returns normally to the caller. Anything you register on the `'error'` channel should therefore catch its own failures — including whatever formatting or I/O it does with the error, since rendering a hostile error object can throw on its own. `logger.registerReportErrorListener()` does this for you, falling back to the console if its own logging fails.
 
 When testing code like this, dispatch against the real global `EventTarget`. A stubbed `dispatchEvent` returns whatever boolean the stub chose, so an implementation that forgot `cancelable: true` passes against it. Conversely, a test that wants to observe rung 2 has to make rung 1 genuinely unreachable first — on a runtime with a working `dispatchEvent`, the report correctly never gets that far.
 

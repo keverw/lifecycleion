@@ -110,6 +110,8 @@ browserScenarios(
     'resource failures are ignored without the flag',
     'captureResourceErrors logs a failed image with a tag',
     'reported callback errors are untagged and still captured',
+    'a component CustomEvent named error is left alone',
+    'an element error event naming no resource is left alone',
     'unregister detaches the capturing listener',
   ],
   () => suite,

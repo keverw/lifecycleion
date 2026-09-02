@@ -6,9 +6,7 @@
  * This provides basic event handling functionality with type safety and memory management.
  */
 
-import { reportCallbackError } from './safe-handle-callback';
-import { isFunction } from './is-function';
-import { isPromise } from './is-promise';
+import { reportCallbackError, runCallbackSafely } from './safe-handle-callback';
 
 type EventCallback<T = unknown> = (data: T) => void | Promise<void>;
 
@@ -131,29 +129,22 @@ export class EventEmitterProtected {
       return;
     }
 
+    // Loop-invariant: the reporter depends on the event, not on which handler failed.
+    const handleFailure = (error: unknown): void => {
+      this.handleEventHandlerFailure(event, error);
+    };
+
     for (const callback of callbacks) {
-      const handleFailure = (error: unknown): void => {
-        this.handleEventHandlerFailure(event, error);
-      };
-
-      if (!isFunction(callback)) {
-        handleFailure(
-          new Error(`Callback provided for event ${event} is not a function`),
-        );
-
-        continue;
-      }
-
-      try {
-        const result = (callback as (value?: T) => unknown)(data);
-
-        if (isPromise(result)) {
-          // Fire-and-forget: a rejection is reported, never awaited.
-          result.catch(handleFailure);
-        }
-      } catch (error) {
-        handleFailure(error);
-      }
+      // The same invocation helper `safeHandleCallback` uses, with this emitter's
+      // overridable reporter in place of the global `'error'` channel. The callback name
+      // matches what `safeHandleCallback` produced before, so the "is not a function"
+      // message is unchanged for consumers matching on it.
+      runCallbackSafely(
+        `event handler for ${event}`,
+        callback,
+        [data],
+        handleFailure,
+      );
     }
   }
 

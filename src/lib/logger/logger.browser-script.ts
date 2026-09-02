@@ -95,6 +95,63 @@ async function runTests(): Promise<void> {
     browserExpect(sink.logs[0].tags === undefined).toBe(true);
   });
 
+  await test('a component CustomEvent named error is left alone', async () => {
+    // A capturing listener sees every 'error' event in the document, not just failed
+    // loads. A component that dispatches its own cancelable 'error' and branches on the
+    // result must keep its answer: cancelling it here would suppress that component's
+    // fallback, and describing it would log 'Failed to load MY-WIDGET' for something
+    // that never loaded anything.
+    const sink = new ArraySink();
+    const logger = new Logger({ sinks: [sink], callProcessExit: false });
+
+    logger.registerReportErrorListener('Uncaught exception', {
+      captureResourceErrors: true,
+    });
+
+    const widget = document.createElement('my-widget');
+
+    document.body.appendChild(widget);
+
+    // Let the element settle in the document before dispatching, so the window is
+    // genuinely in the event path and a capturing listener would see the event.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const wasNotCancelled = widget.dispatchEvent(
+      new CustomEvent('error', { cancelable: true, bubbles: false }),
+    );
+
+    logger.unregisterReportErrorListener();
+
+    browserExpect(wasNotCancelled).toBe(true);
+    browserExpect(sink.logs.length).toBe(0);
+  });
+
+  await test('an element error event naming no resource is left alone', async () => {
+    // Being an element is not enough either: with no src/href/currentSrc nothing was
+    // loaded, so there is no failed load to describe or claim.
+    const sink = new ArraySink();
+    const logger = new Logger({ sinks: [sink], callProcessExit: false });
+
+    logger.registerReportErrorListener('Uncaught exception', {
+      captureResourceErrors: true,
+    });
+
+    const plain = document.createElement('div');
+
+    document.body.appendChild(plain);
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const wasNotCancelled = plain.dispatchEvent(
+      new Event('error', { cancelable: true, bubbles: false }),
+    );
+
+    logger.unregisterReportErrorListener();
+
+    browserExpect(wasNotCancelled).toBe(true);
+    browserExpect(sink.logs.length).toBe(0);
+  });
+
   await test('unregister detaches the capturing listener', async () => {
     const sink = new ArraySink();
     const logger = new Logger({ sinks: [sink], callProcessExit: false });

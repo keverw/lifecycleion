@@ -1356,6 +1356,8 @@ logger.registerReportErrorListener('Uncaught exception', {
 
 The listener then registers with capture, so it sees element `error` events on the way down. A resource failure is a plain `Event` with no `error` and usually no `message`, so it is described from the failing element instead — `Failed to load IMG: /logo.png` — and tagged `'resource'`.
 
+Capture is a wide net: a listener registered this way sees **every** `error` event dispatched anywhere in the document, not just failed loads. Classification is therefore deliberately narrow, and an event is only treated as a resource failure when it is a plain `Event` (not an `ErrorEvent` or a `CustomEvent`) whose target is an element naming a resource in `src`, `href`, or `currentSrc`. Anything else is left alone — a component that dispatches its own `new CustomEvent('error', { cancelable: true })` and branches on the result keeps its answer, rather than finding the event cancelled by a logger.
+
 Expect volume: every broken asset becomes a log entry, and on a page with flaky third-party resources that adds up. **Filter them in your sinks** — the tag is there so a custom sink can route them somewhere quieter or drop them entirely:
 
 ```typescript

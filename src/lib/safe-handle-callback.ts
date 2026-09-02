@@ -1,6 +1,7 @@
 import { errorToString } from './error-to-string';
 import { isPromise } from './is-promise';
 import { isFunction } from './is-function';
+import { toError } from './to-error';
 import { DOUBLE_EOL } from './constants';
 import { installGlobalEventTarget } from './global-event-target';
 
@@ -78,11 +79,19 @@ function dispatchErrorEvent(error: Error): DispatchOutcome {
   } catch {
     // Reported as `'unhandled'`, not `'unavailable'`: the event was constructed and
     // handed to `dispatchEvent`, so listeners may well have run. A throwing listener is
-    // not what gets here — per spec those are reported out of band and do not
-    // propagate, which Bun and browsers both honour — but an environment actively
-    // fighting us can still reject the event outright. Falling to the console tail
-    // reports the error exactly once; falling to `globalThis.reportError()` instead
-    // would report it a second time to whatever already saw the dispatch.
+    // not what gets here — per spec a listener's exception does not propagate back into
+    // `dispatchEvent`, and browsers, Bun 1.3.14 and Node 25 all honour that — but an
+    // environment actively fighting us can still reject the event outright. Falling to
+    // the console tail reports the error exactly once; falling to
+    // `globalThis.reportError()` instead would report it a second time to whatever
+    // already saw the dispatch.
+    //
+    // "Does not propagate" is not the same as "is harmless": outside a browser the
+    // runtime treats that exception as uncaught and dies. Measured on Bun 1.3.14 and
+    // Node 25.9.0, a listener that throws exits the process with code 1 while
+    // `dispatchEvent` still returns normally. That is why every listener this library
+    // installs catches its own failures rather than relying on the runtime to absorb
+    // them; see `Logger.registerReportErrorListener`.
     return 'unhandled';
   }
 }
@@ -166,11 +175,25 @@ export function reportCallbackError(
   callbackName: string,
   error: unknown,
 ): void {
-  reportToHost(
-    new Error(
+  let report: Error;
+
+  try {
+    report = new Error(
       `Error in a callback ${callbackName}: ${DOUBLE_EOL}${errorToString(error)}`,
-    ),
-  );
+    );
+  } catch {
+    // `errorToString` runs code this module does not own: it reads `message`/`stack` off
+    // the thrown value (a revoked `Proxy` or a throwing accessor makes that throw) and
+    // walks `additionalInfo` (a cyclic one overflows the stack). Rendering must never
+    // turn one failure into a second one thrown out of `safeHandleCallback`,
+    // `safeHandleCallbackAndWait`, or `EventEmitterProtected.emit`, so a value that
+    // cannot be described is reported without its description.
+    report = new Error(
+      `Error in a callback ${callbackName}: ${DOUBLE_EOL}<error could not be rendered>`,
+    );
+  }
+
+  reportToHost(report);
 }
 
 /**
@@ -203,26 +226,54 @@ export function safeHandleCallback(
   callback: unknown,
   ...args: unknown[]
 ): void {
-  const handleError = (error: unknown): void => {
+  runCallbackSafely(callbackName, callback, args, (error) => {
     reportCallbackError(callbackName, error);
-  };
+  });
+}
 
-  if (isFunction(callback)) {
-    try {
-      // We need to cast callback to the appropriate function type now
-      const result = (callback as (...args: unknown[]) => unknown)(...args);
-
-      if (isPromise(result)) {
-        // Fire-and-forget async callback
-        result.catch(handleError);
-      }
-    } catch (error) {
-      handleError(error);
-    }
-  } else {
-    handleError(
+/**
+ * Invoke a callback and route every way it can fail to `onError`.
+ *
+ * The one place that knows how to call an untrusted callback: it rejects a non-function,
+ * catches a synchronous throw, and reports a rejection from a returned promise without
+ * awaiting it. `safeHandleCallback` pairs it with {@link reportCallbackError}, and
+ * `EventEmitterProtected.emit` pairs it with its own overridable reporter, so an emitter
+ * that must stay off the global `'error'` channel (`Logger`) does not need a second copy
+ * of this body.
+ *
+ * `onError` must not throw: it runs on the failure path, and there is nothing above it
+ * left to catch.
+ *
+ * @param callbackName Used only for the "is not a function" message.
+ * @param callback The untrusted value to invoke.
+ * @param args Arguments to pass to the callback.
+ * @param onError Receives the thrown value, the rejection reason, or a synthesized
+ *                `Error` when `callback` is not callable.
+ */
+export function runCallbackSafely(
+  callbackName: string,
+  callback: unknown,
+  args: unknown[],
+  onError: (error: unknown) => void,
+): void {
+  if (!isFunction(callback)) {
+    onError(
       new Error(`Callback provided for ${callbackName} is not a function`),
     );
+
+    return;
+  }
+
+  try {
+    // We need to cast callback to the appropriate function type now
+    const result = (callback as (...args: unknown[]) => unknown)(...args);
+
+    if (isPromise(result)) {
+      // Fire-and-forget: a rejection is reported, never awaited.
+      result.catch(onError);
+    }
+  } catch (error) {
+    onError(error);
   }
 }
 
@@ -262,7 +313,11 @@ export async function safeHandleCallbackAndWait<T>(
   const handleError = (error: unknown): CallbackResult<T> => {
     reportCallbackError(callbackName, error);
 
-    return { success: false, error: error as Error };
+    // Normalized, not cast: `CallbackResult.error` is declared `Error`, but `throw` and
+    // promise rejection both accept any value, so a callback that throws `null` would
+    // otherwise hand the caller a `null` typed as an `Error` and break
+    // `result.error.message`. The original value stays reachable as `cause`.
+    return { success: false, error: toError(error) };
   };
 
   if (isFunction(callback)) {

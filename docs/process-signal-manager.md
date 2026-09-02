@@ -797,6 +797,9 @@ const manager = new ProcessSignalManager({
 
 // Listen for errors globally on the standard 'error' channel
 globalThis.addEventListener('error', (event) => {
+  // Claim the report, so it is not written to the console as well
+  event.preventDefault();
+
   console.error('Callback error:', event.error);
 });
 

@@ -799,6 +799,84 @@ describe('Logger', () => {
       );
     });
 
+    test('survives an error event whose payload cannot be inspected', () => {
+      // The payload belongs to whoever dispatched the event. `instanceof` walks a
+      // prototype chain, which a revoked `Proxy` refuses, and rendering reads `stack`,
+      // which can be a throwing accessor. An escaping throw here would skip the
+      // cancellation below and, outside a browser, take the process down from inside the
+      // error-reporting path.
+      const { proxy, revoke } = Proxy.revocable({}, {});
+
+      revoke();
+
+      const hostileStack = new Error('hostile stack');
+
+      Object.defineProperty(hostileStack, 'stack', {
+        get(): never {
+          throw new Error('stack getter boom');
+        },
+      });
+
+      for (const payload of [proxy, hostileStack]) {
+        const sink = new ArraySink();
+        const hostileLogger = new Logger({
+          sinks: [sink],
+          callProcessExit: false,
+        });
+
+        hostileLogger.registerReportErrorListener();
+
+        const originalConsoleError = console.error;
+        console.error = (): void => {};
+
+        let wasNotCancelled = true;
+
+        try {
+          expect(() => {
+            wasNotCancelled = globalThis.dispatchEvent(
+              new ErrorEvent('error', { error: payload, cancelable: true }),
+            );
+          }).not.toThrow();
+        } finally {
+          console.error = originalConsoleError;
+          hostileLogger.unregisterReportErrorListener();
+        }
+
+        // Claimed, so the report is not written twice.
+        expect(wasNotCancelled).toBe(false);
+      }
+    });
+
+    test('keeps a non-Error payload reachable as a non-enumerable cause', () => {
+      const sink = new ArraySink();
+      const payloadLogger = new Logger({
+        sinks: [sink],
+        callProcessExit: false,
+      });
+
+      payloadLogger.registerReportErrorListener();
+
+      const payload = { code: 'E42' };
+
+      globalThis.dispatchEvent(
+        new ErrorEvent('error', {
+          error: payload,
+          message: 'Uncaught [object Object]',
+          cancelable: true,
+        }),
+      );
+
+      payloadLogger.unregisterReportErrorListener();
+
+      const logged = sink.logs[0].error as Error;
+
+      expect(logged.cause).toBe(payload);
+
+      // Non-enumerable, as the constructor form gives: an arbitrary payload must not
+      // start appearing in a JSON-serialized log entry.
+      expect(Object.keys(logged).includes('cause')).toBe(false);
+    });
+
     test('cancels the event by default so the error is not also consoled', () => {
       logger.registerReportErrorListener();
 
@@ -1102,10 +1180,10 @@ describe('Logger', () => {
 
       let handlerCalls = 0;
 
-      // Logging emits a 'logger' event, EventEmitter wraps handlers in
-      // safeHandleCallback, and that reports on the same 'error' channel this listener
-      // is on. Without the re-entrancy guard one log call recurses until the stack
-      // gives out.
+      // Logging emits a 'logger' event. The failure of a 'logger' handler is kept off
+      // the global 'error' channel by handleEventHandlerFailure, so it never re-enters
+      // this listener: the handler runs exactly once per log call, not once more for a
+      // report of its own failure.
       recursiveLogger.on('logger', () => {
         handlerCalls++;
 
@@ -1122,8 +1200,56 @@ describe('Logger', () => {
         recursiveLogger.unregisterReportErrorListener();
       }
 
-      // Bounded: the log itself, plus the one report the guard turns away.
-      expect(handlerCalls).toBeLessThan(10);
+      // Exactly the one emit the log itself performed.
+      expect(handlerCalls).toBe(1);
+    });
+
+    test('re-entrancy guard turns away a report raised by a failing sink', () => {
+      // What the guard actually protects: a sink is user code, and one that drives
+      // safeHandleCallback with a failing callback reports on the same 'error' channel
+      // synchronously, while this listener is still logging. The nested report is left
+      // uncancelled and unlogged, so safe-handle-callback's console fall-through takes
+      // it once instead of feeding it back into the sink that is already failing.
+      const sink = new ArraySink();
+      const reentrantSink = {
+        write: (entry: unknown): void => {
+          sink.write(entry as Parameters<typeof sink.write>[0]);
+
+          safeHandleCallback('innerSinkCallback', () => {
+            throw new Error('inner boom');
+          });
+        },
+      };
+
+      const reentrantLogger = new Logger({
+        sinks: [reentrantSink],
+        callProcessExit: false,
+      });
+
+      reentrantLogger.registerReportErrorListener();
+
+      const consoled: unknown[] = [];
+      const originalConsoleError = console.error;
+      console.error = (...args: unknown[]): void => {
+        consoled.push(args[0]);
+      };
+
+      try {
+        safeHandleCallback('outerCallback', () => {
+          throw new Error('outer boom');
+        });
+      } finally {
+        console.error = originalConsoleError;
+        reentrantLogger.unregisterReportErrorListener();
+      }
+
+      // The outer report reached the sinks once, and did not loop.
+      expect(sink.logs.length).toBe(1);
+      expect(sink.logs[0].message).toContain('outer boom');
+
+      // The nested one went to the console instead, without this logger's formatting.
+      expect(consoled.length).toBe(1);
+      expect(String((consoled[0] as Error).message)).toContain('inner boom');
     });
 
     test('should register reportError listener', () => {

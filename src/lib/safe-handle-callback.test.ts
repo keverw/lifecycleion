@@ -317,6 +317,82 @@ describe('safeHandleCallback error channel', () => {
     expect((captured[0][0] as Error).message).toContain('Unclaimed boom');
   });
 
+  it('reports a value it cannot render instead of throwing out of the callback', () => {
+    // Rendering the thrown value runs code this library does not own: `errorToString`
+    // reads `message`/`stack` off it and walks `additionalInfo`. Each of these makes
+    // that throw. Before the render was guarded, the resulting error escaped
+    // `safeHandleCallback` itself — the "safe" wrapper threw, and for the async form it
+    // became an unhandled rejection.
+    const { proxy, revoke } = Proxy.revocable({}, {});
+
+    revoke();
+
+    const hostileStack = new Error('hostile stack');
+
+    Object.defineProperty(hostileStack, 'stack', {
+      get(): never {
+        throw new Error('stack getter boom');
+      },
+    });
+
+    const cyclic = new Error('cyclic') as Error & {
+      additionalInfo?: unknown;
+    };
+
+    const loop: Record<string, unknown> = {};
+    loop.self = loop;
+    cyclic.additionalInfo = loop;
+
+    for (const value of [proxy, hostileStack, cyclic]) {
+      const captured = withCapturedConsoleError((entries) => {
+        expect(() => {
+          safeHandleCallback('unrenderableCallback', () => {
+            // eslint-disable-next-line @typescript-eslint/only-throw-error -- the point of the test
+            throw value;
+          });
+        }).not.toThrow();
+
+        return entries;
+      });
+
+      // Still reported, and still named, even though the value itself could not be
+      // described.
+      expect(captured.length).toBe(1);
+      expect((captured[0][0] as Error).message).toContain(
+        'unrenderableCallback',
+      );
+    }
+  });
+
+  it('returns a real Error from safeHandleCallbackAndWait for a non-Error throw', async () => {
+    // `CallbackResult.error` is declared `Error`, so a callback that throws `null` must
+    // not hand the caller a `null` typed as one: `result.error.message` would throw.
+    const captured: unknown[][] = [];
+    const original = console.error;
+
+    console.error = (...args: unknown[]): void => {
+      captured.push(args);
+    };
+
+    let result: Awaited<ReturnType<typeof safeHandleCallbackAndWait>>;
+
+    try {
+      result = await safeHandleCallbackAndWait('nonErrorThrow', () => {
+        // eslint-disable-next-line @typescript-eslint/only-throw-error -- the point of the test
+        throw null;
+      });
+    } finally {
+      console.error = original;
+    }
+
+    expect(result.success).toBe(false);
+    expect(result.error).toBeInstanceOf(Error);
+    expect(result.error?.message).toBe('Non-error value thrown: null');
+
+    // The value actually thrown stays reachable.
+    expect(result.error?.cause).toBe(null);
+  });
+
   /**
    * These two stub `globalThis.dispatchEvent` deliberately, which is legitimate here and
    * a trap in the tests above: the question is what *this* code does when a dispatch

@@ -8,6 +8,7 @@ import {
 import { CurlyBrackets } from '../curly-brackets';
 import { isNumber } from '../is-number';
 import { isPromise } from '../is-promise';
+import { toError } from '../to-error';
 import type {
   LogEntry,
   LogSink,
@@ -27,6 +28,48 @@ import { LoggerService } from './logger-service';
  * Main Logger class with sink-based architecture and EventEmitter support
  */
 /**
+ * Read a property off an event without trusting it.
+ *
+ * The event reaching a global `'error'` listener was dispatched by whoever chose to
+ * dispatch it, and `Event` can be subclassed with accessors of its own. A throw from one
+ * of these reads would escape the listener, which outside a browser means the runtime
+ * treats it as uncaught and exits — from inside the code whose whole job is reporting a
+ * failure.
+ */
+function readEventProperty(event: Event, key: string): unknown {
+  try {
+    return (event as unknown as Record<string, unknown>)[key];
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Whether the event was dispatched on a DOM element rather than on the global object.
+ *
+ * A DOM element is identified by a string `tagName`, which the global object and the
+ * polyfilled backing `EventTarget` both lack. Used to tell an event belonging to the
+ * page from a report meant for this library.
+ */
+function isElementTarget(event: Event): boolean {
+  const target: unknown = readEventProperty(event, 'target');
+
+  if (target === null || target === undefined || typeof target !== 'object') {
+    return false;
+  }
+
+  let tagName: unknown;
+
+  try {
+    tagName = (target as Record<string, unknown>).tagName;
+  } catch {
+    return false;
+  }
+
+  return typeof tagName === 'string';
+}
+
+/**
  * Describe an `'error'` event target when it is a failed page resource.
  *
  * A resource failure (a broken `<img>`, `<script>`, `<link>`, media element) fires an
@@ -34,23 +77,49 @@ import { LoggerService } from './logger-service';
  * with `capture: true` sees it. It is a plain `Event`: no `error`, and usually no
  * `message`, so the target is the only place a useful description can come from.
  *
- * An uncaught script error targets the global object instead and is a real `ErrorEvent`,
- * which is what distinguishes the two.
+ * Classification is deliberately narrow, because a capturing listener on the global
+ * object sees *every* `'error'` event dispatched anywhere in the document, not just
+ * resource failures. Two things are required beyond an element target:
  *
- * Every read is guarded: the target is a DOM object belonging to the page, so an
- * accessor on it may throw, and this runs on an error path that must not raise one of
- * its own.
+ * - The event must be a plain `Event`. An `ErrorEvent` carries its own error, and a
+ *   `CustomEvent` is an application's own signal — a component that dispatches
+ *   `new CustomEvent('error', { cancelable: true })` on itself and branches on the
+ *   return value must not have that answer changed by a logger.
+ * - The element must actually name a resource (`src`, `href`, or `currentSrc`). An
+ *   arbitrary element that happens to be an event target is not a failed load.
+ *
+ * Every read of the target is guarded, and so is the `instanceof` pair: the target is a
+ * DOM object belonging to the page, so an accessor on it may throw, and a prototype
+ * chain can be one a revoked `Proxy` refuses to walk. This runs on an error path that
+ * must not raise one of its own.
  *
  * @returns A description such as `Failed to load IMG: /logo.png`, or `undefined` when
- *          the target is not a resource element.
+ *          the event is not a resource failure this can describe.
  */
-function describeResourceTarget(target: unknown): string | undefined {
+function describeResourceTarget(event: Event): string | undefined {
+  const target: unknown = readEventProperty(event, 'target');
+
   if (
     target === null ||
     target === undefined ||
     (target as unknown) === globalThis ||
     typeof target !== 'object'
   ) {
+    return undefined;
+  }
+
+  // A real resource failure is a bare `Event`. Anything richer belongs to whoever
+  // dispatched it; claiming and cancelling it would change their semantics.
+  try {
+    if (
+      (typeof ErrorEvent === 'function' && event instanceof ErrorEvent) ||
+      (typeof CustomEvent === 'function' && event instanceof CustomEvent)
+    ) {
+      return undefined;
+    }
+  } catch {
+    // A hostile or exotic global: treat the event as not classifiable rather than
+    // guessing, since guessing wrong means cancelling somebody else's event.
     return undefined;
   }
 
@@ -77,36 +146,8 @@ function describeResourceTarget(target: unknown): string | undefined {
     }
   }
 
-  return `Failed to load ${tagName}`;
-}
-
-/**
- * Coerce whatever a handler threw or rejected with into an `Error`.
- *
- * `throw` accepts any value and a promise can reject with any value, so a failure path
- * must not assume it was handed an `Error`. Reading `.message` off `null` raises a
- * `TypeError` of its own, and on this path that one escapes through `emit()` and out of
- * whichever log call emitted the event.
- */
-function toError(value: unknown): Error {
-  let description: string;
-
-  try {
-    if (value instanceof Error) {
-      return value;
-    }
-
-    description = typeof value === 'string' ? value : String(value);
-  } catch {
-    // Both steps run code this module does not own: `instanceof` walks a prototype
-    // chain, which a revoked `Proxy` makes throw, and `String()` invokes
-    // `toString`/`Symbol.toPrimitive`, which are ordinary properties.
-    description = 'unknown value';
-  }
-
-  // The value itself is kept as the cause: the description is lossy, and for a value
-  // whose `toString` threw it carries nothing at all.
-  return new Error(`Non-error value thrown: ${description}`, { cause: value });
+  // An element that names no resource did not fail to load one.
+  return undefined;
 }
 
 export class Logger extends EventEmitter {
@@ -382,13 +423,19 @@ export class Logger extends EventEmitter {
     const useCapture = options.captureResourceErrors === true;
 
     this._reportErrorListener = (event: Event): void => {
-      // Re-entrancy guard. Logging goes through `handleLog`, which writes to the sinks
-      // and emits a `'logger'` event; a `'logger'` handler that throws is itself wrapped
-      // in `safeHandleCallback`, which reports on this very channel. Without this flag
-      // that is an unbounded loop: one `logger.info()` call recursed until the stack
-      // gave out. A report that arrives while this listener is still logging is left
-      // uncancelled and unlogged here, so `safe-handle-callback`'s console fall-through
-      // reports it once instead of feeding it back through the sinks.
+      // Re-entrancy guard, for reports raised *by this listener's own logging*.
+      // `handleLog` writes to every sink, and a sink is user code: one that itself drives
+      // `safeHandleCallback` (or any non-`Logger` Lifecycleion emitter) with a failing
+      // callback reports on this very channel, synchronously, while this listener is
+      // still on the stack. Without the flag a sink that fails on every write loops.
+      //
+      // Failures of this logger's own `'logger'` handlers are *not* what this guards:
+      // `handleEventHandlerFailure` is overridden below to keep those off the global
+      // channel entirely, so they never re-enter here.
+      //
+      // The cost is that such a nested report is neither logged nor cancelled, so
+      // `safe-handle-callback`'s console fall-through reports it once, without this
+      // logger's formatting, instead of feeding it back through the failing sink.
       if (this._isHandlingReportedError) {
         return;
       }
@@ -402,28 +449,74 @@ export class Logger extends EventEmitter {
         return;
       }
 
-      const errorEvent = event as ErrorEvent;
-      const resource = describeResourceTarget(event.target);
+      const resource = describeResourceTarget(event);
+
+      // Registered with capture, this listener is in the event path of *every* `'error'`
+      // event dispatched anywhere in the document, not just the ones meant for it. An
+      // event targeting an element that did not classify as a resource failure above
+      // belongs to whoever dispatched it — a component's own
+      // `new CustomEvent('error', { cancelable: true })`, say, whose result that
+      // component is about to branch on. Leave it entirely alone: not logged, and above
+      // all not cancelled.
+      //
+      // Keyed on the target being an element rather than on it not being `globalThis`,
+      // because on Node the reports meant for this listener arrive through the polyfill's
+      // backing `EventTarget` and so do not target the global object either.
+      if (resource === undefined && isElementTarget(event)) {
+        return;
+      }
 
       // Uncaught errors can carry a message but no `error` object, and a resource
       // failure is a plain `Event` with neither, so a value is always synthesized
-      // rather than logging `undefined`.
-      const reported: unknown = errorEvent.error;
+      // rather than logging `undefined`. Read through the guard for the same reason the
+      // target is: the event is whatever was dispatched, accessors included.
+      const reported: unknown = readEventProperty(event, 'error');
+
+      const reportedMessage: unknown = readEventProperty(event, 'message');
 
       // Emptiness is checked, not just `undefined`: `ErrorEvent`'s `message` defaults to
       // `''`, so a plain `new ErrorEvent('error')` would satisfy `??` and produce an
       // `Error` with no message at all instead of reaching the description below.
       const message: string | undefined =
-        typeof errorEvent.message === 'string' && errorEvent.message.length > 0
-          ? errorEvent.message
+        typeof reportedMessage === 'string' && reportedMessage.length > 0
+          ? reportedMessage
           : undefined;
 
-      const error =
-        reported instanceof Error
-          ? reported
-          : new Error(
-              resource ?? message ?? 'Unknown error reported by an error event',
-            );
+      // `isError` rather than a bare `instanceof`: the payload comes from whoever
+      // dispatched the event, and `instanceof` walks a prototype chain, which a revoked
+      // `Proxy` makes throw. A throw here would escape the listener, skipping the
+      // `preventDefault()` below and — on Bun and Node — killing the process from inside
+      // the error-reporting path.
+      let isError: boolean;
+
+      try {
+        isError = reported instanceof Error;
+      } catch {
+        isError = false;
+      }
+
+      let error: Error;
+
+      if (isError) {
+        error = reported as Error;
+      } else {
+        // The reported value is kept reachable as the cause: a browser
+        // `throw { code: 'E42' }` puts that object here, and the synthesized message
+        // ('Uncaught [object Object]') carries none of it.
+        //
+        // Passed to the constructor rather than assigned afterwards: the constructor
+        // form defines `cause` non-enumerable, matching `toError` and the rest of the
+        // library, so `JSON.stringify` of the logged error does not suddenly carry an
+        // arbitrary — possibly large or cyclic — payload. The options object is omitted
+        // entirely when there was nothing to keep, so an event that genuinely carried no
+        // error does not gain a `cause: undefined`.
+        error = new Error(
+          resource ?? message ?? 'Unknown error reported by an error event',
+          reported === undefined || reported === null
+            ? undefined
+            : { cause: reported },
+        );
+      }
 
       this._isHandlingReportedError = true;
 
@@ -438,6 +531,14 @@ export class Logger extends EventEmitter {
           eventType: 'uncaughtException',
           error,
         });
+      } catch (error_) {
+        // Logging is user code all the way down: a sink, a redaction rule, or rendering
+        // an error whose `stack` accessor throws can all fail here. Letting that escape
+        // would leave the event uncancelled and, on Bun and Node, terminate the process
+        // from a listener whose whole job is reporting a failure. The console is the only
+        // rung left, as it is for a failing sink.
+        // eslint-disable-next-line no-console -- last resort on the reporting path
+        console.error(toError(error_).message);
       } finally {
         // Cleared in `finally` so a sink or handler that throws its way out cannot leave
         // the listener permanently deaf.
@@ -445,9 +546,15 @@ export class Logger extends EventEmitter {
       }
 
       if (shouldPreventDefault) {
-        // Only meaningful because the event is dispatched with `cancelable: true`;
-        // `preventDefault()` on an uncancelable event is a silent no-op.
-        event.preventDefault();
+        try {
+          // Only meaningful because the event is dispatched with `cancelable: true`;
+          // `preventDefault()` on an uncancelable event is a silent no-op.
+          event.preventDefault();
+        } catch {
+          // The last statement in the listener, and the error is already logged by this
+          // point, so a `preventDefault` that throws costs only the cancellation. It
+          // must not cost the process, which is what an escaping throw would do here.
+        }
       }
     };
 
