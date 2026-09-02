@@ -1643,7 +1643,7 @@ async start() {
   try {
     await this.db.connect();
   } catch (error) {
-    const err = error instanceof Error ? error : new Error(String(error));
+    const err = toError(error);
 
     this.logger.error('Failed to connect: {{error.message}}', {
       params: { error: err },
@@ -1653,7 +1653,9 @@ async start() {
 }
 ```
 
-Normalizing the caught value (`error instanceof Error ? error : new Error(String(error))`) ensures `{{error.message}}` always resolves to a string - without it, a thrown string or plain object would produce `(null)` in the output. Libraries and native APIs occasionally throw non-`Error` values.
+Normalizing the caught value with [`toError`](./to-error.md) ensures `{{error.message}}` always resolves to a string - without it, a thrown string or plain object would produce `(null)` in the output. Libraries and native APIs occasionally throw non-`Error` values.
+
+Use `toError` rather than hand-rolling `error instanceof Error ? error : new Error(String(error))`: both halves of that idiom can throw. `instanceof` walks a prototype chain, which a revoked `Proxy` refuses, and `String()` invokes `toString`/`Symbol.toPrimitive` - on a value created with `Object.create(null)` it raises a `TypeError` of its own, from the line that was only trying to normalize an error. `toError` guards both and keeps the original on `cause`.
 
 The normalized `err` is also captured in `params` for structured sinks that need the full error object or stack trace. Because the pattern only wraps non-`Error` values, original `Error` stack traces are preserved when the thrown value was already an `Error`.
 
@@ -3324,7 +3326,7 @@ export class DatabaseHelper {
       typeof error === 'object' && error !== null && 'code' in error
         ? String(error.code)
         : null;
-    const message = error instanceof Error ? error.message : String(error);
+    const message = describeError(error);
 
     return (
       (code !== null && retryableCodes.has(code)) ||
@@ -3473,7 +3475,7 @@ export class DatabaseHelper {
         value: result,
       };
     } catch (error) {
-      const err = error instanceof Error ? error : new Error(String(error));
+      const err = toError(error);
 
       // If not finalized yet, auto-rollback
       if (!tx.isCompleted()) {

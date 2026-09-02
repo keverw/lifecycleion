@@ -82,14 +82,26 @@ CurlyBrackets.compileTemplate = function (
       let replacement: unknown = locals;
 
       for (const part of parts) {
-        if (
-          replacement !== undefined &&
-          replacement !== null &&
-          typeof replacement === 'object' &&
-          part in replacement
-        ) {
-          replacement = (replacement as Record<string, unknown>)[part];
-        } else {
+        // Both the membership test and the read run code this function does not own: a
+        // `Proxy` can throw from its `has` trap, and an ordinary property can be an
+        // accessor that throws — an `Error` with a hostile `message` getter reaching
+        // `{{error.message}}` is the case that matters, since the logger renders
+        // templates on paths that must not raise an error of their own. An unresolvable
+        // path is exactly what `fallback` is for, so treat an unreadable one the same
+        // way rather than propagating.
+        try {
+          if (
+            replacement !== undefined &&
+            replacement !== null &&
+            typeof replacement === 'object' &&
+            part in replacement
+          ) {
+            replacement = (replacement as Record<string, unknown>)[part];
+          } else {
+            replacement = undefined;
+            break;
+          }
+        } catch {
           replacement = undefined;
           break;
         }
@@ -99,7 +111,12 @@ CurlyBrackets.compileTemplate = function (
         return fallback;
       }
 
-      return stringifyTemplateValue(replacement);
+      try {
+        return stringifyTemplateValue(replacement);
+      } catch {
+        // `String()` invokes `toString`/`Symbol.toPrimitive`, both ordinary properties.
+        return fallback;
+      }
     });
   };
 };

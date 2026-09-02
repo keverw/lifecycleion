@@ -127,7 +127,7 @@ Each library has comprehensive documentation in the [docs](./docs) folder. Click
 | [sleep](./docs/sleep.md)                                           | `lifecycleion/sleep`                                    | Pause async execution for a given number of milliseconds                                                                                      |
 | [strings](./docs/strings.md)                                       | `lifecycleion/strings`                                  | String type guard, case conversion (PascalCase, camelCase, CONSTANT_CASE), grapheme splitting, character filtering, and chopping helpers      |
 | [tmp-dir](./docs/tmp-dir.md)                                       | `lifecycleion/tmp-dir`                                  | Create and automatically clean up uniquely-named temporary directories with configurable prefix, postfix, and unsafe cleanup support          |
-| [to-error](./docs/to-error.md)                                     | `lifecycleion/to-error`                                 | Coerce any thrown or rejected value into an `Error`, keeping the original on `cause`                                                          |
+| [to-error](./docs/to-error.md)                                     | `lifecycleion/to-error`                                 | Coerce any thrown or rejected value into an `Error` (`toError`), or describe it as a string that is always safe to read (`describeError`)     |
 | [unix-time-helpers](./docs/unix-time-helpers.md)                   | `lifecycleion/unix-time-helpers`                        | Unix timestamp utilities for seconds, milliseconds, high-resolution timing, and unit conversion                                               |
 
 ## Change Log

@@ -745,7 +745,11 @@ describe('FetchAdapter body-stream failures', () => {
 
     expect(response.isStreamError).toBe(true);
     expect(response.errorCause).toBeInstanceOf(Error);
-    expect(response.errorCause?.message).toBe('socket hang up');
+    // Same shape `toError` produces, and the raw value stays reachable on `cause`.
+    expect(response.errorCause?.message).toBe(
+      'Non-error value thrown: socket hang up',
+    );
+    expect(response.errorCause?.cause).toBe('socket hang up');
   });
 
   test('re-throws a caller abort rather than reporting a stream error', () => {

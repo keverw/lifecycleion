@@ -86,6 +86,7 @@ import {
 } from '../process-signal-manager';
 import { isPromise } from '../is-promise';
 import { safeHandleCallback } from '../safe-handle-callback';
+import { describeError, toError } from '../to-error';
 import { finiteClampMin } from '../clamp';
 
 /**
@@ -136,6 +137,17 @@ export class LifecycleManager
     { startedAt: number | null; stoppedAt: number | null }
   > = new Map();
   private componentErrors: Map<string, Error | null> = new Map();
+  /**
+   * Whether `reportUnexpectedStop()` was called with a real `Error`, as opposed to with
+   * nothing or with an off-type value.
+   *
+   * Recorded separately because `componentErrors` now holds a *normalized* error:
+   * `toError` turns any reported value into an `Error`, which is what keeps a hostile
+   * value from stranding the manager, but it also means `instanceof Error` can no longer
+   * answer "did the component explain why it stopped?". The overlapping-startup-failure
+   * rule in `startComponent` depends on that distinction.
+   */
+  private componentUnexpectedStopHadError: Map<string, boolean> = new Map();
   private componentStartAttemptTokens: Map<string, string> = new Map();
   // Use per-stop ULIDs instead of incrementing counters because a stalled
   // component can be unregistered and replaced by a same-name instance before
@@ -474,6 +486,7 @@ export class LifecycleManager
     this.componentStates.delete(name);
     this.componentTimestamps.delete(name);
     this.componentErrors.delete(name);
+    this.componentUnexpectedStopHadError.delete(name);
     this.componentStartAttemptTokens.delete(name);
     this.componentStopAttemptTokens.delete(name);
     this.pendingForceStopWaiters.delete(name);
@@ -742,7 +755,7 @@ export class LifecycleManager
         startupOrder: this.getStartupOrderInternal(),
       };
     } catch (error) {
-      const err = error instanceof Error ? error : new Error(String(error));
+      const err = toError(error);
       const code =
         err instanceof DependencyCycleError
           ? 'dependency_cycle'
@@ -1021,7 +1034,7 @@ export class LifecycleManager
       try {
         startupOrder = this.getStartupOrderInternal();
       } catch (error) {
-        const err = error instanceof Error ? error : new Error(String(error));
+        const err = toError(error);
         const code =
           err instanceof DependencyCycleError
             ? 'dependency_cycle'
@@ -2008,7 +2021,7 @@ export class LifecycleManager
       };
     } catch (error) {
       const durationMS = Date.now() - startTime;
-      const err = error instanceof Error ? error : new Error(String(error));
+      const err = toError(error);
 
       this.logger.entity(name).error('Health check failed: {{error.message}}', {
         params: { error: err },
@@ -2206,7 +2219,7 @@ export class LifecycleManager
       try {
         result = component.onMessage(payload, from);
       } catch (error) {
-        const err = error instanceof Error ? error : new Error(String(error));
+        const err = toError(error);
 
         this.logger
           .entity(componentName)
@@ -2282,7 +2295,7 @@ export class LifecycleManager
         code: 'sent',
       };
     } catch (error) {
-      const err = error instanceof Error ? error : new Error(String(error));
+      const err = toError(error);
 
       this.logger
         .entity(componentName)
@@ -2546,7 +2559,7 @@ export class LifecycleManager
         code: wasFound ? 'found' : 'not_found',
       };
     } catch (error) {
-      const err = error instanceof Error ? error : new Error(String(error));
+      const err = toError(error);
 
       this.logger
         .entity(componentName)
@@ -2788,7 +2801,7 @@ export class LifecycleManager
           // cycles before registration. However, if this.components somehow contains
           // a cycle (e.g., due to internal bugs or direct mutations), we must not
           // throw from an error handler. Return empty array to fail gracefully.
-          const err = error instanceof Error ? error : new Error(String(error));
+          const err = toError(error);
 
           this.logger.warn(
             'Failed to compute startup order in error handler: {{error.message}}',
@@ -2901,6 +2914,7 @@ export class LifecycleManager
         stoppedAt: null,
       });
       this.componentErrors.set(componentName, null);
+      this.componentUnexpectedStopHadError.delete(componentName);
       this.componentStartAttemptTokens.set(componentName, ulid());
 
       // Check if manual position was respected for logging
@@ -3042,7 +3056,7 @@ export class LifecycleManager
       };
     } catch (error) {
       // Handle unexpected errors during registration
-      const err = error instanceof Error ? error : new Error(String(error));
+      const err = toError(error);
       const code: RegistrationFailureCode =
         err instanceof DependencyCycleError
           ? 'dependency_cycle'
@@ -3166,7 +3180,7 @@ export class LifecycleManager
       shutdownOrder = [...startupOrder].reverse();
     } catch (error) {
       // If we can't resolve order due to cycle, fall back to reverse registration order
-      const err = error instanceof Error ? error : new Error(String(error));
+      const err = toError(error);
 
       this.logger.warn(
         'Could not resolve shutdown order, using registration order: {{error.message}}',
@@ -3627,8 +3641,7 @@ export class LifecycleManager
               try {
                 component.onStartupAborted();
               } catch (error) {
-                const err =
-                  error instanceof Error ? error : new Error(String(error));
+                const err = toError(error);
 
                 this.logger
                   .entity(name)
@@ -3757,7 +3770,7 @@ export class LifecycleManager
       };
     } catch (error) {
       component._clearUnexpectedStopHandler();
-      const err = error instanceof Error ? error : new Error(String(error));
+      const err = toError(error);
 
       // Decision rule for overlapping startup failures:
       // - If the component explicitly self-reported an unexpected stop *with
@@ -3779,7 +3792,8 @@ export class LifecycleManager
         this.componentStartAttemptTokens.get(name) === startAttemptToken &&
         this.componentStates.get(name) === 'stopped' &&
         !this.runningComponents.has(name) &&
-        (isStartupTimeout || unexpectedStopError instanceof Error)
+        (isStartupTimeout ||
+          this.componentUnexpectedStopHadError.get(name) === true)
       ) {
         return {
           success: false,
@@ -4016,14 +4030,21 @@ export class LifecycleManager
             this.lifecycleEvents.componentShutdownWarningCompleted(name);
           })
           .catch((error) => {
-            const err =
-              error instanceof Error ? error : new Error(String(error));
+            const err = toError(error);
 
             this.logger
               .entity(name)
               .warn('Shutdown warning phase failed: {{error.message}}', {
                 params: { error: err },
               });
+          })
+          // Terminal, because this chain is deliberately not retained: unlike the
+          // timed branch below, nothing collects it into `Promise.allSettled`, so a
+          // throw from the reporting handler above would become an unhandled rejection
+          // mid-shutdown — fatal under Node's default `--unhandled-rejections=throw`.
+          // Logging is guarded, but a floating chain should not have to rely on that.
+          .catch(() => {
+            // Nothing left to report with.
           });
       }
 
@@ -4056,8 +4077,7 @@ export class LifecycleManager
           })
           .catch((error) => {
             statuses.set(name, 'rejected');
-            const err =
-              error instanceof Error ? error : new Error(String(error));
+            const err = toError(error);
 
             this.logger
               .entity(name)
@@ -4148,8 +4168,7 @@ export class LifecycleManager
               try {
                 component.onGracefulStopTimeout();
               } catch (error) {
-                const err =
-                  error instanceof Error ? error : new Error(String(error));
+                const err = toError(error);
 
                 this.logger
                   .entity(name)
@@ -4224,7 +4243,7 @@ export class LifecycleManager
         status: this.getComponentStatus(name),
       };
     } catch (error) {
-      const err = error instanceof Error ? error : new Error(String(error));
+      const err = toError(error);
 
       // Store error
       this.componentErrors.set(name, err);
@@ -4367,8 +4386,7 @@ export class LifecycleManager
               try {
                 component.onShutdownForceAborted();
               } catch (error) {
-                const err =
-                  error instanceof Error ? error : new Error(String(error));
+                const err = toError(error);
 
                 this.logger
                   .entity(name)
@@ -4469,7 +4487,7 @@ export class LifecycleManager
         };
       }
 
-      const err = error instanceof Error ? error : new Error(String(error));
+      const err = toError(error);
 
       // Determine if timeout or error
       const isTimeout =
@@ -4928,6 +4946,7 @@ export class LifecycleManager
     // Clear the stall/timeout error so lastError reflects a clean stop, not the
     // timeout that caused the stall.
     this.componentErrors.set(name, null);
+    this.componentUnexpectedStopHadError.delete(name);
     this.updateStartedFlag();
     this.resolvePendingForceStopWaiters(name);
 
@@ -4997,11 +5016,35 @@ export class LifecycleManager
       return false;
     }
 
+    // Normalized at the boundary. `error` is declared `Error`, but it arrives from the
+    // component's own `reportUnexpectedStop()` and is never validated, so it can be any
+    // value at all. It is stored here and dereferenced in several places later — the
+    // warning below, `startAllComponents`'s failure summary, `getComponentStatus` — and
+    // every one of those reads would otherwise be an unguarded `.message` on user input.
+    // Normalizing once means a bad value cannot strand the manager: the state mutations
+    // directly above have already run, so a throw between here and the events at the
+    // bottom would leave the component recorded as stopped while nothing was emitted.
+    const failure =
+      error === undefined || error === null ? null : toError(error);
+
+    // Captured before the normalization above is allowed to blur the distinction. Guarded
+    // for the same reason everything else on this path is: `instanceof` walks a prototype
+    // chain, which a revoked `Proxy` refuses.
+    let didReportError: boolean;
+
+    try {
+      didReportError = error instanceof Error;
+    } catch {
+      didReportError = false;
+    }
+
+    this.componentUnexpectedStopHadError.set(name, didReportError);
+
     this.runningComponents.delete(name);
     this.componentStates.set(name, 'stopped');
-    this.componentErrors.set(name, error ?? null);
+    this.componentErrors.set(name, failure);
     if (this.isStarting) {
-      this.unexpectedStopsDuringStartup.set(name, error ?? null);
+      this.unexpectedStopsDuringStartup.set(name, failure);
     }
     this.updateStartedFlag();
 
@@ -5028,16 +5071,16 @@ export class LifecycleManager
     this.logger
       .entity(name)
       .warn(
-        error
-          ? `Component stopped unexpectedly: ${error.message}`
+        failure
+          ? `Component stopped unexpectedly: ${describeError(failure)}`
           : 'Component stopped unexpectedly',
-        { params: { error } },
+        { params: { error: failure } },
       );
 
     // Model this the same as other terminal transitions: emit the abnormal-cause
     // event first, then the canonical stopped-state event that generic listeners
     // can rely on regardless of why the component stopped.
-    this.lifecycleEvents.componentUnexpectedStop(name, error);
+    this.lifecycleEvents.componentUnexpectedStop(name, failure ?? undefined);
     this.lifecycleEvents.componentStopped(name, this.getComponentStatus(name));
     return true;
   }
@@ -5052,7 +5095,7 @@ export class LifecycleManager
     try {
       this.emit(event, data);
     } catch (error) {
-      const err = error instanceof Error ? error : new Error(String(error));
+      const err = toError(error);
 
       this.logger.error('Event handler error: {{error.message}}', {
         params: { event, error: err },
@@ -5076,7 +5119,7 @@ export class LifecycleManager
       // cycles before registration. However, if this.components somehow contains
       // a cycle (e.g., due to internal bugs or direct mutations), we must not
       // throw from an error handler. Return empty array to fail gracefully.
-      const err = error instanceof Error ? error : new Error(String(error));
+      const err = toError(error);
 
       this.logger.warn(
         'Failed to compute startup order in error handler: {{error.message}}',
@@ -5120,7 +5163,7 @@ export class LifecycleManager
       // cycles before registration. However, if this.components somehow contains
       // a cycle (e.g., due to internal bugs or direct mutations), we must not
       // throw from an error handler. Return empty array to fail gracefully.
-      const err = error instanceof Error ? error : new Error(String(error));
+      const err = toError(error);
 
       this.logger.warn(
         'Failed to compute startup order in error handler: {{error.message}}',
@@ -5964,7 +6007,7 @@ export class LifecycleManager
           });
         }
       } catch (error) {
-        const err = error instanceof Error ? error : new Error(String(error));
+        const err = toError(error);
 
         this.logger.entity(name).error(descriptor.errorLog, {
           params: { error: err },

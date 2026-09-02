@@ -1474,7 +1474,9 @@ describe('HTTPClient — adapter marker flags', () => {
 
     expect(response.isCancelled).toBe(false);
     expect(builder.error?.code).toBe('adapter_error');
-    expect(builder.error?.cause?.message).toBe('Unknown error');
+    expect(builder.error?.cause?.message).toBe(
+      'Non-error value thrown: unknown value',
+    );
   });
 
   test('throwing stream metadata getters cannot replace a caller cancellation', async () => {

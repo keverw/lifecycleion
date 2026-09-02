@@ -2722,11 +2722,20 @@ function normalizeError(value: unknown): Error {
     return value;
   }
 
+  // The value itself is kept as the cause: `String(value)` is lossy - a rejection with
+  // `{ code: 'E42' }` renders as `[object Object]` - and for a value whose `toString`
+  // threw it carries nothing at all, leaving the caller no way back to what was thrown.
+  // Behaviourally identical to `toError` in `to-error`, message included, kept local so
+  // the HTTP client does not import across module boundaries.
+  let description: string;
+
   try {
-    return new Error(String(value));
+    description = typeof value === 'string' ? value : String(value);
   } catch {
-    return new Error('Unknown error');
+    description = 'unknown value';
   }
+
+  return new Error(`Non-error value thrown: ${description}`, { cause: value });
 }
 
 /**

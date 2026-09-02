@@ -18,6 +18,7 @@ A modern, flexible logging library with sink-based architecture, template string
   - [Redaction of Sensitive Data](#redaction-of-sensitive-data)
     - [Nested Object Redaction](#nested-object-redaction)
     - [Custom Redaction Function](#custom-redaction-function)
+    - [Redaction fails closed](#redaction-fails-closed)
   - [Tags for Categorization and Filtering](#tags-for-categorization-and-filtering)
     - [Use Cases](#use-cases)
     - [Notes](#notes)
@@ -351,7 +352,7 @@ logger.info(
 try {
   await db.connect();
 } catch (error) {
-  const err = error instanceof Error ? error : new Error(String(error));
+  const err = toError(error);
   logger.error('Database connection failed: {{error.message}}', {
     params: { error: err },
   });
@@ -359,7 +360,9 @@ try {
 }
 ```
 
-Normalizing the caught value (`error instanceof Error ? error : new Error(String(error))`) ensures `{{error.message}}` always resolves to a string - without it, a thrown string or plain object would produce `(null)` in the output. Libraries and native APIs occasionally throw non-`Error` values.
+Normalizing the caught value with [`toError`](./to-error.md) ensures `{{error.message}}` always resolves to a string - without it, a thrown string or plain object would produce `(null)` in the output. Libraries and native APIs occasionally throw non-`Error` values.
+
+Use `toError` rather than hand-rolling `error instanceof Error ? error : new Error(String(error))`: both halves of that idiom can throw. `instanceof` walks a prototype chain, which a revoked `Proxy` refuses, and `String()` invokes `toString`/`Symbol.toPrimitive` - on a value created with `Object.create(null)` it raises a `TypeError` of its own, from the line that was only trying to normalize an error. `toError` guards both and keeps the original on `cause`.
 
 The normalized `err` is also captured in `params` for structured sinks that need the full error object or stack trace. Because the pattern only wraps non-`Error` values, original `Error` stack traces are preserved when the thrown value was already an `Error`.
 
@@ -470,6 +473,42 @@ logger.info('API call', {
 });
 // apiKey will be masked as: [REDACTED-apiKey]
 ```
+
+#### Redaction fails closed
+
+Your `redactFunction` is your code, and the values it is handed are your callers' - either
+can fail. Redaction runs inside `handleLog`, which must not throw out of a `logger.info()`,
+so a failure is contained. What it must never do is leave the original value in place: the
+rendered message is built from the redacted params, so falling through would print the very
+value redaction was asked to hide, to every sink.
+
+A value whose redaction fails is replaced with `REDACTION_FAILED_MARKER`:
+
+```typescript
+import { REDACTION_FAILED_MARKER } from 'lifecycleion/logger';
+
+REDACTION_FAILED_MARKER; // '***REDACTION FAILED***'
+```
+
+Three failure modes, all fail closed:
+
+| What failed                                                                           | Result                                                                                                          |
+| ------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| Your `redactFunction` throws for a key                                                | That key becomes the marker; every other param redacts normally                                                 |
+| A value cannot be stringified (a `toString` that throws)                              | Same - that key becomes the marker                                                                              |
+| The `params` object cannot be copied at all (a getter that throws, a revoked `Proxy`) | **Only** the redacted keys are returned, each set to the marker; other params are dropped from `redactedParams` |
+
+The marker is deliberately distinct from an ordinary `***` mask. An operator seeing `***`
+concludes redaction worked, so a broken `redactFunction` would otherwise hide itself behind
+output that looks successful.
+
+Note that a cyclic `params` object is **not** a failure - it is copied and redacted
+normally.
+
+`entry.params` is unaffected by any of this and still carries the raw values, exactly as it
+does on the success path; only `entry.redactedParams` and the rendered `message` are
+substituted. A sink that wants to detect the condition should compare against the exported
+constant rather than hard-coding the literal.
 
 ### Tags for Categorization and Filtering
 
@@ -1268,7 +1307,7 @@ The third row is the one that would otherwise loop: logging emits a `'logger'` e
 const logger = new Logger({
   sinks: [new FileSink({ logDir: './logs', basename: 'app' })],
   onEventHandlerError: (error, event) => {
-    // error: the failure, with the original on `error.cause`
+    // error: the wrapped failure, with the handler's original error on `error.cause`
     // event: the event whose handler failed, e.g. 'logger'
     metrics.increment('logger.handler_failure');
   },
@@ -1278,6 +1317,25 @@ const logger = new Logger({
 Everything else — errors reported by other Lifecycleion modules, and by your own code using [the reporting pattern](./safe-handle-callback.md#the-reporting-pattern) — reaches your sinks normally through `registerReportErrorListener()`.
 
 > Do not call this logger's own log methods from inside `onSinkError` or `onEventHandlerError`. If the sink is what failed, logging from the handler asks the same sink to write again; and logging from `onEventHandlerError` re-emits the very event whose handler just failed.
+
+> **Do not read `.message` directly inside these callbacks.** Both are handed a real `Error`, but the value a sink or handler threw is not yours, and `message` is an ordinary property that a subclass or a `Proxy` can turn into an accessor that throws. Reading it raises a second failure from inside the callback that was handling the first.
+
+Use [`describeError`](./to-error.md#describeerror) instead, which normalizes and reads in one guarded step and never throws:
+
+```typescript
+import { describeError } from 'lifecycleion/to-error';
+
+onSinkError: (error, context, sink) => {
+  metrics.increment('logger.sink_failure', { reason: describeError(error) });
+};
+```
+
+The two callbacks are handed differently shaped errors, which matters if you log or group on them:
+
+| Callback              | Receives                                                                                                                      |
+| --------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| `onSinkError`         | The sink's own error, unwrapped. `cause` is set only when the sink threw a non-`Error` value                                  |
+| `onEventHandlerError` | A **wrapped** error, `Error in a logger event handler for <event>: <message>`, with the handler's original failure on `cause` |
 
 This allows you to:
 

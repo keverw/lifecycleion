@@ -29,3 +29,34 @@ export function toError(value: unknown): Error {
   // whose `toString` threw it carries nothing at all.
   return new Error(`Non-error value thrown: ${description}`, { cause: value });
 }
+
+/**
+ * Describe any thrown or rejected value as a single-line string, without ever throwing.
+ *
+ * `toError` guarantees an `Error` *object*, not a readable one: it returns an `Error`
+ * instance unchanged — deliberately, so the original identity, `stack`, and `cause`
+ * survive for a caller that needs them — and `message` is an ordinary property that a
+ * subclass or a `Proxy` can turn into an accessor that throws. So `toError(value).message`
+ * is still an unguarded read, and on a reporting path that throw escapes into the caller
+ * that was only trying to report a failure.
+ *
+ * This is the pairing for the common case: normalize, then read, both guarded. Reach for
+ * it anywhere a failure has to become text — a `console.error`, a template literal, a log
+ * line — and for `toError` only when the `Error` object itself is what you need.
+ *
+ * For the full multi-line rendering of an error's `name`, `code`, `additionalInfo`, and
+ * `stack`, see `errorToString` in `error-to-string`, which is guarded the same way.
+ *
+ * @returns The value's message, or a placeholder when it cannot be read. Never throws.
+ */
+export function describeError(value: unknown): string {
+  try {
+    const message: unknown = toError(value).message;
+
+    return typeof message === 'string' ? message : String(message);
+  } catch {
+    // `message` may be an accessor that throws, and a non-string `message` may be an
+    // object whose `toString` throws in turn.
+    return '<error message could not be read>';
+  }
+}

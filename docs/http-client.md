@@ -322,7 +322,7 @@ When a request settles through the client's failure path the builder's `.error` 
 interface HTTPClientError {
   code: ErrorCode; // See error codes below
   message: string;
-  cause?: Error; // Underlying error when available
+  cause?: Error; // The originally thrown value, always attached when the failure came from a throw or rejection
   initialURL: string;
   requestURL: string; // URL of the last adapter attempt, or the redirect target if redirect handling failed before the follow-up was dispatched
   wasRedirectDetected: boolean;

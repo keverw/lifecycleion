@@ -75,7 +75,9 @@ if (result.success) {
 **Returns:** `Promise<{ success: boolean; value?: T; error?: Error }>`
 
 - `success: true` - callback completed without throwing, and `value` holds the return value
-- `success: false` - callback threw or was not a function, and `error` holds the caught error
+- `success: false` - callback threw or was not a function, and `error` holds the failure
+
+`error` is always a real `Error`, even when the callback did something like `throw null`: the value is normalized with [`toError`](./to-error.md), which keeps whatever was actually thrown on `error.cause`. Reading `result.error.message` is therefore safe against a non-`Error` throw - though see the note below about errors whose `message` accessor itself throws.
 
 ## The reporting pattern
 
@@ -128,6 +130,8 @@ Four details are load-bearing:
 **Classify a failed dispatch as unclaimed, not unavailable.** If `dispatchEvent()` itself throws, the event was still handed over and listeners may have run, so fall through to the console rather than on to `reportError()`. Only a failure to _construct_ the event means nothing was dispatched. (A throwing listener is not what reaches this path: per spec a listener's exception does not propagate back into `dispatchEvent`, and browsers, Bun and Node all honour that. An exotic or hostile `dispatchEvent` that rejects the event outright is.)
 
 **A listener that throws still takes the process down.** "Does not propagate" is not the same as "is harmless". A browser reports the exception to the console and carries on, but outside a browser the runtime treats it as uncaught: measured on Bun 1.3.14 and Node 25.9.0, a listener that throws exits the process with code 1 while `dispatchEvent()` still returns normally to the caller. Anything you register on the `'error'` channel should therefore catch its own failures — including whatever formatting or I/O it does with the error, since rendering a hostile error object can throw on its own. `logger.registerReportErrorListener()` does this for you, falling back to the console if its own logging fails.
+
+For the formatting itself, use the library's own renderers rather than reading the error directly: [`describeError`](./to-error.md#describeerror) for a single-line message and [`errorToString`](./error-to-string.md) for the full table. Both guard every read and never throw, which is exactly the guarantee a listener on this channel needs.
 
 When testing code like this, dispatch against the real global `EventTarget`. A stubbed `dispatchEvent` returns whatever boolean the stub chose, so an implementation that forgot `cancelable: true` passes against it. Conversely, a test that wants to observe rung 2 has to make rung 1 genuinely unreachable first — on a runtime with a working `dispatchEvent`, the report correctly never gets that far.
 

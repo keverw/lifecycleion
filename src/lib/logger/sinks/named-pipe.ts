@@ -2,6 +2,7 @@ import * as fs from 'fs';
 import { promises as fsPromises } from 'fs';
 import * as os from 'os';
 import type { LogEntry, LogSink } from '../types';
+import { describeError, toError } from '../../to-error';
 
 /**
  * Types of pipe errors that can occur
@@ -161,10 +162,7 @@ export class NamedPipeSink implements LogSink {
             resolve();
           });
         } catch (error) {
-          this.handleError(
-            PipeErrorType.CLOSE,
-            error instanceof Error ? error : new Error(String(error)),
-          );
+          this.handleError(PipeErrorType.CLOSE, error);
           resolve();
         }
       });
@@ -217,7 +215,8 @@ export class NamedPipeSink implements LogSink {
       this.handleError(
         PipeErrorType.NOT_FOUND,
         new Error(
-          `Could not open named pipe at ${this.pipePath}: ${(error as Error).message}`,
+          `Could not open named pipe at ${this.pipePath}: ${describeError(error)}`,
+          { cause: error },
         ),
       );
     }
@@ -258,10 +257,7 @@ export class NamedPipeSink implements LogSink {
         });
       }
     } catch (error) {
-      this.handleError(
-        PipeErrorType.WRITE,
-        error instanceof Error ? error : new Error(String(error)),
-      );
+      this.handleError(PipeErrorType.WRITE, error);
     }
   }
 
@@ -311,13 +307,30 @@ export class NamedPipeSink implements LogSink {
   /**
    * Handle errors
    */
-  private handleError(errorType: PipeErrorType, error: Error): void {
+  private handleError(errorType: PipeErrorType, error: unknown): void {
+    // Normalized rather than trusted: `error` reaches here from Node's stream and
+    // filesystem callbacks as well as from `catch` blocks, so it is not guaranteed to be
+    // an `Error`, and `onError` declares one.
+    const failure = toError(error);
+
     if (this.onError) {
-      this.onError(errorType, error, this.pipePath);
-    } else {
-      // Default: log to console
-      // eslint-disable-next-line no-console
-      console.error(`NamedPipeSink error (${errorType}): ${error.message}`);
+      try {
+        this.onError(errorType, failure, this.pipePath);
+
+        return;
+      } catch {
+        // Fall through to the console, exactly as `FileSink` does for its own callback.
+        // This must not escape: `handleError` is called from a Node stream 'error'
+        // handler, where a throw is an uncaught exception and ends the process, and
+        // from `initializePipe`, whose promise the constructor starts without a
+        // `.catch`, where it would become an unhandled rejection from a constructor.
+      }
     }
+
+    // Default: log to console
+    // eslint-disable-next-line no-console
+    console.error(
+      `NamedPipeSink error (${errorType}): ${describeError(failure)}`,
+    );
   }
 }

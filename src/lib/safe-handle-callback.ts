@@ -182,12 +182,12 @@ export function reportCallbackError(
       `Error in a callback ${callbackName}: ${DOUBLE_EOL}${errorToString(error)}`,
     );
   } catch {
-    // `errorToString` runs code this module does not own: it reads `message`/`stack` off
-    // the thrown value (a revoked `Proxy` or a throwing accessor makes that throw) and
-    // walks `additionalInfo` (a cyclic one overflows the stack). Rendering must never
-    // turn one failure into a second one thrown out of `safeHandleCallback`,
-    // `safeHandleCallbackAndWait`, or `EventEmitterProtected.emit`, so a value that
-    // cannot be described is reported without its description.
+    // Belt and braces. `errorToString` guards its own reads of the thrown value and
+    // returns `<error could not be rendered>` rather than throwing, so this branch is
+    // not expected to be reachable through it — but rendering must never turn one
+    // failure into a second one thrown out of `safeHandleCallback`,
+    // `safeHandleCallbackAndWait`, or `EventEmitterProtected.emit`, and this keeps that
+    // guarantee local instead of resting on another module's.
     report = new Error(
       `Error in a callback ${callbackName}: ${DOUBLE_EOL}<error could not be rendered>`,
     );

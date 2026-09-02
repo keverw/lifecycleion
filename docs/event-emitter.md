@@ -19,6 +19,7 @@ A lightweight, type-safe event emitter implementation that works in both browser
   - [`listenerCount(event: string): number`](#listenercountevent-string-number)
   - [`clear(event?: string): void`](#clearevent-string-void)
 - [Error Handling](#error-handling)
+  - [Overriding where handler failures go](#overriding-where-handler-failures-go)
 - [Memory Management](#memory-management)
 
 <!-- tocstop -->
@@ -169,6 +170,46 @@ emitter.on('test', async () => {
 ```
 
 The error messages include the event name and detailed error information, making debugging easier.
+
+### Overriding where handler failures go
+
+The global `'error'` channel is not always the right destination. An emitter whose own
+events are logged can feed its handler failures straight back into itself: a failing
+`'logger'` handler would be reported, which logs, which emits again, which fails again.
+
+`EventEmitterProtected` therefore exposes the reporting step as a `protected` hook that a
+subclass can override:
+
+```typescript
+protected handleEventHandlerFailure(event: string, error: unknown): void;
+```
+
+The default calls `reportCallbackError(...)` from
+[safe-handle-callback](./safe-handle-callback.md), which is what puts the failure on the
+global `'error'` channel. Override it to send failures somewhere that cannot loop back:
+
+```typescript
+class MyEmitter extends EventEmitterProtected {
+  protected override handleEventHandlerFailure(
+    event: string,
+    error: unknown,
+  ): void {
+    // `error` is `unknown` on purpose: `throw` and promise rejection both accept any
+    // value, so an override must not assume it was handed an `Error`.
+    metrics.increment('handler_failure', {
+      event,
+      reason: describeError(error),
+    });
+  }
+}
+```
+
+Two rules for an override: it must not throw - it runs on the failure path and there is
+nothing above it left to catch - and it must not assume `error` is an `Error`. Use
+[`describeError`](./to-error.md#describeerror), which satisfies both.
+
+[`Logger`](./logger.md) overrides this exact hook for the loop described above, routing
+its own `'logger'` handler failures to the `onEventHandlerError` option instead.
 
 ## Memory Management
 

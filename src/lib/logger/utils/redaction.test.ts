@@ -1,5 +1,9 @@
 import { describe, expect, test } from 'bun:test';
-import { applyRedaction, defaultRedactFunction } from './redaction';
+import {
+  applyRedaction,
+  defaultRedactFunction,
+  REDACTION_FAILED_MARKER,
+} from './redaction';
 
 describe('applyRedaction', () => {
   test('should redact specified keys', () => {
@@ -364,5 +368,90 @@ describe('defaultRedactFunction', () => {
     const result = defaultRedactFunction('metadata', { key: 'value' });
 
     expect(result).toBe('***REDACTED***');
+  });
+});
+
+describe('applyRedaction - fail closed', () => {
+  // Redaction runs user code (`redactFunction`) over caller-supplied values on a path
+  // that must not throw. When any of it fails, the one unacceptable outcome is leaving
+  // the original value in place, so a failure marks the key instead.
+
+  test('a throwing redactFunction marks the key instead of leaking it', () => {
+    const result = applyRedaction(
+      { password: 'hunter2', user: 'kev' },
+      ['password'],
+      () => {
+        throw new Error('redactor blew up');
+      },
+    );
+
+    expect(result['password']).toBe(REDACTION_FAILED_MARKER);
+    expect(result['password']).not.toBe('hunter2');
+    expect(result['user']).toBe('kev');
+  });
+
+  test('a value whose toString throws marks the key instead of leaking it', () => {
+    const hostile = {
+      toString() {
+        throw new Error('no');
+      },
+    };
+
+    const result = applyRedaction({ password: hostile }, ['password']);
+
+    expect(result['password']).toBe(REDACTION_FAILED_MARKER);
+  });
+
+  test('a throwing redactFunction on a nested path marks that path', () => {
+    const result = applyRedaction(
+      { user: { password: 'hunter2', name: 'kev' } },
+      ['user.password'],
+      () => {
+        throw new Error('redactor blew up');
+      },
+    );
+
+    const user = result['user'] as Record<string, unknown>;
+
+    expect(user['password']).toBe(REDACTION_FAILED_MARKER);
+    expect(user['name']).toBe('kev');
+  });
+
+  test('a cyclic params object is still redacted normally', () => {
+    // `deepClone` handles cycles, so this does not reach the fail-closed path — pinned
+    // so the case below is not mistaken for covering it.
+    const cyclic: Record<string, unknown> = { password: 'hunter2' };
+
+    cyclic['self'] = cyclic;
+
+    const result = applyRedaction(cyclic, ['password']);
+
+    expect(result['password']).not.toBe('hunter2');
+    expect(result['password']).not.toBe(REDACTION_FAILED_MARKER);
+  });
+
+  test('an uncopyable params object yields markers only, never the originals', () => {
+    // A throwing getter is something `deepClone` genuinely cannot copy, unlike a cycle.
+    const uncopyable = {
+      password: 'hunter2',
+      get boom(): never {
+        throw new Error('cannot read');
+      },
+    };
+
+    const result = applyRedaction(uncopyable, ['password']);
+
+    expect(result['password']).toBe(REDACTION_FAILED_MARKER);
+    expect(Object.values(result)).not.toContain('hunter2');
+  });
+
+  test('a revoked Proxy as params yields markers only', () => {
+    const revocable = Proxy.revocable({ password: 'hunter2' }, {});
+
+    revocable.revoke();
+
+    const result = applyRedaction(revocable.proxy, ['password']);
+
+    expect(result['password']).toBe(REDACTION_FAILED_MARKER);
   });
 });

@@ -22,6 +22,15 @@ export const defaultRedactFunction: RedactFunction = (
 };
 
 /**
+ * Substituted for a value whose redaction failed.
+ *
+ * Deliberately distinct from a successful mask: an operator seeing the ordinary `***`
+ * concludes redaction worked, so a broken `redactFunction` would hide itself. Redaction
+ * fails closed — the original value is never left in place — but it says so.
+ */
+export const REDACTION_FAILED_MARKER = '***REDACTION FAILED***';
+
+/**
  * Set a value at a nested path in an object
  */
 function setNestedValue(
@@ -119,25 +128,58 @@ export function applyRedaction(
 
   const redactFn = redactFunction || defaultRedactFunction;
 
-  // Deep clone to avoid mutating original
-  const redactedParams = deepClone(params);
+  // Deep clone to avoid mutating original.
+  //
+  // Guarded, and failing closed: `deepClone` runs over caller-supplied params and can
+  // throw on a structure it cannot copy. Returning the originals here would hand every
+  // sink — and the rendered message — the unredacted values, which is the one outcome
+  // redaction exists to prevent, so an uncopyable params object yields only markers for
+  // the redacted keys and nothing else. Losing the non-sensitive params from
+  // `redactedParams` is the price; `entry.params` still carries them for a sink that
+  // opts into the raw view.
+  let redactedParams: Record<string, unknown>;
+
+  try {
+    redactedParams = deepClone(params);
+  } catch {
+    return Object.fromEntries(
+      redactedKeys.map((key) => [key, REDACTION_FAILED_MARKER]),
+    );
+  }
 
   // Apply redaction to specified keys (supports nested object paths, array indexes, and quoted bracket keys)
   for (const key of redactedKeys) {
-    // Check if it's a nested key or array path
-    if (key.includes('.') || key.includes('[')) {
-      const value = getNestedValue(params, key);
+    // Every step here runs code this module does not own: `redactFn` is user-supplied,
+    // `stringifyTemplateValue` invokes `toString`, and reading or writing the path can
+    // trip an accessor or a `Proxy` trap. A failure must not propagate — `handleLog` is
+    // on a path that must not throw — and must never leave the original value in place,
+    // so the key is marked instead.
+    try {
+      // Check if it's a nested key or array path
+      if (key.includes('.') || key.includes('[')) {
+        const value = getNestedValue(params, key);
 
-      if (value !== undefined) {
-        const redactedValue = redactFn(key, stringifyTemplateValue(value));
-        setNestedValue(redactedParams, key, redactedValue);
+        if (value !== undefined) {
+          const redactedValue = redactFn(key, stringifyTemplateValue(value));
+          setNestedValue(redactedParams, key, redactedValue);
+        }
+      } else {
+        // Top-level key
+        if (key in params) {
+          redactedParams[key] = redactFn(
+            key,
+            stringifyTemplateValue(params[key]),
+          );
+        }
       }
-    } else {
-      // Top-level key
-      if (key in params) {
-        redactedParams[key] = redactFn(
-          key,
-          stringifyTemplateValue(params[key]),
+    } catch {
+      try {
+        setNestedValue(redactedParams, key, REDACTION_FAILED_MARKER);
+      } catch {
+        // The path cannot even be written. Drop every param rather than return a copy
+        // whose sensitive key still holds its original value.
+        return Object.fromEntries(
+          redactedKeys.map((failedKey) => [failedKey, REDACTION_FAILED_MARKER]),
         );
       }
     }

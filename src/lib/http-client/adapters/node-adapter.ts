@@ -1226,21 +1226,54 @@ function markStreamFactoryError(
   fallbackHeaders: Record<string, string | string[]>,
 ): Error {
   const normalized = normalizeError(error);
-  const tagged = normalized as Error &
-    Partial<
-      Record<typeof NON_RETRYABLE_HTTP_CLIENT_CALLBACK_ERROR_FLAG, boolean>
-    >;
-
-  tagged[NON_RETRYABLE_HTTP_CLIENT_CALLBACK_ERROR_FLAG] = true;
-  Object.assign(normalized, { [STREAM_FACTORY_ERROR_FLAG]: true });
-  Object.assign(normalized, {
+  const marks = {
+    [NON_RETRYABLE_HTTP_CLIENT_CALLBACK_ERROR_FLAG]: true,
+    [STREAM_FACTORY_ERROR_FLAG]: true,
     effectiveRequestHeaders: snapshotEffectiveRequestHeaders(
       req,
       fallbackHeaders,
     ),
-  });
+  };
 
-  return normalized;
+  // Tagged in place when possible, so the caller still sees the error its own
+  // `streamResponse` factory threw, with its identity and stack intact.
+  try {
+    Object.assign(normalized, marks);
+
+    return normalized;
+  } catch {
+    // The factory threw something frozen or sealed, and in strict mode assigning to it
+    // raises `TypeError: object is not extensible`. Falling through with an untagged
+    // error is the damaging outcome: the client reads both flags to classify this as a
+    // non-retryable `stream_setup_error`, so without them the failure lands in the
+    // generic retry arm and the factory is invoked again. A fresh carrier keeps the
+    // classification and preserves the original on `cause`, the same way
+    // `markResponseStreamAbort` does in the fetch adapter.
+  }
+
+  const carrier = new Error(
+    readErrorMessage(normalized) ?? 'Stream factory failed',
+    { cause: error },
+  );
+
+  const originalName = readObjectMember(normalized, 'name');
+
+  if (typeof originalName === 'string') {
+    carrier.name = originalName;
+  }
+
+  Object.assign(carrier, marks);
+
+  return carrier;
+}
+
+/** `message` is an ordinary property, so a frozen or exotic error may not yield one. */
+function readErrorMessage(error: Error): string | undefined {
+  const message = readObjectMember(error, 'message');
+
+  return typeof message === 'string' && message.length > 0
+    ? message
+    : undefined;
 }
 
 function markResponseStreamAbortError(
@@ -1303,9 +1336,18 @@ function normalizeError(value: unknown): Error {
     return value;
   }
 
+  // The value itself is kept as the cause: `String(value)` is lossy - a rejection with
+  // `{ code: 'E42' }` renders as `[object Object]` - and for a value whose `toString`
+  // threw it carries nothing at all, leaving the caller no way back to what was thrown.
+  // Behaviourally identical to `toError` in `to-error`, message included, kept local so
+  // the HTTP client does not import across module boundaries.
+  let description: string;
+
   try {
-    return new Error(String(value));
+    description = typeof value === 'string' ? value : String(value);
   } catch {
-    return new Error('Unknown error');
+    description = 'unknown value';
   }
+
+  return new Error(`Non-error value thrown: ${description}`, { cause: value });
 }

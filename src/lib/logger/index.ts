@@ -8,7 +8,7 @@ import {
 import { CurlyBrackets } from '../curly-brackets';
 import { isNumber } from '../is-number';
 import { isPromise } from '../is-promise';
-import { toError } from '../to-error';
+import { describeError, toError } from '../to-error';
 import type {
   LogEntry,
   LogSink,
@@ -20,7 +20,7 @@ import type {
 import type { HandleLogOptions } from './internal-types';
 import { ArraySink } from './sinks/array';
 import { ConsoleSink } from './sinks/console';
-import { applyRedaction } from './utils/redaction';
+import { applyRedaction, REDACTION_FAILED_MARKER } from './utils/redaction';
 import { prepareErrorObjectLog } from './utils/error-object';
 import { LoggerService } from './logger-service';
 
@@ -571,7 +571,7 @@ export class Logger extends EventEmitter {
         // from a listener whose whole job is reporting a failure. The console is the only
         // rung left, as it is for a failing sink.
         // eslint-disable-next-line no-console -- last resort on the reporting path
-        console.error(toError(error_).message);
+        console.error(describeError(error_));
       } finally {
         // Cleared in `finally` so a sink or handler that throws its way out cannot leave
         // the listener permanently deaf.
@@ -791,11 +791,29 @@ export class Logger extends EventEmitter {
     const tags = options?.tags;
     const redactedKeys = options?.redactedKeys;
 
-    // Process template and apply redaction
-    const redactedParams =
-      params && redactedKeys && redactedKeys.length > 0
-        ? applyRedaction(params, redactedKeys, this.redactFunction)
-        : undefined;
+    // Process template and apply redaction.
+    //
+    // Guarded because `applyRedaction` calls the user's `redactFunction` and stringifies
+    // caller-supplied values, neither of which this method can vouch for, and `handleLog`
+    // must not throw out of a `logger.info()`. It already fails closed per key; this is
+    // the backstop for a failure that escapes it entirely.
+    let redactedParams: Record<string, unknown> | undefined;
+
+    if (params && redactedKeys && redactedKeys.length > 0) {
+      try {
+        redactedParams = applyRedaction(
+          params,
+          redactedKeys,
+          this.redactFunction,
+        );
+      } catch {
+        // Never fall through to the raw params below: rendering the message from those
+        // would print the very values redaction was asked to hide, to every sink.
+        redactedParams = Object.fromEntries(
+          redactedKeys.map((key) => [key, REDACTION_FAILED_MARKER]),
+        );
+      }
+    }
 
     const messageParams = redactedParams ?? params;
     const message = messageParams
@@ -875,7 +893,7 @@ export class Logger extends EventEmitter {
     const cause = toError(error);
 
     const failure = new Error(
-      `Error in a logger event handler for ${event}: ${cause.message}`,
+      `Error in a logger event handler for ${event}: ${describeError(cause)}`,
       { cause },
     );
 
@@ -916,13 +934,15 @@ export class Logger extends EventEmitter {
       } catch {
         // Ignore errors in the error handler to prevent infinite loops
         // eslint-disable-next-line no-console
-        console.error(`Error in onSinkError handler: ${failure.message}`);
+        console.error(
+          `Error in onSinkError handler: ${describeError(failure)}`,
+        );
       }
     } else {
       // Fallback to console.error
       // eslint-disable-next-line no-console
       console.error(
-        `Error ${context === 'write' ? 'writing to' : 'closing'} sink: ${failure.message}`,
+        `Error ${context === 'write' ? 'writing to' : 'closing'} sink: ${describeError(failure)}`,
       );
     }
   }
@@ -953,5 +973,8 @@ export class Logger extends EventEmitter {
 
 // Re-export types and sinks
 export * from './types';
+// Exported so a sink can recognise a value whose redaction failed without hard-coding
+// the literal; see the redaction section of the logger docs.
+export { REDACTION_FAILED_MARKER } from './utils/redaction';
 export * from './sinks';
 export type { LoggerService } from './logger-service';
