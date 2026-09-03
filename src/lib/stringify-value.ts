@@ -1,4 +1,8 @@
-import { getPathParts } from './internal/path-utils';
+import {
+  matchRedactPath,
+  parseRedactPaths,
+  type RedactPath,
+} from './internal/redact-paths';
 import { stringifyTemplateValue } from './internal/stringify-template-value';
 import { maskValueDeep } from './internal/mask-value-deep';
 import { resolveRedaction } from './internal/resolve-redaction';
@@ -24,44 +28,6 @@ export interface StringifyValueOptions {
   redactFunction?: StringifyRedactFunction;
 }
 
-/** One parsed entry, kept with the text the caller wrote so it can be passed back. */
-interface RedactPath {
-  parts: string[];
-  entry: string;
-}
-
-function parsePaths(entries: string[]): RedactPath[] {
-  const paths: RedactPath[] = [];
-
-  for (const entry of entries) {
-    if (typeof entry !== 'string' || entry.length === 0) {
-      continue;
-    }
-
-    // A dotted or bracketed entry is ambiguous: it can name a nested location or one
-    // literal key spelled that way. Both readings are covered, as the logger does.
-    paths.push({ parts: [entry], entry });
-
-    if (entry.includes('.') || entry.includes('[')) {
-      const parts = getPathParts(entry);
-
-      if (parts !== null && parts.length > 0) {
-        paths.push({ parts, entry });
-      }
-    }
-  }
-
-  return paths;
-}
-
-function matchPath(paths: RedactPath[], path: string[]): string | undefined {
-  return paths.find(
-    (candidate) =>
-      candidate.parts.length === path.length &&
-      candidate.parts.every((part, index) => part === path[index]),
-  )?.entry;
-}
-
 /** Build a copy of `value` with every matched path masked, keeping the shape. */
 function redactPaths(
   value: unknown,
@@ -70,7 +36,7 @@ function redactPaths(
   redactFunction: StringifyRedactFunction | undefined,
   seen: WeakSet<object>,
 ): unknown {
-  const matched = matchPath(paths, path);
+  const matched = matchRedactPath(paths, path);
 
   if (matched !== undefined) {
     try {
@@ -172,7 +138,14 @@ export function stringifyValue(
       return stringifyTemplateValue(value);
     }
 
-    const paths = parsePaths(entries);
+    const paths = parseRedactPaths(entries);
+
+    // Fails closed, as `sensitiveFieldNames` does: a list that is present but unusable
+    // means the caller asked for masking and this cannot tell what for, so nothing is
+    // rendered rather than everything.
+    if (paths === null) {
+      return REDACTION_FAILED_MARKER;
+    }
 
     if (paths.length === 0) {
       return stringifyTemplateValue(value);

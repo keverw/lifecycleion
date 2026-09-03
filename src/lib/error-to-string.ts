@@ -1,6 +1,10 @@
 import type { NestedKeyValueEntry } from './ascii-tables/key-value-ascii-table';
 import { KeyValueASCIITable } from './ascii-tables/key-value-ascii-table';
-import { getPathParts } from './internal/path-utils';
+import {
+  matchRedactPath,
+  parseRedactPaths,
+  type RedactPath,
+} from './internal/redact-paths';
 import { REDACTION_FAILED_MARKER } from './internal/default-redact-function';
 import { resolveRedaction } from './internal/resolve-redaction';
 import { maskValueDeep } from './internal/mask-value-deep';
@@ -41,57 +45,6 @@ export interface ErrorToStringOptions {
  *          paths - which callers must treat as a reason to mask everything rather than
  *          to mask nothing.
  */
-interface SensitivePath {
-  /** Parsed segments, used for matching. */
-  parts: string[];
-  /** The entry exactly as the caller wrote it, handed to a custom `redactFunction`. */
-  entry: string;
-}
-
-function parseSensitivePaths(value: unknown): SensitivePath[] | null {
-  try {
-    if (!Array.isArray(value)) {
-      return null;
-    }
-
-    const paths: SensitivePath[] = [];
-
-    for (const entry of value as unknown[]) {
-      if (typeof entry !== 'string') {
-        return null;
-      }
-
-      const hasPathSyntax = entry.includes('.') || entry.includes('[');
-
-      if (!hasPathSyntax) {
-        // A bare name is a top-level key and is taken literally, without going through
-        // the path grammar. `getPathParts` only accepts `\w+` for an unquoted segment,
-        // so a perfectly ordinary name like `password-hash` fails to parse — and the
-        // logger's `redactedKeys` masks it happily via its own top-level branch.
-        paths.push({ parts: [entry], entry });
-
-        continue;
-      }
-
-      // An entry with path syntax is ambiguous: it can name a nested location or one
-      // literal key spelled that way. Both readings are covered, matching what
-      // `applyRedaction` does, since leaving either unmasked is the outcome this list
-      // exists to prevent.
-      paths.push({ parts: [entry], entry });
-
-      const parts = getPathParts(entry);
-
-      if (parts !== null && parts.length > 0) {
-        paths.push({ parts, entry });
-      }
-    }
-
-    return paths;
-  } catch {
-    return null;
-  }
-}
-
 /**
  * Replace a sensitive value for display.
  *
@@ -148,24 +101,6 @@ function maskSensitiveValue(
     // failed, which must read differently from a value that masked successfully.
     return REDACTION_FAILED_MARKER;
   }
-}
-
-/**
- * The originating entry when `path` matches one of the sensitive paths, else `undefined`.
- *
- * Returns the entry rather than a boolean so a custom `redactFunction` can be handed the
- * key the caller actually wrote - `user.password`, not the leaf `password` - which is what
- * the logger's `redactedKeys` passes for the same field.
- */
-function matchSensitivePath(
-  sensitive: SensitivePath[],
-  path: string[],
-): string | undefined {
-  return sensitive.find(
-    (candidate) =>
-      candidate.parts.length === path.length &&
-      candidate.parts.every((part, index) => part === path[index]),
-  )?.entry;
 }
 
 function readMember(value: Record<string, unknown>, key: string): unknown {
@@ -265,7 +200,7 @@ function errorToASCIITable(
   error: unknown,
   maxRowLength: number,
   seen: WeakSet<object>,
-  inheritedSensitive: SensitivePath[],
+  inheritedSensitive: RedactPath[],
   redactFunction: RedactFieldFunction | undefined,
 ): KeyValueASCIITable {
   const table = new KeyValueASCIITable({
@@ -305,7 +240,7 @@ function errorToASCIITable(
       const ownPaths =
         rawSensitive === undefined || rawSensitive === null
           ? []
-          : parseSensitivePaths(
+          : parseRedactPaths(
               rawSensitive === READ_THREW ? undefined : rawSensitive,
             );
 
@@ -346,7 +281,7 @@ function errorToASCIITable(
       }
 
       for (const key of keys) {
-        const matchedEntry = matchSensitivePath(sensitivePaths, [key]);
+        const matchedEntry = matchRedactPath(sensitivePaths, [key]);
 
         if (matchedEntry !== undefined) {
           table.addRow(
@@ -398,7 +333,7 @@ function stringifyValue(
   table: KeyValueASCIITable,
   maxRowLength: number,
   seen: WeakSet<object>,
-  sensitive: SensitivePath[],
+  sensitive: RedactPath[],
   path: string[],
   redactFunction: RedactFieldFunction | undefined,
 ): string | KeyValueASCIITable | NestedKeyValueEntry[] {
@@ -447,7 +382,7 @@ function stringifyValueInner(
   table: KeyValueASCIITable,
   maxRowLength: number,
   seen: WeakSet<object>,
-  sensitive: SensitivePath[],
+  sensitive: RedactPath[],
   path: string[],
   redactFunction: RedactFieldFunction | undefined,
 ): string | KeyValueASCIITable | NestedKeyValueEntry[] {
@@ -466,7 +401,7 @@ function stringifyValueInner(
     // Handle arrays differently
     return arrayValue
       .map((item, index) => {
-        const matchedEntry = matchSensitivePath(sensitive, [
+        const matchedEntry = matchRedactPath(sensitive, [
           ...path,
           String(index),
         ]);
@@ -539,7 +474,7 @@ function stringifyValueInner(
       // `sensitiveFieldNames` addresses a top-level key of `additionalInfo`, and reaching
       // a nested value takes a path such as `user.password` or `items[0].token`.
       const entries: NestedKeyValueEntry[] = ownEntries.map(([key, val]) => {
-        const matchedEntry = matchSensitivePath(sensitive, [...path, key]);
+        const matchedEntry = matchRedactPath(sensitive, [...path, key]);
 
         return {
           key,

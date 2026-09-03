@@ -1,5 +1,5 @@
 import { getPathParts } from './internal/path-utils';
-import { stringifyTemplateValue } from './internal/stringify-template-value';
+import { stringifyValue } from './stringify-value';
 
 export type TemplateFunction = (locals: Record<string, unknown>) => string;
 
@@ -112,7 +112,7 @@ CurlyBrackets.compileTemplate = function (
       }
 
       try {
-        return stringifyTemplateValue(replacement);
+        return stringifyValue(replacement);
       } catch {
         // `String()` invokes `toString`/`Symbol.toPrimitive`, both ordinary properties.
         return fallback;

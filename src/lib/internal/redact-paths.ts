@@ -1,0 +1,77 @@
+import { getPathParts } from './path-utils';
+
+/** One parsed redaction entry, kept with the text the caller wrote. */
+export interface RedactPath {
+  /** Parsed segments, used for matching. */
+  parts: string[];
+  /**
+   * The entry exactly as the caller wrote it. Handed to a custom `redactFunction` as the
+   * key, so it sees `user.password` rather than the leaf `password`.
+   */
+  entry: string;
+}
+
+/**
+ * Parse redaction entries into matchable paths.
+ *
+ * Shared so `sensitiveFieldNames` and `stringifyValue`'s `redactedKeys` agree on what an
+ * entry means, and on the logger's syntax: a bare name is a top-level key, and
+ * `user.password` or `items[0].token` addresses one location.
+ *
+ * @returns `null` when the list itself is unusable - not an array, or holding a
+ *          non-string. Callers must treat that as a reason to mask everything rather
+ *          than to mask nothing, since the caller asked for masking and this cannot tell
+ *          what for.
+ */
+export function parseRedactPaths(value: unknown): RedactPath[] | null {
+  try {
+    if (!Array.isArray(value)) {
+      return null;
+    }
+
+    const paths: RedactPath[] = [];
+
+    for (const entry of value as unknown[]) {
+      if (typeof entry !== 'string') {
+        return null;
+      }
+
+      // A bare name is a top-level key and is taken literally, without going through the
+      // path grammar. An unquoted segment must not contain a delimiter, so an ordinary
+      // name like `password-hash` is fine here but would need quoting inside a path.
+      paths.push({ parts: [entry], entry });
+
+      if (entry.includes('.') || entry.includes('[')) {
+        // An entry with path syntax is ambiguous: it can name a nested location or one
+        // literal key spelled that way. Both readings are covered, since leaving either
+        // unmasked is the outcome redaction exists to prevent.
+        const parts = getPathParts(entry);
+
+        if (parts !== null && parts.length > 0) {
+          paths.push({ parts, entry });
+        }
+      }
+    }
+
+    return paths;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The originating entry when `path` matches one of `paths`, else `undefined`.
+ *
+ * Returns the entry rather than a boolean so a custom `redactFunction` can be handed the
+ * key the caller actually wrote.
+ */
+export function matchRedactPath(
+  paths: RedactPath[],
+  path: string[],
+): string | undefined {
+  return paths.find(
+    (candidate) =>
+      candidate.parts.length === path.length &&
+      candidate.parts.every((part, index) => part === path[index]),
+  )?.entry;
+}
