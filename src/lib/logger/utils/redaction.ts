@@ -1,5 +1,5 @@
-import datamask from 'datamask';
 import { deepClone } from '../../deep-clone';
+import { defaultRedactValue } from '../../internal/default-redact-function';
 import { getPathParts } from '../../internal/path-utils';
 import { stringifyTemplateValue } from '../../internal/stringify-template-value';
 import type { RedactFunction } from '../types';
@@ -8,18 +8,7 @@ import type { RedactFunction } from '../types';
  * Default redaction function using datamask
  * Masks sensitive values with asterisks
  */
-export const defaultRedactFunction: RedactFunction = (
-  _keyName: string,
-  value: unknown,
-): unknown => {
-  if (typeof value === 'string') {
-    return datamask.string(value, '*', 60);
-  }
-
-  // Defensive fallback for direct callers bypassing applyRedaction.
-  // Ideally, this should never be reached.
-  return '***REDACTED***';
-};
+export const defaultRedactFunction: RedactFunction = defaultRedactValue;
 
 /**
  * Substituted for a value whose redaction failed.
@@ -128,6 +117,21 @@ export function applyRedaction(
 
   const redactFn = redactFunction || defaultRedactFunction;
 
+  /**
+   * Apply the caller's function, deferring to the default when it declines.
+   *
+   * `null` (or nothing at all) means "use the default for this one", so a caller can
+   * special-case a few keys without reproducing the default masking for the rest. To
+   * render a literal null, return the string.
+   */
+  const redactValue = (fieldKey: string, value: unknown): unknown => {
+    const masked = redactFn(fieldKey, value);
+
+    return masked === null || masked === undefined
+      ? defaultRedactValue(fieldKey, value)
+      : masked;
+  };
+
   // Deep clone to avoid mutating original.
   //
   // Guarded, and failing closed: `deepClone` runs over caller-supplied params and can
@@ -160,7 +164,7 @@ export function applyRedaction(
         const value = getNestedValue(params, key);
 
         if (value !== undefined) {
-          const redactedValue = redactFn(key, stringifyTemplateValue(value));
+          const redactedValue = redactValue(key, stringifyTemplateValue(value));
           setNestedValue(redactedParams, key, redactedValue);
         }
 
@@ -171,7 +175,7 @@ export function applyRedaction(
         // Both are covered rather than one or the other: the entry is ambiguous, and
         // leaving either reading unredacted is the outcome redaction exists to prevent.
         if (key in params) {
-          redactedParams[key] = redactFn(
+          redactedParams[key] = redactValue(
             key,
             stringifyTemplateValue(params[key]),
           );
@@ -179,7 +183,7 @@ export function applyRedaction(
       } else {
         // Top-level key
         if (key in params) {
-          redactedParams[key] = redactFn(
+          redactedParams[key] = redactValue(
             key,
             stringifyTemplateValue(params[key]),
           );

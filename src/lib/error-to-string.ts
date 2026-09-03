@@ -1,6 +1,25 @@
 import type { NestedKeyValueEntry } from './ascii-tables/key-value-ascii-table';
 import { KeyValueASCIITable } from './ascii-tables/key-value-ascii-table';
 import { getPathParts } from './internal/path-utils';
+import { defaultRedactValue } from './internal/default-redact-function';
+
+/**
+ * Produces the replacement shown for a value named by `sensitiveFieldNames`.
+ *
+ * Mirrors the shape of the logger's `redactFunction`, so the same function can be used
+ * for both, and it defers the same way: return `null` (or nothing at all) to fall back to
+ * the default masking for that value, rather than having to reproduce it.
+ */
+export type RedactFieldFunction = (key: string, value: unknown) => unknown;
+
+/** Options for {@link errorToString}. */
+export interface ErrorToStringOptions {
+  /**
+   * See {@link RedactFieldFunction}. Defaults to the same masking the logger applies, so
+   * a value renders identically whether it went through a log line or a rendered error.
+   */
+  redactFunction?: RedactFieldFunction;
+}
 
 /**
  * Read a property off a value without trusting it.
@@ -60,6 +79,44 @@ function parseSensitivePaths(value: unknown): string[][] | null {
     return paths;
   } catch {
     return null;
+  }
+}
+
+/**
+ * Replace a sensitive value for display.
+ *
+ * The default is the same masking the logger applies, so the same value renders
+ * identically whether it went through a log line or a rendered error. A custom function
+ * is handed the key and the value, and may return `null` to defer to that default for
+ * this one value.
+ *
+ * Fully guarded: reading the value runs an accessor this module does not own, and the
+ * function itself is caller code. Either failing falls back to `***`, never to the
+ * original value.
+ */
+function maskSensitive(
+  key: string,
+  readValue: () => unknown,
+  redactFunction: RedactFieldFunction | undefined,
+): string {
+  try {
+    const value = readValue();
+
+    // `null`/`undefined` from a custom function means "use the default for this one", so
+    // a caller can special-case a few keys without reproducing the default masking for
+    // everything else. To render a literal null, return the string.
+    const custom =
+      redactFunction === undefined ? null : redactFunction(key, value);
+
+    const masked =
+      custom === null || custom === undefined
+        ? defaultRedactValue(key, value)
+        : custom;
+
+    return typeof masked === 'string' ? masked : safeStringify(masked);
+  } catch {
+    // Reading the value or the function itself failed. Never fall back to the original.
+    return '***';
   }
 }
 
@@ -145,9 +202,19 @@ function stringifyPrimitive(value: unknown): string {
  * can still exhaust the stack, and a `RangeError` from that must not escape a caller
  * whose only job was reporting a failure.
  */
-export function errorToString(error: unknown, maxRowLength = 80): string {
+export function errorToString(
+  error: unknown,
+  maxRowLength = 80,
+  options?: ErrorToStringOptions,
+): string {
   try {
-    const table = errorToASCIITable(error, maxRowLength, new WeakSet(), []);
+    const table = errorToASCIITable(
+      error,
+      maxRowLength,
+      new WeakSet(),
+      [],
+      options?.redactFunction,
+    );
 
     return table.toString();
   } catch {
@@ -160,6 +227,7 @@ function errorToASCIITable(
   maxRowLength: number,
   seen: WeakSet<object>,
   inheritedSensitive: string[][],
+  redactFunction: RedactFieldFunction | undefined,
 ): KeyValueASCIITable {
   const table = new KeyValueASCIITable({
     tableWidth: maxRowLength,
@@ -240,15 +308,24 @@ function errorToASCIITable(
 
       for (const key of keys) {
         if (isSensitivePath(sensitivePaths, [key])) {
-          table.addRow(`AdditionalInfo.${key}`, '***');
+          table.addRow(
+            `AdditionalInfo.${key}`,
+            maskSensitive(key, () => readMember(info, key), redactFunction),
+          );
         } else {
           const value = readMember(info, key);
 
           table.addRow(
             `AdditionalInfo.${key}`,
-            stringifyValue(value, table, maxRowLength, seen, sensitivePaths, [
-              key,
-            ]),
+            stringifyValue(
+              value,
+              table,
+              maxRowLength,
+              seen,
+              sensitivePaths,
+              [key],
+              redactFunction,
+            ),
           );
         }
       }
@@ -271,6 +348,7 @@ function stringifyValue(
   seen: WeakSet<object>,
   sensitive: string[][],
   path: string[],
+  redactFunction: RedactFieldFunction | undefined,
 ): string | KeyValueASCIITable | NestedKeyValueEntry[] {
   if (typeof value === 'string') {
     return value;
@@ -303,6 +381,7 @@ function stringifyValue(
       seen,
       sensitive,
       path,
+      redactFunction,
     );
   } finally {
     if (isTracked) {
@@ -318,6 +397,7 @@ function stringifyValueInner(
   seen: WeakSet<object>,
   sensitive: string[][],
   path: string[],
+  redactFunction: RedactFieldFunction | undefined,
 ): string | KeyValueASCIITable | NestedKeyValueEntry[] {
   let arrayValue: unknown[] | null;
 
@@ -335,7 +415,7 @@ function stringifyValueInner(
     return arrayValue
       .map((item, index) => {
         if (isSensitivePath(sensitive, [...path, String(index)])) {
-          return '***';
+          return maskSensitive(String(index), () => item, redactFunction);
         }
 
         const result = stringifyValue(
@@ -345,6 +425,7 @@ function stringifyValueInner(
           seen,
           sensitive,
           [...path, String(index)],
+          redactFunction,
         );
         // Convert complex types to strings for joining
         if (typeof result === 'string') {
@@ -369,7 +450,13 @@ function stringifyValueInner(
     if (isError) {
       // A nested error starts a fresh path root; the parent's entries address it as a
       // whole, which is handled by the caller before recursing here.
-      return errorToASCIITable(value, maxRowLength - 4, seen, []);
+      return errorToASCIITable(
+        value,
+        maxRowLength - 4,
+        seen,
+        [],
+        redactFunction,
+      );
     } else {
       // Handle objects differently
       let ownEntries: [string, unknown][];
@@ -386,11 +473,16 @@ function stringifyValueInner(
       const entries: NestedKeyValueEntry[] = ownEntries.map(([key, val]) => ({
         key,
         value: isSensitivePath(sensitive, [...path, key])
-          ? '***'
-          : stringifyValue(val, table, maxRowLength - 4, seen, sensitive, [
-              ...path,
-              key,
-            ]),
+          ? maskSensitive(key, () => val, redactFunction)
+          : stringifyValue(
+              val,
+              table,
+              maxRowLength - 4,
+              seen,
+              sensitive,
+              [...path, key],
+              redactFunction,
+            ),
       }));
 
       return entries;

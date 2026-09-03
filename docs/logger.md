@@ -480,6 +480,18 @@ logger.info('API call', {
 // apiKey will be masked as: [REDACTED-apiKey]
 ```
 
+Return `null`, or nothing at all, to defer to the default masking for that value, so you can special-case a few keys without reproducing the default for the rest:
+
+```typescript
+const logger = new Logger({
+  sinks: [new ConsoleSink({ colors: true })],
+  redactFunction: (key, _value) => (key === 'apiKey' ? '[hidden]' : null),
+});
+// apiKey → [hidden]; every other redacted key gets the default masking
+```
+
+To render a literal null, return the string `'null'`. The same function and the same deferral rule work with [`errorToString`](./error-to-string.md#choosing-how-values-are-masked), which shares this default.
+
 #### Redaction fails closed
 
 Your `redactFunction` is your code, and the values it is handed are your callers' - either

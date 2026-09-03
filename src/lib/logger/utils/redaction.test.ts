@@ -465,6 +465,38 @@ describe('applyRedaction - ambiguous dotted keys', () => {
   });
 });
 
+describe('applyRedaction - redactFunction deferral', () => {
+  test('null defers to the default masking', () => {
+    const result = applyRedaction(
+      { p: 'hunter2secret', other: 'hunter2secret' },
+      ['p', 'other'],
+      (key) => (key === 'other' ? 'CUSTOM' : null),
+    );
+
+    expect(result['other']).toBe('CUSTOM');
+    expect(result['p']).toBe(
+      applyRedaction({ p: 'hunter2secret' }, ['p'])['p'],
+    );
+    expect(result['p']).not.toBe('hunter2secret');
+  });
+
+  test('returning nothing also defers to the default', () => {
+    const result = applyRedaction(
+      { p: 'hunter2secret' },
+      ['p'],
+      () => undefined,
+    );
+
+    expect(result['p']).toBe(
+      applyRedaction({ p: 'hunter2secret' }, ['p'])['p'],
+    );
+  });
+
+  test('a literal null is rendered by returning the string', () => {
+    expect(applyRedaction({ p: 'x' }, ['p'], () => 'null')['p']).toBe('null');
+  });
+});
+
 describe('applyRedaction - fail closed', () => {
   test('a literal dotted key still fails closed when redaction throws', () => {
     // The catch writes through `setNestedValue`, which re-parses the key as a path and

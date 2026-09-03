@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'bun:test';
 import { errorToString } from './error-to-string';
+import { applyRedaction } from './logger/utils/redaction';
 import { EOL } from './constants';
 
 class MyPrefixErrTestErr extends Error {
@@ -256,6 +257,113 @@ describe('errorToString', () => {
       });
 
       expect(render({ cause: inner }, ['cause']).includes(SECRET)).toBe(false);
+    });
+  });
+
+  describe('sensitiveFieldNames redactFunction option', () => {
+    const SEC = 'hunter2secret';
+
+    const mk = (info: unknown, names: string[]): Error =>
+      Object.assign(new Error('x'), {
+        additionalInfo: info,
+        sensitiveFieldNames: names,
+      });
+
+    it('should default to the same masking the logger applies', () => {
+      const rendered = errorToString(mk({ p: SEC }, ['p']));
+
+      expect(rendered).not.toContain(SEC);
+      // Byte-for-byte what `applyRedaction` produces for the same value.
+      expect(rendered).toContain(
+        String(applyRedaction({ p: SEC }, ['p'])['p']),
+      );
+    });
+
+    it('should defer to the default when the function returns null', () => {
+      const rendered = errorToString(
+        mk({ p: SEC, other: SEC }, ['p', 'other']),
+        80,
+        {
+          redactFunction: (key) => (key === 'other' ? 'CUSTOM' : null),
+        },
+      );
+
+      expect(rendered).toContain('CUSTOM');
+      expect(rendered).toContain(
+        String(applyRedaction({ p: SEC }, ['p'])['p']),
+      );
+      expect(rendered).not.toContain(SEC);
+    });
+
+    it('should defer to the default when the function returns nothing', () => {
+      const rendered = errorToString(mk({ p: SEC }, ['p']), 80, {
+        redactFunction: () => undefined,
+      });
+
+      expect(rendered).toContain(
+        String(applyRedaction({ p: SEC }, ['p'])['p']),
+      );
+      expect(rendered).not.toContain(SEC);
+    });
+
+    it('should use a custom redactFunction at every depth', () => {
+      const shapes: [unknown, string[]][] = [
+        [{ u: { p: SEC } }, ['u.p']],
+        [{ items: [SEC] }, ['items[0]']],
+        [{ items: [{ tok: SEC }] }, ['items[0].tok']],
+        [{ a: { b: { c: SEC } } }, ['a.b.c']],
+      ];
+
+      for (const [info, names] of shapes) {
+        const rendered = errorToString(mk(info, names), 80, {
+          redactFunction: () => 'XXMASKEDXX',
+        });
+
+        expect(rendered).toContain('XXMASKEDXX');
+        expect(rendered).not.toContain(SEC);
+      }
+    });
+
+    it('should receive the key and value', () => {
+      const seen: [string, unknown][] = [];
+
+      errorToString(mk({ p: SEC }, ['p']), 80, {
+        redactFunction: (key, value) => {
+          seen.push([key, value]);
+
+          return '***';
+        },
+      });
+
+      expect(seen).toEqual([['p', SEC]]);
+    });
+
+    it('should fall back to *** when the redactFunction throws', () => {
+      const rendered = errorToString(mk({ p: SEC }, ['p']), 80, {
+        redactFunction: () => {
+          throw new Error('boom');
+        },
+      });
+
+      expect(rendered).toContain('***');
+      expect(rendered).not.toContain(SEC);
+    });
+
+    it('should not leak when reading the value throws', () => {
+      const info = {};
+
+      Object.defineProperty(info, 'p', {
+        get() {
+          throw new Error('nope');
+        },
+        enumerable: true,
+      });
+
+      expect(
+        errorToString(mk(info, ['p']), 80, {
+          redactFunction: (_key, value) => String(value),
+        }),
+      ).not.toContain(SEC);
     });
   });
 
