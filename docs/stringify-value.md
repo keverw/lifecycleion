@@ -1,12 +1,13 @@
 # stringify-value
 
-Render any value as a display string, optionally redacting parts of it first. The rendering every Lifecycleion module uses, exported so an application can produce the same text.
+Render any value as a display string, or return it with parts redacted. The rendering and masking every Lifecycleion module uses, exported so an application can produce the same output.
 
 <!-- toc -->
 
 - [Usage](#usage)
 - [API](#api)
   - [stringifyValue](#stringifyvalue)
+  - [redactValue](#redactvalue)
 - [How values render](#how-values-render)
 - [Redacting while rendering](#redacting-while-rendering)
 - [Notes](#notes)
@@ -16,7 +17,7 @@ Render any value as a display string, optionally redacting parts of it first. Th
 ## Usage
 
 ```typescript
-import { stringifyValue } from 'lifecycleion/stringify-value';
+import { redactValue, stringifyValue } from 'lifecycleion/stringify-value';
 ```
 
 ## API
@@ -31,6 +32,26 @@ function stringifyValue(
 ```
 
 Never throws. A value that resists rendering degrades to a placeholder rather than raising an error out of whatever was trying to describe it.
+
+### redactValue
+
+```typescript
+function redactValue(value: unknown, options?: StringifyValueOptions): unknown;
+```
+
+The masking half, for a caller that wants the **structure** back rather than text - to inspect it, hand it to their own sink, or serialize it themselves. Takes the same options, so the two compose:
+
+```typescript
+const options = { redactedKeys: ['user.password'] };
+
+redactValue({ user: { password: 'hunter2secret' } }, options);
+// { user: { password: 'h***********t' } }   <- an object, shape intact
+
+// Rendering an already-masked structure is the same as masking while rendering.
+stringifyValue(redactValue(value, options)) === stringifyValue(value, options);
+```
+
+The value passed in is never modified; a copy is built. A failure yields the redaction marker rather than the original value.
 
 ## How values render
 
@@ -84,4 +105,5 @@ The value you pass is never modified - redaction builds a copy.
 ## Notes
 
 - The same rendering backs template interpolation in [curly-brackets](./curly-brackets.md) and the logger's message text, so a value reads the same everywhere.
+- `redactValue`, `stringifyValue` and the logger's `redactedKeys` share one implementation, so a `redactFunction` behaves identically in all three.
 - Redaction fails closed. A `redactFunction` that throws, or a value that cannot be read, yields `***REDACTION FAILED***` rather than the original.

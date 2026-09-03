@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { stringifyValue } from './stringify-value';
+import { redactValue, stringifyValue } from './stringify-value';
 import { applyRedaction } from './logger/utils/redaction';
 
 const SECRET = 'hunter2secret';
@@ -131,5 +131,87 @@ describe('stringifyValue - redaction', () => {
     const rendered = stringifyValue(cyclic, { redactedKeys: ['password'] });
 
     expect(rendered).not.toContain(SECRET);
+  });
+});
+
+describe('redactValue', () => {
+  test('returns the masked structure, not text', () => {
+    const masked = redactValue(
+      { user: { password: SECRET } },
+      { redactedKeys: ['user.password'] },
+    ) as { user: { password: string } };
+
+    expect(typeof masked).toBe('object');
+    expect(masked.user.password).not.toBe(SECRET);
+  });
+
+  test('keeps container shape', () => {
+    const masked = redactValue(
+      { list: [SECRET, SECRET], obj: { a: SECRET } },
+      { redactedKeys: ['list', 'obj'] },
+    ) as { list: unknown[]; obj: Record<string, unknown> };
+
+    expect(Array.isArray(masked.list)).toBe(true);
+    expect(masked.list.length).toBe(2);
+    expect(typeof masked.obj).toBe('object');
+    expect(JSON.stringify(masked)).not.toContain(SECRET);
+  });
+
+  test('never modifies the value passed in', () => {
+    const value = { user: { password: SECRET } };
+
+    redactValue(value, { redactedKeys: ['user.password'] });
+
+    expect(value.user.password).toBe(SECRET);
+  });
+
+  test('returns the value untouched with no redactedKeys', () => {
+    const value = { a: 1 };
+
+    expect(redactValue(value)).toBe(value);
+  });
+
+  test('composes with stringifyValue', () => {
+    const options = { redactedKeys: ['user.password'] };
+    const value = { user: { password: SECRET } };
+
+    // Rendering an already-masked structure must equal masking while rendering.
+    expect(stringifyValue(redactValue(value, options))).toBe(
+      stringifyValue(value, options),
+    );
+  });
+
+  test('honours the same redactFunction contract as stringifyValue', () => {
+    const value = { e: 'johndoe@example.com' };
+
+    const shapes: ((key: string, item: unknown) => unknown)[] = [
+      () => null,
+      () => 40,
+      () => ({ strategy: 'email' as const }),
+      () => 'LITERAL',
+    ];
+
+    for (const redactFunction of shapes) {
+      const options = { redactedKeys: ['e'], redactFunction };
+
+      expect(JSON.stringify(redactValue(value, options))).toBe(
+        stringifyValue(value, options),
+      );
+    }
+  });
+
+  test('fails closed rather than returning the original', () => {
+    const masked = redactValue(
+      { p: SECRET },
+      {
+        redactedKeys: ['p'],
+        redactFunction: () => {
+          throw new Error('boom');
+        },
+      },
+    );
+
+    expect(JSON.stringify(masked)).not.toContain(SECRET);
+    expect(JSON.stringify(masked)).toContain('REDACTION FAILED');
   });
 });
