@@ -1,10 +1,8 @@
 import type { NestedKeyValueEntry } from './ascii-tables/key-value-ascii-table';
 import { KeyValueASCIITable } from './ascii-tables/key-value-ascii-table';
 import { getPathParts } from './internal/path-utils';
-import {
-  defaultRedactValue,
-  REDACTION_FAILED_MARKER,
-} from './internal/default-redact-function';
+import { REDACTION_FAILED_MARKER } from './internal/default-redact-function';
+import { resolveRedaction } from './internal/resolve-redaction';
 import { maskValueDeep } from './internal/mask-value-deep';
 
 /**
@@ -135,18 +133,9 @@ function maskSensitiveValue(
     // Each leaf is stringified before the function sees it, exactly as `applyRedaction`
     // does, so one function receives identical arguments from both - and so a mutating
     // function cannot reach into the caller's own error object.
-    const masked = maskValueDeep(entry, readValue(), (key, leaf, isDerived) => {
-      const custom =
-        redactFunction === undefined ? null : redactFunction(key, leaf);
-
-      if (custom !== null) {
-        return custom;
-      }
-
-      // See `MaskLeaf`: a derived string is replaced outright, never masked
-      // proportionally, since its ends are where a secret tends to survive.
-      return isDerived ? '***REDACTED***' : defaultRedactValue(key, leaf);
-    });
+    const masked = maskValueDeep(entry, readValue(), (key, leaf, isDerived) =>
+      resolveRedaction(key, leaf, isDerived, redactFunction),
+    );
 
     if (masked === null || typeof masked !== 'object') {
       return typeof masked === 'string' ? masked : safeStringify(masked);

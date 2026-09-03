@@ -19,6 +19,8 @@ A modern, flexible logging library with sink-based architecture, template string
     - [Nested Object Redaction](#nested-object-redaction)
     - [Custom Redaction Function](#custom-redaction-function)
     - [Redaction fails closed](#redaction-fails-closed)
+    - [Controlling how a value is masked](#controlling-how-a-value-is-masked)
+    - [What the default reveals](#what-the-default-reveals)
   - [Tags for Categorization and Filtering](#tags-for-categorization-and-filtering)
     - [Use Cases](#use-cases)
     - [Notes](#notes)
@@ -535,6 +537,50 @@ substituted. A sink that wants to detect the condition should compare against th
 constant rather than hard-coding the literal.
 
 The guarantee is about redaction _failing_: a key that this attempts to redact never keeps its original value. It is not a guarantee that every sensitive value is found. A `redactedKeys` entry that does not resolve to anything in `params` redacts nothing and is skipped, exactly as it always was, so a typo such as `'password.'` silently protects nothing. A dotted entry is treated as ambiguous and both readings are covered: `'user.password'` redacts the nested `params.user.password` _and_ a literal key spelled `'user.password'`, when either exists.
+
+#### Controlling how a value is masked
+
+A `redactFunction` does not have to produce the masked text itself. What it returns decides:
+
+| return        | meaning                                              |
+| ------------- | ---------------------------------------------------- |
+| a `string`    | used literally as the replacement                    |
+| `null`        | use the default masking                              |
+| a `number`    | use the default masking at that percent, e.g. `70`   |
+| an object     | a masking request, see below                         |
+| anything else | used literally, so returning nothing drops the value |
+
+A masking request asks for the library's own masking with different settings:
+
+```typescript
+interface RedactMaskConfig {
+  strategy?: 'string' | 'email' | 'domain'; // default 'string'
+  percent?: number; // 0-100, default 90
+  maskChar?: string; // default '*'
+  userPercent?: number; // 'email' only, falls back to percent
+  domainPercent?: number; // 'email' only, falls back to percent
+}
+```
+
+`'email'` keeps the `@` and the dots so an address stays recognizable as one, and `'domain'` does the same for a hostname. The default `'string'` masks a proportion of the whole value, which mangles both.
+
+```typescript
+redactFunction: (key) => {
+  if (key === 'email') return { strategy: 'email' };
+  if (key === 'apiKey') return { percent: 100 };
+  return null; // everything else gets the default
+};
+```
+
+The `redactedKeys` list decides _what_ is redacted; this decides _how_, and only for the keys you single out.
+
+Masking never returns the original. A request that would hide nothing - a percent of `0`, a value too short to mask proportionally, an address `email` cannot parse - falls through to `***REDACTED***` instead.
+
+#### What the default reveals
+
+The default masks 90% of a value, so a little survives at each end and the same secret can be correlated across log lines without being readable. A short string (under 8 characters) is replaced with `***REDACTED***` outright, since a proportional mask of something that short hides almost nothing.
+
+Partial masking applies **only to values that were genuinely strings**. A number, an object, a function, or a symbol reaches the masker as a _produced_ string, and proportional masking keeps its ends - which for a card number is the BIN prefix and last four, and for a `URL` is the query string. Those are replaced with `***REDACTED***`. Return a masking request to opt a specific value back into partial masking.
 
 ### Tags for Categorization and Filtering
 

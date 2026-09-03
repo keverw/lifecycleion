@@ -420,6 +420,37 @@ describe('errorToString', () => {
       );
     });
 
+    it('should honour every redactFunction return shape, like the logger', () => {
+      const token = 'sk-live-51H8x9QcAbCdEf';
+
+      // Same contract as `redactedKeys`, verified against it rather than restated.
+      const shapes: ((key: string, value: unknown) => unknown)[] = [
+        () => null,
+        () => 20,
+        () => ({ percent: 50, maskChar: '#' }),
+        () => ({ strategy: 'email' as const }),
+        () => 'LITERAL',
+      ];
+
+      for (const redactFunction of shapes) {
+        const fromLogger = String(
+          applyRedaction({ p: token }, ['p'], redactFunction)['p'],
+        );
+        const rendered = errorToString(mk({ p: token }, ['p']), 140, {
+          redactFunction,
+        });
+
+        expect(rendered).toContain(fromLogger);
+        expect(rendered).not.toContain(token);
+      }
+    });
+
+    it('should not partially mask a number', () => {
+      expect(
+        errorToString(mk({ p: 4111111111111111 }, ['p']), 90),
+      ).not.toContain('1111');
+    });
+
     it('should report a failed mask with the same marker the logger uses', () => {
       const rendered = errorToString(mk({ p: 'secretvalue' }, ['p']), 80, {
         redactFunction: () => {

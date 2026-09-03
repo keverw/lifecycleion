@@ -69,15 +69,11 @@ export function maskValueDeep(
   // Tested by prototype rather than with `is-plain-object`, which accepts an `Error` and
   // a `Date` too. Guarded because reading the prototype of a revoked `Proxy` throws.
   if (!isWalkableContainer(value)) {
-    // Anything whose string form is *produced* rather than being the value itself. An
-    // object, but also a function and a symbol: `String()` on either renders source text
-    // or a description that can carry a secret, and proportional masking preserves the
-    // ends of it. A primitive string is the one thing that is not derived.
-    const isDerived =
-      value !== null &&
-      (typeof value === 'object' ||
-        typeof value === 'function' ||
-        typeof value === 'symbol');
+    // Partial masking is only ever right for a value that was genuinely a string.
+    // Everything else - a number, an object, a function, a symbol - reaches the mask as
+    // a *produced* string, and proportional masking keeps its ends: a card number kept
+    // its BIN prefix and last four, a `URL` kept its query.
+    const isDerived = typeof value !== 'string';
 
     return mask(key, stringifyTemplateValue(value), isDerived);
   }

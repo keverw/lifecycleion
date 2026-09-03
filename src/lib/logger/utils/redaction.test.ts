@@ -204,7 +204,7 @@ describe('applyRedaction', () => {
 
     expect((redacted.users as any)[0].name).toBe('Alice');
     expect((redacted.users as any)[0].password).not.toBe('secret123');
-    expect((redacted.users as any)[0].password).toBe('se*****23');
+    expect((redacted.users as any)[0].password).toBe('********3');
     expect((redacted.users as any)[1].password).toBe('secret456');
   });
 
@@ -221,7 +221,7 @@ describe('applyRedaction', () => {
 
     expect((redacted.sessions as any)[0].tokens[0]).toBe('public-token');
     expect((redacted.sessions as any)[0].tokens[1]).not.toBe('secret-token');
-    expect((redacted.sessions as any)[0].tokens[1]).toBe('se*******ken');
+    expect((redacted.sessions as any)[0].tokens[1]).toBe('s**********n');
   });
 
   test('should redact quoted bracket-key paths', () => {
@@ -241,8 +241,8 @@ describe('applyRedaction', () => {
       'credentials["api-key"]',
     ]);
 
-    expect((redacted.users as any)[0]['password-hash']).toBe('se*****23');
-    expect((redacted.credentials as any)['api-key']).toBe('se*******ken');
+    expect((redacted.users as any)[0]['password-hash']).toBe('********3');
+    expect((redacted.credentials as any)['api-key']).toBe('s**********n');
   });
 
   test('should treat dot notation and quoted bracket notation as equivalent for the same key', () => {
@@ -255,8 +255,8 @@ describe('applyRedaction', () => {
     const dotRedacted = applyRedaction(params, ['user.password']);
     const bracketRedacted = applyRedaction(params, ['user["password"]']);
 
-    expect((dotRedacted.user as any).password).toBe('se*****23');
-    expect((bracketRedacted.user as any).password).toBe('se*****23');
+    expect((dotRedacted.user as any).password).toBe('********3');
+    expect((bracketRedacted.user as any).password).toBe('********3');
     expect(dotRedacted).toEqual(bracketRedacted);
   });
 
@@ -565,6 +565,83 @@ describe('applyRedaction - containers keep their shape', () => {
     expect(p['first']?.['a']).not.toBe('topsecretvalue');
     expect(p['second']?.['a']).toEqual(p['first']?.['a']);
     expect(p['second']).not.toBe('***REDACTED***');
+  });
+});
+
+describe('applyRedaction - redactFunction return shapes', () => {
+  const TOKEN = 'sk-live-51H8x9QcAbCdEf';
+  const EMAIL = 'johndoe@example.com';
+
+  test('a number defers to the default at that percent', () => {
+    const loose = applyRedaction({ p: TOKEN }, ['p'], () => 20)['p'] as string;
+    const tight = applyRedaction({ p: TOKEN }, ['p'], () => 95)['p'] as string;
+
+    expect(loose).not.toBe(TOKEN);
+    expect(tight).not.toBe(TOKEN);
+    // A higher percent hides more, so fewer original characters survive.
+    const surviving = (masked: string): number =>
+      [...masked].filter((character) => character !== '*').length;
+
+    expect(surviving(tight)).toBeLessThan(surviving(loose));
+  });
+
+  test('a config selects the email strategy, keeping the @ and dots', () => {
+    const masked = applyRedaction({ p: EMAIL }, ['p'], () => ({
+      strategy: 'email',
+    }))['p'] as string;
+
+    expect(masked).not.toBe(EMAIL);
+    expect(masked).not.toContain('johndoe');
+    // The structure survives so an address stays recognizable as one.
+    expect(masked).toContain('@');
+    expect(masked).toContain('.');
+  });
+
+  test('a config selects the domain strategy', () => {
+    const masked = applyRedaction({ p: 'api.example.com' }, ['p'], () => ({
+      strategy: 'domain',
+    }))['p'] as string;
+
+    expect(masked).not.toBe('api.example.com');
+    expect(masked).toContain('.');
+  });
+
+  test('a config can set the mask character and percent', () => {
+    const masked = applyRedaction({ p: TOKEN }, ['p'], () => ({
+      maskChar: '#',
+      percent: 50,
+    }))['p'] as string;
+
+    expect(masked).toContain('#');
+    expect(masked).not.toContain('*');
+    expect(masked).not.toBe(TOKEN);
+  });
+
+  test('a config opts a non-string back into partial masking', () => {
+    // A number is replaced outright by default; asking for a percent is deliberate.
+    expect(applyRedaction({ p: 4111111111111111 }, ['p'])['p']).toBe(
+      '***REDACTED***',
+    );
+    expect(
+      applyRedaction({ p: 4111111111111111 }, ['p'], () => ({ percent: 60 }))[
+        'p'
+      ],
+    ).not.toBe('***REDACTED***');
+  });
+
+  test('a masking that hides nothing falls through to the placeholder', () => {
+    // Percent 0 would hand back the original, which is the one unacceptable answer.
+    expect(applyRedaction({ p: TOKEN }, ['p'], () => 0)['p']).toBe(
+      '***REDACTED***',
+    );
+  });
+
+  test('a number is not partially masked by default', () => {
+    // Proportional masking kept a card number's BIN prefix and last four.
+    expect(applyRedaction({ p: 4111111111111111 }, ['p'])['p']).toBe(
+      '***REDACTED***',
+    );
+    expect(applyRedaction({ p: 123456789 }, ['p'])['p']).toBe('***REDACTED***');
   });
 });
 

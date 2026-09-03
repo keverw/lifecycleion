@@ -200,10 +200,10 @@ describe('Logger', () => {
 
       const log = arraySink.logs[0];
 
-      expect(log.message).toBe('Login attempt for john with se*****23');
+      expect(log.message).toBe('Login attempt for john with ********3');
       expect(log.params?.password).toBe('secret123');
       expect(log.redactedParams?.password).not.toBe('secret123');
-      expect(log.redactedParams?.password).toBe('se*****23');
+      expect(log.redactedParams?.password).toBe('********3');
       expect(log.redactedParams?.username).toBe('john');
     });
 
@@ -315,7 +315,7 @@ describe('Logger', () => {
       expect(log.message).toBe('User Alice authenticated');
       expect(redacted.users[0].name).toBe('Alice');
       expect(redacted.users[0].password).not.toBe('secret123');
-      expect(redacted.users[0].password).toBe('se*****23');
+      expect(redacted.users[0].password).toBe('********3');
     });
 
     test('should redact quoted bracket-key paths', () => {
@@ -336,7 +336,7 @@ describe('Logger', () => {
 
       expect(log.message).toBe('User Alice authenticated');
       expect(redacted.users[0]['display-name']).toBe('Alice');
-      expect(redacted.users[0]['password-hash']).toBe('se*****23');
+      expect(redacted.users[0]['password-hash']).toBe('********3');
     });
 
     test('should handle deeply nested redaction', () => {

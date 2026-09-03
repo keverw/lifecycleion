@@ -3,6 +3,7 @@ import {
   defaultRedactValue,
   REDACTION_FAILED_MARKER,
 } from '../../internal/default-redact-function';
+import { resolveRedaction } from '../../internal/resolve-redaction';
 import { maskValueDeep } from '../../internal/mask-value-deep';
 import { getPathParts } from '../../internal/path-utils';
 import type { RedactFunction } from '../types';
@@ -126,23 +127,7 @@ export function applyRedaction(
     fieldKey: string,
     value: string,
     isDerived: boolean,
-  ): unknown => {
-    // Tested against the caller's function, not the `||` fallback: the default never
-    // returns `null`, so folding it in here would make the deferral branch below
-    // unreachable whenever no custom function was supplied.
-    if (redactFunction !== undefined) {
-      const masked = redactFunction(fieldKey, value);
-
-      if (masked !== null) {
-        return masked;
-      }
-    }
-
-    // A string derived from an object is replaced outright rather than masked
-    // proportionally: the default keeps the first and last characters, which for a
-    // `URL` or a custom `toString` is exactly where the secret tends to sit.
-    return isDerived ? '***REDACTED***' : defaultRedactValue(fieldKey, value);
-  };
+  ): unknown => resolveRedaction(fieldKey, value, isDerived, redactFunction);
 
   /**
    * Mask a matched value, keeping the shape of a container.

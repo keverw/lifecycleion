@@ -12,6 +12,18 @@ import datamask from 'datamask';
  */
 export const REDACTION_FAILED_MARKER = '***REDACTION FAILED***';
 
+/** Used where a value is replaced rather than masked in part. */
+export const REDACTED_PLACEHOLDER = '***REDACTED***';
+
+/**
+ * How much of a value the default masking hides.
+ *
+ * High on purpose. Enough survives to correlate the same secret across log lines, but a
+ * long value no longer leaves a proportionally long prefix and suffix readable - at the
+ * previous 60% an API key showed roughly ten of twenty-two characters.
+ */
+export const DEFAULT_MASK_PERCENT = 90;
+
 /**
  * Below this length, proportional masking hides too little to be worth doing.
  *
@@ -22,32 +34,105 @@ export const REDACTION_FAILED_MARKER = '***REDACTION FAILED***';
 const MINIMUM_PARTIAL_MASK_LENGTH = 8;
 
 /**
+ * Asks for a particular masking rather than supplying the masked text.
+ *
+ * Returned from a `redactFunction` when the caller wants the library's masking with
+ * different settings, instead of reproducing it. `strategy` picks how the value is
+ * treated: `'string'` masks a proportion of it, `'email'` keeps the `@` and the dots so
+ * an address stays recognizable, `'domain'` does the same for a hostname.
+ */
+export interface RedactMaskConfig {
+  strategy?: 'string' | 'email' | 'domain';
+  /** 0-100. Defaults to {@link DEFAULT_MASK_PERCENT}. */
+  percent?: number;
+  /** Defaults to `'*'`. */
+  maskChar?: string;
+  /** `email` only. Falls back to `percent`. */
+  userPercent?: number;
+  /** `email` only. Falls back to `percent`. */
+  domainPercent?: number;
+}
+
+/** Whether a value returned from a `redactFunction` is a masking request. */
+export function isRedactMaskConfig(value: unknown): value is RedactMaskConfig {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    return false;
+  }
+
+  try {
+    return (
+      Object.getPrototypeOf(value) === Object.prototype ||
+      Object.getPrototypeOf(value) === null
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Apply a masking request to an already-stringified value.
+ *
+ * Never returns the original: a strategy that hides nothing - too short a value, a
+ * percent of zero, an address `datamask.email` cannot parse - falls through to the
+ * opaque placeholder rather than handing back what it was asked to hide.
+ */
+export function maskWithConfig(
+  value: string,
+  config: RedactMaskConfig,
+): string {
+  const maskChar =
+    typeof config.maskChar === 'string' && config.maskChar.length > 0
+      ? config.maskChar
+      : '*';
+
+  const percent =
+    typeof config.percent === 'number' &&
+    Number.isFinite(config.percent) &&
+    config.percent >= 0
+      ? config.percent
+      : DEFAULT_MASK_PERCENT;
+
+  let masked: string;
+
+  try {
+    if (config.strategy === 'email') {
+      masked = datamask.email(
+        value,
+        maskChar,
+        config.userPercent ?? percent,
+        config.domainPercent ?? percent,
+      );
+    } else if (config.strategy === 'domain') {
+      masked = datamask.domain(value, maskChar, percent);
+    } else {
+      if (value.length < MINIMUM_PARTIAL_MASK_LENGTH) {
+        return REDACTED_PLACEHOLDER;
+      }
+
+      masked = datamask.string(value, maskChar, percent);
+    }
+  } catch {
+    return REDACTED_PLACEHOLDER;
+  }
+
+  // A mask that did not mask is not a mask.
+  return typeof masked === 'string' && masked !== value
+    ? masked
+    : REDACTED_PLACEHOLDER;
+}
+
+/**
  * The masking every redaction feature falls back to.
  *
  * Shared rather than per-module so `errorToString`'s `sensitiveFieldNames` and the
  * logger's `redactedKeys` produce the same output for the same value. A second copy would
  * drift, and a value masked one way in a log line and another way in a rendered error is
  * exactly the inconsistency this is here to prevent.
- *
- * Partial by design for a value long enough to stay unreadable: roughly the middle 60%
- * is masked, so the first and last characters survive and the same secret can be
- * correlated across log lines. A short value is replaced outright instead, since a
- * proportional mask of one would hide almost nothing.
  */
 export function defaultRedactValue(_keyName: string, value: unknown): unknown {
-  if (
-    typeof value === 'string' &&
-    value.length >= MINIMUM_PARTIAL_MASK_LENGTH
-  ) {
-    const masked = datamask.string(value, '*', 60);
-
-    // `datamask` masks a proportion of the string, so even above the length floor a
-    // value can come back with nothing masked. A mask that did not mask is not a mask.
-    if (masked !== value) {
-      return masked;
-    }
+  if (typeof value === 'string') {
+    return maskWithConfig(value, {});
   }
 
-  // Non-string values, and strings too short for proportional masking to hide anything.
-  return '***REDACTED***';
+  return REDACTED_PLACEHOLDER;
 }
