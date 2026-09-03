@@ -338,6 +338,33 @@ describe('errorToString', () => {
       expect(rendered).not.toContain(SEC);
     });
 
+    it('should mask a container leaf by leaf, keeping its shape', () => {
+      // Stringifying the container masked '[object Object]' instead of the secret, and
+      // joined an array so the edges of its elements survived.
+      const object = errorToString(
+        mk({ creds: { pw: SEC, user: 'alice' } }, ['creds']),
+      );
+
+      expect(object).not.toContain(SEC);
+      expect(object).not.toContain('object Object');
+      // The keys still render, so the shape survives for a reader.
+      expect(object).toContain('pw');
+      expect(object).toContain('user');
+
+      const array = errorToString(mk({ items: [SEC, 'other'] }, ['items']));
+
+      expect(array).not.toContain(SEC);
+      expect(array).not.toContain('other');
+    });
+
+    it('should terminate on a self-referencing container', () => {
+      const cyclic: Record<string, unknown> = { a: SEC };
+
+      cyclic['self'] = cyclic;
+
+      expect(errorToString(mk({ p: cyclic }, ['p']))).not.toContain(SEC);
+    });
+
     it('should hand the function the same key and value the logger does', () => {
       // The point of the shared shape: one function must see identical arguments from
       // both, or "the same function serves both" is not true. Captured directly rather

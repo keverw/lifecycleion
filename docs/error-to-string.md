@@ -116,17 +116,21 @@ A dotted or bracketed entry is treated as ambiguous and both readings are covere
 
 #### Choosing how values are masked
 
-Masked values use the same default the logger applies, so a value renders identically whether it went through a log line or a rendered error. That default is **partial**: roughly the middle 60% is masked, so the first and last characters survive and the same secret can be correlated across log lines. That means a long value leaves a proportionally long prefix and suffix readable - if that is not acceptable for your data, pass a `redactFunction` returning a constant. A value too short for proportional masking to hide anything falls back to `***REDACTED***` rather than being returned unmasked.
+Masked values use the same default the logger applies, so a value renders identically whether it went through a log line or a rendered error. That default is **partial**: roughly the middle 60% is masked, so the first and last characters survive and the same secret can be correlated across log lines. That means a long value leaves a proportionally long prefix and suffix readable - if that is not acceptable for your data, pass a `redactFunction` returning a constant.
 
 ```typescript
-// AdditionalInfo.username → j****oe
+// AdditionalInfo.apiKey → sk_1**********2345
 ```
+
+A value shorter than 8 characters is replaced outright with `***REDACTED***` instead, since masking a proportion of something that short hides almost nothing - a four-digit PIN would otherwise render `1**4`.
 
 Pass a `redactFunction` to mask differently. It receives the key and the value, exactly like the logger's option, so one function serves both:
 
 ```typescript
 errorToString(err, 80, { redactFunction: (key) => `[redacted ${key}]` });
 ```
+
+Naming a plain object or an array masks **each value inside it** and keeps the shape, rather than replacing the whole thing with one mask. An `Error` or a `Date` is not a container in this sense: its string form says more than its properties would, so it is masked as a single value.
 
 Return `null` to defer to the default for that value - so you can special-case a few keys without reproducing the default masking for the rest:
 

@@ -1,7 +1,7 @@
 import { deepClone } from '../../deep-clone';
 import { defaultRedactValue } from '../../internal/default-redact-function';
+import { maskValueDeep } from '../../internal/mask-value-deep';
 import { getPathParts } from '../../internal/path-utils';
-import { stringifyTemplateValue } from '../../internal/stringify-template-value';
 import type { RedactFunction } from '../types';
 
 /**
@@ -128,11 +128,21 @@ export function applyRedaction(
    * used literally, which drops the value - treating that as a deferral would turn an
    * existing caller's dropped field into a partial mask, disclosing more than it did.
    */
-  const redactValue = (fieldKey: string, value: unknown): unknown => {
+  const maskLeaf = (fieldKey: string, value: string): unknown => {
     const masked = redactFn(fieldKey, value);
 
     return masked === null ? defaultRedactValue(fieldKey, value) : masked;
   };
+
+  /**
+   * Mask a matched value, keeping the shape of a container.
+   *
+   * Handed the raw value rather than a stringified one: a container is walked and each
+   * leaf masked, so naming an object or array redacts its contents instead of replacing
+   * the whole thing with a mask of `'[object Object]'`.
+   */
+  const redactValue = (fieldKey: string, value: unknown): unknown =>
+    maskValueDeep(fieldKey, value, maskLeaf);
 
   // Deep clone to avoid mutating original.
   //
@@ -166,7 +176,7 @@ export function applyRedaction(
         const value = getNestedValue(params, key);
 
         if (value !== undefined) {
-          const redactedValue = redactValue(key, stringifyTemplateValue(value));
+          const redactedValue = redactValue(key, value);
           setNestedValue(redactedParams, key, redactedValue);
         }
 
@@ -177,18 +187,12 @@ export function applyRedaction(
         // Both are covered rather than one or the other: the entry is ambiguous, and
         // leaving either reading unredacted is the outcome redaction exists to prevent.
         if (key in params) {
-          redactedParams[key] = redactValue(
-            key,
-            stringifyTemplateValue(params[key]),
-          );
+          redactedParams[key] = redactValue(key, params[key]);
         }
       } else {
         // Top-level key
         if (key in params) {
-          redactedParams[key] = redactValue(
-            key,
-            stringifyTemplateValue(params[key]),
-          );
+          redactedParams[key] = redactValue(key, params[key]);
         }
       }
     } catch {

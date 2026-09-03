@@ -2,7 +2,7 @@ import type { NestedKeyValueEntry } from './ascii-tables/key-value-ascii-table';
 import { KeyValueASCIITable } from './ascii-tables/key-value-ascii-table';
 import { getPathParts } from './internal/path-utils';
 import { defaultRedactValue } from './internal/default-redact-function';
-import { stringifyTemplateValue } from './internal/stringify-template-value';
+import { maskValueDeep } from './internal/mask-value-deep';
 
 /**
  * Produces the replacement shown for a value named by `sensitiveFieldNames`.
@@ -103,30 +103,49 @@ function parseSensitivePaths(value: unknown): SensitivePath[] | null {
  * function itself is caller code. Either failing falls back to `***`, never to the
  * original value.
  */
-function maskSensitive(
+/**
+ * Mask a matched value for display, keeping the shape of a container.
+ *
+ * A leaf becomes the mask string. An object or array is walked and every leaf inside it
+ * masked, then rendered normally - so naming a container redacts its contents instead of
+ * replacing the whole thing with a mask of `'[object Object]'`, and an array's elements
+ * are masked individually rather than joined and masked as one string.
+ *
+ * Fully guarded: reading the value runs an accessor this module does not own, and the
+ * function itself is caller code. Either failing falls back to `***`, never to the
+ * original value.
+ */
+function maskSensitiveValue(
   entry: string,
   readValue: () => unknown,
+  table: KeyValueASCIITable,
+  maxRowLength: number,
+  seen: WeakSet<object>,
   redactFunction: RedactFieldFunction | undefined,
-): string {
+): string | KeyValueASCIITable | NestedKeyValueEntry[] {
   try {
-    // Stringified before the function sees it, exactly as `applyRedaction` does. Two
-    // reasons beyond parity: a function written for one would otherwise receive a
-    // different type from the other, and handing over the live value would let a
-    // mutating function reach into the caller's own error object.
-    const value = stringifyTemplateValue(readValue());
-
     // `null` means "use the default for this one", so a caller can special-case a few
     // keys without reproducing the default masking for the rest. To render a literal
     // null, return the string. Only `null` defers - a function that returns nothing has
-    // its `undefined` used literally, which drops the value, as it did before.
-    const custom =
-      redactFunction === undefined ? null : redactFunction(entry, value);
+    // its `undefined` used literally.
+    //
+    // Each leaf is stringified before the function sees it, exactly as `applyRedaction`
+    // does, so one function receives identical arguments from both - and so a mutating
+    // function cannot reach into the caller's own error object.
+    const masked = maskValueDeep(entry, readValue(), (key, leaf) => {
+      const custom =
+        redactFunction === undefined ? null : redactFunction(key, leaf);
 
-    const masked = custom === null ? defaultRedactValue(entry, value) : custom;
+      return custom === null ? defaultRedactValue(key, leaf) : custom;
+    });
 
-    return typeof masked === 'string' ? masked : safeStringify(masked);
+    if (masked === null || typeof masked !== 'object') {
+      return typeof masked === 'string' ? masked : safeStringify(masked);
+    }
+
+    // Already masked all the way down, so it is rendered with no sensitive paths left.
+    return stringifyValue(masked, table, maxRowLength, seen, [], [], undefined);
   } catch {
-    // Reading the value or the function itself failed. Never fall back to the original.
     return '***';
   }
 }
@@ -332,9 +351,12 @@ function errorToASCIITable(
         if (matchedEntry !== undefined) {
           table.addRow(
             `AdditionalInfo.${key}`,
-            maskSensitive(
+            maskSensitiveValue(
               matchedEntry,
               () => readMember(info, key),
+              table,
+              maxRowLength,
+              seen,
               redactFunction,
             ),
           );
@@ -446,7 +468,18 @@ function stringifyValueInner(
         ]);
 
         if (matchedEntry !== undefined) {
-          return maskSensitive(matchedEntry, () => item, redactFunction);
+          const maskedItem = maskSensitiveValue(
+            matchedEntry,
+            () => item,
+            table,
+            maxRowLength,
+            seen,
+            redactFunction,
+          );
+
+          return typeof maskedItem === 'string'
+            ? maskedItem
+            : safeStringify(maskedItem);
         }
 
         const result = stringifyValue(
@@ -508,7 +541,14 @@ function stringifyValueInner(
           key,
           value:
             matchedEntry !== undefined
-              ? maskSensitive(matchedEntry, () => val, redactFunction)
+              ? maskSensitiveValue(
+                  matchedEntry,
+                  () => val,
+                  table,
+                  maxRowLength - 4,
+                  seen,
+                  redactFunction,
+                )
               : stringifyValue(
                   val,
                   table,

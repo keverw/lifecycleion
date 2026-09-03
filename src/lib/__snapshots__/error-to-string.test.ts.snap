@@ -13,7 +13,7 @@ exports[`errorToString should stringify MyPrefixErrTestErr correctly 1`] = `
 +------------------------------------------------------------------------------+
 | errType                 | TestErr                                            |
 +------------------------------------------------------------------------------+
-| AdditionalInfo.username | j****oe                                            |
+| AdditionalInfo.username | ***REDACTED***                                     |
 +------------------------------------------------------------------------------+
 | AdditionalInfo.email    | johndoe@example.com                                |
 +------------------------------------------------------------------------------+

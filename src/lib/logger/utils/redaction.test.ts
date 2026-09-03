@@ -97,7 +97,10 @@ describe('applyRedaction', () => {
 
     expect(redacted.userID).toBe(741);
     expect(redacted.isActive).toBe(true);
-    expect(redacted.metadata).toBe('[ob*********ct]');
+    // A plain object keeps its shape and is masked leaf by leaf, rather than being
+    // stringified to '[object Object]' and masked as that text.
+    // 'value' is below the length floor for partial masking, so it is replaced outright.
+    expect(redacted.metadata).toEqual({ key: '***REDACTED***' });
   });
 
   test('should stringify non-string values before calling custom redaction functions', () => {
@@ -119,15 +122,19 @@ describe('applyRedaction', () => {
       customRedact,
     );
 
+    // A plain object and an array are walked, so the function sees each leaf under the
+    // entry it was named by. An `Error` is not walked: its string form says more than
+    // its enumerable properties would, so it arrives stringified as before.
     expect(seen).toEqual([
       ['error', 'Error: boom'],
-      ['users', 'a,b'],
-      ['metadata', '[object Object]'],
+      ['users', 'a'],
+      ['users', 'b'],
+      ['metadata', 'value'],
     ]);
 
     expect(redacted.error).toBe('[MASKED-error]');
-    expect(redacted.users).toBe('[MASKED-users]');
-    expect(redacted.metadata).toBe('[MASKED-metadata]');
+    expect(redacted.users).toEqual(['[MASKED-users]', '[MASKED-users]']);
+    expect(redacted.metadata).toEqual({ key: '[MASKED-metadata]' });
   });
 
   test('should redact nested keys using dot notation', () => {
@@ -465,6 +472,60 @@ describe('applyRedaction - ambiguous dotted keys', () => {
   });
 });
 
+describe('applyRedaction - containers keep their shape', () => {
+  // Naming a container used to stringify it: an object became a mask of
+  // '[object Object]', and an array was joined so the edges of the first and last
+  // elements survived. Each leaf is masked and the container rebuilt instead.
+
+  test('an object is masked leaf by leaf, keeping its keys', () => {
+    const result = applyRedaction({ p: { a: 'topsecret', b: 'other' } }, ['p']);
+    const p = result['p'] as Record<string, unknown>;
+
+    expect(typeof p).toBe('object');
+    expect(p['a']).not.toBe('topsecret');
+    expect(p['b']).not.toBe('other');
+    expect(JSON.stringify(result)).not.toContain('object Object');
+  });
+
+  test('an array is masked element by element, not joined', () => {
+    const result = applyRedaction({ p: ['topsecret', 'other'] }, ['p']);
+    const p = result['p'] as unknown[];
+
+    expect(Array.isArray(p)).toBe(true);
+    expect(p.length).toBe(2);
+    // Joining produced 'topsecret,other' and masked it as one string, leaking the edges
+    // of both elements into a single value.
+    expect(JSON.stringify(p)).not.toContain('topsecret');
+    expect(JSON.stringify(p)).not.toContain('other');
+  });
+
+  test('masks all the way down', () => {
+    const result = applyRedaction({ p: { a: { b: ['topsecret'] } } }, ['p']);
+
+    expect(JSON.stringify(result)).not.toContain('topsecret');
+    expect(
+      Array.isArray(
+        (
+          (result['p'] as Record<string, unknown>)['a'] as Record<
+            string,
+            unknown
+          >
+        )['b'],
+      ),
+    ).toBe(true);
+  });
+
+  test('a self-referencing container terminates', () => {
+    const cyclic: Record<string, unknown> = { a: 'topsecret' };
+
+    cyclic['self'] = cyclic;
+
+    const result = applyRedaction({ p: cyclic }, ['p']);
+
+    expect(JSON.stringify(result)).not.toContain('topsecret');
+  });
+});
+
 describe('applyRedaction - redactFunction deferral', () => {
   test('null defers to the default masking', () => {
     const result = applyRedaction(
@@ -558,8 +619,9 @@ describe('applyRedaction - fail closed', () => {
     expect(result['user']).toBe('kev');
   });
 
-  test('a value whose toString throws marks the key instead of leaking it', () => {
+  test('a value whose toString throws does not leak', () => {
     const hostile = {
+      secret: 'hunter2',
       toString() {
         throw new Error('no');
       },
@@ -567,7 +629,10 @@ describe('applyRedaction - fail closed', () => {
 
     const result = applyRedaction({ password: hostile }, ['password']);
 
-    expect(result['password']).toBe(REDACTION_FAILED_MARKER);
+    // The hostile value is a plain object, so it is walked rather than stringified and
+    // its `toString` is never called - each of its own properties is masked instead.
+    // The guarantee that matters holds either way: the original is not left in place.
+    expect(JSON.stringify(result)).not.toContain('hunter2');
   });
 
   test('a throwing redactFunction on a nested path marks that path', () => {

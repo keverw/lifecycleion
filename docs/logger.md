@@ -480,6 +480,8 @@ logger.info('API call', {
 // apiKey will be masked as: [REDACTED-apiKey]
 ```
 
+Naming a plain object or an array in `redactedKeys` masks **each value inside it** and keeps the shape, so a structured sink still receives an object or an array rather than one masked string. An `Error` or a `Date` is not treated as a container: its string form says more than its properties would, so it is masked as a single value. A value shorter than 8 characters is replaced with `***REDACTED***` rather than partially masked, since a proportional mask of something that short hides almost nothing.
+
 Return `null` to defer to the default masking for that value, so you can special-case a few keys without reproducing the default for the rest:
 
 ```typescript

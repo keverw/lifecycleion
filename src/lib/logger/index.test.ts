@@ -207,7 +207,7 @@ describe('Logger', () => {
       expect(log.redactedParams?.username).toBe('john');
     });
 
-    test('should stringify non-string redacted values before rendering the message', () => {
+    test('should keep the shape of a redacted container', () => {
       logger.info('Failure {{error}} / {{users}} / {{metadata}}', {
         params: {
           error: new Error('boom'),
@@ -219,10 +219,25 @@ describe('Logger', () => {
 
       const log = arraySink.logs[0];
 
-      expect(log.message).toBe('Failure Er******oom / a*b / [ob*********ct]');
+      // An `Error` is not a container: its string form says more than its enumerable
+      // properties would, so it is stringified and masked as one value.
       expect(log.redactedParams?.error).toBe('Er******oom');
-      expect(log.redactedParams?.users).toBe('a*b');
-      expect(log.redactedParams?.metadata).toBe('[ob*********ct]');
+
+      // A plain object and an array keep their shape, with each leaf masked. Previously
+      // the array was joined to 'a,b' and masked as one string, so the edges of both
+      // elements survived into a single value.
+      expect(log.redactedParams?.users).toEqual([
+        '***REDACTED***',
+        '***REDACTED***',
+      ]);
+      expect(log.redactedParams?.metadata).toEqual({ key: '***REDACTED***' });
+
+      // The rendered message interpolates a container the same way it does an
+      // unredacted one, so a shape that survives for a structured sink reads as
+      // '[object Object]' in the message text.
+      expect(log.message).toBe(
+        'Failure Er******oom / ***REDACTED***,***REDACTED*** / [object Object]',
+      );
     });
 
     test('should use custom redaction function', () => {
