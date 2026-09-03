@@ -515,14 +515,56 @@ describe('applyRedaction - containers keep their shape', () => {
     ).toBe(true);
   });
 
-  test('a self-referencing container terminates', () => {
-    const cyclic: Record<string, unknown> = { a: 'topsecret' };
+  test('a __proto__ key is rebuilt as an own property, not a prototype', () => {
+    // Assignment to `__proto__` is a no-op for a string and reparents the result for an
+    // object, so a payload carrying that key silently lost the entry or changed shape.
+    const payload = JSON.parse(
+      '{"__proto__":{"toString":"topsecretvalue"},"k":"othersecretvalue"}',
+    ) as Record<string, unknown>;
+
+    const p = applyRedaction({ p: payload }, ['p'])['p'] as Record<
+      string,
+      unknown
+    >;
+
+    expect(Object.getPrototypeOf(p)).toBe(Object.prototype);
+    expect(Object.keys(p)).toContain('__proto__');
+    expect(JSON.stringify(p)).not.toContain('topsecretvalue');
+    expect(JSON.stringify(p)).not.toContain('othersecretvalue');
+  });
+
+  test('a self-referencing container terminates and keeps its shape', () => {
+    // Asserted on the resulting shape, not just the absence of the secret: without the
+    // cycle guard the recursion blows the stack and the fail-closed backstop returns
+    // `***REDACTION FAILED***`, which contains no secret either and would pass a bare
+    // `not.toContain`.
+    const cyclic: Record<string, unknown> = { a: 'topsecretvalue' };
 
     cyclic['self'] = cyclic;
 
-    const result = applyRedaction({ p: cyclic }, ['p']);
+    const p = applyRedaction({ p: cyclic }, ['p'])['p'] as Record<
+      string,
+      unknown
+    >;
 
-    expect(JSON.stringify(result)).not.toContain('topsecret');
+    expect(typeof p).toBe('object');
+    expect(p['a']).not.toBe('topsecretvalue');
+    expect(p['a']).not.toBe(REDACTION_FAILED_MARKER);
+    // The back-reference is cut rather than followed.
+    expect(p['self']).toBe('***REDACTED***');
+  });
+
+  test('a container referenced twice is masked both times', () => {
+    // The cycle guard tracks the current path and releases on the way out, so a shared
+    // reference is not mistaken for a cycle.
+    const shared = { a: 'topsecretvalue' };
+    const p = applyRedaction({ p: { first: shared, second: shared } }, ['p'])[
+      'p'
+    ] as Record<string, Record<string, unknown>>;
+
+    expect(p['first']?.['a']).not.toBe('topsecretvalue');
+    expect(p['second']?.['a']).toEqual(p['first']?.['a']);
+    expect(p['second']).not.toBe('***REDACTED***');
   });
 });
 

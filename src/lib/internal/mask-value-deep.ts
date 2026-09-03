@@ -19,8 +19,20 @@ function isWalkableContainer(value: unknown): value is object {
   }
 }
 
-/** Applies the caller's masking to one leaf value. */
-export type MaskLeaf = (key: string, value: string) => unknown;
+/**
+ * Applies the caller's masking to one leaf value.
+ *
+ * `isDerived` is true when `value` is the string form of an object rather than the
+ * value itself. Proportional masking must not be used on a derived string: the default
+ * masking keeps the first and last characters, and for a `URL` or a custom `toString`
+ * the secret often lives at exactly those ends - a query-string API key survived almost
+ * intact. A derived string is replaced outright instead.
+ */
+export type MaskLeaf = (
+  key: string,
+  value: string,
+  isDerived: boolean,
+) => unknown;
 
 /**
  * Mask every leaf of a value, keeping its shape.
@@ -48,15 +60,26 @@ export function maskValueDeep(
   mask: MaskLeaf,
   seen: WeakSet<object> = new WeakSet(),
 ): unknown {
-  // Only a plain object or an array is walked. Anything else that happens to be an
-  // object has a string form worth keeping - an `Error` renders `Error: boom`, a `Date`
-  // renders its timestamp - and walking it would replace that with `[object Object]`,
-  // which tells a reader less than the masked string does.
+  // Only a plain object or an array is walked. Anything else - an `Error`, a `Date`, a
+  // `URL`, a class instance - has no shape worth rebuilding, so it is replaced outright
+  // by the caller's mask rather than partially masked. Rendering it and masking a
+  // proportion of the result is what leaked: a `URL` keeps its query string at the end,
+  // which is exactly where an API key sits and exactly what the default preserves.
   //
   // Tested by prototype rather than with `is-plain-object`, which accepts an `Error` and
   // a `Date` too. Guarded because reading the prototype of a revoked `Proxy` throws.
   if (!isWalkableContainer(value)) {
-    return mask(key, stringifyTemplateValue(value));
+    // Anything whose string form is *produced* rather than being the value itself. An
+    // object, but also a function and a symbol: `String()` on either renders source text
+    // or a description that can carry a secret, and proportional masking preserves the
+    // ends of it. A primitive string is the one thing that is not derived.
+    const isDerived =
+      value !== null &&
+      (typeof value === 'object' ||
+        typeof value === 'function' ||
+        typeof value === 'symbol');
+
+    return mask(key, stringifyTemplateValue(value), isDerived);
   }
 
   if (seen.has(value)) {
@@ -77,7 +100,15 @@ export function maskValueDeep(
     const masked: Record<string, unknown> = {};
 
     for (const [entryKey, entryValue] of Object.entries(value)) {
-      masked[entryKey] = maskValueDeep(key, entryValue, mask, seen);
+      // Defined rather than assigned: a plain assignment to `__proto__` is a no-op for a
+      // string and reparents the rebuilt object for an object, so a payload carrying that
+      // key would silently lose the entry or change the shape of the result.
+      Object.defineProperty(masked, entryKey, {
+        value: maskValueDeep(key, entryValue, mask, seen),
+        enumerable: true,
+        writable: true,
+        configurable: true,
+      });
     }
 
     return masked;

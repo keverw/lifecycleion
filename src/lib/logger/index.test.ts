@@ -219,9 +219,10 @@ describe('Logger', () => {
 
       const log = arraySink.logs[0];
 
-      // An `Error` is not a container: its string form says more than its enumerable
-      // properties would, so it is stringified and masked as one value.
-      expect(log.redactedParams?.error).toBe('Er******oom');
+      // An `Error` has no shape worth rebuilding, so it is replaced outright rather than
+      // stringified and partially masked - a proportional mask of a rendered object
+      // keeps its ends, which is where a secret in a URL or a custom `toString` sits.
+      expect(log.redactedParams?.error).toBe('***REDACTED***');
 
       // A plain object and an array keep their shape, with each leaf masked. Previously
       // the array was joined to 'a,b' and masked as one string, so the edges of both
@@ -236,7 +237,7 @@ describe('Logger', () => {
       // unredacted one, so a shape that survives for a structured sink reads as
       // '[object Object]' in the message text.
       expect(log.message).toBe(
-        'Failure Er******oom / ***REDACTED***,***REDACTED*** / [object Object]',
+        'Failure ***REDACTED*** / ***REDACTED***,***REDACTED*** / [object Object]',
       );
     });
 

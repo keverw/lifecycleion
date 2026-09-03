@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'bun:test';
 import { errorToString } from './error-to-string';
-import { applyRedaction } from './logger/utils/redaction';
+import {
+  applyRedaction,
+  REDACTION_FAILED_MARKER,
+} from './logger/utils/redaction';
 import { EOL } from './constants';
 
 class MyPrefixErrTestErr extends Error {
@@ -357,12 +360,92 @@ describe('errorToString', () => {
       expect(array).not.toContain('other');
     });
 
-    it('should terminate on a self-referencing container', () => {
+    it('should terminate on a self-referencing container and still render it', () => {
+      // Asserted on the rendered shape, not just the absence of the secret: without the
+      // cycle guard the recursion blows the stack and the top-level backstop returns
+      // `<error could not be rendered>`, which also contains no secret.
       const cyclic: Record<string, unknown> = { a: SEC };
 
       cyclic['self'] = cyclic;
 
-      expect(errorToString(mk({ p: cyclic }, ['p']))).not.toContain(SEC);
+      const rendered = errorToString(mk({ p: cyclic }, ['p']), 100);
+
+      expect(rendered).not.toContain(SEC);
+      // Without the cycle guard the walk overflows the stack and the cell degrades to a
+      // bare `***`, so assert the shape that only a successful walk produces: the
+      // back-reference cut with the full marker.
+      expect(rendered).toContain('***REDACTED***');
+      expect(rendered).toContain('self');
+    });
+
+    it('should replace a non-container object outright, not partially mask it', () => {
+      // The headline case: a `URL` stringifies with its query at the end, and the default
+      // masking preserves a value's ends - so partial-masking a derived string left an
+      // API key almost intact. Functions and symbols render derived text too.
+      const secret = 'sk-live-51H8x9QcAbCdEf';
+      const withToString: Record<string, unknown> = {};
+
+      const fn = (): string => secret;
+
+      fn.toString = (): string => `Bearer ${secret}`;
+      withToString['fn'] = fn;
+
+      const derived: [string, unknown][] = [
+        ['url', new URL(`https://api.test/v1?api_key=${secret}`)],
+        ['date', new Date(0)],
+        ['error', new Error(secret)],
+        ['map', new Map([['k', secret]])],
+        [
+          'instance',
+          new (class {
+            public apiKey = secret;
+          })(),
+        ],
+        ['fn', withToString['fn']],
+        ['symbol', Symbol(secret)],
+      ];
+
+      for (const [label, value] of derived) {
+        const rendered = errorToString(mk({ p: value }, ['p']), 140);
+
+        expect(rendered).not.toContain('AbCdEf');
+        expect(rendered).not.toContain('sk-live');
+        expect(rendered).toContain('***REDACTED***');
+        expect(label).toBeDefined();
+      }
+
+      // A plain container is still walked rather than replaced.
+      expect(errorToString(mk({ p: { k: secret } }, ['p']), 140)).not.toContain(
+        '***REDACTED***',
+      );
+    });
+
+    it('should report a failed mask with the same marker the logger uses', () => {
+      const rendered = errorToString(mk({ p: 'secretvalue' }, ['p']), 80, {
+        redactFunction: () => {
+          throw new Error('boom');
+        },
+      });
+
+      expect(rendered).toContain(REDACTION_FAILED_MARKER);
+    });
+
+    it('should report a throwing value accessor as a failed mask', () => {
+      // Read unguarded inside the mask's own try, so a throwing accessor is a failure
+      // rather than `undefined` stringified to the word "undefined" and masked.
+      const info = {};
+
+      Object.defineProperty(info, 'p', {
+        get(): never {
+          throw new Error('nope');
+        },
+        enumerable: true,
+      });
+
+      const rendered = errorToString(mk(info, ['p']), 80);
+
+      expect(rendered).toContain(REDACTION_FAILED_MARKER);
+      expect(rendered).not.toContain('un*****ed');
     });
 
     it('should hand the function the same key and value the logger does', () => {

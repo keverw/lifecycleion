@@ -1,6 +1,18 @@
 import datamask from 'datamask';
 
 /**
+ * Substituted for a value whose redaction failed.
+ *
+ * Deliberately distinct from a successful mask: an operator seeing the ordinary mask
+ * concludes redaction worked, so a broken `redactFunction` would hide itself. Redaction
+ * fails closed - the original value is never left in place - but it says so.
+ *
+ * Shared so a failure reads the same whether it happened while redacting log params or
+ * while rendering an error.
+ */
+export const REDACTION_FAILED_MARKER = '***REDACTION FAILED***';
+
+/**
  * Below this length, proportional masking hides too little to be worth doing.
  *
  * `datamask` masks a proportion of the string, so a short value keeps most of itself: a

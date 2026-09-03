@@ -70,7 +70,7 @@ The following fields are automatically extracted from error objects when present
 
 If the error has an `additionalInfo` object, each key is rendered as an `AdditionalInfo.<key>` row. Nested objects and arrays are handled recursively, and nested `Error` instances produce sub-tables.
 
-Fields listed in `sensitiveFieldNames` (a string array on the error) are masked with `***`:
+Fields listed in `sensitiveFieldNames` (a string array on the error) are masked:
 
 ```typescript
 const err = new Error('auth failed');
@@ -78,7 +78,7 @@ const err = new Error('auth failed');
 (err as any).sensitiveFieldNames = ['token'];
 
 console.log(errorToString(err));
-// AdditionalInfo.token → ***
+// AdditionalInfo.token → se******bc
 // AdditionalInfo.user  → alice
 ```
 
@@ -97,9 +97,9 @@ const err = new Error('auth failed');
   'items[0].token',
 ];
 
-// AdditionalInfo.apiKey → ***
-// AdditionalInfo.user   → password: ***
-// AdditionalInfo.items  → token: ***
+// AdditionalInfo.apiKey → sk****45
+// AdditionalInfo.user   → password: ***REDACTED***
+// AdditionalInfo.items  → [{"key":"token","value":"***REDACTED***"}]
 ```
 
 A bare name does **not** match at depth. `sensitiveFieldNames: ['password']` masks `additionalInfo.password` and leaves `additionalInfo.user.password` rendered, exactly as `redactedKeys: ['password']` does in the logger. Name the path to reach it.
@@ -130,7 +130,9 @@ Pass a `redactFunction` to mask differently. It receives the key and the value, 
 errorToString(err, 80, { redactFunction: (key) => `[redacted ${key}]` });
 ```
 
-Naming a plain object or an array masks **each value inside it** and keeps the shape, rather than replacing the whole thing with one mask. An `Error` or a `Date` is not a container in this sense: its string form says more than its properties would, so it is masked as a single value.
+Naming a plain object or an array masks **each value inside it** and keeps the shape, rather than replacing the whole thing with one mask.
+
+Any **other** value whose string form is produced rather than being the value itself - an `Error`, a `Date`, a `URL`, a `Map`, a class instance, a function, a symbol - has no shape worth rebuilding, so it is replaced outright with `***REDACTED***`. It is deliberately not stringified and partially masked: the default keeps a value's first and last characters, and for a `URL` or a custom `toString` that is exactly where a secret tends to sit.
 
 Return `null` to defer to the default for that value - so you can special-case a few keys without reproducing the default masking for the rest:
 
@@ -145,7 +147,7 @@ To render a literal null, return the string `'null'`. Returning **nothing** is n
 
 The function is handed the key exactly as you wrote it in `sensitiveFieldNames` (`user.password`, not the leaf `password`) and the value already stringified, which is what the logger passes for the same field - so the same function genuinely serves both, and a mutating function cannot reach into your error object.
 
-If the `redactFunction` throws, or reading the value throws, the result falls back to `***` - never to the original value.
+If the `redactFunction` throws, or reading the value throws, the result is `***REDACTION FAILED***` - never the original value. That is the same marker the logger uses for the same condition, and it is deliberately distinct from a successful mask so a broken `redactFunction` cannot hide behind output that looks fine.
 
 Masking **fails closed** when the _list itself_ is unusable. A comma-joined string, a `Set`, a non-string entry, or an accessor that throws all mean the caller asked for masking and this cannot tell what for, so `additionalInfo` is dropped wholesale and replaced with `*** (sensitiveFieldNames unreadable)` rather than rendered in the clear. This does **not** extend to an individual entry: one that does not parse, or that parses but matches nothing, simply masks nothing and leaves the other entries working, exactly as an unmatched `redactedKeys` entry redacts nothing in the logger.
 

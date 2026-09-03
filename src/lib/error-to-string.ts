@@ -1,7 +1,10 @@
 import type { NestedKeyValueEntry } from './ascii-tables/key-value-ascii-table';
 import { KeyValueASCIITable } from './ascii-tables/key-value-ascii-table';
 import { getPathParts } from './internal/path-utils';
-import { defaultRedactValue } from './internal/default-redact-function';
+import {
+  defaultRedactValue,
+  REDACTION_FAILED_MARKER,
+} from './internal/default-redact-function';
 import { maskValueDeep } from './internal/mask-value-deep';
 
 /**
@@ -100,8 +103,8 @@ function parseSensitivePaths(value: unknown): SensitivePath[] | null {
  * this one value.
  *
  * Fully guarded: reading the value runs an accessor this module does not own, and the
- * function itself is caller code. Either failing falls back to `***`, never to the
- * original value.
+ * function itself is caller code. Either failing yields `REDACTION_FAILED_MARKER`, the
+ * same marker the logger uses for the same condition, never the original value.
  */
 /**
  * Mask a matched value for display, keeping the shape of a container.
@@ -132,11 +135,17 @@ function maskSensitiveValue(
     // Each leaf is stringified before the function sees it, exactly as `applyRedaction`
     // does, so one function receives identical arguments from both - and so a mutating
     // function cannot reach into the caller's own error object.
-    const masked = maskValueDeep(entry, readValue(), (key, leaf) => {
+    const masked = maskValueDeep(entry, readValue(), (key, leaf, isDerived) => {
       const custom =
         redactFunction === undefined ? null : redactFunction(key, leaf);
 
-      return custom === null ? defaultRedactValue(key, leaf) : custom;
+      if (custom !== null) {
+        return custom;
+      }
+
+      // See `MaskLeaf`: a derived string is replaced outright, never masked
+      // proportionally, since its ends are where a secret tends to survive.
+      return isDerived ? '***REDACTED***' : defaultRedactValue(key, leaf);
     });
 
     if (masked === null || typeof masked !== 'object') {
@@ -146,7 +155,9 @@ function maskSensitiveValue(
     // Already masked all the way down, so it is rendered with no sensitive paths left.
     return stringifyValue(masked, table, maxRowLength, seen, [], [], undefined);
   } catch {
-    return '***';
+    // Same marker the logger uses for the same condition: redaction was attempted and
+    // failed, which must read differently from a value that masked successfully.
+    return REDACTION_FAILED_MARKER;
   }
 }
 
@@ -353,7 +364,11 @@ function errorToASCIITable(
             `AdditionalInfo.${key}`,
             maskSensitiveValue(
               matchedEntry,
-              () => readMember(info, key),
+              // Read unguarded on purpose: `maskSensitiveValue` catches, so a throwing
+              // accessor is reported as a failed mask. Going through `readMember` would
+              // swallow the throw and hand over `undefined`, which stringifies to the
+              // nine-character word "undefined" and masks to `un*****ed`.
+              () => info[key],
               table,
               maxRowLength,
               seen,
