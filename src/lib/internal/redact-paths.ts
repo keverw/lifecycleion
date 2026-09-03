@@ -1,4 +1,10 @@
 import { getPathParts } from './path-utils';
+import { maskValueDeep } from './mask-value-deep';
+import { resolveRedaction } from './resolve-redaction';
+import { REDACTION_FAILED_MARKER } from './default-redact-function';
+
+/** Decides the replacement for a redacted value. */
+export type RedactLeafFunction = (key: string, value: unknown) => unknown;
 
 /** One parsed redaction entry, kept with the text the caller wrote. */
 export interface RedactPath {
@@ -74,4 +80,93 @@ export function matchRedactPath(
       candidate.parts.length === path.length &&
       candidate.parts.every((part, index) => part === path[index]),
   )?.entry;
+}
+
+/** Build a copy of `value` with every matched path masked, keeping the shape. */
+function redactPathsInner(
+  value: unknown,
+  paths: RedactPath[],
+  path: string[],
+  redactFunction: RedactLeafFunction | undefined,
+  seen: WeakSet<object>,
+): unknown {
+  const matched = matchRedactPath(paths, path);
+
+  if (matched !== undefined) {
+    try {
+      return maskValueDeep(matched, value, (key, leaf, isDerived) =>
+        resolveRedaction(key, leaf, isDerived, redactFunction),
+      );
+    } catch {
+      // Never fall back to the original: a failed redaction says so instead.
+      return REDACTION_FAILED_MARKER;
+    }
+  }
+
+  if (value === null || typeof value !== 'object') {
+    return value;
+  }
+
+  if (seen.has(value)) {
+    return value;
+  }
+
+  seen.add(value);
+
+  try {
+    if (Array.isArray(value)) {
+      return (value as unknown[]).map((item, index) =>
+        redactPathsInner(
+          item,
+          paths,
+          [...path, String(index)],
+          redactFunction,
+          seen,
+        ),
+      );
+    }
+
+    let entries: [string, unknown][];
+
+    try {
+      entries = Object.entries(value);
+    } catch {
+      return value;
+    }
+
+    const copy: Record<string, unknown> = {};
+
+    for (const [key, entryValue] of entries) {
+      Object.defineProperty(copy, key, {
+        value: redactPathsInner(
+          entryValue,
+          paths,
+          [...path, key],
+          redactFunction,
+          seen,
+        ),
+        enumerable: true,
+        writable: true,
+        configurable: true,
+      });
+    }
+
+    return copy;
+  } finally {
+    seen.delete(value);
+  }
+}
+
+/**
+ * Build a copy of `value` with every path in `paths` masked, keeping the shape.
+ *
+ * The one walk both the logger's `redactedKeys` and `stringifyValue` use, so an entry
+ * addresses the same thing and masks the same way in either.
+ */
+export function redactMatchedPaths(
+  value: unknown,
+  paths: RedactPath[],
+  redactFunction: RedactLeafFunction | undefined,
+): unknown {
+  return redactPathsInner(value, paths, [], redactFunction, new WeakSet());
 }

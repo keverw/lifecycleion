@@ -3,9 +3,10 @@ import {
   defaultRedactValue,
   REDACTION_FAILED_MARKER,
 } from '../../internal/default-redact-function';
-import { resolveRedaction } from '../../internal/resolve-redaction';
-import { maskValueDeep } from '../../internal/mask-value-deep';
-import { getPathParts } from '../../internal/path-utils';
+import {
+  parseRedactPaths,
+  redactMatchedPaths,
+} from '../../internal/redact-paths';
 import type { RedactFunction } from '../types';
 
 /**
@@ -15,82 +16,6 @@ import type { RedactFunction } from '../types';
 export const defaultRedactFunction: RedactFunction = defaultRedactValue;
 
 export { REDACTION_FAILED_MARKER } from '../../internal/default-redact-function';
-
-/**
- * Set a value at a nested path in an object
- */
-function setNestedValue(
-  obj: Record<string, unknown>,
-  path: string,
-  value: unknown,
-): void {
-  const parts = getPathParts(path);
-
-  if (!parts || parts.length === 0) {
-    return;
-  }
-
-  let current: unknown = obj;
-
-  for (let i = 0; i < parts.length - 1; i++) {
-    const part = parts[i];
-    if (
-      current === undefined ||
-      current === null ||
-      typeof current !== 'object' ||
-      !(part in current)
-    ) {
-      return; // Path doesn't exist, can't set value
-    }
-
-    const next = (current as Record<string, unknown>)[part];
-
-    if (next === undefined || next === null || typeof next !== 'object') {
-      return; // Path doesn't exist, can't set value
-    }
-
-    current = next;
-  }
-
-  const lastPart = parts[parts.length - 1];
-
-  if (
-    lastPart !== undefined &&
-    current !== undefined &&
-    current !== null &&
-    typeof current === 'object' &&
-    lastPart in current
-  ) {
-    (current as Record<string, unknown>)[lastPart] = value;
-  }
-}
-
-/**
- * Get a value at a nested path in an object
- */
-function getNestedValue(obj: Record<string, unknown>, path: string): unknown {
-  const parts = getPathParts(path);
-
-  if (!parts || parts.length === 0) {
-    return undefined;
-  }
-
-  let current: unknown = obj;
-
-  for (const part of parts) {
-    if (
-      current === undefined ||
-      current === null ||
-      typeof current !== 'object' ||
-      !(part in current)
-    ) {
-      return undefined;
-    }
-    current = (current as Record<string, unknown>)[part];
-  }
-
-  return current;
-}
 
 /**
  * Apply redaction to params based on redacted keys
@@ -112,105 +37,50 @@ export function applyRedaction(
     return params;
   }
 
-  /**
-   * Apply the caller's function, deferring to the default when it declines.
-   *
-   * `null` means "use the default for this one", so a caller can special-case a few keys
-   * without reproducing the default masking for the rest. To render a literal null,
-   * return the string.
-   *
-   * Only `null` defers. A function that returns nothing keeps having its `undefined`
-   * used literally, which drops the value - treating that as a deferral would turn an
-   * existing caller's dropped field into a partial mask, disclosing more than it did.
-   */
-  const maskLeaf = (
-    fieldKey: string,
-    value: string,
-    isDerived: boolean,
-  ): unknown => resolveRedaction(fieldKey, value, isDerived, redactFunction);
-
-  /**
-   * Mask a matched value, keeping the shape of a container.
-   *
-   * Handed the raw value rather than a stringified one: a container is walked and each
-   * leaf masked, so naming an object or array redacts its contents instead of replacing
-   * the whole thing with a mask of `'[object Object]'`.
-   */
-  const redactValue = (fieldKey: string, value: unknown): unknown =>
-    maskValueDeep(fieldKey, value, maskLeaf);
-
-  // Deep clone to avoid mutating original.
-  //
-  // Guarded, and failing closed: `deepClone` runs over caller-supplied params and can
-  // throw on a structure it cannot copy. Returning the originals here would hand every
-  // sink — and the rendered message — the unredacted values, which is the one outcome
-  // redaction exists to prevent, so an uncopyable params object yields only markers for
-  // the redacted keys and nothing else. Losing the non-sensitive params from
-  // `redactedParams` is the price; `entry.params` still carries them for a sink that
-  // opts into the raw view.
-  let redactedParams: Record<string, unknown>;
-
-  try {
-    redactedParams = deepClone(params);
-  } catch {
-    return Object.fromEntries(
+  /** Every redacted key marked, used whenever nothing safer can be produced. */
+  const allMarked = (): Record<string, unknown> =>
+    Object.fromEntries(
       redactedKeys.map((key) => [key, REDACTION_FAILED_MARKER]),
     );
+
+  // Parsed with the shared parser rather than a local `includes('.')` test, so an entry
+  // addresses the same thing here as it does in `sensitiveFieldNames` and
+  // `stringifyValue`. A list that is present but unusable fails closed.
+  const paths = parseRedactPaths(redactedKeys);
+
+  if (paths === null) {
+    return allMarked();
   }
 
-  // Apply redaction to specified keys (supports nested object paths, array indexes, and quoted bracket keys)
-  for (const key of redactedKeys) {
-    // Every step here runs code this module does not own: `redactFn` is user-supplied,
-    // `stringifyTemplateValue` invokes `toString`, and reading or writing the path can
-    // trip an accessor or a `Proxy` trap. A failure must not propagate — `handleLog` is
-    // on a path that must not throw — and must never leave the original value in place,
-    // so the key is marked instead.
-    try {
-      // Check if it's a nested key or array path
-      if (key.includes('.') || key.includes('[')) {
-        const value = getNestedValue(params, key);
-
-        if (value !== undefined) {
-          const redactedValue = redactValue(key, value);
-          setNestedValue(redactedParams, key, redactedValue);
-        }
-
-        // Also redact a key spelled exactly like the path, when one exists.
-        // `{ 'user.password': 'secret' }` names one literal key, not a nested one, and
-        // the path walk looks for `params.user.password` - so without this the caller
-        // redacts the only spelling they have and the value still renders in the clear.
-        // Both are covered rather than one or the other: the entry is ambiguous, and
-        // leaving either reading unredacted is the outcome redaction exists to prevent.
-        if (key in params) {
-          redactedParams[key] = redactValue(key, params[key]);
-        }
-      } else {
-        // Top-level key
-        if (key in params) {
-          redactedParams[key] = redactValue(key, params[key]);
-        }
-      }
-    } catch {
-      try {
-        // The literal slot first, and unconditionally: `setNestedValue` re-parses `key`
-        // as a path, so for a key spelled `'user.password'` it finds no such path, writes
-        // nothing, and the deep clone's original value survives in the clear. That is
-        // reachable without any user code at all - a value whose `toString` throws makes
-        // `stringifyTemplateValue` fail on the success path above and land here.
-        if (key in redactedParams) {
-          redactedParams[key] = REDACTION_FAILED_MARKER;
-        }
-
-        setNestedValue(redactedParams, key, REDACTION_FAILED_MARKER);
-      } catch {
-        // The path cannot even be written. Drop every param rather than return a copy
-        // whose sensitive key still holds its original value.
-        return Object.fromEntries(
-          redactedKeys.map((failedKey) => [failedKey, REDACTION_FAILED_MARKER]),
-        );
-      }
-    }
+  // A copy is probed for, not used.
+  //
+  // `deepClone` runs over caller-supplied params and throws on a structure it cannot
+  // copy - a throwing getter, a revoked `Proxy`. That is the signal this fails closed
+  // on: returning the originals would hand every sink, and the rendered message, the
+  // unredacted values, which is the one outcome redaction exists to prevent. An
+  // uncopyable params object yields only markers for the redacted keys and nothing
+  // else. Losing the non-sensitive params is the price; `entry.params` still carries
+  // them for a sink that opts into the raw view.
+  //
+  // The walk below then runs over `params` itself rather than the copy, and builds its
+  // own. Masking the copy would mask the wrong thing: `deepClone` keeps only enumerable
+  // own properties, so an `Error` arrives as `{}` and its message is never seen. The
+  // walk does not mutate what it reads, so the copy has no other job.
+  try {
+    deepClone(params);
+  } catch {
+    return allMarked();
   }
 
-  return redactedParams;
+  try {
+    return redactMatchedPaths(params, paths, redactFunction) as Record<
+      string,
+      unknown
+    >;
+  } catch {
+    // The walk guards every step it owns, so reaching here means something beneath it
+    // refused entirely. Drop every param rather than return a copy whose sensitive key
+    // still holds its original value.
+    return allMarked();
+  }
 }

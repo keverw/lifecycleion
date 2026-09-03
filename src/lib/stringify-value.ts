@@ -1,11 +1,5 @@
-import {
-  matchRedactPath,
-  parseRedactPaths,
-  type RedactPath,
-} from './internal/redact-paths';
+import { parseRedactPaths, redactMatchedPaths } from './internal/redact-paths';
 import { stringifyTemplateValue } from './internal/stringify-template-value';
-import { maskValueDeep } from './internal/mask-value-deep';
-import { resolveRedaction } from './internal/resolve-redaction';
 import { REDACTION_FAILED_MARKER } from './internal/default-redact-function';
 
 export type { RedactMaskConfig } from './internal/default-redact-function';
@@ -26,81 +20,6 @@ export interface StringifyValueOptions {
    * `RedactMaskConfig` to ask for a particular masking.
    */
   redactFunction?: StringifyRedactFunction;
-}
-
-/** Build a copy of `value` with every matched path masked, keeping the shape. */
-function redactPaths(
-  value: unknown,
-  paths: RedactPath[],
-  path: string[],
-  redactFunction: StringifyRedactFunction | undefined,
-  seen: WeakSet<object>,
-): unknown {
-  const matched = matchRedactPath(paths, path);
-
-  if (matched !== undefined) {
-    try {
-      return maskValueDeep(matched, value, (key, leaf, isDerived) =>
-        resolveRedaction(key, leaf, isDerived, redactFunction),
-      );
-    } catch {
-      // Never fall back to the original: a failed redaction says so instead.
-      return REDACTION_FAILED_MARKER;
-    }
-  }
-
-  if (value === null || typeof value !== 'object') {
-    return value;
-  }
-
-  if (seen.has(value)) {
-    return value;
-  }
-
-  seen.add(value);
-
-  try {
-    if (Array.isArray(value)) {
-      return (value as unknown[]).map((item, index) =>
-        redactPaths(
-          item,
-          paths,
-          [...path, String(index)],
-          redactFunction,
-          seen,
-        ),
-      );
-    }
-
-    let entries: [string, unknown][];
-
-    try {
-      entries = Object.entries(value);
-    } catch {
-      return value;
-    }
-
-    const copy: Record<string, unknown> = {};
-
-    for (const [key, entryValue] of entries) {
-      Object.defineProperty(copy, key, {
-        value: redactPaths(
-          entryValue,
-          paths,
-          [...path, key],
-          redactFunction,
-          seen,
-        ),
-        enumerable: true,
-        writable: true,
-        configurable: true,
-      });
-    }
-
-    return copy;
-  } finally {
-    seen.delete(value);
-  }
 }
 
 /**
@@ -152,7 +71,7 @@ export function stringifyValue(
     }
 
     return stringifyTemplateValue(
-      redactPaths(value, paths, [], options?.redactFunction, new WeakSet()),
+      redactMatchedPaths(value, paths, options?.redactFunction),
     );
   } catch {
     return '[unrenderable]';
