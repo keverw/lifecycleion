@@ -1,23 +1,5 @@
+import { isPlainContainer } from './is-plain-container';
 import { stringifyTemplateValue } from './stringify-template-value';
-
-/** Whether a value is a plain object or an array, and so has a shape worth rebuilding. */
-function isWalkableContainer(value: unknown): value is object {
-  if (value === null || typeof value !== 'object') {
-    return false;
-  }
-
-  try {
-    if (Array.isArray(value)) {
-      return true;
-    }
-
-    const prototype: unknown = Object.getPrototypeOf(value);
-
-    return prototype === Object.prototype || prototype === null;
-  } catch {
-    return false;
-  }
-}
 
 /**
  * Applies the caller's masking to one leaf value.
@@ -68,7 +50,8 @@ export function maskValueDeep(
   //
   // Tested by prototype rather than with `is-plain-object`, which accepts an `Error` and
   // a `Date` too. Guarded because reading the prototype of a revoked `Proxy` throws.
-  if (!isWalkableContainer(value)) {
+  //
+  if (!isPlainContainer(value)) {
     // Partial masking is only ever right for a value that was genuinely a string.
     // Everything else - a number, an object, a function, a symbol - reaches the mask as
     // a *produced* string, and proportional masking keeps its ends: a card number kept

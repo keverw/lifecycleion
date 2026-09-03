@@ -30,9 +30,19 @@ export interface StringifyValueOptions {
  * themselves. Paths and the `redactFunction` contract are exactly the logger's, so a
  * function written for one works here.
  *
- * The value passed in is never modified; a copy is built. Naming a plain object or array
- * masks each value inside it and keeps the shape, so what comes back is still an object
- * or an array.
+ * The value passed in is never modified. Copies are built only along the branches that
+ * lead to a mask, so anything not named comes back as it went in - a `Date` is still that
+ * `Date`, an `Error` still carries its `message` and `stack`. Naming a plain object or
+ * array masks each value inside it and keeps the shape, so what comes back is still an
+ * object or an array.
+ *
+ * **Masking covers exactly what {@link stringifyValue} prints: own enumerable
+ * string-keyed properties of plain objects and arrays.** Anything `Object.entries` does
+ * not see - a non-enumerable property, a symbol key, one carried on a prototype, one a
+ * `Proxy` hides from `ownKeys` - is neither masked nor printed. The result is therefore
+ * safe to *render*, and is not a sanitized object for an arbitrary consumer: hand it to
+ * `Object.getOwnPropertyNames`, a different serializer, or a sink that walks properties
+ * directly, and hidden state comes with it.
  *
  * Never throws. A failure yields the redaction marker rather than the original value.
  *

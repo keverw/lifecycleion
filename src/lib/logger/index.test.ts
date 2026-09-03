@@ -1847,3 +1847,33 @@ describe('Logger', () => {
     });
   });
 });
+
+describe('Logger - redaction and non-plain params', () => {
+  test('renders a Date and an Error param beside a redacted one', () => {
+    // The message is rendered from the redacted params, so a param flattened by
+    // redaction is a param the template cannot read. `{{error.message}}` going blank the
+    // moment any key is redacted is the case that matters most.
+    const sink = new ArraySink();
+    const logger = new Logger({ sinks: [sink], callProcessExit: false });
+
+    logger.info('{{when}} / {{failure.message}} / {{password}}', {
+      params: {
+        password: 'hunter2secret',
+        when: new Date('2020-01-01T00:00:00Z'),
+        failure: new Error('boom'),
+      },
+      redactedKeys: ['password'],
+    });
+
+    const entry = sink.logs[0];
+
+    expect(entry?.message).toContain('2020');
+    expect(entry?.message).toContain('boom');
+    expect(entry?.message).not.toContain('hunter2secret');
+
+    // The structured view a sink reads agrees with the rendered text.
+    expect(
+      (entry?.redactedParams?.['failure'] as Error | undefined)?.message,
+    ).toBe('boom');
+  });
+});

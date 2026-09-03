@@ -86,6 +86,11 @@ export function applyRedaction(
   // own. Masking the copy would mask the wrong thing: `deepClone` keeps only enumerable
   // own properties, so an `Error` arrives as `{}` and its message is never seen. The
   // walk does not mutate what it reads, so the copy has no other job.
+  //
+  // The walk copies only the branches that lead to a redacted key; every other param is
+  // passed through by reference. That is what keeps a `Date`, an `Error`, or a `URL`
+  // logged alongside a secret from being flattened into `{}` - both in the rendered
+  // message and in the `redactedParams` a structured sink reads.
   try {
     deepClone(params);
   } catch {

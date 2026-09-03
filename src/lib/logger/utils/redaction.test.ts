@@ -841,3 +841,32 @@ describe('applyRedaction - fail closed', () => {
     expect(result['password']).toBe(REDACTION_FAILED_MARKER);
   });
 });
+
+describe('applyRedaction - params it was not asked to redact', () => {
+  test('keeps a non-plain param intact beside a redacted one', () => {
+    // Redaction rebuilt every object it walked, which read `Object.entries` - empty for
+    // a `Date` and a `Set`, and blind to the non-enumerable `message` and `stack` of an
+    // `Error`. Naming one key therefore flattened every other param to `{}`, both in the
+    // rendered message and in the `redactedParams` a structured sink reads.
+    const when = new Date('2020-01-01T00:00:00Z');
+    const failure = new Error('boom');
+    const tags = new Set(['a']);
+
+    const redacted = applyRedaction(
+      { password: 'hunter2secret', when, failure, tags },
+      ['password'],
+    );
+
+    expect(redacted['password']).not.toBe('hunter2secret');
+    expect(redacted['when']).toBe(when);
+    expect(redacted['failure']).toBe(failure);
+    expect(redacted['tags']).toBe(tags);
+    expect((redacted['failure'] as Error).message).toBe('boom');
+  });
+
+  test('leaves the params object itself alone when nothing matches', () => {
+    const params = { a: 1, nested: { b: 2 } };
+
+    expect(applyRedaction(params, ['missing'])).toBe(params);
+  });
+});

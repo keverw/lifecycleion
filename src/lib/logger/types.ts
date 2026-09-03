@@ -62,7 +62,18 @@ export interface LogEntry {
   entityName?: string; // Optional entity identifier (e.g., 'audio-component-123', 'door-main', UUID)
   template: string; // Original template: "User {{userID}} logged in"
   message: string; // Computed message: "User 456 logged in"
+  /**
+   * The caller's own params object, by reference and never redacted.
+   *
+   * An escape hatch for a sink that needs the real values. A sink that writes anywhere
+   * the values could outlive the process should read `redactedParams ?? params` instead,
+   * or a redacted log line still ships the secret.
+   */
   params?: Record<string, unknown>; // Raw params: { userID: 456, password: 'secret' }
+  /**
+   * `params` with every configured `redactedKeys` path masked, and nothing else changed.
+   * Present only when redaction is configured.
+   */
   redactedParams?: Record<string, unknown>; // Present when redaction is configured: { userID: 456, password: '***' }
   redactedKeys?: string[]; // List of keys that were redacted (e.g., ['password', 'user.apiKey'])
   error?: unknown; // Original error object from errorObject() calls

@@ -309,3 +309,792 @@ describe('stringifyValue / redactValue - fail-closed branches', () => {
     expect(masked['self']).toBe('***REDACTION FAILED***');
   });
 });
+
+describe('redactValue - values it was not asked to touch', () => {
+  // The walk used to rebuild every object it passed through, reading `Object.entries`.
+  // That is empty for a `Date` and a `Map`, and skips the non-enumerable `message` and
+  // `stack` of an `Error`, so naming one key flattened every unrelated value beside it
+  // to `{}` - in the returned structure and in anything rendered from it.
+  test('passes a non-plain sibling through by reference', () => {
+    const when = new Date('2020-01-01T00:00:00Z');
+    const failure = new Error('boom');
+    const tags = new Set(['a']);
+    const pattern = /abc/g;
+    const href = new URL('https://example.test/x');
+
+    const value = { password: SECRET, when, failure, tags, pattern, href };
+
+    const masked = redactValue(value, {
+      redactedKeys: ['password'],
+    }) as Record<string, unknown>;
+
+    expect(masked['password']).not.toBe(SECRET);
+
+    // Identity, not just shape: nothing was masked inside these, so nothing was rebuilt.
+    expect(masked['when']).toBe(when);
+    expect(masked['failure']).toBe(failure);
+    expect(masked['tags']).toBe(tags);
+    expect(masked['pattern']).toBe(pattern);
+    expect(masked['href']).toBe(href);
+
+    // And the members a rebuild would have dropped are still readable.
+    expect((masked['when'] as Date).toISOString()).toBe(
+      '2020-01-01T00:00:00.000Z',
+    );
+    expect((masked['failure'] as Error).message).toBe('boom');
+  });
+
+  test('preserves a non-plain value nested below the masked branch', () => {
+    const when = new Date('2020-01-01T00:00:00Z');
+    const value = { user: { password: SECRET, lastSeen: when } };
+
+    const masked = redactValue(value, { redactedKeys: ['user.password'] }) as {
+      user: Record<string, unknown>;
+    };
+
+    // `user` is rebuilt, because a mask landed inside it - but only the masked leaf is
+    // replaced, and its sibling is carried across untouched.
+    expect(masked.user['password']).not.toBe(SECRET);
+    expect(masked.user['lastSeen']).toBe(when);
+  });
+
+  test('returns the original value when no path matches anything', () => {
+    const value = { a: { b: 1 } };
+
+    expect(redactValue(value, { redactedKeys: ['nothing.here'] })).toBe(value);
+  });
+
+  test('does not mutate the value it was given', () => {
+    const inner = { password: SECRET, keep: 'visible' };
+    const value = { user: inner };
+
+    redactValue(value, { redactedKeys: ['user.password'] });
+
+    expect(value.user).toBe(inner);
+    expect(inner.password).toBe(SECRET);
+  });
+
+  test('renders a preserved value with its own string form', () => {
+    // The rendering half follows the structure, so the fix has to show up here too:
+    // a `Date` beside a secret used to render as `{}`.
+    expect(
+      stringifyValue(
+        { password: SECRET, href: new URL('https://example.test/x') },
+        { redactedKeys: ['password'] },
+      ),
+    ).toContain('https://example.test/x');
+  });
+
+  test('still masks a non-plain value that is named outright', () => {
+    // Preserving what was not named must not weaken what was. An `Error` is a leaf, so
+    // naming it replaces it rather than exposing its enumerable properties.
+    const masked = redactValue(
+      { failure: new Error('boom') },
+      { redactedKeys: ['failure'] },
+    ) as Record<string, unknown>;
+
+    expect(masked['failure']).toBe('***REDACTED***');
+  });
+});
+
+describe('redactValue and stringifyValue compose', () => {
+  test('stringifyValue(v, o) matches stringifyValue(redactValue(v, o))', () => {
+    // The documented relationship between the two halves, checked across the value types
+    // the walk treats differently: a plain container it rebuilds, and a non-plain one it
+    // either passes through untouched or replaces outright. Masking through one call and
+    // masking then rendering must not diverge, or a caller who wants the structure back
+    // gets different text than one who wants it rendered.
+    const when = new Date('2020-01-01T00:00:00Z');
+
+    const cases: [unknown, string[]][] = [
+      [{ p: SECRET, v: when }, ['p']],
+      [{ p: SECRET, v: new Error('boom') }, ['p']],
+      [{ p: SECRET, v: new URL('https://ex.test/a') }, ['p']],
+      [{ p: SECRET, v: new Map([['k', 'v']]) }, ['p']],
+      [{ p: SECRET, v: new Set(['a']) }, ['p']],
+      [{ v: new Map([['k', 'v']]) }, ['v']],
+      [{ v: when }, ['v']],
+      [{ u: { p: SECRET, d: when } }, ['u.p']],
+      [{ v: when }, ['no.match']],
+    ];
+
+    for (const [value, redactedKeys] of cases) {
+      expect(stringifyValue(value, { redactedKeys })).toBe(
+        stringifyValue(redactValue(value, { redactedKeys })),
+      );
+    }
+  });
+
+  test('redactValue agrees with the logger applyRedaction', () => {
+    // One implementation behind both, so an entry masks the same way and preserves the
+    // same references whichever entry point a caller reaches for.
+    const params = {
+      p: SECRET,
+      d: new Date('2020-01-01T00:00:00Z'),
+      e: new Error('boom'),
+    };
+
+    expect(redactValue(params, { redactedKeys: ['p'] })).toEqual(
+      applyRedaction(params, ['p']),
+    );
+  });
+});
+
+describe('stringifyValue - a value renders the same at every depth', () => {
+  // Nested values used to go through `JSON.stringify`, which applies its own rules rather
+  // than these. They disagreed in ways that lost information or leaked it, and the
+  // disagreement was invisible: the same value printed two different ways depending only
+  // on whether it happened to sit inside an object.
+  const nest = (value: unknown): string => stringifyValue({ v: value });
+
+  test('renders a leaf identically alone and inside a container', () => {
+    class Session {
+      constructor(
+        public apiKey = 'topsecret',
+        public id = 1,
+      ) {}
+    }
+
+    const values: unknown[] = [
+      new Date('2020-01-01T00:00:00Z'),
+      new Error('boom'),
+      new URL('https://ex.test/a'),
+      new Map([['k', 'v']]),
+      new Set(['a']),
+      new Session(),
+      function named(): void {},
+      undefined,
+      10n,
+    ];
+
+    for (const value of values) {
+      expect(nest(value)).toBe(`{"v":${JSON.stringify(stringifyValue(value))}}`);
+    }
+
+    // And inside an array, which is the same walk.
+    expect(stringifyValue([new Error('boom')])).toBe('["Error: boom"]');
+  });
+
+  test('does not dump a class instance fields when nested', () => {
+    // The rule one level up is to name a class instance rather than print fields the
+    // caller never asked to expose. `JSON.stringify` ignored that and dumped them, so a
+    // secret hidden at top level was printed in full one level down - and no redaction
+    // path could reach it, since nothing was named.
+    class Session {
+      public apiKey = 'topsecret';
+    }
+
+    expect(stringifyValue(new Session())).toBe('[Session]');
+    expect(nest(new Session())).toBe('{"v":"[Session]"}');
+    expect(nest(new Session())).not.toContain('topsecret');
+    expect(stringifyValue({ a: { b: new Session() } })).not.toContain(
+      'topsecret',
+    );
+  });
+
+  test('renders a Date as ISO at every depth', () => {
+    // Sortable, parseable, and timezone-explicit, which the locale form is not.
+    const when = new Date('2020-01-01T00:00:00Z');
+
+    expect(stringifyValue(when)).toBe('2020-01-01T00:00:00.000Z');
+    expect(nest(when)).toBe('{"v":"2020-01-01T00:00:00.000Z"}');
+  });
+
+  test('an invalid Date keeps its own string form', () => {
+    expect(stringifyValue(new Date('nonsense'))).toBe('Invalid Date');
+  });
+
+  test('one awkward leaf no longer collapses the whole render', () => {
+    // A `BigInt` made `JSON.stringify` throw, and the entire object degraded to
+    // `[object]` - every other field lost over one value.
+    expect(stringifyValue({ id: 10n, name: 'kept' })).toBe(
+      '{"id":"10","name":"kept"}',
+    );
+  });
+
+  test('cuts a cycle where it closes rather than losing the object', () => {
+    const cyclic: Record<string, unknown> = { a: 1 };
+
+    cyclic['self'] = cyclic;
+
+    expect(stringifyValue(cyclic)).toBe('{"a":1,"self":"[circular]"}');
+  });
+
+  test('keeps a value referenced twice side by side', () => {
+    // Not a cycle: releasing each object as its branch finishes is what tells the two
+    // apart, the same rule errorToString follows.
+    const shared = { n: 1 };
+
+    expect(stringifyValue({ a: shared, b: shared })).toBe(
+      '{"a":{"n":1},"b":{"n":1}}',
+    );
+  });
+
+  test('still renders a plain container as ordinary JSON', () => {
+    expect(stringifyValue({ k: 'v', n: 1, b: true, z: null })).toBe(
+      '{"k":"v","n":1,"b":true,"z":null}',
+    );
+    expect(stringifyValue(['a', 'b'])).toBe('["a","b"]');
+    expect(stringifyValue({ 'quoted"key': 'a"b' })).toBe(
+      '{"quoted\\"key":"a\\"b"}',
+    );
+  });
+});
+
+describe('redactValue - deeply mixed containers', () => {
+  test('addresses and rebuilds arrays and objects interleaved to any depth', () => {
+    // The general case the path grammar exists for: objects inside arrays inside objects,
+    // and an array directly inside another array, which has no key of its own to name.
+    const value = {
+      users: [
+        {
+          name: 'a',
+          creds: { token: 'topsecret1', nested: [{ deep: 'topsecret2' }] },
+        },
+        { name: 'b', tags: ['x', ['y', { z: 'topsecret3' }]] },
+      ],
+      meta: { when: new Date('2020-01-01T00:00:00Z'), err: new Error('boom') },
+    };
+
+    const masked = redactValue(value, {
+      redactedKeys: [
+        'users[0].creds.token',
+        'users[0].creds.nested[0].deep',
+        'users[1].tags[1][1].z',
+      ],
+    }) as typeof value;
+
+    const rendered = stringifyValue(masked);
+
+    expect(rendered).not.toContain('topsecret');
+    // Every unnamed neighbour survives, at every level.
+    expect(rendered).toContain('"name":"a"');
+    expect(rendered).toContain('"x"');
+    expect(rendered).toContain('"y"');
+
+    // Shape is preserved rather than coerced: an array is still an array, nested ones
+    // included.
+    expect(Array.isArray(masked.users)).toBe(true);
+    expect(Array.isArray(masked.users[1]?.tags?.[1])).toBe(true);
+
+    // Only the branches leading to a mask are rebuilt. `meta` held nothing named, so it
+    // is the caller's own object, and the `Date` and `Error` inside it are untouched.
+    expect(masked.meta).toBe(value.meta);
+    expect(masked.meta.when).toBeInstanceOf(Date);
+    expect(masked.meta.err).toBeInstanceOf(Error);
+    expect(masked.users[1]).not.toBe(value.users[1]);
+  });
+});
+
+describe('stringifyValue - one bad value never costs the rest', () => {
+  test('degrades a throwing array element, not the array around it', () => {
+    // The object branch guarded its reads from the start; the array branch did not, so a
+    // single throwing element unwound to the top-level catch and the entire payload
+    // collapsed to `[object]` - every unrelated field lost over one value.
+    const list: unknown[] = [1, 2];
+
+    Object.defineProperty(list, '1', {
+      get() {
+        throw new Error('boom');
+      },
+      enumerable: true,
+      configurable: true,
+    });
+
+    expect(stringifyValue({ user: 'alice', list, note: 'kept' })).toBe(
+      '{"user":"alice","list":[1,"[unrenderable]"],"note":"kept"}',
+    );
+  });
+
+  test('degrades a throwing object entry, not the object around it', () => {
+    expect(
+      stringifyValue({
+        user: 'alice',
+        o: {
+          get x(): never {
+            throw new Error('boom');
+          },
+        },
+        note: 'kept',
+      }),
+    ).toContain('"note":"kept"');
+  });
+});
+
+describe('stringifyValue - opting out and bounding output', () => {
+  test('does not call a toJSON, at any depth', () => {
+    // `JSON.stringify` honours `toJSON`; this renderer deliberately does not. It was
+    // honoured for a plain object and silently ignored for a class instance, which is an
+    // arbitrary split, and it is the one place caller code ran on the logging path - a
+    // method free to throw, to be slow, or to return something different each call.
+    // Everything is walked by this library instead, so what prints is what the value
+    // actually holds. Use `redactedKeys` to hide a field rather than a `toJSON`.
+    const value = { id: 1, toJSON: (): string => 'CUSTOM' };
+
+    expect(stringifyValue(value)).toBe('{"id":1,"toJSON":"[Function: toJSON]"}');
+    expect(stringifyValue({ inner: value })).toBe(
+      '{"inner":{"id":1,"toJSON":"[Function: toJSON]"}}',
+    );
+  });
+
+  test('a toJSON object redacts like any other plain object', () => {
+    // The payoff for not honouring it: no special case, and a path reaches the field.
+    expect(
+      stringifyValue(
+        { cfg: { env: 'prod', apiKey: SECRET, toJSON: (): string => 'CUSTOM' } },
+        { redactedKeys: ['cfg.apiKey'] },
+      ),
+    ).toBe(
+      '{"cfg":{"env":"prod","apiKey":"h***********t","toJSON":"[Function: toJSON]"}}',
+    );
+  });
+
+  test('a throwing toJSON is never called, so it cannot fail', () => {
+    expect(
+      stringifyValue({
+        kept: 'v',
+        toJSON: (): never => {
+          throw new Error('boom');
+        },
+      }),
+    ).toContain('"kept":"v"');
+  });
+
+  test('a toJSON returning the container itself does not recurse', () => {
+    const value: Record<string, unknown> = { a: 1 };
+
+    value['toJSON'] = (): unknown => value;
+
+    expect(typeof stringifyValue(value)).toBe('string');
+  });
+
+  test('a throwing toJSON falls back to the ordinary walk', () => {
+    expect(
+      stringifyValue({
+        toJSON: (): never => {
+          throw new Error('boom');
+        },
+        kept: 'v',
+      }),
+    ).toContain('"kept":"v"');
+  });
+
+  test('names a function rather than printing its body', () => {
+    // `String(fn)` is the whole source: unbounded, and carrying whatever the author wrote
+    // inside it into a log line.
+    function secretHelper(): string {
+      return 'AKIA-LEAK';
+    }
+
+    expect(stringifyValue(secretHelper)).toBe('[Function: secretHelper]');
+    expect(stringifyValue({ fn: secretHelper })).toBe(
+      '{"fn":"[Function: secretHelper]"}',
+    );
+    expect(stringifyValue({ fn: secretHelper })).not.toContain('AKIA-LEAK');
+    expect(stringifyValue(function (): void {})).toBe('[Function]');
+  });
+});
+
+describe('stringifyValue - depth', () => {
+  test('marks where a too-deep render stopped', () => {
+    // Catching the per-entry throw meant a `RangeError` from deep recursion was swallowed
+    // silently: tens of kilobytes of output that simply stopped, with nothing saying so.
+    let deep: Record<string, unknown> = { v: 1 };
+
+    for (let index = 0; index < 5000; index++) {
+      deep = { d: deep };
+    }
+
+    const rendered = stringifyValue(deep);
+
+    expect(rendered).toContain('[max depth exceeded]');
+    expect(rendered.length).toBeLessThan(2000);
+    expect(() => JSON.parse(rendered) as unknown).not.toThrow();
+  });
+});
+
+describe('redactValue - redaction changes only what it masks', () => {
+  // The rule the rest of this follows: redacted output must differ from unredacted output
+  // only where a value was masked. Redaction decides what to hide, never how the value
+  // around it is printed.
+  //
+  // It is not a style preference. The walk used to descend into anything object-shaped,
+  // so masking one field rebuilt an `Error` or a class instance as a plain object - and
+  // the renderer, which prints those through their own string form, then printed their
+  // fields instead. Asking to hide `password` on a `Session` printed the `internalToken`
+  // sitting beside it, which no unredacted log line had ever shown. Redaction disclosed.
+  //
+  // So redaction now walks exactly what the renderer walks: a plain object or an array.
+  // Everything else is one value in both, and masking it replaces one string with another.
+
+  class Session {
+    public id = 5;
+
+    public password = SECRET;
+
+    public internalToken = 'NEVER-MEANT-TO-PRINT';
+
+    public toString(): string {
+      return 'Session';
+    }
+  }
+
+  test('masking never reveals a field that was not printed before', () => {
+    const rendered = stringifyValue(
+      { s: new Session() },
+      { redactedKeys: ['s.password'] },
+    );
+
+    expect(rendered).not.toContain('NEVER-MEANT-TO-PRINT');
+    expect(rendered).not.toContain(SECRET);
+
+    const failure = Object.assign(new Error('boom'), {
+      password: SECRET,
+      databaseURL: 'postgres://user:pw@host/db',
+    });
+
+    expect(
+      stringifyValue({ e: failure }, { redactedKeys: ['e.password'] }),
+    ).not.toContain('postgres');
+  });
+
+  test('a value keeps its printed shape whether or not it is redacted', () => {
+    // A string before, a string after; an object before, an object after.
+    const shapes: [() => unknown, string][] = [
+      [() => ({ id: 5, password: SECRET }), 'v.password'],
+      [() => [{ password: SECRET }], 'v[0].password'],
+      [() => new Session(), 'v.password'],
+      [() => Object.assign(new Error('boom'), { password: SECRET }), 'v.password'],
+      [() => new Map([['password', SECRET]]), 'v.password'],
+      [() => new Date('2020-01-01T00:00:00Z'), 'v.password'],
+    ];
+
+    for (const [make, entry] of shapes) {
+      const plain = stringifyValue({ v: make() });
+      const redacted = stringifyValue({ v: make() }, { redactedKeys: [entry] });
+
+      // Both render an object at `v`, or both render a string at `v`.
+      expect(redacted.startsWith('{"v":{') || redacted.startsWith('{"v":[')).toBe(
+        plain.startsWith('{"v":{') || plain.startsWith('{"v":['),
+      );
+      expect(redacted).not.toContain(SECRET);
+    }
+  });
+
+  test('a path into a value the renderer prints whole masks that value', () => {
+    // There is no way to mask part of `Error: boom`, and leaving it alone would print the
+    // very thing the path named, so the value goes.
+    for (const [value, entry] of [
+      [{ err: new Error('SUPERSECRET') }, 'err.message'],
+      [{ u: new URL('https://user:PASSWORD@ex.test/') }, 'u.password'],
+      [{ c: new Map([['apiKey', SECRET]]) }, 'c.apiKey'],
+      [{ s: new Session() }, 's.password'],
+    ] as [Record<string, unknown>, string][]) {
+      const rendered = stringifyValue(value, { redactedKeys: [entry] });
+
+      expect(rendered).toContain('***REDACTED***');
+      expect(rendered).not.toContain('SUPERSECRET');
+      expect(rendered).not.toContain('PASSWORD');
+      expect(rendered).not.toContain(SECRET);
+    }
+  });
+
+  test('such a value is untouched when nothing points inside it', () => {
+    expect(
+      stringifyValue(
+        { err: new Error('boom'), other: SECRET },
+        { redactedKeys: ['other'] },
+      ),
+    ).toBe(`{"err":"Error: boom","other":"h***********t"}`);
+  });
+
+  test('a plain container is still masked surgically', () => {
+    // Its own entries are the whole of what prints, so a path reaches exactly one of them
+    // and a path naming one it lacks reaches nothing.
+    expect(
+      stringifyValue(
+        { u: { name: 'alice', password: SECRET }, a: [1, 2] },
+        { redactedKeys: ['u.password', 'u.stale', 'a.stale'] },
+      ),
+    ).toBe('{"u":{"name":"alice","password":"h***********t"},"a":[1,2]}');
+  });
+});
+
+describe('stringifyValue - the redaction invariant', () => {
+  test('redacted output differs from unredacted output only at the masked values', () => {
+    // Asserted mechanically rather than eyeballed, over one payload holding every kind of
+    // value the two walks treat differently: plain objects and arrays, which are entered;
+    // a `Date`, an `Error` and a class instance, which are printed whole; and an object
+    // defining `toJSON`, which is resolved to its result first.
+    //
+    // This is the property the whole design serves. Breaking it is how redaction came to
+    // disclose fields - masking rebuilt a value the renderer would have printed whole, and
+    // the renderer then printed its fields instead.
+    class Session {
+      public id = 5;
+
+      public token = SECRET;
+
+      public toString(): string {
+        return 'Session';
+      }
+    }
+
+    const payload = (): Record<string, unknown> => ({
+      user: { name: 'alice', token: SECRET },
+      list: [{ token: SECRET }, 'plain'],
+      when: new Date('2020-01-01T00:00:00Z'),
+      err: new Error('boom'),
+      cfg: {
+        env: 'prod',
+        token: SECRET,
+        toJSON: (): unknown => ({ env: 'prod', token: SECRET }),
+      },
+      sess: new Session(),
+    });
+
+    const before = stringifyValue(payload());
+    const after = stringifyValue(payload(), {
+      redactedKeys: ['user.token', 'list[0].token', 'cfg.token'],
+    });
+
+    expect(after).not.toContain(SECRET);
+
+    // Every masked spot replaced by the same token in both renders: what is left must
+    // match exactly, so nothing appeared, vanished, or changed shape.
+    const mask = /h\*+t/g;
+
+    expect(before.split(SECRET).join('<M>')).toBe(after.split(mask).join('<M>'));
+
+    // And the values nobody named print identically, character for character.
+    for (const fragment of [
+      '"when":"2020-01-01T00:00:00.000Z"',
+      '"err":"Error: boom"',
+      '"sess":"Session"',
+      '"name":"alice"',
+      '"plain"',
+    ]) {
+      expect(before).toContain(fragment);
+      expect(after).toContain(fragment);
+    }
+  });
+});
+
+describe('redactValue - a Map or any unsupported type', () => {
+  test('is replaced by a string, not rebuilt into anything', () => {
+    // Nothing is constructed for it. A `Map`, a `Set`, a `Date`, an `Error`, a class
+    // instance - each is one value to both walks, so masking swaps it for a plain string
+    // and that string is what gets rendered. Which is exactly why the printed shape does
+    // not move: a string stood there before, and a string stands there after.
+    const masked = redactValue(
+      { m: new Map([['k', SECRET]]), s: new Set([SECRET]) },
+      { redactedKeys: ['m', 's'] },
+    ) as Record<string, unknown>;
+
+    expect(masked['m']).toBe('***REDACTED***');
+    expect(masked['s']).toBe('***REDACTED***');
+    expect(typeof masked['m']).toBe('string');
+
+    expect(
+      stringifyValue(
+        { m: new Map([['k', SECRET]]) },
+        { redactedKeys: ['m'] },
+      ),
+    ).toBe('{"m":"***REDACTED***"}');
+  });
+
+  test('is passed through untouched when nothing names it', () => {
+    const conf = new Map([['k', SECRET]]);
+    const masked = redactValue(
+      { conf, other: SECRET },
+      { redactedKeys: ['other'] },
+    ) as Record<string, unknown>;
+
+    // The same Map, by reference - not a copy, not a rebuild.
+    expect(masked['conf']).toBe(conf);
+    expect(stringifyValue({ conf }, { redactedKeys: ['other'] })).toBe(
+      '{"conf":"[Map]"}',
+    );
+  });
+});
+
+describe('redactValue - a hostile array cannot cost the payload', () => {
+  // The array branch used to reach `entries` off the array itself and rebuild through
+  // `map`, both of which are caller code: an own `entries` property, and a subclass
+  // constructor reached through `ArraySpeciesCreate`. Either could throw from inside the
+  // walk, where there was no guard, so one bad array anywhere turned an entire payload
+  // into the failure marker - while the renderer walked the same array without trouble.
+  // That divergence between the two walks is the thing this design exists to remove.
+  const withArray = (a: unknown): Record<string, unknown> => ({
+    a,
+    password: SECRET,
+    user: 'alice',
+  });
+
+  test('keeps every sibling when the array itself misbehaves', () => {
+    const shadowed: unknown[] = [1, 2];
+
+    (shadowed as unknown as Record<string, unknown>)['entries'] = 'not a method';
+
+    const throwing: unknown[] = [1, 2];
+
+    (throwing as unknown as Record<string, unknown>)['entries'] = (): never => {
+      throw new Error('nope');
+    };
+
+    // A generator yielding different pairs rebuilt the array from the lie, silently
+    // dropping every element it did not mention.
+    const hijacked: unknown[] = [1, 2];
+
+    (hijacked as unknown as Record<string, unknown>)['entries'] =
+      function* (): Generator<[number, unknown]> {
+        yield [0, 'HIJACK'];
+      };
+
+    class Tuple extends Array {
+      constructor(...items: unknown[]) {
+        super();
+
+        if (items.length !== 2) {
+          throw new TypeError('Tuple needs exactly 2');
+        }
+
+        this.push(...items);
+      }
+    }
+
+    for (const array of [
+      shadowed,
+      throwing,
+      hijacked,
+      new Tuple('lat', 'lng') as unknown as unknown[],
+    ]) {
+      const rendered = stringifyValue(withArray(array), {
+        redactedKeys: ['password'],
+      });
+
+      expect(rendered).not.toContain(SECRET);
+      expect(rendered).toContain('"user":"alice"');
+      // The array survives with both elements, exactly as the renderer prints it.
+      expect(rendered).toContain('"a":[');
+      expect(rendered).not.toBe('***REDACTION FAILED***');
+    }
+  });
+
+  test('degrades one unreadable element rather than the whole array', () => {
+    const array: unknown[] = [1, 2];
+
+    Object.defineProperty(array, '1', {
+      get(): never {
+        throw new Error('nope');
+      },
+      enumerable: true,
+      configurable: true,
+    });
+
+    const rendered = stringifyValue(withArray(array), {
+      redactedKeys: ['password'],
+    });
+
+    expect(rendered).toContain('"user":"alice"');
+    expect(rendered).toContain('***REDACTION FAILED***');
+    expect(rendered).not.toContain(SECRET);
+  });
+});
+
+describe('redactValue - a cycle nobody named is left alone', () => {
+  test('does not rewrite a cyclic payload when nothing matched', () => {
+    // A back-edge yields the failure marker so that an unmasked original never ends up
+    // inside a copy being rebuilt around it. With no mask anywhere there is no such copy,
+    // and rewriting the value would break the rule that only masked things change.
+    const cyclic: Record<string, unknown> = { a: 1 };
+
+    cyclic['self'] = cyclic;
+
+    expect(stringifyValue({ c: cyclic }, { redactedKeys: ['zzz'] })).toBe(
+      stringifyValue({ c: cyclic }),
+    );
+
+    // An unreadable read is deliberately *not* given this treatment - see the test below.
+  });
+
+  test('still fails closed once a mask lands beside the cycle', () => {
+    const cyclic: Record<string, unknown> = { a: 1 };
+
+    cyclic['self'] = cyclic;
+
+    const rendered = stringifyValue(
+      { c: cyclic, password: SECRET },
+      { redactedKeys: ['password'] },
+    );
+
+    expect(rendered).toContain('***REDACTION FAILED***');
+    expect(rendered).not.toContain(SECRET);
+  });
+
+  test('an unreadable read is never mistaken for nothing to mask', () => {
+    // The key distinction: a cycle is a place the walk already knows, so "nothing matched"
+    // is real. A read that failed hides what was behind it, so the same conclusion would
+    // hand back the original with a redacted key still in the clear.
+    const value: Record<string, unknown> = { password: SECRET };
+
+    Object.defineProperty(value, 'boom', {
+      get(): never {
+        throw new Error('nope');
+      },
+      enumerable: true,
+    });
+
+    expect(redactValue(value, { redactedKeys: ['password'] })).toBe(
+      '***REDACTION FAILED***',
+    );
+  });
+});
+
+describe('redactValue - what masking reaches', () => {
+  test('does not mask state the renderer cannot see either', () => {
+    // Masking covers own enumerable string-keyed properties, which is exactly what gets
+    // printed. Anything hidden from `Object.entries` is neither masked nor printed, so no
+    // log line leaks - but the returned object still holds it, which makes `redactValue`
+    // safe to render rather than a sanitizer for an arbitrary consumer.
+    //
+    // Deliberately not fixed with a reachability check: testing whether a name exists
+    // rather than whether it prints is what caused a stale entry to blank a whole value
+    // earlier in this work.
+    const hidden = 'SUPERSECRET';
+
+    const withNonEnumerable = (): Record<string, unknown> => {
+      const o: Record<string, unknown> = { visible: 1 };
+
+      Object.defineProperty(o, 'password', {
+        value: hidden,
+        enumerable: false,
+      });
+
+      return o;
+    };
+
+    // Never printed, with or without redaction.
+    expect(stringifyValue({ o: withNonEnumerable() })).toBe(
+      '{"o":{"visible":1}}',
+    );
+    expect(
+      stringifyValue({ o: withNonEnumerable() }, { redactedKeys: ['o.password'] }),
+    ).toBe('{"o":{"visible":1}}');
+
+    // But not removed from the returned structure either.
+    const masked = redactValue(
+      { o: withNonEnumerable() },
+      { redactedKeys: ['o.password'] },
+    ) as { o: Record<string, unknown> };
+
+    expect(masked.o['password']).toBe(hidden);
+
+    // Naming the container masks every leaf it can see and keeps the shape - so the
+    // hidden property is not covered by that either. Only a value the renderer prints
+    // whole is replaced outright.
+    expect(
+      redactValue({ o: withNonEnumerable() }, { redactedKeys: ['o'] }),
+    ).toEqual({ o: { visible: '***REDACTED***' } });
+  });
+});

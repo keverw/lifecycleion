@@ -1633,13 +1633,25 @@ interface LogEntry {
 ### Important Notes
 
 - **`message`**: Contains the interpolated template. When `redactedKeys` are configured, the message is rendered from `redactedParams`. Otherwise it is rendered from the original `params`.
-- **`params`**: Raw unredacted parameters
-- **`redactedParams`**: Parameters with sensitive values masked according to `redactedKeys` when redaction is configured
+- **`params`**: Raw unredacted parameters - the caller's own object, by reference. **This is an escape hatch, and it holds the secrets.** See below.
+- **`redactedParams`**: Parameters with sensitive values masked according to `redactedKeys`. Present only when redaction is configured
 - **`redactedKeys`**: List of parameter keys that were redacted (useful for auditing and metadata)
 
 ### Security Note
 
 If you configure `redactedKeys`, the `message` field is rendered from the redacted values. This means templated sensitive fields such as `{{password}}` are masked in the message as well as in `redactedParams`. Without `redactedKeys`, the message is rendered from the original `params`.
+
+**`entry.params` is never redacted.** Every entry carries both views: `params` is handed to sinks exactly as the caller passed it, secrets and all, so a sink that genuinely needs the real values - an in-process metric, a local debugger - can have them. Redaction masks `redactedParams` and the `message`, not `params`.
+
+That makes it the one field a sink must be deliberate about. **A sink that writes anywhere the values could outlive the process - a file, a socket, a pipe, a third-party service - should not read `params` directly:**
+
+```ts
+const safe = entry.redactedParams ?? entry.params;
+```
+
+`redactedParams` is `undefined` when no `redactedKeys` were configured, which is why the fallback is needed; when redaction _was_ configured, this always prefers the masked view. Reaching for `entry.params` on its own is how a redacted log line still ends up shipping the secret.
+
+`redactedParams` differs from `params` only where a value was masked. Everything else is the value the caller passed, by reference - a `Date` is still that `Date`, an `Error` still carries its `message` and `stack` - so a structured sink can read it without losing fidelity to redaction.
 
 ## Testing
 
