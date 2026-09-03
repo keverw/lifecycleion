@@ -159,6 +159,11 @@
       "import": "./dist/lib/tmp-dir.js",
       "require": "./dist/lib/tmp-dir.cjs"
     },
+    "./stringify-value": {
+      "types": "./dist/lib/stringify-value.d.ts",
+      "import": "./dist/lib/stringify-value.js",
+      "require": "./dist/lib/stringify-value.cjs"
+    },
     "./to-error": {
       "types": "./dist/lib/to-error.d.ts",
       "import": "./dist/lib/to-error.js",

@@ -303,7 +303,7 @@ describe('CurlyBrackets', () => {
 
     expect(
       CurlyBrackets('{{user}}', { user: { name: 'Alice', age: 42 } }, '(???)'),
-    ).toEqual('{\"name\":\"Alice\",\"age\":42}');
+    ).toEqual('{"name":"Alice","age":42}');
   });
 
   test('compileTemplate and escaped brackets', () => {
