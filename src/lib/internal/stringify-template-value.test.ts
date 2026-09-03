@@ -11,10 +11,10 @@ describe('stringifyTemplateValue', () => {
   });
 
   test('should stringify arrays', () => {
-    expect(stringifyTemplateValue(['a', 'b'])).toBe('a,b');
+    expect(stringifyTemplateValue(['a', 'b'])).toBe('["a","b"]');
   });
 
-  test('should stringify objects using JavaScript coercion', () => {
-    expect(stringifyTemplateValue({ key: 'value' })).toBe('[object Object]');
+  test('should stringify plain objects as JSON', () => {
+    expect(stringifyTemplateValue({ key: 'value' })).toBe('{"key":"value"}');
   });
 });

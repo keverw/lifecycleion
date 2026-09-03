@@ -234,10 +234,10 @@ describe('Logger', () => {
       expect(log.redactedParams?.metadata).toEqual({ key: '***REDACTED***' });
 
       // The rendered message interpolates a container the same way it does an
-      // unredacted one, so a shape that survives for a structured sink reads as
-      // '[object Object]' in the message text.
+      // unredacted one - as JSON - so the masked leaves are visible in the message
+      // text rather than hidden behind '[object Object]'.
       expect(log.message).toBe(
-        'Failure ***REDACTED*** / ***REDACTED***,***REDACTED*** / [object Object]',
+        'Failure ***REDACTED*** / ["***REDACTED***","***REDACTED***"] / {"key":"***REDACTED***"}',
       );
     });
 

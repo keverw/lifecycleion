@@ -293,17 +293,17 @@ describe('CurlyBrackets', () => {
     );
   });
 
-  it('should stringify full arrays and objects using default JavaScript coercion', () => {
+  it('should stringify full arrays and plain objects as JSON', () => {
     expect(
       CurlyBrackets('{{users}}', { users: ['Alice', 'Bob'] }, '(???)'),
-    ).toEqual('Alice,Bob');
+    ).toEqual('["Alice","Bob"]');
     expect(CurlyBrackets('{{counts}}', { counts: [1, 2, 3] }, '(???)')).toEqual(
-      '1,2,3',
+      '[1,2,3]',
     );
 
     expect(
       CurlyBrackets('{{user}}', { user: { name: 'Alice', age: 42 } }, '(???)'),
-    ).toEqual('[object Object]');
+    ).toEqual('{\"name\":\"Alice\",\"age\":42}');
   });
 
   test('compileTemplate and escaped brackets', () => {
@@ -336,7 +336,7 @@ describe('CurlyBrackets', () => {
         },
       }),
     ).toEqual(
-      'Hello Steve Jobs - [object Object] - {{name}} - {{name}} - {{name}}',
+      'Hello Steve Jobs - {"first":"Steve","last":"Jobs"} - {{name}} - {{name}} - {{name}}',
     );
   });
 });
