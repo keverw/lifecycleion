@@ -98,9 +98,10 @@ export interface BeforeExitResult {
 /**
  * Produces the replacement for a redacted value.
  *
- * Return `null` (or nothing at all) to defer to the default masking for that value, so a
- * caller can special-case a few keys without reproducing the default for the rest. To
- * render a literal null, return the string.
+ * Return `null` to defer to the default masking for that value, so a caller can
+ * special-case a few keys without reproducing the default for the rest. To render a
+ * literal null, return the string. Returning nothing is not a deferral: `undefined` is
+ * used literally and drops the value.
  *
  * The same shape and the same deferral rule apply to `errorToString`'s `redactFunction`
  * option, so one function can serve both.

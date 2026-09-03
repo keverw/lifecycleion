@@ -120,16 +120,18 @@ export function applyRedaction(
   /**
    * Apply the caller's function, deferring to the default when it declines.
    *
-   * `null` (or nothing at all) means "use the default for this one", so a caller can
-   * special-case a few keys without reproducing the default masking for the rest. To
-   * render a literal null, return the string.
+   * `null` means "use the default for this one", so a caller can special-case a few keys
+   * without reproducing the default masking for the rest. To render a literal null,
+   * return the string.
+   *
+   * Only `null` defers. A function that returns nothing keeps having its `undefined`
+   * used literally, which drops the value - treating that as a deferral would turn an
+   * existing caller's dropped field into a partial mask, disclosing more than it did.
    */
   const redactValue = (fieldKey: string, value: unknown): unknown => {
     const masked = redactFn(fieldKey, value);
 
-    return masked === null || masked === undefined
-      ? defaultRedactValue(fieldKey, value)
-      : masked;
+    return masked === null ? defaultRedactValue(fieldKey, value) : masked;
   };
 
   // Deep clone to avoid mutating original.

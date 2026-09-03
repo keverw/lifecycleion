@@ -2,13 +2,15 @@ import type { NestedKeyValueEntry } from './ascii-tables/key-value-ascii-table';
 import { KeyValueASCIITable } from './ascii-tables/key-value-ascii-table';
 import { getPathParts } from './internal/path-utils';
 import { defaultRedactValue } from './internal/default-redact-function';
+import { stringifyTemplateValue } from './internal/stringify-template-value';
 
 /**
  * Produces the replacement shown for a value named by `sensitiveFieldNames`.
  *
  * Mirrors the shape of the logger's `redactFunction`, so the same function can be used
- * for both, and it defers the same way: return `null` (or nothing at all) to fall back to
- * the default masking for that value, rather than having to reproduce it.
+ * for both: it is handed the same key the caller wrote and the same stringified value,
+ * and it defers the same way - return `null` to fall back to the default masking for that
+ * value rather than having to reproduce it.
  */
 export type RedactFieldFunction = (key: string, value: unknown) => unknown;
 
@@ -38,13 +40,20 @@ export interface ErrorToStringOptions {
  *          paths - which callers must treat as a reason to mask everything rather than
  *          to mask nothing.
  */
-function parseSensitivePaths(value: unknown): string[][] | null {
+interface SensitivePath {
+  /** Parsed segments, used for matching. */
+  parts: string[];
+  /** The entry exactly as the caller wrote it, handed to a custom `redactFunction`. */
+  entry: string;
+}
+
+function parseSensitivePaths(value: unknown): SensitivePath[] | null {
   try {
     if (!Array.isArray(value)) {
       return null;
     }
 
-    const paths: string[][] = [];
+    const paths: SensitivePath[] = [];
 
     for (const entry of value as unknown[]) {
       if (typeof entry !== 'string') {
@@ -58,7 +67,7 @@ function parseSensitivePaths(value: unknown): string[][] | null {
         // the path grammar. `getPathParts` only accepts `\w+` for an unquoted segment,
         // so a perfectly ordinary name like `password-hash` fails to parse — and the
         // logger's `redactedKeys` masks it happily via its own top-level branch.
-        paths.push([entry]);
+        paths.push({ parts: [entry], entry });
 
         continue;
       }
@@ -67,12 +76,12 @@ function parseSensitivePaths(value: unknown): string[][] | null {
       // literal key spelled that way. Both readings are covered, matching what
       // `applyRedaction` does, since leaving either unmasked is the outcome this list
       // exists to prevent.
-      paths.push([entry]);
+      paths.push({ parts: [entry], entry });
 
       const parts = getPathParts(entry);
 
       if (parts !== null && parts.length > 0) {
-        paths.push(parts);
+        paths.push({ parts, entry });
       }
     }
 
@@ -95,23 +104,25 @@ function parseSensitivePaths(value: unknown): string[][] | null {
  * original value.
  */
 function maskSensitive(
-  key: string,
+  entry: string,
   readValue: () => unknown,
   redactFunction: RedactFieldFunction | undefined,
 ): string {
   try {
-    const value = readValue();
+    // Stringified before the function sees it, exactly as `applyRedaction` does. Two
+    // reasons beyond parity: a function written for one would otherwise receive a
+    // different type from the other, and handing over the live value would let a
+    // mutating function reach into the caller's own error object.
+    const value = stringifyTemplateValue(readValue());
 
-    // `null`/`undefined` from a custom function means "use the default for this one", so
-    // a caller can special-case a few keys without reproducing the default masking for
-    // everything else. To render a literal null, return the string.
+    // `null` means "use the default for this one", so a caller can special-case a few
+    // keys without reproducing the default masking for the rest. To render a literal
+    // null, return the string. Only `null` defers - a function that returns nothing has
+    // its `undefined` used literally, which drops the value, as it did before.
     const custom =
-      redactFunction === undefined ? null : redactFunction(key, value);
+      redactFunction === undefined ? null : redactFunction(entry, value);
 
-    const masked =
-      custom === null || custom === undefined
-        ? defaultRedactValue(key, value)
-        : custom;
+    const masked = custom === null ? defaultRedactValue(entry, value) : custom;
 
     return typeof masked === 'string' ? masked : safeStringify(masked);
   } catch {
@@ -120,13 +131,22 @@ function maskSensitive(
   }
 }
 
-/** Whether `path` is exactly one of the sensitive paths. */
-function isSensitivePath(sensitive: string[][], path: string[]): boolean {
-  return sensitive.some(
+/**
+ * The originating entry when `path` matches one of the sensitive paths, else `undefined`.
+ *
+ * Returns the entry rather than a boolean so a custom `redactFunction` can be handed the
+ * key the caller actually wrote - `user.password`, not the leaf `password` - which is what
+ * the logger's `redactedKeys` passes for the same field.
+ */
+function matchSensitivePath(
+  sensitive: SensitivePath[],
+  path: string[],
+): string | undefined {
+  return sensitive.find(
     (candidate) =>
-      candidate.length === path.length &&
-      candidate.every((part, index) => part === path[index]),
-  );
+      candidate.parts.length === path.length &&
+      candidate.parts.every((part, index) => part === path[index]),
+  )?.entry;
 }
 
 function readMember(value: Record<string, unknown>, key: string): unknown {
@@ -226,7 +246,7 @@ function errorToASCIITable(
   error: unknown,
   maxRowLength: number,
   seen: WeakSet<object>,
-  inheritedSensitive: string[][],
+  inheritedSensitive: SensitivePath[],
   redactFunction: RedactFieldFunction | undefined,
 ): KeyValueASCIITable {
   const table = new KeyValueASCIITable({
@@ -307,10 +327,16 @@ function errorToASCIITable(
       }
 
       for (const key of keys) {
-        if (isSensitivePath(sensitivePaths, [key])) {
+        const matchedEntry = matchSensitivePath(sensitivePaths, [key]);
+
+        if (matchedEntry !== undefined) {
           table.addRow(
             `AdditionalInfo.${key}`,
-            maskSensitive(key, () => readMember(info, key), redactFunction),
+            maskSensitive(
+              matchedEntry,
+              () => readMember(info, key),
+              redactFunction,
+            ),
           );
         } else {
           const value = readMember(info, key);
@@ -346,7 +372,7 @@ function stringifyValue(
   table: KeyValueASCIITable,
   maxRowLength: number,
   seen: WeakSet<object>,
-  sensitive: string[][],
+  sensitive: SensitivePath[],
   path: string[],
   redactFunction: RedactFieldFunction | undefined,
 ): string | KeyValueASCIITable | NestedKeyValueEntry[] {
@@ -395,7 +421,7 @@ function stringifyValueInner(
   table: KeyValueASCIITable,
   maxRowLength: number,
   seen: WeakSet<object>,
-  sensitive: string[][],
+  sensitive: SensitivePath[],
   path: string[],
   redactFunction: RedactFieldFunction | undefined,
 ): string | KeyValueASCIITable | NestedKeyValueEntry[] {
@@ -414,8 +440,13 @@ function stringifyValueInner(
     // Handle arrays differently
     return arrayValue
       .map((item, index) => {
-        if (isSensitivePath(sensitive, [...path, String(index)])) {
-          return maskSensitive(String(index), () => item, redactFunction);
+        const matchedEntry = matchSensitivePath(sensitive, [
+          ...path,
+          String(index),
+        ]);
+
+        if (matchedEntry !== undefined) {
+          return maskSensitive(matchedEntry, () => item, redactFunction);
         }
 
         const result = stringifyValue(
@@ -470,20 +501,25 @@ function stringifyValueInner(
       // Matched by path, exactly as the logger's `redactedKeys` does: a bare name in
       // `sensitiveFieldNames` addresses a top-level key of `additionalInfo`, and reaching
       // a nested value takes a path such as `user.password` or `items[0].token`.
-      const entries: NestedKeyValueEntry[] = ownEntries.map(([key, val]) => ({
-        key,
-        value: isSensitivePath(sensitive, [...path, key])
-          ? maskSensitive(key, () => val, redactFunction)
-          : stringifyValue(
-              val,
-              table,
-              maxRowLength - 4,
-              seen,
-              sensitive,
-              [...path, key],
-              redactFunction,
-            ),
-      }));
+      const entries: NestedKeyValueEntry[] = ownEntries.map(([key, val]) => {
+        const matchedEntry = matchSensitivePath(sensitive, [...path, key]);
+
+        return {
+          key,
+          value:
+            matchedEntry !== undefined
+              ? maskSensitive(matchedEntry, () => val, redactFunction)
+              : stringifyValue(
+                  val,
+                  table,
+                  maxRowLength - 4,
+                  seen,
+                  sensitive,
+                  [...path, key],
+                  redactFunction,
+                ),
+        };
+      });
 
       return entries;
     }

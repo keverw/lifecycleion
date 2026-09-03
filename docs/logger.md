@@ -480,7 +480,7 @@ logger.info('API call', {
 // apiKey will be masked as: [REDACTED-apiKey]
 ```
 
-Return `null`, or nothing at all, to defer to the default masking for that value, so you can special-case a few keys without reproducing the default for the rest:
+Return `null` to defer to the default masking for that value, so you can special-case a few keys without reproducing the default for the rest:
 
 ```typescript
 const logger = new Logger({
@@ -490,7 +490,9 @@ const logger = new Logger({
 // apiKey → [hidden]; every other redacted key gets the default masking
 ```
 
-To render a literal null, return the string `'null'`. The same function and the same deferral rule work with [`errorToString`](./error-to-string.md#choosing-how-values-are-masked), which shares this default.
+To render a literal null, return the string `'null'`. Returning **nothing** is not a deferral: `undefined` is used literally, which drops the value.
+
+The same function and the same deferral rule work with [`errorToString`](./error-to-string.md#choosing-how-values-are-masked), which shares this default and passes the same key and stringified value.
 
 #### Redaction fails closed
 

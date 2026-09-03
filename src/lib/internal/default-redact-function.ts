@@ -13,9 +13,17 @@ import datamask from 'datamask';
  */
 export function defaultRedactValue(_keyName: string, value: unknown): unknown {
   if (typeof value === 'string') {
-    return datamask.string(value, '*', 60);
+    const masked = datamask.string(value, '*', 60);
+
+    // `datamask` masks a proportion of the string, so a short value can come back with
+    // nothing masked at all - a one-character secret was returned verbatim. A mask that
+    // did not mask is not a mask, so fall through to the opaque form rather than hand
+    // back the original.
+    if (masked !== value) {
+      return masked;
+    }
   }
 
-  // Defensive fallback for a non-string value.
+  // Non-string values, and strings too short for proportional masking to hide anything.
   return '***REDACTED***';
 }

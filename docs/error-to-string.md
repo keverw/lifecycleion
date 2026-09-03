@@ -116,7 +116,7 @@ A dotted or bracketed entry is treated as ambiguous and both readings are covere
 
 #### Choosing how values are masked
 
-Masked values use the same default the logger applies, so a value renders identically whether it went through a log line or a rendered error. That default is **partial**: the first and last characters survive, so the same secret can be correlated across log lines without being readable.
+Masked values use the same default the logger applies, so a value renders identically whether it went through a log line or a rendered error. That default is **partial**: roughly the middle 60% is masked, so the first and last characters survive and the same secret can be correlated across log lines. That means a long value leaves a proportionally long prefix and suffix readable - if that is not acceptable for your data, pass a `redactFunction` returning a constant. A value too short for proportional masking to hide anything falls back to `***REDACTED***` rather than being returned unmasked.
 
 ```typescript
 // AdditionalInfo.username → j****oe
@@ -128,7 +128,7 @@ Pass a `redactFunction` to mask differently. It receives the key and the value, 
 errorToString(err, 80, { redactFunction: (key) => `[redacted ${key}]` });
 ```
 
-Return `null`, or nothing at all, to defer to the default for that value - so you can special-case a few keys without reproducing the default masking for the rest:
+Return `null` to defer to the default for that value - so you can special-case a few keys without reproducing the default masking for the rest:
 
 ```typescript
 errorToString(err, 80, {
@@ -137,7 +137,9 @@ errorToString(err, 80, {
 // apiKey renders ***, every other sensitive field gets the default masking
 ```
 
-To render a literal null, return the string `'null'`.
+To render a literal null, return the string `'null'`. Returning **nothing** is not a deferral: `undefined` is used literally, which drops the value.
+
+The function is handed the key exactly as you wrote it in `sensitiveFieldNames` (`user.password`, not the leaf `password`) and the value already stringified, which is what the logger passes for the same field - so the same function genuinely serves both, and a mutating function cannot reach into your error object.
 
 If the `redactFunction` throws, or reading the value throws, the result falls back to `***` - never to the original value.
 

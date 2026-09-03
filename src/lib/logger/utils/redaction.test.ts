@@ -480,20 +480,30 @@ describe('applyRedaction - redactFunction deferral', () => {
     expect(result['p']).not.toBe('hunter2secret');
   });
 
-  test('returning nothing also defers to the default', () => {
+  test('returning nothing is used literally and does not defer', () => {
+    // Treating a missing return as a deferral would turn a value an existing caller was
+    // dropping into a partial mask, disclosing more than before.
     const result = applyRedaction(
       { p: 'hunter2secret' },
       ['p'],
       () => undefined,
     );
 
-    expect(result['p']).toBe(
+    expect(result['p']).toBeUndefined();
+    expect(result['p']).not.toBe(
       applyRedaction({ p: 'hunter2secret' }, ['p'])['p'],
     );
   });
 
   test('a literal null is rendered by returning the string', () => {
-    expect(applyRedaction({ p: 'x' }, ['p'], () => 'null')['p']).toBe('null');
+    // Distinguishes the sentinel from the rendered word: returning `null` defers,
+    // returning `'null'` does not.
+    expect(applyRedaction({ p: 'xyzzy12345' }, ['p'], () => 'null')['p']).toBe(
+      'null',
+    );
+    expect(applyRedaction({ p: 'xyzzy12345' }, ['p'], () => null)['p']).toBe(
+      applyRedaction({ p: 'xyzzy12345' }, ['p'])['p'],
+    );
   });
 });
 

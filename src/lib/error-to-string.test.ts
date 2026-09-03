@@ -295,17 +295,6 @@ describe('errorToString', () => {
       expect(rendered).not.toContain(SEC);
     });
 
-    it('should defer to the default when the function returns nothing', () => {
-      const rendered = errorToString(mk({ p: SEC }, ['p']), 80, {
-        redactFunction: () => undefined,
-      });
-
-      expect(rendered).toContain(
-        String(applyRedaction({ p: SEC }, ['p'])['p']),
-      );
-      expect(rendered).not.toContain(SEC);
-    });
-
     it('should use a custom redactFunction at every depth', () => {
       const shapes: [unknown, string[]][] = [
         [{ u: { p: SEC } }, ['u.p']],
@@ -349,21 +338,67 @@ describe('errorToString', () => {
       expect(rendered).not.toContain(SEC);
     });
 
-    it('should not leak when reading the value throws', () => {
-      const info = {};
+    it('should hand the function the same key and value the logger does', () => {
+      // The point of the shared shape: one function must see identical arguments from
+      // both, or "the same function serves both" is not true. Captured directly rather
+      // than parsed out of the rendered table.
+      const shapes: [Record<string, unknown>, string[]][] = [
+        [{ p: SEC }, ['p']],
+        [{ p: 1234567890 }, ['p']],
+        [{ p: true }, ['p']],
+        [{ user: { password: SEC } }, ['user.password']],
+        [{ items: [SEC] }, ['items[0]']],
+      ];
 
-      Object.defineProperty(info, 'p', {
-        get() {
-          throw new Error('nope');
+      for (const [info, names] of shapes) {
+        const fromLogger: string[] = [];
+        const fromRender: string[] = [];
+
+        const record =
+          (into: string[]) =>
+          (key: string, value: unknown): string => {
+            into.push(`${key}|${typeof value}|${String(value)}`);
+
+            return '***';
+          };
+
+        applyRedaction(structuredClone(info), names, record(fromLogger));
+        errorToString(mk(info, names), 200, {
+          redactFunction: record(fromRender),
+        });
+
+        expect(fromRender).toEqual(fromLogger);
+        expect(fromLogger.length).toBe(1);
+      }
+    });
+
+    it('should not hand the function a live reference to the error', () => {
+      // The value is stringified first, as the logger does, so a mutating function
+      // cannot reach into the caller's own error object.
+      const info: Record<string, unknown> = { creds: { pw: SEC } };
+
+      errorToString(mk(info, ['creds']), 100, {
+        redactFunction: (_key, value) => {
+          (value as Record<string, unknown>).injected = 'HELLO';
+
+          return '***';
         },
-        enumerable: true,
       });
 
-      expect(
-        errorToString(mk(info, ['p']), 80, {
-          redactFunction: (_key, value) => String(value),
-        }),
-      ).not.toContain(SEC);
+      expect(JSON.stringify(info)).toBe(JSON.stringify({ creds: { pw: SEC } }));
+    });
+
+    it('should use undefined literally rather than deferring', () => {
+      // Only `null` defers. Treating a missing return as a deferral would turn a value
+      // an existing caller was dropping into a partial mask.
+      const rendered = errorToString(mk({ p: SEC }, ['p']), 80, {
+        redactFunction: () => undefined,
+      });
+
+      expect(rendered).not.toContain(SEC);
+      expect(rendered).not.toContain(
+        String(applyRedaction({ p: SEC }, ['p'])['p']),
+      );
     });
   });
 
