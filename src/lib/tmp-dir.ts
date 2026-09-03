@@ -215,21 +215,33 @@ export class TmpDir {
   public async cleanup(): Promise<void> {
     if (this.isInitialized && !this.wasCleanedUp) {
       try {
-        await fs.rm(this.fullTempDirPath, {
-          recursive: this.allowUnsafeCleanup,
-          force: this.allowUnsafeCleanup,
-        });
+        if (this.allowUnsafeCleanup) {
+          await fs.rm(this.fullTempDirPath, { recursive: true, force: true });
+        } else {
+          // `rmdir`, not `rm`. `fs.rm` without `recursive` refuses a directory outright
+          // and reports `ERR_FS_EISDIR` whether or not it is empty, so it can never
+          // complete a safe cleanup and cannot tell "not empty" from "removed fine".
+          // `rmdir` is the call that means what this wants: remove it if it is empty,
+          // and report `ENOTEMPTY` if it is not.
+          await fs.rmdir(this.fullTempDirPath);
+        }
 
         this.wasCleanedUp = true;
       } catch (error) {
-        // Check if directory is not empty
-        // Different runtimes may return different error codes:
-        // - ENOTEMPTY: directory not empty (Node.js)
-        // - EFAULT: bad address (Bun when trying to delete non-empty dir without recursive)
-        // - ENOENT: doesn't exist (already cleaned up, this shouldn't happen but handle it)
+        // Different runtimes report a non-empty directory differently:
+        // - ENOTEMPTY: the standard code, from `rmdir` on Node and Bun
+        // - EEXIST: some platforms use this for the same condition
+        // - EFAULT: older Bun, from the `fs.rm` path this no longer takes
+        // - ERR_FS_EISDIR: `fs.rm` refusing a directory, kept in case a runtime routes
+        //   `rmdir` through the same error
         if (error instanceof Error) {
           const code = (error as NodeJS.ErrnoException).code;
-          if (code === 'ENOTEMPTY' || code === 'EFAULT') {
+          if (
+            code === 'ENOTEMPTY' ||
+            code === 'EEXIST' ||
+            code === 'EFAULT' ||
+            code === 'ERR_FS_EISDIR'
+          ) {
             throw new ErrTmpDirCleanupFailedNotEmpty();
           }
         }

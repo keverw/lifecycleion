@@ -164,7 +164,7 @@ function formatFieldName(name: string): string {
  * inject extra headers into the multipart part. Stripping line breaks
  * eliminates that risk while still forwarding the intended media type.
  */
-function sanitizeContentType(raw: string): string {
+export function sanitizeContentType(raw: string): string {
   return raw.replace(/\r\n|\r|\n/g, '');
 }
 

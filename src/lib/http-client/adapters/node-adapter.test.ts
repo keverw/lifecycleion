@@ -3420,7 +3420,12 @@ describe('NodeAdapter via HTTPClient', () => {
     expect(res.status).toBe(0);
     expect(res.isNetworkError).toBe(true);
     expect(res.isFailed).toBe(true);
-    expect(builder.error?.cause?.message).toMatch(/ECONNREFUSED/i);
+    // Asserted on `code`, not the message. `localhost` is dual-stack, and a refused
+    // connection there surfaces as an `AggregateError` whose own message is empty
+    // (Bun 1.4.0) while the code is still `ECONNREFUSED`.
+    const cause = builder.error?.cause;
+
+    expect(cause?.code ?? cause?.message).toMatch(/ECONNREFUSED/i);
   });
 
   test('a GET is still retried after a connection reset', async () => {

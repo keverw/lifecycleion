@@ -4,6 +4,7 @@ import { describe, expect, test } from 'bun:test';
 import {
   calculateMultipartFormDataSize,
   generateMultipartBoundary,
+  sanitizeContentType,
   serializeMultipartFormData,
 } from './multipart';
 import type { RequestBodyWritable } from './request-body-writable';
@@ -568,32 +569,43 @@ describe('serializeMultipartFormData', () => {
     expect(calculateMultipartFormDataSize(fd, boundary)).toBe(getBody().length);
   });
 
-  test('sanitizes CR/LF in File.type to prevent header injection', async () => {
-    const fd = new FormData();
-    fd.append(
-      'file',
-      new File(['data'], 'test.txt', {
-        type: 'text/plain\r\nX-Injected: yes',
-      }),
+  test('sanitizes CR/LF in a Content-Type to prevent header injection', () => {
+    // Asserted against the sanitizer directly rather than through a `File`. As of Bun
+    // 1.4.0 the `File` constructor rejects a type containing CR/LF and `FormData.append`
+    // clones the file, so neither route can deliver the malicious value any more - the
+    // fixture, not the protection, is what stopped working. Pinning the sanitizer keeps
+    // the guarantee under test on a runtime that does not police the type for us.
+    expect(sanitizeContentType('text/plain\r\nX-Injected: yes')).toBe(
+      'text/plainX-Injected: yes',
     );
-    const { req, getBody } = makeCapture();
+    expect(sanitizeContentType('text/plain\nX-Injected: yes')).toBe(
+      'text/plainX-Injected: yes',
+    );
+    expect(sanitizeContentType('text/plain\rX-Injected: yes')).toBe(
+      'text/plainX-Injected: yes',
+    );
+    expect(sanitizeContentType('text/plain')).toBe('text/plain');
 
-    const boundary = generateMultipartBoundary();
-    await serializeMultipartFormData(fd, req, boundary);
+    // Whatever it returns must never carry a header separator.
+    for (const raw of [
+      'a\r\nb',
+      '\r\n\r\n',
+      'x\ny\rz',
+      'text/plain\r\n\r\nGET / HTTP/1.1',
+    ]) {
+      const sanitized = sanitizeContentType(raw);
 
-    const body = getBody().toString('utf8');
-    expect(body).toContain('Content-Type: text/plainx-injected: yes');
-    expect(body).not.toContain('Content-Type: text/plain\r\nx-injected: yes');
+      expect(sanitized).not.toContain('\r');
+      expect(sanitized).not.toContain('\n');
+    }
   });
 
   test('sanitized Content-Type: size matches actual byte length', async () => {
+    // The size calculation and the serializer must agree on the sanitized type. A plain
+    // type exercises the same path now that no runtime lets a CR/LF one through a
+    // `FormData`; the sanitizer's own behaviour is pinned in the test above.
     const fd = new FormData();
-    fd.append(
-      'file',
-      new File(['data'], 'test.txt', {
-        type: 'text/plain\r\nX-Injected: yes',
-      }),
-    );
+    fd.append('file', new File(['data'], 'test.txt', { type: 'text/plain' }));
 
     const { req, getBody } = makeCapture();
     const boundary = generateMultipartBoundary();
