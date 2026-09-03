@@ -814,9 +814,31 @@ async function streamResponseBody(
     let isSettled = false;
     let didReceiveEnd = false;
 
+    /**
+     * Absorb one `error` the writable has not delivered yet.
+     *
+     * A failed write destroys the stream and emits its `error` on a later tick, usually
+     * after this request has settled and its listeners are gone - and an `error` event
+     * with no listener is an uncaught exception that takes the process down. A one-shot
+     * listener catches exactly that one and removes itself, so a writable reused across
+     * requests is not left carrying listeners.
+     */
+    const absorbPendingWritableError = (): void => {
+      try {
+        writable.once('error', () => {
+          // Already reported through `settle`; this exists only to keep the event from
+          // going unhandled.
+        });
+      } catch {
+        // A writable that will not take a listener cannot be protected. Nothing else
+        // here depends on it.
+      }
+    };
+
     const cleanup = (): void => {
       removeWritableListener(writable, 'drain', onWritableDrain);
       removeWritableListener(writable, 'error', onWritableError);
+
       res.off('data', onResponseData);
       res.off('end', onResponseEnd);
       res.off('error', onResponseError);
@@ -884,6 +906,9 @@ async function streamResponseBody(
           });
         });
       } catch (error) {
+        // The throw came out of `write`, which means the stream is being torn down and
+        // its own `error` event is still on the way.
+        absorbPendingWritableError();
         settle({
           code: 'stream_write_error',
           cause: normalizeError(error),
@@ -907,8 +932,26 @@ async function streamResponseBody(
       didReceiveEnd = true;
 
       try {
-        writable.end(() => {
+        writable.end((endError?: Error | null) => {
           if (isSettled) {
+            return;
+          }
+
+          // The callback's error argument is not optional to honour. A write that
+          // failed destroys the stream, so `end` reports here rather than succeeding -
+          // and the writable's own `error` event may not have been delivered yet, so
+          // ignoring this settles a broken download as a success. `writable.errored`
+          // is consulted too, for a runtime that destroys the stream without passing
+          // the error along.
+          const writeFailure = endError ?? writable.errored;
+
+          if (writeFailure) {
+            absorbPendingWritableError();
+            settle({
+              code: 'stream_write_error',
+              cause: normalizeError(writeFailure),
+            });
+
             return;
           }
 

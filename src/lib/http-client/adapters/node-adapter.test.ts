@@ -3420,12 +3420,31 @@ describe('NodeAdapter via HTTPClient', () => {
     expect(res.status).toBe(0);
     expect(res.isNetworkError).toBe(true);
     expect(res.isFailed).toBe(true);
-    // Asserted on `code`, not the message. `localhost` is dual-stack, and a refused
-    // connection there surfaces as an `AggregateError` whose own message is empty
-    // (Bun 1.4.0) while the code is still `ECONNREFUSED`.
-    const cause = builder.error?.cause;
+    // Every surface is checked rather than one, because runtimes disagree about where
+    // the refusal is recorded. A single-stack connect gives an `Error` whose message
+    // reads `connect ECONNREFUSED 127.0.0.1:1`. `localhost` is dual-stack, so both
+    // `::1` and `127.0.0.1` are tried and the results are bundled into an
+    // `AggregateError` whose own message is empty by spec, with `code` set and the
+    // per-attempt errors in `errors`. Bun reported the flat form before 1.4.0 and the
+    // aggregate one after, and either is correct - the test should not care which.
+    interface ConnectFailure {
+      code?: string;
+      message?: string;
+      errors?: ConnectFailure[];
+    }
 
-    expect(cause?.code ?? cause?.message).toMatch(/ECONNREFUSED/i);
+    const cause: ConnectFailure | undefined = builder.error?.cause;
+
+    const surfaces = [
+      cause?.code,
+      cause?.message,
+      ...(cause?.errors ?? []).flatMap((attempt) => [
+        attempt.code,
+        attempt.message,
+      ]),
+    ].filter((value): value is string => typeof value === 'string');
+
+    expect(surfaces.some((value) => /ECONNREFUSED/i.test(value))).toBe(true);
   });
 
   test('a GET is still retried after a connection reset', async () => {

@@ -166,12 +166,23 @@ export interface AdapterResponse {
  */
 export interface WritableLike {
   write(chunk: Uint8Array | string, cb?: (err?: Error | null) => void): boolean;
-  end(cb?: () => void): void;
+  /**
+   * The callback receives an error when the stream could not be finished - a write that
+   * failed destroys it, so `end` reports here rather than succeeding. Ignoring the
+   * argument settles a broken write as a success.
+   */
+  end(cb?: (err?: Error | null) => void): void;
   on(event: 'error', listener: (err: Error) => void): this;
   on(event: 'close', listener: () => void): this;
   on(event: 'drain', listener: () => void): this;
   once(event: 'drain', listener: () => void): this;
+  once(event: 'error', listener: (err: Error) => void): this;
   destroy(error?: Error): void;
+  /**
+   * Set by Node-style streams once the stream has errored. Read as a second signal, for
+   * a runtime that destroys the stream without passing the error to `end`'s callback.
+   */
+  errored?: Error | null;
 }
 
 /**
