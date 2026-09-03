@@ -105,7 +105,11 @@ A bare name does **not** match at depth. `sensitiveFieldNames: ['password']` mas
 
 An error nested inside another's `additionalInfo` starts a fresh path root: the outer error's entries address it as a whole (`['cause']` masks the nested error entirely), and the nested error's own `sensitiveFieldNames` covers its own contents.
 
-A bare name is taken literally, so a name that is not a valid path segment still works: `sensitiveFieldNames: ['password-hash']` masks `additionalInfo['password-hash']`. Inside a path, an unquoted segment must be `\w+`, so a hyphenated name nested deeper needs quoting: `user["password-hash"]`.
+A bare name is taken literally, so `sensitiveFieldNames: ['password-hash']` masks `additionalInfo['password-hash']`.
+
+A path segment is delimited by `.`, `[` and `]` only, so ordinary key names need no quoting inside a path either: `user.password-hash`, `u.my key`, and `users[0].api-key` all work. A key that genuinely contains a delimiter needs the quoted bracket form, which is the only way to disambiguate it: `user["a.b"]`.
+
+Entries the grammar rejects mask **nothing at all**, silently. That covers wildcard selectors such as `users[*].password`, which are not supported, along with a trailing dot and an unterminated bracket. The logger's `redactedKeys` behaves identically.
 
 A dotted or bracketed entry is treated as ambiguous and both readings are covered, the same way the logger's `redactedKeys` does: `'user.password'` masks the nested `additionalInfo.user.password` _and_ a literal key spelled `'user.password'`, when either exists.
 

@@ -455,11 +455,11 @@ logger.info('User login attempt', {
 });
 ```
 
-**Note:** Redaction paths are exact matches. Dot notation, array indexes, and quoted bracket keys like `users[0]["password-hash"]` are supported, but wildcard selectors such as `users[*].password` are not.
+**Note:** Redaction paths are exact matches. Dot notation, array indexes, and quoted bracket keys like `users[0]["password-hash"]` are supported, but wildcard selectors such as `users[*].password` are not. Quoting is only required for a key that contains `.`, `[` or `]`; `users[0].password-hash` resolves the same as `users[0]["password-hash"]`.
 
 A bare name therefore addresses a top-level key only: `redactedKeys: ['password']` masks `params.password` and leaves `params.user.password` rendered. Name the path to reach it.
 
-Inside a path, an unquoted segment must be `\w+`, so a hyphenated or spaced name nested deeper must be quoted. `redactedKeys: ['user.password-hash']` does not parse and redacts **nothing**; write `redactedKeys: ['user["password-hash"]']`. The same goes for any entry the grammar rejects, including a trailing dot and the unsupported wildcard form. Nothing warns you, so prefer the quoted form whenever a segment is not plain `\w+`.
+A path segment is delimited by `.`, `[` and `]` only, so ordinary key names need no quoting: `user.password-hash` and `users[0].api-key` both work. A key that genuinely contains a delimiter needs the quoted bracket form, which is the only way to disambiguate it: `user["a.b"]`. An entry the grammar rejects, such as the unsupported wildcard form or a trailing dot, redacts **nothing** and does not warn.
 
 [`errorToString`](./error-to-string.md#additional-info--sensitive-fields) uses this same syntax for the `sensitiveFieldNames` list it reads off an error, so one mental model covers both. The two agree on bare names, dotted paths, array indexes, and quoted bracket keys; they differ only in what happens when the list itself is unusable, where `errorToString` drops `additionalInfo` wholesale.
 

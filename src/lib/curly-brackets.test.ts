@@ -246,15 +246,24 @@ describe('CurlyBrackets', () => {
     );
   });
 
-  it('should leave unsupported placeholder path syntax unchanged', () => {
+  it('should resolve unquoted segments that are not plain identifiers', () => {
+    // Only `.`, `[` and `]` delimit a path segment, so an ordinary hyphenated or spaced
+    // key resolves without quoting. These used to render as the literal placeholder.
     expect(
       CurlyBrackets(
         '{{user.display-name}}',
         { user: { 'display-name': 'Alice' } },
         '(???)',
       ),
-    ).toEqual('{{user.display-name}}');
+    ).toEqual('Alice');
 
+    expect(
+      CurlyBrackets('{{u.my key}}', { u: { 'my key': 'Bob' } }, '(???)'),
+    ).toEqual('Bob');
+  });
+
+  it('should leave unsupported placeholder path syntax unchanged', () => {
+    // Wildcards remain unsupported.
     expect(
       CurlyBrackets(
         '{{users[*].name}}',
@@ -262,6 +271,10 @@ describe('CurlyBrackets', () => {
         '(???)',
       ),
     ).toEqual('{{users[*].name}}');
+
+    expect(CurlyBrackets('{{user.}}', { user: { a: 1 } }, '(???)')).toEqual(
+      '{{user.}}',
+    );
   });
 
   it('should stringify Error values and allow access to Error properties', () => {

@@ -371,6 +371,72 @@ describe('defaultRedactFunction', () => {
   });
 });
 
+describe('applyRedaction - non-identifier key names', () => {
+  // An unquoted path segment is any run of characters that are not `.`, `[` or `]`, so an
+  // ordinary hyphenated or spaced name needs no quoting. These used to fail to parse and
+  // silently redact nothing.
+
+  test('redacts a hyphenated nested key without quoting', () => {
+    const result = applyRedaction({ user: { 'password-hash': 'hunter2' } }, [
+      'user.password-hash',
+    ]);
+
+    expect(
+      (result['user'] as Record<string, unknown>)['password-hash'],
+    ).not.toBe('hunter2');
+  });
+
+  test('redacts a hyphenated key through an array index', () => {
+    const result = applyRedaction({ users: [{ 'api-key': 'hunter2' }] }, [
+      'users[0].api-key',
+    ]);
+
+    const users = result['users'] as Record<string, unknown>[];
+
+    expect(users[0]['api-key']).not.toBe('hunter2');
+  });
+
+  test('redacts spaced and non-ASCII names', () => {
+    const result = applyRedaction(
+      { u: { 'my key': 'hunter2', contraseña: 'hunter2' } },
+      ['u.my key', 'u.contraseña'],
+    );
+
+    const u = result['u'] as Record<string, unknown>;
+
+    expect(u['my key']).not.toBe('hunter2');
+    expect(u['contraseña']).not.toBe('hunter2');
+  });
+
+  test('the quoted form still works and still disambiguates a dotted key', () => {
+    const quoted = applyRedaction({ user: { 'password-hash': 'hunter2' } }, [
+      'user["password-hash"]',
+    ]);
+
+    expect(
+      (quoted['user'] as Record<string, unknown>)['password-hash'],
+    ).not.toBe('hunter2');
+
+    // A key that really contains a dot can only be reached by quoting.
+    const dotted = applyRedaction({ user: { 'a.b': 'hunter2' } }, [
+      'user["a.b"]',
+    ]);
+
+    expect((dotted['user'] as Record<string, unknown>)['a.b']).not.toBe(
+      'hunter2',
+    );
+  });
+
+  test('still redacts nothing for genuinely unsupported syntax', () => {
+    // Wildcards remain unsupported, as documented.
+    expect(
+      applyRedaction({ users: [{ password: 'hunter2' }] }, [
+        'users[*].password',
+      ]),
+    ).toEqual({ users: [{ password: 'hunter2' }] });
+  });
+});
+
 describe('applyRedaction - ambiguous dotted keys', () => {
   // A dotted entry can name either a nested path or one literal key. Both readings are
   // redacted, because leaving either in the clear is the outcome redaction prevents.

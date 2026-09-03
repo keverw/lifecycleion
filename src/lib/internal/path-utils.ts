@@ -1,5 +1,16 @@
+// An unquoted segment is any run of characters that are not path delimiters, rather than
+// `\w+`. Ordinary key names contain hyphens, spaces, `@`, `$`, and non-ASCII letters, and
+// rejecting those made a path such as `user.password-hash` unparseable - which silently
+// resolved to nothing in every consumer of this grammar: it rendered a template fallback
+// in `CurlyBrackets`, and redacted nothing in the logger's `redactedKeys` and in
+// `errorToString`'s `sensitiveFieldNames`, with no warning either way.
+//
+// Genuinely unsupported syntax is still rejected, which is what the grammar was tightened
+// for: a wildcard such as `users[*].password`, a trailing dot, and an unterminated
+// bracket all still fail to parse. A key that really does contain `.`, `[`, or `]` still
+// needs the quoted bracket form, since only quoting can disambiguate it.
 const PATH_SEGMENT_PATTERN =
-  /(\w+)|\[(\d+)\]|\["((?:[^"\\]|\\.)*)"\]|\['((?:[^'\\]|\\.)*)'\]/y;
+  /([^.[\]]+)|\[(\d+)\]|\["((?:[^"\\]|\\.)*)"\]|\['((?:[^'\\]|\\.)*)'\]/y;
 
 function unescapeQuotedPathPart(value: string): string {
   return value.replace(/\\(["'\\])/g, '$1');

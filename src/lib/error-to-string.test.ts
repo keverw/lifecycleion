@@ -206,27 +206,35 @@ describe('errorToString', () => {
       expect(rendered).toContain('diagnostic');
     });
 
-    it('should mask nothing for an entry the path grammar rejects', () => {
-      // An unquoted segment must be `\w+`, so `user.password-hash` does not parse. The
-      // logger's `redactedKeys` behaves the same way, and neither warns - pinned here so
-      // the documented footgun cannot drift into a silent change either direction.
-      const unquoted = render(
-        { user: { 'password-hash': SECRET }, keep: 'diagnostic' },
-        ['user.password-hash'],
-      );
+    it('should mask a hyphenated nested key without quoting', () => {
+      // Same grammar as the logger's `redactedKeys`: an unquoted segment is any run of
+      // characters that are not `.`, `[` or `]`, so ordinary names need no quoting.
+      expect(
+        render({ user: { 'password-hash': SECRET } }, ['user.password-hash']),
+      ).not.toContain(SECRET);
 
-      expect(unquoted).toContain(SECRET);
-      // A rejected entry is not the fail-closed case: other fields keep rendering and
-      // `additionalInfo` is not dropped wholesale.
-      expect(unquoted).toContain('diagnostic');
-      expect(unquoted).not.toContain('sensitiveFieldNames unreadable');
+      expect(
+        render({ users: [{ 'api-key': SECRET }] }, ['users[0].api-key']),
+      ).not.toContain(SECRET);
 
-      // The quoted form is the fix.
+      // The quoted form remains equivalent.
       expect(
         render({ user: { 'password-hash': SECRET } }, [
           'user["password-hash"]',
         ]),
       ).not.toContain(SECRET);
+    });
+
+    it('should mask nothing for genuinely unsupported syntax', () => {
+      // Wildcards are not supported, and an unparseable entry is not the fail-closed
+      // case: it masks nothing and leaves the other fields rendering.
+      const rendered = render({ users: [{ password: SECRET }], keep: 'diag' }, [
+        'users[*].password',
+      ]);
+
+      expect(rendered).toContain(SECRET);
+      expect(rendered).toContain('diag');
+      expect(rendered).not.toContain('sensitiveFieldNames unreadable');
     });
 
     it('should mask a key spelled literally like a path', () => {
