@@ -8062,7 +8062,10 @@ describe('LifecycleManager - Signal Integration', () => {
         logger,
         repeatedShutdownRequestPolicy: {
           forceAfterCount: 3,
-          withinMS: 20,
+          // Scaled well above the sleeps below rather than sitting just outside them:
+          // these race a real wall-clock window, and at the previous 20ms a 5ms sleep
+          // had only 15ms of slack, which the full suite under load regularly overshot.
+          withinMS: 200,
           onForceShutdown: (context) => {
             forceShutdownCalls.push({
               requestCount: context.requestCount,
@@ -8074,7 +8077,7 @@ describe('LifecycleManager - Signal Integration', () => {
       });
 
       await lifecycle.registerComponent(
-        new SlowStopComponent(logger, 'slow-stop', 120),
+        new SlowStopComponent(logger, 'slow-stop', 1200),
       );
       await lifecycle.startAllComponents();
 
@@ -8085,13 +8088,13 @@ describe('LifecycleManager - Signal Integration', () => {
       });
 
       (lifecycle as any).handleShutdownRequest('SIGINT');
-      await sleep(40);
+      await sleep(400);
       (lifecycle as any).handleShutdownRequest('SIGTERM');
-      await sleep(40);
+      await sleep(400);
       (lifecycle as any).handleShutdownRequest('SIGTERM');
-      await sleep(5);
+      await sleep(50);
       (lifecycle as any).handleShutdownRequest('SIGTERM');
-      await sleep(5);
+      await sleep(50);
       (lifecycle as any).handleShutdownRequest('SIGTERM');
 
       await shutdownCompleted;
