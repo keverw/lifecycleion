@@ -108,7 +108,9 @@ function redactPathsInner(
   }
 
   if (seen.has(value)) {
-    return value;
+    // A cycle cannot be rebuilt, and handing back the original would put an unmasked
+    // object inside the copy - its own contents may sit at a path not yet reached.
+    return REDACTION_FAILED_MARKER;
   }
 
   seen.add(value);
@@ -131,7 +133,10 @@ function redactPathsInner(
     try {
       entries = Object.entries(value);
     } catch {
-      return value;
+      // The keys cannot be read, so nothing below can be masked. Returning the original
+      // would hand back every sibling in the clear - including the ones named for
+      // redaction, since the walk never reached them.
+      return REDACTION_FAILED_MARKER;
     }
 
     const copy: Record<string, unknown> = {};

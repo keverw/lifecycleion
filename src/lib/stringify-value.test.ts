@@ -215,3 +215,97 @@ describe('redactValue', () => {
     expect(JSON.stringify(masked)).toContain('REDACTION FAILED');
   });
 });
+
+describe('stringifyValue / redactValue - fail-closed branches', () => {
+  // These are the "never return the original" guarantees. They are the branches that
+  // matter most and the ones least likely to be hit by ordinary use, so each is driven
+  // deliberately rather than left to chance.
+
+  test('an unusable redactedKeys list masks everything', () => {
+    // Not an array, and an array holding a non-string: in both the caller asked for
+    // masking and this cannot tell what for.
+    for (const redactedKeys of [
+      'password' as unknown as string[],
+      [42] as unknown as string[],
+      [null] as unknown as string[],
+    ]) {
+      const value = { password: SECRET };
+
+      expect(stringifyValue(value, { redactedKeys })).toBe(
+        '***REDACTION FAILED***',
+      );
+      expect(redactValue(value, { redactedKeys })).toBe(
+        '***REDACTION FAILED***',
+      );
+    }
+  });
+
+  test('an empty redactedKeys list leaves the value alone', () => {
+    const value = { a: 1 };
+
+    expect(redactValue(value, { redactedKeys: [] })).toBe(value);
+    expect(stringifyValue(value, { redactedKeys: [] })).toBe('{"a":1}');
+  });
+
+  test('an entry naming nothing masks nothing', () => {
+    // An empty-string entry is a valid path that simply matches no key, so the walk
+    // still runs and the contents come through unchanged.
+    const value = { a: 1 };
+
+    expect(redactValue(value, { redactedKeys: [''] })).toEqual(value);
+    expect(stringifyValue(value, { redactedKeys: [''] })).toBe('{"a":1}');
+  });
+
+  test('a redactedKeys array that cannot be iterated fails closed', () => {
+    const hostile = new Proxy([] as string[], {
+      get(target, property) {
+        if (property === 'length') {
+          throw new Error('no');
+        }
+
+        return Reflect.get(target, property) as unknown;
+      },
+    });
+
+    expect(redactValue({ p: SECRET }, { redactedKeys: hostile })).toBe(
+      '***REDACTION FAILED***',
+    );
+    expect(stringifyValue({ p: SECRET }, { redactedKeys: hostile })).toBe(
+      '***REDACTION FAILED***',
+    );
+  });
+
+  test('a sibling whose read throws does not leak the rest', () => {
+    // The walk reads keys to find the paths. If that read fails, returning the value
+    // hands back every sibling in the clear - including the ones named for redaction,
+    // which the walk never reached.
+    const value: Record<string, unknown> = { password: SECRET };
+
+    Object.defineProperty(value, 'boom', {
+      get(): never {
+        throw new Error('nope');
+      },
+      enumerable: true,
+    });
+
+    expect(redactValue(value, { redactedKeys: ['password'] })).toBe(
+      '***REDACTION FAILED***',
+    );
+    expect(stringifyValue(value, { redactedKeys: ['password'] })).not.toContain(
+      SECRET,
+    );
+  });
+
+  test('a cycle is cut rather than handed back unmasked', () => {
+    const cyclic: Record<string, unknown> = { password: SECRET };
+
+    cyclic['self'] = cyclic;
+
+    const masked = redactValue(cyclic, {
+      redactedKeys: ['password'],
+    }) as Record<string, unknown>;
+
+    expect(masked['password']).not.toBe(SECRET);
+    expect(masked['self']).toBe('***REDACTION FAILED***');
+  });
+});

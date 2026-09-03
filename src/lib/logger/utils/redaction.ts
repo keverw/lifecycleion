@@ -37,11 +37,31 @@ export function applyRedaction(
     return params;
   }
 
-  /** Every redacted key marked, used whenever nothing safer can be produced. */
-  const allMarked = (): Record<string, unknown> =>
-    Object.fromEntries(
-      redactedKeys.map((key) => [key, REDACTION_FAILED_MARKER]),
-    );
+  // Checked before anything reads the list: a non-array cannot name a key, so there is
+  // no safe way to redact and no key to mark. Returning `params` would hand back the
+  // values the caller asked to hide.
+  if (!Array.isArray(redactedKeys)) {
+    return {};
+  }
+
+  /**
+   * Every redacted key marked, used whenever nothing safer can be produced.
+   *
+   * Guarded: this runs on the path that exists because the input could not be trusted,
+   * so it must not assume `redactedKeys` is a usable array. `redactedKeys` is typed
+   * `string[]`, but a JavaScript caller can pass anything, and a fail-closed branch that
+   * throws is not fail-closed. With nothing nameable to mark, an empty object is the
+   * safe answer - it carries no original value.
+   */
+  const allMarked = (): Record<string, unknown> => {
+    try {
+      return Object.fromEntries(
+        redactedKeys.map((key) => [key, REDACTION_FAILED_MARKER]),
+      );
+    } catch {
+      return {};
+    }
+  };
 
   // Parsed with the shared parser rather than a local `includes('.')` test, so an entry
   // addresses the same thing here as it does in `sensitiveFieldNames` and

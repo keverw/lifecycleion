@@ -688,6 +688,40 @@ describe('applyRedaction - redactFunction deferral', () => {
 });
 
 describe('applyRedaction - fail closed', () => {
+  test('an unusable redactedKeys list marks every key', () => {
+    // Not an array, or holding a non-string: the caller asked for masking and this
+    // cannot tell what for, so nothing comes back rather than everything.
+    for (const redactedKeys of [
+      'password' as unknown as string[],
+      [42] as unknown as string[],
+    ]) {
+      const result = applyRedaction(
+        { password: 'hunter2secret' },
+        redactedKeys,
+      );
+
+      expect(JSON.stringify(result)).not.toContain('hunter2secret');
+    }
+  });
+
+  test('a params object that cannot be walked marks every key', () => {
+    // A sibling whose read throws stops the walk before it reaches the named key, so
+    // returning what was read would hand back the secret untouched.
+    const params: Record<string, unknown> = { password: 'hunter2secret' };
+
+    Object.defineProperty(params, 'boom', {
+      get(): never {
+        throw new Error('nope');
+      },
+      enumerable: true,
+    });
+
+    const result = applyRedaction(params, ['password']);
+
+    expect(result['password']).toBe(REDACTION_FAILED_MARKER);
+    expect(JSON.stringify(result)).not.toContain('hunter2secret');
+  });
+
   test('a literal dotted key still fails closed when redaction throws', () => {
     // The catch writes through `setNestedValue`, which re-parses the key as a path and
     // finds none - so without the literal-slot write the clone's original survives.
