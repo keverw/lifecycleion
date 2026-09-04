@@ -608,7 +608,7 @@ A masking request asks for the library's own masking with different settings:
 ```typescript
 interface RedactMaskConfig {
   strategy?: 'string' | 'email' | 'domain'; // default 'string'
-  percent?: number; // 0-100, default 90
+  percent?: number; // 0-100 (out-of-range values are clamped), default 90
   maskChar?: string; // default '*'
   userPercent?: number; // 'email' only, falls back to percent
   domainPercent?: number; // 'email' only, falls back to percent

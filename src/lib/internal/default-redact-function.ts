@@ -205,6 +205,24 @@ export function matchRedactMaskConfig(value: unknown): RedactMaskConfigMatch {
 }
 
 /**
+ * A usable masking percent, or `fallback` when the value does not name one.
+ *
+ * Clamped at the ceiling as well as the floor. `datamask` masks a *proportion*, emitting
+ * `length * percent / 100` mask characters without stopping at the length of the value,
+ * so an out-of-range percent lengthens the output rather than merely over-masking: at
+ * 10000 a 200-character secret came back as a 20,000-character string, written to every
+ * sink. A percent above 100 names nothing beyond "all of it", so 100 is the honest
+ * reading of one - and these numbers come from caller code, where
+ * `Number(process.env.MASK_PERCENT)` or someone reading `percent` as a multiplier is an
+ * ordinary mistake rather than a hostile one.
+ */
+function normalizePercent(value: unknown, fallback: number): number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0
+    ? Math.min(value, 100)
+    : fallback;
+}
+
+/**
  * Apply a masking request to an already-stringified value.
  *
  * Never returns the original: a strategy that hides nothing - too short a value, a
@@ -220,22 +238,21 @@ export function maskWithConfig(
       ? config.maskChar
       : '*';
 
-  const percent =
-    typeof config.percent === 'number' &&
-    Number.isFinite(config.percent) &&
-    config.percent >= 0
-      ? config.percent
-      : DEFAULT_MASK_PERCENT;
+  const percent = normalizePercent(config.percent, DEFAULT_MASK_PERCENT);
 
   let masked: string;
 
   try {
     if (config.strategy === 'email') {
+      // The per-part percents go through the same normalization rather than being handed
+      // over as given: they are the same caller-supplied number by another name, and
+      // reading one directly would leave the ceiling - and the finiteness check - applying
+      // to `percent` alone.
       masked = datamask.email(
         value,
         maskChar,
-        config.userPercent ?? percent,
-        config.domainPercent ?? percent,
+        normalizePercent(config.userPercent, percent),
+        normalizePercent(config.domainPercent, percent),
       );
     } else if (config.strategy === 'domain') {
       masked = datamask.domain(value, maskChar, percent);

@@ -1952,3 +1952,96 @@ describe('Logger - errorObject redaction reaches the caller, not the console', (
     expect(sink.logs[0]?.message).not.toContain('hunter2secret');
   });
 });
+
+describe('Logger - a redactedKeys list that will not be read twice', () => {
+  const SECRET = 'hunter2secret';
+
+  /**
+   * A `redactedKeys` whose `length` answers differently each time it is read.
+   *
+   * `redactedKeys` is caller-supplied, so `length` need not be a data property: a `Proxy`
+   * answers it from a trap, which is free to throw or to lie. It was read at four points
+   * across one log call, and each of them believing something different is what the
+   * copy taken in `handleLog` exists to stop.
+   */
+  const lyingLength = (answers: (number | 'throw')[]): string[] => {
+    let read = 0;
+
+    return new Proxy(['password'], {
+      get(target, property, receiver): unknown {
+        if (property === 'length') {
+          const answer = answers[Math.min(read++, answers.length - 1)];
+
+          if (answer === 'throw') {
+            throw new Error('length is not for you');
+          }
+
+          return answer;
+        }
+
+        return Reflect.get(target, property, receiver) as unknown;
+      },
+    });
+  };
+
+  test('a list that later reads as empty does not hand back the params in the clear', () => {
+    // The leak this closes: `handleLog` saw one key and asked for redaction,
+    // `applyRedaction` read the same list as empty and returned `params` untouched - so
+    // the value redaction was asked to hide was rendered into the message and written to
+    // every sink.
+    const sink = new ArraySink();
+    const logger = new Logger({ sinks: [sink], callProcessExit: false });
+
+    logger.info('login {{password}}', {
+      params: { password: SECRET },
+      redactedKeys: lyingLength([1, 0]),
+    });
+
+    const entry = sink.logs[0];
+
+    expect(entry?.message).not.toContain(SECRET);
+    expect(entry?.redactedParams?.['password']).not.toBe(SECRET);
+    expect(entry?.redactedKeys).toEqual(['password']);
+  });
+
+  test('a list that refuses a later read fails closed instead of throwing', () => {
+    // The second read was outside every guard, so a list that answered once and then
+    // refused threw straight out of `logger.info()` - after redaction had already
+    // succeeded. An unreadable list counts as *requested*: it was supplied, and this
+    // cannot tell what for, so nothing of the params is rendered.
+    const sink = new ArraySink();
+    const logger = new Logger({
+      sinks: [sink],
+      callProcessExit: false,
+      onRedactionError: () => {},
+    });
+
+    expect(() => {
+      logger.info('login {{password}}', {
+        params: { password: SECRET },
+        redactedKeys: lyingLength([1, 'throw']),
+      });
+    }).not.toThrow();
+
+    const entry = sink.logs[0];
+
+    expect(entry?.message).not.toContain(SECRET);
+    expect(entry?.redactedParams?.['password']).not.toBe(SECRET);
+    // The params themselves are still the caller's own object, by reference, as they are
+    // on every other log call.
+    expect(entry?.params?.['password']).toBe(SECRET);
+  });
+
+  test('an ordinary list is still reported as the caller wrote it', () => {
+    const sink = new ArraySink();
+    const logger = new Logger({ sinks: [sink], callProcessExit: false });
+    const keys = ['password'];
+
+    logger.info('login {{password}}', {
+      params: { password: SECRET },
+      redactedKeys: keys,
+    });
+
+    expect(sink.logs[0]?.redactedKeys).toEqual(keys);
+  });
+});

@@ -675,6 +675,38 @@ describe('applyRedaction - redactFunction return shapes', () => {
     ).not.toBe('***REDACTED***');
   });
 
+  test('a percent above 100 masks the value rather than lengthening it', () => {
+    // `datamask` masks a *proportion*: it emits `length * percent / 100` characters
+    // without stopping at the length of the value. An unclamped percent therefore grew
+    // the output instead of hiding more of it - at 10000 a 22-character token came back
+    // as 2200 characters, written to every sink. `Number(process.env.MASK_PERCENT)` and
+    // a percent read as a multiplier both arrive here.
+    const full = '*'.repeat(TOKEN.length);
+
+    expect(
+      applyRedaction({ p: TOKEN }, ['p'], () => ({ percent: 10000 }))['p'],
+    ).toBe(full);
+    // The numeric shorthand is the same request spelled another way.
+    expect(applyRedaction({ p: TOKEN }, ['p'], () => 10000)['p']).toBe(full);
+
+    // The per-part percents used to bypass validation entirely, so the ceiling - and the
+    // finiteness check with it - applied to `percent` alone.
+    const address = applyRedaction({ p: EMAIL }, ['p'], () => ({
+      strategy: 'email',
+      userPercent: 10000,
+      domainPercent: 10000,
+    }))['p'] as string;
+
+    expect(address.length).toBe(EMAIL.length);
+    expect(address).toBe(
+      applyRedaction({ p: EMAIL }, ['p'], () => ({
+        strategy: 'email',
+        userPercent: 100,
+        domainPercent: 100,
+      }))['p'] as string,
+    );
+  });
+
   test('a masking that hides nothing falls through to the placeholder', () => {
     // Percent 0 would hand back the original, which is the one unacceptable answer.
     expect(applyRedaction({ p: TOKEN }, ['p'], () => 0)['p']).toBe(

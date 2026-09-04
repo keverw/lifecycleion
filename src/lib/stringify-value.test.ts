@@ -1016,6 +1016,37 @@ describe('redactValue - a hostile array cannot cost the payload', () => {
     }
   });
 
+  test('emits the element it walked, reading each one once', () => {
+    // The element was read to walk it and read *again* to copy it on the unchanged path,
+    // so what reached the output was never the value the walk had looked at. An accessor
+    // need not answer the same way twice: the walk concluded "nothing matched" from the
+    // first answer and then copied the second, which could hold what the first did not.
+    let reads = 0;
+
+    const array: unknown[] = [null, SECRET];
+
+    Object.defineProperty(array, '0', {
+      get(): string {
+        reads++;
+
+        return reads === 1 ? 'harmless' : SECRET;
+      },
+      enumerable: true,
+      configurable: true,
+    });
+
+    // The second element is named, so the array is rebuilt and the first takes the
+    // unchanged path into the copy - the only path where the two reads could differ.
+    const redacted = redactValue(
+      { a: array },
+      { redactedKeys: ['a[1]'] },
+    ) as Record<string, unknown[]>;
+
+    expect(reads).toBe(1);
+    expect(redacted['a']?.[0]).toBe('harmless');
+    expect(redacted['a']?.[1]).not.toBe(SECRET);
+  });
+
   test('degrades one unreadable element rather than the whole array', () => {
     const array: unknown[] = [1, 2];
 

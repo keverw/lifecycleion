@@ -798,7 +798,58 @@ export class Logger extends EventEmitter {
     const entityName = options?.entityName?.trim() || undefined;
     const params = options?.params;
     const tags = options?.tags;
-    const redactedKeys = options?.redactedKeys;
+    const requested = options?.redactedKeys;
+
+    // The requested list, copied once, and everything below reads the copy.
+    //
+    // `redactedKeys` is caller-supplied, so neither `length` nor an element is
+    // necessarily a data property - a `Proxy` can answer from a trap, and need not answer
+    // the same way twice. The list is read four times over this call: to decide whether
+    // to redact, inside `applyRedaction`, again by the walk, and once more when the entry
+    // records what was redacted. Each read seeing something different is what let a list
+    // say "one key" here and "no keys" inside `applyRedaction`, which returned `params`
+    // untouched - so the values redaction was asked to hide were rendered into the
+    // message and handed to every sink. The last read was outside every guard as well, so
+    // a list that refused it threw straight out of the `logger.info()` call after
+    // redaction had already succeeded.
+    //
+    // Copied only when it is an array: a non-array is passed along as it is, since
+    // spreading `'password'` would turn one plainly unusable list into a list of
+    // characters and lose the `<redactedKeys>` report `applyRedaction` makes of it. A
+    // copy that fails leaves the original in place, where the guards below catch it.
+    //
+    // The copy is also what reaches `entry.redactedKeys`, so a sink is handed an inert
+    // array of strings rather than the caller's object with its traps still attached.
+    let redactedKeys = requested;
+
+    try {
+      if (Array.isArray(requested)) {
+        redactedKeys = [...requested];
+      }
+    } catch {
+      // Nothing usable came of it, so the original stands and fails closed below.
+    }
+
+    // Whether the caller asked for redaction. Guarded, because a list that refused to be
+    // copied is still being read here.
+    //
+    // A read that fails counts as *requested*, not as absent. A list was supplied, so
+    // redaction was asked for and this cannot tell what for; treating it as absent would
+    // render the params in the clear, which is the one outcome redaction exists to
+    // prevent. `params` and `redactedKeys` are both non-`undefined` whenever the read
+    // throws, since the `length` access is reached only after both have been tested.
+    let didRequestRedaction: boolean;
+
+    try {
+      didRequestRedaction =
+        params !== undefined &&
+        redactedKeys !== undefined &&
+        redactedKeys.length > 0;
+    } catch {
+      didRequestRedaction = true;
+    }
+
+    let redactedParams: Record<string, unknown> | undefined;
 
     // Process template and apply redaction.
     //
@@ -806,9 +857,11 @@ export class Logger extends EventEmitter {
     // caller-supplied values, neither of which this method can vouch for, and `handleLog`
     // must not throw out of a `logger.info()`. It already fails closed per key; this is
     // the backstop for a failure that escapes it entirely.
-    let redactedParams: Record<string, unknown> | undefined;
-
-    if (params && redactedKeys && redactedKeys.length > 0) {
+    if (
+      didRequestRedaction &&
+      params !== undefined &&
+      redactedKeys !== undefined
+    ) {
       try {
         redactedParams = applyRedaction(
           params,
@@ -819,9 +872,21 @@ export class Logger extends EventEmitter {
       } catch {
         // Never fall through to the raw params below: rendering the message from those
         // would print the very values redaction was asked to hide, to every sink.
-        redactedParams = Object.fromEntries(
-          redactedKeys.map((key) => [key, REDACTION_FAILED_MARKER]),
-        );
+        //
+        // Guarded, for the reason `applyRedaction`'s own `allMarked()` is: this runs only
+        // because something above it threw, and the way that happens is a `redactedKeys`
+        // that cannot be read - a `length` accessor that throws on a later read, a
+        // `Symbol.iterator` that refuses. Marking the keys reads the same list again, so
+        // an unguarded `map` here fails the same way and the throw escapes `handleLog`
+        // and the `logger.info()` call this backstop exists to protect. With nothing
+        // nameable to mark, an empty bag is the safe answer: it carries no original value.
+        try {
+          redactedParams = Object.fromEntries(
+            redactedKeys.map((key) => [key, REDACTION_FAILED_MARKER]),
+          );
+        } catch {
+          redactedParams = {};
+        }
       }
     }
 
@@ -840,10 +905,8 @@ export class Logger extends EventEmitter {
       message,
       params,
       redactedParams,
-      redactedKeys:
-        params && redactedKeys && redactedKeys.length > 0
-          ? redactedKeys
-          : undefined,
+      // The decision made above, not a second read of `redactedKeys`.
+      redactedKeys: didRequestRedaction ? redactedKeys : undefined,
       error: options?.error,
       exitCode: isNumber(exitCode) ? exitCode : undefined,
       tags: tags && tags.length > 0 ? tags : undefined,

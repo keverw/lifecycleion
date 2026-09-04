@@ -307,9 +307,29 @@ function redactPathsInner(
       for (let index = 0; index < length; index++) {
         let result: unknown;
 
+        // Read once and kept, exactly as the object branch keeps the value
+        // `Object.entries` gave it. Reading again for the `UNCHANGED` path below emitted
+        // a value the walk had never looked at: an element backed by an accessor need not
+        // answer the same way twice, so the walk concluded "nothing matched" from the
+        // first read and then copied the second - which could be a value a path did
+        // match. It also ran every element's getter twice, which is the cost
+        // `renderContainer` counts as worth avoiding for the same reason.
+        let element: unknown;
+
+        try {
+          element = source[index];
+        } catch (error) {
+          report(error, [...path, String(index)].join('.'));
+          state.didFailToRead = true;
+          didMask = true;
+          copy.push(REDACTION_FAILED_MARKER);
+
+          continue;
+        }
+
         try {
           result = redactPathsInner(
-            source[index],
+            element,
             paths,
             [...path, String(index)],
             redactFunction,
@@ -327,14 +347,7 @@ function redactPathsInner(
         }
 
         if (result === UNCHANGED) {
-          try {
-            copy.push(source[index]);
-          } catch (error) {
-            report(error, [...path, String(index)].join('.'));
-            state.didFailToRead = true;
-            didMask = true;
-            copy.push(REDACTION_FAILED_MARKER);
-          }
+          copy.push(element);
         } else {
           didMask = true;
           copy.push(result);
