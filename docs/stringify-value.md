@@ -7,6 +7,7 @@ Render any value as a display string, or return it with parts redacted. The rend
 - [Usage](#usage)
 - [API](#api)
   - [stringifyValue](#stringifyvalue)
+  - [Options](#options)
   - [redactValue](#redactvalue)
 - [How values render](#how-values-render)
 - [Redacting while rendering](#redacting-while-rendering)
@@ -33,6 +34,33 @@ function stringifyValue(
 ```
 
 Never throws. A value that resists rendering degrades to a placeholder rather than raising an error out of whatever was trying to describe it.
+
+### Options
+
+Both functions take the same options.
+
+```typescript
+interface StringifyValueOptions {
+  /** Paths to mask, same syntax as the logger's `redactedKeys`. */
+  redactedKeys?: string[];
+  /** Decides how a matched value is replaced. */
+  redactFunction?: (key: string, value: string) => RedactFunctionResult;
+  /** Notified when redaction fails. Defaults to `console.error`. */
+  onRedactionError?: (error: Error, key: string) => void;
+}
+
+/**
+ * A string is the replacement. The rest are control signals: `null` for the default
+ * masking, a number for the default at that percent, a `RedactMaskConfig` for the
+ * library's masking with your settings, and `undefined` to drop the value.
+ */
+type RedactFunctionResult =
+  string | number | RedactMaskConfig | null | undefined;
+```
+
+The value reaching your `redactFunction` is **always a `string`** - the leaf is rendered
+before the function is called, whatever it started as. That is also what stops a mutating
+function reaching into the value you passed in.
 
 ### redactValue
 

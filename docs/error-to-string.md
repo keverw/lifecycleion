@@ -28,13 +28,29 @@ import { errorToString } from 'lifecycleion/error-to-string';
 Converts an error (or any unknown value) into a formatted ASCII table string.
 
 ```typescript
-function errorToString(error: unknown, maxRowLength?: number): string;
+function errorToString(
+  error: unknown,
+  maxRowLength?: number,
+  options?: ErrorToStringOptions,
+): string;
+
+interface ErrorToStringOptions {
+  /** Decides how a value named by `sensitiveFieldNames` is replaced. */
+  redactFunction?: (key: string, value: string) => RedactFunctionResult;
+  /** Notified when redaction fails. Defaults to `console.error`. */
+  onRedactionError?: (error: Error, key: string) => void;
+}
 ```
 
-| Parameter      | Type      | Default | Description                            |
-| -------------- | --------- | ------- | -------------------------------------- |
-| `error`        | `unknown` | -       | The error or thrown value to format    |
-| `maxRowLength` | `number`  | `80`    | Maximum character width for table rows |
+| Parameter      | Type                   | Default | Description                                                              |
+| -------------- | ---------------------- | ------- | ------------------------------------------------------------------------ |
+| `error`        | `unknown`              | -       | The error or thrown value to format                                      |
+| `maxRowLength` | `number`               | `80`    | Maximum character width for table rows                                   |
+| `options`      | `ErrorToStringOptions` | -       | How sensitive values are masked, and where a masking failure is reported |
+
+`RedactFunctionResult` is the same contract the logger uses - see
+[Choosing how values are masked](#choosing-how-values-are-masked). The value reaching your
+`redactFunction` is always a `string`, already rendered.
 
 ```typescript
 try {

@@ -1402,7 +1402,8 @@ interface LogOptions {
 ```typescript
 interface LoggerOptions {
   sinks?: LogSink[]; // Output destinations
-  redactFunction?: (keyName, value) => unknown; // Custom redaction (default: masks with asterisks using datamask)
+  redactFunction?: (keyName, value: string) => RedactFunctionResult; // Custom redaction (default: masks with asterisks using datamask)
+  onRedactionError?: (error, key) => void; // Redaction failed for a param (default: console.error)
   callProcessExit?: boolean; // Actually call process.exit() (default: true, disable for tests/browser)
   beforeExitCallback?: (
     code,
@@ -1454,9 +1455,11 @@ Some failures cannot be written to the sinks, because the sinks are either the t
 | Your `onSinkError` itself throws                                                                | `console.error`                                                      |
 | A `'logger'` event handler of this logger throws or rejects                                     | `onEventHandlerError`, or `console.error` if you did not provide one |
 | Your `onEventHandlerError` itself throws                                                        | `console.error`                                                      |
+| Your `redactFunction` throws, or a value cannot be read to redact it                            | `onRedactionError`, or `console.error` if you did not provide one    |
+| Your `onRedactionError` itself throws                                                           | `console.error`                                                      |
 | A new error is reported while `registerReportErrorListener()` is still logging the previous one | `console.error`                                                      |
 
-The third row is the one that would otherwise loop: logging emits a `'logger'` event, so reporting that handler's failure through the logger would emit again. It gets its own callback rather than `onSinkError` because no sink was involved, and there would be nothing honest to pass as that callback's `sink` argument:
+The third and fifth rows are the ones that would otherwise loop. Logging emits a `'logger'` event, so reporting that handler's failure through the logger would emit again; and logging renders a message, which redacts, so reporting a redaction failure through the logger would redact again and throw again. Neither loop is a stack overflow that a re-entrancy guard could catch - each pass is a fresh turn - which is why both get a callback that cannot re-enter the logger. It gets its own callback rather than `onSinkError` because no sink was involved, and there would be nothing honest to pass as that callback's `sink` argument:
 
 ```typescript
 const logger = new Logger({
@@ -1471,7 +1474,7 @@ const logger = new Logger({
 
 Everything else — errors reported by other Lifecycleion modules, and by your own code using [the reporting pattern](./safe-handle-callback.md#the-reporting-pattern) — reaches your sinks normally through `registerReportErrorListener()`.
 
-> Do not call this logger's own log methods from inside `onSinkError` or `onEventHandlerError`. If the sink is what failed, logging from the handler asks the same sink to write again; and logging from `onEventHandlerError` re-emits the very event whose handler just failed.
+> Do not call this logger's own log methods from inside `onSinkError`, `onEventHandlerError`, or `onRedactionError`. If the sink is what failed, logging from the handler asks the same sink to write again; logging from `onEventHandlerError` re-emits the very event whose handler just failed; and logging from `onRedactionError` runs the same redaction that just threw.
 
 > **Do not read `.message` directly inside these callbacks.** Both are handed a real `Error`, but the value a sink or handler threw is not yours, and `message` is an ordinary property that a subclass or a `Proxy` can turn into an accessor that throws. Reading it raises a second failure from inside the callback that was handling the first.
 
@@ -1485,12 +1488,13 @@ onSinkError: (error, context, sink) => {
 };
 ```
 
-The two callbacks are handed differently shaped errors, which matters if you log or group on them:
+The callbacks are handed differently shaped errors, which matters if you log or group on them:
 
-| Callback              | Receives                                                                                                                      |
-| --------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
-| `onSinkError`         | The sink's own error, unwrapped. `cause` is set only when the sink threw a non-`Error` value                                  |
-| `onEventHandlerError` | A **wrapped** error, `Error in a logger event handler for <event>: <message>`, with the handler's original failure on `cause` |
+| Callback              | Receives                                                                                                                                                             |
+| --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `onSinkError`         | The sink's own error, unwrapped. `cause` is set only when the sink threw a non-`Error` value                                                                         |
+| `onEventHandlerError` | A **wrapped** error, `Error in a logger event handler for <event>: <message>`, with the handler's original failure on `cause`                                        |
+| `onRedactionError`    | The `redactFunction`'s own error, normalized. `cause` is set only when it threw a non-`Error` value. The second argument is the `redactedKeys` entry as you wrote it |
 
 This allows you to:
 
