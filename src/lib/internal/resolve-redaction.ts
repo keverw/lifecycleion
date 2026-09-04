@@ -1,3 +1,4 @@
+import type { RedactFunctionResult } from './default-redact-function';
 import {
   defaultRedactValue,
   matchRedactMaskConfig,
@@ -31,7 +32,8 @@ export function resolveRedaction(
   key: string,
   value: string,
   isDerived: boolean,
-  redactFunction: ((key: string, value: unknown) => unknown) | undefined,
+  redactFunction:
+    ((key: string, value: string) => RedactFunctionResult) | undefined,
 ): unknown {
   let requested: unknown = null;
 

@@ -541,15 +541,25 @@ The guarantee is about redaction _failing_: a key that this attempts to redact n
 
 #### Controlling how a value is masked
 
-A `redactFunction` does not have to produce the masked text itself. What it returns decides:
+Your function is handed the key and the value **already stringified** - it is always a
+`string`, whatever the original was - and a string is the ordinary thing to hand back. The
+other returns are control signals rather than replacement values, ways of saying "you do
+the masking":
 
 | return            | meaning                                              |
 | ----------------- | ---------------------------------------------------- |
-| a `string`        | used literally as the replacement                    |
+| a `string`        | the replacement text, used as-is                     |
 | `null`            | use the default masking                              |
 | a `number`        | use the default masking at that percent, e.g. `70`   |
 | a masking request | the library's masking with your settings, see below  |
-| anything else     | used literally, so returning nothing drops the value |
+| `undefined`       | drop the value, which is what returning nothing does |
+
+```typescript
+type RedactFunction = (keyName: string, value: string) => RedactFunctionResult;
+
+type RedactFunctionResult =
+  string | number | RedactMaskConfig | null | undefined;
+```
 
 A masking request asks for the library's own masking with different settings:
 
@@ -573,20 +583,26 @@ redactFunction: (key) => {
 };
 ```
 
-A returned object counts as a masking request only when it is a plain object - an object
-literal, or one made with `Object.create(null)` - whose **own enumerable keys are all
-masking settings**. Anything else is an ordinary literal replacement, so returning
-`{ note: 'withheld' }` puts that object in the log line rather than a mask of the value it
-replaced, and an object mixing settings with unknown keys does the same: guessing which
-half was meant could only mask a value the caller had asked to replace outright,
-half-revealing it in the process. A class instance is never a request, even one carrying
-only `percent`.
+**An object is always read as a masking request, never as a replacement value.** There is
+no case where returning an object puts that object in your log line - hand back a string if
+that is what you want. So there are only two outcomes for one, and the unusable one is not
+an error:
 
-Every field is optional, so `{}` is a valid request asking for the defaults - which is
-where `null` already lands. Returning one is the same as returning the other, in every
-respect, so a config you assemble conditionally still masks when it ends up empty. That
-includes the rule below on non-string values: `{}` asks for the default treatment, and the
-default replaces a produced string outright rather than masking part of it.
+| you return                                  | you get                    |
+| ------------------------------------------- | -------------------------- |
+| every key names a setting, and there is one | masking with exactly those |
+| anything else                               | the default masking        |
+
+The second row covers `{}`, `{ note: 'withheld' }`, a mixed `{ percent: 10, note: 'x' }`,
+an array, and a class instance. All of them land exactly where `null` does - masked as
+though no `redactFunction` had been given at all. `{}` because every field is optional, so
+a config you assemble conditionally can legitimately come out empty; the rest because
+honouring the half of an object we recognize is a guess, and the guess is what leaked
+before: an unrecognized shape read as a config discarded the caller's value and emitted a
+proportional mask of the _original_ in its place.
+
+Landing where `null` does means landing there in full, the rule below on non-string values
+included - so an unusable request cannot quietly hand a `URL` back with its query intact.
 
 The `redactedKeys` list decides _what_ is redacted; this decides _how_, and only for the keys you single out.
 
@@ -596,7 +612,7 @@ Masking never returns the original. A request that would hide nothing - a percen
 
 The default masks 90% of a value, so a little survives at each end and the same secret can be correlated across log lines without being readable. A short string (under 8 characters) is replaced with `***REDACTED***` outright, since a proportional mask of something that short hides almost nothing.
 
-Partial masking applies **only to values that were genuinely strings**. A number, an object, a function, or a symbol reaches the masker as a _produced_ string, and proportional masking keeps its ends - which for a card number is the BIN prefix and last four, and for a `URL` is the query string. Those are replaced with `***REDACTED***`. Return a masking request that **names a setting** - `{ percent: 60 }` - to opt a specific value back into partial masking, or a number, which is the same request spelled shorter. That is the deliberate choice the opt-in asks for, which is why an empty `{}` does not count as one: it requests the default, and the default is the replacement.
+Partial masking applies **only to values that were genuinely strings**. A number, an object, a function, or a symbol reaches the masker as a _produced_ string, and proportional masking keeps its ends - which for a card number is the BIN prefix and last four, and for a `URL` is the query string. Those are replaced with `***REDACTED***`. Return a masking request that **names a setting** - `{ percent: 60 }` - to opt a specific value back into partial masking, or a number, which is the same request spelled shorter. That is the deliberate choice the opt-in asks for, which is why an object that does not name a setting - `{}` included - does not count as one: it requests the default, and the default is the replacement.
 
 ### Tags for Categorization and Filtering
 

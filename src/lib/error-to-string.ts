@@ -5,7 +5,10 @@ import {
   parseRedactPaths,
   type RedactPath,
 } from './internal/redact-paths';
-import { REDACTION_FAILED_MARKER } from './internal/default-redact-function';
+import {
+  REDACTION_FAILED_MARKER,
+  type RedactFunctionResult,
+} from './internal/default-redact-function';
 import { resolveRedaction } from './internal/resolve-redaction';
 import { maskValueDeep } from './internal/mask-value-deep';
 
@@ -17,7 +20,10 @@ import { maskValueDeep } from './internal/mask-value-deep';
  * and it defers the same way - return `null` to fall back to the default masking for that
  * value rather than having to reproduce it.
  */
-export type RedactFieldFunction = (key: string, value: unknown) => unknown;
+export type RedactFieldFunction = (
+  key: string,
+  value: string,
+) => RedactFunctionResult;
 
 /** Options for {@link errorToString}. */
 export interface ErrorToStringOptions {

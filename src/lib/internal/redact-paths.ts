@@ -2,10 +2,16 @@ import { getPathParts } from './path-utils';
 import { isPlainContainer } from './is-plain-container';
 import { maskValueDeep } from './mask-value-deep';
 import { resolveRedaction } from './resolve-redaction';
-import { REDACTION_FAILED_MARKER } from './default-redact-function';
+import {
+  REDACTION_FAILED_MARKER,
+  type RedactFunctionResult,
+} from './default-redact-function';
 
 /** Decides the replacement for a redacted value. */
-export type RedactLeafFunction = (key: string, value: unknown) => unknown;
+export type RedactLeafFunction = (
+  key: string,
+  value: string,
+) => RedactFunctionResult;
 
 /** One parsed redaction entry, kept with the text the caller wrote. */
 export interface RedactPath {

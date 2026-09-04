@@ -69,11 +69,30 @@ const REDACT_MASK_CONFIG_KEYS = new Set([
 ]);
 
 /**
- * What an object returned from a `redactFunction` turned out to be.
+ * What a `redactFunction` may return.
+ *
+ * A **string** is the answer in the ordinary case: the function is handed one
+ * already-stringified leaf and hands back the text that stands in for it. The rest are
+ * control signals rather than replacement values - ways of saying "you do the masking":
+ *
+ * - `null` - use the default masking
+ * - a `number` - the default masking at that percent, shorthand for `{ percent: n }`
+ * - a {@link RedactMaskConfig} - the library's masking with these settings
+ * - `undefined` - drop the value, which is what a function returning nothing does
+ *
+ * An object is therefore always read as a masking request, never as a replacement value.
+ * One that is not a usable request falls back to the default masking rather than being
+ * emitted, so a rendered `{"note":"x"}` can never stand where a masked value belonged.
+ */
+export type RedactFunctionResult =
+  string | number | RedactMaskConfig | null | undefined;
+
+/**
+ * What a value returned from a `redactFunction` turned out to be.
  *
  * - `'settings'` - a masking request naming at least one setting, in `config`
- * - `'defaults'` - a plain object naming no setting at all, such as `{}`
- * - `'literal'` - anything else, to be used as the replacement verbatim
+ * - `'defaults'` - an object that is not a usable request, so the default masking applies
+ * - `'literal'` - not an object at all, to be used as the replacement verbatim
  */
 export type RedactMaskConfigMatch =
   | { kind: 'settings'; config: RedactMaskConfig }
@@ -83,65 +102,79 @@ export type RedactMaskConfigMatch =
 /**
  * Classify a value returned from a `redactFunction`.
  *
- * Recognized by its keys, not merely by being a plain object. Accepting any plain object
- * broke the documented contract in the one direction that matters: a function returning a
- * structured replacement - `{ note: 'withheld' }` - had that value silently discarded and
- * the library's proportional mask of the *original* emitted in its place, which is both
- * not what the caller asked for and a partial disclosure of the value they meant to
- * replace outright. An array return, meanwhile, was already used literally, so the two
- * disagreed.
+ * An **object is always a masking request** - never a replacement value. A `redactFunction`
+ * is handed one already-stringified leaf and is meant to hand back the text that stands in
+ * for it, so a string is the answer; the non-string returns are control signals, and an
+ * object is the one that says "you do the masking, like this". Letting an object through
+ * as a literal instead put a rendered `{"note":"x"}` in the log line where a masked value
+ * belonged, and reading which kind of object it was is exactly the guess that leaked: an
+ * unrecognized shape taken for a config discarded the caller's value and emitted a
+ * proportional mask of the *original* in its place.
  *
- * A request must therefore name nothing but settings. An object mixing settings with
- * unknown keys is a literal: guessing which half was meant could only ever mask when the
- * caller wanted their own value, and the safe direction is to hand back what was returned.
+ * So there are only two answers for an object, and the unusable one is not an error:
+ *
+ * - every own key names a setting, and there is at least one - `'settings'`, masked with
+ *   exactly those
+ * - anything else - `'defaults'`, masked as though no `redactFunction` had been given at
+ *   all. `{}` lands here because every field is optional and a config assembled
+ *   conditionally can legitimately come out empty; so do `{ note: 'x' }`, a mixed
+ *   `{ percent: 10, note: 'x' }`, an array, a class instance, and a revoked `Proxy`.
+ *   Honouring the half of a mixed object we recognize would be the same guess in a
+ *   smaller costume, and falling back to the default is the answer that neither guesses
+ *   nor leaves anything unmasked.
  *
  * `'defaults'` is reported separately from `'settings'` rather than folded into it, and
- * the distinction is load-bearing. Every field of {@link RedactMaskConfig} is optional, so
- * `{}` is a valid config and a caller assembling one conditionally can legitimately end up
- * with it - but it is not the *deliberate* request that lets a derived string be masked in
- * part. Masking it as though it were leaked a `URL`'s query string and a card number's BIN
- * prefix and last four, which is precisely what the derived-value rule exists to stop. An
- * empty config asks for the default, so the caller gets the default, `null` and all.
+ * the distinction is load-bearing. An empty config is not the *deliberate* request that
+ * lets a derived string be masked in part: masking `{}` as though it were leaked a `URL`'s
+ * query string and a card number's BIN prefix and last four, which is precisely what the
+ * derived-value rule exists to stop.
  *
- * Emptiness is decided here, in the same guarded read that classifies the keys, rather
- * than re-read at the call site: the value is caller code, an `ownKeys` trap need not
- * answer the same way twice, and one of the two reads could throw where the other did not.
+ * The keys are read once, here, inside the guard that classifies them - not re-read at the
+ * call site. The value is caller code, an `ownKeys` trap need not answer the same way
+ * twice, and one of two reads could throw where the other did not.
  */
 export function matchRedactMaskConfig(value: unknown): RedactMaskConfigMatch {
+  // Only an object can be a request. A primitive is the caller's own replacement, which
+  // is what keeps `undefined` dropping the value as it always has.
   if (value === null || typeof value !== 'object') {
     return { kind: 'literal' };
   }
 
   try {
-    // Inside the guard, like the same test in `isPlainContainer`: `Array.isArray` throws
-    // on a revoked `Proxy`, so testing it above the `try` would throw out of a function
-    // whose whole contract is to answer which of three things this is.
+    // A plain object is the only shape a config comes in. An array or a class instance is
+    // not a request - and not a literal either, since no object is: it falls back to the
+    // default masking below.
     if (Array.isArray(value)) {
-      return { kind: 'literal' };
+      return { kind: 'defaults' };
     }
 
     const prototype: unknown = Object.getPrototypeOf(value);
 
     if (prototype !== Object.prototype && prototype !== null) {
-      return { kind: 'literal' };
+      return { kind: 'defaults' };
     }
 
-    // Own keys rather than `in`: a masking request is a data object, and reading through
-    // a prototype would let an unrelated shape inherit its way into being one.
-    const keys = Object.keys(value);
+    // Own keys rather than `in`: a request is a data object, and reading through a
+    // prototype would let an unrelated shape inherit its way into being one.
+    //
+    // `Reflect.ownKeys` rather than `Object.keys`, so a symbol key and a non-enumerable
+    // one both count. `Object.keys` sees neither, which made an object carrying its data
+    // that way indistinguishable from `{}`. Nothing is lost by the stricter read: a
+    // setting defined non-enumerably still counts as one, since `maskWithConfig` reads it
+    // by name either way.
+    const keys = Reflect.ownKeys(value);
 
-    if (!keys.every((key) => REDACT_MASK_CONFIG_KEYS.has(key))) {
-      return { kind: 'literal' };
-    }
-
-    return keys.length > 0
+    return keys.length > 0 &&
+      keys.every(
+        (key) => typeof key === 'string' && REDACT_MASK_CONFIG_KEYS.has(key),
+      )
       ? { kind: 'settings', config: value }
       : { kind: 'defaults' };
   } catch {
-    // A revoked `Proxy`, or an `ownKeys`/`getPrototypeOf` trap that throws. Not
-    // classifiable, so not a request - and the caller's `catch` turns it into the failure
-    // marker rather than anything derived from the value.
-    return { kind: 'literal' };
+    // A revoked `Proxy`, or an `ownKeys`/`getPrototypeOf` trap that throws. Unclassifiable,
+    // so it cannot be honoured as a request - and handing it back as a literal would put a
+    // value nothing can read into the output. The default masking is the safe answer.
+    return { kind: 'defaults' };
   }
 }
 
@@ -205,7 +238,10 @@ export function maskWithConfig(
  * drift, and a value masked one way in a log line and another way in a rendered error is
  * exactly the inconsistency this is here to prevent.
  */
-export function defaultRedactValue(_keyName: string, value: unknown): unknown {
+export function defaultRedactValue(
+  _keyName: string,
+  value: unknown,
+): RedactFunctionResult {
   if (typeof value === 'string') {
     return maskWithConfig(value, {});
   }

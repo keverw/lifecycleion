@@ -1,10 +1,14 @@
 import { describe, expect, it } from 'bun:test';
-import { errorToString } from './error-to-string';
+import { errorToString, type RedactFieldFunction } from './error-to-string';
 import {
   applyRedaction,
   REDACTION_FAILED_MARKER,
 } from './logger/utils/redaction';
 import { EOL } from './constants';
+import type { RedactFunction } from './logger/types';
+
+/** A `redactFunction` as a JavaScript caller may write one, before the type narrows it. */
+type RedactFunctionLike = (key: string, value: unknown) => unknown;
 
 class MyPrefixErrTestErr extends Error {
   public errPrefix = 'MyPrefixErr';
@@ -425,7 +429,7 @@ describe('errorToString', () => {
       const token = 'sk-live-51H8x9QcAbCdEf';
 
       // Same contract as `redactedKeys`, verified against it rather than restated.
-      const shapes: ((key: string, value: unknown) => unknown)[] = [
+      const shapes: RedactFunctionLike[] = [
         () => null,
         () => 20,
         () => ({ percent: 50, maskChar: '#' }),
@@ -435,10 +439,14 @@ describe('errorToString', () => {
 
       for (const redactFunction of shapes) {
         const fromLogger = String(
-          applyRedaction({ p: token }, ['p'], redactFunction)['p'],
+          applyRedaction(
+            { p: token },
+            ['p'],
+            redactFunction as unknown as RedactFunction,
+          )['p'],
         );
         const rendered = errorToString(mk({ p: token }, ['p']), 140, {
-          redactFunction,
+          redactFunction: redactFunction as unknown as RedactFieldFunction,
         });
 
         expect(rendered).toContain(fromLogger);
@@ -521,7 +529,10 @@ describe('errorToString', () => {
 
       errorToString(mk(info, ['creds']), 100, {
         redactFunction: (_key, value) => {
-          (value as Record<string, unknown>).injected = 'HELLO';
+          // The type now says `string`, so this is only reachable from JavaScript - which
+          // is the point: a mutating function must not be able to reach the caller's own
+          // error object, and it cannot, because it is handed the rendered text.
+          (value as unknown as Record<string, unknown>).injected = 'HELLO';
 
           return '***';
         },
@@ -677,12 +688,12 @@ describe('errorToString', () => {
   });
 });
 
-describe('errorToString - masking request vs literal replacement', () => {
+describe('errorToString - what a redactFunction may return', () => {
   // `errorToString`'s `redactFunction` and the logger's are documented as one contract, so
-  // the shape rules that decide between a masking request and a literal replacement have
-  // to hold here identically. They are separate call sites over shared code, which is
-  // exactly where a rule drifts.
+  // the rules that decide between a masking request and everything else have to hold here
+  // identically. Separate call sites over shared code is exactly where a rule drifts.
   const SECRET = 'hunter2secret';
+  const DEFAULT_MASKED = 'h***********t';
 
   const render = (returned: unknown): string => {
     const error = new Error('boom') as Error & {
@@ -693,7 +704,9 @@ describe('errorToString - masking request vs literal replacement', () => {
     error.additionalInfo = { password: SECRET };
     error.sensitiveFieldNames = ['password'];
 
-    return errorToString(error, 200, { redactFunction: () => returned });
+    return errorToString(error, 200, {
+      redactFunction: (() => returned) as unknown as RedactFieldFunction,
+    });
   };
 
   it('honours an object naming only masking settings', () => {
@@ -703,13 +716,16 @@ describe('errorToString - masking request vs literal replacement', () => {
     expect(rendered).toContain('#'.repeat(SECRET.length));
   });
 
-  it('uses any other object literally', () => {
-    const rendered = render({ note: 'withheld' });
+  it('falls back to the default for an object it cannot use', () => {
+    // An object is always a masking request here too, never a replacement value - so an
+    // unusable one is masked by default rather than rendered into the table.
+    for (const returned of [{}, { note: 'withheld' }, { percent: 1, n: 'x' }]) {
+      const rendered = render(returned);
 
-    expect(rendered).not.toContain(SECRET);
-    expect(rendered).toContain('withheld');
-    // Not a mask of the secret standing in for the caller's own replacement.
-    expect(rendered).not.toContain('*'.repeat(3));
+      expect(rendered).not.toContain(SECRET);
+      expect(rendered).not.toContain('withheld');
+      expect(rendered).toContain(DEFAULT_MASKED);
+    }
   });
 
   it('matches the logger for the same return value', () => {
@@ -717,6 +733,8 @@ describe('errorToString - masking request vs literal replacement', () => {
     for (const returned of [
       { percent: 100 },
       { strategy: 'email' as const },
+      { note: 'withheld' },
+      {},
       null,
       70,
       '[hidden]',

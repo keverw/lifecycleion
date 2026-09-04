@@ -4,6 +4,10 @@ import {
   defaultRedactFunction,
   REDACTION_FAILED_MARKER,
 } from './redaction';
+import type { RedactFunction } from '../types';
+
+/** A `redactFunction` as a JavaScript caller may write one, before the type narrows it. */
+type RedactFunctionLike = (keyName: string, value: unknown) => unknown;
 
 describe('applyRedaction', () => {
   test('should redact specified keys', () => {
@@ -366,13 +370,18 @@ describe('defaultRedactFunction', () => {
   });
 
   test('should handle non-string values', () => {
-    const result = defaultRedactFunction('apiKey', 12345);
+    const result = (defaultRedactFunction as RedactFunctionLike)(
+      'apiKey',
+      12345,
+    );
 
     expect(result).toBe('***REDACTED***');
   });
 
   test('should handle object values', () => {
-    const result = defaultRedactFunction('metadata', { key: 'value' });
+    const result = (defaultRedactFunction as RedactFunctionLike)('metadata', {
+      key: 'value',
+    });
 
     expect(result).toBe('***REDACTED***');
   });
@@ -917,51 +926,64 @@ describe('applyRedaction - params it was not asked to redact', () => {
   });
 });
 
-describe('applyRedaction - telling a masking request from a literal', () => {
+describe('applyRedaction - what a redactFunction may return', () => {
   const SECRET = 'hunter2secret';
+  const DEFAULT_MASKED = 'h***********t';
 
+  // Cast at the boundary: the published type now rules most of these out, and the point
+  // is what a JavaScript caller - who has no type to stop them - still gets.
   const ask = (returned: unknown): unknown =>
-    applyRedaction({ password: SECRET }, ['password'], () => returned)[
-      'password'
-    ];
+    applyRedaction(
+      { password: SECRET },
+      ['password'],
+      (() => returned) as unknown as RedactFunction,
+    )['password'];
 
-  test('an object naming only masking settings is a request', () => {
+  test('an object naming only settings is a masking request', () => {
     expect(ask({ percent: 100 })).toBe('*'.repeat(SECRET.length));
     expect(ask({ maskChar: '#', percent: 100 })).toBe(
       '#'.repeat(SECRET.length),
     );
   });
 
-  test('any other object is used literally', () => {
-    // Reading a caller's structured replacement as an empty masking request threw their
-    // value away and emitted a proportional mask of the original instead - both not what
-    // they asked for and a partial disclosure of the value they meant to replace whole.
-    expect(ask({ note: 'withheld' })).toEqual({ note: 'withheld' });
-    expect(ask({ percent: 10, note: 'x' })).toEqual({ percent: 10, note: 'x' });
-    expect(ask(['a', 'b'])).toEqual(['a', 'b']);
-    // `{}` is the exception: every setting is optional, so it is a request for the
-    // defaults rather than a literal, landing where `null` does.
-    expect(ask({})).toBe(ask(null));
+  test('an object that is not a usable request gets the default masking', () => {
+    // An object is always read as a masking request, never as a replacement value.
+    // Emitting one put a rendered `{"note":"x"}` in the log line where a masked value
+    // belonged; reading an unrecognized shape *as* a config was worse still, discarding
+    // the caller's value and emitting a proportional mask of the original in its place.
+    for (const returned of [
+      {},
+      { note: 'withheld' },
+      { percent: 10, note: 'x' },
+      ['a', 'b'],
+    ]) {
+      expect(ask(returned)).toBe(DEFAULT_MASKED);
+      expect(ask(returned)).toBe(ask(null));
+    }
   });
 
-  test('an empty object defers in full, non-string handling included', () => {
-    // Asserted on a derived value, which is the only place the two paths can differ: an
-    // empty config routed through the masker instead of the deferral would partially mask
-    // a produced string, handing back a `URL` with its query intact.
+  test('an unusable request defers in full, non-string handling included', () => {
+    // Asserted on a derived value, which is the only place the two paths can differ:
+    // routed through the masker instead of the deferral, an unusable request would
+    // partially mask a produced string and hand back a `URL` with its query intact.
     const url = new URL('https://api.x.test/v1?api_key=sk_live_abcdef123456');
     const via = (returned: unknown): unknown =>
-      applyRedaction({ endpoint: url }, ['endpoint'], () => returned)[
-        'endpoint'
-      ];
+      applyRedaction(
+        { endpoint: url },
+        ['endpoint'],
+        (() => returned) as unknown as RedactFunction,
+      )['endpoint'];
 
-    expect(via({})).toBe('***REDACTED***');
-    expect(via({})).toBe(via(null));
+    for (const returned of [{}, { note: 'x' }, { percent: 10, note: 'x' }]) {
+      expect(via(returned)).toBe('***REDACTED***');
+      expect(via(returned)).toBe(via(null));
+    }
   });
 
-  test('a literal object never carries part of the value it replaced', () => {
+  test('nothing the caller returned leaks through an unusable request', () => {
     const replacement = ask({ note: 'withheld' });
 
+    expect(JSON.stringify(replacement)).not.toContain('withheld');
     expect(JSON.stringify(replacement)).not.toContain(SECRET.slice(0, 3));
-    expect(JSON.stringify(replacement)).not.toContain('*');
   });
 });

@@ -12,6 +12,7 @@ import { describeError, toError } from '../to-error';
 import type {
   LogEntry,
   LogSink,
+  RedactFunction,
   LogType,
   LoggerOptions,
   LogOptions,
@@ -176,7 +177,7 @@ export class Logger extends EventEmitter {
   public readonly isLoggerClass = true;
 
   private sinks: LogSink[];
-  private redactFunction?: (key: string, value: unknown) => unknown;
+  private redactFunction?: RedactFunction;
   private callProcessExit: boolean;
   private beforeExitCallback?: (
     exitCode: number,

@@ -1,11 +1,20 @@
 import { parseRedactPaths, redactMatchedPaths } from './internal/redact-paths';
 import { stringifyTemplateValue } from './internal/stringify-template-value';
-import { REDACTION_FAILED_MARKER } from './internal/default-redact-function';
+import {
+  REDACTION_FAILED_MARKER,
+  type RedactFunctionResult,
+} from './internal/default-redact-function';
 
-export type { RedactMaskConfig } from './internal/default-redact-function';
+export type {
+  RedactFunctionResult,
+  RedactMaskConfig,
+} from './internal/default-redact-function';
 
 /** Decides the replacement for a redacted value. See the logger's `redactFunction`. */
-export type StringifyRedactFunction = (key: string, value: unknown) => unknown;
+export type StringifyRedactFunction = (
+  key: string,
+  value: string,
+) => RedactFunctionResult;
 
 export interface StringifyValueOptions {
   /**

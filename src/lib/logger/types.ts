@@ -1,3 +1,4 @@
+import type { RedactMaskConfig } from '../internal/default-redact-function';
 /**
  * Log level enum for filtering logs by severity
  * Lower numbers = more important/higher priority
@@ -117,7 +118,30 @@ export interface BeforeExitResult {
  * The same shape and the same deferral rule apply to `errorToString`'s `redactFunction`
  * option, so one function can serve both.
  */
-export type RedactFunction = (keyName: string, value: unknown) => unknown;
+/**
+ * What a `redactFunction` may return.
+ *
+ * A **string** is the answer in the ordinary case: the function is handed one
+ * already-stringified leaf and hands back the text that stands in for it. The rest are
+ * control signals rather than replacement values - ways of saying "you do the masking":
+ *
+ * - `null` - use the default masking
+ * - a `number` - use the default masking at that percent, shorthand for `{ percent: n }`
+ * - a {@link RedactMaskConfig} - use the library's masking with these settings
+ * - `undefined` - drop the value, which is what a function that returns nothing does
+ *
+ * An object is therefore always read as a masking request, never as a replacement. One
+ * that is not a usable request - `{}`, an unrecognized key, a mixture - falls back to the
+ * default masking rather than being emitted, so a rendered `{"note":"x"}` can never stand
+ * where a masked value belonged.
+ */
+export type RedactFunctionResult =
+  string | number | RedactMaskConfig | null | undefined;
+
+export type RedactFunction = (
+  keyName: string,
+  value: string,
+) => RedactFunctionResult;
 
 /**
  * Array log transformer function type.

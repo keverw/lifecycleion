@@ -1,8 +1,16 @@
 import { describe, expect, test } from 'bun:test';
-import { redactValue, stringifyValue } from './stringify-value';
+import {
+  redactValue,
+  stringifyValue,
+  type StringifyValueOptions,
+} from './stringify-value';
 import { applyRedaction } from './logger/utils/redaction';
+import type { RedactFunction } from './logger/types';
 
 const SECRET = 'hunter2secret';
+
+/** A `redactFunction` as a JavaScript caller may write one, before the type narrows it. */
+type StringifyRedactFunctionLike = (key: string, item: unknown) => unknown;
 
 describe('stringifyValue - rendering', () => {
   test('renders a plain object and array as JSON', () => {
@@ -184,7 +192,7 @@ describe('redactValue', () => {
   test('honours the same redactFunction contract as stringifyValue', () => {
     const value = { e: 'johndoe@example.com' };
 
-    const shapes: ((key: string, item: unknown) => unknown)[] = [
+    const shapes: StringifyRedactFunctionLike[] = [
       () => null,
       () => 40,
       () => ({ strategy: 'email' as const }),
@@ -192,7 +200,10 @@ describe('redactValue', () => {
     ];
 
     for (const redactFunction of shapes) {
-      const options = { redactedKeys: ['e'], redactFunction };
+      const options = {
+        redactedKeys: ['e'],
+        redactFunction,
+      } as unknown as StringifyValueOptions;
 
       expect(JSON.stringify(redactValue(value, options))).toBe(
         stringifyValue(value, options),
@@ -1141,22 +1152,42 @@ describe('redactValue array subclasses', () => {
   });
 });
 
-describe('redactValue - what counts as a masking request', () => {
-  // A `redactFunction` may return the masked text itself, or ask the library to do the
-  // masking with different settings. Telling the two apart by shape is the whole of this
-  // contract, and getting it wrong is not symmetric: reading a caller's literal
-  // replacement as a masking request throws their value away *and* emits a proportional
-  // mask of the original in its place, which partially discloses the very value they
-  // asked to replace outright.
+describe('redactValue - what a redactFunction may return', () => {
+  // The function is handed one already-stringified leaf and hands back the text that
+  // stands in for it, so a string is the ordinary answer. Every non-string return is a
+  // control signal - "you do the masking" - rather than a replacement value, and an object
+  // is the signal that carries settings.
+  //
+  // Which means an object is *never* a literal. Reading one as a replacement put a
+  // rendered `{"note":"x"}` in the output where a masked value belonged, and guessing
+  // which kind of object it was is what leaked: an unrecognized shape taken for a config
+  // discarded the caller's value and emitted a proportional mask of the original instead.
+  // An object that is not a usable request falls back to the default masking.
+  //
+  // Typed `unknown` and cast at the boundary throughout: the published type now rules
+  // most of these out, and the point of the tests is what a JavaScript caller - who has
+  // no type to stop them - still gets.
   const ask = (returned: unknown): unknown =>
     (
-      redactValue(
-        { password: SECRET },
-        { redactedKeys: ['password'], redactFunction: () => returned },
-      ) as Record<string, unknown>
+      redactValue({ password: SECRET }, {
+        redactedKeys: ['password'],
+        redactFunction: () => returned,
+      } as unknown as StringifyValueOptions) as Record<string, unknown>
     )['password'];
 
-  test('an object naming only masking settings is a request', () => {
+  const DEFAULT_MASKED = 'h***********t';
+
+  test('a string is the replacement, used as-is', () => {
+    expect(ask('[hidden]')).toBe('[hidden]');
+  });
+
+  test('null and a number are the deferral signals', () => {
+    expect(ask(null)).toBe(DEFAULT_MASKED);
+    expect(ask(50)).not.toBe(SECRET);
+    expect(ask(50)).not.toBe(DEFAULT_MASKED);
+  });
+
+  test('an object naming only settings is a masking request', () => {
     expect(ask({ percent: 100 })).toBe('*'.repeat(SECRET.length));
     expect(ask({ maskChar: '#', percent: 100 })).toBe(
       '#'.repeat(SECRET.length),
@@ -1173,53 +1204,73 @@ describe('redactValue - what counts as a masking request', () => {
     );
   });
 
-  test('any other object is the literal replacement', () => {
-    // The regression this guards: returning a structured stand-in used to be read as an
-    // empty masking request, discarding it and emitting `h***********t` instead - the
-    // caller's value gone and the ends of the secret shown.
-    expect(ask({ note: 'withheld' })).toEqual({ note: 'withheld' });
-    // And nothing derived from the secret is emitted alongside it.
-    expect(
-      stringifyValue(
-        { password: SECRET },
-        {
-          redactedKeys: ['password'],
-          redactFunction: () => ({ note: 'withheld' }),
-        },
-      ),
-    ).toBe('{"password":{"note":"withheld"}}');
+  test('a setting defined non-enumerably still counts as one', () => {
+    // Keys are read with `Reflect.ownKeys`, and the masker reads the value by name.
+    expect(ask(Object.defineProperty({}, 'percent', { value: 100 }))).toBe(
+      '*'.repeat(SECRET.length),
+    );
   });
 
-  test('an empty object is a request for the defaults, like null', () => {
-    // Every field is optional, so `{}` is a valid config asking for nothing in
-    // particular - which is where `null` already lands. A caller assembling a config
-    // conditionally can legitimately end up with one, and reading it as a literal would
-    // put a bare `{}` in the output where they asked for masking.
-    expect(ask({})).toBe(ask(null));
-    expect(ask({})).not.toBe(SECRET);
-    expect(typeof ask({})).toBe('string');
+  test('an object that is not a usable request gets the default masking', () => {
+    // Not the object itself, and not a mask derived from a shape nobody asked for: the
+    // same answer as if no `redactFunction` had been supplied at all.
+    for (const returned of [
+      {}, // every setting is optional, so an empty config asks for the defaults
+      { note: 'withheld' }, // nothing recognized
+      { percent: 10, note: 'x' }, // half recognized, which is not enough to act on
+      { [Symbol('note')]: 'x' }, // a key `Object.keys` cannot see is still a key
+      Object.defineProperty({}, 'note', { value: 'x' }),
+      ['a', 'b'],
+      new (class Replacement {
+        public note = 'x';
+      })(),
+    ]) {
+      expect(ask(returned)).toBe(DEFAULT_MASKED);
+      expect(ask(returned)).toBe(ask(null));
+    }
   });
 
-  test('an empty object defers on a derived value too, not just a string', () => {
-    // The half of the equivalence a string cannot test. Routing `{}` through the masker
-    // rather than through the deferral skips the derived-value rule, and for anything
-    // that was not genuinely a string that is a disclosure: proportional masking keeps
-    // the ends, which is where a `URL` keeps its query and a card number its BIN prefix
-    // and last four. Both are what the default replaces outright, so `{}` must too.
+  test('an unusable request never emits the object it could not read', () => {
+    // The regression this guards, from both sides: the caller's object must not appear in
+    // the output, and neither must a partial mask of the value it was standing in for.
+    const rendered = stringifyValue({ password: SECRET }, {
+      redactedKeys: ['password'],
+      redactFunction: () => ({ note: 'withheld' }),
+    } as unknown as StringifyValueOptions);
+
+    expect(rendered).toBe(`{"password":"${DEFAULT_MASKED}"}`);
+    expect(rendered).not.toContain('withheld');
+    expect(rendered).not.toContain(SECRET);
+  });
+
+  test('a primitive that is not a signal is used literally', () => {
+    // Only an object is read as a request. A primitive is the caller's own replacement,
+    // which is what keeps `undefined` dropping the value as it always has.
+    expect(ask(undefined)).toBeUndefined();
+    expect(ask(false)).toBe(false);
+  });
+
+  test('an unusable request defers on a derived value too, not just a string', () => {
+    // The half a string cannot test. Routing an unusable object through the masker rather
+    // than through the deferral skips the derived-value rule, and for anything that was
+    // not genuinely a string that is a disclosure: proportional masking keeps the ends,
+    // which is where a `URL` keeps its query and a card number its BIN prefix and last
+    // four. Both are what the default replaces outright, so these must too.
     const derived = (returned: unknown, value: unknown): unknown =>
       (
-        redactValue(
-          { v: value },
-          { redactedKeys: ['v'], redactFunction: () => returned },
-        ) as Record<string, unknown>
+        redactValue({ v: value }, {
+          redactedKeys: ['v'],
+          redactFunction: () => returned,
+        } as unknown as StringifyValueOptions) as Record<string, unknown>
       )['v'];
 
     const url = new URL('https://api.x.test/v1?api_key=sk_live_abcdef123456');
 
-    expect(derived({}, url)).toBe('***REDACTED***');
-    expect(derived({}, url)).toBe(derived(null, url));
-    expect(derived({}, 4111111111111111)).toBe('***REDACTED***');
-    expect(derived({}, 4111111111111111)).toBe(derived(null, 4111111111111111));
+    for (const returned of [{}, { note: 'x' }, { percent: 10, note: 'x' }]) {
+      expect(derived(returned, url)).toBe('***REDACTED***');
+      expect(derived(returned, url)).toBe(derived(null, url));
+      expect(derived(returned, 4111111111111111)).toBe('***REDACTED***');
+    }
 
     // A request that names a setting is the deliberate opt-in, and still masks in part.
     expect(derived({ percent: 60 }, 4111111111111111)).not.toBe(
@@ -1227,65 +1278,37 @@ describe('redactValue - what counts as a masking request', () => {
     );
   });
 
-  test('settings mixed with unknown keys are a literal', () => {
-    // Guessing which half was meant could only mask a value the caller wanted replaced.
-    expect(ask({ percent: 10, note: 'x' })).toEqual({ percent: 10, note: 'x' });
-  });
+  test('all three entry points read a return value the same way', () => {
+    // One implementation, three callers. A return classified one way in one and another
+    // way in another is exactly the drift the shared code exists to prevent.
+    for (const [returned, expected] of [
+      [{ percent: 100 }, '*'.repeat(SECRET.length)],
+      [{ note: 'x' }, DEFAULT_MASKED],
+      [{}, DEFAULT_MASKED],
+      [null, DEFAULT_MASKED],
+      ['[hidden]', '[hidden]'],
+    ] as [unknown, string][]) {
+      const options = {
+        redactedKeys: ['password'],
+        redactFunction: () => returned,
+      } as unknown as StringifyValueOptions;
 
-  test('an array is a literal, as it always was', () => {
-    // Objects and arrays disagreed before: an array return was used literally while a
-    // plain object was swallowed as a config.
-    expect(ask(['a', 'b'])).toEqual(['a', 'b']);
-  });
-
-  test('a class instance is a literal', () => {
-    class Replacement {
-      public note = 'withheld';
+      expect(
+        (redactValue({ password: SECRET }, options) as Record<string, unknown>)[
+          'password'
+        ],
+      ).toBe(expected);
+      expect(stringifyValue({ password: SECRET }, options)).toBe(
+        `{"password":"${expected}"}`,
+      );
+      expect(
+        applyRedaction(
+          { password: SECRET },
+          ['password'],
+          (() => returned) as unknown as RedactFunction,
+        )['password'],
+      ).toBe(expected);
     }
-
-    expect(ask(new Replacement())).toBeInstanceOf(Replacement);
-  });
-
-  test('the other return shapes are unchanged', () => {
-    expect(ask('[hidden]')).toBe('[hidden]');
-    expect(ask(undefined)).toBeUndefined();
-    expect(ask(false)).toBe(false);
-    // `null` defers, so it must match what no `redactFunction` at all produces.
-    expect(ask(null)).toBe(
-      (
-        redactValue(
-          { password: SECRET },
-          { redactedKeys: ['password'] },
-        ) as Record<string, unknown>
-      )['password'],
-    );
-  });
-
-  test('a masking request is honoured identically by all three entry points', () => {
-    // One function, three callers. A config recognized in one and treated as a literal in
-    // another is exactly the drift the shared implementation exists to prevent.
-    const redactFunction = (): unknown => ({ percent: 100 });
-    const expected = '*'.repeat(SECRET.length);
-
-    expect(
-      (
-        redactValue(
-          { password: SECRET },
-          { redactedKeys: ['password'], redactFunction },
-        ) as Record<string, unknown>
-      )['password'],
-    ).toBe(expected);
-    expect(
-      stringifyValue(
-        { password: SECRET },
-        { redactedKeys: ['password'], redactFunction },
-      ),
-    ).toBe(`{"password":"${expected}"}`);
-    expect(
-      applyRedaction({ password: SECRET }, ['password'], redactFunction)[
-        'password'
-      ],
-    ).toBe(expected);
   });
 });
 
