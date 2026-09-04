@@ -135,3 +135,4 @@ Nothing reaches a log line, because the renderer cannot see it either. But it me
 - The same rendering backs template interpolation in [curly-brackets](./curly-brackets.md) and the logger's message text, so a value reads the same everywhere.
 - `redactValue`, `stringifyValue` and the logger's `redactedKeys` share one implementation, so a `redactFunction` behaves identically in all three.
 - Redaction fails closed. A `redactFunction` that throws, or a value that cannot be read, yields `***REDACTION FAILED***` rather than the original.
+- Pass `onRedactionError` to learn _why_ it failed. The marker says only that it did; this callback is handed the error and the `redactedKeys` entry it happened on. It defaults to `console.error`, fires at most once per call, and is deliberately not the global `'error'` channel - reporting a redaction failure there loops through any logger listening on it.

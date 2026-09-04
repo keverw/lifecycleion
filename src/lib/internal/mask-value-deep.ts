@@ -3,6 +3,10 @@ import {
   REDACTION_FAILED_MARKER,
 } from './default-redact-function';
 import { isPlainContainer } from './is-plain-container';
+import {
+  NOOP_REDACTION_REPORTER,
+  type ReportRedactionFailure,
+} from './redaction-reporter';
 import { stringifyTemplateValue } from './stringify-template-value';
 
 /**
@@ -39,12 +43,15 @@ export type MaskLeaf = (
  * @param value The value to mask.
  * @param mask  Applied to each leaf, already stringified the way templates render it.
  * @param seen  Guards against a container that contains itself.
+ * @param report Notified of the first leaf whose masking threw, so a broken
+ *               `redactFunction` leaves a diagnosis and not only a marker.
  */
 export function maskValueDeep(
   key: string,
   value: unknown,
   mask: MaskLeaf,
   seen: WeakSet<object> = new WeakSet(),
+  report: ReportRedactionFailure = NOOP_REDACTION_REPORTER,
 ): unknown {
   // Only a plain object or an array is walked. Anything else - an `Error`, a `Date`, a
   // `URL`, a class instance - has no shape worth rebuilding, so it is replaced outright
@@ -90,8 +97,10 @@ export function maskValueDeep(
 
       try {
         length = source.length;
-      } catch {
+      } catch (error) {
         // Nothing can be enumerated, so nothing of the original may survive.
+        report(error, key);
+
         return REDACTION_FAILED_MARKER;
       }
 
@@ -106,8 +115,9 @@ export function maskValueDeep(
         // perfectly well everywhere else lost its shape, and the two walks disagreed
         // about a value they are meant to treat identically.
         try {
-          masked.push(maskValueDeep(key, source[index], mask, seen));
-        } catch {
+          masked.push(maskValueDeep(key, source[index], mask, seen, report));
+        } catch (error) {
+          report(error, key);
           masked.push(REDACTION_FAILED_MARKER);
         }
       }
@@ -119,9 +129,11 @@ export function maskValueDeep(
 
     try {
       entries = Object.entries(value);
-    } catch {
+    } catch (error) {
       // The keys cannot be read, so there is no shape to rebuild and no way to know what
       // is below. Fails closed, as the same read does in `redactPathsInner`.
+      report(error, key);
+
       return REDACTION_FAILED_MARKER;
     }
 
@@ -131,8 +143,9 @@ export function maskValueDeep(
       let entryResult: unknown;
 
       try {
-        entryResult = maskValueDeep(key, entryValue, mask, seen);
-      } catch {
+        entryResult = maskValueDeep(key, entryValue, mask, seen, report);
+      } catch (error) {
+        report(error, key);
         entryResult = REDACTION_FAILED_MARKER;
       }
 

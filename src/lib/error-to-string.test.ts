@@ -752,3 +752,65 @@ describe('errorToString - what a redactFunction may return', () => {
     }
   });
 });
+
+describe('errorToString - reporting why redaction failed', () => {
+  const SECRET = 'hunter2secret';
+
+  const mkError = (): Error => {
+    const error = new Error('boom') as Error & {
+      additionalInfo: Record<string, unknown>;
+      sensitiveFieldNames: unknown;
+    };
+
+    error.additionalInfo = { password: SECRET };
+    error.sensitiveFieldNames = ['password'];
+    error.stack = 'Error: boom';
+
+    return error;
+  };
+
+  it('reports a throwing redactFunction with its cause and key', () => {
+    const reports: [string, string][] = [];
+
+    const rendered = errorToString(mkError(), 120, {
+      redactFunction: (() => {
+        throw new Error('redactor exploded');
+      }) as unknown as RedactFieldFunction,
+      onRedactionError: (error, key) => reports.push([key, error.message]),
+    });
+
+    expect(reports).toEqual([['password', 'redactor exploded']]);
+    expect(rendered).toContain('REDACTION FAILED');
+    expect(rendered).not.toContain(SECRET);
+  });
+
+  it('reports an unusable sensitiveFieldNames', () => {
+    // This branch drops `additionalInfo` wholesale - the right call, and one nobody could
+    // diagnose from the output alone.
+    const error = mkError() as Error & { sensitiveFieldNames: unknown };
+
+    error.sensitiveFieldNames = 'password';
+
+    const reports: string[] = [];
+    const rendered = errorToString(error, 120, {
+      onRedactionError: (_error, key) => reports.push(key),
+    });
+
+    expect(reports).toEqual(['<sensitiveFieldNames>']);
+    expect(rendered).toContain('sensitiveFieldNames unreadable');
+    expect(rendered).not.toContain(SECRET);
+  });
+
+  it('renders identically with and without a handler', () => {
+    const redactFunction = (() => {
+      throw new Error('redactor exploded');
+    }) as unknown as RedactFieldFunction;
+
+    expect(
+      errorToString(mkError(), 120, {
+        redactFunction,
+        onRedactionError: () => undefined,
+      }),
+    ).toBe(errorToString(mkError(), 120, { redactFunction }));
+  });
+});

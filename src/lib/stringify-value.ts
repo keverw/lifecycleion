@@ -1,6 +1,10 @@
 import { parseRedactPaths, redactMatchedPaths } from './internal/redact-paths';
 import { stringifyTemplateValue } from './internal/stringify-template-value';
 import {
+  createRedactionReporter,
+  type RedactionErrorHandler,
+} from './internal/redaction-reporter';
+import {
   REDACTION_FAILED_MARKER,
   type RedactFunctionResult,
 } from './internal/default-redact-function';
@@ -29,6 +33,18 @@ export interface StringifyValueOptions {
    * `RedactMaskConfig` to ask for a particular masking.
    */
   redactFunction?: StringifyRedactFunction;
+  /**
+   * Notified when redaction fails for a value, so a broken `redactFunction` leaves a
+   * diagnosis and not only a `***REDACTION FAILED***` marker. Defaults to `console.error`.
+   *
+   * Not routed to the global `'error'` channel: reporting there would loop, since a
+   * listening logger logs it, logging renders, rendering redacts, and redaction throws
+   * again. Fires at most once per call - a failure is raised per leaf, so an unconditional
+   * throw would otherwise report thousands of times for one broken function.
+   *
+   * Do not redact or log from inside it.
+   */
+  onRedactionError?: RedactionErrorHandler;
 }
 
 /**
@@ -65,6 +81,8 @@ export function redactValue(
   value: unknown,
   options?: StringifyValueOptions,
 ): unknown {
+  const report = createRedactionReporter(options?.onRedactionError);
+
   try {
     const entries = options?.redactedKeys;
 
@@ -78,6 +96,11 @@ export function redactValue(
     // means the caller asked for masking and this cannot tell what for, so nothing is
     // returned rather than everything.
     if (paths === null) {
+      report(
+        new Error('redactedKeys is not a usable list of paths'),
+        '<redactedKeys>',
+      );
+
       return REDACTION_FAILED_MARKER;
     }
 
@@ -85,8 +108,10 @@ export function redactValue(
       return value;
     }
 
-    return redactMatchedPaths(value, paths, options?.redactFunction);
-  } catch {
+    return redactMatchedPaths(value, paths, options?.redactFunction, report);
+  } catch (error) {
+    report(error, '<value>');
+
     return REDACTION_FAILED_MARKER;
   }
 }

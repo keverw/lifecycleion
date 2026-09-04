@@ -6,6 +6,10 @@ import {
   REDACTION_FAILED_MARKER,
   type RedactFunctionResult,
 } from './default-redact-function';
+import {
+  NOOP_REDACTION_REPORTER,
+  type ReportRedactionFailure,
+} from './redaction-reporter';
 
 /** Decides the replacement for a redacted value. */
 export type RedactLeafFunction = (
@@ -181,6 +185,7 @@ function redactPathsInner(
   redactFunction: RedactLeafFunction | undefined,
   seen: WeakSet<object>,
   state: RedactState,
+  report: ReportRedactionFailure,
 ): unknown {
   const matched = matchRedactPath(paths, path);
 
@@ -190,11 +195,18 @@ function redactPathsInner(
     state.didMaskAnything = true;
 
     try {
-      return maskValueDeep(matched, value, (key, leaf, isDerived) =>
-        resolveRedaction(key, leaf, isDerived, redactFunction),
+      return maskValueDeep(
+        matched,
+        value,
+        (key, leaf, isDerived) =>
+          resolveRedaction(key, leaf, isDerived, redactFunction),
+        new WeakSet(),
+        report,
       );
-    } catch {
+    } catch (error) {
       // Never fall back to the original: a failed redaction says so instead.
+      report(error, matched);
+
       return REDACTION_FAILED_MARKER;
     }
   }
@@ -226,10 +238,17 @@ function redactPathsInner(
     state.didMaskAnything = true;
 
     try {
-      return maskValueDeep(inside, value, (key, leaf, isDerived) =>
-        resolveRedaction(key, leaf, isDerived, redactFunction),
+      return maskValueDeep(
+        inside,
+        value,
+        (key, leaf, isDerived) =>
+          resolveRedaction(key, leaf, isDerived, redactFunction),
+        new WeakSet(),
+        report,
       );
-    } catch {
+    } catch (error) {
+      report(error, inside);
+
       return REDACTION_FAILED_MARKER;
     }
   }
@@ -267,7 +286,8 @@ function redactPathsInner(
 
       try {
         length = source.length;
-      } catch {
+      } catch (error) {
+        report(error, path.join('.') || '<root>');
         state.didFailToRead = true;
 
         return REDACTION_FAILED_MARKER;
@@ -295,8 +315,10 @@ function redactPathsInner(
             redactFunction,
             seen,
             state,
+            report,
           );
-        } catch {
+        } catch (error) {
+          report(error, path.join('.') || String(index));
           state.didFailToRead = true;
           didMask = true;
           copy.push(REDACTION_FAILED_MARKER);
@@ -307,7 +329,8 @@ function redactPathsInner(
         if (result === UNCHANGED) {
           try {
             copy.push(source[index]);
-          } catch {
+          } catch (error) {
+            report(error, [...path, String(index)].join('.'));
             state.didFailToRead = true;
             didMask = true;
             copy.push(REDACTION_FAILED_MARKER);
@@ -325,10 +348,11 @@ function redactPathsInner(
 
     try {
       entries = Object.entries(value);
-    } catch {
+    } catch (error) {
       // The keys cannot be read, so the walk cannot tell whether something named for
       // redaction sits below. Handing back the original would risk returning it in the
       // clear, so this one value fails closed even though nothing under it matched.
+      report(error, path.join('.') || '<root>');
       state.didFailToRead = true;
 
       return REDACTION_FAILED_MARKER;
@@ -360,9 +384,11 @@ function redactPathsInner(
           redactFunction,
           seen,
           state,
+          report,
         );
-      } catch {
+      } catch (error) {
         // The walk never saw what was below, so it cannot conclude nothing matched there.
+        report(error, [...path, key].join('.'));
         state.didFailToRead = true;
         result = REDACTION_FAILED_MARKER;
       }
@@ -414,6 +440,7 @@ export function redactMatchedPaths(
   value: unknown,
   paths: RedactPath[],
   redactFunction: RedactLeafFunction | undefined,
+  report: ReportRedactionFailure = NOOP_REDACTION_REPORTER,
 ): unknown {
   const state: RedactState = {
     didMaskAnything: false,
@@ -427,6 +454,7 @@ export function redactMatchedPaths(
     redactFunction,
     new WeakSet(),
     state,
+    report,
   );
 
   // Nothing matched anywhere, so there is nothing to copy: the caller's own value is the

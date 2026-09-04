@@ -11,6 +11,12 @@ import {
 } from './internal/default-redact-function';
 import { resolveRedaction } from './internal/resolve-redaction';
 import { maskValueDeep } from './internal/mask-value-deep';
+import {
+  createRedactionReporter,
+  NOOP_REDACTION_REPORTER,
+  type RedactionErrorHandler,
+  type ReportRedactionFailure,
+} from './internal/redaction-reporter';
 
 /**
  * Produces the replacement shown for a value named by `sensitiveFieldNames`.
@@ -25,6 +31,8 @@ export type RedactFieldFunction = (
   value: string,
 ) => RedactFunctionResult;
 
+export type { RedactionErrorHandler } from './internal/redaction-reporter';
+
 /** Options for {@link errorToString}. */
 export interface ErrorToStringOptions {
   /**
@@ -32,6 +40,17 @@ export interface ErrorToStringOptions {
    * a value renders identically whether it went through a log line or a rendered error.
    */
   redactFunction?: RedactFieldFunction;
+  /**
+   * Notified when redaction fails for a value, so a broken `redactFunction` leaves a
+   * diagnosis and not only a `***REDACTION FAILED***` marker. Defaults to `console.error`.
+   *
+   * Not routed to the global `'error'` channel: reporting there would loop, since a
+   * listening logger logs it, logging renders, rendering redacts, and redaction throws
+   * again. Fires at most once per call.
+   *
+   * Do not redact or log from inside it.
+   */
+  onRedactionError?: RedactionErrorHandler;
 }
 
 /**
@@ -82,6 +101,7 @@ function maskSensitiveValue(
   maxRowLength: number,
   seen: WeakSet<object>,
   redactFunction: RedactFieldFunction | undefined,
+  report: ReportRedactionFailure,
 ): string | KeyValueASCIITable | NestedKeyValueEntry[] {
   try {
     // `null` means "use the default for this one", so a caller can special-case a few
@@ -92,8 +112,13 @@ function maskSensitiveValue(
     // Each leaf is stringified before the function sees it, exactly as `applyRedaction`
     // does, so one function receives identical arguments from both - and so a mutating
     // function cannot reach into the caller's own error object.
-    const masked = maskValueDeep(entry, readValue(), (key, leaf, isDerived) =>
-      resolveRedaction(key, leaf, isDerived, redactFunction),
+    const masked = maskValueDeep(
+      entry,
+      readValue(),
+      (key, leaf, isDerived) =>
+        resolveRedaction(key, leaf, isDerived, redactFunction),
+      new WeakSet(),
+      report,
     );
 
     if (masked === null || typeof masked !== 'object') {
@@ -101,10 +126,21 @@ function maskSensitiveValue(
     }
 
     // Already masked all the way down, so it is rendered with no sensitive paths left.
-    return stringifyValue(masked, table, maxRowLength, seen, [], [], undefined);
-  } catch {
+    return stringifyValue(
+      masked,
+      table,
+      maxRowLength,
+      seen,
+      [],
+      [],
+      undefined,
+      NOOP_REDACTION_REPORTER,
+    );
+  } catch (error) {
     // Same marker the logger uses for the same condition: redaction was attempted and
     // failed, which must read differently from a value that masked successfully.
+    report(error, entry);
+
     return REDACTION_FAILED_MARKER;
   }
 }
@@ -187,6 +223,8 @@ export function errorToString(
   maxRowLength = 80,
   options?: ErrorToStringOptions,
 ): string {
+  const report = createRedactionReporter(options?.onRedactionError);
+
   try {
     const table = errorToASCIITable(
       error,
@@ -194,6 +232,7 @@ export function errorToString(
       new WeakSet(),
       [],
       options?.redactFunction,
+      report,
     );
 
     return table.toString();
@@ -208,6 +247,7 @@ function errorToASCIITable(
   seen: WeakSet<object>,
   inheritedSensitive: RedactPath[],
   redactFunction: RedactFieldFunction | undefined,
+  report: ReportRedactionFailure,
 ): KeyValueASCIITable {
   const table = new KeyValueASCIITable({
     tableWidth: maxRowLength,
@@ -258,6 +298,10 @@ function errorToASCIITable(
       // to nothing is not this case: it masks nothing, exactly as the logger's
       // `redactedKeys` does.
       if (ownPaths === null) {
+        report(
+          new Error('sensitiveFieldNames is not a usable list of paths'),
+          '<sensitiveFieldNames>',
+        );
         table.addRow('AdditionalInfo', '*** (sensitiveFieldNames unreadable)');
 
         const stackOnly = readMember(err, 'stack');
@@ -303,6 +347,7 @@ function errorToASCIITable(
               maxRowLength,
               seen,
               redactFunction,
+              report,
             ),
           );
         } else {
@@ -318,6 +363,7 @@ function errorToASCIITable(
               sensitivePaths,
               [key],
               redactFunction,
+              report,
             ),
           );
         }
@@ -342,6 +388,7 @@ function stringifyValue(
   sensitive: RedactPath[],
   path: string[],
   redactFunction: RedactFieldFunction | undefined,
+  report: ReportRedactionFailure,
 ): string | KeyValueASCIITable | NestedKeyValueEntry[] {
   if (typeof value === 'string') {
     return value;
@@ -375,6 +422,7 @@ function stringifyValue(
       sensitive,
       path,
       redactFunction,
+      report,
     );
   } finally {
     if (isTracked) {
@@ -391,6 +439,7 @@ function stringifyValueInner(
   sensitive: RedactPath[],
   path: string[],
   redactFunction: RedactFieldFunction | undefined,
+  report: ReportRedactionFailure,
 ): string | KeyValueASCIITable | NestedKeyValueEntry[] {
   let arrayValue: unknown[] | null;
 
@@ -443,6 +492,7 @@ function stringifyValueInner(
             maxRowLength,
             seen,
             redactFunction,
+            report,
           );
 
           parts.push(
@@ -462,6 +512,7 @@ function stringifyValueInner(
           sensitive,
           [...path, String(index)],
           redactFunction,
+          report,
         );
         // Convert complex types to strings for joining
         if (typeof result === 'string') {
@@ -496,6 +547,7 @@ function stringifyValueInner(
         seen,
         [],
         redactFunction,
+        report,
       );
     } else {
       // Handle objects differently
@@ -524,6 +576,7 @@ function stringifyValueInner(
                   maxRowLength - 4,
                   seen,
                   redactFunction,
+                  report,
                 )
               : stringifyValue(
                   val,
@@ -533,6 +586,7 @@ function stringifyValueInner(
                   sensitive,
                   [...path, key],
                   redactFunction,
+                  report,
                 ),
         };
       });

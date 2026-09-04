@@ -8,6 +8,10 @@ import {
   redactMatchedPaths,
 } from '../../internal/redact-paths';
 import type { RedactFunction } from '../types';
+import {
+  createRedactionReporter,
+  type RedactionErrorHandler,
+} from '../../internal/redaction-reporter';
 
 /**
  * Default redaction function using datamask
@@ -31,16 +35,21 @@ export function applyRedaction(
   params: Record<string, unknown>,
   redactedKeys?: string[],
   redactFunction?: RedactFunction,
+  onRedactionError?: RedactionErrorHandler,
 ): Record<string, unknown> {
   // No redaction needed
   if (!redactedKeys || redactedKeys.length === 0) {
     return params;
   }
 
+  const report = createRedactionReporter(onRedactionError);
+
   // Checked before anything reads the list: a non-array cannot name a key, so there is
   // no safe way to redact and no key to mark. Returning `params` would hand back the
   // values the caller asked to hide.
   if (!Array.isArray(redactedKeys)) {
+    report(new Error('redactedKeys is not an array'), '<redactedKeys>');
+
     return {};
   }
 
@@ -69,6 +78,11 @@ export function applyRedaction(
   const paths = parseRedactPaths(redactedKeys);
 
   if (paths === null) {
+    report(
+      new Error('redactedKeys is not a usable list of paths'),
+      '<redactedKeys>',
+    );
+
     return allMarked();
   }
 
@@ -116,10 +130,12 @@ export function applyRedaction(
     let result: unknown;
 
     try {
-      result = redactMatchedPaths(root, paths, redactFunction);
-    } catch {
+      result = redactMatchedPaths(root, paths, redactFunction, report);
+    } catch (error) {
       // The walk guards every step it owns, so reaching here means something beneath it
       // refused entirely.
+      report(error, '<params>');
+
       return null;
     }
 

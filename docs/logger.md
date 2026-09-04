@@ -537,6 +537,40 @@ does on the success path; only `entry.redactedParams` and the rendered `message`
 substituted. A sink that wants to detect the condition should compare against the exported
 constant rather than hard-coding the literal.
 
+#### Finding out _why_ redaction failed
+
+The marker says that redaction failed, never why - the thrown error was discarded. Pass
+`onRedactionError` to get the cause:
+
+```typescript
+const logger = new Logger({
+  redactFunction: myRedactor,
+  onRedactionError: (error, key) => {
+    metrics.increment('redaction.failed', { key });
+    // `error.message` is the throw from `myRedactor`; the original is on `error.cause`.
+  },
+});
+```
+
+It is handed the failure, normalized to an `Error`, and the `redactedKeys` entry as you
+wrote it - `user.password`, not the leaf `password`. It **defaults to `console.error`**, so
+a broken redactor is loud rather than silent.
+
+Two things about it are deliberate:
+
+- **It is not the global `'error'` channel**, which is where every other failure in this
+  library goes. Reporting there would loop: `registerReportErrorListener()` logs what it
+  hears, logging renders a message, rendering redacts, and redaction throws again. Each
+  pass is a fresh turn, so no re-entrancy guard closes it. `onEventHandlerError` exists for
+  the same reason and takes the same shape.
+- **It fires at most once per log call.** A failure is raised per leaf, so a redactor that
+  throws unconditionally would otherwise report once for every value inside a named
+  container. The first failure names the cause; the markers left in the output show the
+  full extent.
+
+Don't log from inside it, for the reason above. The same option is available on
+`stringifyValue`, `redactValue`, and `errorToString`.
+
 The guarantee is about redaction _failing_: a key that this attempts to redact never keeps its original value. It is not a guarantee that every sensitive value is found. A `redactedKeys` entry that does not resolve to anything in `params` redacts nothing and is skipped, exactly as it always was, so a typo such as `'password.'` silently protects nothing. A dotted entry is treated as ambiguous and both readings are covered: `'user.password'` redacts the nested `params.user.password` _and_ a literal key spelled `'user.password'`, when either exists.
 
 #### Controlling how a value is masked

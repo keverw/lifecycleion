@@ -1433,3 +1433,124 @@ describe('redactValue and stringifyValue stay one implementation', () => {
     expect(stringifyValue(masked)).not.toContain(SECRET);
   });
 });
+
+describe('redactValue - reporting why redaction failed', () => {
+  // Failing closed is only half the job. The marker says *that* redaction failed and is
+  // deliberately distinct from an ordinary mask, but the thrown error used to be
+  // discarded outright - so a `redactFunction` that threw for one key out of forty left a
+  // marker in one slot and nothing at all to trace it with.
+  //
+  // Reported through a dedicated callback rather than the global `'error'` channel every
+  // other failure in this library uses, because that channel loops here: a listening
+  // logger logs the report, logging renders a message, rendering redacts, and redaction
+  // throws again. Each pass is a fresh turn, so no re-entrancy guard closes it.
+  const boom = (): never => {
+    throw new Error('redactor exploded');
+  };
+
+  const collect = (
+    value: unknown,
+    redactedKeys: string[],
+    redactFunction?: unknown,
+  ): { reports: [string, string][]; result: unknown } => {
+    const reports: [string, string][] = [];
+    const result = redactValue(value, {
+      redactedKeys,
+      redactFunction,
+      onRedactionError: (error: Error, key: string) =>
+        reports.push([key, error.message]),
+    } as unknown as StringifyValueOptions);
+
+    return { reports, result };
+  };
+
+  test('a throwing redactFunction is reported with its cause and key', () => {
+    const { reports, result } = collect(
+      { user: { password: SECRET } },
+      ['user.password'],
+      boom,
+    );
+
+    expect(reports).toEqual([['user.password', 'redactor exploded']]);
+    // The key is the entry as written, not the leaf, so it matches what was configured.
+    expect(JSON.stringify(result)).toContain('***REDACTION FAILED***');
+    expect(JSON.stringify(result)).not.toContain(SECRET);
+  });
+
+  test('an unusable redactedKeys list is reported too', () => {
+    const { reports } = collect({ password: SECRET }, 'password' as never);
+
+    expect(reports.length).toBe(1);
+    expect(reports[0]?.[0]).toBe('<redactedKeys>');
+  });
+
+  test('fires at most once, however many leaves fail', () => {
+    // The bound is the point, not a nicety: a failure is raised per leaf, so an
+    // unconditional throw would otherwise report once for every value inside a named
+    // container - thousands of lines for one broken function.
+    const { reports, result } = collect(
+      { creds: { a: SECRET, b: SECRET, c: SECRET, d: [SECRET, SECRET] } },
+      ['creds'],
+      boom,
+    );
+
+    expect(reports.length).toBe(1);
+    // Every leaf still marked, so the output shows the full extent.
+    expect(JSON.stringify(result).match(/REDACTION FAILED/g)?.length).toBe(5);
+  });
+
+  test('nothing is reported when redaction succeeds', () => {
+    const { reports, result } = collect({ password: SECRET }, ['password']);
+
+    expect(reports).toEqual([]);
+    expect(JSON.stringify(result)).not.toContain(SECRET);
+  });
+
+  test('a handler that throws costs the report, not the redaction', () => {
+    // A handler for failures must not be able to turn one into two.
+    expect(() =>
+      redactValue(
+        { password: SECRET },
+        {
+          redactedKeys: ['password'],
+          redactFunction: boom,
+          onRedactionError: () => {
+            throw new Error('handler exploded');
+          },
+        },
+      ),
+    ).not.toThrow();
+
+    const masked = redactValue(
+      { password: SECRET },
+      {
+        redactedKeys: ['password'],
+        redactFunction: boom,
+        onRedactionError: () => {
+          throw new Error('handler exploded');
+        },
+      },
+    );
+
+    expect(JSON.stringify(masked)).toContain('***REDACTION FAILED***');
+    expect(JSON.stringify(masked)).not.toContain(SECRET);
+  });
+
+  test('the marker is unchanged by any of this', () => {
+    // The diagnostic is additive. Output with a handler must equal output without one.
+    const withHandler = collect(
+      { password: SECRET },
+      ['password'],
+      boom,
+    ).result;
+    const withoutHandler = redactValue(
+      { password: SECRET },
+      {
+        redactedKeys: ['password'],
+        redactFunction: boom,
+      },
+    );
+
+    expect(JSON.stringify(withHandler)).toBe(JSON.stringify(withoutHandler));
+  });
+});

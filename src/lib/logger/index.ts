@@ -9,6 +9,7 @@ import { CurlyBrackets } from '../curly-brackets';
 import { isNumber } from '../is-number';
 import { isPromise } from '../is-promise';
 import { describeError, toError } from '../to-error';
+import type { RedactionErrorHandler } from '../internal/redaction-reporter';
 import type {
   LogEntry,
   LogSink,
@@ -189,6 +190,7 @@ export class Logger extends EventEmitter {
     sink: LogSink,
   ) => void;
   private onEventHandlerError?: (error: Error, event: string) => void;
+  private onRedactionError?: RedactionErrorHandler;
 
   private _didExit = false;
   private _exitCode: number = 0;
@@ -210,6 +212,7 @@ export class Logger extends EventEmitter {
     this.beforeExitCallback = options.beforeExitCallback;
     this.onSinkError = options.onSinkError;
     this.onEventHandlerError = options.onEventHandlerError;
+    this.onRedactionError = options.onRedactionError;
   }
 
   public get didExit(): boolean {
@@ -806,6 +809,7 @@ export class Logger extends EventEmitter {
           params,
           redactedKeys,
           this.redactFunction,
+          this.onRedactionError,
         );
       } catch {
         // Never fall through to the raw params below: rendering the message from those

@@ -987,3 +987,57 @@ describe('applyRedaction - what a redactFunction may return', () => {
     expect(JSON.stringify(replacement)).not.toContain(SECRET.slice(0, 3));
   });
 });
+
+describe('applyRedaction - reporting why redaction failed', () => {
+  const SECRET = 'hunter2secret';
+  const boom = (): never => {
+    throw new Error('redactor exploded');
+  };
+
+  test('a throwing redactFunction reaches onRedactionError', () => {
+    const reports: [string, string][] = [];
+
+    const result = applyRedaction(
+      { password: SECRET },
+      ['password'],
+      boom,
+      (error, key) => reports.push([key, error.message]),
+    );
+
+    expect(reports).toEqual([['password', 'redactor exploded']]);
+    expect(result['password']).toBe(REDACTION_FAILED_MARKER);
+  });
+
+  test('a non-array redactedKeys is reported rather than dropped in silence', () => {
+    // This branch returns `{}` - every param gone. Without a report that is indisputably
+    // correct and completely inexplicable from the outside.
+    const reports: string[] = [];
+
+    expect(
+      applyRedaction(
+        { password: SECRET },
+        'password' as unknown as string[],
+        undefined,
+        (_error, key) => reports.push(key),
+      ),
+    ).toEqual({});
+    expect(reports).toEqual(['<redactedKeys>']);
+  });
+
+  test('the redacted params are identical with and without a handler', () => {
+    // The diagnostic is additive; it must not change what is logged.
+    const withHandler = applyRedaction(
+      { password: SECRET },
+      ['password'],
+      boom,
+      () => undefined,
+    );
+    const withoutHandler = applyRedaction(
+      { password: SECRET },
+      ['password'],
+      boom,
+    );
+
+    expect(withHandler).toEqual(withoutHandler);
+  });
+});

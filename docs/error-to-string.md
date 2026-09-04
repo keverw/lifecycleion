@@ -149,6 +149,8 @@ To render a literal null, return the string `'null'`. Returning **nothing** is n
 
 The function is handed the key exactly as you wrote it in `sensitiveFieldNames` (`user.password`, not the leaf `password`) and the value already stringified, which is what the logger passes for the same field - so the same function genuinely serves both, and a mutating function cannot reach into your error object.
 
+Pass `onRedactionError` to find out why a value failed to redact - it receives the error and the `sensitiveFieldNames` entry it happened on, defaults to `console.error`, and fires at most once per call. The same option is on the logger and on `stringifyValue`.
+
 If the `redactFunction` throws, or reading the value throws, the result is `***REDACTION FAILED***` - never the original value. That is the same marker the logger uses for the same condition, and it is deliberately distinct from a successful mask so a broken `redactFunction` cannot hide behind output that looks fine.
 
 Masking **fails closed** when the _list itself_ is unusable. A comma-joined string, a `Set`, a non-string entry, or an accessor that throws all mean the caller asked for masking and this cannot tell what for, so `additionalInfo` is dropped wholesale and replaced with `*** (sensitiveFieldNames unreadable)` rather than rendered in the clear. This does **not** extend to an individual entry: one that does not parse, or that parses but matches nothing, simply masks nothing and leaves the other entries working, exactly as an unmatched `redactedKeys` entry redacts nothing in the logger.

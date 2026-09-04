@@ -1,4 +1,7 @@
 import type { RedactMaskConfig } from '../internal/default-redact-function';
+import type { RedactionErrorHandler } from '../internal/redaction-reporter';
+
+export type { RedactionErrorHandler } from '../internal/redaction-reporter';
 /**
  * Log level enum for filtering logs by severity
  * Lower numbers = more important/higher priority
@@ -183,6 +186,24 @@ export interface LoggerOptions {
    * Do not call this logger's own log methods from here.
    */
   onEventHandlerError?: (error: Error, event: string) => void;
+
+  /**
+   * Notified when redaction fails for a param, so a broken `redactFunction` leaves a
+   * diagnosis and not only a `***REDACTION FAILED***` marker in the output.
+   * Defaults to `console.error`.
+   *
+   * Deliberately not the global `'error'` channel, for the reason `onEventHandlerError`
+   * is not either: a listening logger would log the report, logging renders a message,
+   * rendering redacts, and redaction throws again - a cycle no re-entrancy guard closes,
+   * since each pass is a fresh turn.
+   *
+   * Fires at most once per log call. A failure is raised per leaf, so an unconditionally
+   * throwing `redactFunction` would otherwise report once for every value inside a named
+   * container. The markers left in the output show the full extent; this names the cause.
+   *
+   * Do not call this logger's own log methods from here.
+   */
+  onRedactionError?: RedactionErrorHandler;
 }
 
 /**
