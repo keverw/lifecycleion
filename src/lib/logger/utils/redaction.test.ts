@@ -404,15 +404,37 @@ describe('applyRedaction - non-identifier key names', () => {
   });
 
   test('redacts spaced and non-ASCII names', () => {
+    // A non-ASCII name needs no quoting; a spaced one does, since an unquoted segment
+    // stops at whitespace so that brace-wrapped prose is not read as a lookup path.
     const result = applyRedaction(
       { u: { 'my key': 'hunter2', contraseña: 'hunter2' } },
-      ['u.my key', 'u.contraseña'],
+      ["u['my key']", 'u.contraseña'],
     );
 
     const u = result['u'] as Record<string, unknown>;
 
     expect(u['my key']).not.toBe('hunter2');
     expect(u['contraseña']).not.toBe('hunter2');
+  });
+
+  test('a params bag with a non-plain prototype still comes back a record', () => {
+    // The walk masks a non-plain object whole, which is right for one nested inside a
+    // payload but not for the bag itself: it returned the bare string `'***REDACTED***'`
+    // against the declared record type, so every template placeholder rendered as the
+    // fallback and a structured sink got a string in place of its params.
+    class Bag {
+      public password = 'hunter2secret';
+      public userID = 7;
+    }
+
+    const result = applyRedaction(
+      new Bag() as unknown as Record<string, unknown>,
+      ['password'],
+    );
+
+    expect(typeof result).toBe('object');
+    expect(result['password']).not.toBe('hunter2secret');
+    expect(result['userID']).toBe(7);
   });
 
   test('the quoted form still works and still disambiguates a dotted key', () => {

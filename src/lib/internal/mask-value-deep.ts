@@ -71,9 +71,26 @@ export function maskValueDeep(
 
   try {
     if (Array.isArray(value)) {
-      return (value as unknown[]).map((item) =>
-        maskValueDeep(key, item, mask, seen),
-      );
+      // A plain `[]` filled by index, not `source.map`, for the reason `redactPathsInner`
+      // does the same: `map` goes through `ArraySpeciesCreate`, which calls the value's
+      // own subclass constructor with a length. A tuple subclass whose constructor
+      // rejects that argument threw from inside the walk, where there is no `catch`, so
+      // a named container came back as the failure marker instead of the masked array
+      // shape this promises. Rebuilding plain also matches what masking does everywhere
+      // else: the caller's value must not be mutated and its type cannot be
+      // reconstructed from outside.
+      const source = value as unknown[];
+      const masked: unknown[] = [];
+
+      // A counted index loop, not `for...of`: iteration resolves `Symbol.iterator` off
+      // the value, which is caller code on a subclass, free to throw or to yield
+      // something other than the elements. Same reason `redactPathsInner` counts.
+      // eslint-disable-next-line unicorn/no-for-loop -- must not use the iterator protocol
+      for (let index = 0; index < source.length; index++) {
+        masked.push(maskValueDeep(key, source[index], mask, seen));
+      }
+
+      return masked;
     }
 
     const masked: Record<string, unknown> = {};

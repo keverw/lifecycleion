@@ -1098,3 +1098,33 @@ describe('redactValue - what masking reaches', () => {
     ).toEqual({ o: { visible: '***REDACTED***' } });
   });
 });
+
+describe('redactValue array subclasses', () => {
+  test('masks an array subclass whose constructor rejects a length argument', () => {
+    // Masking used `Array.prototype.map`, which goes through `ArraySpeciesCreate` and
+    // calls the value's own constructor with a length. A tuple subclass that rejects
+    // that threw from inside the walk and the whole container came back as the failure
+    // marker instead of the masked array shape.
+    class Tuple extends Array {
+      constructor(...items: unknown[]) {
+        if (items.length === 1 && typeof items[0] === 'number') {
+          throw new TypeError('Tuple cannot be constructed from a length');
+        }
+
+        super(...(items as never[]));
+      }
+    }
+
+    const tuple = new Tuple();
+
+    tuple.push('topsecretvalue', 'other');
+
+    const result = redactValue({ tuple }, { redactedKeys: ['tuple'] }) as {
+      tuple: unknown;
+    };
+
+    expect(Array.isArray(result.tuple)).toBe(true);
+    expect((result.tuple as unknown[]).length).toBe(2);
+    expect((result.tuple as unknown[])[0]).not.toBe('topsecretvalue');
+  });
+});

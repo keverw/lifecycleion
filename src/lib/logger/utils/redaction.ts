@@ -3,6 +3,7 @@ import {
   defaultRedactValue,
   REDACTION_FAILED_MARKER,
 } from '../../internal/default-redact-function';
+import { isPlainContainer } from '../../internal/is-plain-container';
 import {
   parseRedactPaths,
   redactMatchedPaths,
@@ -97,8 +98,30 @@ export function applyRedaction(
     return allMarked();
   }
 
+  // The params bag itself is normalized to a plain object, which the walk does not do
+  // for it. The walk treats anything with a non-plain prototype as a single *value* and
+  // masks it whole - right for a `URL` or a class instance sitting inside a payload,
+  // since that is how it renders, but wrong for the bag being walked. A class instance
+  // passed as `params` matched "a path points inside this" at the root and came back as
+  // the string `'***REDACTED***'`, against this function's declared record type: every
+  // template placeholder then rendered as the fallback, and a structured sink reading
+  // `entry.redactedParams` got a string where it expected its params.
+  //
+  // Spread rather than walked as-is: own enumerable properties are exactly what the
+  // renderer prints and what the walk would have read anyway, so this changes only the
+  // prototype. Guarded because a property can be an accessor that throws.
+  let root: Record<string, unknown>;
+
   try {
-    return redactMatchedPaths(params, paths, redactFunction) as Record<
+    root = isPlainContainer(params)
+      ? params
+      : { ...(params as Record<string, unknown>) };
+  } catch {
+    return allMarked();
+  }
+
+  try {
+    return redactMatchedPaths(root, paths, redactFunction) as Record<
       string,
       unknown
     >;

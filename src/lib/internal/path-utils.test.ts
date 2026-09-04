@@ -59,7 +59,6 @@ describe('getPathParts', () => {
       'user',
       'password-hash',
     ]);
-    expect(getPathParts('u.my key')).toEqual(['u', 'my key']);
     expect(getPathParts('u.contraseña')).toEqual(['u', 'contraseña']);
     expect(getPathParts('user.@id')).toEqual(['user', '@id']);
   });
@@ -76,5 +75,14 @@ describe('getPathParts', () => {
     // Only quoting can disambiguate a key that really contains `.` or `[`.
     expect(getPathParts('user["a.b"]')).toEqual(['user', 'a.b']);
     expect(getPathParts('["a[0]"]')).toEqual(['a[0]']);
+  });
+
+  test('should reject an unquoted segment containing whitespace', () => {
+    // Load-bearing: without it almost any brace-wrapped phrase parses as a key name, so
+    // `CurlyBrackets` renders its fallback over prose it used to leave alone. A key that
+    // really contains a space takes the quoted form.
+    expect(getPathParts('Hello world')).toBeNull();
+    expect(getPathParts('u.my key')).toBeNull();
+    expect(getPathParts("u['my key']")).toEqual(['u', 'my key']);
   });
 });

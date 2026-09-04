@@ -257,9 +257,23 @@ describe('CurlyBrackets', () => {
       ),
     ).toEqual('Alice');
 
+    // A key containing a space needs the quoted form, so that ordinary prose inside a
+    // placeholder is not mistaken for a lookup.
+    expect(
+      CurlyBrackets("{{u['my key']}}", { u: { 'my key': 'Bob' } }, '(???)'),
+    ).toEqual('Bob');
+  });
+
+  it('should leave a placeholder holding prose exactly as written', () => {
+    // An unquoted segment cannot contain whitespace, so this does not parse as a path
+    // and is left alone rather than being replaced by the fallback.
+    expect(CurlyBrackets('Note: {{Hello world}} done', {}, '(???)')).toEqual(
+      'Note: {{Hello world}} done',
+    );
+
     expect(
       CurlyBrackets('{{u.my key}}', { u: { 'my key': 'Bob' } }, '(???)'),
-    ).toEqual('Bob');
+    ).toEqual('{{u.my key}}');
   });
 
   it('should leave unsupported placeholder path syntax unchanged', () => {
