@@ -29,6 +29,18 @@ import {
 } from './node-adapter-utils';
 import { resolveDetectedRedirectURL } from '../utils';
 
+/**
+ * The absorber currently attached to a writable, if any.
+ *
+ * Module-level and keyed on the writable, because `streamResponse` may hand the same sink
+ * to several concurrent requests: a per-request absorber let a dozen simultaneous write
+ * failures attach a dozen listeners inside one turn. See `absorbPendingWritableError`.
+ */
+const pendingWritableErrorAbsorbers = new WeakMap<
+  WritableLike,
+  (error: Error) => void
+>();
+
 type StreamResponseBodyResult =
   | true
   | {
@@ -815,23 +827,97 @@ async function streamResponseBody(
     let didReceiveEnd = false;
 
     /**
-     * Absorb one `error` the writable has not delivered yet.
+     * Absorb an `error` the writable has not delivered yet.
      *
      * A failed write destroys the stream and emits its `error` on a later tick, usually
      * after this request has settled and its listeners are gone - and an `error` event
-     * with no listener is an uncaught exception that takes the process down. A one-shot
-     * listener catches exactly that one and removes itself, so a writable reused across
-     * requests is not left carrying listeners.
+     * with no listener is an uncaught exception that takes the process down.
+     *
+     * Keyed on the writable rather than on the request, because `streamResponse` may hand
+     * the same sink to several requests at once. A per-request absorber meant a dozen
+     * concurrent failures on one shared writable attached a dozen listeners within the
+     * same turn, before any removal ran, which is the `MaxListenersExceededWarning` this
+     * is meant to avoid. One absorber per writable is also all that is needed: it is
+     * attached with `on`, not `once`, so it keeps absorbing for as long as it is there
+     * instead of standing down after the first error and leaving a sibling's unhandled.
+     *
+     * Its lifetime is bounded rather than left to an event that may never come. A
+     * hand-written {@link WritableLike} that throws from `write` or `end` is not obliged
+     * to emit anything afterwards, so a listener waiting for delivery could wait forever.
+     * A `setImmediate` removes it unconditionally, which is safely after the emit rather
+     * than a guess: measured on Node 25 and Bun 1.4, a failed write emits after
+     * `process.nextTick` and before the next `setImmediate`, so a real stream has always
+     * delivered by then. `unref` so a pending removal cannot hold the process open. An
+     * error emitted after that window is unhandled again - the documented expectation on
+     * `WritableLike`, and the only alternative to holding a listener indefinitely.
+     *
+     * Skipped entirely for a writable with no listener-removal method, because an
+     * absorber attached to one could never be taken back: the `setImmediate` would drop
+     * the `WeakMap` entry while the listener stayed, and the next failure would attach
+     * another, which is the unbounded growth this exists to prevent. Nothing is lost by
+     * skipping it - `cleanup` could not have detached `onWritableError` from such a
+     * writable either, so that listener is still attached and absorbs the late error on
+     * its own, settling nothing because `settle` has already run.
      */
     const absorbPendingWritableError = (): void => {
+      // Captured once, here, rather than looked up again inside the removal below. Two
+      // lookups is two answers: the member is caller code and could be gone, or changed,
+      // by the time the removal runs, and a removal that cannot find its method is one
+      // that silently does not happen.
+      const removeListener = getWritableListenerRemover(writable);
+
+      if (removeListener === null) {
+        return;
+      }
+
       try {
-        writable.once('error', () => {
-          // Already reported through `settle`; this exists only to keep the event from
-          // going unhandled.
-        });
+        if (pendingWritableErrorAbsorbers.has(writable)) {
+          // One is already attached to this writable and still absorbing.
+          return;
+        }
+      } catch {
+        // Not a usable `WeakMap` key, so it cannot be tracked or protected.
+        return;
+      }
+
+      const absorb = (): void => {
+        // Already reported through `settle`; this exists only to keep the event from
+        // going unhandled.
+      };
+
+      try {
+        writable.on('error', absorb);
+        pendingWritableErrorAbsorbers.set(writable, absorb);
       } catch {
         // A writable that will not take a listener cannot be protected. Nothing else
         // here depends on it.
+        return;
+      }
+
+      try {
+        const removal = setImmediate(() => {
+          if (pendingWritableErrorAbsorbers.get(writable) !== absorb) {
+            return;
+          }
+
+          try {
+            removeListener('error', absorb);
+          } catch {
+            // The removal itself is caller code and can refuse. The listener is
+            // therefore still attached, so the bookkeeping that says so is kept:
+            // dropping it would let the next failure add a second listener on top of one
+            // that never came off, which is the accumulation being prevented. The one
+            // still attached goes on absorbing, so nothing is left uncovered.
+            return;
+          }
+
+          pendingWritableErrorAbsorbers.delete(writable);
+        });
+
+        removal.unref?.();
+      } catch {
+        // No way to schedule the removal, so the listener stays. That is the same trade
+        // this made before it was bounded, and the safe direction of the two.
       }
     };
 
@@ -969,6 +1055,10 @@ async function streamResponseBody(
           settle(true);
         });
       } catch (error) {
+        // Same reasoning as the `write` throw above: a throw out of `end` means the
+        // stream is being torn down, and its own `error` event is still on the way -
+        // after `settle` has removed every listener this function registered.
+        absorbPendingWritableError();
         settle({
           code: 'stream_write_error',
           cause: normalizeError(error),
@@ -1213,19 +1303,53 @@ function destroyWritableQuietly(writable: WritableLike): void {
   }
 }
 
+type WritableListenerRemover = (
+  event: 'drain' | 'error',
+  listener: (() => void) | ((error: Error) => void),
+) => unknown;
+
+/**
+ * The writable's own listener-removal method, or `null` when it has none.
+ *
+ * `removeListener` as well as `off`, because both are `EventEmitter`'s and a hand-written
+ * {@link WritableLike} may define either. Neither is required by the interface, so a
+ * structurally valid writable can have no way to take a listener back at all.
+ */
+function getWritableListenerRemover(
+  writable: WritableLike,
+): WritableListenerRemover | null {
+  try {
+    const removable = writable as WritableLike & {
+      off?: WritableListenerRemover;
+      removeListener?: WritableListenerRemover;
+    };
+
+    if (typeof removable.off === 'function') {
+      return removable.off.bind(removable);
+    }
+
+    if (typeof removable.removeListener === 'function') {
+      return removable.removeListener.bind(removable);
+    }
+  } catch {
+    // Reading or binding a member runs code this adapter does not own.
+  }
+
+  return null;
+}
+
 function removeWritableListener(
   writable: WritableLike,
   event: 'drain' | 'error',
   listener: (() => void) | ((error: Error) => void),
 ): void {
-  const removable = writable as WritableLike & {
-    off?: (
-      event: 'drain' | 'error',
-      listener: (() => void) | ((error: Error) => void),
-    ) => WritableLike;
-  };
-
-  removable.off?.(event, listener);
+  try {
+    getWritableListenerRemover(writable)?.(event, listener);
+  } catch {
+    // A removal that throws leaves the listener attached, which is the same place a
+    // writable with no removal method leaves it. Nothing here depends on it, and this
+    // runs from `cleanup`, on the settle path.
+  }
 }
 
 /**

@@ -2394,6 +2394,250 @@ describe('NodeAdapter.send() — unit branches without server', () => {
     }
   });
 
+  test('the pending-error listener is absorbed and then released', async () => {
+    // Two halves of the same guarantee. A writable torn down by a failed `end` emits its
+    // `error` after the request has settled and its listeners are gone, so an absorber is
+    // attached to keep that from being an uncaught exception. But `once` only detaches on
+    // delivery, and a hand-written `WritableLike` need not emit at all - so on a writable
+    // reused across requests the absorbers would pile up until Node warned about a leak.
+    const emitter = new EventEmitter();
+    const writable = emitter as unknown as WritableLike;
+    writable.write = () => true;
+    writable.end = () => {
+      throw new Error('sync end boom');
+    };
+    writable.destroy = () => writable;
+
+    const runOnce = async (): Promise<void> => {
+      const req = new MockClientRequest();
+      const res = new MockIncomingMessage(200, {
+        'content-type': 'application/octet-stream',
+        'content-length': '1',
+      });
+      const requestSpy = spyOn(http, 'request').mockImplementation(
+        (_options, callback) => {
+          const cb = callback as
+            | ((res: http.IncomingMessage) => void)
+            | undefined;
+          queueMicrotask(() => {
+            cb?.(res as unknown as http.IncomingMessage);
+            queueMicrotask(() => {
+              res.emit('data', Buffer.from('a'));
+              res.emit('end');
+            });
+          });
+          return req as unknown as http.ClientRequest;
+        },
+      );
+
+      try {
+        const response = await new NodeAdapter().send({
+          requestURL: 'http://example.test/data',
+          method: 'GET',
+          headers: {},
+          streamResponse: () => writable,
+        });
+
+        expect(response.streamErrorCode).toBe('stream_write_error');
+      } finally {
+        requestSpy.mockRestore();
+      }
+    };
+
+    await runOnce();
+
+    // Attached while the event may still be on its way, so a late emit is absorbed
+    // rather than thrown.
+    expect(emitter.listenerCount('error')).toBe(1);
+    expect(() => emitter.emit('error', new Error('late boom'))).not.toThrow();
+
+    // Absorbed with `on`, not `once`, so one listener keeps covering the writable
+    // instead of standing down after the first error and leaving a sibling's unhandled.
+    expect(() => emitter.emit('error', new Error('later boom'))).not.toThrow();
+    expect(emitter.listenerCount('error')).toBe(1);
+
+    // Concurrent requests sharing one writable attach one absorber between them, not one
+    // each: a dozen failures inside a single turn would otherwise trip Node's listener
+    // warning before any removal ran.
+    await Promise.all(Array.from({ length: 12 }, async () => runOnce()));
+    expect(emitter.listenerCount('error')).toBe(1);
+
+    // Released on the next `setImmediate` turn, which lands after a real stream would
+    // have emitted, so nothing accumulates across requests.
+    await new Promise<void>((done) => {
+      setImmediate(done);
+    });
+
+    expect(emitter.listenerCount('error')).toBe(0);
+  });
+
+  test('a writable with no removal method gets no absorber it cannot take back', async () => {
+    // `off`/`removeListener` are optional on `WritableLike`, and an absorber attached to
+    // a writable without either could never be removed: the scheduled cleanup would drop
+    // its bookkeeping while the listener stayed, and the next failure would attach
+    // another. Nothing is lost by skipping it - the request's own 'error' listener could
+    // not be detached from such a writable either, so it is still there and absorbs the
+    // late error itself.
+    const handlers: ((error: Error) => void)[] = [];
+    const track = (event: string, listener: (error: Error) => void): void => {
+      if (event === 'error') {
+        handlers.push(listener);
+      }
+    };
+    const writable = {
+      write: () => true,
+      end: () => {
+        throw new Error('sync end boom');
+      },
+      on: (event: string, listener: (error: Error) => void) => {
+        track(event, listener);
+
+        return writable;
+      },
+      once: (event: string, listener: (error: Error) => void) => {
+        track(event, listener);
+
+        return writable;
+      },
+      destroy: () => writable,
+    } as unknown as WritableLike;
+
+    const runOnce = async (): Promise<void> => {
+      const req = new MockClientRequest();
+      const res = new MockIncomingMessage(200, {
+        'content-type': 'application/octet-stream',
+        'content-length': '1',
+      });
+      const requestSpy = spyOn(http, 'request').mockImplementation(
+        (_options, callback) => {
+          const cb = callback as
+            | ((res: http.IncomingMessage) => void)
+            | undefined;
+          queueMicrotask(() => {
+            cb?.(res as unknown as http.IncomingMessage);
+            queueMicrotask(() => {
+              res.emit('data', Buffer.from('a'));
+              res.emit('end');
+            });
+          });
+          return req as unknown as http.ClientRequest;
+        },
+      );
+
+      try {
+        const response = await new NodeAdapter().send({
+          requestURL: 'http://example.test/data',
+          method: 'GET',
+          headers: {},
+          streamResponse: () => writable,
+        });
+
+        expect(response.streamErrorCode).toBe('stream_write_error');
+      } finally {
+        requestSpy.mockRestore();
+      }
+    };
+
+    await runOnce();
+
+    // One listener per request - the request's own, which it could not detach - and no
+    // second absorber piled on top of it.
+    expect(handlers.length).toBe(1);
+
+    // It still absorbs the error the torn-down writable delivers late, and settles
+    // nothing, because the request has already settled.
+    expect(() => handlers[0]?.(new Error('late boom'))).not.toThrow();
+
+    await new Promise<void>((done) => {
+      setImmediate(done);
+    });
+
+    expect(handlers.length).toBe(1);
+  });
+
+  test('a refused removal keeps the absorber tracked instead of stacking another', async () => {
+    // The removal method is caller code and can refuse. When it does, the absorber is
+    // still attached, so its bookkeeping is kept rather than dropped - dropping it would
+    // let the next failure add a second listener on top of one that never came off.
+    let errorListeners = 0;
+    const writable = {
+      write: () => true,
+      end: () => {
+        throw new Error('sync end boom');
+      },
+      on: (event: string) => {
+        if (event === 'error') {
+          errorListeners++;
+        }
+
+        return writable;
+      },
+      once: () => writable,
+      off: () => {
+        throw new Error('this writable refuses removals');
+      },
+      destroy: () => writable,
+    } as unknown as WritableLike;
+
+    const runOnce = async (): Promise<void> => {
+      const req = new MockClientRequest();
+      const res = new MockIncomingMessage(200, {
+        'content-type': 'application/octet-stream',
+        'content-length': '1',
+      });
+      const requestSpy = spyOn(http, 'request').mockImplementation(
+        (_options, callback) => {
+          const cb = callback as
+            | ((res: http.IncomingMessage) => void)
+            | undefined;
+          queueMicrotask(() => {
+            cb?.(res as unknown as http.IncomingMessage);
+            queueMicrotask(() => {
+              res.emit('data', Buffer.from('a'));
+              res.emit('end');
+            });
+          });
+          return req as unknown as http.ClientRequest;
+        },
+      );
+
+      try {
+        const response = await new NodeAdapter().send({
+          requestURL: 'http://example.test/data',
+          method: 'GET',
+          headers: {},
+          streamResponse: () => writable,
+        });
+
+        expect(response.streamErrorCode).toBe('stream_write_error');
+      } finally {
+        requestSpy.mockRestore();
+      }
+    };
+
+    await runOnce();
+
+    // The request's own listener plus one absorber.
+    expect(errorListeners).toBe(2);
+
+    await new Promise<void>((done) => {
+      setImmediate(done);
+    });
+
+    // Three more failures on the same writable. The refused removal left the absorber
+    // attached and tracked, so each of these skips attaching a second one and only the
+    // per-request listener is added.
+    await runOnce();
+    await runOnce();
+    await runOnce();
+
+    await new Promise<void>((done) => {
+      setImmediate(done);
+    });
+
+    expect(errorListeners).toBe(5);
+  });
+
   test('async streamResponse factory rejection rejects the promise', async () => {
     const req = new MockClientRequest();
     const res = new MockIncomingMessage(200, {

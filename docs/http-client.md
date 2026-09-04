@@ -1265,6 +1265,28 @@ const response = await client.get('/large-file.bin', {
 });
 ```
 
+#### Writing your own `WritableLike`
+
+A Node stream — `fs.createWriteStream()`, a socket, a `zlib` transform — satisfies
+`WritableLike` as it is, and everything below is already true of it. The rest of this
+section only matters if you hand-roll the sink.
+
+Two expectations the adapter relies on:
+
+- **Define `off` or `removeListener`.** Both are optional on the type so an existing
+  object still compiles, but the adapter attaches listeners for the life of a request and
+  takes them off again afterwards. With neither method it cannot, so rather than attach
+  listeners it could never remove, it keeps the ones it has — and a sink reused across
+  many requests accumulates them until Node warns about a leak. Either name works; a Node
+  stream has both.
+- **Report a failed write promptly.** Either call the callback passed to `write` / `end`
+  with the error, or emit `'error'` no later than the next `setImmediate` turn — which is
+  what a Node stream does. A write that fails destroys the stream and its `'error'` often
+  arrives after the request has already settled, so the adapter holds a listener across
+  that gap to keep it from becoming an uncaught exception. After that turn the listener is
+  removed, since a sink that might never emit would otherwise hold one forever. If yours
+  emits later than that, handle the event yourself.
+
 Return `null` or `{ cancel: true, reason? }` from the factory to cancel the request (produces `isCancelled: true`, error code `cancelled`). The `reason` string is surfaced on `HTTPClientError.cancelReason`. If the factory throws, the error code is `stream_setup_error` instead.
 
 When streaming is active on a retry attempt (before headers arrive), the factory is called again for the new attempt. The `signal` from the previous attempt will have fired, allowing cleanup code to run before the new stream is set up.
