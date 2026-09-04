@@ -398,9 +398,32 @@ function stringifyValueInner(
   }
 
   if (arrayValue !== null) {
-    // Handle arrays differently
-    return arrayValue
-      .map((item, index) => {
+    // Handle arrays differently.
+    //
+    // A counted index loop building a plain `string[]`, not `source.map(...).join(', ')`,
+    // for the same reason `redactPathsInner` and `maskValueDeep` count: `map` goes through
+    // `ArraySpeciesCreate`, which calls the value's own subclass constructor with a
+    // length, and a constructor that validates its arguments throws from inside the walk.
+    // `join` would then be resolved off that subclass too. Either throw escapes every
+    // per-value guard here and reaches only the top-level backstop, which discards the
+    // error's message, name, and stack over a single bad value.
+    const source = arrayValue;
+    const parts: string[] = [];
+
+    let length: number;
+
+    try {
+      length = source.length;
+    } catch {
+      return '<unrenderable>';
+    }
+
+    for (let index = 0; index < length; index++) {
+      // Each element is read and rendered inside its own guard, exactly as the object
+      // branch does, so one unreadable element degrades alone.
+      try {
+        const item = source[index];
+
         const matchedEntry = matchRedactPath(sensitive, [
           ...path,
           String(index),
@@ -416,9 +439,13 @@ function stringifyValueInner(
             redactFunction,
           );
 
-          return typeof maskedItem === 'string'
-            ? maskedItem
-            : safeStringify(maskedItem);
+          parts.push(
+            typeof maskedItem === 'string'
+              ? maskedItem
+              : safeStringify(maskedItem),
+          );
+
+          continue;
         }
 
         const result = stringifyValue(
@@ -432,14 +459,18 @@ function stringifyValueInner(
         );
         // Convert complex types to strings for joining
         if (typeof result === 'string') {
-          return result;
+          parts.push(result);
         } else if (result instanceof KeyValueASCIITable) {
-          return result.toString();
+          parts.push(result.toString());
         } else {
-          return safeStringify(result);
+          parts.push(safeStringify(result));
         }
-      })
-      .join(', ');
+      } catch {
+        parts.push('<unrenderable>');
+      }
+    }
+
+    return parts.join(', ');
   } else if (typeof value === 'object' && value !== null) {
     let isError: boolean;
 

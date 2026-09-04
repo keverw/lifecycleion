@@ -461,7 +461,7 @@ logger.info('User login attempt', {
 
 A bare name therefore addresses a top-level key only: `redactedKeys: ['password']` masks `params.password` and leaves `params.user.password` rendered. Name the path to reach it.
 
-A path segment is delimited by `.`, `[` and `]` only, so ordinary key names need no quoting: `user.password-hash` and `users[0].api-key` both work. A key that genuinely contains a delimiter needs the quoted bracket form, which is the only way to disambiguate it: `user["a.b"]`. An entry the grammar rejects, such as the unsupported wildcard form or a trailing dot, redacts **nothing** and does not warn.
+An unquoted path segment is a run of name characters - letters, digits, combining marks, `_`, `$`, `@` and `-` - so ordinary key names need no quoting: `user.password-hash` and `users[0].api-key` both work. A key that contains anything else, including a delimiter, whitespace, or any other punctuation, needs the quoted bracket form, which is the only way to disambiguate it: `user["a.b"]`, `user["my key"]`, `user["a+b"]`. An entry the grammar rejects, such as the unsupported wildcard form or a trailing dot, redacts **nothing** and does not warn.
 
 [`errorToString`](./error-to-string.md#additional-info--sensitive-fields) uses this same syntax for the `sensitiveFieldNames` list it reads off an error, so one mental model covers both. The two agree on bare names, dotted paths, array indexes, and quoted bracket keys; they differ only in what happens when the list itself is unusable, where `errorToString` drops `additionalInfo` wholesale.
 
@@ -516,19 +516,20 @@ import { REDACTION_FAILED_MARKER } from 'lifecycleion/logger';
 REDACTION_FAILED_MARKER; // '***REDACTION FAILED***'
 ```
 
-Three failure modes, all fail closed:
+Four failure modes, all fail closed:
 
-| What failed                                                                           | Result                                                                                                          |
-| ------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
-| Your `redactFunction` throws for a key                                                | That key becomes the marker; every other param redacts normally                                                 |
-| A value cannot be stringified (a `toString` that throws)                              | Same - that key becomes the marker                                                                              |
-| The `params` object cannot be copied at all (a getter that throws, a revoked `Proxy`) | **Only** the redacted keys are returned, each set to the marker; other params are dropped from `redactedParams` |
+| What failed                                                                         | Result                                                                                                          |
+| ----------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| Your `redactFunction` throws for a key                                              | That key becomes the marker; every other param redacts normally                                                 |
+| A value cannot be stringified (a `toString` that throws)                            | Same - that key becomes the marker                                                                              |
+| A param cannot be read (a getter that throws)                                       | That key becomes the marker where it sits; every other param, the redacted one included, redacts normally       |
+| The `params` object cannot be read at all (a revoked `Proxy`, a throwing `ownKeys`) | **Only** the redacted keys are returned, each set to the marker; other params are dropped from `redactedParams` |
 
 The marker is deliberately distinct from an ordinary `***` mask. An operator seeing `***`
 concludes redaction worked, so a broken `redactFunction` would otherwise hide itself behind
 output that looks successful.
 
-Note that a cyclic `params` object is **not** a failure - it is copied and redacted
+Note that a cyclic `params` object is **not** a failure - it is walked and redacted
 normally.
 
 `entry.params` is unaffected by any of this and still carries the raw values, exactly as it

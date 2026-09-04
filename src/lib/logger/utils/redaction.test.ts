@@ -726,9 +726,10 @@ describe('applyRedaction - fail closed', () => {
     }
   });
 
-  test('a params object that cannot be walked marks every key', () => {
-    // A sibling whose read throws stops the walk before it reaches the named key, so
-    // returning what was read would hand back the secret untouched.
+  test('a params object that cannot be walked marks only the key that threw', () => {
+    // A sibling whose read throws stops the walk, so the bag is re-read one key at a
+    // time: the throwing sibling is marked where it is, and the named key is still
+    // masked rather than the whole log line losing its params over an unrelated getter.
     const params: Record<string, unknown> = { password: 'hunter2secret' };
 
     Object.defineProperty(params, 'boom', {
@@ -740,7 +741,9 @@ describe('applyRedaction - fail closed', () => {
 
     const result = applyRedaction(params, ['password']);
 
-    expect(result['password']).toBe(REDACTION_FAILED_MARKER);
+    expect(result['boom']).toBe(REDACTION_FAILED_MARKER);
+    expect(result['password']).not.toBe('hunter2secret');
+    expect(result['password']).not.toBe(REDACTION_FAILED_MARKER);
     expect(JSON.stringify(result)).not.toContain('hunter2secret');
   });
 
@@ -826,8 +829,8 @@ describe('applyRedaction - fail closed', () => {
   });
 
   test('a cyclic params object is still redacted normally', () => {
-    // `deepClone` handles cycles, so this does not reach the fail-closed path — pinned
-    // so the case below is not mistaken for covering it.
+    // The walk handles cycles, so this does not reach the fail-closed path — pinned so
+    // the case below is not mistaken for covering it.
     const cyclic: Record<string, unknown> = { password: 'hunter2' };
 
     cyclic['self'] = cyclic;
@@ -838,8 +841,9 @@ describe('applyRedaction - fail closed', () => {
     expect(result['password']).not.toBe(REDACTION_FAILED_MARKER);
   });
 
-  test('an uncopyable params object yields markers only, never the originals', () => {
-    // A throwing getter is something `deepClone` genuinely cannot copy, unlike a cycle.
+  test('an unreadable param never leaves the originals in place', () => {
+    // A throwing getter defeats reading the bag in one go, unlike a cycle. The named key
+    // is still masked; only the unreadable one is marked.
     const uncopyable = {
       password: 'hunter2',
       get boom(): never {
@@ -849,8 +853,28 @@ describe('applyRedaction - fail closed', () => {
 
     const result = applyRedaction(uncopyable, ['password']);
 
-    expect(result['password']).toBe(REDACTION_FAILED_MARKER);
+    expect(result['boom']).toBe(REDACTION_FAILED_MARKER);
     expect(Object.values(result)).not.toContain('hunter2');
+  });
+
+  test('an unreadable param that is itself redacted keeps the marker', () => {
+    // The re-read leaves the marker in place of the value it could not read, and the walk
+    // would then mask *that* - turning `***REDACTION FAILED***` into something that looks
+    // like an ordinary successful mask, which is the one thing the distinct marker exists
+    // to rule out.
+    const params: Record<string, unknown> = { keep: 'diagnostic' };
+
+    Object.defineProperty(params, 'password', {
+      get(): never {
+        throw new Error('nope');
+      },
+      enumerable: true,
+    });
+
+    const result = applyRedaction(params, ['password']);
+
+    expect(result['password']).toBe(REDACTION_FAILED_MARKER);
+    expect(result['keep']).toBe('diagnostic');
   });
 
   test('a revoked Proxy as params yields markers only', () => {

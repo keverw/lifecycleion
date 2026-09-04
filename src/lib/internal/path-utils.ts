@@ -1,28 +1,30 @@
-// An unquoted segment is any run of characters that are neither a path delimiter nor
-// whitespace, rather than `\w+`. Ordinary key names contain hyphens, `@`, `$`, and
-// non-ASCII letters, and rejecting those made a path such as `user.password-hash`
+// An unquoted segment is a run of name characters - letters, digits, combining marks,
+// `_`, `$`, `@`, `-` - rather than `\w+`. Ordinary key names contain hyphens, `@`, `$`,
+// and non-ASCII letters, and rejecting those made a path such as `user.password-hash`
 // unparseable - which silently resolved to nothing in every consumer of this grammar: it
 // rendered the literal placeholder in `CurlyBrackets`, and redacted nothing in the
 // logger's `redactedKeys` and in `errorToString`'s `sensitiveFieldNames`, with no warning
 // either way.
 //
-// Whitespace stays excluded, and that exclusion is load-bearing rather than fussy. A
-// placeholder is written by hand into prose, and `CurlyBrackets` leaves one it cannot
-// parse exactly as the author wrote it. Accepting a run of spaces would make almost any
-// brace-wrapped phrase parse as a key name, resolve to nothing, and render as the
-// configured fallback - so `Note: {{Hello world}} done` would silently become
-// `Note: (null) done`, losing text nobody meant as a lookup. That is reachable without
-// anyone writing a template: `LifecycleManager` interpolates a component's own error
-// message into one before rendering it. A key that genuinely contains a space takes the
-// quoted bracket form, `u['my key']`, for the same reason a key containing a delimiter
-// does.
+// An allowlist, deliberately, rather than "anything that is not a delimiter or
+// whitespace". That exclusion is load-bearing rather than fussy, and excluding only
+// whitespace does not achieve it. A placeholder is written by hand into prose, and
+// `CurlyBrackets` leaves one it cannot parse exactly as the author wrote it, but renders
+// the configured fallback for one that parses and resolves to nothing. So every character
+// admitted here is a character that turns a brace-wrapped phrase into a silent `(null)`:
+// `Note: {{Hello world}} done` is safe because of the space, but `{{Hello,world}}` and
+// `{{oops!}}` are not, and prose punctuation is exactly what a phrase is made of. That is
+// reachable without anyone writing a template: `LifecycleManager` interpolates a
+// component's own error message into one, with params, before rendering it. A key that
+// genuinely contains a space - or a comma, or any other punctuation - takes the quoted
+// bracket form, `u['my key']`, for the same reason a key containing a delimiter does.
 //
 // Genuinely unsupported syntax is still rejected, which is what the grammar was tightened
 // for: a wildcard such as `users[*].password`, a trailing dot, and an unterminated
 // bracket all still fail to parse. A key that really does contain `.`, `[`, or `]` still
 // needs the quoted bracket form, since only quoting can disambiguate it.
 const PATH_SEGMENT_PATTERN =
-  /([^.[\]\s]+)|\[(\d+)\]|\["((?:[^"\\]|\\.)*)"\]|\['((?:[^'\\]|\\.)*)'\]/y;
+  /([\p{L}\p{N}\p{M}_$@-]+)|\[(\d+)\]|\["((?:[^"\\]|\\.)*)"\]|\['((?:[^'\\]|\\.)*)'\]/uy;
 
 function unescapeQuotedPathPart(value: string): string {
   return value.replace(/\\(["'\\])/g, '$1');

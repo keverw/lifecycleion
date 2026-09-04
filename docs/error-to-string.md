@@ -108,7 +108,7 @@ An error nested inside another's `additionalInfo` starts a fresh path root: the 
 
 A bare name is taken literally, so `sensitiveFieldNames: ['password-hash']` masks `additionalInfo['password-hash']`.
 
-A path segment is delimited by `.`, `[` and `]`, so ordinary key names need no quoting inside a path either: `user.password-hash`, `user.@id`, and `users[0].api-key` all work. A key that genuinely contains a delimiter or a space needs the quoted bracket form, which is the only way to disambiguate it: `user["a.b"]`, `user["my key"]`.
+An unquoted path segment is a run of name characters - letters, digits, combining marks, `_`, `$`, `@` and `-` - so ordinary key names need no quoting inside a path either: `user.password-hash`, `user.@id`, and `users[0].api-key` all work. A key that contains anything else, including a delimiter, whitespace, or any other punctuation, needs the quoted bracket form, which is the only way to disambiguate it: `user["a.b"]`, `user["my key"]`, `user["a+b"]`.
 
 Entries the grammar rejects mask **nothing at all**, silently. That covers wildcard selectors such as `users[*].password`, which are not supported, along with a trailing dot and an unterminated bracket. The logger's `redactedKeys` behaves identically.
 

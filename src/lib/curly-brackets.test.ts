@@ -265,11 +265,19 @@ describe('CurlyBrackets', () => {
   });
 
   it('should leave a placeholder holding prose exactly as written', () => {
-    // An unquoted segment cannot contain whitespace, so this does not parse as a path
+    // An unquoted segment holds name characters only, so this does not parse as a path
     // and is left alone rather than being replaced by the fallback.
     expect(CurlyBrackets('Note: {{Hello world}} done', {}, '(???)')).toEqual(
       'Note: {{Hello world}} done',
     );
+
+    // Punctuation counts as prose too. Excluding whitespace alone left these parsing as
+    // key names that resolve to nothing, so a phrase rendered as `(???)`.
+    expect(CurlyBrackets('Note: {{Hello,world}} done', {}, '(???)')).toEqual(
+      'Note: {{Hello,world}} done',
+    );
+
+    expect(CurlyBrackets('{{oops!}}', {}, '(???)')).toEqual('{{oops!}}');
 
     expect(
       CurlyBrackets('{{u.my key}}', { u: { 'my key': 'Bob' } }, '(???)'),

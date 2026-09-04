@@ -199,10 +199,11 @@ describe('errorToString', () => {
     });
 
     it('should mask a bare name that is not a valid path segment', () => {
-      // `getPathParts` only accepts `\w+` unquoted, so `password-hash` does not parse -
-      // but the logger masks it fine through its top-level branch, and so must this.
-      const rendered = render({ 'password-hash': SECRET, keep: 'diagnostic' }, [
-        'password-hash',
+      // A bare name never goes through the path grammar, so it is masked whatever it is
+      // spelled with - the logger masks it through its top-level branch, and so must
+      // this.
+      const rendered = render({ 'password!': SECRET, keep: 'diagnostic' }, [
+        'password!',
       ]);
 
       expect(rendered).not.toContain(SECRET);
@@ -211,8 +212,8 @@ describe('errorToString', () => {
     });
 
     it('should mask a hyphenated nested key without quoting', () => {
-      // Same grammar as the logger's `redactedKeys`: an unquoted segment is any run of
-      // characters that are not `.`, `[` or `]`, so ordinary names need no quoting.
+      // Same grammar as the logger's `redactedKeys`: an unquoted segment is a run of
+      // name characters, hyphens included, so ordinary names need no quoting.
       expect(
         render({ user: { 'password-hash': SECRET } }, ['user.password-hash']),
       ).not.toContain(SECRET);

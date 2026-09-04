@@ -85,4 +85,23 @@ describe('getPathParts', () => {
     expect(getPathParts('u.my key')).toBeNull();
     expect(getPathParts("u['my key']")).toEqual(['u', 'my key']);
   });
+
+  test('should reject an unquoted segment containing prose punctuation', () => {
+    // Same reason as whitespace, and excluding whitespace alone does not achieve it: a
+    // brace-wrapped phrase is made of punctuation too, and every character admitted here
+    // is one that turns such a phrase into a silent fallback render. The segment is an
+    // allowlist of name characters for exactly this.
+    expect(getPathParts('Hello,world')).toBeNull();
+    expect(getPathParts('oops!')).toBeNull();
+    expect(getPathParts('user.a+b')).toBeNull();
+    expect(getPathParts('user.a:b')).toBeNull();
+    expect(getPathParts("u['a,b']")).toEqual(['u', 'a,b']);
+  });
+
+  test('should accept a non-ASCII name character outside the BMP', () => {
+    // The pattern is Unicode-aware, so an astral letter is one character rather than two
+    // stray surrogates, and the sticky `lastIndex` still lands on the next delimiter.
+    expect(getPathParts('x.𝐀bc')).toEqual(['x', '𝐀bc']);
+    expect(getPathParts('user.日本語')).toEqual(['user', '日本語']);
+  });
 });
