@@ -1286,6 +1286,14 @@ Two expectations the adapter relies on:
   that gap to keep it from becoming an uncaught exception. After that turn the listener is
   removed, since a sink that might never emit would otherwise hold one forever. If yours
   emits later than that, handle the event yourself.
+- **Set `errored` if you can, but you need not.** A Node stream records the error it failed
+  with there, and the adapter reads it as a second signal when `end`'s callback reports
+  success on a stream that was destroyed underneath it. It is optional, and a sink without
+  it loses nothing as long as it honours the point above. The read is guarded, so an
+  `errored` accessor that throws costs that one signal rather than the request — it happens
+  inside `end`'s callback, a tick after the call, where an escaping throw would be an
+  uncaught exception rather than a failed download. That is not a general licence to throw:
+  a sink whose `on` or `destroy` throws still fails the request.
 
 Return `null` or `{ cancel: true, reason? }` from the factory to cancel the request (produces `isCancelled: true`, error code `cancelled`). The `reason` string is surfaced on `HTTPClientError.cancelReason`. If the factory throws, the error code is `stream_setup_error` instead.
 

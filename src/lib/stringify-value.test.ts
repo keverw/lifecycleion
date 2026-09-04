@@ -1140,3 +1140,273 @@ describe('redactValue array subclasses', () => {
     expect((result.tuple as unknown[])[0]).not.toBe('topsecretvalue');
   });
 });
+
+describe('redactValue - what counts as a masking request', () => {
+  // A `redactFunction` may return the masked text itself, or ask the library to do the
+  // masking with different settings. Telling the two apart by shape is the whole of this
+  // contract, and getting it wrong is not symmetric: reading a caller's literal
+  // replacement as a masking request throws their value away *and* emits a proportional
+  // mask of the original in its place, which partially discloses the very value they
+  // asked to replace outright.
+  const ask = (returned: unknown): unknown =>
+    (
+      redactValue(
+        { password: SECRET },
+        { redactedKeys: ['password'], redactFunction: () => returned },
+      ) as Record<string, unknown>
+    )['password'];
+
+  test('an object naming only masking settings is a request', () => {
+    expect(ask({ percent: 100 })).toBe('*'.repeat(SECRET.length));
+    expect(ask({ maskChar: '#', percent: 100 })).toBe(
+      '#'.repeat(SECRET.length),
+    );
+    expect(ask({ strategy: 'string', percent: 100 })).toBe(
+      '*'.repeat(SECRET.length),
+    );
+  });
+
+  test('a null-prototype object naming settings is a request too', () => {
+    // Recognized by its keys, so how it was constructed does not change the answer.
+    expect(ask(Object.assign(Object.create(null), { percent: 100 }))).toBe(
+      '*'.repeat(SECRET.length),
+    );
+  });
+
+  test('any other object is the literal replacement', () => {
+    // The regression this guards: returning a structured stand-in used to be read as an
+    // empty masking request, discarding it and emitting `h***********t` instead - the
+    // caller's value gone and the ends of the secret shown.
+    expect(ask({ note: 'withheld' })).toEqual({ note: 'withheld' });
+    // And nothing derived from the secret is emitted alongside it.
+    expect(
+      stringifyValue(
+        { password: SECRET },
+        {
+          redactedKeys: ['password'],
+          redactFunction: () => ({ note: 'withheld' }),
+        },
+      ),
+    ).toBe('{"password":{"note":"withheld"}}');
+  });
+
+  test('an empty object is a request for the defaults, like null', () => {
+    // Every field is optional, so `{}` is a valid config asking for nothing in
+    // particular - which is where `null` already lands. A caller assembling a config
+    // conditionally can legitimately end up with one, and reading it as a literal would
+    // put a bare `{}` in the output where they asked for masking.
+    expect(ask({})).toBe(ask(null));
+    expect(ask({})).not.toBe(SECRET);
+    expect(typeof ask({})).toBe('string');
+  });
+
+  test('an empty object defers on a derived value too, not just a string', () => {
+    // The half of the equivalence a string cannot test. Routing `{}` through the masker
+    // rather than through the deferral skips the derived-value rule, and for anything
+    // that was not genuinely a string that is a disclosure: proportional masking keeps
+    // the ends, which is where a `URL` keeps its query and a card number its BIN prefix
+    // and last four. Both are what the default replaces outright, so `{}` must too.
+    const derived = (returned: unknown, value: unknown): unknown =>
+      (
+        redactValue(
+          { v: value },
+          { redactedKeys: ['v'], redactFunction: () => returned },
+        ) as Record<string, unknown>
+      )['v'];
+
+    const url = new URL('https://api.x.test/v1?api_key=sk_live_abcdef123456');
+
+    expect(derived({}, url)).toBe('***REDACTED***');
+    expect(derived({}, url)).toBe(derived(null, url));
+    expect(derived({}, 4111111111111111)).toBe('***REDACTED***');
+    expect(derived({}, 4111111111111111)).toBe(derived(null, 4111111111111111));
+
+    // A request that names a setting is the deliberate opt-in, and still masks in part.
+    expect(derived({ percent: 60 }, 4111111111111111)).not.toBe(
+      '***REDACTED***',
+    );
+  });
+
+  test('settings mixed with unknown keys are a literal', () => {
+    // Guessing which half was meant could only mask a value the caller wanted replaced.
+    expect(ask({ percent: 10, note: 'x' })).toEqual({ percent: 10, note: 'x' });
+  });
+
+  test('an array is a literal, as it always was', () => {
+    // Objects and arrays disagreed before: an array return was used literally while a
+    // plain object was swallowed as a config.
+    expect(ask(['a', 'b'])).toEqual(['a', 'b']);
+  });
+
+  test('a class instance is a literal', () => {
+    class Replacement {
+      public note = 'withheld';
+    }
+
+    expect(ask(new Replacement())).toBeInstanceOf(Replacement);
+  });
+
+  test('the other return shapes are unchanged', () => {
+    expect(ask('[hidden]')).toBe('[hidden]');
+    expect(ask(undefined)).toBeUndefined();
+    expect(ask(false)).toBe(false);
+    // `null` defers, so it must match what no `redactFunction` at all produces.
+    expect(ask(null)).toBe(
+      (
+        redactValue(
+          { password: SECRET },
+          { redactedKeys: ['password'] },
+        ) as Record<string, unknown>
+      )['password'],
+    );
+  });
+
+  test('a masking request is honoured identically by all three entry points', () => {
+    // One function, three callers. A config recognized in one and treated as a literal in
+    // another is exactly the drift the shared implementation exists to prevent.
+    const redactFunction = (): unknown => ({ percent: 100 });
+    const expected = '*'.repeat(SECRET.length);
+
+    expect(
+      (
+        redactValue(
+          { password: SECRET },
+          { redactedKeys: ['password'], redactFunction },
+        ) as Record<string, unknown>
+      )['password'],
+    ).toBe(expected);
+    expect(
+      stringifyValue(
+        { password: SECRET },
+        { redactedKeys: ['password'], redactFunction },
+      ),
+    ).toBe(`{"password":"${expected}"}`);
+    expect(
+      applyRedaction({ password: SECRET }, ['password'], redactFunction)[
+        'password'
+      ],
+    ).toBe(expected);
+  });
+});
+
+describe('redactValue and stringifyValue stay one implementation', () => {
+  test('rendering a redacted value equals redacting while rendering', () => {
+    // The documented equivalence, swept over every shape the two walks treat differently
+    // rather than spot-checked. `stringifyValue(v, o)` is defined as
+    // `stringifyTemplateValue(redactValue(v, o))`, so any divergence means one of them
+    // grew a rule the other does not have - which is how a value came to be masked one
+    // way in a log line and another in a rendered error.
+    const cases: [string, () => unknown, string[]][] = [
+      [
+        'nested plain object',
+        () => ({ user: { password: SECRET, n: 1 } }),
+        ['user.password'],
+      ],
+      ['named array', () => ({ t: [SECRET, 'anothersecret'] }), ['t']],
+      ['named container', () => ({ u: { a: SECRET, b: [1, 2] } }), ['u']],
+      ['Date beside a secret', () => ({ d: new Date(0), p: SECRET }), ['p']],
+      [
+        'Error beside a secret',
+        () => ({ e: new Error('boom'), p: SECRET }),
+        ['p'],
+      ],
+      [
+        'Map beside a secret',
+        () => ({ m: new Map([['a', 1]]), p: SECRET }),
+        ['p'],
+      ],
+      ['named URL', () => ({ u: new URL('https://x.test/?k=SECRET') }), ['u']],
+      ['named number', () => ({ n: 1234567890 }), ['n']],
+      ['named bigint', () => ({ b: 123456789012345n }), ['b']],
+      ['named function', () => ({ f: function secretFn() {} }), ['f']],
+      ['nothing matched', () => ({ a: 1, b: { c: 2 } }), ['zzz']],
+      [
+        'indexed path',
+        () => ({ items: [{ token: SECRET }] }),
+        ['items[0].token'],
+      ],
+      ['unusable list', () => ({ p: SECRET }), [1 as never]],
+      ['root is an array', () => [{ token: SECRET }], ['[0].token']],
+    ];
+
+    for (const [label, build, redactedKeys] of cases) {
+      const direct = stringifyValue(build(), { redactedKeys });
+      const twoStep = stringifyValue(redactValue(build(), { redactedKeys }));
+
+      expect(`${label}: ${direct}`).toBe(`${label}: ${twoStep}`);
+    }
+  });
+
+  test('an unreadable element degrades alone in both walks', () => {
+    // One throwing element, run through each walk over the *same hostile original* -
+    // which is the only way the two can be compared at all. The renderer degrades that
+    // element and keeps its siblings; masking a named container used to have no
+    // per-entry guard, so the same array collapsed whole to the marker.
+    const hostileArray = (): unknown[] => {
+      const array: unknown[] = [SECRET];
+
+      Object.defineProperty(array, '1', {
+        get() {
+          throw new Error('unreadable element');
+        },
+        enumerable: true,
+        configurable: true,
+      });
+      array.length = 2;
+
+      return array;
+    };
+
+    // The rendering walk, over the hostile value itself: the bad element alone degrades.
+    const rendered = stringifyValue({ t: hostileArray() });
+
+    expect(rendered).toContain('[unrenderable]');
+    expect(rendered).toContain(SECRET);
+
+    // The redaction walk, over an equally hostile value: same place, same shape.
+    const masked = redactValue(
+      { t: hostileArray() },
+      { redactedKeys: ['t'] },
+    ) as Record<string, unknown>;
+
+    expect(Array.isArray(masked['t'])).toBe(true);
+    expect((masked['t'] as unknown[]).length).toBe(2);
+    expect((masked['t'] as unknown[])[0]).not.toBe(SECRET);
+    expect((masked['t'] as unknown[])[1]).toBe('***REDACTION FAILED***');
+    expect(JSON.stringify(masked)).not.toContain(SECRET);
+  });
+
+  test('an unreadable key set fails the container closed in both walks', () => {
+    // `Object.entries` runs every getter, so one that throws hides the whole key set.
+    // Neither walk can tell what is below, so both degrade that container and leave the
+    // rest of the payload alone - the agreement asserted here over the hostile original
+    // in each case, not over a copy one of them already sanitized.
+    const hostile = (): Record<string, unknown> => {
+      const value: Record<string, unknown> = { good: SECRET };
+
+      Object.defineProperty(value, 'bad', {
+        get() {
+          throw new Error('unreadable entry');
+        },
+        enumerable: true,
+      });
+
+      return value;
+    };
+
+    const rendered = stringifyValue({ u: hostile(), keep: 'visible' });
+
+    expect(rendered).toContain('[unrenderable]');
+    expect(rendered).toContain('visible');
+    expect(rendered).not.toContain(SECRET);
+
+    const masked = redactValue(
+      { u: hostile(), keep: 'visible' },
+      { redactedKeys: ['u'] },
+    ) as Record<string, unknown>;
+
+    expect(masked['u']).toBe('***REDACTION FAILED***');
+    expect(masked['keep']).toBe('visible');
+    expect(stringifyValue(masked)).not.toContain(SECRET);
+  });
+});

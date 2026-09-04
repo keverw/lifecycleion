@@ -916,3 +916,52 @@ describe('applyRedaction - params it was not asked to redact', () => {
     expect(applyRedaction(params, ['missing'])).toBe(params);
   });
 });
+
+describe('applyRedaction - telling a masking request from a literal', () => {
+  const SECRET = 'hunter2secret';
+
+  const ask = (returned: unknown): unknown =>
+    applyRedaction({ password: SECRET }, ['password'], () => returned)[
+      'password'
+    ];
+
+  test('an object naming only masking settings is a request', () => {
+    expect(ask({ percent: 100 })).toBe('*'.repeat(SECRET.length));
+    expect(ask({ maskChar: '#', percent: 100 })).toBe(
+      '#'.repeat(SECRET.length),
+    );
+  });
+
+  test('any other object is used literally', () => {
+    // Reading a caller's structured replacement as an empty masking request threw their
+    // value away and emitted a proportional mask of the original instead - both not what
+    // they asked for and a partial disclosure of the value they meant to replace whole.
+    expect(ask({ note: 'withheld' })).toEqual({ note: 'withheld' });
+    expect(ask({ percent: 10, note: 'x' })).toEqual({ percent: 10, note: 'x' });
+    expect(ask(['a', 'b'])).toEqual(['a', 'b']);
+    // `{}` is the exception: every setting is optional, so it is a request for the
+    // defaults rather than a literal, landing where `null` does.
+    expect(ask({})).toBe(ask(null));
+  });
+
+  test('an empty object defers in full, non-string handling included', () => {
+    // Asserted on a derived value, which is the only place the two paths can differ: an
+    // empty config routed through the masker instead of the deferral would partially mask
+    // a produced string, handing back a `URL` with its query intact.
+    const url = new URL('https://api.x.test/v1?api_key=sk_live_abcdef123456');
+    const via = (returned: unknown): unknown =>
+      applyRedaction({ endpoint: url }, ['endpoint'], () => returned)[
+        'endpoint'
+      ];
+
+    expect(via({})).toBe('***REDACTED***');
+    expect(via({})).toBe(via(null));
+  });
+
+  test('a literal object never carries part of the value it replaced', () => {
+    const replacement = ask({ note: 'withheld' });
+
+    expect(JSON.stringify(replacement)).not.toContain(SECRET.slice(0, 3));
+    expect(JSON.stringify(replacement)).not.toContain('*');
+  });
+});

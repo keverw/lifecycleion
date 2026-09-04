@@ -118,7 +118,7 @@ A dotted or bracketed entry is treated as ambiguous and both readings are covere
 
 Masked values use the same default the logger applies, so a value renders identically whether it went through a log line or a rendered error. That default masks 90% of a value, so a little survives at each end and the same secret can be correlated across log lines without being readable.
 
-The `redactFunction` here honours the same return contract as the logger's - a string is used literally, `null` defers to the default, a number sets the percent, and an object is a masking request with `strategy` (`'string' | 'email' | 'domain'`), `percent`, and `maskChar`. See [the logger docs](./logger.md#controlling-how-a-value-is-masked) for the full table.
+The `redactFunction` here honours the same return contract as the logger's - a string is used literally, `null` defers to the default, a number sets the percent, and a plain object whose own enumerable keys are all masking settings (`strategy`, one of `'string' | 'email' | 'domain'`, plus `percent`, `maskChar`, `userPercent`, `domainPercent`) is a masking request. Every field is optional, so `{}` asks for the defaults and lands where `null` does, the treatment of non-string values included - it is a request for the default, not the deliberate opt-in that masks a produced string in part. Any other object - one carrying an unrecognized key, or a class instance - is a literal replacement. See [the logger docs](./logger.md#controlling-how-a-value-is-masked) for the full table.
 
 ```typescript
 // AdditionalInfo.apiKey → sk_1**********2345

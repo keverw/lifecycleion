@@ -1,3 +1,7 @@
+import {
+  REDACTED_PLACEHOLDER,
+  REDACTION_FAILED_MARKER,
+} from './default-redact-function';
 import { isPlainContainer } from './is-plain-container';
 import { stringifyTemplateValue } from './stringify-template-value';
 
@@ -64,7 +68,7 @@ export function maskValueDeep(
   if (seen.has(value)) {
     // A cycle cannot be rebuilt, and must not be walked forever. Nothing of the original
     // survives here, which is the safe direction.
-    return '***REDACTED***';
+    return REDACTED_PLACEHOLDER;
   }
 
   seen.add(value);
@@ -82,25 +86,61 @@ export function maskValueDeep(
       const source = value as unknown[];
       const masked: unknown[] = [];
 
+      let length: number;
+
+      try {
+        length = source.length;
+      } catch {
+        // Nothing can be enumerated, so nothing of the original may survive.
+        return REDACTION_FAILED_MARKER;
+      }
+
       // A counted index loop, not `for...of`: iteration resolves `Symbol.iterator` off
       // the value, which is caller code on a subclass, free to throw or to yield
       // something other than the elements. Same reason `redactPathsInner` counts.
-      // eslint-disable-next-line unicorn/no-for-loop -- must not use the iterator protocol
-      for (let index = 0; index < source.length; index++) {
-        masked.push(maskValueDeep(key, source[index], mask, seen));
+      for (let index = 0; index < length; index++) {
+        // Each element read and masked inside its own guard, exactly as
+        // `redactPathsInner` and `renderContainer` do. Without this, one throwing
+        // accessor anywhere inside a named container collapsed the *whole* container to
+        // the failure marker at the caller's `catch` - so a payload that redacted
+        // perfectly well everywhere else lost its shape, and the two walks disagreed
+        // about a value they are meant to treat identically.
+        try {
+          masked.push(maskValueDeep(key, source[index], mask, seen));
+        } catch {
+          masked.push(REDACTION_FAILED_MARKER);
+        }
       }
 
       return masked;
     }
 
+    let entries: [string, unknown][];
+
+    try {
+      entries = Object.entries(value);
+    } catch {
+      // The keys cannot be read, so there is no shape to rebuild and no way to know what
+      // is below. Fails closed, as the same read does in `redactPathsInner`.
+      return REDACTION_FAILED_MARKER;
+    }
+
     const masked: Record<string, unknown> = {};
 
-    for (const [entryKey, entryValue] of Object.entries(value)) {
+    for (const [entryKey, entryValue] of entries) {
+      let entryResult: unknown;
+
+      try {
+        entryResult = maskValueDeep(key, entryValue, mask, seen);
+      } catch {
+        entryResult = REDACTION_FAILED_MARKER;
+      }
+
       // Defined rather than assigned: a plain assignment to `__proto__` is a no-op for a
       // string and reparents the rebuilt object for an object, so a payload carrying that
       // key would silently lose the entry or change the shape of the result.
       Object.defineProperty(masked, entryKey, {
-        value: maskValueDeep(key, entryValue, mask, seen),
+        value: entryResult,
         enumerable: true,
         writable: true,
         configurable: true,

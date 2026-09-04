@@ -2394,6 +2394,110 @@ describe('NodeAdapter.send() — unit branches without server', () => {
     }
   });
 
+  test('a writable that errored without telling end resolves as stream_write_error', async () => {
+    // Some runtimes destroy a writable on a failed write and then call `end`'s callback
+    // with nothing, so the callback's own argument says the download finished. `errored`
+    // is the second signal that says otherwise; ignoring it settles a truncated file as a
+    // success, which is the one answer a download must never give.
+    const req = new MockClientRequest();
+    const res = new MockIncomingMessage(200, {
+      'content-type': 'application/octet-stream',
+      'content-length': '1',
+    });
+    const writable = new EventEmitter() as unknown as WritableLike;
+    writable.write = () => true;
+    writable.end = (callback?: (err?: Error | null) => void) => {
+      writable.errored = new Error('destroyed mid-write');
+      callback?.();
+    };
+    writable.destroy = () => writable;
+    const requestSpy = spyOn(http, 'request').mockImplementation(
+      (_options, callback) => {
+        const cb = callback as
+          ((res: http.IncomingMessage) => void) | undefined;
+        queueMicrotask(() => {
+          cb?.(res as unknown as http.IncomingMessage);
+          queueMicrotask(() => {
+            res.emit('data', Buffer.from('a'));
+            res.emit('end');
+          });
+        });
+        return req as unknown as http.ClientRequest;
+      },
+    );
+
+    try {
+      const response = await new NodeAdapter().send({
+        requestURL: 'http://example.test/data',
+        method: 'GET',
+        headers: {},
+        streamResponse: () => writable,
+      });
+
+      expect(response.status).toBe(200);
+      expect(response.isStreamError).toBe(true);
+      expect(response.streamErrorCode).toBe('stream_write_error');
+      expect(response.errorCause?.message).toBe('destroyed mid-write');
+    } finally {
+      requestSpy.mockRestore();
+    }
+  });
+
+  test('a throwing errored accessor costs the signal, not the request', async () => {
+    // `errored` is read inside `end`'s callback, which a real stream invokes on a later
+    // tick with no `try` above it. An unguarded throw there is an uncaught exception that
+    // ends the process, so the read degrades to "no second signal" instead - and the
+    // download, which actually succeeded, still resolves as one.
+    const req = new MockClientRequest();
+    const res = new MockIncomingMessage(200, {
+      'content-type': 'application/octet-stream',
+      'content-length': '1',
+    });
+    const writable = new EventEmitter() as unknown as WritableLike;
+    writable.write = () => true;
+    // Deferred, as a real stream defers it: invoking the callback synchronously would put
+    // the throw back inside the `try` that wraps the `end` call, which is not the failure
+    // being guarded against. On a later tick there is nothing above it to catch.
+    writable.end = (callback?: (err?: Error | null) => void) => {
+      setImmediate(() => callback?.());
+    };
+    writable.destroy = () => writable;
+    Object.defineProperty(writable, 'errored', {
+      get() {
+        throw new Error('hostile errored accessor');
+      },
+    });
+    const requestSpy = spyOn(http, 'request').mockImplementation(
+      (_options, callback) => {
+        const cb = callback as
+          ((res: http.IncomingMessage) => void) | undefined;
+        queueMicrotask(() => {
+          cb?.(res as unknown as http.IncomingMessage);
+          queueMicrotask(() => {
+            res.emit('data', Buffer.from('a'));
+            res.emit('end');
+          });
+        });
+        return req as unknown as http.ClientRequest;
+      },
+    );
+
+    try {
+      const response = await new NodeAdapter().send({
+        requestURL: 'http://example.test/data',
+        method: 'GET',
+        headers: {},
+        streamResponse: () => writable,
+      });
+
+      expect(response.status).toBe(200);
+      expect(response.isStreamError).toBeFalsy();
+      expect(response.streamErrorCode).toBeUndefined();
+    } finally {
+      requestSpy.mockRestore();
+    }
+  });
+
   test('the pending-error listener is absorbed and then released', async () => {
     // Two halves of the same guarantee. A writable torn down by a failed `end` emits its
     // `error` after the request has settled and its listeners are gone, so an absorber is

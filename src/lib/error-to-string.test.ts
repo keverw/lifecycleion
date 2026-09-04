@@ -676,3 +676,61 @@ describe('errorToString', () => {
     });
   });
 });
+
+describe('errorToString - masking request vs literal replacement', () => {
+  // `errorToString`'s `redactFunction` and the logger's are documented as one contract, so
+  // the shape rules that decide between a masking request and a literal replacement have
+  // to hold here identically. They are separate call sites over shared code, which is
+  // exactly where a rule drifts.
+  const SECRET = 'hunter2secret';
+
+  const render = (returned: unknown): string => {
+    const error = new Error('boom') as Error & {
+      additionalInfo: Record<string, unknown>;
+      sensitiveFieldNames: string[];
+    };
+
+    error.additionalInfo = { password: SECRET };
+    error.sensitiveFieldNames = ['password'];
+
+    return errorToString(error, 200, { redactFunction: () => returned });
+  };
+
+  it('honours an object naming only masking settings', () => {
+    const rendered = render({ maskChar: '#', percent: 100 });
+
+    expect(rendered).not.toContain(SECRET);
+    expect(rendered).toContain('#'.repeat(SECRET.length));
+  });
+
+  it('uses any other object literally', () => {
+    const rendered = render({ note: 'withheld' });
+
+    expect(rendered).not.toContain(SECRET);
+    expect(rendered).toContain('withheld');
+    // Not a mask of the secret standing in for the caller's own replacement.
+    expect(rendered).not.toContain('*'.repeat(3));
+  });
+
+  it('matches the logger for the same return value', () => {
+    // The masked text itself, not just the classification, has to agree.
+    for (const returned of [
+      { percent: 100 },
+      { strategy: 'email' as const },
+      null,
+      70,
+      '[hidden]',
+    ]) {
+      const viaLogger = applyRedaction(
+        { password: SECRET },
+        ['password'],
+        () =>
+          typeof returned === 'object' && returned !== null
+            ? { ...returned }
+            : returned,
+      )['password'];
+
+      expect(render(returned)).toContain(String(viaLogger));
+    }
+  });
+});

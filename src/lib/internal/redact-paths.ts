@@ -332,14 +332,34 @@ function redactPathsInner(
     let didMask = false;
 
     for (const [key, entryValue] of entries) {
-      const result = redactPathsInner(
-        entryValue,
-        paths,
-        [...path, key],
-        redactFunction,
-        seen,
-        state,
-      );
+      let result: unknown;
+
+      // Guarded per entry, exactly as the array branch above and the renderer both are.
+      //
+      // Defensive rather than a fix for a reproduced failure, and the only guard here
+      // that is: `Object.entries` has already run every getter, so no hostile accessor
+      // reaches this call, and the one thing left that could throw is stack exhaustion on
+      // a payload nested past the recursion limit - which neither redaction walk caps and
+      // which measurement could not actually provoke here (200k levels deep still
+      // completes on Bun 1.4). It stays because the alternative is one branch of one walk
+      // being the single place a throw escapes: `redactValue` and `applyRedaction` would
+      // then fail the *whole* payload closed where the array branch degrades one entry,
+      // and a divergence between these walks is the bug class this design exists to
+      // remove. Costing nothing on the hot path, it is not worth leaving as the exception.
+      try {
+        result = redactPathsInner(
+          entryValue,
+          paths,
+          [...path, key],
+          redactFunction,
+          seen,
+          state,
+        );
+      } catch {
+        // The walk never saw what was below, so it cannot conclude nothing matched there.
+        state.didFailToRead = true;
+        result = REDACTION_FAILED_MARKER;
+      }
 
       if (result !== UNCHANGED) {
         didMask = true;

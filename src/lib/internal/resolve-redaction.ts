@@ -1,6 +1,6 @@
 import {
   defaultRedactValue,
-  isRedactMaskConfig,
+  matchRedactMaskConfig,
   maskWithConfig,
   REDACTED_PLACEHOLDER,
 } from './default-redact-function';
@@ -13,8 +13,12 @@ import {
  * - a `string` is the replacement, used as-is
  * - `null` defers to the default masking
  * - a `number` defers too, at that percent - shorthand for `{ percent: n }`
- * - a {@link RedactMaskConfig} asks for the library's masking with those settings
- * - anything else is used literally, so a function that returns nothing drops the value
+ * - a {@link RedactMaskConfig} asks for the library's masking with those settings, and is
+ *   recognized by naming nothing but masking settings - `{}` included, which asks for the
+ *   defaults and so lands in the same place as `null`
+ * - anything else is used literally, so a function that returns nothing drops the value,
+ *   and one returning `{ note: 'withheld' }` gets that object as the replacement rather
+ *   than a mask of the value it was replacing
  *
  * @param isDerived Whether the value reaching here was something other than a string -
  *                  a number, an object, a function. The default never masks such a value
@@ -42,11 +46,19 @@ export function resolveRedaction(
       return maskWithConfig(value, { percent: requested });
     }
 
-    if (isRedactMaskConfig(requested)) {
-      return maskWithConfig(value, requested);
+    const match = matchRedactMaskConfig(requested);
+
+    if (match.kind === 'settings') {
+      return maskWithConfig(value, match.config);
     }
 
-    if (requested !== null) {
+    // An empty config falls through to the tail rather than to `maskWithConfig`, so it
+    // lands exactly where `null` does - the derived-value rule included. Taking the
+    // `maskWithConfig` path would skip that rule and partially mask a produced string,
+    // which is how a `URL` kept its query and a card number its BIN prefix and last four.
+    // For a value that genuinely was a string the two are identical anyway, so nothing is
+    // lost by routing both through one place.
+    if (match.kind !== 'defaults' && requested !== null) {
       // Used literally. `undefined` from a function that returns nothing drops the value,
       // which is what it did before deferral existed.
       return requested;
