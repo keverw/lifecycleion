@@ -1,8 +1,23 @@
-import { describe, expect, test, beforeEach, spyOn } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test';
+import {
+  muteConsoleError,
+  restoreConsoleError,
+} from '../internal/console-test-utils';
 import { Logger } from './index';
 import { ArraySink } from './sinks/array';
 import { sleep } from '../sleep';
 import { safeHandleCallback } from '../safe-handle-callback';
+
+// These suites deliberately drive the paths that fall through to `console.error` when
+// nothing claims the report. Captured rather than printed so a real failure in the run
+// output still stands out; flip `DEBUG` in the helper to see them.
+beforeEach(() => {
+  muteConsoleError();
+});
+
+afterEach(() => {
+  restoreConsoleError();
+});
 
 describe('Logger', () => {
   let arraySink: ArraySink;

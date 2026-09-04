@@ -1,10 +1,25 @@
-import { describe, expect, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import {
+  muteConsoleError,
+  restoreConsoleError,
+} from '../../internal/console-test-utils';
 import {
   applyRedaction,
   defaultRedactFunction,
   REDACTION_FAILED_MARKER,
 } from './redaction';
 import type { RedactFunction } from '../types';
+
+// These suites deliberately drive the paths that fall through to `console.error` when
+// no handler is supplied. Captured rather than printed so a real failure in the run
+// output still stands out; flip `DEBUG` in the helper to see them.
+beforeEach(() => {
+  muteConsoleError();
+});
+
+afterEach(() => {
+  restoreConsoleError();
+});
 
 /** A `redactFunction` as a JavaScript caller may write one, before the type narrows it. */
 type RedactFunctionLike = (keyName: string, value: unknown) => unknown;

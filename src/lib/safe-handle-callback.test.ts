@@ -1,9 +1,24 @@
-import { describe, expect, it } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
+import {
+  muteConsoleError,
+  restoreConsoleError,
+} from './internal/console-test-utils';
 import {
   safeHandleCallback,
   safeHandleCallbackAndWait,
 } from './safe-handle-callback';
 import { sleep } from './sleep';
+
+// These suites deliberately drive the paths that fall through to `console.error` when
+// nothing claims the report. Captured rather than printed so a real failure in the run
+// output still stands out; flip `DEBUG` in the helper to see them.
+beforeEach(() => {
+  muteConsoleError();
+});
+
+afterEach(() => {
+  restoreConsoleError();
+});
 
 describe('safeHandleCallback', () => {
   it('should call a synchronous callback successfully', () => {

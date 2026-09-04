@@ -1,4 +1,8 @@
-import { describe, expect, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import {
+  muteConsoleError,
+  restoreConsoleError,
+} from './internal/console-test-utils';
 import {
   redactValue,
   stringifyValue,
@@ -6,6 +10,17 @@ import {
 } from './stringify-value';
 import { applyRedaction } from './logger/utils/redaction';
 import type { RedactFunction } from './logger/types';
+
+// These suites deliberately drive the paths that fall through to `console.error` when
+// no handler is supplied. Captured rather than printed so a real failure in the run
+// output still stands out; flip `DEBUG` in the helper to see them.
+beforeEach(() => {
+  muteConsoleError();
+});
+
+afterEach(() => {
+  restoreConsoleError();
+});
 
 const SECRET = 'hunter2secret';
 
