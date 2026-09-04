@@ -468,7 +468,9 @@ describe('stringifyValue - a value renders the same at every depth', () => {
     ];
 
     for (const value of values) {
-      expect(nest(value)).toBe(`{"v":${JSON.stringify(stringifyValue(value))}}`);
+      expect(nest(value)).toBe(
+        `{"v":${JSON.stringify(stringifyValue(value))}}`,
+      );
     }
 
     // And inside an array, which is the same walk.
@@ -631,7 +633,9 @@ describe('stringifyValue - opting out and bounding output', () => {
     // actually holds. Use `redactedKeys` to hide a field rather than a `toJSON`.
     const value = { id: 1, toJSON: (): string => 'CUSTOM' };
 
-    expect(stringifyValue(value)).toBe('{"id":1,"toJSON":"[Function: toJSON]"}');
+    expect(stringifyValue(value)).toBe(
+      '{"id":1,"toJSON":"[Function: toJSON]"}',
+    );
     expect(stringifyValue({ inner: value })).toBe(
       '{"inner":{"id":1,"toJSON":"[Function: toJSON]"}}',
     );
@@ -641,7 +645,9 @@ describe('stringifyValue - opting out and bounding output', () => {
     // The payoff for not honouring it: no special case, and a path reaches the field.
     expect(
       stringifyValue(
-        { cfg: { env: 'prod', apiKey: SECRET, toJSON: (): string => 'CUSTOM' } },
+        {
+          cfg: { env: 'prod', apiKey: SECRET, toJSON: (): string => 'CUSTOM' },
+        },
         { redactedKeys: ['cfg.apiKey'] },
       ),
     ).toBe(
@@ -764,7 +770,10 @@ describe('redactValue - redaction changes only what it masks', () => {
       [() => ({ id: 5, password: SECRET }), 'v.password'],
       [() => [{ password: SECRET }], 'v[0].password'],
       [() => new Session(), 'v.password'],
-      [() => Object.assign(new Error('boom'), { password: SECRET }), 'v.password'],
+      [
+        () => Object.assign(new Error('boom'), { password: SECRET }),
+        'v.password',
+      ],
       [() => new Map([['password', SECRET]]), 'v.password'],
       [() => new Date('2020-01-01T00:00:00Z'), 'v.password'],
     ];
@@ -774,9 +783,9 @@ describe('redactValue - redaction changes only what it masks', () => {
       const redacted = stringifyValue({ v: make() }, { redactedKeys: [entry] });
 
       // Both render an object at `v`, or both render a string at `v`.
-      expect(redacted.startsWith('{"v":{') || redacted.startsWith('{"v":[')).toBe(
-        plain.startsWith('{"v":{') || plain.startsWith('{"v":['),
-      );
+      expect(
+        redacted.startsWith('{"v":{') || redacted.startsWith('{"v":['),
+      ).toBe(plain.startsWith('{"v":{') || plain.startsWith('{"v":['));
       expect(redacted).not.toContain(SECRET);
     }
   });
@@ -864,7 +873,9 @@ describe('stringifyValue - the redaction invariant', () => {
     // match exactly, so nothing appeared, vanished, or changed shape.
     const mask = /h\*+t/g;
 
-    expect(before.split(SECRET).join('<M>')).toBe(after.split(mask).join('<M>'));
+    expect(before.split(SECRET).join('<M>')).toBe(
+      after.split(mask).join('<M>'),
+    );
 
     // And the values nobody named print identically, character for character.
     for (const fragment of [
@@ -896,10 +907,7 @@ describe('redactValue - a Map or any unsupported type', () => {
     expect(typeof masked['m']).toBe('string');
 
     expect(
-      stringifyValue(
-        { m: new Map([['k', SECRET]]) },
-        { redactedKeys: ['m'] },
-      ),
+      stringifyValue({ m: new Map([['k', SECRET]]) }, { redactedKeys: ['m'] }),
     ).toBe('{"m":"***REDACTED***"}');
   });
 
@@ -934,7 +942,8 @@ describe('redactValue - a hostile array cannot cost the payload', () => {
   test('keeps every sibling when the array itself misbehaves', () => {
     const shadowed: unknown[] = [1, 2];
 
-    (shadowed as unknown as Record<string, unknown>)['entries'] = 'not a method';
+    (shadowed as unknown as Record<string, unknown>)['entries'] =
+      'not a method';
 
     const throwing: unknown[] = [1, 2];
 
@@ -1079,7 +1088,10 @@ describe('redactValue - what masking reaches', () => {
       '{"o":{"visible":1}}',
     );
     expect(
-      stringifyValue({ o: withNonEnumerable() }, { redactedKeys: ['o.password'] }),
+      stringifyValue(
+        { o: withNonEnumerable() },
+        { redactedKeys: ['o.password'] },
+      ),
     ).toBe('{"o":{"visible":1}}');
 
     // But not removed from the returned structure either.

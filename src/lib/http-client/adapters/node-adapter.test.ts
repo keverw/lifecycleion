@@ -2417,8 +2417,7 @@ describe('NodeAdapter.send() — unit branches without server', () => {
       const requestSpy = spyOn(http, 'request').mockImplementation(
         (_options, callback) => {
           const cb = callback as
-            | ((res: http.IncomingMessage) => void)
-            | undefined;
+            ((res: http.IncomingMessage) => void) | undefined;
           queueMicrotask(() => {
             cb?.(res as unknown as http.IncomingMessage);
             queueMicrotask(() => {
@@ -2511,8 +2510,7 @@ describe('NodeAdapter.send() — unit branches without server', () => {
       const requestSpy = spyOn(http, 'request').mockImplementation(
         (_options, callback) => {
           const cb = callback as
-            | ((res: http.IncomingMessage) => void)
-            | undefined;
+            ((res: http.IncomingMessage) => void) | undefined;
           queueMicrotask(() => {
             cb?.(res as unknown as http.IncomingMessage);
             queueMicrotask(() => {
@@ -2588,8 +2586,7 @@ describe('NodeAdapter.send() — unit branches without server', () => {
       const requestSpy = spyOn(http, 'request').mockImplementation(
         (_options, callback) => {
           const cb = callback as
-            | ((res: http.IncomingMessage) => void)
-            | undefined;
+            ((res: http.IncomingMessage) => void) | undefined;
           queueMicrotask(() => {
             cb?.(res as unknown as http.IncomingMessage);
             queueMicrotask(() => {

@@ -99,10 +99,7 @@ export function matchRedactPath(
  *
  * @returns The entry as the caller wrote it, so a `redactFunction` sees the key it named.
  */
-function findPathInto(
-  paths: RedactPath[],
-  path: string[],
-): string | undefined {
+function findPathInto(paths: RedactPath[], path: string[]): string | undefined {
   return paths.find((candidate) => {
     if (candidate.parts.length <= path.length) {
       return false;
