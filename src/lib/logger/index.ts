@@ -9,7 +9,11 @@ import { CurlyBrackets } from '../curly-brackets';
 import { isNumber } from '../is-number';
 import { isPromise } from '../is-promise';
 import { describeError, toError } from '../to-error';
-import type { RedactionErrorHandler } from '../internal/redaction-reporter';
+import {
+  createRedactionReporter,
+  type RedactionErrorHandler,
+  type ReportRedactionFailure,
+} from '../internal/redaction-reporter';
 import type {
   LogEntry,
   LogSink,
@@ -840,13 +844,38 @@ export class Logger extends EventEmitter {
     // throws, since the `length` access is reached only after both have been tested.
     let didRequestRedaction: boolean;
 
+    // The reporter for every fail-closed path below, built on first use so an ordinary
+    // log call allocates nothing for it.
+    //
+    // These paths were silent, which broke the promise `onRedactionError` makes
+    // everywhere else: a failure leaves a diagnosis and not only a marker. The other four
+    // surfaces keep it - `applyRedaction` for params, `errorToString` for an error's
+    // `sensitiveFieldNames`, `redactValue` and `stringifyValue` - because each builds a
+    // reporter and hands every failure to it. Only these guards, which exist precisely
+    // for the input nothing below them could read, dropped the cause on the floor and
+    // left an operator with `(null)` or a marker and nothing to trace it with.
+    //
+    // One reporter shared across all of them, so the several guards a single unreadable
+    // list trips report once rather than once each - the same once-per-pass bound
+    // `createRedactionReporter` gives every other caller. It does not double up with
+    // `applyRedaction`'s own reporter either: everything in that function after the
+    // reporter is built is itself guarded, so a throw that reaches the backstop came from
+    // the unguarded length read above it, before anything could have been reported.
+    let backstopReporter: ReportRedactionFailure | null = null;
+
+    const reportBackstop = (error: unknown, key: string): void => {
+      backstopReporter ??= createRedactionReporter(this.onRedactionError);
+      backstopReporter(error, key);
+    };
+
     try {
       didRequestRedaction =
         params !== undefined &&
         redactedKeys !== undefined &&
         redactedKeys.length > 0;
-    } catch {
+    } catch (error) {
       didRequestRedaction = true;
+      reportBackstop(error, '<redactedKeys>');
     }
 
     let redactedParams: Record<string, unknown> | undefined;
@@ -869,7 +898,9 @@ export class Logger extends EventEmitter {
           this.redactFunction,
           this.onRedactionError,
         );
-      } catch {
+      } catch (error) {
+        reportBackstop(error, '<redactedKeys>');
+
         // Never fall through to the raw params below: rendering the message from those
         // would print the very values redaction was asked to hide, to every sink.
         //

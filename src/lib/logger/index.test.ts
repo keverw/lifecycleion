@@ -2032,6 +2032,50 @@ describe('Logger - a redactedKeys list that will not be read twice', () => {
     expect(entry?.params?.['password']).toBe(SECRET);
   });
 
+  test('a list that cannot be read reaches onRedactionError', () => {
+    // The fail-closed guards used to swallow the cause, which broke the promise
+    // `onRedactionError` keeps on every other surface that redacts - `applyRedaction` for
+    // params, `errorToString` for an error's `sensitiveFieldNames`, `redactValue` and
+    // `stringifyValue`. All of those hand a failure to the handler; these guards, which
+    // exist precisely for input nothing below them can read, left an operator with a
+    // blanked message and nothing to trace it with.
+    const failures: [string, string][] = [];
+    const sink = new ArraySink();
+    const logger = new Logger({
+      sinks: [sink],
+      callProcessExit: false,
+      onRedactionError: (error, key) => failures.push([key, error.message]),
+    });
+
+    logger.info('login {{password}}', {
+      params: { password: SECRET },
+      redactedKeys: lyingLength([1, 'throw']),
+    });
+
+    // Once, not once per guard the one unreadable list trips.
+    expect(failures.length).toBe(1);
+    expect(failures[0]?.[0]).toBe('<redactedKeys>');
+    expect(sink.logs[0]?.message).not.toContain(SECRET);
+  });
+
+  test('a list that reads cleanly reports no failure', () => {
+    const failures: [string, string][] = [];
+    const sink = new ArraySink();
+    const logger = new Logger({
+      sinks: [sink],
+      callProcessExit: false,
+      onRedactionError: (error, key) => failures.push([key, error.message]),
+    });
+
+    logger.info('login {{password}}', {
+      params: { password: SECRET },
+      redactedKeys: ['password'],
+    });
+
+    expect(failures).toEqual([]);
+    expect(sink.logs[0]?.message).not.toContain(SECRET);
+  });
+
   test('an ordinary list is still reported as the caller wrote it', () => {
     const sink = new ArraySink();
     const logger = new Logger({ sinks: [sink], callProcessExit: false });
