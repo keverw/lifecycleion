@@ -563,10 +563,18 @@ Two things about it are deliberate:
   hears, logging renders a message, rendering redacts, and redaction throws again. Each
   pass is a fresh turn, so no re-entrancy guard closes it. `onEventHandlerError` exists for
   the same reason and takes the same shape.
-- **It fires at most once per log call.** A failure is raised per leaf, so a redactor that
-  throws unconditionally would otherwise report once for every value inside a named
+- **It fires at most once per redaction pass.** A failure is raised per leaf, so a redactor
+  that throws unconditionally would otherwise report once for every value inside a named
   container. The first failure names the cause; the markers left in the output show the
-  full extent.
+  full extent. A pass, not a log call: `errorObject()` redacts twice - once rendering the
+  error, once over the params - so it can report twice, for two different failures.
+
+> The error you are handed **may contain the value**. It is your `redactFunction`'s own
+> error, and that function was given the value - `throw new Error('cannot mask ' + value)`
+> carries it verbatim, and so does a bare `throw value`. The library never puts a value in
+> one of these and the `key` is always the entry as you configured it, so this is only ever
+> as safe as your own message. Mind that before forwarding it somewhere the log line itself
+> would not go.
 
 Don't log from inside it, for the reason above. The same option is available on
 `stringifyValue`, `redactValue`, and `errorToString`.

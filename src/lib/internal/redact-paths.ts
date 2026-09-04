@@ -318,7 +318,7 @@ function redactPathsInner(
             report,
           );
         } catch (error) {
-          report(error, path.join('.') || String(index));
+          report(error, [...path, String(index)].join('.'));
           state.didFailToRead = true;
           didMask = true;
           copy.push(REDACTION_FAILED_MARKER);

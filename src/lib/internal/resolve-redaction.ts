@@ -17,9 +17,11 @@ import {
  * - a {@link RedactMaskConfig} asks for the library's masking with those settings, and is
  *   recognized by naming nothing but masking settings - `{}` included, which asks for the
  *   defaults and so lands in the same place as `null`
- * - anything else is used literally, so a function that returns nothing drops the value,
- *   and one returning `{ note: 'withheld' }` gets that object as the replacement rather
- *   than a mask of the value it was replacing
+ * - any other object is not a usable request, so it lands on the default masking too -
+ *   `{ note: 'withheld' }`, a mixture, an array, a class instance. An object is never a
+ *   replacement value; return a string for that
+ * - a non-object that is none of the above is used literally, which is what makes a
+ *   function returning nothing drop the value
  *
  * @param isDerived Whether the value reaching here was something other than a string -
  *                  a number, an object, a function. The default never masks such a value
@@ -44,7 +46,18 @@ export function resolveRedaction(
       return requested;
     }
 
-    if (typeof requested === 'number' && Number.isFinite(requested)) {
+    if (typeof requested === 'number') {
+      // A non-finite percent names no usable setting, so it lands where `null` and an
+      // empty config land rather than being emitted as a literal - which is what a bare
+      // `NaN` used to do, serializing to `null` in the output. `Number(process.env.X)`
+      // reaches here, and `{ percent: NaN }` already fell back to the default, so the
+      // two spellings agreeing matters.
+      if (!Number.isFinite(requested)) {
+        return isDerived
+          ? REDACTED_PLACEHOLDER
+          : defaultRedactValue(key, value);
+      }
+
       return maskWithConfig(value, { percent: requested });
     }
 

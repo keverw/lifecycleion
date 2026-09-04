@@ -340,7 +340,12 @@ export class Logger extends EventEmitter {
     error: unknown,
     options?: LogOptions,
   ): void {
-    const message = prepareErrorObjectLog(prefix, error);
+    const message = prepareErrorObjectLog(prefix, error, {
+      // The logger's own masking and its failure handler, so an error rendered here masks
+      // the way params do and a failure reaches `onRedactionError` rather than the console.
+      redactFunction: this.redactFunction,
+      onRedactionError: this.onRedactionError,
+    });
 
     this.handleLog('error', message, { ...(options ?? {}), error });
   }

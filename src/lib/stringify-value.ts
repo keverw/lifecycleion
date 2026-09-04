@@ -81,14 +81,17 @@ export function redactValue(
   value: unknown,
   options?: StringifyValueOptions,
 ): unknown {
-  const report = createRedactionReporter(options?.onRedactionError);
-
   try {
     const entries = options?.redactedKeys;
 
     if (entries === undefined || entries.length === 0) {
+      // Before the reporter is built: with nothing to redact there is nothing to report,
+      // and `stringifyValue(value)` with no options is the hot path every template render
+      // takes.
       return value;
     }
+
+    const report = createRedactionReporter(options?.onRedactionError);
 
     const paths = parseRedactPaths(entries);
 
@@ -109,9 +112,10 @@ export function redactValue(
     }
 
     return redactMatchedPaths(value, paths, options?.redactFunction, report);
-  } catch (error) {
-    report(error, '<value>');
-
+  } catch {
+    // The reporter is scoped inside the `try`, and the only statements above it cannot
+    // throw, so a failure here has no reporter to reach and nothing more to say than the
+    // marker already says.
     return REDACTION_FAILED_MARKER;
   }
 }

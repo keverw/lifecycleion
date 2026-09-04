@@ -1554,3 +1554,56 @@ describe('redactValue - reporting why redaction failed', () => {
     expect(JSON.stringify(withHandler)).toBe(JSON.stringify(withoutHandler));
   });
 });
+
+describe('redactValue - a config that names no setting', () => {
+  // The shape the deferral rule was built for, and the one it originally missed. A config
+  // assembled conditionally does not come out `{}` in practice - it comes out
+  // `{ percent: cond ? 10 : undefined }`, which has a key. Classifying on key *presence*
+  // sent it through the masker and so past the derived-value rule, which is exactly the
+  // leak `{}` was routed away from: the same `URL` back with its query intact.
+  const derived = (returned: unknown, value: unknown): unknown =>
+    (
+      redactValue({ v: value }, {
+        redactedKeys: ['v'],
+        redactFunction: () => returned,
+      } as unknown as StringifyValueOptions) as Record<string, unknown>
+    )['v'];
+
+  const url = new URL('https://api.x.test/v1?api_key=sk_live_abcdef123456');
+
+  test('a key set to undefined is not a setting', () => {
+    for (const returned of [
+      { percent: undefined },
+      { maskChar: undefined },
+      { strategy: undefined },
+      { percent: undefined, maskChar: undefined },
+    ]) {
+      // Identical to `{}` and to `null`, on a derived value and on a string alike.
+      expect(derived(returned, url)).toBe('***REDACTED***');
+      expect(derived(returned, url)).toBe(derived({}, url));
+      expect(derived(returned, 4111111111111111)).toBe('***REDACTED***');
+      expect(derived(returned, SECRET)).toBe(derived(null, SECRET));
+    }
+  });
+
+  test('one real setting beside an undefined one still counts', () => {
+    // Only "no settings at all" defers; a config that names something is honoured.
+    expect(derived({ percent: 100, maskChar: undefined }, SECRET)).toBe(
+      '*'.repeat(SECRET.length),
+    );
+  });
+
+  test('a non-finite number defers rather than being emitted', () => {
+    // `Number(process.env.MASK_PERCENT)` reaches here. A bare `NaN` used to be used
+    // literally and serialize to `null`, while `{ percent: NaN }` already fell back to the
+    // default - two spellings of the same thing disagreeing.
+    for (const returned of [Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(derived(returned, SECRET)).toBe(derived(null, SECRET));
+      expect(derived(returned, url)).toBe('***REDACTED***');
+    }
+
+    expect(derived({ percent: Number.NaN }, SECRET)).toBe(
+      derived(null, SECRET),
+    );
+  });
+});

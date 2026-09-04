@@ -141,6 +141,17 @@ export interface BeforeExitResult {
 export type RedactFunctionResult =
   string | number | RedactMaskConfig | null | undefined;
 
+/**
+ * Decides the replacement for a redacted value.
+ *
+ * Handed the key exactly as written in `redactedKeys` - `user.password`, not the leaf -
+ * and the value **already stringified**, so `value` is always a `string` whatever it
+ * started as. That is also what keeps a mutating function from reaching into the caller's
+ * own payload.
+ *
+ * See {@link RedactFunctionResult} for what to hand back. In short: a string is the
+ * replacement, and everything else is a control signal.
+ */
 export type RedactFunction = (
   keyName: string,
   value: string,
@@ -197,9 +208,14 @@ export interface LoggerOptions {
    * rendering redacts, and redaction throws again - a cycle no re-entrancy guard closes,
    * since each pass is a fresh turn.
    *
-   * Fires at most once per log call. A failure is raised per leaf, so an unconditionally
-   * throwing `redactFunction` would otherwise report once for every value inside a named
-   * container. The markers left in the output show the full extent; this names the cause.
+   * Fires at most once per redaction pass. A failure is raised per leaf, so an
+   * unconditionally throwing `redactFunction` would otherwise report once for every value
+   * inside a named container. The markers left in the output show the full extent; this
+   * names the cause. `errorObject()` redacts twice - the error it renders, and the params -
+   * so it can report twice, for two genuinely different failures.
+   *
+   * The error may contain the value: it is your `redactFunction`'s own, and that function
+   * was handed the value. The `key` never does.
    *
    * Do not call this logger's own log methods from here.
    */

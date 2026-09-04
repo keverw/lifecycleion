@@ -12,6 +12,12 @@ import { toError } from '../to-error';
  * This is the diagnostic half. The marker is unchanged; this is how the cause reaches you.
  *
  * @param error The failure, normalized to an `Error`. The original is on `cause`.
+ *              **May contain the value.** It came from the caller's own `redactFunction`,
+ *              which was handed the value and is free to put it in the message - a
+ *              `throw new Error('cannot mask ' + value)` carries it verbatim, and so does
+ *              a bare `throw value`. The library never puts a value in one of these, and
+ *              `key` is always the entry as configured, but the handler and the default
+ *              `console.error` are only as safe as the redactor's own message.
  * @param key   The redaction entry being applied, as the caller wrote it - `user.password`
  *              rather than the leaf `password`.
  */
@@ -31,11 +37,16 @@ export type ReportRedactionFailure = (error: unknown, key: string) => void;
  * this shape of problem and takes the same approach: a dedicated callback, defaulting to
  * the console, that cannot re-enter the thing that failed.
  *
- * **Fires at most once**, and that bound is the point rather than a nicety. A failure is
- * raised per *leaf*, so a `redactFunction` that throws unconditionally would otherwise
- * report once for every value inside a named container - thousands of lines for one broken
- * function, on a path whose whole job is to stay out of the way. The first failure carries
- * the cause and the key; the markers left in the output show the full extent.
+ * **Fires at most once per redaction pass**, and that bound is the point rather than a
+ * nicety. A failure is raised per *leaf*, so a `redactFunction` that throws
+ * unconditionally would otherwise report once for every value inside a named container -
+ * thousands of lines for one broken function, on a path whose whole job is to stay out of
+ * the way. The first failure carries the cause and the key; the markers left in the output
+ * show the full extent.
+ *
+ * A pass, not a log call: `logger.errorObject()` redacts twice - once rendering the error,
+ * once over the params - so it can report twice. Those are two genuinely different
+ * failures in two different values, and collapsing them would hide one.
  *
  * @param handler Called with the first failure. Defaults to `console.error`. A handler
  *                that throws falls back to the console, as `onSinkError` does: a handler

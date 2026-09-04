@@ -1877,3 +1877,63 @@ describe('Logger - redaction and non-plain params', () => {
     ).toBe('boom');
   });
 });
+
+describe('Logger - errorObject redaction reaches the caller, not the console', () => {
+  // `prepareErrorObjectLog` rendered the error with the library defaults, so the logger's
+  // own `redactFunction` did not apply and a redaction failure went to `console.error`
+  // even when the caller had supplied a handler - and did so *alongside* the params
+  // report, twice for one call, one of them uninterceptable.
+  test('a redaction failure while rendering the error reaches onRedactionError', () => {
+    const keys: string[] = [];
+    const consoleLines: string[] = [];
+    const realError = console.error;
+
+    console.error = (...args: unknown[]): void => {
+      consoleLines.push(String(args[0]));
+    };
+
+    try {
+      const error = new Error('boom') as Error & {
+        additionalInfo: unknown;
+        sensitiveFieldNames: unknown;
+      };
+
+      error.additionalInfo = { token: 'x' };
+      error.sensitiveFieldNames = 'not-a-list';
+
+      const logger = new Logger({
+        sinks: [new ArraySink()],
+        onRedactionError: (_error, key) => keys.push(key),
+      });
+
+      logger.errorObject('prefix', error);
+
+      expect(keys).toEqual(['<sensitiveFieldNames>']);
+      expect(consoleLines).toEqual([]);
+    } finally {
+      console.error = realError;
+    }
+  });
+
+  test('the logger redactFunction applies to a rendered error too', () => {
+    // Otherwise the same value masks one way as a param and another way inside an error.
+    const sink = new ArraySink();
+    const logger = new Logger({
+      sinks: [sink],
+      redactFunction: () => '[CUSTOM]',
+    });
+
+    const error = new Error('boom') as Error & {
+      additionalInfo: unknown;
+      sensitiveFieldNames: unknown;
+    };
+
+    error.additionalInfo = { token: 'hunter2secret' };
+    error.sensitiveFieldNames = ['token'];
+
+    logger.errorObject('prefix', error);
+
+    expect(sink.logs[0]?.message).toContain('[CUSTOM]');
+    expect(sink.logs[0]?.message).not.toContain('hunter2secret');
+  });
+});

@@ -164,10 +164,36 @@ export function matchRedactMaskConfig(value: unknown): RedactMaskConfigMatch {
     // by name either way.
     const keys = Reflect.ownKeys(value);
 
-    return keys.length > 0 &&
-      keys.every(
+    if (
+      !keys.every(
         (key) => typeof key === 'string' && REDACT_MASK_CONFIG_KEYS.has(key),
       )
+    ) {
+      return { kind: 'defaults' };
+    }
+
+    // A key set to `undefined` names nothing. `{ percent: undefined }` is the *normal*
+    // shape of a config assembled conditionally - `{ percent: cond ? 10 : undefined }` -
+    // which is precisely the case `'defaults'` exists for, and it is identical in effect
+    // to `{}`, since `maskWithConfig` falls back to the default for an absent setting
+    // either way.
+    //
+    // Presence alone would send it down the `maskWithConfig` branch and so past the
+    // derived-value rule, which is the leak `{}` was routed away from: a `URL` came back
+    // with its query intact and a card number with its BIN prefix and last four. Reading
+    // the values, not just the keys, is what keeps the two spellings of "no settings"
+    // landing in the same place.
+    let hasSetting = false;
+
+    for (const key of keys) {
+      if ((value as Record<string | symbol, unknown>)[key] !== undefined) {
+        hasSetting = true;
+
+        break;
+      }
+    }
+
+    return hasSetting
       ? { kind: 'settings', config: value }
       : { kind: 'defaults' };
   } catch {
