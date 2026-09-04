@@ -94,7 +94,7 @@ const err = new Error('auth failed');
 (err as any).sensitiveFieldNames = ['token'];
 
 console.log(errorToString(err));
-// AdditionalInfo.token → se******bc
+// AdditionalInfo.token → *********c
 // AdditionalInfo.user  → alice
 ```
 
@@ -113,7 +113,7 @@ const err = new Error('auth failed');
   'items[0].token',
 ];
 
-// AdditionalInfo.apiKey → sk****45
+// AdditionalInfo.apiKey → *******5
 // AdditionalInfo.user   → password: ***REDACTED***
 // AdditionalInfo.items  → [{"key":"token","value":"***REDACTED***"}]
 ```
@@ -137,7 +137,8 @@ Masked values use the same default the logger applies, so a value renders identi
 The `redactFunction` here honours the same return contract as the logger's - a string is used literally, `null` defers to the default, a number sets the percent, and an object is always a masking request, never a replacement value. A plain object whose own keys are all masking settings (`strategy`, one of `'string' | 'email' | 'domain'`, plus `percent`, `maskChar`, `userPercent`, `domainPercent`) is masked with those; any other object - `{}`, an unrecognized key, a mixture, an array, a class instance - falls back to the default masking, landing exactly where `null` does, the treatment of non-string values included. The value reaching your function is always a `string`, already rendered. See [the logger docs](./logger.md#controlling-how-a-value-is-masked) for the full table.
 
 ```typescript
-// AdditionalInfo.apiKey → sk_1**********2345
+// apiKey: 'sk_live_51H8x9QcAbCdEf'
+// AdditionalInfo.apiKey → s*******************Ef
 ```
 
 A value shorter than 8 characters is replaced outright with `***REDACTED***` instead, since masking a proportion of something that short hides almost nothing - a four-digit PIN would otherwise render `1**4`.

@@ -422,9 +422,9 @@ logger.info('User login attempt', {
 });
 
 // The params object will have nested values redacted:
-// user.password → '********'
-// credentials.apiKey → '***************'
-// personalInfo.ssn → '***********'
+// user.password → '********3'
+// credentials.apiKey → 'k*************5'
+// personalInfo.ssn → '1*********9'
 ```
 
 ```typescript
