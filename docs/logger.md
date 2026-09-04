@@ -604,6 +604,23 @@ proportional mask of the _original_ in its place.
 Landing where `null` does means landing there in full, the rule below on non-string values
 included - so an unusable request cannot quietly hand a `URL` back with its query intact.
 
+TypeScript catches most of this for you. Returning an array, a boolean, or an object with
+nothing recognizable in it (`{ note: 'x' }`) is a type error, because the return type is
+`RedactFunctionResult`. **The one case it does not catch is an object that mixes settings
+with unknown keys** - `{ percent: 10, note: 'x' }` compiles, then masks with the defaults
+rather than at 10%. Excess-property checking needs a fresh object literal in a directly
+annotated position, and the return of a contextually-typed arrow is not one, so the extra
+key slips past. Annotate the return if you want the compiler's help:
+
+```typescript
+redactFunction: (key): RedactFunctionResult =>
+  key === 'apiKey' ? { percent: 10, note: 'x' } : null,
+//                                  ^^^^ now an error
+```
+
+This is why the runtime falls back to the default rather than honouring the half it
+recognizes: a green build is not evidence your config parsed.
+
 The `redactedKeys` list decides _what_ is redacted; this decides _how_, and only for the keys you single out.
 
 Masking never returns the original. A request that would hide nothing - a percent of `0`, a value too short to mask proportionally, an address `email` cannot parse - falls through to `***REDACTED***` instead.
