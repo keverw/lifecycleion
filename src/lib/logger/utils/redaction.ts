@@ -22,6 +22,50 @@ export const defaultRedactFunction: RedactFunction = defaultRedactValue;
 export { REDACTION_FAILED_MARKER } from '../../internal/default-redact-function';
 
 /**
+ * The params bag as a plain object holding exactly what the walk and the renderer can
+ * both reach.
+ *
+ * Always copied, and copied with `for...in` rather than a spread. Both halves of that
+ * fix the same class of bug: the walk enumerates a bag, while the template renderer
+ * resolves `{{name}}` by property lookup, and every key one of them can see that the
+ * other cannot is either a value printed without being masked or a value masked out of a
+ * message that would have printed it.
+ *
+ * - A spread and `Object.entries` see only *own enumerable* properties, so a key on the
+ *   prototype - a bag built with `Object.create`, or a class instance - was invisible to
+ *   redaction while the renderer still resolved it. `for...in` walks the prototype chain,
+ *   so both now see it and it is masked and printed as it was before this walk existed.
+ * - Neither sees a *non-enumerable* own property, or one a `Proxy` hides from `ownKeys`,
+ *   but property lookup does. Handing the caller's own bag straight to the walk left such
+ *   a key unmasked *and* still resolvable, so `{{password}}` rendered a secret the
+ *   caller had explicitly named. Copying means the renderer is given this object instead,
+ *   which does not carry the key at all: it is neither masked nor printed, which is what
+ *   the walk not seeing it has to mean.
+ *
+ * Values are copied by reference, so this stays shallow - `redactedParams` is still not
+ * a snapshot of what lies beneath it.
+ *
+ * Defined rather than assigned, because a plain assignment to `__proto__` reparents the
+ * object instead of storing the entry.
+ */
+function normalizeParamsBag(
+  params: Record<string, unknown>,
+): Record<string, unknown> {
+  const copy: Record<string, unknown> = {};
+
+  for (const key in params) {
+    Object.defineProperty(copy, key, {
+      value: params[key],
+      enumerable: true,
+      writable: true,
+      configurable: true,
+    });
+  }
+
+  return copy;
+}
+
+/**
  * Apply redaction to params based on redacted keys
  * Supports top-level keys and mixed object/array paths
  * (e.g., 'user.password', 'users[0].password', or 'users[0]["password-hash"]')
@@ -29,9 +73,10 @@ export { REDACTION_FAILED_MARKER } from '../../internal/default-redact-function'
  * @param params Original params object
  * @param redactedKeys Keys to redact (supports nested object paths, array indexes, and quoted bracket keys)
  * @param redactFunction Custom redaction function (uses defaultRedactFunction if not provided)
- * @returns The params with every matched path masked. Copies are built only along the
- *          branches that lead to a mask, so anything else comes back by reference - and
- *          when nothing matched, `params` itself.
+ * @returns The params with every matched path masked. The bag itself is always a fresh
+ *          plain object, so what the renderer can reach is exactly what the walk saw;
+ *          copies below it are built only along the branches that lead to a mask, so
+ *          every other value comes back by reference.
  */
 export function applyRedaction(
   params: Record<string, unknown>,
@@ -118,12 +163,7 @@ export function applyRedaction(
   // template placeholder then rendered as the fallback, and a structured sink reading
   // `entry.redactedParams` got a string where it expected its params.
   //
-  // Spread rather than walked as-is: own enumerable properties are exactly what the
-  // renderer prints and what the walk would have read anyway, so this changes only the
-  // prototype. A plain bag is handed over untouched, so a walk that matches nothing gives
-  // the caller back its own object.
-  //
-  // Guarded because a property can be an accessor that throws, and a spread abandons the
+  // Guarded because a property can be an accessor that throws, and copying abandons the
   // whole bag at the first one that does. That is the retry below, not a reason to give
   // up on the params.
   const walk = (
@@ -154,9 +194,7 @@ export function applyRedaction(
   let root: Record<string, unknown> | null;
 
   try {
-    root = isPlainContainer(params)
-      ? params
-      : { ...(params as Record<string, unknown>) };
+    root = normalizeParamsBag(params);
   } catch {
     root = null;
   }
@@ -190,7 +228,10 @@ export function applyRedaction(
 
     guarded = {};
 
-    for (const key of Object.keys(source)) {
+    // `for...in`, matching `normalizeParamsBag`: an inherited enumerable key is one the
+    // renderer resolves, so it has to reach the walk here too or this path would mask
+    // and print a different set of keys than the one above it.
+    for (const key in source) {
       let copied: unknown;
 
       try {

@@ -78,6 +78,29 @@ describe('stringifyValue - rendering', () => {
     );
   });
 
+  test('a path never addresses the root value itself', () => {
+    // A bare name addresses a top-level key, and an `Error` has none to address, so
+    // naming one has to reach nothing rather than blank the payload. Any non-empty
+    // `redactedKeys` used to turn a non-plain root into `***REDACTED***`.
+    expect(
+      stringifyValue(new Error('boom'), { redactedKeys: ['password'] }),
+    ).toBe('Error: boom');
+    expect(
+      stringifyValue(new URL('https://example.test/y'), {
+        redactedKeys: ['password'],
+      }),
+    ).toBe('https://example.test/y');
+
+    // Nested, the same path still masks the value whole - that is where it addresses
+    // something the value is inside of.
+    expect(
+      stringifyValue(
+        { inner: new Error('boom') },
+        { redactedKeys: ['inner.password'] },
+      ),
+    ).toBe('{"inner":"***REDACTED***"}');
+  });
+
   test('names a class instance rather than dumping it', () => {
     class FooBar {
       public secret = SECRET;

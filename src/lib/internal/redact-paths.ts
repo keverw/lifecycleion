@@ -107,6 +107,17 @@ export function matchRedactPath(
  * @returns The entry as the caller wrote it, so a `redactFunction` sees the key it named.
  */
 function findPathInto(paths: RedactPath[], path: string[]): string | undefined {
+  // Nothing addresses the root itself. Paths are rooted *at* the value, so the shortest
+  // one names an entry of it, and the prefix test below is vacuously true for every entry
+  // when `path` is empty - which made any non-empty `redactedKeys` blank a non-plain value
+  // handed straight to `redactValue` or `stringifyValue`. `['password']` turned
+  // `new Error('boom')` into `***REDACTED***`, though a bare name addresses a top-level
+  // key and an `Error` has none to address: a path naming an entry a value lacks must
+  // reach nothing rather than blanking the payload.
+  if (path.length === 0) {
+    return undefined;
+  }
+
   return paths.find((candidate) => {
     if (candidate.parts.length <= path.length) {
       return false;

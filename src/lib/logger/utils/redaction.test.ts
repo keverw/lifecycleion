@@ -970,10 +970,45 @@ describe('applyRedaction - params it was not asked to redact', () => {
     expect((redacted['failure'] as Error).message).toBe('boom');
   });
 
-  test('leaves the params object itself alone when nothing matches', () => {
+  test('hands back a copy of the bag, sharing everything under it', () => {
+    // The bag itself is always copied, so what the template renderer can resolve is
+    // exactly what the walk saw - a non-enumerable key, or one a `Proxy` hides from
+    // `ownKeys`, is invisible to both rather than unmasked in the walk and still
+    // printable by lookup. Nothing beneath it is copied, so an untouched value is still
+    // the caller's own.
     const params = { a: 1, nested: { b: 2 } };
+    const result = applyRedaction(params, ['missing']);
 
-    expect(applyRedaction(params, ['missing'])).toBe(params);
+    expect(result).not.toBe(params);
+    expect(result).toEqual(params);
+    expect(result['nested']).toBe(params.nested);
+  });
+
+  test('copies a key the bag inherits, which the renderer would resolve', () => {
+    // `{{plan}}` resolves by lookup, which walks the prototype chain, so a bag built
+    // with `Object.create` used to render a value the walk never saw and never masked.
+    const params: Record<string, unknown> = Object.create({ plan: 'pro' });
+
+    params['user'] = 'bob';
+
+    expect(applyRedaction(params, ['missing'])).toEqual({
+      plan: 'pro',
+      user: 'bob',
+    });
+  });
+
+  test('drops a key the renderer could resolve but the walk cannot see', () => {
+    const params: Record<string, unknown> = {};
+
+    Object.defineProperty(params, 'password', {
+      value: 'hunter2secret',
+      enumerable: false,
+    });
+
+    const result = applyRedaction(params, ['password']);
+
+    expect('password' in result).toBe(false);
+    expect(JSON.stringify(result)).not.toContain('hunter2secret');
   });
 });
 
