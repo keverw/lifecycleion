@@ -7,7 +7,7 @@ import {
 } from './internal/redact-paths';
 import {
   REDACTION_FAILED_MARKER,
-  type RedactFunctionResult,
+  type RedactValueFunction,
 } from './internal/default-redact-function';
 import { resolveRedaction } from './internal/resolve-redaction';
 import { maskValueDeep } from './internal/mask-value-deep';
@@ -21,17 +21,22 @@ import {
 /**
  * Produces the replacement shown for a value named by `sensitiveFieldNames`.
  *
- * Mirrors the shape of the logger's `redactFunction`, so the same function can be used
- * for both: it is handed the same key the caller wrote and the same stringified value,
- * and it defers the same way - return `null` to fall back to the default masking for that
- * value rather than having to reproduce it.
+ * The logger's `redactFunction` under this entry point's own name - one definition, so
+ * the same function can be used for both and a change to the contract cannot reach one
+ * and miss the other. It is handed the key the caller wrote and the stringified value,
+ * and defers the same way: return `null` to fall back to the default masking for that
+ * value rather than reproducing it.
  */
-export type RedactFieldFunction = (
-  key: string,
-  value: string,
-) => RedactFunctionResult;
+export type RedactFieldFunction = RedactValueFunction;
 
 export type { RedactionErrorHandler } from './internal/redaction-reporter';
+
+// The return type of a `redactFunction` and the config it may hand back, so this entry
+// point can be used without importing the logger for its types.
+export type {
+  RedactFunctionResult,
+  RedactMaskConfig,
+} from './internal/default-redact-function';
 
 /** Options for {@link errorToString}. */
 export interface ErrorToStringOptions {

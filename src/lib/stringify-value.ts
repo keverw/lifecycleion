@@ -6,7 +6,7 @@ import {
 } from './internal/redaction-reporter';
 import {
   REDACTION_FAILED_MARKER,
-  type RedactFunctionResult,
+  type RedactValueFunction,
 } from './internal/default-redact-function';
 
 export type {
@@ -15,10 +15,7 @@ export type {
 } from './internal/default-redact-function';
 
 /** Decides the replacement for a redacted value. See the logger's `redactFunction`. */
-export type StringifyRedactFunction = (
-  key: string,
-  value: string,
-) => RedactFunctionResult;
+export type StringifyRedactFunction = RedactValueFunction;
 
 export interface StringifyValueOptions {
   /**

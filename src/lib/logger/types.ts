@@ -1,6 +1,9 @@
-import type { RedactMaskConfig } from '../internal/default-redact-function';
+import type { RedactValueFunction } from '../internal/default-redact-function';
 import type { RedactionErrorHandler } from '../internal/redaction-reporter';
 
+// Re-exported, not merely imported: it is half of what a `redactFunction` may return, so
+// a caller cannot annotate one without it.
+export type { RedactMaskConfig } from '../internal/default-redact-function';
 export type { RedactionErrorHandler } from '../internal/redaction-reporter';
 /**
  * Log level enum for filtering logs by severity
@@ -140,40 +143,16 @@ export interface BeforeExitResult {
  * option, so one function can serve both.
  */
 /**
- * What a `redactFunction` may return.
+ * What a `redactFunction` may return, and the function itself.
  *
- * A **string** is the answer in the ordinary case: the function is handed one
- * already-stringified leaf and hands back the text that stands in for it. The rest are
- * control signals rather than replacement values - ways of saying "you do the masking":
- *
- * - `null` - use the default masking
- * - a `number` - use the default masking at that percent, shorthand for `{ percent: n }`
- * - a {@link RedactMaskConfig} - use the library's masking with these settings
- * - `undefined` - drop the value, which is what a function that returns nothing does
- *
- * An object is therefore always read as a masking request, never as a replacement. One
- * that is not a usable request - `{}`, an unrecognized key, a mixture - falls back to the
- * default masking rather than being emitted, so a rendered `{"note":"x"}` can never stand
- * where a masked value belonged.
+ * Both are the shared definitions, re-exported under the logger's own names so a single
+ * change to the contract reaches every entry point. See {@link RedactFunctionResult} for
+ * the return values and what each one signals.
  */
-export type RedactFunctionResult =
-  string | number | RedactMaskConfig | null | undefined;
-
-/**
- * Decides the replacement for a redacted value.
- *
- * Handed the key exactly as written in `redactedKeys` - `user.password`, not the leaf -
- * and the value **already stringified**, so `value` is always a `string` whatever it
- * started as. That is also what keeps a mutating function from reaching into the caller's
- * own payload.
- *
- * See {@link RedactFunctionResult} for what to hand back. In short: a string is the
- * replacement, and everything else is a control signal.
- */
-export type RedactFunction = (
-  keyName: string,
-  value: string,
-) => RedactFunctionResult;
+export type {
+  RedactFunctionResult,
+  RedactValueFunction as RedactFunction,
+} from '../internal/default-redact-function';
 
 /**
  * Array log transformer function type.
@@ -189,7 +168,7 @@ export interface LoggerOptions {
   sinks?: LogSink[];
 
   // Security
-  redactFunction?: RedactFunction;
+  redactFunction?: RedactValueFunction;
 
   // Behavior
   callProcessExit?: boolean;

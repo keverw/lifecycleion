@@ -88,6 +88,28 @@ export type RedactFunctionResult =
   string | number | RedactMaskConfig | null | undefined;
 
 /**
+ * Decides the replacement for a redacted value.
+ *
+ * The one definition behind every name the package publishes for this shape -
+ * `RedactFunction` on the logger, `RedactFieldFunction` on `errorToString`,
+ * `StringifyRedactFunction` on `stringifyValue`, `RedactLeafFunction` on the shared walk.
+ * They are aliases so each entry point can document the parameter in its own terms; they
+ * were separate declarations, which meant a change to what a function may return had to
+ * be made in several places and compiled fine when it was not.
+ *
+ * Handed the key exactly as the caller wrote it - `user.password`, not the leaf - and the
+ * value **already stringified**, so `value` is always a `string` whatever it started as.
+ * That is also what keeps a mutating function from reaching into the caller's own payload.
+ *
+ * See {@link RedactFunctionResult} for what to hand back. In short: a string is the
+ * replacement, and everything else is a control signal.
+ */
+export type RedactValueFunction = (
+  key: string,
+  value: string,
+) => RedactFunctionResult;
+
+/**
  * What a value returned from a `redactFunction` turned out to be.
  *
  * - `'settings'` - a masking request naming at least one setting, in `config`

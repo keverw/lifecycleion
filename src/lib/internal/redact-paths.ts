@@ -4,7 +4,7 @@ import { maskValueDeep } from './mask-value-deep';
 import { resolveRedaction } from './resolve-redaction';
 import {
   REDACTION_FAILED_MARKER,
-  type RedactFunctionResult,
+  type RedactValueFunction,
 } from './default-redact-function';
 import {
   NOOP_REDACTION_REPORTER,
@@ -12,10 +12,7 @@ import {
 } from './redaction-reporter';
 
 /** Decides the replacement for a redacted value. */
-export type RedactLeafFunction = (
-  key: string,
-  value: string,
-) => RedactFunctionResult;
+export type RedactLeafFunction = RedactValueFunction;
 
 /** One parsed redaction entry, kept with the text the caller wrote. */
 export interface RedactPath {
