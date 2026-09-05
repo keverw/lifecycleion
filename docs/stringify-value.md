@@ -132,7 +132,7 @@ stringifyValue(
 
 A bare name addresses a top-level key; `user.password` and `items[0].token` address one location. Naming a plain object or array masks each value inside it and keeps the shape.
 
-Paths address **locations, not values**. One object reachable by two paths is masked only where it was named - `redactValue({ a, b: { ref: a } }, { redactedKeys: ['a.secret'] })` masks `a.secret` and hands back `b.ref.secret` as it came in, because the two are the same object and only one path named it. Name both to mask both. Masking by value instead would change a location nobody wrote down, and which of the two got masked would depend on the order the walk reached them.
+A path names a **location, not a value**, so one object reachable by two paths is masked only where it was named: `redactValue({ a, b: { ref: a } }, { redactedKeys: ['a.secret'] })` masks `a.secret` and hands `b.ref.secret` back as it came in. Name both to mask both. See [A Path Names a Location, Not a Value](./logger.md#a-path-names-a-location-not-a-value) for why, which covers this surface too.
 
 No path addresses `value` itself. The shortest one names an entry _of_ it, so there is nothing to write that means "mask the whole thing" - pass the mask you want instead of the value. This is why `redactValue(new Error('boom'), { redactedKeys: ['message'] })` returns the error unchanged: a bare name addresses a top-level key, and an `Error` has none to address. Nested is a different question, and the rule below still applies - `['err.message']` masks an `Error` sitting at `err`, because there the path names an entry that a container does have.
 

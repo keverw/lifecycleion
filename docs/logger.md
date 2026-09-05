@@ -17,6 +17,8 @@ A modern, flexible logging library with sink-based architecture, template string
     - [Nested Object Support](#nested-object-support)
   - [Redaction of Sensitive Data](#redaction-of-sensitive-data)
     - [Nested Object Redaction](#nested-object-redaction)
+    - [A Path Names a Location, Not a Value](#a-path-names-a-location-not-a-value)
+    - [Path Grammar](#path-grammar)
     - [Custom Redaction Function](#custom-redaction-function)
     - [Redaction fails closed](#redaction-fails-closed)
     - [Controlling how a value is masked](#controlling-how-a-value-is-masked)
@@ -461,7 +463,11 @@ logger.info('User login attempt', {
 
 A bare name therefore addresses a top-level key only: `redactedKeys: ['password']` masks `params.password` and leaves `params.user.password` rendered. Name the path to reach it.
 
-Redaction addresses **locations, not values**. If one object is reachable by two paths, masking one leaves the other in the clear, because only one of them was named:
+#### A Path Names a Location, Not a Value
+
+This section is the one description of path behaviour for all three surfaces that redact - the logger's `redactedKeys`, [`errorToString`](./error-to-string.md#additional-info--sensitive-fields)'s `sensitiveFieldNames`, and [`stringifyValue`](./stringify-value.md#redacting-while-rendering)'s `redactedKeys`. They share the parser and the walk, so what follows holds for each of them.
+
+If one object is reachable by two paths, masking one leaves the other in the clear, because only one of them was named:
 
 ```typescript
 const account = { apiKey: 'sk-live-abcdefghijkl' };
@@ -474,9 +480,13 @@ logger.info('sync', {
 // redactedParams.snapshot.account.apiKey  → 'sk-live-abcdefghijkl'
 ```
 
-Both entries are the same object, so the second one is the first one unmasked. The rendered message is unaffected unless it interpolates the second path, but a structured sink walks the whole bag and reaches it. Name every path you want masked - here, `['account.apiKey', 'snapshot.account.apiKey']`.
+Both entries are the same object, so the second one is the first one unmasked. Name every path you want masked - here, `['account.apiKey', 'snapshot.account.apiKey']`.
+
+Where that shows up depends on the surface. The rendered log message is unaffected unless it interpolates the second path, but a structured sink walks the whole of `redactedParams` and reaches it; `redactValue` hands the alias back as it came in; and `errorToString` prints it, since it renders every entry of `additionalInfo` into the table.
 
 This falls out of what a path means and is not an oversight to work around. Masking by value instead would mean that naming one key silently rewrote a value somewhere else in the payload that you never mentioned, which is the opposite of the guarantee that redacted output differs from unredacted output only where a value was masked. It also cannot be done reliably in one pass, since whether the alias is masked would depend on which of the two paths the walk happened to reach first.
+
+#### Path Grammar
 
 An unquoted path segment is a run of name characters - letters, digits, combining marks, `_`, `$`, `@` and `-` - so ordinary key names need no quoting: `user.password-hash` and `users[0].api-key` both work. A key that contains anything else, including a delimiter, whitespace, or any other punctuation, needs the quoted bracket form, which is the only way to disambiguate it: `user["a.b"]`, `user["my key"]`, `user["a+b"]`. An entry the grammar rejects, such as the unsupported wildcard form or a trailing dot, redacts **nothing** and does not warn.
 

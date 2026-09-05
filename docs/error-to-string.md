@@ -98,7 +98,7 @@ console.log(errorToString(err));
 // AdditionalInfo.user  → alice
 ```
 
-`sensitiveFieldNames` uses the **same path syntax as the logger's [`redactedKeys`](./logger.md#redaction-of-sensitive-data)**, so one mental model covers both. A bare name addresses a top-level key of `additionalInfo`; reaching a nested value takes a path, and array indexes and quoted bracket keys work the same way:
+`sensitiveFieldNames` uses the **same path syntax as the logger's [`redactedKeys`](./logger.md#redaction-of-sensitive-data)**, so one mental model covers both. That extends to what a path _means_: it names a **location, not a value**, so one object sitting at two places in `additionalInfo` is masked only where it was named and is printed in full at the other. See [A Path Names a Location, Not a Value](./logger.md#a-path-names-a-location-not-a-value). A bare name addresses a top-level key of `additionalInfo`; reaching a nested value takes a path, and array indexes and quoted bracket keys work the same way:
 
 ```typescript
 const err = new Error('auth failed');
