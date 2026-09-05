@@ -442,10 +442,13 @@ describe('applyRedaction - non-identifier key names', () => {
   });
 
   test('a params bag with a non-plain prototype still comes back a record', () => {
-    // The walk masks a non-plain object whole, which is right for one nested inside a
-    // payload but not for the bag itself: it returned the bare string `'***REDACTED***'`
-    // against the declared record type, so every template placeholder rendered as the
-    // fallback and a structured sink got a string in place of its params.
+    // The walk treats a non-plain object as a single value, which is right for one nested
+    // inside a payload but not for the bag itself. That first showed up as the bare string
+    // `'***REDACTED***'` against the declared record type, so every template placeholder
+    // rendered as the fallback and a structured sink got a string in place of its params.
+    // Now that no path addresses the root, the same cause fails the other way and more
+    // quietly: an unnormalized bag is left alone entirely, so `password` is never masked.
+    // Normalizing it to a plain object is what this asserts, from both ends.
     class Bag {
       public password = 'hunter2secret';
       public userID = 7;

@@ -132,6 +132,8 @@ stringifyValue(
 
 A bare name addresses a top-level key; `user.password` and `items[0].token` address one location. Naming a plain object or array masks each value inside it and keeps the shape.
 
+No path addresses `value` itself. The shortest one names an entry _of_ it, so there is nothing to write that means "mask the whole thing" - pass the mask you want instead of the value. This is why `redactValue(new Error('boom'), { redactedKeys: ['message'] })` returns the error unchanged: a bare name addresses a top-level key, and an `Error` has none to address. Nested is a different question, and the rule below still applies - `['err.message']` masks an `Error` sitting at `err`, because there the path names an entry that a container does have.
+
 Redaction walks exactly what the renderer walks: a **plain object or an array**. Their own entries are the whole of what gets printed, so a path addresses one of them precisely, and a path naming an entry they lack reaches nothing - a misspelling, or one stale entry in a long-lived list, protects nothing rather than blanking a payload.
 
 Everything else - an `Error`, a `Date`, a `URL`, a `Map`, a class instance - is printed whole, as `Error: boom` or `[Map]` or `[Session]`. There is no way to mask part of that, so naming anything inside one masks all of it:

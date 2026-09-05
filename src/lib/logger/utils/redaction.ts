@@ -73,10 +73,11 @@ function normalizeParamsBag(
  * @param params Original params object
  * @param redactedKeys Keys to redact (supports nested object paths, array indexes, and quoted bracket keys)
  * @param redactFunction Custom redaction function (uses defaultRedactFunction if not provided)
- * @returns The params with every matched path masked. The bag itself is always a fresh
- *          plain object, so what the renderer can reach is exactly what the walk saw;
- *          copies below it are built only along the branches that lead to a mask, so
- *          every other value comes back by reference.
+ * @returns With no `redactedKeys` to act on, `params` itself - nothing was asked for, so
+ *          nothing is copied. Otherwise a fresh plain bag carrying exactly the keys the
+ *          walk saw, so the renderer cannot resolve one the walk could not: every matched
+ *          path masked, and every other value carried over by reference, since copies are
+ *          built only along the branches that lead to a mask.
  */
 export function applyRedaction(
   params: Record<string, unknown>,
@@ -155,13 +156,18 @@ export function applyRedaction(
   // `redactedParams` a structured sink reads. It does not mutate what it reads.
 
   // The params bag itself is normalized to a plain object, which the walk does not do
-  // for it. The walk treats anything with a non-plain prototype as a single *value* and
-  // masks it whole - right for a `URL` or a class instance sitting inside a payload,
-  // since that is how it renders, but wrong for the bag being walked. A class instance
-  // passed as `params` matched "a path points inside this" at the root and came back as
-  // the string `'***REDACTED***'`, against this function's declared record type: every
-  // template placeholder then rendered as the fallback, and a structured sink reading
-  // `entry.redactedParams` got a string where it expected its params.
+  // for it. The walk treats anything with a non-plain prototype as a single *value* -
+  // right for a `URL` or a class instance sitting inside a payload, since that is how it
+  // renders, but wrong for the bag being walked, whose entries are the params.
+  //
+  // This is now the only thing standing between a non-plain bag and an unmasked log line.
+  // It first went in when a class instance passed as `params` matched "a path points
+  // inside this" at the root and came back as the string `'***REDACTED***'`, against this
+  // function's declared record type. Since a path no longer addresses the root at all,
+  // the failure has changed sides and got quieter: an unnormalized class instance is now
+  // left *entirely alone*, so a key named in `redactedKeys` is never masked and the
+  // renderer prints it. Verified rather than assumed - the walk hands back
+  // `{ password: 'hunter2secret' }` for a `Session` bag redacted on `['password']`.
   //
   // Guarded because a property can be an accessor that throws, and copying abandons the
   // whole bag at the first one that does. That is the retry below, not a reason to give
