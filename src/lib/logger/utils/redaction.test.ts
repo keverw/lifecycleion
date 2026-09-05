@@ -464,6 +464,32 @@ describe('applyRedaction - non-identifier key names', () => {
     expect(result['userID']).toBe(7);
   });
 
+  test('a list whose length cannot be read fails closed instead of throwing', () => {
+    // The head read used to sit above the guards, so this threw out of `applyRedaction`
+    // and the caller needed a backstop of its own purely to catch it - which is how the
+    // fail-closed bag came to be written in two places.
+    const failures: string[] = [];
+    const hostile = new Proxy(['password'], {
+      get(target, property, receiver): unknown {
+        if (property === 'length') {
+          throw new Error('length is not for you');
+        }
+
+        return Reflect.get(target, property, receiver) as unknown;
+      },
+    });
+
+    const result = applyRedaction(
+      { password: 'hunter2secret' },
+      hostile,
+      undefined,
+      (_error, key) => failures.push(key),
+    );
+
+    expect(result).toEqual({});
+    expect(failures).toEqual(['<redactedKeys>']);
+  });
+
   test('the quoted form still works and still disambiguates a dotted key', () => {
     const quoted = applyRedaction({ user: { 'password-hash': 'hunter2' } }, [
       'user["password-hash"]',

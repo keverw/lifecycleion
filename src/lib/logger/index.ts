@@ -26,7 +26,7 @@ import type {
 import type { HandleLogOptions } from './internal-types';
 import { ArraySink } from './sinks/array';
 import { ConsoleSink } from './sinks/console';
-import { applyRedaction, REDACTION_FAILED_MARKER } from './utils/redaction';
+import { applyRedaction, markAllRedactionFailed } from './utils/redaction';
 import { prepareErrorObjectLog } from './utils/error-object';
 import { LoggerService } from './logger-service';
 
@@ -868,10 +868,9 @@ export class Logger extends EventEmitter {
     //
     // One reporter shared across all of them, so the several guards a single unreadable
     // list trips report once rather than once each - the same once-per-pass bound
-    // `createRedactionReporter` gives every other caller. It does not double up with
-    // `applyRedaction`'s own reporter either: everything in that function after the
-    // reporter is built is itself guarded, so a throw that reaches the backstop came from
-    // the unguarded length read above it, before anything could have been reported.
+    // `createRedactionReporter` gives every other caller. It is handed to `applyRedaction`
+    // as well, so that function's own reporter nests inside this one instead of carrying a
+    // second budget: the params are one pass, and one pass reports once.
     let backstopReporter: ReportRedactionFailure | null = null;
 
     const reportBackstop = (error: unknown, key: string): void => {
@@ -907,28 +906,28 @@ export class Logger extends EventEmitter {
           params,
           redactedKeys,
           this.redactFunction,
-          this.onRedactionError,
+          // One reporter for the whole params pass, rather than one here and another
+          // inside `applyRedaction`. Both are once-per-pass, so nesting them keeps that
+          // bound: the several guards a single unreadable list trips report once between
+          // them, which is what `createRedactionReporter` promises and what two
+          // independent budgets quietly broke.
+          reportBackstop,
         );
       } catch (error) {
+        // Belt and braces. `applyRedaction` guards every step it owns, its own head read
+        // included, so nothing is expected to arrive here - but a logger must not throw
+        // out of a `logger.info()`, and that guarantee should not rest on a promise made
+        // in another file.
         reportBackstop(error, '<redactedKeys>');
 
         // Never fall through to the raw params below: rendering the message from those
         // would print the very values redaction was asked to hide, to every sink.
         //
-        // Guarded, for the reason `applyRedaction`'s own `allMarked()` is: this runs only
-        // because something above it threw, and the way that happens is a `redactedKeys`
-        // that cannot be read - a `length` accessor that throws on a later read, a
-        // `Symbol.iterator` that refuses. Marking the keys reads the same list again, so
-        // an unguarded `map` here fails the same way and the throw escapes `handleLog`
-        // and the `logger.info()` call this backstop exists to protect. With nothing
-        // nameable to mark, an empty bag is the safe answer: it carries no original value.
-        try {
-          redactedParams = Object.fromEntries(
-            redactedKeys.map((key) => [key, REDACTION_FAILED_MARKER]),
-          );
-        } catch {
-          redactedParams = {};
-        }
+        // The same helper `applyRedaction` fails closed with, rather than a second copy
+        // of it here. Two spellings of "everything marked" meant a sink saw a different
+        // shape depending on which layer gave up, and the copy was written here only
+        // because this one is itself guarded - marking reads the unusable list again.
+        redactedParams = markAllRedactionFailed(redactedKeys);
       }
     }
 

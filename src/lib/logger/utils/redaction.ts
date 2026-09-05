@@ -66,6 +66,31 @@ function normalizeParamsBag(
 }
 
 /**
+ * Every redacted key marked as failed, used whenever nothing safer can be produced.
+ *
+ * Exported because two layers need the same answer: `applyRedaction` when the list is
+ * present but unusable, and any caller that has to fail a whole redacted log call closed.
+ * Written twice, the two drifted the moment either changed what "all marked" means, and a
+ * sink would then have seen a different shape depending on which layer gave up.
+ *
+ * Guarded throughout: this runs precisely because the input could not be trusted, so it
+ * must not assume `redactedKeys` is a usable array - a fail-closed branch that throws is
+ * not fail-closed. With nothing nameable to mark, an empty object is the safe answer,
+ * since it carries no original value.
+ */
+export function markAllRedactionFailed(
+  redactedKeys: unknown,
+): Record<string, unknown> {
+  try {
+    return Object.fromEntries(
+      (redactedKeys as string[]).map((key) => [key, REDACTION_FAILED_MARKER]),
+    );
+  } catch {
+    return {};
+  }
+}
+
+/**
  * Apply redaction to params based on redacted keys
  * Supports top-level keys and mixed object/array paths
  * (e.g., 'user.password', 'users[0].password', or 'users[0]["password-hash"]')
@@ -85,12 +110,32 @@ export function applyRedaction(
   redactFunction?: RedactFunction,
   onRedactionError?: RedactionErrorHandler,
 ): Record<string, unknown> {
-  // No redaction needed
-  if (!redactedKeys || redactedKeys.length === 0) {
-    return params;
+  const report = createRedactionReporter(onRedactionError);
+
+  // Read inside the guard, not before it. `redactedKeys` is typed `string[]`, but a
+  // JavaScript caller can hand over anything, and `length` is an ordinary property that a
+  // `Proxy` or an accessor can make throw. Reading it in the function's own head put the
+  // one throw this function could not catch in the one place nothing was watching, which
+  // is why `handleLog` carried a second copy of the fail-closed bag purely to catch it.
+  let requestedCount: number;
+
+  try {
+    if (!redactedKeys) {
+      return params;
+    }
+
+    requestedCount = redactedKeys.length;
+  } catch (error) {
+    report(error, '<redactedKeys>');
+
+    // Nothing nameable to mark, since the list is what could not be read.
+    return {};
   }
 
-  const report = createRedactionReporter(onRedactionError);
+  // No redaction needed
+  if (requestedCount === 0) {
+    return params;
+  }
 
   // Checked before anything reads the list: a non-array cannot name a key, so there is
   // no safe way to redact and no key to mark. Returning `params` would hand back the
@@ -100,25 +145,6 @@ export function applyRedaction(
 
     return {};
   }
-
-  /**
-   * Every redacted key marked, used whenever nothing safer can be produced.
-   *
-   * Guarded: this runs on the path that exists because the input could not be trusted,
-   * so it must not assume `redactedKeys` is a usable array. `redactedKeys` is typed
-   * `string[]`, but a JavaScript caller can pass anything, and a fail-closed branch that
-   * throws is not fail-closed. With nothing nameable to mark, an empty object is the
-   * safe answer - it carries no original value.
-   */
-  const allMarked = (): Record<string, unknown> => {
-    try {
-      return Object.fromEntries(
-        redactedKeys.map((key) => [key, REDACTION_FAILED_MARKER]),
-      );
-    } catch {
-      return {};
-    }
-  };
 
   // Parsed with the shared parser rather than a local `includes('.')` test, so an entry
   // addresses the same thing here as it does in `sensitiveFieldNames` and
@@ -131,7 +157,7 @@ export function applyRedaction(
       '<redactedKeys>',
     );
 
-    return allMarked();
+    return markAllRedactionFailed(redactedKeys);
   }
 
   // No copy is made, and none is probed for either.
@@ -261,7 +287,7 @@ export function applyRedaction(
   } catch {
     // `Object.keys` itself refused - a revoked `Proxy`, an `ownKeys` trap that throws -
     // so there is no key to read safely and nothing to mark but the redacted ones.
-    return allMarked();
+    return markAllRedactionFailed(redactedKeys);
   }
 
   // Never fall through with the originals: a sensitive key still holding its own value is
@@ -269,7 +295,7 @@ export function applyRedaction(
   const walked = walk(guarded);
 
   if (walked === null) {
-    return allMarked();
+    return markAllRedactionFailed(redactedKeys);
   }
 
   for (const key of unreadable) {
