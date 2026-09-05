@@ -461,6 +461,23 @@ logger.info('User login attempt', {
 
 A bare name therefore addresses a top-level key only: `redactedKeys: ['password']` masks `params.password` and leaves `params.user.password` rendered. Name the path to reach it.
 
+Redaction addresses **locations, not values**. If one object is reachable by two paths, masking one leaves the other in the clear, because only one of them was named:
+
+```typescript
+const account = { apiKey: 'sk-live-abcdefghijkl' };
+
+logger.info('sync', {
+  params: { account, snapshot: { account } },
+  redactedKeys: ['account.apiKey'],
+});
+// redactedParams.account.apiKey           → 's******************l'
+// redactedParams.snapshot.account.apiKey  → 'sk-live-abcdefghijkl'
+```
+
+Both entries are the same object, so the second one is the first one unmasked. The rendered message is unaffected unless it interpolates the second path, but a structured sink walks the whole bag and reaches it. Name every path you want masked - here, `['account.apiKey', 'snapshot.account.apiKey']`.
+
+This falls out of what a path means and is not an oversight to work around. Masking by value instead would mean that naming one key silently rewrote a value somewhere else in the payload that you never mentioned, which is the opposite of the guarantee that redacted output differs from unredacted output only where a value was masked. It also cannot be done reliably in one pass, since whether the alias is masked would depend on which of the two paths the walk happened to reach first.
+
 An unquoted path segment is a run of name characters - letters, digits, combining marks, `_`, `$`, `@` and `-` - so ordinary key names need no quoting: `user.password-hash` and `users[0].api-key` both work. A key that contains anything else, including a delimiter, whitespace, or any other punctuation, needs the quoted bracket form, which is the only way to disambiguate it: `user["a.b"]`, `user["my key"]`, `user["a+b"]`. An entry the grammar rejects, such as the unsupported wildcard form or a trailing dot, redacts **nothing** and does not warn.
 
 [`errorToString`](./error-to-string.md#additional-info--sensitive-fields) uses this same syntax for the `sensitiveFieldNames` list it reads off an error, so one mental model covers both. The two agree on bare names, dotted paths, array indexes, and quoted bracket keys; they differ only in what happens when the list itself is unusable, where `errorToString` drops `additionalInfo` wholesale.
