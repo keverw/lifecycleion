@@ -276,6 +276,43 @@ describe('NamedPipeSink', () => {
     await sink.close();
   });
 
+  test('a queued write keeps the params it was given', async () => {
+    // The queue is drained after initialization, and `entry.redactedParams` is not a
+    // snapshot - it is the caller's own bag, or shares every subtree that held nothing
+    // redacted - so rendering at flush time wrote whatever the caller had done to it
+    // during the outage.
+    const pipePath = `${tmpDir.path}/queue-snapshot.pipe`;
+    await createNamedPipe(pipePath);
+
+    const reader = startPipeReader(pipePath);
+
+    const sink = new NamedPipeSink({ pipePath, jsonFormat: true });
+
+    const params: Record<string, unknown> = { foo: 'bar' };
+
+    sink.write({
+      timestamp: Date.now(),
+      type: 'info',
+      template: 'msg',
+      message: 'msg',
+      params,
+      redactedParams: params,
+    });
+
+    // Synchronously after `write`, so the queue cannot have been drained yet.
+    params['password'] = 'hunter2secret';
+
+    await new Promise((resolve) => setTimeout(resolve, 200));
+
+    const allData = reader.data.join('');
+
+    expect(allData).toContain('"foo":"bar"');
+    expect(allData).not.toContain('hunter2secret');
+
+    reader.stop();
+    await sink.close();
+  });
+
   test('should handle multiple concurrent writes', async () => {
     const pipePath = `${tmpDir.path}/concurrent.pipe`;
     await createNamedPipe(pipePath);

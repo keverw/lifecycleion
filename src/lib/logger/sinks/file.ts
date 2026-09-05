@@ -49,6 +49,19 @@ class FileSinkError extends Error {
 interface QueuedEntry {
   entry: LogEntry;
   attempts: number;
+  /**
+   * The line to write, rendered while `write` still held the caller's stack.
+   *
+   * `entry.redactedParams` is not a snapshot - it is the caller's own bag, or shares
+   * every subtree that held nothing redacted - so serializing it after an `await` writes
+   * whatever the caller has done to it since. A bag reused across calls then wrote a
+   * secret added *after* the log call under a key that was named in `redactedKeys`, and
+   * wrote params that disagreed with the message rendered beside them.
+   *
+   * `undefined` when the render threw, which leaves it to happen again on the write path
+   * where the retry and `onError` handling already live.
+   */
+  formatted: string | undefined;
 }
 
 /**
@@ -109,8 +122,21 @@ export class FileSink implements LogSink {
       }
     }
 
+    // Rendered here rather than on the write path, which runs after `setupLogFile` and
+    // `rotateIfNeeded` have been awaited: by then the caller has had the chance to mutate
+    // the bag `entry.redactedParams` points at, since redaction no longer copies it.
+    let formatted: string | undefined;
+
+    try {
+      formatted = this.formatEntry(entry);
+    } catch {
+      // Left for `writeEntry` to hit again, so a value that cannot be serialized fails
+      // exactly where it did before, with the retry and `onError` handling around it.
+      formatted = undefined;
+    }
+
     // Add to queue with retry tracking
-    this.writeQueue.push({ entry, attempts: 0 });
+    this.writeQueue.push({ entry, attempts: 0, formatted });
 
     // Process queue if initialized
     if (this.isInitialized) {
@@ -297,7 +323,7 @@ export class FileSink implements LogSink {
         }
 
         try {
-          await this.writeEntry(queuedEntry.entry);
+          await this.writeEntry(queuedEntry.entry, queuedEntry.formatted);
           this.consecutiveFailures = 0;
           this.totalEntriesWritten++;
         } catch (error) {
@@ -341,7 +367,10 @@ export class FileSink implements LogSink {
    * Write a single entry to the file
    * If stream is broken, it will be recreated on next attempt
    */
-  private async writeEntry(entry: LogEntry): Promise<void> {
+  private async writeEntry(
+    entry: LogEntry,
+    preformatted?: string,
+  ): Promise<void> {
     if (this.closed) {
       throw new FileSinkError('Cannot write to closed sink');
     }
@@ -357,8 +386,8 @@ export class FileSink implements LogSink {
     // Check rotation before writing (handles date change and size limit)
     await this.rotateIfNeeded();
 
-    // Format the entry
-    const messageToWrite = this.formatEntry(entry);
+    // Format the entry - already done in `write`, unless rendering threw there.
+    const messageToWrite = preformatted ?? this.formatEntry(entry);
     const messageBytes = Buffer.byteLength(messageToWrite, 'utf8');
 
     // Check if writing would exceed limit

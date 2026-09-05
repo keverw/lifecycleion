@@ -148,6 +148,49 @@ describe('FileSink', () => {
     await sink.close();
   });
 
+  test('writes the params as they were at write() time', async () => {
+    // `entry.redactedParams` is not a snapshot - it is the caller's own bag, or shares
+    // every subtree that held nothing redacted - and the queue is drained after
+    // `setupLogFile` and `rotateIfNeeded` have been awaited. Serializing it there wrote
+    // whatever the caller had done to the bag since, so a bag reused across calls could
+    // put a value into a line that was rendered without it.
+    const sink = new FileSink({
+      logDir: tmpDir.path,
+      basename: 'snapshot-test',
+      maxSizeMB: 1,
+      jsonFormat: true,
+    });
+
+    const params: Record<string, unknown> = { foo: 'bar' };
+
+    sink.write({
+      timestamp: Date.now(),
+      type: 'info',
+      template: 'msg',
+      message: 'msg',
+      params,
+      redactedParams: params,
+    });
+
+    // Synchronously after `write`, so the queue cannot have been drained yet.
+    params['password'] = 'hunter2secret';
+    params['foo'] = 'mutated';
+
+    await sink.flush();
+
+    const currentDate = new Date().toISOString().slice(0, 10);
+    const content = await fsPromises.readFile(
+      `${tmpDir.path}/snapshot-test-${currentDate}.log`,
+      'utf8',
+    );
+
+    expect(content).not.toContain('hunter2secret');
+    expect(content).not.toContain('mutated');
+    expect(JSON.parse(content.trim()).params).toEqual({ foo: 'bar' });
+
+    await sink.close();
+  });
+
   test('should rotate log file when size exceeds maxSizeMB', async () => {
     // Create a sink with a very small max size (1 KB)
     const sink = new FileSink({

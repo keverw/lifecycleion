@@ -29,6 +29,12 @@ export type ReconnectStatus =
   | { success: false; reason: 'already_reconnecting' }
   | { success: false; reason: 'error'; error: Error };
 
+interface QueuedPipeEntry {
+  entry: LogEntry;
+  /** The rendered line, or `undefined` when rendering it threw at `write` time. */
+  formatted: string | undefined;
+}
+
 /**
  * NamedPipeSink writes logs to a named pipe (FIFO)
  * Only supported on Linux and macOS
@@ -43,7 +49,15 @@ export class NamedPipeSink implements LogSink {
   ) => void;
   private formatter?: (entry: LogEntry) => string;
   private pipeStream?: fs.WriteStream;
-  private writeQueue: LogEntry[] = [];
+  /**
+   * Entries waiting for the pipe, each with the line already rendered.
+   *
+   * Rendered at `write` time rather than at flush time: `entry.redactedParams` is not a
+   * snapshot - it is the caller's own bag, or shares every subtree that held nothing
+   * redacted - so serializing it after the outage writes whatever the caller has done to
+   * it since, including a secret added under a key that was named in `redactedKeys`.
+   */
+  private writeQueue: QueuedPipeEntry[] = [];
   private isInitialized = false;
   private _isReconnecting = false;
   private initPromise: Promise<void>;
@@ -68,7 +82,17 @@ export class NamedPipeSink implements LogSink {
 
     // Queue entry if not initialized
     if (!this.isInitialized) {
-      this.writeQueue.push(entry);
+      let formatted: string | undefined;
+
+      try {
+        formatted = this.formatEntry(entry);
+      } catch {
+        // Left for the flush to hit again, where `handleError` already reports it.
+        formatted = undefined;
+      }
+
+      this.writeQueue.push({ entry, formatted });
+
       return;
     }
 
@@ -227,9 +251,9 @@ export class NamedPipeSink implements LogSink {
    */
   private processQueue(): void {
     while (this.writeQueue.length > 0 && !this.closed) {
-      const entry = this.writeQueue.shift();
-      if (entry) {
-        this.writeEntry(entry);
+      const queued = this.writeQueue.shift();
+      if (queued) {
+        this.writeEntry(queued.entry, queued.formatted);
       }
     }
   }
@@ -237,7 +261,7 @@ export class NamedPipeSink implements LogSink {
   /**
    * Write a single entry
    */
-  private writeEntry(entry: LogEntry): void {
+  private writeEntry(entry: LogEntry, preformatted?: string): void {
     if (this.closed) {
       return;
     }
@@ -248,7 +272,8 @@ export class NamedPipeSink implements LogSink {
     }
 
     try {
-      const messageToWrite = this.formatEntry(entry);
+      // Already rendered when the entry was queued, unless that render threw.
+      const messageToWrite = preformatted ?? this.formatEntry(entry);
 
       // Write to pipe with backpressure handling
       if (!this.pipeStream.write(messageToWrite)) {
