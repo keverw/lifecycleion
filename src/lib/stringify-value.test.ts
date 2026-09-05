@@ -804,6 +804,68 @@ describe('stringifyValue - depth', () => {
   });
 });
 
+describe('redactValue - a subtree no path addresses', () => {
+  // Nothing below such a subtree can match, so the walk's whole answer for it is the
+  // subtree that went in - which it used to reach by rebuilding every object and array
+  // inside it and discarding the rebuild once nothing had matched. It is skipped now, but
+  // only after ruling out the two things that make handing back the original wrong.
+
+  test('comes back as the very same object', () => {
+    const payload = { rows: [{ id: 1 }, { id: 2 }] };
+    const result = redactValue(
+      { password: SECRET, payload },
+      { redactedKeys: ['password'] },
+    ) as Record<string, unknown>;
+
+    expect(result['payload']).toBe(payload);
+    expect(result['password']).not.toBe(SECRET);
+  });
+
+  test('is still walked when it points back at an ancestor', () => {
+    // The one case the skip must not take: the ancestor is being rebuilt, so passing the
+    // original through would carry the unmasked version into the result beside the mask.
+    const bag: Record<string, unknown> = { password: SECRET, payload: {} };
+
+    (bag['payload'] as Record<string, unknown>)['self'] = bag;
+
+    const result = redactValue(bag, {
+      redactedKeys: ['password'],
+    }) as Record<string, unknown>;
+    const payload = result['payload'] as Record<string, unknown>;
+
+    expect(payload['self']).toBe('***REDACTION FAILED***');
+    expect(result['password']).not.toBe(SECRET);
+  });
+
+  test('is still walked when one of its values cannot be read', () => {
+    const other: Record<string, unknown> = {};
+
+    Object.defineProperty(other, 'boom', {
+      enumerable: true,
+      get() {
+        throw new Error('nope');
+      },
+    });
+
+    const result = redactValue(
+      { password: SECRET, other },
+      { redactedKeys: ['password'], onRedactionError: () => {} },
+    ) as Record<string, unknown>;
+
+    expect(result['other']).toBe('***REDACTION FAILED***');
+    expect(result['password']).not.toBe(SECRET);
+  });
+
+  test('a path reaching into it still masks what it names', () => {
+    const result = redactValue(
+      { payload: { rows: [{ token: 'abcdefghijkl' }] } },
+      { redactedKeys: ['payload.rows[0].token'] },
+    ) as Record<string, unknown>;
+
+    expect(JSON.stringify(result)).not.toContain('abcdefghijkl');
+  });
+});
+
 describe('redactValue - redaction changes only what it masks', () => {
   // The rule the rest of this follows: redacted output must differ from unredacted output
   // only where a value was masked. Redaction decides what to hide, never how the value

@@ -118,6 +118,21 @@ function findPathInto(paths: RedactPath[], path: string[]): string | undefined {
     return undefined;
   }
 
+  return pathPointingBelow(paths, path)?.entry;
+}
+
+/**
+ * The first entry that addresses something strictly below `path`, if any.
+ *
+ * The prefix test on its own, without {@link findPathInto}'s rule about the root. The two
+ * questions are different and only one of them excludes the root: "should this value be
+ * masked whole" is meaningless for the value the paths are rooted at, while "can anything
+ * below here match" is exactly what has to be asked of it before walking into it.
+ */
+function pathPointingBelow(
+  paths: RedactPath[],
+  path: string[],
+): RedactPath | undefined {
   return paths.find((candidate) => {
     if (candidate.parts.length <= path.length) {
       return false;
@@ -130,7 +145,107 @@ function findPathInto(paths: RedactPath[], path: string[]): string | undefined {
     }
 
     return true;
-  })?.entry;
+  });
+}
+
+/**
+ * Whether a subtree that no path addresses still has to be walked in full.
+ *
+ * A container with no candidate beneath it masks nothing, so the walk's whole output for
+ * it is the value that went in - which it reaches by rebuilding every object and array
+ * below it and then throwing all of that away when nothing turns out to have matched. On
+ * a payload of any size that is the dominant cost of redacting, and it is spent to learn
+ * something the parsed paths already knew.
+ *
+ * It cannot simply be skipped, though, and this is what the skip has to rule out first:
+ *
+ * - **A back-edge into an ancestor.** Handing back the original is safe for a value
+ *   nothing points out of, but a subtree holding a reference *up* to an ancestor that is
+ *   being rebuilt would carry the unmasked original into the result, where a structured
+ *   sink reads it. That is the one case {@link REDACTION_FAILED_MARKER} exists for here.
+ * - **A read that throws.** The walk marks a container whose keys or elements cannot be
+ *   read, and degrades per entry rather than per payload. Rather than reproduce any of
+ *   that, a failed read here just says "walk it properly".
+ *
+ * Both answers are conservative in the same direction: anything unusual falls back to the
+ * full walk, which is unchanged and still decides the output. The scan only ever removes
+ * work that would have produced the input.
+ *
+ * Traversal mirrors the walk's exactly - plain containers only, own enumerable keys, one
+ * read per element - so it cannot conclude "nothing below" about a place the walk would
+ * have entered. On the fallback path a value is read twice, once here and once by the
+ * walk; only the walk's read reaches the output, and nothing in a subtree with no
+ * candidate is masked either way, so the second read cannot change what is emitted.
+ */
+function needsFullWalk(value: unknown, seen: WeakSet<object>): boolean {
+  if (!isPlainContainer(value)) {
+    return false;
+  }
+
+  if (seen.has(value)) {
+    return true;
+  }
+
+  if (Array.isArray(value)) {
+    let length: number;
+
+    try {
+      length = value.length;
+    } catch {
+      return true;
+    }
+
+    for (let index = 0; index < length; index++) {
+      let element: unknown;
+
+      try {
+        element = value[index];
+      } catch {
+        return true;
+      }
+
+      if (needsFullWalk(element, seen)) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  let keys: string[];
+
+  try {
+    keys = Object.keys(value);
+  } catch {
+    return true;
+  }
+
+  for (const key of keys) {
+    let entry: unknown;
+
+    try {
+      entry = (value as Record<string, unknown>)[key];
+    } catch {
+      return true;
+    }
+
+    if (needsFullWalk(entry, seen)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+/** {@link needsFullWalk}, with a payload too deep to scan counting as "walk it". */
+function mustWalkInFull(value: unknown, seen: WeakSet<object>): boolean {
+  try {
+    return needsFullWalk(value, seen);
+  } catch {
+    // A `RangeError` from a payload nested past the stack, and nothing else: every read
+    // the scan makes is already guarded.
+    return true;
+  }
 }
 
 /**
@@ -259,6 +374,15 @@ function redactPathsInner(
 
       return REDACTION_FAILED_MARKER;
     }
+  }
+
+  // Nothing below can match, so the walk's answer for this whole subtree is the subtree
+  // itself - reached, without this, by rebuilding all of it and discarding the rebuild.
+  if (
+    pathPointingBelow(paths, path) === undefined &&
+    !mustWalkInFull(value, seen)
+  ) {
+    return UNCHANGED;
   }
 
   if (seen.has(value)) {
