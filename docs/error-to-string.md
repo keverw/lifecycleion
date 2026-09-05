@@ -151,7 +151,7 @@ errorToString(err, 80, { redactFunction: (key) => `[redacted ${key}]` });
 
 Naming a plain object or an array masks **each value inside it** and keeps the shape, rather than replacing the whole thing with one mask.
 
-Any **other** value whose string form is produced rather than being the value itself - an `Error`, a `Date`, a `URL`, a `Map`, a class instance, a function, a symbol - has no shape worth rebuilding, so it is replaced outright with `***REDACTED***`. It is deliberately not stringified and partially masked: the default keeps a value's first and last characters, and for a `URL` or a custom `toString` that is exactly where a secret tends to sit.
+Any **other** value whose string form is produced rather than being the value itself - an `Error`, a `Date`, a `URL`, a `Map`, a class instance, a function, a symbol, and `null` or `undefined` - has no shape worth rebuilding, so it is replaced outright with `***REDACTED***`. It is deliberately not stringified and partially masked: the default keeps a value's first and last characters, and for a `URL` or a custom `toString` that is exactly where a secret tends to sit.
 
 Return `null` to defer to the default for that value - so you can special-case a few keys without reproducing the default masking for the rest:
 
@@ -162,7 +162,7 @@ errorToString(err, 80, {
 // apiKey renders ***, every other sensitive field gets the default masking
 ```
 
-To render a literal null, return the string `'null'`. Returning **nothing** is not a deferral: `undefined` is used literally, which drops the value.
+To render a literal null, return the string `'null'`. Returning **nothing** defers as well: `undefined` is read exactly as `null`, so a function that handles a few keys and falls off the end for the rest masks them by default.
 
 The function is handed the key exactly as you wrote it in `sensitiveFieldNames` (`user.password`, not the leaf `password`) and the value already stringified, which is what the logger passes for the same field - so the same function genuinely serves both, and a mutating function cannot reach into your error object.
 

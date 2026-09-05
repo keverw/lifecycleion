@@ -81,21 +81,22 @@ export interface LogEntry {
    * `params` with every configured `redactedKeys` path masked, and nothing else changed.
    * Present only when redaction is configured.
    *
-   * **Not an independent copy, and not a snapshot.** Copies are built only along the
-   * branches that lead to a mask - which is what keeps a `Date`, an `Error`, or a `URL`
-   * logged beside a secret from being flattened - so everything else is the caller's own
-   * object, by reference. When no path matched anything, this *is* `params`:
-   * `entry.redactedParams === entry.params` holds.
+   * **Not an independent copy, and not a snapshot.** The bag itself is always a fresh
+   * object - what a sink can read is exactly what redaction walked - but copies below it
+   * are built only along the branches that lead to a mask, which is what keeps a `Date`,
+   * an `Error`, or a `URL` logged beside a secret from being flattened. Everything the
+   * walk did not touch is therefore the caller's own object, by reference.
    *
    * Two consequences for a sink:
    *
-   * - **Do not write into it.** A sink or transformer that normalizes a value in place
-   *   writes into the caller's own object, and so does one that adds a top-level field
-   *   when nothing matched. Build your own object instead.
+   * - **Do not write into it.** Adding or replacing a top-level field is safe, since the
+   *   bag belongs to the entry, but a sink or transformer that normalizes a value *in
+   *   place* writes into the caller's own object. Build your own instead.
    * - **Read it before you await.** A caller reusing one params object across log calls
    *   is ordinary, and an unmasked subtree reflects whatever that object holds at the
    *   moment you read it, not at the moment the entry was created. Serialize
-   *   synchronously, or take your own copy first.
+   *   synchronously, or take your own copy first - `FileSink` and `NamedPipeSink` render
+   *   the line in `write()` and queue the string for this reason.
    *
    * The masked values themselves are fresh strings and are never affected by either.
    */

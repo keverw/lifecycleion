@@ -484,7 +484,7 @@ logger.info('API call', {
 
 Naming a plain object or an array in `redactedKeys` masks **each value inside it** and keeps the shape, so a structured sink still receives an object or an array rather than one masked string.
 
-Any **other** value whose string form is produced rather than being the value itself - an `Error`, a `Date`, a `URL`, a `Map`, a class instance, a function, a symbol - has no shape worth rebuilding and is replaced outright with `***REDACTED***`. It is deliberately not stringified and partially masked: the default keeps a value's first and last characters, and for a `URL` or a custom `toString` that is exactly where a secret tends to sit. A string shorter than 8 characters is replaced the same way, since a proportional mask of something that short hides almost nothing.
+Any **other** value whose string form is produced rather than being the value itself - an `Error`, a `Date`, a `URL`, a `Map`, a class instance, a function, a symbol, and `null` or `undefined` - has no shape worth rebuilding and is replaced outright with `***REDACTED***`. It is deliberately not stringified and partially masked: the default keeps a value's first and last characters, and for a `URL` or a custom `toString` that is exactly where a secret tends to sit. A string shorter than 8 characters is replaced the same way, since a proportional mask of something that short hides almost nothing.
 
 Return `null` to defer to the default masking for that value, so you can special-case a few keys without reproducing the default for the rest:
 
@@ -496,7 +496,7 @@ const logger = new Logger({
 // apiKey → [hidden]; every other redacted key gets the default masking
 ```
 
-To render a literal null, return the string `'null'`. Returning **nothing** is not a deferral: `undefined` is used literally, which drops the value.
+To render a literal null, return the string `'null'`. Returning **nothing** defers as well: `undefined` is read exactly as `null`, so a function that handles a few keys and falls off the end for the rest masks them by default.
 
 The same function and the same deferral rule work with [`errorToString`](./error-to-string.md#choosing-how-values-are-masked), which shares this default and passes the same key and stringified value.
 
@@ -588,13 +588,13 @@ Your function is handed the key and the value **already stringified** - it is al
 other returns are control signals rather than replacement values, ways of saying "you do
 the masking":
 
-| return            | meaning                                              |
-| ----------------- | ---------------------------------------------------- |
-| a `string`        | the replacement text, used as-is                     |
-| `null`            | use the default masking                              |
-| a `number`        | use the default masking at that percent, e.g. `70`   |
-| a masking request | the library's masking with your settings, see below  |
-| `undefined`       | drop the value, which is what returning nothing does |
+| return            | meaning                                             |
+| ----------------- | --------------------------------------------------- |
+| a `string`        | the replacement text, used as-is                    |
+| `null`            | use the default masking                             |
+| a `number`        | use the default masking at that percent, e.g. `70`  |
+| a masking request | the library's masking with your settings, see below |
+| `undefined`       | use the default masking, exactly as `null` does     |
 
 ```typescript
 type RedactFunction = (keyName: string, value: string) => RedactFunctionResult;
@@ -671,7 +671,7 @@ Masking never returns the original. A request that would hide nothing - a percen
 
 The default masks 90% of a value, so a little survives at each end and the same secret can be correlated across log lines without being readable. A short string (under 8 characters) is replaced with `***REDACTED***` outright, since a proportional mask of something that short hides almost nothing.
 
-Partial masking applies **only to values that were genuinely strings**. A number, an object, a function, or a symbol reaches the masker as a _produced_ string, and proportional masking keeps its ends - which for a card number is the BIN prefix and last four, and for a `URL` is the query string. Those are replaced with `***REDACTED***`. Return a masking request that **names a setting** - `{ percent: 60 }` - to opt a specific value back into partial masking, or a number, which is the same request spelled shorter. That is the deliberate choice the opt-in asks for, which is why an object that does not name a setting - `{}` included - does not count as one: it requests the default, and the default is the replacement.
+Partial masking applies **only to values that were genuinely strings**. A number, an object, a function, a symbol, and `null` or `undefined` all reach the masker as a _produced_ string, and proportional masking keeps its ends - which for a card number is the BIN prefix and last four, and for a `URL` is the query string. Those are replaced with `***REDACTED***`. This is why deferring on an `undefined` value gives `***REDACTED***` rather than a partial mask of the `[undefined]` text your function was shown: the default is handed the original value, not its rendering. Return a masking request that **names a setting** - `{ percent: 60 }` - to opt a specific value back into partial masking, or a number, which is the same request spelled shorter. That is the deliberate choice the opt-in asks for, which is why an object that does not name a setting - `{}` included - does not count as one: it requests the default, and the default is the replacement.
 
 ### Tags for Categorization and Filtering
 
@@ -1748,10 +1748,10 @@ const safe = entry.redactedParams ?? entry.params;
 
 `redactedParams` differs from `params` only where a value was masked. Everything else is the value the caller passed, by reference - a `Date` is still that `Date`, an `Error` still carries its `message` and `stack` - so a structured sink can read it without losing fidelity to redaction.
 
-**That reference sharing is literal, and it is not a copy or a snapshot.** Copies are built only along the branches that lead to a mask; when no `redactedKeys` path matched anything, `entry.redactedParams === entry.params` is the same object. Two rules follow for a sink or an `arrayLogTransformer`:
+**That reference sharing is literal, and it is not a copy or a snapshot.** The bag itself is always a fresh object - that is what keeps what a sink can read equal to what redaction walked - but copies below it are built only along the branches that lead to a mask, so every value the walk did not touch is the caller's own. Two rules follow for a sink or an `arrayLogTransformer`:
 
-- **Do not write into `redactedParams`.** Normalizing a value in place writes into the caller's own object, and so does adding a top-level field whenever nothing matched, since that case hands back `params` itself. Build your own object instead - `{ ...entry.redactedParams }` for a shallow change, a deep copy for anything below the top level.
-- **Read it before you `await`.** An unmasked subtree reflects whatever the caller's object holds at the moment you read it, not at the moment the entry was created, and reusing one params object across log calls is ordinary. Serialize synchronously, or take your own copy first.
+- **Do not write into `redactedParams`.** Adding or replacing a top-level field is safe, since that bag belongs to the entry, but normalizing a value _in place_ writes into the caller's own object. Build your own instead - `{ ...entry.redactedParams }` for a shallow change, a deep copy for anything below the top level.
+- **Read it before you `await`.** An unmasked subtree reflects whatever the caller's object holds at the moment you read it, not at the moment the entry was created, and reusing one params object across log calls is ordinary. Serialize synchronously, or take your own copy first. `FileSink` and `NamedPipeSink` both do the former: they render the line in `write()` and queue the string, not the entry.
 
 The masked values themselves are fresh strings and are affected by neither.
 

@@ -52,7 +52,8 @@ interface StringifyValueOptions {
 /**
  * A string is the replacement. The rest are control signals: `null` for the default
  * masking, a number for the default at that percent, a `RedactMaskConfig` for the
- * library's masking with your settings, and `undefined` to drop the value.
+ * library's masking with your settings. `undefined` defers to the default too, so a
+ * function that returns nothing for a key it does not handle still masks it.
  */
 type RedactFunctionResult =
   string | number | RedactMaskConfig | null | undefined;
@@ -107,7 +108,11 @@ A plain object or array renders as JSON, so its contents are readable and an arr
 | `Map`, `Set`        | `[Map]`, `[Set]` - never walked, so nesting one inside another is a single leaf |
 | class instance      | `[ClassName]`                                                                   |
 
-Anything with a string form of its own keeps it. A class instance that defines no `toString` inherits `Object.prototype`'s, which renders `[object Object]` and names nothing, so it renders as `[ClassName]` instead - enough to identify what was passed without dumping fields the caller never asked to print.
+Anything that is not walked keeps a string form of its own. A class instance that defines no `toString` inherits `Object.prototype`'s, which renders `[object Object]` and names nothing, so it renders as `[ClassName]` instead - enough to identify what was passed without dumping fields the caller never asked to print.
+
+Being walked comes first, so a **plain object or array is rendered as JSON even when it defines its own `toString`**, and that method is never called: `{ toString: () => 'printable', v: 1 }` renders `{"toString":"[Function: toString]","v":1}`. A plain container's entries are the whole of what it holds, they are what `redactedKeys` addresses, and a `toString` on one is caller code on the rendering path for the same reasons a `toJSON` is not called. Give the value a prototype - a class instance, a `URL` - to have its string form used instead.
+
+`undefined` renders as `[undefined]`, named the way everything else with no JSON form is. Spelling it out quoted to `"undefined"` inside a container, which is indistinguishable from a string holding that text - a distinction redaction keeps, since it masks a genuine string in part and replaces a derived value whole. `null` has a JSON form and renders unquoted, so it needs no such treatment. A `redactFunction` is handed the same spelling, because each leaf is stringified by this renderer before the function sees it.
 
 A cycle is cut where it closes - `{"a":1,"self":"[circular]"}` - rather than losing the object around it, and an object referenced twice side by side is not a cycle and renders in full both times. A `BigInt` renders as text. One awkward value never costs you the rest of the render.
 
