@@ -29,7 +29,9 @@ export { REDACTION_FAILED_MARKER } from '../../internal/default-redact-function'
  * @param params Original params object
  * @param redactedKeys Keys to redact (supports nested object paths, array indexes, and quoted bracket keys)
  * @param redactFunction Custom redaction function (uses defaultRedactFunction if not provided)
- * @returns New object with redacted values
+ * @returns The params with every matched path masked. Copies are built only along the
+ *          branches that lead to a mask, so anything else comes back by reference - and
+ *          when nothing matched, `params` itself.
  */
 export function applyRedaction(
   params: Record<string, unknown>,

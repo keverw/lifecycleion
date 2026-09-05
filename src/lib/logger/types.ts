@@ -77,6 +77,24 @@ export interface LogEntry {
   /**
    * `params` with every configured `redactedKeys` path masked, and nothing else changed.
    * Present only when redaction is configured.
+   *
+   * **Not an independent copy, and not a snapshot.** Copies are built only along the
+   * branches that lead to a mask - which is what keeps a `Date`, an `Error`, or a `URL`
+   * logged beside a secret from being flattened - so everything else is the caller's own
+   * object, by reference. When no path matched anything, this *is* `params`:
+   * `entry.redactedParams === entry.params` holds.
+   *
+   * Two consequences for a sink:
+   *
+   * - **Do not write into it.** A sink or transformer that normalizes a value in place
+   *   writes into the caller's own object, and so does one that adds a top-level field
+   *   when nothing matched. Build your own object instead.
+   * - **Read it before you await.** A caller reusing one params object across log calls
+   *   is ordinary, and an unmasked subtree reflects whatever that object holds at the
+   *   moment you read it, not at the moment the entry was created. Serialize
+   *   synchronously, or take your own copy first.
+   *
+   * The masked values themselves are fresh strings and are never affected by either.
    */
   redactedParams?: Record<string, unknown>; // Present when redaction is configured: { userID: 456, password: '***' }
   redactedKeys?: string[]; // List of keys that were redacted (e.g., ['password', 'user.apiKey'])

@@ -423,7 +423,7 @@ logger.info('User login attempt', {
 
 // The params object will have nested values redacted:
 // user.password → '********3'
-// credentials.apiKey → 'k*************5'
+// credentials.apiKey → 's****************0'
 // personalInfo.ssn → '1*********9'
 ```
 
@@ -1729,7 +1729,7 @@ interface LogEntry {
 
 - **`message`**: Contains the interpolated template. When `redactedKeys` are configured, the message is rendered from `redactedParams`. Otherwise it is rendered from the original `params`.
 - **`params`**: Raw unredacted parameters - the caller's own object, by reference. **This is an escape hatch, and it holds the secrets.** See below.
-- **`redactedParams`**: Parameters with sensitive values masked according to `redactedKeys`. Present only when redaction is configured
+- **`redactedParams`**: Parameters with sensitive values masked according to `redactedKeys`. Present only when redaction is configured. **Not an independent copy** - see below.
 - **`redactedKeys`**: List of parameter keys that were redacted (useful for auditing and metadata)
 
 ### Security Note
@@ -1747,6 +1747,13 @@ const safe = entry.redactedParams ?? entry.params;
 `redactedParams` is `undefined` when no `redactedKeys` were configured, which is why the fallback is needed; when redaction _was_ configured, this always prefers the masked view. Reaching for `entry.params` on its own is how a redacted log line still ends up shipping the secret.
 
 `redactedParams` differs from `params` only where a value was masked. Everything else is the value the caller passed, by reference - a `Date` is still that `Date`, an `Error` still carries its `message` and `stack` - so a structured sink can read it without losing fidelity to redaction.
+
+**That reference sharing is literal, and it is not a copy or a snapshot.** Copies are built only along the branches that lead to a mask; when no `redactedKeys` path matched anything, `entry.redactedParams === entry.params` is the same object. Two rules follow for a sink or an `arrayLogTransformer`:
+
+- **Do not write into `redactedParams`.** Normalizing a value in place writes into the caller's own object, and so does adding a top-level field whenever nothing matched, since that case hands back `params` itself. Build your own object instead - `{ ...entry.redactedParams }` for a shallow change, a deep copy for anything below the top level.
+- **Read it before you `await`.** An unmasked subtree reflects whatever the caller's object holds at the moment you read it, not at the moment the entry was created, and reusing one params object across log calls is ordinary. Serialize synchronously, or take your own copy first.
+
+The masked values themselves are fresh strings and are affected by neither.
 
 ## Testing
 
