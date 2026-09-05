@@ -974,7 +974,28 @@ async function streamResponseBody(
 
       try {
         canContinue = writable.write(chunk, (error) => {
-          if (error || isSettled) {
+          if (isSettled) {
+            return;
+          }
+
+          // `write`'s callback is a failure channel in its own right, as `WritableLike`
+          // says: a write fails "either through the callback given to `write`/`end` or as
+          // an `'error'` event". Dropping the error here was the one hole left in the set
+          // of signals this function already honours - `end`'s callback and `errored` -
+          // and it settled a truncated download as a success for a writable that reports
+          // only this way. A real Node stream also emits `'error'`, and `settle` is
+          // idempotent, so the two cannot both take effect.
+          //
+          // Absorbed first, exactly as the `write`-throw and `end`-callback paths do:
+          // `settle` runs `cleanup`, which detaches the `'error'` listener, so a real
+          // stream's event arriving on the next tick would otherwise be uncaught.
+          if (error) {
+            absorbPendingWritableError();
+            settle({
+              code: 'stream_write_error',
+              cause: normalizeError(error),
+            });
+
             return;
           }
 

@@ -2443,6 +2443,60 @@ describe('NodeAdapter.send() — unit branches without server', () => {
     }
   });
 
+  test('a write that fails only through its callback is a stream_write_error', async () => {
+    // The third way a writable can report a failed write, alongside `end`'s callback and
+    // `errored`: the callback handed to `write` itself, which `WritableLike` names as a
+    // failure channel. Dropping it settled a truncated download as a success.
+    const req = new MockClientRequest();
+    const res = new MockIncomingMessage(200, {
+      'content-type': 'application/octet-stream',
+      'content-length': '1',
+    });
+    const writable = new EventEmitter() as unknown as WritableLike;
+    writable.write = (
+      _chunk: unknown,
+      callback?: (err?: Error | null) => void,
+    ) => {
+      callback?.(new Error('disk full'));
+
+      return true;
+    };
+    writable.end = (callback?: (err?: Error | null) => void) => {
+      callback?.();
+    };
+    writable.destroy = () => writable;
+    const requestSpy = spyOn(http, 'request').mockImplementation(
+      (_options, callback) => {
+        const cb = callback as
+          ((res: http.IncomingMessage) => void) | undefined;
+        queueMicrotask(() => {
+          cb?.(res as unknown as http.IncomingMessage);
+          queueMicrotask(() => {
+            res.emit('data', Buffer.from('a'));
+            res.emit('end');
+          });
+        });
+        return req as unknown as http.ClientRequest;
+      },
+    );
+
+    try {
+      const response = await new NodeAdapter().send({
+        requestURL: 'http://example.test/data',
+        method: 'GET',
+        headers: {},
+        streamResponse: () => writable,
+      });
+
+      expect(response.status).toBe(200);
+      expect(response.isStreamError).toBe(true);
+      expect(response.streamErrorCode).toBe('stream_write_error');
+      expect(response.errorCause?.message).toBe('disk full');
+    } finally {
+      requestSpy.mockRestore();
+    }
+  });
+
   test('a throwing errored accessor costs the signal, not the request', async () => {
     // `errored` is read inside `end`'s callback, which a real stream invokes on a later
     // tick with no `try` above it. An unguarded throw there is an uncaught exception that
