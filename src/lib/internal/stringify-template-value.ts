@@ -228,6 +228,21 @@ export function stringifyTemplateValue(value: unknown): string {
     return value;
   }
 
+  // `undefined` has no JSON form, so it is named the way everything else without one is -
+  // `[circular]`, `[Function: f]`, `[Map]`, `[max depth exceeded]`. `String(undefined)`
+  // produced the bare word, which inside a container quoted to `"undefined"` and became
+  // indistinguishable from the string `'undefined'` actually holding that text. Redaction
+  // already tells those apart, masking a genuine string in part and replacing a derived
+  // value whole, so the renderer losing the distinction made it the less precise of the
+  // two. `null` needs no such treatment: it has a JSON form and renders unquoted.
+  //
+  // `maskValueDeep` stringifies every leaf through this function before a `redactFunction`
+  // sees it, so a custom function is handed `[undefined]` here too rather than a second
+  // spelling of the same value.
+  if (value === undefined) {
+    return '[undefined]';
+  }
+
   // A plain object or array is its contents, so render them rather than `[object Object]`
   // - and rather than an array's default comma join, which cannot be told apart from one
   // element that happens to contain a comma.
@@ -265,6 +280,12 @@ export function stringifyTemplateValue(value: unknown): string {
   }
 
   try {
+    // Every object still here has a `toString` of its own - a plain container was walked
+    // above, and one inheriting `Object.prototype`'s was named by its constructor - so
+    // this can no longer produce `[object Object]`. The rule cannot see that, and only
+    // started asking once the `undefined` check above narrowed `unknown` to a type that
+    // admits an object.
+    // eslint-disable-next-line @typescript-eslint/no-base-to-string
     return String(value);
   } catch {
     return '[unrenderable]';

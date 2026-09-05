@@ -78,7 +78,8 @@ const REDACT_MASK_CONFIG_KEYS = new Set([
  * - `null` - use the default masking
  * - a `number` - the default masking at that percent, shorthand for `{ percent: n }`
  * - a {@link RedactMaskConfig} - the library's masking with these settings
- * - `undefined` - drop the value, which is what a function returning nothing does
+ * - `undefined` - the default masking too, exactly as `null`, so a function that returns
+ *   nothing for a key it does not special-case still masks it
  *
  * An object is therefore always read as a masking request, never as a replacement value.
  * One that is not a usable request falls back to the default masking rather than being

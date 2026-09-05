@@ -111,8 +111,9 @@ function maskSensitiveValue(
   try {
     // `null` means "use the default for this one", so a caller can special-case a few
     // keys without reproducing the default masking for the rest. To render a literal
-    // null, return the string. Only `null` defers - a function that returns nothing has
-    // its `undefined` used literally.
+    // null, return the string. `undefined` defers the same way, so a function that
+    // returns nothing for the keys it does not handle masks them rather than writing the
+    // word `undefined` into the row.
     //
     // Each leaf is stringified before the function sees it, exactly as `applyRedaction`
     // does, so one function receives identical arguments from both - and so a mutating

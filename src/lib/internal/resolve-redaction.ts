@@ -20,8 +20,13 @@ import {
  * - any other object is not a usable request, so it lands on the default masking too -
  *   `{ note: 'withheld' }`, a mixture, an array, a class instance. An object is never a
  *   replacement value; return a string for that
- * - a non-object that is none of the above is used literally, which is what makes a
- *   function returning nothing drop the value
+ * - `undefined` defers to the default masking, exactly as `null` does. A function that
+ *   returns nothing for a key it does not special-case has not said what to put there,
+ *   and every surface has to render *something*: `errorToString` writes a table row and
+ *   `stringifyValue` writes a JSON leaf, so the value came out as the literal text
+ *   `undefined` in both. Masking by default is the one answer that means the same thing
+ *   everywhere and never prints what was named for redaction
+ * - any other non-object is used literally - a boolean, a `bigint`, a symbol
  *
  * @param isDerived Whether the value reaching here was something other than a string -
  *                  a number, an object, a function. The default never masks such a value
@@ -72,9 +77,12 @@ export function resolveRedaction(
     // which is how a `URL` kept its query and a card number its BIN prefix and last four.
     // For a value that genuinely was a string the two are identical anyway, so nothing is
     // lost by routing both through one place.
-    if (match.kind !== 'defaults' && requested !== null) {
-      // Used literally. `undefined` from a function that returns nothing drops the value,
-      // which is what it did before deferral existed.
+    if (
+      match.kind !== 'defaults' &&
+      requested !== null &&
+      requested !== undefined
+    ) {
+      // Used literally.
       return requested;
     }
   }

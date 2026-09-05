@@ -556,15 +556,17 @@ describe('errorToString', () => {
       expect(JSON.stringify(info)).toBe(JSON.stringify({ creds: { pw: SEC } }));
     });
 
-    it('should use undefined literally rather than deferring', () => {
-      // Only `null` defers. Treating a missing return as a deferral would turn a value
-      // an existing caller was dropping into a partial mask.
+    it('should defer on undefined, exactly as it does on null', () => {
+      // A row has to render something, so using `undefined` literally wrote the word
+      // `undefined` where a masked value belonged - and a function that special-cases a
+      // few keys returns nothing for every other one.
       const rendered = errorToString(mk({ p: SEC }, ['p']), 80, {
         redactFunction: () => undefined,
       });
 
       expect(rendered).not.toContain(SEC);
-      expect(rendered).not.toContain(
+      expect(rendered).not.toContain('undefined');
+      expect(rendered).toContain(
         String(applyRedaction({ p: SEC }, ['p'])['p']),
       );
     });

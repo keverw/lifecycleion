@@ -35,6 +35,42 @@ describe('stringifyValue - rendering', () => {
     expect(stringifyValue(['a,b'])).toBe('["a,b"]');
   });
 
+  test('names undefined rather than spelling it, so a string is distinct', () => {
+    // `undefined` has no JSON form, so it is named the way `[circular]`, `[Function: f]`
+    // and `[Map]` are. Spelling it quoted to `"undefined"` inside a container, which is
+    // exactly what a string holding that text renders as - a distinction redaction keeps
+    // (a genuine string is masked in part, a derived value replaced whole) and the
+    // renderer was throwing away.
+    expect(stringifyValue({ a: undefined })).toBe('{"a":"[undefined]"}');
+    expect(stringifyValue({ a: 'undefined' })).toBe('{"a":"undefined"}');
+    expect(stringifyValue([undefined, 'undefined'])).toBe(
+      '["[undefined]","undefined"]',
+    );
+    // `null` has a JSON form and needs no such treatment.
+    expect(stringifyValue({ a: null })).toBe('{"a":null}');
+    expect(stringifyValue({ a: 'null' })).toBe('{"a":"null"}');
+  });
+
+  test('hands a redactFunction the same spelling the renderer uses', () => {
+    // `maskValueDeep` stringifies each leaf through the renderer before the function sees
+    // it, so the two cannot disagree about what an `undefined` leaf is called.
+    const seen: string[] = [];
+
+    redactValue(
+      { a: undefined },
+      {
+        redactedKeys: ['a'],
+        redactFunction: (_key, value) => {
+          seen.push(value);
+
+          return null;
+        },
+      },
+    );
+
+    expect(seen).toEqual(['[undefined]']);
+  });
+
   test('keeps a value that has a string form of its own', () => {
     expect(stringifyValue(new Error('boom'))).toBe('Error: boom');
     expect(stringifyValue(new URL('https://example.test/y'))).toBe(
@@ -1290,10 +1326,12 @@ describe('redactValue - what a redactFunction may return', () => {
   });
 
   test('a primitive that is not a signal is used literally', () => {
-    // Only an object is read as a request. A primitive is the caller's own replacement,
-    // which is what keeps `undefined` dropping the value as it always has.
-    expect(ask(undefined)).toBeUndefined();
+    // Only an object is read as a request, so a primitive is the caller's own
+    // replacement - `undefined` excepted, which defers exactly as `null` does rather
+    // than leaving the word `undefined` where a masked value belonged.
     expect(ask(false)).toBe(false);
+    expect(ask(undefined)).toBe(ask(null));
+    expect(ask(undefined)).not.toBe(undefined);
   });
 
   test('an unusable request defers on a derived value too, not just a string', () => {

@@ -738,19 +738,23 @@ describe('applyRedaction - redactFunction deferral', () => {
     expect(result['p']).not.toBe('hunter2secret');
   });
 
-  test('returning nothing is used literally and does not defer', () => {
-    // Treating a missing return as a deferral would turn a value an existing caller was
-    // dropping into a partial mask, disclosing more than before.
+  test('returning nothing defers, exactly as null does', () => {
+    // A function that special-cases a few keys and falls off the end for the rest has
+    // not said what to put there. Using `undefined` literally was tried first, to drop
+    // the value - but only the logger can drop a field: `errorToString` writes a table
+    // row and `stringifyValue` a JSON leaf, and both rendered the literal text
+    // `undefined` there. Masking by default is the one answer that means the same thing
+    // on all three and never prints a value that was named for redaction.
     const result = applyRedaction(
       { p: 'hunter2secret' },
       ['p'],
       () => undefined,
     );
 
-    expect(result['p']).toBeUndefined();
-    expect(result['p']).not.toBe(
+    expect(result['p']).toBe(
       applyRedaction({ p: 'hunter2secret' }, ['p'])['p'],
     );
+    expect(result['p']).not.toBe('hunter2secret');
   });
 
   test('a literal null is rendered by returning the string', () => {
