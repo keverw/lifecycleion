@@ -344,12 +344,7 @@ export class Logger extends EventEmitter {
     error: unknown,
     options?: LogOptions,
   ): void {
-    const message = prepareErrorObjectLog(prefix, error, {
-      // The logger's own masking and its failure handler, so an error rendered here masks
-      // the way params do and a failure reaches `onRedactionError` rather than the console.
-      redactFunction: this.redactFunction,
-      onRedactionError: this.onRedactionError,
-    });
+    const message = this.renderErrorObject(prefix, error);
 
     this.handleLog('error', message, { ...(options ?? {}), error });
   }
@@ -400,7 +395,13 @@ export class Logger extends EventEmitter {
    * Create a scoped logger with a service name
    */
   public service(serviceName: string): LoggerService {
-    return new LoggerService(this.handleLog.bind(this), serviceName);
+    return new LoggerService(
+      this.handleLog.bind(this),
+      // Bound rather than passing the settings themselves, so a service logger renders an
+      // error exactly as `this.errorObject` does, reading them when it is called.
+      (prefix, error) => this.renderErrorObject(prefix, error),
+      serviceName,
+    );
   }
 
   /**
@@ -628,11 +629,21 @@ export class Logger extends EventEmitter {
 
     // The capture flag has to match the one used to register, or the listener is not
     // the one being removed and stays attached.
-    globalThis.removeEventListener(
-      'error',
-      this._reportErrorListener,
-      this._reportErrorListenerCapture,
-    );
+    try {
+      globalThis.removeEventListener(
+        'error',
+        this._reportErrorListener,
+        this._reportErrorListenerCapture,
+      );
+    } catch {
+      // The global was usable when the listener went on and is not now. Rethrowing buys
+      // nothing and costs a great deal: this runs from `close()` *before* the sinks are
+      // closed, so a throw here left every file and pipe sink holding its handle for the
+      // life of the process. A listener that cannot be taken off is already inert, since
+      // `close()` sets `_closed` first and the listener returns early on it, and the
+      // state below is cleared either way. Guarded here rather than at `close()` so all
+      // of the other callers are covered by the same fix.
+    }
 
     this._reportErrorListener = null;
     this._reportErrorListenerRegistered = false;
@@ -1016,6 +1027,20 @@ export class Logger extends EventEmitter {
 
     // eslint-disable-next-line no-console -- reporting this any other way reopens the loop
     console.error(failure.message);
+  }
+
+  /**
+   * Render an error for `errorObject`, here and in every `LoggerService` below this.
+   *
+   * One place, so a service or entity logger cannot drift from the logger that made it.
+   */
+  private renderErrorObject(prefix: string, error: unknown): string {
+    return prepareErrorObjectLog(prefix, error, {
+      // The logger's own masking and its failure handler, so an error rendered here masks
+      // the way params do and a failure reaches `onRedactionError` rather than the console.
+      redactFunction: this.redactFunction,
+      onRedactionError: this.onRedactionError,
+    });
   }
 
   /**

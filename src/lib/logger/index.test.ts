@@ -1444,6 +1444,43 @@ describe('Logger', () => {
       expect(wasCloseCalled).toBe(true);
     });
 
+    test('closes the sinks even when removeEventListener is gone', async () => {
+      // `close()` gives up the global listener before it closes the sinks. That call was
+      // unguarded, so a global that was usable at register time and is not at close time
+      // rejected `close()` before any sink saw it, leaving a file or pipe sink holding
+      // its handle for the life of the process.
+      let wasCloseCalled = false;
+
+      const customSink = {
+        write: () => {},
+        close: () => {
+          wasCloseCalled = true;
+        },
+      };
+
+      const closeLogger = new Logger({
+        sinks: [customSink],
+        callProcessExit: false,
+      });
+
+      closeLogger.registerReportErrorListener();
+
+      const original = globalThis.removeEventListener;
+
+      globalThis.removeEventListener = () => {
+        throw new Error('removeEventListener gone');
+      };
+
+      try {
+        await closeLogger.close();
+      } finally {
+        globalThis.removeEventListener = original;
+      }
+
+      expect(wasCloseCalled).toBe(true);
+      expect(closeLogger.isReportErrorListenerRegistered()).toBe(false);
+    });
+
     test('should emit close event', async () => {
       const events: any[] = [];
 
@@ -1950,6 +1987,52 @@ describe('Logger - errorObject redaction reaches the caller, not the console', (
 
     expect(sink.logs[0]?.message).toContain('[CUSTOM]');
     expect(sink.logs[0]?.message).not.toContain('hunter2secret');
+  });
+
+  test('a service or entity logger renders an error the same way', () => {
+    // `LoggerService.errorObject` called the shared helper directly, which left it the
+    // one surface rendering with the library defaults: the same value masked one way
+    // through `logger.errorObject` and another through `logger.service(...).errorObject`,
+    // and a failure there went to the console the caller had replaced.
+    const keys: string[] = [];
+    const sink = new ArraySink();
+    const logger = new Logger({
+      sinks: [sink],
+      redactFunction: () => '[CUSTOM]',
+      onRedactionError: (_error, key) => keys.push(key),
+    });
+
+    const makeError = (): Error => {
+      const error = new Error('boom') as Error & {
+        additionalInfo: unknown;
+        sensitiveFieldNames: unknown;
+      };
+
+      error.additionalInfo = { token: 'hunter2secret' };
+      error.sensitiveFieldNames = ['token'];
+
+      return error;
+    };
+
+    logger.service('api').errorObject('prefix', makeError());
+    logger.service('api').entity('users').errorObject('prefix', makeError());
+
+    for (const entry of sink.logs) {
+      expect(entry.message).toContain('[CUSTOM]');
+      expect(entry.message).not.toContain('hunter2secret');
+    }
+
+    const broken = new Error('boom') as Error & {
+      additionalInfo: unknown;
+      sensitiveFieldNames: unknown;
+    };
+
+    broken.additionalInfo = { token: 'x' };
+    broken.sensitiveFieldNames = 'not-a-list';
+
+    logger.service('api').errorObject('prefix', broken);
+
+    expect(keys).toEqual(['<sensitiveFieldNames>']);
   });
 });
 

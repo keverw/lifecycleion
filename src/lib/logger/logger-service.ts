@@ -1,6 +1,5 @@
 import type { LogType, LogOptions } from './types';
 import type { HandleLogOptions } from './internal-types';
-import { prepareErrorObjectLog } from './utils/error-object';
 
 /**
  * LoggerService for scoped logging with service names
@@ -11,6 +10,16 @@ export class LoggerService {
     template: string,
     options?: HandleLogOptions,
   ) => void;
+  /**
+   * Renders an error for `errorObject`, supplied by the `Logger` that made this.
+   *
+   * Handed down rather than called here, so a service logger masks with the logger's own
+   * `redactFunction` and reports a redaction failure to its `onRedactionError`. Calling
+   * the shared helper directly instead left this the one surface that rendered an error
+   * with the library defaults - masking differently from the same logger's `errorObject`
+   * and from its params, and writing failures to the console the caller had replaced.
+   */
+  private renderErrorObject: (prefix: string, error: unknown) => string;
   private serviceName: string;
   private entityName?: string;
 
@@ -20,10 +29,12 @@ export class LoggerService {
       template: string,
       options?: HandleLogOptions,
     ) => void,
+    renderErrorObject: (prefix: string, error: unknown) => string,
     serviceName: string,
     entityName?: string,
   ) {
     this.handleLog = handleLog;
+    this.renderErrorObject = renderErrorObject;
     this.serviceName = serviceName;
     this.entityName = entityName;
   }
@@ -32,7 +43,12 @@ export class LoggerService {
    * Create a scoped logger for a specific entity within this service
    */
   public entity(entityName: string): LoggerService {
-    return new LoggerService(this.handleLog, this.serviceName, entityName);
+    return new LoggerService(
+      this.handleLog,
+      this.renderErrorObject,
+      this.serviceName,
+      entityName,
+    );
   }
 
   /**
@@ -54,7 +70,7 @@ export class LoggerService {
     error: unknown,
     options?: LogOptions,
   ): void {
-    const message = prepareErrorObjectLog(prefix, error);
+    const message = this.renderErrorObject(prefix, error);
 
     this.handleLog('error', message, {
       ...(options ?? {}),
