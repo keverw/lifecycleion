@@ -28,6 +28,11 @@ import {
   normalizeNodeRequestHeaders,
 } from './node-adapter-utils';
 import { resolveDetectedRedirectURL } from '../utils';
+// The shared coercion, not a fourth copy of it. Each adapter carried a body that
+// was behaviourally identical to this one, message included, on the grounds that the
+// HTTP client should not import across module boundaries - which it already does for
+// `sleep`, `deep-clone` and `retry-utils`. Aliased so the call sites read unchanged.
+import { toError as normalizeError } from '../../to-error';
 
 /**
  * The absorber currently attached to a writable, if any.
@@ -1516,33 +1521,4 @@ function readObjectMember(source: unknown, key: string): unknown {
   } catch {
     return undefined;
   }
-}
-
-function isErrorValue(value: unknown): value is Error {
-  try {
-    return value instanceof Error;
-  } catch {
-    return false;
-  }
-}
-
-function normalizeError(value: unknown): Error {
-  if (isErrorValue(value)) {
-    return value;
-  }
-
-  // The value itself is kept as the cause: `String(value)` is lossy - a rejection with
-  // `{ code: 'E42' }` renders as `[object Object]` - and for a value whose `toString`
-  // threw it carries nothing at all, leaving the caller no way back to what was thrown.
-  // Behaviourally identical to `toError` in `to-error`, message included, kept local so
-  // the HTTP client does not import across module boundaries.
-  let description: string;
-
-  try {
-    description = typeof value === 'string' ? value : String(value);
-  } catch {
-    description = 'unknown value';
-  }
-
-  return new Error(`Non-error value thrown: ${description}`, { cause: value });
 }

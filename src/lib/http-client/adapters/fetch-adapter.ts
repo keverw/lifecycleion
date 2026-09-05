@@ -7,6 +7,11 @@ import type {
   AdapterResponse,
   AdapterType,
 } from '../types';
+// The shared coercion, not a fourth copy of it. Each adapter carried a body that
+// was behaviourally identical to this one, message included, on the grounds that the
+// HTTP client should not import across module boundaries - which it already does for
+// `sleep`, `deep-clone` and `retry-utils`. Aliased so the call sites read unchanged.
+import { toError as normalizeError } from '../../to-error';
 
 export class FetchAdapter implements HTTPAdapter {
   public getType(): AdapterType {
@@ -193,29 +198,6 @@ function asError(value: unknown): Error | undefined {
   } catch {
     return undefined;
   }
-}
-
-function normalizeError(value: unknown): Error {
-  const existing = asError(value);
-
-  if (existing !== undefined) {
-    return existing;
-  }
-
-  // The value itself is kept as the cause: `String(value)` is lossy - a rejection with
-  // `{ code: 'E42' }` renders as `[object Object]` - and for a value whose `toString`
-  // threw it carries nothing at all, leaving the caller no way back to what was thrown.
-  // Behaviourally identical to `toError` in `to-error`, message included, kept local so
-  // the HTTP client does not import across module boundaries.
-  let description: string;
-
-  try {
-    description = typeof value === 'string' ? value : String(value);
-  } catch {
-    description = 'unknown value';
-  }
-
-  return new Error(`Non-error value thrown: ${description}`, { cause: value });
 }
 
 /** Guard error members for the same reason adapter marker reads are guarded. */
