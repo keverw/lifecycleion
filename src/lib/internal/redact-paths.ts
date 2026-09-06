@@ -300,6 +300,17 @@ interface RedactState {
  *          it - in which case the caller keeps the original, by reference. A container
  *          is copied only where a mask actually landed inside it, so redaction never
  *          rewrites the parts of a payload it was not asked to touch.
+ *
+ * @param shouldSkipCandidateScan Set once an ancestor's {@link mustWalkInFull} has
+ *        already answered "walk it properly", so the scan is not repeated below it.
+ *        Without this the same subtree was scanned again at every level beneath the node
+ *        that failed the scan, which is `O(depth x subtree)`: a 4000-deep chain ending in
+ *        a back-edge cost 235ms against 0.1ms for the same chain without the cycle, and
+ *        every getter in it ran once per ancestor level. Nothing is lost by inheriting
+ *        the answer. A node is scanned only when no path points below it, which means
+ *        nothing under it matches, which means the same is true of every one of its
+ *        descendants - so the scan they skip is one whose only possible outcome is the
+ *        full walk they are already doing.
  */
 function redactPathsInner(
   value: unknown,
@@ -309,6 +320,7 @@ function redactPathsInner(
   seen: WeakSet<object>,
   state: RedactState,
   report: ReportRedactionFailure,
+  shouldSkipCandidateScan = false,
 ): unknown {
   const matched = matchRedactPath(paths, path);
 
@@ -378,11 +390,20 @@ function redactPathsInner(
 
   // Nothing below can match, so the walk's answer for this whole subtree is the subtree
   // itself - reached, without this, by rebuilding all of it and discarding the rebuild.
+  //
+  // Scanned at most once per branch: an ancestor that already scanned and was told to
+  // walk in full passes that answer down rather than having each level rediscover it.
+  let shouldSkipScanBelow = shouldSkipCandidateScan;
+
   if (
-    pathPointingBelow(paths, path) === undefined &&
-    !mustWalkInFull(value, seen)
+    !shouldSkipCandidateScan &&
+    pathPointingBelow(paths, path) === undefined
   ) {
-    return UNCHANGED;
+    if (!mustWalkInFull(value, seen)) {
+      return UNCHANGED;
+    }
+
+    shouldSkipScanBelow = true;
   }
 
   if (seen.has(value)) {
@@ -468,6 +489,7 @@ function redactPathsInner(
             seen,
             state,
             report,
+            shouldSkipScanBelow,
           );
         } catch (error) {
           report(error, [...path, String(index)].join('.'));
@@ -530,6 +552,7 @@ function redactPathsInner(
           seen,
           state,
           report,
+          shouldSkipScanBelow,
         );
       } catch (error) {
         // The walk never saw what was below, so it cannot conclude nothing matched there.
