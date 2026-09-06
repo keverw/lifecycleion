@@ -80,11 +80,16 @@ interface RenderBudget {
 /**
  * Charge `text` against the budget and hand it back.
  *
- * Applied to the terminals only - a rendered leaf, a key, the punctuation between
- * entries - never to a container's assembled result. A container's text is exactly the
- * sum of what its contents already charged, so charging it again would bill a leaf once
- * per level above it and make the effective cap collapse with depth rather than hold at
- * {@link MAX_RENDER_LENGTH}.
+ * Applied to the terminals only - a rendered leaf, a key, a container's own brackets and
+ * the punctuation between its entries - never to a container's assembled result. A
+ * container's text is exactly the sum of what its contents already charged, so charging it
+ * again would bill a leaf once per level above it and make the effective cap collapse with
+ * depth rather than hold at {@link MAX_RENDER_LENGTH}.
+ *
+ * The delimiters have to be charged for the cap to hold at all. Left uncharged, a container
+ * with nothing chargeable inside it cost nothing, so a payload built from empty containers
+ * ran past the cap without ever reaching it: 500,000 `{}` in an array rendered 1.5 MB with
+ * the budget still untouched, and the size grew linearly from there.
  */
 function charge(budget: RenderBudget, text: string): string {
   budget.remaining -= text.length;
@@ -206,10 +211,23 @@ function renderContainer(
     try {
       length = source.length;
     } catch {
-      return quote('[unrenderable]');
+      // Charged like the same marker inside the loop: it is a leaf this render emits,
+      // and one per element of the container above would otherwise be free.
+      return charge(budget, quote('[unrenderable]'));
     }
 
+    // The two brackets this branch returns, charged as they are decided on rather than
+    // when the result is assembled. See `charge` for why an uncharged delimiter defeats
+    // the cap entirely.
+    charge(budget, '[]');
+
     for (let index = 0; index < length; index++) {
+      // The separator this element will be joined with, charged before anything else so
+      // it counts even on the truncation path below.
+      if (parts.length > 0) {
+        charge(budget, ',');
+      }
+
       // Read inside the guard, exactly as the object branch reads its entries inside one.
       // An element can be a throwing accessor or a `Proxy` trap, and losing the array -
       // and with it every sibling of whatever holds it - over one bad element is the
@@ -243,13 +261,23 @@ function renderContainer(
     entries = Object.entries(value);
   } catch {
     // A throwing getter or a revoked `Proxy`: this one value degrades rather than taking
-    // the whole render with it.
-    return quote('[unrenderable]');
+    // the whole render with it. Charged for the reason the array branch charges its own.
+    return charge(budget, quote('[unrenderable]'));
   }
 
   const parts: string[] = [];
 
+  // The two braces this branch returns, for the reason the array branch charges its
+  // brackets.
+  charge(budget, '{}');
+
   for (const [key, entryValue] of entries) {
+    // The separator this entry will be joined with, charged before anything else so it
+    // counts even on the truncation path below.
+    if (parts.length > 0) {
+      charge(budget, ',');
+    }
+
     // Stops the loop rather than only this entry, for the reason the array branch does:
     // the entries still to come would each be walked in full to no purpose.
     if (budget.remaining <= 0) {
