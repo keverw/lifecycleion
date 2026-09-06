@@ -59,35 +59,6 @@ export interface ErrorToStringOptions {
 }
 
 /**
- * Read a property off a value without trusting it.
- *
- * The value being rendered is whatever was thrown, and `message`/`stack`/`code` are
- * ordinary properties that a subclass or a `Proxy` can turn into accessors that throw.
- * This module runs on reporting paths that must not raise an error of their own, so an
- * unreadable member is treated as absent.
- */
-/**
- * Parse `sensitiveFieldNames` into path segments, using the same syntax as the logger's
- * `redactedKeys`: a bare name is a top-level key, and `user.password` / `items[0].token`
- * / quoted bracket keys address one exact location.
- *
- * @returns One segment list per entry, or `null` when the value is not a usable list of
- *          paths - which callers must treat as a reason to mask everything rather than
- *          to mask nothing.
- */
-/**
- * Replace a sensitive value for display.
- *
- * The default is the same masking the logger applies, so the same value renders
- * identically whether it went through a log line or a rendered error. A custom function
- * is handed the key and the value, and may return `null` to defer to that default for
- * this one value.
- *
- * Fully guarded: reading the value runs an accessor this module does not own, and the
- * function itself is caller code. Either failing yields `REDACTION_FAILED_MARKER`, the
- * same marker the logger uses for the same condition, never the original value.
- */
-/**
  * Mask a matched value for display, keeping the shape of a container.
  *
  * A leaf becomes the mask string. An object or array is walked and every leaf inside it
@@ -151,6 +122,16 @@ function maskSensitiveValue(
   }
 }
 
+/**
+ * Read a property off a value without trusting it.
+ *
+ * The value being rendered is whatever was thrown, and `message`/`stack`/`code` are
+ * ordinary properties that a subclass or a `Proxy` can turn into accessors that throw.
+ * This module runs on reporting paths that must not raise an error of their own, so an
+ * unreadable member is treated as absent.
+ *
+ * See {@link readMemberOrThrew} where "absent" and "unreadable" have to be told apart.
+ */
 function readMember(value: Record<string, unknown>, key: string): unknown {
   try {
     return value[key];
