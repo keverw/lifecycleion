@@ -6,8 +6,17 @@
  * `TypeError` of its own, and on a reporting path that one escapes into the caller that
  * was only trying to report a failure.
  *
- * Shared rather than per-module: `safe-handle-callback`, `Logger` sinks, and `Logger`
- * event handlers all need the same guarantee, and a second copy would drift.
+ * Shared rather than per-module: `safe-handle-callback`, `Logger` sinks, `Logger` event
+ * handlers, `LifecycleManager`, and the HTTP client's adapters all need the same
+ * guarantee, and a second copy would drift.
+ *
+ * **An `Error` is returned unchanged** - same identity, `stack`, `message`, and `cause` -
+ * so a caller that only ever throws `Error`s sees nothing new.
+ *
+ * **Anything else becomes `Non-error value thrown: <description>`**, with the original
+ * value kept on `cause`. The prefix is the point: it says the failure path was handed
+ * something that was never an `Error`, which a bare `String(value)` would have disguised.
+ * Read `cause`, not the message, to recover the thrown value.
  */
 export function toError(value: unknown): Error {
   let description: string;
