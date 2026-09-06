@@ -1871,4 +1871,24 @@ describe('a shared subtree costs one walk, not one per route', () => {
 
     expect(reads).toBe(1);
   });
+
+  test('rendering a shared subtree is bounded rather than exponential', () => {
+    // 23 objects, 2^22 routes: rendered per route this was 96 MB of JSON.
+    const rendered = stringifyValue(sharedGraph(22));
+
+    expect(rendered.length).toBeLessThan(2_000_000);
+    expect(rendered).toContain('[max length exceeded]');
+  });
+
+  test('an ordinary value is nowhere near the length cap', () => {
+    const rendered = stringifyValue({
+      user: 'alice',
+      roles: ['admin', 'ops'],
+      meta: { attempts: 3, at: new Date(0) },
+    });
+
+    expect(rendered).not.toContain('[max length exceeded]');
+    expect(rendered).toContain('"user":"alice"');
+    expect(rendered).toContain('"attempts":3');
+  });
 });

@@ -51,6 +51,47 @@ const MAX_RENDER_DEPTH = 100;
 /** Emitted where the walk stopped, so a truncated render never looks complete. */
 const TRUNCATED = '[max depth exceeded]';
 
+/**
+ * How much text one render may produce before it stops.
+ *
+ * The depth cap bounds how *deep* the walk goes and says nothing about how much it emits,
+ * and the two are not the same limit. `seen` is released as the walk leaves a container -
+ * deliberately, so a value referenced twice side by side renders in full both times
+ * rather than the second being called circular - which means a shared subtree is
+ * serialized once per reference. An object graph of 45 objects, 22 levels of
+ * `{ l: child, r: child }`, rendered to 96 MB, four times that at 24 levels, and it is a
+ * log line: it becomes `LogEntry.message` and is handed to every sink. Nothing about that
+ * payload is pathological - reusing one object under two keys is ordinary - and neither
+ * the depth cap nor the cycle check stops any of it.
+ *
+ * A megabyte is far past any log line worth writing and still leaves the cap invisible to
+ * every render that is not running away.
+ */
+const MAX_RENDER_LENGTH = 1_000_000;
+
+/** Emitted where the budget ran out, so a truncated render never looks complete. */
+const TRUNCATED_LENGTH = '[max length exceeded]';
+
+/** Remaining output allowance for one render, shared by every level of it. */
+interface RenderBudget {
+  remaining: number;
+}
+
+/**
+ * Charge `text` against the budget and hand it back.
+ *
+ * Applied to the terminals only - a rendered leaf, a key, the punctuation between
+ * entries - never to a container's assembled result. A container's text is exactly the
+ * sum of what its contents already charged, so charging it again would bill a leaf once
+ * per level above it and make the effective cap collapse with depth rather than hold at
+ * {@link MAX_RENDER_LENGTH}.
+ */
+function charge(budget: RenderBudget, text: string): string {
+  budget.remaining -= text.length;
+
+  return text;
+}
+
 /** JSON string literal for `value`, used for both keys and rendered leaves. */
 function quote(value: string): string {
   try {
@@ -97,22 +138,23 @@ function renderNested(
   value: unknown,
   seen: WeakSet<object>,
   depth: number,
+  budget: RenderBudget,
 ): string {
   if (value === null) {
-    return 'null';
+    return charge(budget, 'null');
   }
 
   switch (typeof value) {
     case 'boolean':
-      return value ? 'true' : 'false';
+      return charge(budget, value ? 'true' : 'false');
     case 'number':
       // `NaN` and the infinities have no JSON form; `null` is the conventional stand-in.
-      return Number.isFinite(value) ? String(value) : 'null';
+      return charge(budget, Number.isFinite(value) ? String(value) : 'null');
     case 'string':
-      return quote(value);
+      return charge(budget, quote(value));
     case 'bigint':
       // Rendered as text rather than thrown on, which is what `JSON.stringify` does.
-      return quote(String(value));
+      return charge(budget, quote(String(value)));
     default:
       break;
   }
@@ -120,17 +162,24 @@ function renderNested(
   if (isPlainContainer(value)) {
     if (seen.has(value)) {
       // A cycle is cut where it closes, rather than collapsing everything above it.
-      return quote('[circular]');
+      return charge(budget, quote('[circular]'));
     }
 
     if (depth >= MAX_RENDER_DEPTH) {
-      return quote(TRUNCATED);
+      return charge(budget, quote(TRUNCATED));
+    }
+
+    // Checked before descending rather than only after emitting: the cost of a runaway
+    // render is the walk as much as the string, and a container entered past the budget
+    // would serialize its whole subtree before anyone looked at the total.
+    if (budget.remaining <= 0) {
+      return charge(budget, quote(TRUNCATED_LENGTH));
     }
 
     seen.add(value);
 
     try {
-      return renderContainer(value, seen, depth);
+      return renderContainer(value, seen, depth, budget);
     } finally {
       // Released so a value referenced twice side by side renders in full both times, and
       // only an object genuinely contained within itself is cut.
@@ -138,7 +187,7 @@ function renderNested(
     }
   }
 
-  return quote(stringifyTemplateValue(value));
+  return charge(budget, quote(stringifyTemplateValue(value)));
 }
 
 /** Render a plain object or array as JSON, its leaves rendered by the shared rules. */
@@ -146,6 +195,7 @@ function renderContainer(
   value: object,
   seen: WeakSet<object>,
   depth: number,
+  budget: RenderBudget,
 ): string {
   if (Array.isArray(value)) {
     const source = value as unknown[];
@@ -169,10 +219,18 @@ function renderContainer(
       // and changed nothing (185ms against 181ms for 200k renders), because the cost here
       // is one `JSON.stringify` per string leaf rather than one for the whole value, not
       // the guard. A retry loop would have bought a getter being called twice for no gain.
+      // Stops the loop rather than only the element: the elements still to come would
+      // each be walked in full before adding to a total already past the cap.
+      if (budget.remaining <= 0) {
+        parts.push(charge(budget, quote(TRUNCATED_LENGTH)));
+
+        break;
+      }
+
       try {
-        parts.push(renderNested(source[index], seen, depth + 1));
+        parts.push(renderNested(source[index], seen, depth + 1, budget));
       } catch {
-        parts.push(quote('[unrenderable]'));
+        parts.push(charge(budget, quote('[unrenderable]')));
       }
     }
 
@@ -192,10 +250,23 @@ function renderContainer(
   const parts: string[] = [];
 
   for (const [key, entryValue] of entries) {
+    // Stops the loop rather than only this entry, for the reason the array branch does:
+    // the entries still to come would each be walked in full to no purpose.
+    if (budget.remaining <= 0) {
+      parts.push(charge(budget, quote(TRUNCATED_LENGTH)));
+
+      break;
+    }
+
+    // The key and its separator are charged here; the value charges itself as it renders.
+    const renderedKey = charge(budget, `${quote(key)}:`);
+
     try {
-      parts.push(`${quote(key)}:${renderNested(entryValue, seen, depth + 1)}`);
+      parts.push(
+        `${renderedKey}${renderNested(entryValue, seen, depth + 1, budget)}`,
+      );
     } catch {
-      parts.push(`${quote(key)}:${quote('[unrenderable]')}`);
+      parts.push(`${renderedKey}${charge(budget, quote('[unrenderable]'))}`);
     }
   }
 
@@ -252,7 +323,9 @@ export function stringifyTemplateValue(value: unknown): string {
 
       seen.add(value);
 
-      return renderContainer(value, seen, 0);
+      return renderContainer(value, seen, 0, {
+        remaining: MAX_RENDER_LENGTH,
+      });
     } catch {
       // Nothing below is expected to throw: every read it makes is guarded, and the
       // depth cap stops recursion before it can exhaust the stack. Kept as a backstop

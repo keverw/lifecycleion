@@ -116,6 +116,15 @@ Being walked comes first, so a **plain object or array is rendered as JSON even 
 
 A cycle is cut where it closes - `{"a":1,"self":"[circular]"}` - rather than losing the object around it, and an object referenced twice side by side is not a cycle and renders in full both times. A `BigInt` renders as text. One awkward value never costs you the rest of the render.
 
+Two limits bound a render that would otherwise run away, and both leave a marker where they stopped so a truncated render never looks complete:
+
+| marker                  | limit                                                                     |
+| ----------------------- | ------------------------------------------------------------------------- |
+| `[max depth exceeded]`  | nesting past 100 levels                                                   |
+| `[max length exceeded]` | roughly 1 MB of output, after which the walk stops rather than continuing |
+
+The length limit is what bounds breadth, which depth cannot. Rendering _is_ recursive over shared references - an object reached by two paths is rendered at both, deliberately, since it is not a cycle - so a graph reusing one child under two keys doubles per level. Twenty-two levels of `{ l: child, r: child }` is only 45 objects and would render to 96 MB without a cap. Both limits are far outside ordinary use: 1 MB is around 8,500 typical records or 12,000 config entries in a single line, and reaching either usually means more was passed to a log call than was meant. The length limit is approximate rather than exact - it is checked before descending into a container, so the last one entered can overshoot, by under 10% on flat data and around 30% on deeply nested data.
+
 ## Redacting while rendering
 
 Pass `redactedKeys` to mask parts of the value before it is rendered. Paths use the same syntax as the logger's [`redactedKeys`](./logger.md#redaction-of-sensitive-data), rooted at `value`:
