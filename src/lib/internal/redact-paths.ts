@@ -176,8 +176,31 @@ function pathPointingBelow(
  * have entered. On the fallback path a value is read twice, once here and once by the
  * walk; only the walk's read reaches the output, and nothing in a subtree with no
  * candidate is masked either way, so the second read cannot change what is emitted.
+ *
+ * @param visited Nodes this scan has already entered. Without it the scan is not a walk
+ *        of the graph but of every *route* through it, and both shapes that produces are
+ *        real. A subtree that reuses one object across `n` references is scanned `2^n`
+ *        times. A cycle closing below the scan root - rather than back into an ancestor,
+ *        which `seen` catches - is not a cycle to this function at all, so it recursed
+ *        until the stack ran out: the `RangeError` reached {@link mustWalkInFull}, which
+ *        answered "walk it properly" correctly, but only after running every getter in
+ *        the loop thousands of times over. A three-node cycle holding fifty accessors
+ *        cost 625,550 reads against the hundred this promises.
+ *
+ *        A revisit answers `false`, and that is the same answer in both shapes. A node
+ *        that had already *finished* returned `false`, since one returning `true` bails
+ *        the whole scan out at once and there is no second route to take. A node still on
+ *        the scan stack is a cycle contained entirely within this subtree, which nothing
+ *        needs to mask: the subtree is handed back by reference, so the loop stays inside
+ *        a value that was never rebuilt, and the back-edge hazard the failure marker
+ *        exists for - a reference *up* into an ancestor mid-rebuild - is what `seen`
+ *        answers, separately and unchanged.
  */
-function needsFullWalk(value: unknown, seen: WeakSet<object>): boolean {
+function needsFullWalk(
+  value: unknown,
+  seen: WeakSet<object>,
+  visited: Set<object>,
+): boolean {
   if (!isPlainContainer(value)) {
     return false;
   }
@@ -185,6 +208,12 @@ function needsFullWalk(value: unknown, seen: WeakSet<object>): boolean {
   if (seen.has(value)) {
     return true;
   }
+
+  if (visited.has(value)) {
+    return false;
+  }
+
+  visited.add(value);
 
   if (Array.isArray(value)) {
     let length: number;
@@ -204,7 +233,7 @@ function needsFullWalk(value: unknown, seen: WeakSet<object>): boolean {
         return true;
       }
 
-      if (needsFullWalk(element, seen)) {
+      if (needsFullWalk(element, seen, visited)) {
         return true;
       }
     }
@@ -229,7 +258,7 @@ function needsFullWalk(value: unknown, seen: WeakSet<object>): boolean {
       return true;
     }
 
-    if (needsFullWalk(entry, seen)) {
+    if (needsFullWalk(entry, seen, visited)) {
       return true;
     }
   }
@@ -240,7 +269,10 @@ function needsFullWalk(value: unknown, seen: WeakSet<object>): boolean {
 /** {@link needsFullWalk}, with a payload too deep to scan counting as "walk it". */
 function mustWalkInFull(value: unknown, seen: WeakSet<object>): boolean {
   try {
-    return needsFullWalk(value, seen);
+    // A fresh set per scan, not one shared across the walk: `seen` differs between
+    // scans, so a node that answered `false` under one ancestor chain is not answering
+    // the same question under another.
+    return needsFullWalk(value, seen, new Set());
   } catch {
     // A `RangeError` from a payload nested past the stack, and nothing else: every read
     // the scan makes is already guarded.
@@ -291,6 +323,32 @@ interface RedactState {
    * the leak the failure marker exists to prevent.
    */
   didFailToRead: boolean;
+  /**
+   * Nodes already walked, inside a region no path can reach, that came back
+   * {@link UNCHANGED}.
+   *
+   * `seen` is released as the walk leaves a node, deliberately, so a value referenced
+   * twice side by side is walked both times rather than the second being called a cycle.
+   * That makes the walk one of every *route* through the payload rather than of the
+   * payload, and a subtree reachable by two references is therefore walked twice, its own
+   * shared children four times, and so on: an object graph of 53 objects nested 26 deep,
+   * with each level holding the same child under two keys, took 2.7 seconds, and 61
+   * objects took roughly 44. This is what bounds that to one walk per node.
+   *
+   * Two conditions make the memo sound, and both are load-bearing:
+   *
+   * - **Only inside a skipped region.** A result is keyed on the node alone, but the walk
+   *   answers a question about the node *at a path*. Where an ancestor's scan already
+   *   established that no path points below it, nothing at or beneath it can match, so
+   *   the path stops mattering and the node alone determines the answer.
+   * - **Only {@link UNCHANGED}.** A cycle yields the failure marker, and whether a
+   *   back-edge closes depends on the route, not on the node - so a marker must never be
+   *   replayed onto a route where the same node is not in a cycle. `UNCHANGED` cannot be
+   *   wrong in that direction: it is returned only when nothing beneath produced a marker
+   *   on this route, and a node whose subtree reaches back into itself produces one on
+   *   every route that walks it, this one included.
+   */
+  noMatchUnchanged: WeakSet<object>;
 }
 
 /**
@@ -386,6 +444,13 @@ function redactPathsInner(
 
       return REDACTION_FAILED_MARKER;
     }
+  }
+
+  // Already walked, under an ancestor that established nothing here can match, and found
+  // to change nothing. See `RedactState.noMatchUnchanged` for why the node alone is
+  // enough to key that on here and nowhere else.
+  if (shouldSkipCandidateScan && state.noMatchUnchanged.has(value)) {
+    return UNCHANGED;
   }
 
   // Nothing below can match, so the walk's answer for this whole subtree is the subtree
@@ -508,7 +573,13 @@ function redactPathsInner(
         }
       }
 
-      return didMask ? copy : UNCHANGED;
+      if (didMask) {
+        return copy;
+      }
+
+      recordUnchanged(value, shouldSkipCandidateScan, state);
+
+      return UNCHANGED;
     }
 
     let entries: [string, unknown][];
@@ -588,9 +659,37 @@ function redactPathsInner(
     // Only a plain container reaches here, and its own entries are the whole of what the
     // renderer prints, so a path naming one it does not have reaches nothing - exactly as
     // a typo does, and masking over that would blank a payload for a misspelling.
-    return didMask ? copy : UNCHANGED;
+    if (didMask) {
+      return copy;
+    }
+
+    recordUnchanged(value, shouldSkipCandidateScan, state);
+
+    return UNCHANGED;
   } finally {
     seen.delete(value);
+  }
+}
+
+/**
+ * Note that `value` walked to {@link UNCHANGED}, when that answer can be reused.
+ *
+ * Only inside a region an ancestor's scan already cleared, and only for `UNCHANGED`; see
+ * `RedactState.noMatchUnchanged` for why both conditions are what make the memo sound.
+ */
+function recordUnchanged(
+  value: object,
+  isInSkippedRegion: boolean,
+  state: RedactState,
+): void {
+  if (!isInSkippedRegion) {
+    return;
+  }
+
+  try {
+    state.noMatchUnchanged.add(value);
+  } catch {
+    // Not a usable `WeakSet` key, so this node is simply walked again if it recurs.
   }
 }
 
@@ -613,6 +712,7 @@ export function redactMatchedPaths(
   const state: RedactState = {
     didMaskAnything: false,
     didFailToRead: false,
+    noMatchUnchanged: new WeakSet(),
   };
 
   const result = redactPathsInner(

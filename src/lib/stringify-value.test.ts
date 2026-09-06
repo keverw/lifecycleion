@@ -1205,7 +1205,12 @@ describe('redactValue - a cycle nobody named is left alone', () => {
     // An unreadable read is deliberately *not* given this treatment - see the test below.
   });
 
-  test('still fails closed once a mask lands beside the cycle', () => {
+  test('leaves the cycle alone even when a mask lands beside it', () => {
+    // The sibling mask does not reach into `c`, and neither does any path, so `c` is
+    // handed back by reference and its loop is simply rendered as `[circular]`. The
+    // failure marker is for a back-edge *up* into an ancestor being rebuilt, where
+    // passing the original through would carry unmasked values into the copy. A loop
+    // closing entirely inside a subtree nothing rebuilt is not that case.
     const cyclic: Record<string, unknown> = { a: 1 };
 
     cyclic['self'] = cyclic;
@@ -1214,6 +1219,22 @@ describe('redactValue - a cycle nobody named is left alone', () => {
       { c: cyclic, password: SECRET },
       { redactedKeys: ['password'] },
     );
+
+    expect(rendered).toContain('[circular]');
+    expect(rendered).not.toContain('***REDACTION FAILED***');
+    expect(rendered).not.toContain(SECRET);
+    expect(rendered).toContain('"password":"h***********t"');
+  });
+
+  test('a back-edge into an ancestor being rebuilt still fails closed', () => {
+    // The case the marker exists for: `inner` points back up at `root`, which *is* being
+    // rebuilt because `root.password` matched. Handing the original through here would
+    // put the unmasked `root` inside the copy.
+    const root: Record<string, unknown> = { password: SECRET };
+
+    root['inner'] = { up: root };
+
+    const rendered = stringifyValue(root, { redactedKeys: ['password'] });
 
     expect(rendered).toContain('***REDACTION FAILED***');
     expect(rendered).not.toContain(SECRET);
@@ -1774,5 +1795,80 @@ describe('redactValue - a config that names no setting', () => {
     expect(derived({ percent: Number.NaN }, SECRET)).toBe(
       derived(null, SECRET),
     );
+  });
+});
+
+describe('a shared subtree costs one walk, not one per route', () => {
+  /** `levels` nestings of `{ l: child, r: child }`: `levels + 1` objects, `2^levels` routes. */
+  function sharedGraph(levels: number): unknown {
+    let node: unknown = { leaf: 'x' };
+
+    for (let index = 0; index < levels; index++) {
+      node = { l: node, r: node };
+    }
+
+    return node;
+  }
+
+  test('redaction does not walk every route through it', () => {
+    // 31 objects, 2^30 routes. Walked per route this took roughly 44 seconds; walked per
+    // node it is immediate. A generous ceiling, so the test fails on the shape of the
+    // regression rather than on a slow machine.
+    const start = performance.now();
+
+    const redacted = redactValue(
+      { data: sharedGraph(30), password: SECRET },
+      { redactedKeys: ['password'] },
+    ) as Record<string, unknown>;
+
+    expect(performance.now() - start).toBeLessThan(2000);
+    expect(redacted['password']).not.toBe(SECRET);
+  });
+
+  test('the scan reads each node once, however many references reach it', () => {
+    let reads = 0;
+    const leaf = {
+      get counted(): number {
+        reads++;
+
+        return 1;
+      },
+    };
+
+    let node: unknown = leaf;
+
+    for (let index = 0; index < 12; index++) {
+      node = { l: node, r: node };
+    }
+
+    // No path points below `data`, so the whole subtree is scanned and then handed back
+    // untouched. One read per node, not one per route.
+    redactValue(
+      { data: node, password: SECRET },
+      { redactedKeys: ['password'] },
+    );
+
+    expect(reads).toBe(1);
+  });
+
+  test('a cycle below the scan root does not recurse until the stack gives out', () => {
+    let reads = 0;
+    const inner = {
+      get counted(): number {
+        reads++;
+
+        return 1;
+      },
+    };
+
+    const a: Record<string, unknown> = { inner };
+    a['b'] = { a };
+
+    // The loop closes inside `data`, not back into an ancestor, so the scan must
+    // recognize it rather than recursing to a `RangeError`. Unrecognized it ran this
+    // getter 12,511 times.
+    redactValue({ data: a, password: SECRET }, { redactedKeys: ['password'] });
+
+    expect(reads).toBe(1);
   });
 });
