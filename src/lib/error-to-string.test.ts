@@ -835,6 +835,48 @@ describe('errorToString', () => {
     });
   });
 
+  describe('objects inside an array', () => {
+    it("renders an array element's object as the caller's shape", () => {
+      // An array joins its elements into one cell, so an element that rendered as
+      // structure is flattened back to text. That flattening did not know the renderer's
+      // own entry-list shape and serialized the wrapper, so the row read
+      // `[{"key":"token","value":"x"}]` for a payload of `[{ token: 'x' }]`.
+      const rendered = errorToString(
+        Object.assign(new Error('boom'), {
+          additionalInfo: { items: [{ token: 'abc', name: 'kevin' }] },
+        }),
+      );
+
+      expect(rendered).toContain('{"token":"abc","name":"kevin"}');
+      expect(rendered).not.toContain('"key"');
+    });
+
+    it('keeps masking when flattening an array element', () => {
+      const rendered = errorToString(
+        Object.assign(new Error('boom'), {
+          additionalInfo: {
+            items: [{ token: 'tok-abcdefghij', tenant: 'acme' }],
+          },
+          sensitiveFieldNames: ['items[0].token'],
+        }),
+      );
+
+      expect(rendered).not.toContain('tok-abcdefghij');
+      expect(rendered).toContain('"tenant":"acme"');
+      expect(rendered).not.toContain('"key"');
+    });
+
+    it('still renders an array of plain strings unquoted', () => {
+      const rendered = errorToString(
+        Object.assign(new Error('boom'), {
+          additionalInfo: { tags: ['alpha', 'beta'] },
+        }),
+      );
+
+      expect(rendered).toContain('alpha, beta');
+    });
+  });
+
   describe('output budget', () => {
     it('bounds many large values under one additionalInfo', () => {
       // Charging without checking bounded nothing: fifty megabyte-long values billed the

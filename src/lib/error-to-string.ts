@@ -179,6 +179,51 @@ function readMemberOrThrew(
   }
 }
 
+/**
+ * A rendered value as one line of text, for a context that can only hold a string.
+ *
+ * An array joins its elements into a single cell, so an element that rendered as
+ * structure has to be flattened back into text. The entry list is the *renderer's* shape,
+ * not the caller's: `stringifyValue` returns `NestedKeyValueEntry[]` for a plain object so
+ * the table can lay it out as indented rows, which an array element never gets. Handing
+ * that list to `safeStringify` serialized the wrapper itself, so an ordinary
+ * `additionalInfo: { items: [{ token: 'x' }] }` rendered as
+ * `[{"key":"token","value":"x"}]` - the caller's data wearing this module's plumbing.
+ * Masking was applied first, so nothing was disclosed by it; it was simply unreadable.
+ */
+function entriesToText(entries: NestedKeyValueEntry[]): string {
+  const parts: string[] = [];
+
+  for (const entry of entries) {
+    parts.push(`${quoteText(entry.key)}:${renderedValueToText(entry.value)}`);
+  }
+
+  return `{${parts.join(',')}}`;
+}
+
+function renderedValueToText(
+  value: string | KeyValueASCIITable | NestedKeyValueEntry[],
+): string {
+  if (typeof value === 'string') {
+    return quoteText(value);
+  }
+
+  if (value instanceof KeyValueASCIITable) {
+    return quoteText(value.toString());
+  }
+
+  return entriesToText(value);
+}
+
+/** JSON string literal, so a value containing a comma cannot be read as two entries. */
+function quoteText(value: string): string {
+  try {
+    return JSON.stringify(value) ?? '""';
+  } catch {
+    return '"<unrenderable>"';
+  }
+}
+
 function safeStringify(value: unknown): string {
   try {
     return stringifyPrimitive(value);
@@ -661,7 +706,7 @@ function stringifyValueInner(
           parts.push(
             typeof maskedItem === 'string'
               ? maskedItem
-              : safeStringify(maskedItem),
+              : renderedValueToText(maskedItem),
           );
 
           continue;
@@ -678,13 +723,16 @@ function stringifyValueInner(
           redactFunction,
           report,
         );
-        // Convert complex types to strings for joining
+        // Convert complex types to strings for joining. A string element is pushed as
+        // it stands rather than quoted, so `['a', 'b']` still renders `a, b`; only a
+        // value nested *inside* an element is quoted, where the quoting is what keeps a
+        // value containing a comma from reading as two entries.
         if (typeof result === 'string') {
           parts.push(result);
         } else if (result instanceof KeyValueASCIITable) {
           parts.push(result.toString());
         } else {
-          parts.push(safeStringify(result));
+          parts.push(entriesToText(result));
         }
       } catch {
         parts.push('<unrenderable>');
