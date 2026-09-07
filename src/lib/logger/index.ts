@@ -841,9 +841,19 @@ export class Logger extends EventEmitter {
     // array of strings rather than the caller's object with its traps still attached.
     let redactedKeys = requested;
 
+    // The copy, and only ever the copy, once it has actually been made. The entry reads
+    // this rather than `redactedKeys`, which still holds the caller's object whenever the
+    // copy could not be made - a non-array, or an array whose spread threw. Handing that
+    // object to a sink put the traps back exactly where this copy exists to remove them:
+    // a sink reading `entry.redactedKeys.length` or `.join(',')` threw inside
+    // `sink.write`, and one unreadable list became an `onSinkError` for every registered
+    // sink on that call.
+    let inertKeys: string[] | undefined;
+
     try {
       if (Array.isArray(requested)) {
         redactedKeys = [...requested];
+        inertKeys = redactedKeys;
       }
     } catch {
       // Nothing usable came of it, so the original stands and fails closed below.
@@ -882,11 +892,18 @@ export class Logger extends EventEmitter {
       backstopReporter(error, key);
     };
 
+    // Only an array is asked how long it is. `length` is the wrong question for anything
+    // else: a `Set` of keys, or any object without a numeric `length`, answered
+    // `undefined`, and `undefined > 0` said "no redaction requested" - so the params went
+    // to every sink in the clear, and `applyRedaction`'s fail-closed `Array.isArray`
+    // branch never ran, because this gate had already decided not to call it. A supplied
+    // non-array is a list this cannot use, not a list that is empty; it counts as
+    // requested and fails closed below, where it is also reported.
     try {
       didRequestRedaction =
         params !== undefined &&
         redactedKeys !== undefined &&
-        redactedKeys.length > 0;
+        (!Array.isArray(redactedKeys) || redactedKeys.length > 0);
     } catch (error) {
       didRequestRedaction = true;
       reportBackstop(error, '<redactedKeys>');
@@ -950,8 +967,12 @@ export class Logger extends EventEmitter {
       message,
       params,
       redactedParams,
-      // The decision made above, not a second read of `redactedKeys`.
-      redactedKeys: didRequestRedaction ? redactedKeys : undefined,
+      // The decision made above, not a second read of `redactedKeys`, and the inert copy
+      // rather than the caller's object. A list too hostile to copy leaves this
+      // `undefined`: the redaction itself has already failed closed and said so through
+      // `onRedactionError`, and `redactedParams` carries the marker, so there is nothing
+      // this field could honestly name.
+      redactedKeys: didRequestRedaction ? inertKeys : undefined,
       error: options?.error,
       exitCode: isNumber(exitCode) ? exitCode : undefined,
       tags: tags && tags.length > 0 ? tags : undefined,

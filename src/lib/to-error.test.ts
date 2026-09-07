@@ -113,3 +113,24 @@ describe('describeError', () => {
     }
   });
 });
+
+describe('toError cross-realm errors', () => {
+  test('should return an error built in another realm unchanged', async () => {
+    // `instanceof` compares against this realm's `Error.prototype`, so an error from a
+    // `vm` context, an iframe, or a jsdom window failed it and was wrapped as though it
+    // had never been an error - a different identity, message and prototype for callers
+    // that had only ever thrown errors.
+    const vm = await import('node:vm');
+    const foreign = vm.runInNewContext('new Error("boom")') as Error;
+
+    expect(foreign instanceof Error).toBe(false);
+    expect(toError(foreign)).toBe(foreign);
+    expect(toError(foreign).message).toBe('boom');
+  });
+
+  test('should still wrap a plain object that is not an error', () => {
+    const wrapped = toError({ message: 'boom' });
+
+    expect(wrapped.message).toContain('Non-error value thrown');
+  });
+});

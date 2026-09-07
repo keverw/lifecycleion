@@ -4,17 +4,14 @@ import {
   KeyValueASCIITable,
 } from './ascii-tables/key-value-ascii-table';
 import {
-  findPathInto,
-  matchRedactPath,
   parseRedactPaths,
+  redactMatchedPaths,
   type RedactPath,
 } from './internal/redact-paths';
 import {
   REDACTION_FAILED_MARKER,
   type RedactValueFunction,
 } from './internal/default-redact-function';
-import { resolveRedaction } from './internal/resolve-redaction';
-import { maskValueDeep } from './internal/mask-value-deep';
 import { isPlainContainer } from './internal/is-plain-container';
 import { stringifyTemplateValue } from './internal/stringify-template-value';
 import {
@@ -28,7 +25,6 @@ import {
 } from './internal/render-budget';
 import {
   createRedactionReporter,
-  NOOP_REDACTION_REPORTER,
   type RedactionErrorHandler,
   type ReportRedactionFailure,
 } from './internal/redaction-reporter';
@@ -74,75 +70,6 @@ export interface ErrorToStringOptions {
 }
 
 /**
- * Mask a matched value for display, keeping the shape of a container.
- *
- * A leaf becomes the mask string. An object or array is walked and every leaf inside it
- * masked, then rendered normally - so naming a container redacts its contents instead of
- * replacing the whole thing with a mask of `'[object Object]'`, and an array's elements
- * are masked individually rather than joined and masked as one string.
- *
- * Fully guarded: reading the value runs an accessor this module does not own, and the
- * function itself is caller code. Either failing falls back to `***`, never to the
- * original value.
- */
-function maskSensitiveValue(
-  entry: string,
-  readValue: () => unknown,
-  maxRowLength: number,
-  seen: WeakSet<object>,
-  depth: number,
-  budget: RenderBudget,
-  redactFunction: RedactFieldFunction | undefined,
-  report: ReportRedactionFailure,
-): string | KeyValueASCIITable | NestedKeyValueEntry[] {
-  try {
-    // `null` means "use the default for this one", so a caller can special-case a few
-    // keys without reproducing the default masking for the rest. To render a literal
-    // null, return the string. `undefined` defers the same way, so a function that
-    // returns nothing for the keys it does not handle masks them rather than writing the
-    // word `undefined` into the row.
-    //
-    // Each leaf is stringified before the function sees it, exactly as `applyRedaction`
-    // does, so one function receives identical arguments from both - and so a mutating
-    // function cannot reach into the caller's own error object.
-    const masked = maskValueDeep(
-      entry,
-      readValue(),
-      (key, leaf, isDerived) =>
-        resolveRedaction(key, leaf, isDerived, redactFunction),
-      new WeakSet(),
-      report,
-    );
-
-    if (masked === null || typeof masked !== 'object') {
-      return charge(
-        budget,
-        typeof masked === 'string' ? masked : safeStringify(masked),
-      );
-    }
-
-    // Already masked all the way down, so it is rendered with no sensitive paths left.
-    return stringifyValue(
-      masked,
-      maxRowLength,
-      seen,
-      depth,
-      budget,
-      [],
-      [],
-      undefined,
-      NOOP_REDACTION_REPORTER,
-    );
-  } catch (error) {
-    // Same marker the logger uses for the same condition: redaction was attempted and
-    // failed, which must read differently from a value that masked successfully.
-    report(error, entry);
-
-    return REDACTION_FAILED_MARKER;
-  }
-}
-
-/**
  * Read a property off a value without trusting it.
  *
  * The value being rendered is whatever was thrown, and `message`/`stack`/`code` are
@@ -176,6 +103,119 @@ function readMemberOrThrew(
     return value[key];
   } catch {
     return READ_THREW;
+  }
+}
+
+/**
+ * A value's own `sensitiveFieldNames`, parsed into a fresh path root.
+ *
+ * Shared by the two places a value can start a root of its own - the error table and the
+ * nested-object walk - so the "absent, usable, or unreadable" reading cannot drift
+ * between them.
+ *
+ * @returns The parsed paths; `[]` when the value names none; `null` when it named
+ *   something that is not a usable list of paths, which the caller must fail closed on.
+ */
+function readOwnSensitivePaths(
+  value: Record<string, unknown>,
+  report: ReportRedactionFailure,
+): RedactPath[] | null {
+  const raw = readMemberOrThrew(value, 'sensitiveFieldNames');
+
+  if (raw === undefined || raw === null) {
+    return [];
+  }
+
+  const parsed = parseRedactPaths(raw === READ_THREW ? undefined : raw);
+
+  // Fails closed. A `sensitiveFieldNames` that is present but is not a usable list of
+  // strings - a comma-joined string, a `Set`, a non-string entry, or an accessor that
+  // threw - means the caller asked for masking and this cannot tell what for. Rendering
+  // everything in the clear would be the one unacceptable answer.
+  if (parsed === null) {
+    report(
+      new Error('sensitiveFieldNames is not a usable list of paths'),
+      '<sensitiveFieldNames>',
+    );
+  }
+
+  return parsed;
+}
+
+/**
+ * `additionalInfo` as something the paths can actually address.
+ *
+ * The walk treats a non-plain value - a class instance, an `Error`, a `Map` - as a single
+ * leaf, and no path can address the root, so nothing inside one is ever masked. The table
+ * enumerates its keys regardless of what it is, so the two disagreed exactly where it
+ * matters: `sensitiveFieldNames: ['password']` on a class-instance `additionalInfo` masked
+ * nothing and the table printed the password. Forwarding the same keys through a plain
+ * object puts them where the paths are rooted, so the walk sees what the renderer will.
+ *
+ * Getters are forwarded rather than read here. Reading now would turn an accessor that
+ * throws into `undefined`, which masks to the nine-character word "undefined"; left as an
+ * accessor, it throws inside the walk, which fails it closed.
+ */
+function asAddressableBag(info: object): object {
+  if (isPlainContainer(info)) {
+    return info;
+  }
+
+  let keys: string[];
+
+  try {
+    keys = Object.keys(info);
+  } catch {
+    // A `Proxy` can throw from its `ownKeys` trap. Nothing can be addressed, and nothing
+    // can be rendered either, so an empty bag is the whole answer.
+    return {};
+  }
+
+  const bag: Record<string, unknown> = {};
+
+  for (const key of keys) {
+    try {
+      Object.defineProperty(bag, key, {
+        get: () => (info as Record<string, unknown>)[key],
+        enumerable: true,
+        configurable: true,
+      });
+    } catch {
+      // One key that will not forward is dropped rather than failing the whole bag.
+    }
+  }
+
+  return bag;
+}
+
+/**
+ * Mask everything the paths name, before any of it is rendered.
+ *
+ * The shared walk from `redact-paths`, which is also what the logger's `redactedKeys`
+ * runs, so a value masked in a log line and the same value masked in a rendered error
+ * cannot disagree. The input is never mutated: copies are built only along the branches
+ * that lead to a mask.
+ *
+ * Fully guarded. The walk reads caller properties and calls the caller's `redactFunction`,
+ * and this sits on a reporting path that must not raise an error of its own. A failure
+ * fails closed on the whole value rather than falling through to the unmasked original.
+ */
+function redactAddressedValue(
+  value: unknown,
+  paths: RedactPath[],
+  redactFunction: RedactFieldFunction | undefined,
+  report: ReportRedactionFailure,
+): unknown {
+  if (paths.length === 0) {
+    return value;
+  }
+
+  try {
+    return redactMatchedPaths(value, paths, redactFunction, report);
+  } catch (error) {
+    report(error, '<sensitiveFieldNames>');
+
+    return REDACTION_FAILED_MARKER;
   }
 }
 
@@ -284,7 +324,6 @@ export function errorToString(
       new WeakSet(),
       0,
       createRenderBudget(),
-      [],
       options?.redactFunction,
       report,
     );
@@ -301,7 +340,6 @@ function errorToASCIITable(
   seen: WeakSet<object>,
   depth: number,
   budget: RenderBudget,
-  inheritedSensitive: RedactPath[],
   redactFunction: RedactFieldFunction | undefined,
   report: ReportRedactionFailure,
 ): KeyValueASCIITable {
@@ -349,41 +387,61 @@ function errorToASCIITable(
     let ownPaths: RedactPath[] | null = [];
 
     if (hasInfo || hasCause) {
-      const rawSensitive = readMemberOrThrew(err, 'sensitiveFieldNames');
-
-      ownPaths =
-        rawSensitive === undefined || rawSensitive === null
-          ? []
-          : parseRedactPaths(
-              rawSensitive === READ_THREW ? undefined : rawSensitive,
-            );
-
-      // Fails closed. A `sensitiveFieldNames` that is present but is not a usable list
-      // of strings — a comma-joined string, a `Set`, a non-string entry, or an accessor
-      // that threw — means the caller asked for masking and this cannot tell what for.
-      // Rendering everything in the clear would be the one unacceptable answer, so
-      // `additionalInfo` and `cause` are dropped wholesale instead. An entry that parses
-      // but resolves to nothing is not this case: it masks nothing, exactly as the
-      // logger's `redactedKeys` does.
-      if (ownPaths === null) {
-        report(
-          new Error('sensitiveFieldNames is not a usable list of paths'),
-          '<sensitiveFieldNames>',
-        );
-      }
+      // Unusable means `additionalInfo` and `cause` are dropped wholesale below. An entry
+      // that parses but resolves to nothing is not that case: it masks nothing, exactly
+      // as the logger's `redactedKeys` does.
+      ownPaths = readOwnSensitivePaths(err, report);
     }
 
-    // An error nested in another's `additionalInfo` starts a fresh root for paths, so
-    // the parent's entries address it as a whole rather than reaching inside it. Its
-    // own list covers its own contents.
-    const sensitivePaths =
-      ownPaths === null ? null : [...inheritedSensitive, ...ownPaths];
+    // Every table is its own root. An error nested in another's `additionalInfo` is
+    // addressed by the parent's entries as a whole or not at all - the parent's walk has
+    // already run by the time this is reached - and its own list covers its own contents.
+    const sensitivePaths = ownPaths;
 
     if (hasInfo) {
       if (sensitivePaths === null) {
         table.addRow('AdditionalInfo', '*** (sensitiveFieldNames unreadable)');
       } else {
-        const info = additionalInfo as Record<string, unknown>;
+        // Redacted once, here, then rendered as ordinary data.
+        //
+        // The renderer used to carry the path list down every branch and re-decide at
+        // each one whether the value in hand was named - a second implementation of the
+        // walk `redact-paths` already owns, and one that disagreed with it three separate
+        // times on this branch alone: an object inside an array, a path reaching into a
+        // nested error, and a derived value each rendered in the clear here while the
+        // logger masked them. Masking first leaves one walk to be right, and the renderer
+        // with nothing to decide.
+        const masked = redactAddressedValue(
+          asAddressableBag(additionalInfo as object),
+          sensitivePaths,
+          redactFunction,
+          report,
+        );
+
+        // The walk can fail the whole value closed, and what it hands back then is the
+        // marker string rather than a bag of keys. Enumerating that walks the *string*,
+        // so a failed redaction rendered as twenty-two rows of `AdditionalInfo.0`,
+        // `AdditionalInfo.1` - one per character of `***REDACTION FAILED***`.
+        if (masked === null || typeof masked !== 'object') {
+          table.addRow('AdditionalInfo', charge(budget, safeStringify(masked)));
+
+          addErrorTail(
+            table,
+            err,
+            cause,
+            sensitivePaths,
+            maxRowLength,
+            seen,
+            depth,
+            budget,
+            redactFunction,
+            report,
+          );
+
+          return table;
+        }
+
+        const info = masked as Record<string, unknown>;
 
         // Keys enumerated through a guard: `for...in` walks the prototype chain and a
         // `Proxy` can throw from its `ownKeys` trap.
@@ -407,44 +465,18 @@ function errorToASCIITable(
 
           charge(budget, key);
 
-          const matchedEntry = matchRedactPath(sensitivePaths, [key]);
-
-          if (matchedEntry !== undefined) {
-            table.addRow(
-              `AdditionalInfo.${key}`,
-              maskSensitiveValue(
-                matchedEntry,
-                // Read unguarded on purpose: `maskSensitiveValue` catches, so a throwing
-                // accessor is reported as a failed mask. Going through `readMember` would
-                // swallow the throw and hand over `undefined`, which stringifies to the
-                // nine-character word "undefined" and masks to `un*****ed`.
-                () => info[key],
-                maxRowLength,
-                seen,
-                depth + 1,
-                budget,
-                redactFunction,
-                report,
-              ),
-            );
-          } else {
-            const value = readMember(info, key);
-
-            table.addRow(
-              `AdditionalInfo.${key}`,
-              stringifyValue(
-                value,
-                maxRowLength,
-                seen,
-                depth + 1,
-                budget,
-                sensitivePaths,
-                [key],
-                redactFunction,
-                report,
-              ),
-            );
-          }
+          table.addRow(
+            `AdditionalInfo.${key}`,
+            stringifyValue(
+              readMember(info, key),
+              maxRowLength,
+              seen,
+              depth + 1,
+              budget,
+              redactFunction,
+              report,
+            ),
+          );
         }
       }
     }
@@ -501,32 +533,37 @@ function addErrorTail(
       // masks the whole thing and `['cause.password']` reaches one field inside it. A
       // cause that is itself an error takes the nested-error branch and renders under its
       // own list instead, exactly as one nested in `additionalInfo` does.
-      const matchedEntry = matchRedactPath(sensitive, ['cause']);
+      //
+      // Wrapped in an object rather than redacted bare, because that is what puts it at
+      // the `cause` path the caller writes; the walk refuses an empty path, and a bare
+      // value would put `['cause.password']` one level off.
+      const maskedWrapper = redactAddressedValue(
+        { cause },
+        sensitive,
+        redactFunction,
+        report,
+      );
+
+      // The same guard the `additionalInfo` branch carries. A walk that fails the whole
+      // wrapper closed hands back the marker *string*, and reading `cause` off a string is
+      // `undefined` - which would render the literal word "undefined" in place of the
+      // marker that says redaction was attempted and failed.
+      const maskedCause =
+        maskedWrapper === null || typeof maskedWrapper !== 'object'
+          ? maskedWrapper
+          : readMember(maskedWrapper as Record<string, unknown>, 'cause');
 
       table.addRow(
         'Cause',
-        matchedEntry !== undefined
-          ? maskSensitiveValue(
-              matchedEntry,
-              () => cause,
-              maxRowLength,
-              seen,
-              depth + 1,
-              budget,
-              redactFunction,
-              report,
-            )
-          : stringifyValue(
-              cause,
-              maxRowLength,
-              seen,
-              depth + 1,
-              budget,
-              sensitive,
-              ['cause'],
-              redactFunction,
-              report,
-            ),
+        stringifyValue(
+          maskedCause,
+          maxRowLength,
+          seen,
+          depth + 1,
+          budget,
+          redactFunction,
+          report,
+        ),
       );
     }
   }
@@ -554,8 +591,6 @@ function stringifyValue(
   seen: WeakSet<object>,
   depth: number,
   budget: RenderBudget,
-  sensitive: RedactPath[],
-  path: string[],
   redactFunction: RedactFieldFunction | undefined,
   report: ReportRedactionFailure,
 ): string | KeyValueASCIITable | NestedKeyValueEntry[] {
@@ -612,8 +647,6 @@ function stringifyValue(
       seen,
       depth,
       budget,
-      sensitive,
-      path,
       redactFunction,
       report,
     );
@@ -630,8 +663,6 @@ function stringifyValueInner(
   seen: WeakSet<object>,
   depth: number,
   budget: RenderBudget,
-  sensitive: RedactPath[],
-  path: string[],
   redactFunction: RedactFieldFunction | undefined,
   report: ReportRedactionFailure,
 ): string | KeyValueASCIITable | NestedKeyValueEntry[] {
@@ -686,40 +717,12 @@ function stringifyValueInner(
       try {
         const item = source[index];
 
-        const matchedEntry = matchRedactPath(sensitive, [
-          ...path,
-          String(index),
-        ]);
-
-        if (matchedEntry !== undefined) {
-          const maskedItem = maskSensitiveValue(
-            matchedEntry,
-            () => item,
-            maxRowLength,
-            seen,
-            depth + 1,
-            budget,
-            redactFunction,
-            report,
-          );
-
-          parts.push(
-            typeof maskedItem === 'string'
-              ? maskedItem
-              : renderedValueToText(maskedItem),
-          );
-
-          continue;
-        }
-
         const result = stringifyValue(
           item,
           maxRowLength,
           seen,
           depth + 1,
           budget,
-          sensitive,
-          [...path, String(index)],
           redactFunction,
           report,
         );
@@ -760,32 +763,11 @@ function stringifyValueInner(
       // naming `session.password` on a class instance masked that one field while
       // printing every sibling beside it - an `internalToken` the caller never asked to
       // have shown, which is exactly what the logger's walk was rebuilt to prevent.
-      // Named as a whole, such a value is masked as one leaf by the branch above. Named
-      // *into* - `session.password` on a `Session` - the whole value is masked here, the
-      // same answer the logger's walk gives: it is the only masking whose result still
-      // prints the way the original did, one string in place of another.
       //
-      // Checked ahead of the nested-error branch below, not after it. A nested error is
-      // not structure either, and letting it skip this rule was the one way a named value
-      // still rendered in the clear: `['cause.additionalInfo.apiKey']` matched nothing on
-      // the way down, the nested error then rendered under its *own* empty list, and the
-      // key the caller named was printed. Every other non-plain value failed closed in
-      // that position; this one failed open, and silently.
-      const inside = findPathInto(sensitive, path);
-
-      if (inside !== undefined) {
-        return maskSensitiveValue(
-          inside,
-          () => value,
-          maxRowLength,
-          seen,
-          depth,
-          budget,
-          redactFunction,
-          report,
-        );
-      }
-
+      // Both of those cases are settled before this function sees the value: the walk
+      // treats a non-plain value as one leaf, so a value named as a whole and a value
+      // named *into* have each already been replaced by their mask. What arrives here is
+      // whatever the walk left alone.
       if (isError) {
         // Nothing above addresses it, so it starts a fresh path root: the parent's list
         // addresses it as a whole or not at all, and its own `sensitiveFieldNames` covers
@@ -796,7 +778,6 @@ function stringifyValueInner(
           seen,
           depth + 1,
           budget,
-          [],
           redactFunction,
           report,
         );
@@ -804,6 +785,49 @@ function stringifyValueInner(
 
       return charge(budget, stringifyTemplateValue(value));
     } else {
+      // An error-shaped plain object renders as an error, under its own
+      // `sensitiveFieldNames`.
+      //
+      // `sensitiveFieldNames` names paths into `additionalInfo`, so honouring it means
+      // rendering through the table that anchors it there; walking the object as ordinary
+      // structure gives those names nothing to match. That was only ever reached when
+      // such an object was handed straight to `errorToString`, and the reporting paths
+      // stopped doing that: `reportCallbackError` and the `Logger` error listener both
+      // wrap a thrown non-`Error` as `new Error(..., { cause })`. So an object that named
+      // its own sensitive fields arrived one level down, was walked under the parent's
+      // empty list, and printed those fields in the clear to every sink.
+      //
+      // Gated on `additionalInfo`/`cause` because that is the shape the list addresses -
+      // and gated on exactly what the table itself requires of them, not on merely having
+      // the key. The table renders `additionalInfo` only when it is a non-null object and
+      // `cause` only when it is non-null, so an object holding `additionalInfo: 'text'` or
+      // `cause: null` passed a looser gate here and then rendered as a completely empty
+      // table, dropping every key it had. An object this cannot address stays on the walk
+      // below, where its keys still render.
+      const asRecord = value as Record<string, unknown>;
+      const ownInfo = readMember(asRecord, 'additionalInfo');
+      const ownCause = readMember(asRecord, 'cause');
+      const isErrorShaped =
+        (Boolean(ownInfo) && typeof ownInfo === 'object') ||
+        (ownCause !== undefined && ownCause !== null);
+
+      // Read the "or threw" way: an accessor that refused is the caller asking for
+      // masking without saying what for, so it routes here too and the table fails it
+      // closed, rather than being read as absent and walked in the clear.
+      const rawOwnList = readMemberOrThrew(asRecord, 'sensitiveFieldNames');
+
+      if (isErrorShaped && rawOwnList !== undefined && rawOwnList !== null) {
+        return errorToASCIITable(
+          value,
+          Math.max(KEY_VALUE_TABLE_MIN_WIDTH, maxRowLength - 4),
+          seen,
+          depth + 1,
+          budget,
+          redactFunction,
+          report,
+        );
+      }
+
       // Handle objects differently
       //
       // Keys first, then each value read inside its own guard. Reading them together with
@@ -819,9 +843,6 @@ function stringifyValueInner(
         keys = [];
       }
 
-      // Matched by path, exactly as the logger's `redactedKeys` does: a bare name in
-      // `sensitiveFieldNames` addresses a top-level key of `additionalInfo`, and reaching
-      // a nested value takes a path such as `user.password` or `items[0].token`.
       // Clamped, not just decremented. `KeyValueASCIITable` throws below its minimum
       // width, so a chain of nested values that kept subtracting four eventually threw
       // from the constructor and the top-level backstop turned the whole render into
@@ -851,29 +872,6 @@ function stringifyValueInner(
         charge(budget, key);
         chargeUnits(budget, Math.max(MIN_ROW_COST, maxRowLength) * (depth + 1));
 
-        const matchedEntry = matchRedactPath(sensitive, [...path, key]);
-
-        if (matchedEntry !== undefined) {
-          entries.push({
-            key,
-            // Read unguarded on purpose, as at the top level: `maskSensitiveValue`
-            // catches, so a throwing accessor is reported as a failed mask rather than
-            // masking the word "undefined".
-            value: maskSensitiveValue(
-              matchedEntry,
-              () => (value as Record<string, unknown>)[key],
-              nestedRowLength,
-              seen,
-              depth + 1,
-              budget,
-              redactFunction,
-              report,
-            ),
-          });
-
-          continue;
-        }
-
         let val: unknown;
 
         try {
@@ -892,8 +890,6 @@ function stringifyValueInner(
             seen,
             depth + 1,
             budget,
-            sensitive,
-            [...path, key],
             redactFunction,
             report,
           ),

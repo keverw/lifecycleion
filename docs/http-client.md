@@ -1279,13 +1279,16 @@ Two expectations the adapter relies on:
   listeners it could never remove, it keeps the ones it has — and a sink reused across
   many requests accumulates them until Node warns about a leak. Either name works; a Node
   stream has both.
-- **Report a failed write promptly.** Either call the callback passed to `write` / `end`
-  with the error, or emit `'error'` no later than the next `setImmediate` turn — which is
-  what a Node stream does. A write that fails destroys the stream and its `'error'` often
-  arrives after the request has already settled, so the adapter holds a listener across
-  that gap to keep it from becoming an uncaught exception. After that turn the listener is
-  removed, since a sink that might never emit would otherwise hold one forever. If yours
-  emits later than that, handle the event yourself.
+- **Report a failed write.** Either call the callback passed to `write` / `end` with the
+  error, or emit `'error'` — which is what a Node stream does. A write that fails destroys
+  the stream and its `'error'` often arrives after the request has already settled, so the
+  adapter holds a listener across that gap to keep it from becoming an uncaught exception.
+  There is no deadline: a real `fs.WriteStream` closes its file descriptor asynchronously
+  before it emits, and any deadline short enough to be useful expired first — which turned
+  the very error the listener existed to absorb into an uncaught exception.
+- **Emit `'close'` when you are finished.** That is how the adapter learns nothing further
+  is coming and releases the listener. A sink that emits neither an `'error'` nor a
+  `'close'` after a failed write keeps one listener attached for as long as it lives.
 - **Set `errored` if you can, but you need not.** A Node stream records the error it failed
   with there, and the adapter reads it as a second signal when `end`'s callback reports
   success on a stream that was destroyed underneath it. It is optional, and a sink without

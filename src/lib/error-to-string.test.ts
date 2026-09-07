@@ -281,6 +281,68 @@ describe('errorToString', () => {
 
       expect(render({ cause: inner }, ['cause']).includes(SECRET)).toBe(false);
     });
+
+    it('should honour a thrown plain object\'s own sensitiveFieldNames once it is wrapped as a cause', () => {
+      // The reporting paths no longer render a thrown value directly: `reportCallbackError`
+      // and the `Logger` error listener both wrap a non-`Error` as `new Error(..., { cause })`.
+      // A thrown object naming its own sensitive fields then arrived one level down, was
+      // walked as ordinary structure under the parent's empty list, and printed them.
+      const thrown = {
+        message: 'boom',
+        additionalInfo: { apiKey: SECRET },
+        sensitiveFieldNames: ['apiKey'],
+      };
+
+      const rendered = errorToString(new Error('wrapper', { cause: thrown }));
+
+      expect(rendered.includes(SECRET)).toBe(false);
+      expect(rendered).toContain('AdditionalInfo.apiKey');
+    });
+
+    it('should still render a plain object that names nothing it can address', () => {
+      // Only an error-shaped object takes the fresh root, because `sensitiveFieldNames`
+      // names paths into `additionalInfo`. One without it stays on the ordinary walk, where
+      // its keys still render rather than being dropped for a list that matches nothing.
+      const rendered = errorToString(
+        new Error('wrapper', { cause: { note: 'keep me' } }),
+      );
+
+      expect(rendered).toContain('keep me');
+    });
+
+    it('should not drop the keys of an object whose additionalInfo the table cannot render', () => {
+      // The gate has to require what the table requires, not merely that the key exists.
+      // `additionalInfo: 'text'` and `cause: null` passed a looser gate and then rendered
+      // as a completely empty table, losing every key the object had.
+      for (const shape of [
+        { additionalInfo: 'not-an-object', sensitiveFieldNames: ['a'], keep: 'KEEPME' },
+        { cause: null, sensitiveFieldNames: ['a'], keep: 'KEEPME' },
+      ]) {
+        expect(errorToString(new Error('w', { cause: shape }))).toContain(
+          'KEEPME',
+        );
+      }
+    });
+
+    it('should mask a named field on an additionalInfo that is not a plain object', () => {
+      // The shared walk treats a class instance, an `Error` or a `Map` as a single leaf and
+      // no path can address the root, so nothing inside one was masked - while the table
+      // enumerates its keys regardless and printed them.
+      class Config {
+        public password = SECRET;
+        public other = 'ok';
+      }
+
+      const rendered = errorToString(
+        Object.assign(new Error('x'), {
+          additionalInfo: new Config(),
+          sensitiveFieldNames: ['password'],
+        }),
+      );
+
+      expect(rendered.includes(SECRET)).toBe(false);
+      expect(rendered).toContain('AdditionalInfo.other');
+    });
   });
 
   describe('sensitiveFieldNames redactFunction option', () => {

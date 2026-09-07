@@ -120,7 +120,14 @@ export function applyRedaction(
   let requestedCount: number;
 
   try {
-    if (!redactedKeys) {
+    // Absent, not merely falsy. `undefined` is the caller saying nothing about redaction;
+    // `null`, `0`, `''` and `false` are a caller who supplied a list that cannot name a
+    // key, which is the fail-closed case the `Array.isArray` check below reports. Letting
+    // every falsy value take this exit handed those callers their params back untouched,
+    // and said nothing about it - and once `handleLog` started counting a supplied
+    // non-array as a redaction request, it put those unmasked params in
+    // `entry.redactedParams` for every sink under a name that claims they were masked.
+    if (redactedKeys === undefined) {
       return params;
     }
 

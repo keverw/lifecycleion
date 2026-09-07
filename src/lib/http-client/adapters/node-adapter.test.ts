@@ -2619,11 +2619,80 @@ describe('NodeAdapter.send() — unit branches without server', () => {
     await Promise.all(Array.from({ length: 12 }, async () => runOnce()));
     expect(emitter.listenerCount('error')).toBe(1);
 
-    // Released on the next `setImmediate` turn, which lands after a real stream would
-    // have emitted, so nothing accumulates across requests.
+    // Released a turn after the error was delivered, not a turn after it was attached.
+    // A `setImmediate` scheduled at attach time used to release it unconditionally, and
+    // that lands *before* a real `fs.WriteStream` emits - it closes its fd asynchronously
+    // first - so the error it was attached to absorb arrived to no listener at all and
+    // killed the process. Counting from delivery instead keeps the siblings above covered
+    // and still bounds the listener's life.
     await new Promise<void>((done) => {
       setImmediate(done);
     });
+
+    expect(emitter.listenerCount('error')).toBe(0);
+  });
+
+  test('the pending-error listener is released when the writable closes without erroring', async () => {
+    // The other bound. A writable handed a failed write that then never emits the error -
+    // a hand-written `WritableLike` is not obliged to - would otherwise keep the absorber,
+    // and with it the closure scope of the request it was declared in, for as long as the
+    // writable itself lives.
+    const emitter = new EventEmitter();
+    const writable = emitter as unknown as WritableLike;
+
+    writable.write = ((
+      _chunk: Uint8Array | string,
+      cb?: (error?: Error | null) => void,
+    ): boolean => {
+      cb?.(new Error('write failed'));
+
+      return true;
+    });
+    writable.end = ((cb?: (error?: Error | null) => void): void => {
+      cb?.();
+    });
+    writable.destroy = () => writable;
+
+    const req = new MockClientRequest();
+    const res = new MockIncomingMessage(200, {
+      'content-type': 'application/octet-stream',
+      'content-length': '1',
+    });
+    const requestSpy = spyOn(http, 'request').mockImplementation(
+      (_options, callback) => {
+        const cb = callback as
+          | ((res: http.IncomingMessage) => void)
+          | undefined;
+
+        queueMicrotask(() => {
+          cb?.(res as unknown as http.IncomingMessage);
+          queueMicrotask(() => {
+            res.emit('data', Buffer.from('a'));
+            res.emit('end');
+          });
+        });
+
+        return req as unknown as http.ClientRequest;
+      },
+    );
+
+    try {
+      const response = await new NodeAdapter().send({
+        requestURL: 'http://example.test/data',
+        method: 'GET',
+        headers: {},
+        streamResponse: () => writable,
+      });
+
+      expect(response.streamErrorCode).toBe('stream_write_error');
+    } finally {
+      requestSpy.mockRestore();
+    }
+
+    // No error was ever emitted, so nothing has bounded it yet.
+    expect(emitter.listenerCount('error')).toBe(1);
+
+    emitter.emit('close');
 
     expect(emitter.listenerCount('error')).toBe(0);
   });

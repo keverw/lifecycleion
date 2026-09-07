@@ -73,6 +73,33 @@ describe('LifecycleManager - hostile thrown values', () => {
     await lifecycle.stopAllComponents();
   });
 
+  test('an unreadable error reported during start() still returns a result', async () => {
+    // The existing coverage reports the stop *after* `startComponent` has resolved. During
+    // `start()` the reads sit inside a `try` whose `catch` reads `message` again, so an
+    // accessor that throws escaped both and rejected `startComponent` rather than
+    // returning the `component_unexpected_stop` result it exists to return.
+    const lifecycle = new LifecycleManager({ logger });
+
+    class FailsDuringStart extends BaseComponent {
+      public start(): void {
+        this.reportUnexpectedStop(unreadableError());
+      }
+      public stop(): void {}
+    }
+
+    await lifecycle.registerComponent(
+      new FailsDuringStart(logger, { name: 'hostile-start' }),
+    );
+
+    const result = await lifecycle.startComponent('hostile-start');
+
+    expect(result.success).toBe(false);
+    expect(result.code).toBe('component_unexpected_stop');
+    expect(typeof result.reason).toBe('string');
+
+    await lifecycle.stopAllComponents();
+  });
+
   test('a non-Error thrown value from reportUnexpectedStop is normalized', async () => {
     const lifecycle = new LifecycleManager({ logger });
 

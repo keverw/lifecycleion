@@ -846,15 +846,12 @@ async function streamResponseBody(
      * attached with `on`, not `once`, so it keeps absorbing for as long as it is there
      * instead of standing down after the first error and leaving a sibling's unhandled.
      *
-     * Its lifetime is bounded rather than left to an event that may never come. A
-     * hand-written {@link WritableLike} that throws from `write` or `end` is not obliged
-     * to emit anything afterwards, so a listener waiting for delivery could wait forever.
-     * A `setImmediate` removes it unconditionally, which is safely after the emit rather
-     * than a guess: measured on Node 25 and Bun 1.4, a failed write emits after
-     * `process.nextTick` and before the next `setImmediate`, so a real stream has always
-     * delivered by then. `unref` so a pending removal cannot hold the process open. An
-     * error emitted after that window is unhandled again - the documented expectation on
-     * `WritableLike`, and the only alternative to holding a listener indefinitely.
+     * Its lifetime is bounded by the stream's own delivery: the absorber removes itself
+     * once the error arrives, and a `'close'` listener removes it once the stream has
+     * finished tearing down. A `setImmediate` is the fallback, and only for a writable
+     * that would not take a `'close'` listener - a hand-written {@link WritableLike} that
+     * throws from `write` or `end` is not obliged to emit anything afterwards, so a
+     * listener waiting for delivery could otherwise wait forever.
      *
      * Skipped entirely for a writable with no listener-removal method, because an
      * absorber attached to one could never be taken back: the `setImmediate` would drop
@@ -885,9 +882,73 @@ async function streamResponseBody(
         return;
       }
 
+      // Takes the absorber back off, whichever signal got here first. Guarded on the
+      // `WeakMap` still naming this absorber so a second call, or a removal that has
+      // already run, does nothing.
+      const detach = (): void => {
+        try {
+          if (pendingWritableErrorAbsorbers.get(writable) !== absorb) {
+            return;
+          }
+        } catch {
+          return;
+        }
+
+        try {
+          removeListener('error', absorb);
+        } catch {
+          // The removal itself is caller code and can refuse. The listener is therefore
+          // still attached, so the bookkeeping that says so is kept: dropping it would
+          // let the next failure add a second listener on top of one that never came
+          // off, which is the accumulation being prevented. The one still attached goes
+          // on absorbing, so nothing is left uncovered.
+          return;
+        }
+
+        try {
+          removeListener('close', onClose);
+        } catch {
+          // Same trade as the `'error'` removal above: the listener is still attached, so
+          // the bookkeeping that says so is kept. Deleting the entry anyway would let the
+          // next failure attach a second `onClose` on top of one that never came off,
+          // moving the accumulation this exists to prevent onto the other channel.
+          return;
+        }
+
+        pendingWritableErrorAbsorbers.delete(writable);
+      };
+
+      // Detach on the next turn of the loop rather than now, so an error delivered in
+      // this one still finds the listener. `unref` so a pending removal cannot hold the
+      // process open.
+      const scheduleDetach = (): void => {
+        try {
+          const removal = setImmediate(detach);
+
+          removal.unref?.();
+        } catch {
+          // No way to schedule it, so the listener stays. `'close'` may still take it off,
+          // and holding one absorber is the safe direction of the two.
+        }
+      };
+
       const absorb = (): void => {
         // Already reported through `settle`; this exists only to keep the event from
         // going unhandled.
+        //
+        // Stands down a turn after delivery, not on it. `streamResponse` may hand the same
+        // writable to several requests at once and one absorber covers them all, so
+        // detaching the moment the first error lands would leave a sibling's unhandled -
+        // but staying attached until a `'close'` that a writable is not obliged to emit
+        // keeps this closure, and with it the whole request scope it was declared in,
+        // alive for as long as the writable is. Deferring by one turn covers the siblings
+        // and still bounds it.
+        scheduleDetach();
+      };
+
+      const onClose = (): void => {
+        // The stream has finished tearing down, so nothing further is coming.
+        detach();
       };
 
       try {
@@ -899,30 +960,34 @@ async function streamResponseBody(
         return;
       }
 
+      // Bounded by delivery, and by the stream's own teardown, rather than by a turn of
+      // the loop counted from here.
+      //
+      // A `setImmediate` scheduled at this point used to remove it unconditionally, on the
+      // measurement that a failed write emits within the same turn. That is not true of
+      // every stream: a real `fs.WriteStream` destroys itself through an asynchronous
+      // `fs.close(fd)` before it emits, so the error lands a poll phase later - after the
+      // removal had run and after `cleanup` had taken `onWritableError` off too. With no
+      // listener left, Node turned a `stream_write_error` this had already reported
+      // correctly into an uncaught exception that killed the process. It could not be
+      // caught here either: Bun emits inside the window, so the suite never saw it.
+      //
+      // Both signals are used because neither alone is enough. `absorb` cannot cover a
+      // writable that is never going to emit at all - a hand-written {@link WritableLike}
+      // that throws from `write` or `end` is not obliged to. `'close'` cannot cover one
+      // that emits `'error'` and nothing after it, and waiting on a close that never comes
+      // is what would pin this closure, and the request scope around it, to the writable's
+      // lifetime.
       try {
-        const removal = setImmediate(() => {
-          if (pendingWritableErrorAbsorbers.get(writable) !== absorb) {
-            return;
-          }
-
-          try {
-            removeListener('error', absorb);
-          } catch {
-            // The removal itself is caller code and can refuse. The listener is
-            // therefore still attached, so the bookkeeping that says so is kept:
-            // dropping it would let the next failure add a second listener on top of one
-            // that never came off, which is the accumulation being prevented. The one
-            // still attached goes on absorbing, so nothing is left uncovered.
-            return;
-          }
-
-          pendingWritableErrorAbsorbers.delete(writable);
-        });
-
-        removal.unref?.();
+        writable.on('close', onClose);
       } catch {
-        // No way to schedule the removal, so the listener stays. That is the same trade
-        // this made before it was bounded, and the safe direction of the two.
+        // Neither bound is available: this writable would not take the `'close'` listener,
+        // and `absorb` only fires if the error actually arrives. A writable that emits
+        // nothing at all would keep the absorber, and the request scope it closes over,
+        // for as long as it lives - so fall back to the turn-counted removal. It is the
+        // timing that was wrong for a real stream, and a writable that refuses a listener
+        // is not one.
+        scheduleDetach();
       }
     };
 
@@ -1333,7 +1398,7 @@ function destroyWritableQuietly(writable: WritableLike): void {
 }
 
 type WritableListenerRemover = (
-  event: 'drain' | 'error',
+  event: 'drain' | 'error' | 'close',
   listener: (() => void) | ((error: Error) => void),
 ) => unknown;
 

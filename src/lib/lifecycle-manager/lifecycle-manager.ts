@@ -1227,7 +1227,8 @@ export class LifecycleManager
               startedComponents: [],
               failedOptionalComponents,
               skippedDueToDependency: Array.from(skippedDueToDependency),
-              reason: error.message,
+              // Guarded: this is the component's own reported error.
+              reason: describeError(error),
               code: 'component_unexpected_stop',
               error,
               durationMS: Date.now() - startTime,
@@ -1322,7 +1323,7 @@ export class LifecycleManager
             startedComponents: [],
             failedOptionalComponents,
             skippedDueToDependency: Array.from(skippedDueToDependency),
-            reason: unexpectedStopResult.requiredFailure.error.message,
+            reason: describeError(unexpectedStopResult.requiredFailure.error),
             code: 'component_unexpected_stop',
             error: unexpectedStopResult.requiredFailure.error,
             durationMS: Date.now() - startTime,
@@ -1373,7 +1374,7 @@ export class LifecycleManager
           startedComponents: [],
           failedOptionalComponents,
           skippedDueToDependency: Array.from(skippedDueToDependency),
-          reason: unexpectedStopResult.requiredFailure.error.message,
+          reason: describeError(unexpectedStopResult.requiredFailure.error),
           code: 'component_unexpected_stop',
           error: unexpectedStopResult.requiredFailure.error,
           durationMS: Date.now() - startTime,
@@ -3695,7 +3696,12 @@ export class LifecycleManager
         return {
           success: false,
           componentName: name,
-          reason: error.message,
+          // Guarded: `error` came from the component's own `reportUnexpectedStop`, and
+          // `toError` returns an `Error` unchanged, so `message` is whatever accessor the
+          // component put there. An unguarded read threw out of the `try` and then again
+          // out of the `catch` below, so `startComponent` rejected instead of returning
+          // this `component_unexpected_stop` result.
+          reason: describeError(error),
           code: 'component_unexpected_stop',
           error,
           status: this.getComponentStatus(name),
@@ -3798,8 +3804,13 @@ export class LifecycleManager
         return {
           success: false,
           componentName: name,
+          // Guarded for the same reason as the `try` path above, and it matters more
+          // here: this runs inside the `catch`, so a `message` that throws has nothing
+          // left above it to catch and escapes as a rejection.
           reason:
-            unexpectedStopError?.message ||
+            (unexpectedStopError === undefined
+              ? undefined
+              : describeError(unexpectedStopError)) ||
             `Component "${name}" stopped unexpectedly during startup`,
           code: 'component_unexpected_stop',
           error:

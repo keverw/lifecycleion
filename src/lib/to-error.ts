@@ -11,18 +11,46 @@
  * guarantee, and a second copy would drift.
  *
  * **An `Error` is returned unchanged** - same identity, `stack`, `message`, and `cause` -
- * so a caller that only ever throws `Error`s sees nothing new.
+ * so a caller that only ever throws `Error`s sees nothing new. "An `Error`" is not only
+ * `instanceof Error`: an error built in another realm - a `vm` context, an iframe, a
+ * jsdom window - has a different `Error` constructor and fails `instanceof` while being
+ * an error in every way the caller cares about, so its internal brand is checked too.
  *
  * **Anything else becomes `Non-error value thrown: <description>`**, with the original
  * value kept on `cause`. The prefix is the point: it says the failure path was handed
  * something that was never an `Error`, which a bare `String(value)` would have disguised.
  * Read `cause`, not the message, to recover the thrown value.
  */
+/**
+ * Is this value an error, including one built in another realm?
+ *
+ * `instanceof` compares against *this* realm's `Error.prototype`, so an error thrown out
+ * of a `vm` context, an iframe, or a jsdom window fails it while being an error in every
+ * respect the caller cares about. `Object.prototype.toString` reads the internal brand
+ * instead, which crosses realms.
+ *
+ * A hostile object can claim the brand with `Symbol.toStringTag`, and one that does is
+ * returned as-is rather than wrapped. That is the same bargain `instanceof` already
+ * offers - a `Proxy` can forge a prototype chain - and it costs nothing here: every read
+ * off the result is guarded anyway, by `describeError` or by `errorToString`.
+ */
+function isErrorValue(value: unknown): value is Error {
+  if (value instanceof Error) {
+    return true;
+  }
+
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    Object.prototype.toString.call(value) === '[object Error]'
+  );
+}
+
 export function toError(value: unknown): Error {
   let description: string;
 
   try {
-    if (value instanceof Error) {
+    if (isErrorValue(value)) {
       return value;
     }
 

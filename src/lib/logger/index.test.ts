@@ -189,6 +189,104 @@ describe('Logger', () => {
   });
 
   describe('Redaction', () => {
+    test('should fail closed when redactedKeys is not an array', () => {
+      // The gate used to ask a caller-supplied list how long it was before asking what it
+      // was. A `Set`, or anything else without a numeric `length`, answered `undefined`,
+      // and `undefined > 0` read as "no redaction requested" - so the params went to every
+      // sink in the clear and `applyRedaction`'s own `Array.isArray` guard never ran,
+      // because nothing called it.
+      const failures: string[] = [];
+      const strictLogger = new Logger({
+        sinks: [arraySink],
+        onRedactionError: (error, key) => {
+          failures.push(key);
+        },
+      });
+
+      strictLogger.info('pw={{password}}', {
+        params: { password: 'hunter2' },
+        redactedKeys: new Set(['password']) as unknown as string[],
+      });
+
+      const log = arraySink.logs[0];
+
+      expect(log.message).not.toContain('hunter2');
+      expect(log.redactedParams?.password).not.toBe('hunter2');
+      expect(failures.length).toBeGreaterThan(0);
+    });
+
+    test('should not hand a sink a redactedKeys it cannot read', () => {
+      // The copy is what makes `entry.redactedKeys` inert. When the copy itself fails,
+      // the caller's object used to be put on the entry with its traps still attached, so
+      // a sink reading `.length` or `.join(',')` threw inside `sink.write`.
+      const hostile = new Proxy(['password'], {
+        get(target, key, receiver) {
+          if (key === 'length') {
+            throw new Error('no length');
+          }
+
+          return Reflect.get(target, key, receiver);
+        },
+      });
+
+      const strictLogger = new Logger({
+        sinks: [arraySink],
+        onRedactionError: () => {},
+      });
+
+      strictLogger.info('pw={{password}}', {
+        params: { password: 'hunter2' },
+        redactedKeys: hostile,
+      });
+
+      const log = arraySink.logs[0];
+
+      expect(log.message).not.toContain('hunter2');
+      expect(log.redactedKeys).toBeUndefined();
+    });
+
+    test('should fail closed on a falsy redactedKeys that is not an array', () => {
+      // `undefined` is the caller saying nothing about redaction. `null`, `0`, `''` and
+      // `false` are a supplied list that cannot name a key, which has to fail closed and
+      // say so - not hand the params back untouched under a name claiming they were masked.
+      for (const bogus of [null, 0, '', false]) {
+        const sink = new ArraySink();
+        let reports = 0;
+        const strictLogger = new Logger({
+          sinks: [sink],
+          onRedactionError: () => {
+            reports++;
+          },
+        });
+
+        strictLogger.info('pw={{password}}', {
+          params: { password: 'hunter2' },
+          redactedKeys: bogus as unknown as string[],
+        });
+
+        const log = sink.logs[0];
+
+        expect(log.message).not.toContain('hunter2');
+        expect(log.redactedParams?.password).toBeUndefined();
+        expect(reports).toBeGreaterThan(0);
+      }
+    });
+
+    test('should treat an absent or empty redactedKeys as no redaction', () => {
+      for (const empty of [undefined, []]) {
+        const sink = new ArraySink();
+        const plainLogger = new Logger({ sinks: [sink] });
+
+        plainLogger.info('pw={{password}}', {
+          params: { password: 'hunter2' },
+          redactedKeys: empty,
+        });
+
+        expect(sink.logs[0].message).toBe('pw=hunter2');
+        expect(sink.logs[0].redactedParams).toBeUndefined();
+      }
+    });
+
     test('should redact specified keys', () => {
       logger.info('Login attempt', {
         params: {

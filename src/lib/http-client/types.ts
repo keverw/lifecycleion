@@ -167,14 +167,17 @@ export interface AdapterResponse {
 /**
  * The subset of a Node `Writable` the adapter drives.
  *
- * **Error timing.** A write that fails is expected to surface either through the
- * callback given to `write`/`end` or as an `'error'` event emitted no later than the
- * next `setImmediate` turn - which is what a Node stream does, and what the adapter
- * relies on. Between settling a failed write and that point the adapter keeps a
- * listener attached so the event is not an uncaught exception; after it, the listener is
- * removed, since an implementation that may never emit would otherwise hold one forever.
- * An implementation that emits its `'error'` later than that must not leave it
- * unhandled.
+ * **Reporting a failure.** A write that fails is expected to surface either through the
+ * callback given to `write`/`end` or as an `'error'` event - which is what a Node stream
+ * does. The event often arrives after the request has already settled and its own
+ * listeners are gone, so the adapter keeps a listener attached across that gap to stop it
+ * becoming an uncaught exception. No deadline is imposed on when it arrives: a real
+ * `fs.WriteStream` closes its file descriptor asynchronously before emitting, and a
+ * deadline short enough to be useful was short enough to expire first.
+ *
+ * **Emit `'close'` when finished.** That is how the adapter learns nothing further is
+ * coming and releases the listener. An implementation that emits neither an `'error'` nor
+ * a `'close'` keeps one listener on its own sink.
  */
 export interface WritableLike {
   write(chunk: Uint8Array | string, cb?: (err?: Error | null) => void): boolean;
@@ -198,11 +201,11 @@ export interface WritableLike {
    * `EventEmitter`'s, and a Node stream has both.
    */
   off?(
-    event: 'drain' | 'error',
+    event: 'drain' | 'error' | 'close',
     listener: (() => void) | ((err: Error) => void),
   ): unknown;
   removeListener?(
-    event: 'drain' | 'error',
+    event: 'drain' | 'error' | 'close',
     listener: (() => void) | ((err: Error) => void),
   ): unknown;
   /**
