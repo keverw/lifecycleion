@@ -159,8 +159,9 @@ export type RedactMaskConfigMatch =
  * twice, and one of two reads could throw where the other did not.
  */
 export function matchRedactMaskConfig(value: unknown): RedactMaskConfigMatch {
-  // Only an object can be a request. A primitive is the caller's own replacement, which
-  // is what keeps `undefined` dropping the value as it always has.
+  // Only an object can be a request. A primitive is the caller's own replacement - except
+  // `null` and `undefined`, which `resolveRedaction` reads as "use the default masking"
+  // before ever using a literal, so neither can reach the output as a dropped value.
   if (value === null || typeof value !== 'object') {
     return { kind: 'literal' };
   }

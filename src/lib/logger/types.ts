@@ -128,27 +128,25 @@ export interface BeforeExitResult {
 }
 
 /**
- * Redaction function type.
- *
- * Values are stringified before they are passed to the redaction function.
- */
-/**
- * Produces the replacement for a redacted value.
- *
- * Return `null` to defer to the default masking for that value, so a caller can
- * special-case a few keys without reproducing the default for the rest. To render a
- * literal null, return the string. Returning nothing is not a deferral: `undefined` is
- * used literally and drops the value.
- *
- * The same shape and the same deferral rule apply to `errorToString`'s `redactFunction`
- * option, so one function can serve both.
- */
-/**
  * What a `redactFunction` may return, and the function itself.
  *
  * Both are the shared definitions, re-exported under the logger's own names so a single
  * change to the contract reaches every entry point. See {@link RedactFunctionResult} for
  * the return values and what each one signals.
+ *
+ * Values are stringified before they are passed to the redaction function, so `value` is
+ * always a `string` whatever it started as.
+ *
+ * A `string` is the replacement, used as-is; to render a literal null, return the string.
+ * Everything else is a control signal rather than a replacement value. Return `null` to
+ * defer to the default masking for that value, so a caller can special-case a few keys
+ * without reproducing the default for the rest. **Returning nothing defers the same way:**
+ * `undefined` is treated exactly as `null`, so a function that returns nothing for the
+ * keys it does not handle masks them rather than dropping them or writing the word
+ * `undefined` into the output.
+ *
+ * The same shape and the same deferral rules apply to `errorToString`'s `redactFunction`
+ * option, so one function can serve both.
  */
 export type {
   RedactFunctionResult,

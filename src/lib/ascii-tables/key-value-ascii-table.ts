@@ -5,6 +5,35 @@ import { ASCIITableUtils } from './ascii-table-utils';
 import stringWidth from 'string-width';
 import { clamp } from '../clamp';
 
+/**
+ * Width of the widest line in a multi-line value.
+ *
+ * A counted loop, not `Math.max(...value.split('\n').map(stringWidth))`, for the reason
+ * the nested-value renderer below no longer spreads either: spreading passes one argument
+ * per line, and an engine's argument limit is a hard cliff well below any sane output size
+ * - roughly 125,000 on Node. A value with more lines than that raised
+ * `Maximum call stack size exceeded` from inside width calculation, which
+ * `errorToString`'s backstop turned into `<error could not be rendered>`, throwing away
+ * the error's message, name and stack because one of its values had many lines. A
+ * quarter-megabyte of newline-separated text sits well inside the renderer's own length
+ * budget, so nothing above here bounded it.
+ */
+function widestLineWidth(value: string): number {
+  const lines = value.split('\n');
+
+  let widest = 0;
+
+  for (const line of lines) {
+    const width = stringWidth(line);
+
+    if (width > widest) {
+      widest = width;
+    }
+  }
+
+  return widest;
+}
+
 export type TableRowValue =
   | string
   | number
@@ -274,9 +303,7 @@ export class KeyValueASCIITable {
       }
 
       if (typeof value === 'string') {
-        const valueWidth = Math.max(
-          ...value.split('\n').map((line) => stringWidth(line)),
-        );
+        const valueWidth = widestLineWidth(value);
 
         if (valueWidth > columnWidths[1]) {
           columnWidths[1] = Math.min(
@@ -290,9 +317,7 @@ export class KeyValueASCIITable {
         let valueWidth = 0;
 
         if (isString(value)) {
-          valueWidth = Math.max(
-            ...value.split('\n').map((line) => stringWidth(line)),
-          );
+          valueWidth = widestLineWidth(value);
         }
 
         if (valueWidth > columnWidths[1]) {
@@ -372,9 +397,7 @@ export class KeyValueASCIITable {
           }
 
           if (typeof nestedCell.value === 'string') {
-            const nestedValueWidth = Math.max(
-              ...nestedCell.value.split('\n').map((line) => stringWidth(line)),
-            );
+            const nestedValueWidth = widestLineWidth(nestedCell.value);
 
             if (nestedValueWidth > columnWidths[1]) {
               columnWidths[1] = Math.min(
