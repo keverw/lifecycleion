@@ -3,6 +3,7 @@ import { stringifyTemplateValue } from './internal/stringify-template-value';
 import {
   createRedactionReporter,
   type RedactionErrorHandler,
+  type ReportRedactionFailure,
 } from './internal/redaction-reporter';
 import {
   REDACTION_FAILED_MARKER,
@@ -78,28 +79,38 @@ export function redactValue(
   value: unknown,
   options?: StringifyValueOptions,
 ): unknown {
+  // Declared out here so the `catch` can reach it, as `applyRedaction` does: a failure
+  // that escapes the guarded region below must still leave a diagnosis and not only the
+  // marker, which is the whole promise `onRedactionError` makes. Assigned rather than
+  // built here, so the no-options hot path still allocates nothing.
+  let report: ReportRedactionFailure | null = null;
+
   try {
     const entries = options?.redactedKeys;
 
     // Before the reporter is built: with nothing to redact there is nothing to report,
     // and `stringifyValue(value)` with no options is the hot path every template render
     // takes.
-    //
-    // Emptiness is asked of an array and of nothing else, because this exit hands the
-    // value back in the clear. Asking `length` of whatever arrived let an unusable list
-    // that happened to report `0` - `{ length: 0 }` - take the "nothing was asked for"
-    // path and skip the fail-closed branch below entirely, so a caller who asked for
-    // masking got the value rendered unmasked and no `onRedactionError` to say so. A
-    // non-array now falls through to `parseRedactPaths`, which refuses it.
-    if (
-      entries === undefined ||
-      (Array.isArray(entries) && entries.length === 0)
-    ) {
+    if (entries === undefined) {
       return value;
     }
 
-    const report = createRedactionReporter(options?.onRedactionError);
+    report = createRedactionReporter(options?.onRedactionError);
 
+    // Whether the list is usable and whether it is empty are both asked of
+    // `parseRedactPaths`, rather than of `entries.length` up here.
+    //
+    // A `length` read of its own used to take the "nothing was asked for" exit early, and
+    // that exit hands the value back in the clear, so it had to ask what the list *is*
+    // before asking how long it is: an unusable list answering `0` - `{ length: 0 }` -
+    // otherwise skipped the fail-closed branch below and the value was rendered whole. But
+    // `length` is an ordinary property, and a `Proxy` over an array answers `Array.isArray`
+    // yes while still refusing the read, so the fast path could throw in the one position
+    // nothing was watching - above the reporter, out to the catch, and back to the caller
+    // as a bare marker. `parseRedactPaths` is guarded throughout and answers both questions
+    // from one read, refusing anything it cannot use, so a list that will not be read now
+    // fails closed with a `<redactedKeys>` report like any other unusable one, and an empty
+    // list still hands the value back two exits lower.
     const paths = parseRedactPaths(entries);
 
     // Fails closed, as `sensitiveFieldNames` does: a list that is present but unusable
@@ -119,10 +130,26 @@ export function redactValue(
     }
 
     return redactMatchedPaths(value, paths, options?.redactFunction, report);
-  } catch {
-    // The reporter is scoped inside the `try`, and the only statements above it cannot
-    // throw, so a failure here has no reporter to reach and nothing more to say than the
-    // marker already says.
+  } catch (error) {
+    // Reported when there is a reporter to report with. Nothing above is expected to
+    // throw - `parseRedactPaths` is guarded throughout and the walk guards every read it
+    // owns - but a `RangeError` from a payload nested past the stack, or a
+    // `redactFunction` read that is an accessor and throws, both land here, and returning
+    // the marker without a word is exactly the silence `onRedactionError` exists to end.
+    //
+    // Keyed `<value>`, the way `applyRedaction` keys a walk that refused entirely
+    // `<params>`: everything that can arrive here failed while redacting the value, not
+    // while reading the list, since a list this cannot use is reported as `<redactedKeys>`
+    // above and returns from there. Reporting through the same reporter the walk was
+    // handed keeps the once-per-pass bound, so a leaf failure already reported and then
+    // escaping is not counted twice.
+    //
+    // Still `null` only for a throw raised before the reporter was built - reading
+    // `options` itself - where no handler had been read to call.
+    if (report !== null) {
+      report(error, '<value>');
+    }
+
     return REDACTION_FAILED_MARKER;
   }
 }
