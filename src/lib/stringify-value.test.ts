@@ -325,6 +325,29 @@ describe('stringifyValue / redactValue - fail-closed branches', () => {
     }
   });
 
+  test('a non-array reporting no length masks everything', () => {
+    // The emptiness test is the one exit that hands the value back in the clear, so it is
+    // asked of an array and of nothing else. A non-array answering `0` otherwise took
+    // that exit and never reached the fail-closed branch, so the caller who asked for
+    // masking got the value rendered whole and no `onRedactionError` to say so.
+    const value = { password: SECRET };
+    const redactedKeys = { length: 0 } as unknown as string[];
+    const reported: string[] = [];
+
+    expect(
+      redactValue(value, {
+        redactedKeys,
+        onRedactionError: (_error, key) => {
+          reported.push(key);
+        },
+      }),
+    ).toBe('***REDACTION FAILED***');
+    expect(reported).toEqual(['<redactedKeys>']);
+    expect(
+      stringifyValue(value, { redactedKeys, onRedactionError: () => {} }),
+    ).toBe('***REDACTION FAILED***');
+  });
+
   test('an empty redactedKeys list leaves the value alone', () => {
     const value = { a: 1 };
 

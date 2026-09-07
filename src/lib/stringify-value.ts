@@ -81,10 +81,20 @@ export function redactValue(
   try {
     const entries = options?.redactedKeys;
 
-    if (entries === undefined || entries.length === 0) {
-      // Before the reporter is built: with nothing to redact there is nothing to report,
-      // and `stringifyValue(value)` with no options is the hot path every template render
-      // takes.
+    // Before the reporter is built: with nothing to redact there is nothing to report,
+    // and `stringifyValue(value)` with no options is the hot path every template render
+    // takes.
+    //
+    // Emptiness is asked of an array and of nothing else, because this exit hands the
+    // value back in the clear. Asking `length` of whatever arrived let an unusable list
+    // that happened to report `0` - `{ length: 0 }` - take the "nothing was asked for"
+    // path and skip the fail-closed branch below entirely, so a caller who asked for
+    // masking got the value rendered unmasked and no `onRedactionError` to say so. A
+    // non-array now falls through to `parseRedactPaths`, which refuses it.
+    if (
+      entries === undefined ||
+      (Array.isArray(entries) && entries.length === 0)
+    ) {
       return value;
     }
 

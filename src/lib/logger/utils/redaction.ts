@@ -124,6 +124,22 @@ export function applyRedaction(
       return params;
     }
 
+    // Checked before `length` is read, not after it. A non-array cannot name a key, so
+    // there is no safe way to redact and no key to mark - but the zero-length exit below
+    // returns `params`, so a non-array reaching it hands back the very values the caller
+    // asked to hide. That is not only the plainly bogus `{ length: 0 }`: the length of a
+    // caller-supplied value is read once by `handleLog` and once here, and an accessor
+    // need not answer the same way twice, so an array-like answering 1 then 0 got past
+    // `handleLog`'s check - which does not copy a non-array - and then took this
+    // function's "nothing was asked for" exit, putting the unmasked params in
+    // `entry.redactedParams` for every sink while `redactedKeys` said they were masked.
+    // Asking what the list *is* before asking how long it is settles it in one read.
+    if (!Array.isArray(redactedKeys)) {
+      report(new Error('redactedKeys is not an array'), '<redactedKeys>');
+
+      return {};
+    }
+
     requestedCount = redactedKeys.length;
   } catch (error) {
     report(error, '<redactedKeys>');
@@ -135,15 +151,6 @@ export function applyRedaction(
   // No redaction needed
   if (requestedCount === 0) {
     return params;
-  }
-
-  // Checked before anything reads the list: a non-array cannot name a key, so there is
-  // no safe way to redact and no key to mark. Returning `params` would hand back the
-  // values the caller asked to hide.
-  if (!Array.isArray(redactedKeys)) {
-    report(new Error('redactedKeys is not an array'), '<redactedKeys>');
-
-    return {};
   }
 
   // Parsed with the shared parser rather than a local `includes('.')` test, so an entry

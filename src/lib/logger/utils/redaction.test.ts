@@ -815,6 +815,26 @@ describe('applyRedaction - fail closed', () => {
     }
   });
 
+  test('a non-array reporting no length fails closed rather than passing params through', () => {
+    // The zero-length exit returns `params` itself, so what the list *is* has to be
+    // settled before how long it says it is. A non-array answering `0` otherwise read as
+    // "nothing was asked for" and handed back the very values the caller named - in the
+    // clear, and with no report to say redaction had been skipped.
+    const reported: string[] = [];
+
+    const result = applyRedaction(
+      { password: 'hunter2secret' },
+      { length: 0 } as unknown as string[],
+      undefined,
+      (_error, key) => {
+        reported.push(key);
+      },
+    );
+
+    expect(JSON.stringify(result)).not.toContain('hunter2secret');
+    expect(reported).toEqual(['<redactedKeys>']);
+  });
+
   test('a params object that cannot be walked marks only the key that threw', () => {
     // A sibling whose read throws stops the walk, so the bag is re-read one key at a
     // time: the throwing sibling is marked where it is, and the named key is still
