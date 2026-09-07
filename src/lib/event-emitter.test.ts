@@ -131,7 +131,7 @@ describe('EventEmitter', () => {
     expect(errorHandler).toHaveBeenCalled();
     const errorEvent = getFirstReportedError(errorHandler);
     expect(errorEvent.error.message).toContain('event handler for test');
-    expect(errorEvent.error.message).toContain('Test error');
+    expect((errorEvent.error.cause as Error).message).toBe('Test error');
 
     globalThis.removeEventListener('error', errorHandler);
   });
@@ -152,7 +152,7 @@ describe('EventEmitter', () => {
     expect(errorHandler).toHaveBeenCalled();
     const errorEvent = getFirstReportedError(errorHandler);
     expect(errorEvent.error.message).toContain('event handler for test');
-    expect(errorEvent.error.message).toContain('Test error');
+    expect((errorEvent.error.cause as Error).message).toBe('Test error');
 
     globalThis.removeEventListener('error', errorHandler);
   });
@@ -225,7 +225,7 @@ describe('EventEmitterProtected', () => {
     expect(errorHandler).toHaveBeenCalled();
     const errorEvent = getFirstReportedError(errorHandler);
     expect(errorEvent.error.message).toContain('event handler for test');
-    expect(errorEvent.error.message).toContain('Protected error');
+    expect((errorEvent.error.cause as Error).message).toBe('Protected error');
 
     globalThis.removeEventListener('error', errorHandler);
   });

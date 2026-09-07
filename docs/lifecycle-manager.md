@@ -2294,7 +2294,9 @@ globalThis.addEventListener('error', (event) => {
     event.preventDefault();
 
     console.error('Event handler error:', event.error.message);
-    // error.message includes context: "Error in a callback event handler for component:started"
+    // error.message names the callback: "Error in a callback event handler for component:started"
+    // The error the handler actually threw is on `event.error.cause`, so you can render it
+    // with your own settings - or use `errorToString(event.error)`, which renders both.
   }
 });
 ```

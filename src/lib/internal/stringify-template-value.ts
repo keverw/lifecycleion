@@ -3,6 +3,14 @@
  */
 
 import { isPlainContainer } from './is-plain-container';
+import {
+  charge,
+  createRenderBudget,
+  MAX_RENDER_DEPTH,
+  TRUNCATED,
+  TRUNCATED_LENGTH,
+  type RenderBudget,
+} from './render-budget';
 
 /**
  * Whether a value carries a `toString` of its own worth using.
@@ -35,66 +43,6 @@ function describeByConstructor(value: object): string {
   }
 
   return '[object Object]';
-}
-
-/**
- * How deep the renderer will walk before saying so.
- *
- * A payload nested past this is pathological, and the alternative is worse than a cap in
- * both directions: without one, deep recursion raises a `RangeError`, which the per-entry
- * guards now catch - so the render silently stopped partway and emitted tens of kilobytes
- * with nothing to say it was truncated. An explicit cap keeps the output bounded *and*
- * marks where it stopped.
- */
-const MAX_RENDER_DEPTH = 100;
-
-/** Emitted where the walk stopped, so a truncated render never looks complete. */
-const TRUNCATED = '[max depth exceeded]';
-
-/**
- * How much text one render may produce before it stops.
- *
- * The depth cap bounds how *deep* the walk goes and says nothing about how much it emits,
- * and the two are not the same limit. `seen` is released as the walk leaves a container -
- * deliberately, so a value referenced twice side by side renders in full both times
- * rather than the second being called circular - which means a shared subtree is
- * serialized once per reference. An object graph of 45 objects, 22 levels of
- * `{ l: child, r: child }`, rendered to 96 MB, four times that at 24 levels, and it is a
- * log line: it becomes `LogEntry.message` and is handed to every sink. Nothing about that
- * payload is pathological - reusing one object under two keys is ordinary - and neither
- * the depth cap nor the cycle check stops any of it.
- *
- * A megabyte is far past any log line worth writing and still leaves the cap invisible to
- * every render that is not running away.
- */
-const MAX_RENDER_LENGTH = 1_000_000;
-
-/** Emitted where the budget ran out, so a truncated render never looks complete. */
-const TRUNCATED_LENGTH = '[max length exceeded]';
-
-/** Remaining output allowance for one render, shared by every level of it. */
-interface RenderBudget {
-  remaining: number;
-}
-
-/**
- * Charge `text` against the budget and hand it back.
- *
- * Applied to the terminals only - a rendered leaf, a key, a container's own brackets and
- * the punctuation between its entries - never to a container's assembled result. A
- * container's text is exactly the sum of what its contents already charged, so charging it
- * again would bill a leaf once per level above it and make the effective cap collapse with
- * depth rather than hold at {@link MAX_RENDER_LENGTH}.
- *
- * The delimiters have to be charged for the cap to hold at all. Left uncharged, a container
- * with nothing chargeable inside it cost nothing, so a payload built from empty containers
- * ran past the cap without ever reaching it: 500,000 `{}` in an array rendered 1.5 MB with
- * the budget still untouched, and the size grew linearly from there.
- */
-function charge(budget: RenderBudget, text: string): string {
-  budget.remaining -= text.length;
-
-  return text;
 }
 
 /** JSON string literal for `value`, used for both keys and rendered leaves. */
@@ -351,9 +299,7 @@ export function stringifyTemplateValue(value: unknown): string {
 
       seen.add(value);
 
-      return renderContainer(value, seen, 0, {
-        remaining: MAX_RENDER_LENGTH,
-      });
+      return renderContainer(value, seen, 0, createRenderBudget());
     } catch {
       // Nothing below is expected to throw: every read it makes is guarded, and the
       // depth cap stops recursion before it can exhaust the stack. Kept as a backstop

@@ -1,6 +1,10 @@
 import type { NestedKeyValueEntry } from './ascii-tables/key-value-ascii-table';
-import { KeyValueASCIITable } from './ascii-tables/key-value-ascii-table';
 import {
+  KEY_VALUE_TABLE_MIN_WIDTH,
+  KeyValueASCIITable,
+} from './ascii-tables/key-value-ascii-table';
+import {
+  findPathInto,
   matchRedactPath,
   parseRedactPaths,
   type RedactPath,
@@ -11,6 +15,17 @@ import {
 } from './internal/default-redact-function';
 import { resolveRedaction } from './internal/resolve-redaction';
 import { maskValueDeep } from './internal/mask-value-deep';
+import { isPlainContainer } from './internal/is-plain-container';
+import { stringifyTemplateValue } from './internal/stringify-template-value';
+import {
+  charge,
+  chargeUnits,
+  createRenderBudget,
+  MAX_RENDER_DEPTH,
+  TRUNCATED,
+  TRUNCATED_LENGTH,
+  type RenderBudget,
+} from './internal/render-budget';
 import {
   createRedactionReporter,
   NOOP_REDACTION_REPORTER,
@@ -73,9 +88,10 @@ export interface ErrorToStringOptions {
 function maskSensitiveValue(
   entry: string,
   readValue: () => unknown,
-  table: KeyValueASCIITable,
   maxRowLength: number,
   seen: WeakSet<object>,
+  depth: number,
+  budget: RenderBudget,
   redactFunction: RedactFieldFunction | undefined,
   report: ReportRedactionFailure,
 ): string | KeyValueASCIITable | NestedKeyValueEntry[] {
@@ -99,15 +115,19 @@ function maskSensitiveValue(
     );
 
     if (masked === null || typeof masked !== 'object') {
-      return typeof masked === 'string' ? masked : safeStringify(masked);
+      return charge(
+        budget,
+        typeof masked === 'string' ? masked : safeStringify(masked),
+      );
     }
 
     // Already masked all the way down, so it is rendered with no sensitive paths left.
     return stringifyValue(
       masked,
-      table,
       maxRowLength,
       seen,
+      depth,
+      budget,
       [],
       [],
       undefined,
@@ -217,6 +237,8 @@ export function errorToString(
       error,
       maxRowLength,
       new WeakSet(),
+      0,
+      createRenderBudget(),
       [],
       options?.redactFunction,
       report,
@@ -232,6 +254,8 @@ function errorToASCIITable(
   error: unknown,
   maxRowLength: number,
   seen: WeakSet<object>,
+  depth: number,
+  budget: RenderBudget,
   inheritedSensitive: RedactPath[],
   redactFunction: RedactFieldFunction | undefined,
   report: ReportRedactionFailure,
@@ -261,16 +285,28 @@ function errorToASCIITable(
       const value = readMember(err, key);
 
       if (value) {
-        table.addRow(label, safeStringify(value));
+        table.addRow(label, charge(budget, safeStringify(value)));
       }
     }
 
     const additionalInfo = readMember(err, 'additionalInfo');
+    const cause = readMember(err, 'cause');
 
-    if (additionalInfo && typeof additionalInfo === 'object') {
+    const hasInfo =
+      Boolean(additionalInfo) && typeof additionalInfo === 'object';
+    const hasCause = cause !== undefined && cause !== null;
+
+    // Parsed once, ahead of both consumers. `cause` is caller data as much as
+    // `additionalInfo` is, so it is covered by the same list and by the same fail-closed
+    // rule; reading the list separately for each would let them disagree about whether it
+    // was usable, and rendering the cause outside the rule is how a masked
+    // `additionalInfo` came to sit beside a cause printed in the clear.
+    let ownPaths: RedactPath[] | null = [];
+
+    if (hasInfo || hasCause) {
       const rawSensitive = readMemberOrThrew(err, 'sensitiveFieldNames');
 
-      const ownPaths =
+      ownPaths =
         rawSensitive === undefined || rawSensitive === null
           ? []
           : parseRedactPaths(
@@ -281,104 +317,212 @@ function errorToASCIITable(
       // of strings — a comma-joined string, a `Set`, a non-string entry, or an accessor
       // that threw — means the caller asked for masking and this cannot tell what for.
       // Rendering everything in the clear would be the one unacceptable answer, so
-      // `additionalInfo` is dropped wholesale instead. An entry that parses but resolves
-      // to nothing is not this case: it masks nothing, exactly as the logger's
-      // `redactedKeys` does.
+      // `additionalInfo` and `cause` are dropped wholesale instead. An entry that parses
+      // but resolves to nothing is not this case: it masks nothing, exactly as the
+      // logger's `redactedKeys` does.
       if (ownPaths === null) {
         report(
           new Error('sensitiveFieldNames is not a usable list of paths'),
           '<sensitiveFieldNames>',
         );
+      }
+    }
+
+    // An error nested in another's `additionalInfo` starts a fresh root for paths, so
+    // the parent's entries address it as a whole rather than reaching inside it. Its
+    // own list covers its own contents.
+    const sensitivePaths =
+      ownPaths === null ? null : [...inheritedSensitive, ...ownPaths];
+
+    if (hasInfo) {
+      if (sensitivePaths === null) {
         table.addRow('AdditionalInfo', '*** (sensitiveFieldNames unreadable)');
+      } else {
+        const info = additionalInfo as Record<string, unknown>;
 
-        const stackOnly = readMember(err, 'stack');
+        // Keys enumerated through a guard: `for...in` walks the prototype chain and a
+        // `Proxy` can throw from its `ownKeys` trap.
+        let keys: string[];
 
-        if (stackOnly) {
-          table.addValueOnSeparateRow('Stack', safeStringify(stackOnly));
+        try {
+          keys = Object.keys(info);
+        } catch {
+          keys = [];
         }
 
-        return table;
-      }
+        for (const key of keys) {
+          // Checked, not only charged. Charging without a check bounds nothing: a payload
+          // of fifty megabyte-long values billed the budget deeply negative and rendered
+          // every one of them anyway.
+          if (budget.remaining <= 0) {
+            table.addRow('AdditionalInfo', TRUNCATED_LENGTH);
 
-      // An error nested in another's `additionalInfo` starts a fresh root for paths, so
-      // the parent's entries address it as a whole rather than reaching inside it. Its
-      // own list covers its own contents.
-      const sensitivePaths = [...inheritedSensitive, ...ownPaths];
+            break;
+          }
 
-      const info = additionalInfo as Record<string, unknown>;
+          charge(budget, key);
 
-      // Keys enumerated through a guard: `for...in` walks the prototype chain and a
-      // `Proxy` can throw from its `ownKeys` trap.
-      let keys: string[];
+          const matchedEntry = matchRedactPath(sensitivePaths, [key]);
 
-      try {
-        keys = Object.keys(info);
-      } catch {
-        keys = [];
-      }
+          if (matchedEntry !== undefined) {
+            table.addRow(
+              `AdditionalInfo.${key}`,
+              maskSensitiveValue(
+                matchedEntry,
+                // Read unguarded on purpose: `maskSensitiveValue` catches, so a throwing
+                // accessor is reported as a failed mask. Going through `readMember` would
+                // swallow the throw and hand over `undefined`, which stringifies to the
+                // nine-character word "undefined" and masks to `un*****ed`.
+                () => info[key],
+                maxRowLength,
+                seen,
+                depth + 1,
+                budget,
+                redactFunction,
+                report,
+              ),
+            );
+          } else {
+            const value = readMember(info, key);
 
-      for (const key of keys) {
-        const matchedEntry = matchRedactPath(sensitivePaths, [key]);
-
-        if (matchedEntry !== undefined) {
-          table.addRow(
-            `AdditionalInfo.${key}`,
-            maskSensitiveValue(
-              matchedEntry,
-              // Read unguarded on purpose: `maskSensitiveValue` catches, so a throwing
-              // accessor is reported as a failed mask. Going through `readMember` would
-              // swallow the throw and hand over `undefined`, which stringifies to the
-              // nine-character word "undefined" and masks to `un*****ed`.
-              () => info[key],
-              table,
-              maxRowLength,
-              seen,
-              redactFunction,
-              report,
-            ),
-          );
-        } else {
-          const value = readMember(info, key);
-
-          table.addRow(
-            `AdditionalInfo.${key}`,
-            stringifyValue(
-              value,
-              table,
-              maxRowLength,
-              seen,
-              sensitivePaths,
-              [key],
-              redactFunction,
-              report,
-            ),
-          );
+            table.addRow(
+              `AdditionalInfo.${key}`,
+              stringifyValue(
+                value,
+                maxRowLength,
+                seen,
+                depth + 1,
+                budget,
+                sensitivePaths,
+                [key],
+                redactFunction,
+                report,
+              ),
+            );
+          }
         }
       }
     }
 
-    const stack = readMember(err, 'stack');
-
-    if (stack) {
-      table.addValueOnSeparateRow('Stack', safeStringify(stack));
-    }
+    addErrorTail(
+      table,
+      err,
+      cause,
+      sensitivePaths,
+      maxRowLength,
+      seen,
+      depth,
+      budget,
+      redactFunction,
+      report,
+    );
   }
 
   return table;
 }
 
-function stringifyValue(
-  value: unknown,
+/**
+ * Add the rows that close every error table: its `cause`, then its stack.
+ *
+ * `cause` is rendered because it is where the original now lives. A reporting path that
+ * wraps a failure - `reportCallbackError` does - hands listeners a wrapper carrying the
+ * thrown value on `cause` rather than a pre-rendered string, so that a consumer with its
+ * own `redactFunction` renders it under its own settings. Rendered here, the wrapper still
+ * says everything the pre-rendered form did.
+ *
+ * Shared so the fail-closed `sensitiveFieldNames` branch, which returns early, cannot
+ * drift from the ordinary one.
+ */
+function addErrorTail(
   table: KeyValueASCIITable,
+  err: Record<string, unknown>,
+  cause: unknown,
+  sensitive: RedactPath[] | null,
   maxRowLength: number,
   seen: WeakSet<object>,
+  depth: number,
+  budget: RenderBudget,
+  redactFunction: RedactFieldFunction | undefined,
+  report: ReportRedactionFailure,
+): void {
+  if (cause !== undefined && cause !== null) {
+    if (sensitive === null) {
+      // The same fail-closed answer `additionalInfo` gets. Rendering the cause here while
+      // refusing to render `additionalInfo` two rows above would disclose exactly what
+      // the refusal was protecting.
+      table.addRow('Cause', '*** (sensitiveFieldNames unreadable)');
+    } else {
+      // Rooted at `cause`, so the caller can address it: `sensitiveFieldNames: ['cause']`
+      // masks the whole thing and `['cause.password']` reaches one field inside it. A
+      // cause that is itself an error takes the nested-error branch and renders under its
+      // own list instead, exactly as one nested in `additionalInfo` does.
+      const matchedEntry = matchRedactPath(sensitive, ['cause']);
+
+      table.addRow(
+        'Cause',
+        matchedEntry !== undefined
+          ? maskSensitiveValue(
+              matchedEntry,
+              () => cause,
+              maxRowLength,
+              seen,
+              depth + 1,
+              budget,
+              redactFunction,
+              report,
+            )
+          : stringifyValue(
+              cause,
+              maxRowLength,
+              seen,
+              depth + 1,
+              budget,
+              sensitive,
+              ['cause'],
+              redactFunction,
+              report,
+            ),
+      );
+    }
+  }
+
+  const stack = readMember(err, 'stack');
+
+  if (stack) {
+    table.addValueOnSeparateRow('Stack', charge(budget, safeStringify(stack)));
+  }
+}
+
+/**
+ * Floor for what one nested row costs the budget.
+ *
+ * The table width shrinks by four per level of nesting and goes negative past twenty, and
+ * a negative cost is a *refund*: charging the width unclamped, a payload deep enough to
+ * exhaust the width paid nothing and then handed budget back, so the deepest payloads -
+ * the only ones the cap exists for - were the ones it stopped bounding.
+ */
+const MIN_ROW_COST = 8;
+
+function stringifyValue(
+  value: unknown,
+  maxRowLength: number,
+  seen: WeakSet<object>,
+  depth: number,
+  budget: RenderBudget,
   sensitive: RedactPath[],
   path: string[],
   redactFunction: RedactFieldFunction | undefined,
   report: ReportRedactionFailure,
 ): string | KeyValueASCIITable | NestedKeyValueEntry[] {
   if (typeof value === 'string') {
-    return value;
+    // Checked before it is charged. A leaf is emitted whole rather than cut mid-string, so
+    // the total can overshoot by one value; what it cannot do is emit an unbounded number
+    // of them, which is what charging without checking allowed.
+    if (budget.remaining <= 0) {
+      return TRUNCATED_LENGTH;
+    }
+
+    return charge(budget, value);
   }
 
   // A payload that points back at itself would otherwise recurse until the stack runs
@@ -397,15 +541,32 @@ function stringifyValue(
       return '<circular>';
     }
 
+    // Releasing `seen` on the way out is what makes a shared subtree render once per
+    // reference, so the cycle check bounds nothing about the size of the output: a
+    // payload of `{ l: child, r: child }` nested twenty deep is not circular, not deep,
+    // and rendered to over a hundred megabytes before the string length limit turned it
+    // into `<error could not be rendered>` - losing the message, name and stack this
+    // exists to report. The same depth cap and shared length budget the template
+    // renderer already carries, since the two walk the same caller payloads and a cap
+    // that held in only one of them would just be reached through the other entry point.
+    if (depth >= MAX_RENDER_DEPTH) {
+      return charge(budget, TRUNCATED);
+    }
+
+    if (budget.remaining <= 0) {
+      return charge(budget, TRUNCATED_LENGTH);
+    }
+
     seen.add(value);
   }
 
   try {
     return stringifyValueInner(
       value,
-      table,
       maxRowLength,
       seen,
+      depth,
+      budget,
       sensitive,
       path,
       redactFunction,
@@ -420,9 +581,10 @@ function stringifyValue(
 
 function stringifyValueInner(
   value: unknown,
-  table: KeyValueASCIITable,
   maxRowLength: number,
   seen: WeakSet<object>,
+  depth: number,
+  budget: RenderBudget,
   sensitive: RedactPath[],
   path: string[],
   redactFunction: RedactFieldFunction | undefined,
@@ -461,6 +623,19 @@ function stringifyValueInner(
     }
 
     for (let index = 0; index < length; index++) {
+      // The separator is charged, not the parts: a part was charged by the call that
+      // produced it, and charging it again here would bill a leaf once per level above
+      // it and make the cap collapse with depth instead of holding.
+      if (index > 0) {
+        charge(budget, ', ');
+      }
+
+      if (budget.remaining <= 0) {
+        parts.push(TRUNCATED_LENGTH);
+
+        break;
+      }
+
       // Each element is read and rendered inside its own guard, exactly as the object
       // branch does, so one unreadable element degrades alone.
       try {
@@ -475,9 +650,10 @@ function stringifyValueInner(
           const maskedItem = maskSensitiveValue(
             matchedEntry,
             () => item,
-            table,
             maxRowLength,
             seen,
+            depth + 1,
+            budget,
             redactFunction,
             report,
           );
@@ -493,9 +669,10 @@ function stringifyValueInner(
 
         const result = stringifyValue(
           item,
-          table,
           maxRowLength,
           seen,
+          depth + 1,
+          budget,
           sensitive,
           [...path, String(index)],
           redactFunction,
@@ -530,57 +707,145 @@ function stringifyValueInner(
       // whole, which is handled by the caller before recursing here.
       return errorToASCIITable(
         value,
-        maxRowLength - 4,
+        Math.max(KEY_VALUE_TABLE_MIN_WIDTH, maxRowLength - 4),
         seen,
+        depth + 1,
+        budget,
         [],
         redactFunction,
         report,
       );
+    } else if (!isPlainContainer(value)) {
+      // Only a plain object or an array is *structure* to be walked; anything else - a
+      // `Date`, a `Map`, a `URL`, a class instance - is a single value, rendered by its
+      // own string form. The shared rule, so redaction and rendering cannot disagree
+      // about what a value is.
+      //
+      // Walking these was both wrong and disclosing. A `Date` has no own enumerable
+      // properties, so it rendered as an empty nested table instead of its timestamp; and
+      // naming `session.password` on a class instance masked that one field while
+      // printing every sibling beside it - an `internalToken` the caller never asked to
+      // have shown, which is exactly what the logger's walk was rebuilt to prevent.
+      // Named as a whole, such a value is masked as one leaf by the branch above. Named
+      // *into* - `session.password` on a `Session` - the whole value is masked here, the
+      // same answer the logger's walk gives: it is the only masking whose result still
+      // prints the way the original did, one string in place of another.
+      const inside = findPathInto(sensitive, path);
+
+      if (inside !== undefined) {
+        return maskSensitiveValue(
+          inside,
+          () => value,
+          maxRowLength,
+          seen,
+          depth,
+          budget,
+          redactFunction,
+          report,
+        );
+      }
+
+      return charge(budget, stringifyTemplateValue(value));
     } else {
       // Handle objects differently
-      let ownEntries: [string, unknown][];
+      //
+      // Keys first, then each value read inside its own guard. Reading them together with
+      // `Object.entries` runs every own getter under one `catch`, so a single throwing
+      // accessor discarded the whole object and rendered it empty with nothing to say a
+      // read had failed - while the array branch beside it, and every other walk, degrade
+      // one entry at a time.
+      let keys: string[];
 
       try {
-        ownEntries = Object.entries(value);
+        keys = Object.keys(value);
       } catch {
-        ownEntries = [];
+        keys = [];
       }
 
       // Matched by path, exactly as the logger's `redactedKeys` does: a bare name in
       // `sensitiveFieldNames` addresses a top-level key of `additionalInfo`, and reaching
       // a nested value takes a path such as `user.password` or `items[0].token`.
-      const entries: NestedKeyValueEntry[] = ownEntries.map(([key, val]) => {
+      // Clamped, not just decremented. `KeyValueASCIITable` throws below its minimum
+      // width, so a chain of nested values that kept subtracting four eventually threw
+      // from the constructor and the top-level backstop turned the whole render into
+      // `<error could not be rendered>` - eighteen levels was enough.
+      const nestedRowLength = Math.max(
+        KEY_VALUE_TABLE_MIN_WIDTH,
+        maxRowLength - 4,
+      );
+
+      const entries: NestedKeyValueEntry[] = [];
+
+      for (const key of keys) {
+        if (budget.remaining <= 0) {
+          entries.push({ key: TRUNCATED_LENGTH, value: '' });
+
+          break;
+        }
+
+        // The row's framing as well as the key, and the framing scaled by how deep the
+        // row sits. Two things the plain character count cannot see: every entry becomes
+        // a row padded out to the table width, which is none of the strings the walk
+        // produces; and the table re-indents each nested line once per level above it, so
+        // one row's text is copied `depth` times into the finished output. Charging only
+        // content let a payload of one-character keys build a million rows against a
+        // budget it had barely touched, and charging a flat row let twenty levels of it
+        // amplify to eighteen megabytes.
+        charge(budget, key);
+        chargeUnits(budget, Math.max(MIN_ROW_COST, maxRowLength) * (depth + 1));
+
         const matchedEntry = matchRedactPath(sensitive, [...path, key]);
 
-        return {
+        if (matchedEntry !== undefined) {
+          entries.push({
+            key,
+            // Read unguarded on purpose, as at the top level: `maskSensitiveValue`
+            // catches, so a throwing accessor is reported as a failed mask rather than
+            // masking the word "undefined".
+            value: maskSensitiveValue(
+              matchedEntry,
+              () => (value as Record<string, unknown>)[key],
+              nestedRowLength,
+              seen,
+              depth + 1,
+              budget,
+              redactFunction,
+              report,
+            ),
+          });
+
+          continue;
+        }
+
+        let val: unknown;
+
+        try {
+          val = (value as Record<string, unknown>)[key];
+        } catch {
+          entries.push({ key, value: '<unrenderable>' });
+
+          continue;
+        }
+
+        entries.push({
           key,
-          value:
-            matchedEntry !== undefined
-              ? maskSensitiveValue(
-                  matchedEntry,
-                  () => val,
-                  table,
-                  maxRowLength - 4,
-                  seen,
-                  redactFunction,
-                  report,
-                )
-              : stringifyValue(
-                  val,
-                  table,
-                  maxRowLength - 4,
-                  seen,
-                  sensitive,
-                  [...path, key],
-                  redactFunction,
-                  report,
-                ),
-        };
-      });
+          value: stringifyValue(
+            val,
+            nestedRowLength,
+            seen,
+            depth + 1,
+            budget,
+            sensitive,
+            [...path, key],
+            redactFunction,
+            report,
+          ),
+        });
+      }
 
       return entries;
     }
   } else {
-    return safeStringify(value);
+    return charge(budget, safeStringify(value));
   }
 }

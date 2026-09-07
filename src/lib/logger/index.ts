@@ -94,8 +94,9 @@ function isElementTarget(event: Event): boolean {
  *   `CustomEvent` is an application's own signal — a component that dispatches
  *   `new CustomEvent('error', { cancelable: true })` on itself and branches on the
  *   return value must not have that answer changed by a logger.
- * - The element must actually name a resource (`src`, `href`, or `currentSrc`). An
- *   arbitrary element that happens to be an event target is not a failed load.
+ * - The element must actually name a resource (`src`, `href`, `currentSrc`, or `data` -
+ *   the last for `<object>`, which names its resource nowhere else). An arbitrary element
+ *   that happens to be an event target is not a failed load.
  *
  * Every read of the target is guarded, and so is the `instanceof` pair: the target is a
  * DOM object belonging to the page, so an accessor on it may throw, and a prototype
@@ -166,7 +167,10 @@ function describeResourceTarget(event: Event): string | undefined {
     return undefined;
   }
 
-  for (const key of ['src', 'href', 'currentSrc']) {
+  // `data` alongside the three obvious ones: `<object data="...">` names its resource
+  // there and nowhere else, so a broken `<object>` failed to classify and its load
+  // failure was neither logged nor cancelled, unlike an equivalent `<img>` or `<script>`.
+  for (const key of ['src', 'href', 'currentSrc', 'data']) {
     const url = read(key);
 
     if (typeof url === 'string' && url.length > 0) {

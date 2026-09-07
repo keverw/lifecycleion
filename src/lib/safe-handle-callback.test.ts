@@ -69,7 +69,11 @@ describe('safeHandleCallback', () => {
         'Error in a callback syncCallbackWithError',
       );
 
-      expect((event as ErrorEvent).error.message).toContain('Sync error');
+      // The thrown error itself, on `cause` rather than rendered into the message, so
+      // whoever receives the report renders it under their own settings.
+      expect(((event as ErrorEvent).error.cause as Error).message).toBe(
+        'Sync error',
+      );
 
       done();
     };
@@ -94,7 +98,9 @@ describe('safeHandleCallback', () => {
         'Error in a callback asyncCallbackWithError',
       );
 
-      expect((event as ErrorEvent).error.message).toContain('Async error');
+      expect(((event as ErrorEvent).error.cause as Error).message).toBe(
+        'Async error',
+      );
 
       globalThis.removeEventListener('error', errorHandler);
       done();
@@ -115,7 +121,7 @@ describe('safeHandleCallback', () => {
         'Error in a callback nonFunctionCallback',
       );
 
-      expect((event as ErrorEvent).error.message).toContain(
+      expect(((event as ErrorEvent).error.cause as Error).message).toContain(
         'Callback provided for nonFunctionCallback is not a function',
       );
 
@@ -177,7 +183,9 @@ describe('safeHandleCallbackAndWait', () => {
       expect((event as ErrorEvent).error.message).toContain(
         'Error in a callback syncCallbackWithError',
       );
-      expect((event as ErrorEvent).error.message).toContain('Sync error');
+      expect(((event as ErrorEvent).error.cause as Error).message).toBe(
+        'Sync error',
+      );
     };
 
     globalThis.addEventListener('error', errorHandler);
@@ -205,7 +213,9 @@ describe('safeHandleCallbackAndWait', () => {
         'Error in a callback asyncCallbackWithError',
       );
 
-      expect((event as ErrorEvent).error.message).toContain('Async error');
+      expect(((event as ErrorEvent).error.cause as Error).message).toBe(
+        'Async error',
+      );
     };
 
     globalThis.addEventListener('error', errorHandler);
@@ -234,6 +244,8 @@ describe('safeHandleCallbackAndWait', () => {
     const errorHandler = (event: Event): void => {
       event.preventDefault();
 
+      // Dispatched by hand from `result.error`, which is the failure itself and not the
+      // wrapper `reportCallbackError` builds, so the message is the message.
       const errorMessage = (event as ErrorEvent).error.message;
       expect(errorMessage).toContain(
         'Callback provided for nonFunctionCallback is not a function',
@@ -296,7 +308,7 @@ describe('safeHandleCallback error channel', () => {
     // Without `cancelable: true` this is `false` and `preventDefault()` is a silent
     // no-op, which would make the console fall-through unsuppressable.
     expect(event.cancelable).toBe(true);
-    expect(event.error.message).toContain('Cancelable boom');
+    expect((event.error.cause as Error).message).toBe('Cancelable boom');
   });
 
   it('skips the console fall-through when a listener claims the report', () => {
@@ -329,7 +341,8 @@ describe('safeHandleCallback error channel', () => {
     });
 
     expect(captured.length).toBe(1);
-    expect((captured[0][0] as Error).message).toContain('Unclaimed boom');
+    // The console rung is the one that renders, so it receives the rendered text.
+    expect(String(captured[0][0])).toContain('Unclaimed boom');
   });
 
   it('reports a value it cannot render instead of throwing out of the callback', () => {
@@ -373,9 +386,7 @@ describe('safeHandleCallback error channel', () => {
       // Still reported, and still named, even though the value itself could not be
       // described.
       expect(captured.length).toBe(1);
-      expect((captured[0][0] as Error).message).toContain(
-        'unrenderableCallback',
-      );
+      expect(String(captured[0][0])).toContain('unrenderableCallback');
     }
   });
 
@@ -432,7 +443,7 @@ describe('safeHandleCallback error channel', () => {
   }
 
   it('reports to globalThis.reportError when the event cannot be constructed', () => {
-    const reported: Error[] = [];
+    const reported: (string | Error)[] = [];
 
     const throwingErrorEvent = (): never => {
       throw new Error('ErrorEvent unavailable');
@@ -441,7 +452,7 @@ describe('safeHandleCallback error channel', () => {
     const captured = withGlobalReplaced('ErrorEvent', throwingErrorEvent, () =>
       withGlobalReplaced(
         'reportError',
-        (error: Error) => reported.push(error),
+        (error: string | Error) => reported.push(error),
         () =>
           withCapturedConsoleError((entries) => {
             safeHandleCallback('constructorFailureCallback', () => {
@@ -453,9 +464,13 @@ describe('safeHandleCallback error channel', () => {
       ),
     );
 
-    // Nothing was dispatched, so the next rung is the host reporting function...
+    // Nothing was dispatched, so the next rung is the host reporting function. It only
+    // prints, so it is handed the rendered form rather than the wrapper - whose `cause`
+    // a runtime's error inspection would print unmasked.
     expect(reported.length).toBe(1);
-    expect(reported[0].message).toContain('Constructor rung boom');
+    expect(typeof reported[0]).toBe('string');
+    expect(String(reported[0])).toContain('Constructor rung boom');
+    expect(String(reported[0])).toContain('constructorFailureCallback');
 
     // ...and the console is not also written to.
     expect(captured.length).toBe(0);
@@ -488,6 +503,6 @@ describe('safeHandleCallback error channel', () => {
     expect(reported.length).toBe(0);
 
     expect(captured.length).toBe(1);
-    expect((captured[0][0] as Error).message).toContain('Dispatch rung boom');
+    expect(String(captured[0][0])).toContain('Dispatch rung boom');
   });
 });

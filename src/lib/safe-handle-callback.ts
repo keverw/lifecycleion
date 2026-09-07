@@ -121,7 +121,7 @@ function dispatchErrorEvent(error: Error): DispatchOutcome {
  * An unclaimed dispatch still falls through to `console.error`, mirroring the console
  * output a native `reportError()` produces when no listener cancels the event.
  */
-function reportToHost(error: Error): void {
+function reportToHost(error: Error, renderForConsole?: () => string): void {
   // Also installed at module load, above. Repeating it here costs a few typeof checks on
   // an error path and makes reporting independent of whether a bundler kept that
   // top-level call, so a failure can never be swallowed for a packaging reason.
@@ -140,7 +140,13 @@ function reportToHost(error: Error): void {
       try {
         (reportError as (this: unknown, error: unknown) => void).call(
           globalThis,
-          error,
+          // Rendered, like the console rung below it, and for the same reason: this rung
+          // is only reached when dispatch is unavailable, so there is no listener to hand
+          // the structured failure to - only a host that will print it. Handing over the
+          // wrapper would hand over its `cause`, and a runtime's error inspection prints
+          // an error's own properties, so an `additionalInfo` this library exists to mask
+          // would reach stderr in the clear.
+          renderedReport(error, renderForConsole),
         );
 
         return;
@@ -153,10 +159,34 @@ function reportToHost(error: Error): void {
 
   try {
     // eslint-disable-next-line no-console -- the last reporting rung, by design
-    console.error(error);
+    console.error(renderedReport(error, renderForConsole));
   } catch {
     // Nothing left to try. Neither `safeHandleCallback` nor
     // `safeHandleCallbackAndWait` may throw from this path.
+  }
+}
+
+/**
+ * What a rung that only prints should be handed.
+ *
+ * Rendering happens at these rungs and not in what gets dispatched. A rung that prints has
+ * no `redactFunction` of its own, so it needs the rendered form; a listener does, and
+ * handing it a pre-rendered string is what stopped a consumer from applying its own
+ * redaction settings to the failure.
+ */
+function renderedReport(
+  error: Error,
+  renderForConsole?: () => string,
+): string | Error {
+  if (!renderForConsole) {
+    return error;
+  }
+
+  try {
+    return renderForConsole();
+  } catch {
+    // Fall back to the error itself rather than reporting nothing.
+    return error;
   }
 }
 
@@ -170,30 +200,34 @@ function reportToHost(error: Error): void {
  *
  * `error` is `unknown`: `throw` and promise rejection both accept any value, and
  * `errorToString` renders whatever it is given.
+ *
+ * The thrown value travels on `cause` rather than rendered into the message. Rendering it
+ * here settled questions that belong to whoever receives the report: it applied this
+ * module's default masking, so a `Logger` with its own `redactFunction` could not use it;
+ * it sent a broken `sensitiveFieldNames` to `console.error` instead of that logger's
+ * `onRedactionError`; the logger then rendered the already-rendered table a second time,
+ * one table nested inside another; and a structured sink reading `entry.error` had no way
+ * back to the original. `errorToString` renders `cause`, so the wrapper still says
+ * everything the pre-rendered form did - under the settings of whoever renders it.
  */
 export function reportCallbackError(
   callbackName: string,
   error: unknown,
 ): void {
-  let report: Error;
+  const report = new Error(`Error in a callback ${callbackName}`, {
+    cause: error,
+  });
 
-  try {
-    report = new Error(
+  reportToHost(
+    report,
+    // Only the console rung renders, and only if it is reached. `errorToString` guards
+    // its own reads of the thrown value and returns `<error could not be rendered>`
+    // rather than throwing; `reportToHost` catches regardless, because rendering must
+    // never turn one failure into a second one thrown out of `safeHandleCallback`,
+    // `safeHandleCallbackAndWait`, or `EventEmitterProtected.emit`.
+    () =>
       `Error in a callback ${callbackName}: ${DOUBLE_EOL}${errorToString(error)}`,
-    );
-  } catch {
-    // Belt and braces. `errorToString` guards its own reads of the thrown value and
-    // returns `<error could not be rendered>` rather than throwing, so this branch is
-    // not expected to be reachable through it — but rendering must never turn one
-    // failure into a second one thrown out of `safeHandleCallback`,
-    // `safeHandleCallbackAndWait`, or `EventEmitterProtected.emit`, and this keeps that
-    // guarantee local instead of resting on another module's.
-    report = new Error(
-      `Error in a callback ${callbackName}: ${DOUBLE_EOL}<error could not be rendered>`,
-    );
-  }
-
-  reportToHost(report);
+  );
 }
 
 /**

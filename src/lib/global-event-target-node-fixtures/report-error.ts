@@ -15,6 +15,7 @@ import {
 } from '../global-event-target';
 
 import { captureConsoleError } from './capture-console-error';
+import { reportedMessage } from './reported-message';
 
 // `safe-handle-callback` writes an unclaimed report to `console.error`; the harness
 // treats any stderr output as a crash, so it is collected and reported instead.
@@ -62,7 +63,7 @@ const listener = (event: Event): void => {
   reported.push({
     isErrorEvent: errorEvent instanceof ErrorEvent,
     type: errorEvent.type,
-    message: errorEvent.error instanceof Error ? errorEvent.error.message : '',
+    message: reportedMessage(errorEvent.error),
     originalStack:
       errorEvent.error instanceof Error &&
       typeof errorEvent.error.stack === 'string',

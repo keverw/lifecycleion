@@ -38,6 +38,25 @@ async function loadBrokenImage(src: string): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, 0));
 }
 
+/**
+ * Load a deliberately missing `<object>` and resolve once the browser has given up on it.
+ *
+ * Separate from {@link loadBrokenImage} because the point is the attribute: an `<object>`
+ * names its resource in `data` and in none of `src`, `href`, or `currentSrc`.
+ */
+async function loadBrokenObject(data: string): Promise<void> {
+  await new Promise<void>((resolve) => {
+    const element = document.createElement('object');
+
+    element.addEventListener('error', () => resolve());
+    element.data = data;
+
+    document.body.appendChild(element);
+  });
+
+  await new Promise((resolve) => setTimeout(resolve, 0));
+}
+
 async function runTests(): Promise<void> {
   const { test, finish } = createBrowserTestRunner();
 
@@ -70,6 +89,29 @@ async function runTests(): Promise<void> {
     browserExpect(sink.logs[0].message).toContain('Failed to load IMG');
     browserExpect(sink.logs[0].message).toContain(
       'definitely-missing-capture.png',
+    );
+    browserExpect(sink.logs[0].tags?.includes('resource')).toBe(true);
+  });
+
+  await test('captureResourceErrors logs a failed object element', async () => {
+    // `<object>` carries its URL in `data`. While only `src`, `href`, and `currentSrc`
+    // were read it classified as "names no resource", so a broken `<object>` was neither
+    // logged nor cancelled while an equivalent broken `<img>` was.
+    const sink = new ArraySink();
+    const logger = new Logger({ sinks: [sink], callProcessExit: false });
+
+    logger.registerReportErrorListener('Uncaught exception', {
+      captureResourceErrors: true,
+    });
+
+    await loadBrokenObject('/definitely-missing-object.svg');
+
+    logger.unregisterReportErrorListener();
+
+    browserExpect(sink.logs.length).toBe(1);
+    browserExpect(sink.logs[0].message).toContain('Failed to load OBJECT');
+    browserExpect(sink.logs[0].message).toContain(
+      'definitely-missing-object.svg',
     );
     browserExpect(sink.logs[0].tags?.includes('resource')).toBe(true);
   });

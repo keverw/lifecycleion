@@ -877,7 +877,9 @@ describe('LRUCache', () => {
 
       const errorEvent = getFirstReportedError(errorHandler);
       expect(errorEvent.error.message).toContain('LRUCache onChange');
-      expect(errorEvent.error.message).toContain('onChange sync failure');
+      expect((errorEvent.error.cause as Error).message).toBe(
+        'onChange sync failure',
+      );
 
       globalThis.removeEventListener('error', errorHandler);
     });
@@ -898,7 +900,9 @@ describe('LRUCache', () => {
 
       const errorEvent = getFirstReportedError(errorHandler);
       expect(errorEvent.error.message).toContain('LRUCache onChange');
-      expect(errorEvent.error.message).toContain('onChange async failure');
+      expect((errorEvent.error.cause as Error).message).toBe(
+        'onChange async failure',
+      );
 
       globalThis.removeEventListener('error', errorHandler);
     });

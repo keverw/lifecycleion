@@ -677,11 +677,12 @@ describe('errorToString', () => {
       ).toContain('<circular>');
     });
 
-    it('should fall back to the backstop when the render exhausts the stack', () => {
-      // The outermost guarantee. Deeply nested but acyclic, so the `<circular>` guard
-      // does not apply and the recursive walk keeps descending until the stack is gone.
-      // A `RangeError` from that must not escape a caller whose only job was reporting a
-      // failure, so the whole render is wrapped.
+    it('should stop at the depth cap rather than exhausting the stack', () => {
+      // Deeply nested but acyclic, so the `<circular>` guard does not apply and the walk
+      // would otherwise keep descending until the stack is gone. The depth cap stops it
+      // first and says where, which is strictly better than the backstop it used to hit:
+      // the error's own message and stack survive instead of the whole render collapsing
+      // to `<error could not be rendered>`.
       let deep: Record<string, unknown> = { end: true };
 
       for (let i = 0; i < 200_000; i++) {
@@ -692,7 +693,35 @@ describe('errorToString', () => {
         additionalInfo: { deep },
       });
 
-      expect(errorToString(error)).toBe('<error could not be rendered>');
+      const rendered = errorToString(error);
+
+      expect(rendered).not.toBe('<error could not be rendered>');
+      expect(rendered).toContain('boom');
+      expect(rendered).toContain('[max depth exceeded]');
+    });
+
+    it('bounds the output of a payload that reuses one subtree', () => {
+      // Not circular and not deep: `seen` is released as the walk leaves a container, so
+      // each shared child is rendered once per reference and the size doubles per level.
+      // This rendered over a hundred megabytes before the length budget, and past twenty
+      // levels it exceeded the maximum string length and lost the error entirely.
+      let shared: Record<string, unknown> = { leaf: 'x' };
+
+      for (let i = 0; i < 24; i++) {
+        shared = { l: shared, r: shared };
+      }
+
+      const error = Object.assign(new Error('boom'), {
+        additionalInfo: { shared },
+      });
+
+      const rendered = errorToString(error);
+
+      expect(rendered).toContain('boom');
+      expect(rendered).toContain('[max length exceeded]');
+      // Bounded by the budget rather than by the shape of the payload: this rendered
+      // over a hundred megabytes before, and grew fourfold with every two levels added.
+      expect(rendered.length).toBeLessThan(2_000_000);
     });
 
     it('should not throw on a BigInt nested in additionalInfo', () => {
@@ -701,6 +730,164 @@ describe('errorToString', () => {
       });
 
       expect(errorToString(error)).toContain('boom');
+    });
+  });
+
+  describe('cause', () => {
+    // `reportCallbackError` dispatches a wrapper whose message names the callback and
+    // whose `cause` is the value that was actually thrown, so everything a consumer needs
+    // reaches it through this row. Nothing below is incidental: each case is one that
+    // rendered the cause wrongly or lost the whole table.
+    it('renders a nested error cause as its own table', () => {
+      const original = Object.assign(new Error('original'), {
+        additionalInfo: { requestID: 'r-1' },
+      });
+
+      const rendered = errorToString(new Error('wrapper', { cause: original }));
+
+      expect(rendered).toContain('Cause');
+      expect(rendered).toContain('original');
+      expect(rendered).toContain('r-1');
+      expect(rendered).toContain('wrapper');
+    });
+
+    it("masks a nested error cause under the cause's own sensitiveFieldNames", () => {
+      const original = Object.assign(new Error('original'), {
+        additionalInfo: { token: 'tok-abcdefghijklmnop' },
+        sensitiveFieldNames: ['token'],
+      });
+
+      const rendered = errorToString(new Error('wrapper', { cause: original }));
+
+      expect(rendered).not.toContain('tok-abcdefghijklmnop');
+    });
+
+    it('addresses a non-error cause through the cause path', () => {
+      const error = Object.assign(new Error('wrapper'), {
+        sensitiveFieldNames: ['cause.password'],
+      });
+
+      error.cause = { password: 'hunter2secret', tenant: 'acme' };
+
+      const rendered = errorToString(error);
+
+      expect(rendered).not.toContain('hunter2secret');
+      // Only what was named: the sibling is still readable.
+      expect(rendered).toContain('acme');
+    });
+
+    it('masks a whole non-error cause named as one entry', () => {
+      const error = Object.assign(new Error('wrapper'), {
+        sensitiveFieldNames: ['cause'],
+      });
+
+      error.cause = { password: 'hunter2secret', tenant: 'acme' };
+
+      const rendered = errorToString(error);
+
+      expect(rendered).not.toContain('hunter2secret');
+      expect(rendered).not.toContain('acme');
+    });
+
+    it('drops the cause when sensitiveFieldNames is unusable', () => {
+      // The fail-closed rule covers the cause as well. Rendering it while refusing to
+      // render `additionalInfo` two rows above would disclose what the refusal protects.
+      const error = Object.assign(new Error('wrapper'), {
+        additionalInfo: { note: 'n' },
+        sensitiveFieldNames: 'password',
+      });
+
+      error.cause = { password: 'hunter2secret' };
+
+      const rendered = errorToString(error, 80, {
+        onRedactionError: () => undefined,
+      });
+
+      expect(rendered).not.toContain('hunter2secret');
+      expect(rendered).toContain('sensitiveFieldNames unreadable');
+    });
+
+    it('renders a long cause chain instead of collapsing', () => {
+      // The table throws below its minimum width, and each nested error narrowed it by
+      // four: at eighteen levels the constructor threw and the backstop discarded the
+      // whole render, message and stack included.
+      let error = new Error('root');
+
+      for (let index = 0; index < 40; index++) {
+        error = new Error(`level ${index}`, { cause: error });
+      }
+
+      const rendered = errorToString(error);
+
+      expect(rendered).not.toBe('<error could not be rendered>');
+      expect(rendered).toContain('level 39');
+    });
+
+    it('cuts a cause that points back at itself', () => {
+      const error: Error & { cause?: unknown } = new Error('self');
+
+      error.cause = error;
+
+      const rendered = errorToString(error);
+
+      expect(rendered).not.toBe('<error could not be rendered>');
+      expect(rendered).toContain('<circular>');
+    });
+  });
+
+  describe('output budget', () => {
+    it('bounds many large values under one additionalInfo', () => {
+      // Charging without checking bounded nothing: fifty megabyte-long values billed the
+      // budget deeply negative and every one of them rendered anyway, for 73 MB.
+      const big = 'x'.repeat(1_000_000);
+      const info: Record<string, string> = {};
+
+      for (let index = 0; index < 50; index++) {
+        info[`k${index}`] = big;
+      }
+
+      const rendered = errorToString(
+        Object.assign(new Error('boom'), { additionalInfo: info }),
+      );
+
+      expect(rendered).toContain('boom');
+      expect(rendered.length).toBeLessThan(4_000_000);
+    });
+
+    it('bounds a very wide nested object', () => {
+      const wide: Record<string, string> = {};
+
+      for (let index = 0; index < 200_000; index++) {
+        wide[`k${index}`] = 'v';
+      }
+
+      const rendered = errorToString(
+        Object.assign(new Error('boom'), { additionalInfo: { wide } }),
+      );
+
+      expect(rendered).toContain('boom');
+      expect(rendered.length).toBeLessThan(4_000_000);
+    });
+
+    it('bounds the masking walk, not only the render', () => {
+      // `maskValueDeep` runs to completion before the budgeted render sees anything, so
+      // bounding only the render left the cost untouched: this took 51 seconds and 9.4 GB.
+      let shared: Record<string, unknown> = { leaf: 'x' };
+
+      for (let index = 0; index < 27; index++) {
+        shared = { l: shared, r: shared };
+      }
+
+      const error = Object.assign(new Error('boom'), {
+        additionalInfo: { payload: shared },
+        sensitiveFieldNames: ['payload'],
+      });
+
+      const startedAt = Date.now();
+      const rendered = errorToString(error);
+
+      expect(rendered).toContain('boom');
+      expect(Date.now() - startedAt).toBeLessThan(10_000);
     });
   });
 });

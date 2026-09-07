@@ -6,6 +6,7 @@
  * installs normally. This is the deliberate counterpart to `unusable-globals`.
  */
 import { captureConsoleError } from './capture-console-error';
+import { reportedMessage } from './reported-message';
 
 // Only dynamic imports below (the globals must be set up first), so make this a module.
 export {};
@@ -31,9 +32,7 @@ globalThis.addEventListener('error', (event: Event) => {
 
   const errorEvent = event as ErrorEvent;
 
-  messages.push(
-    errorEvent.error instanceof Error ? errorEvent.error.message : '',
-  );
+  messages.push(reportedMessage(errorEvent.error));
 });
 
 safeHandleCallback('clearedGlobalsCallback', () => {

@@ -54,7 +54,9 @@ describe('LifecycleManager - Event Handler Error Handling', () => {
 
     // Check that error was dispatched as ErrorEvent
     expect(errors.length).toBe(1);
-    expect(errors[0].error.message).toContain('Event handler error');
+    expect((errors[0].error.cause as Error).message).toBe(
+      'Event handler error',
+    );
     expect(errors[0].error.message).toContain(
       'event handler for component:registered',
     );
@@ -89,7 +91,9 @@ describe('LifecycleManager - Event Handler Error Handling', () => {
 
     // Check that error was dispatched as ErrorEvent
     expect(errors.length).toBe(1);
-    expect(errors[0].error.message).toContain('Started handler error');
+    expect((errors[0].error.cause as Error).message).toBe(
+      'Started handler error',
+    );
 
     globalThis.removeEventListener('error', errorListener);
   });
@@ -121,7 +125,9 @@ describe('LifecycleManager - Event Handler Error Handling', () => {
 
     // Check that error was dispatched as ErrorEvent
     expect(errors.length).toBe(1);
-    expect(errors[0].error.message).toContain('Stopped handler error');
+    expect((errors[0].error.cause as Error).message).toBe(
+      'Stopped handler error',
+    );
 
     globalThis.removeEventListener('error', errorListener);
   });
@@ -152,7 +158,7 @@ describe('LifecycleManager - Event Handler Error Handling', () => {
 
     // Check that error was dispatched as ErrorEvent
     expect(errors.length).toBe(1);
-    expect(errors[0].error.message).toContain(
+    expect((errors[0].error.cause as Error).message).toBe(
       'Shutdown initiated handler error',
     );
 
@@ -188,10 +194,14 @@ describe('LifecycleManager - Event Handler Error Handling', () => {
     // Check that both errors were dispatched as ErrorEvents
     expect(errors.length).toBe(2);
     expect(
-      errors.some((e) => e.error.message.includes('First handler error')),
+      errors.some(
+        (e) => (e.error.cause as Error).message === 'First handler error',
+      ),
     ).toBe(true);
     expect(
-      errors.some((e) => e.error.message.includes('Second handler error')),
+      errors.some(
+        (e) => (e.error.cause as Error).message === 'Second handler error',
+      ),
     ).toBe(true);
 
     globalThis.removeEventListener('error', errorListener);
@@ -225,7 +235,9 @@ describe('LifecycleManager - Event Handler Error Handling', () => {
 
     // Check that error was dispatched as ErrorEvent
     expect(errors.length).toBe(1);
-    expect(errors[0].error.message).toContain('Async handler error');
+    expect((errors[0].error.cause as Error).message).toBe(
+      'Async handler error',
+    );
 
     globalThis.removeEventListener('error', errorListener);
   });

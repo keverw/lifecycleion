@@ -40,6 +40,21 @@ interface KeyValueASCIITableOptions {
   emptyMessage?: string;
 }
 
+/**
+ * The narrowest table that can still be drawn:
+ *
+ * - 2 characters for the `'| '` at the start
+ * - 1 character for the minimum key column width
+ * - 3 characters for the `' | '` separating the key and value columns
+ * - 1 character for the minimum value column width
+ * - 2 characters for the `' |'` at the end
+ *
+ * Exported because a caller that narrows the width as it nests has to clamp against it:
+ * the constructor throws below this, and a renderer that kept subtracting turned a deeply
+ * nested payload into a thrown error rather than a narrow table.
+ */
+export const KEY_VALUE_TABLE_MIN_WIDTH = 9;
+
 export class KeyValueASCIITable {
   public readonly tableWidth: number;
   private emptyMessage: string;
@@ -63,14 +78,7 @@ export class KeyValueASCIITable {
   }
 
   public getMinimumWidth(): number {
-    // The minimum width for the KeyValueASCIITable is 9 characters:
-    // - 2 character for the '| ' at the start
-    // - 1 character for the minimum key column width
-    // - 3 character for the ' | ' separating the key and value columns
-    // - 1 character for the minimum value column width
-    // - 2 character for the ' |' at the end
-
-    return 9;
+    return KEY_VALUE_TABLE_MIN_WIDTH;
   }
 
   /**
@@ -461,7 +469,16 @@ export class KeyValueASCIITable {
           .map((line) => `${indent}${wrappedSpacer}${line}`);
 
         nestedValueLines.push(formattedKey);
-        nestedValueLines.push(...wrappedValue);
+
+        // A loop, not `push(...wrappedValue)`: spreading passes one argument per line, and
+        // an engine's argument limit is a hard cliff well below any sane output size. A
+        // large nested value therefore raised `Maximum call stack size exceeded` from
+        // inside the renderer, which `errorToString`'s backstop turned into
+        // `<error could not be rendered>` - throwing away the error's message, name and
+        // stack because its payload was big rather than because anything was wrong.
+        for (const line of wrappedValue) {
+          nestedValueLines.push(line);
+        }
         nestedValueLines.push('');
       }
 

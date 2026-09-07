@@ -6,6 +6,7 @@
  * its own backing target.
  */
 import { captureConsoleError } from './capture-console-error';
+import { reportedMessage } from './reported-message';
 
 // Only dynamic imports below (globals must be set up first), so make this a module.
 export {};
@@ -42,9 +43,7 @@ ownAddEventListener('error', (event: Event) => {
 
   const errorEvent = event as ErrorEvent;
 
-  messages.push(
-    errorEvent.error instanceof Error ? errorEvent.error.message : '',
-  );
+  messages.push(reportedMessage(errorEvent.error));
 });
 
 safeHandleCallback('existingGlobalsCallback', () => {

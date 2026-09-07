@@ -1,4 +1,5 @@
 import fs, { promises as fsPromises } from 'fs';
+import { toError } from '../../to-error';
 import type { LogEntry, LogSink } from '../types';
 import { LogLevel, getLogLevel } from '../types';
 
@@ -327,7 +328,13 @@ export class FileSink implements LogSink {
           this.consecutiveFailures = 0;
           this.totalEntriesWritten++;
         } catch (error) {
-          const err = error instanceof Error ? error : new Error(String(error));
+          // `toError`, not `String(error)`: the coercion runs inside the `catch` that
+          // is the entry's only retry and `onError` handling, and `String()` invokes a
+          // `toString` this does not own. A value whose `toString` throws made the
+          // coercion throw from inside the handler, skipping `onError`, the re-queue
+          // and the failure counters, and escaping `processQueue` as an unhandled
+          // rejection that left every queued entry behind it stalled.
+          const err = toError(error);
           this.lastError = err;
           this.consecutiveFailures++;
 
@@ -492,7 +499,7 @@ export class FileSink implements LogSink {
     } catch (error) {
       throw new FileSinkError(
         `Failed to setup log file: ${currentLogFile}`,
-        error as Error,
+        toError(error),
       );
     }
   }
@@ -568,7 +575,7 @@ export class FileSink implements LogSink {
     } catch (error) {
       throw new FileSinkError(
         `Error rotating log file from ${this.currentLogFile} to ${rotatedFile}`,
-        error as Error,
+        toError(error),
       );
     }
 

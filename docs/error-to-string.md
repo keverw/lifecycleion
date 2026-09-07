@@ -80,7 +80,21 @@ The following fields are automatically extracted from error objects when present
 | `errPrefix` | Prefix      |
 | `errType`   | errType     |
 | `errCode`   | errCode     |
+| `cause`     | Cause       |
 | `stack`     | Stack       |
+
+A `cause` is rendered as its own nested table when it is itself an error, so a wrapped
+failure shows the wrapping and the failure together. That is how a report from
+[`safeHandleCallback`](./safe-handle-callback.md) carries the value a callback actually
+threw. A `cause` that is not an error is rendered like any other value and is addressed by
+`sensitiveFieldNames` under the `cause` root - `['cause']` masks the whole of it and
+`['cause.password']` reaches one field inside it.
+
+A value that is not a plain object or an array - a `Date`, a `Map`, a `URL`, a class
+instance - is rendered by its own string form rather than walked, which is the same rule
+the logger's redaction follows. Naming a path inside such a value therefore masks the whole
+value: masking one field of a class instance and printing its siblings is a disclosure, and
+the two must agree about what counts as structure.
 
 ## Additional Info & Sensitive Fields
 
@@ -190,9 +204,15 @@ first is the worst possible outcome. It is written so it cannot:
   cycle with `<circular>` rather than exhausting the stack. Only a genuine cycle - an
   object contained within itself - is cut; an object merely referenced twice side by side
   renders in full both times.
-- The whole render is wrapped as a backstop. A payload nested deeply enough can still
-  exhaust the stack, and the resulting `RangeError` is caught and returned as
-  `<error could not be rendered>`.
+- The walk is bounded in both directions, sharing its limits with the logger's template
+  rendering. Past 100 levels it stops and marks the spot with `[max depth exceeded]`; past
+  roughly a megabyte of output it stops and marks it with `[max length exceeded]`. Both
+  matter because the cycle check above deliberately lets an object referenced twice render
+  twice, so a payload that reuses one subtree doubles in size per level without ever being
+  circular or especially deep. The masking walk is bounded the same way.
+- The whole render is still wrapped as a backstop, and returns
+  `<error could not be rendered>` if anything escapes. With the limits above that is no
+  longer reachable through payload size alone.
 
 For a single-line description rather than a table, see
 [`describeError`](./to-error.md#describeerror), which offers the same guarantee.

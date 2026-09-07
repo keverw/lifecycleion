@@ -11,6 +11,7 @@
  */
 
 import { captureConsoleError } from './capture-console-error';
+import { reportedMessage } from './reported-message';
 
 // Only dynamic imports below (the globals must be set up first), so make this a module.
 export {};
@@ -25,7 +26,7 @@ globalRecord.dispatchEvent = null;
 const reportedToHost: string[] = [];
 
 globalRecord.reportError = (error: unknown): void => {
-  reportedToHost.push(error instanceof Error ? error.message : String(error));
+  reportedToHost.push(reportedMessage(error));
 };
 
 const { safeHandleCallback } = await import('../safe-handle-callback');

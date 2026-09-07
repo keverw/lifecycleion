@@ -997,7 +997,9 @@ describe('Logger', () => {
 
       expect(sink.logs.length).toBe(0);
       expect(consoled.length).toBe(1);
-      expect((consoled[0] as Error).message).toContain('After close boom');
+      // `reportCallbackError` renders at the console rung, so the fall-through carries
+      // the rendered text rather than the wrapper error.
+      expect(String(consoled[0])).toContain('After close boom');
     });
 
     test('routes logger handler failures to onEventHandlerError', () => {
@@ -1280,7 +1282,7 @@ describe('Logger', () => {
 
       // The nested one went to the console instead, without this logger's formatting.
       expect(consoled.length).toBe(1);
-      expect(String((consoled[0] as Error).message)).toContain('inner boom');
+      expect(String(consoled[0])).toContain('inner boom');
     });
 
     test('should register reportError listener', () => {

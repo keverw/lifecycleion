@@ -106,7 +106,10 @@ export function matchRedactPath(
  *
  * @returns The entry as the caller wrote it, so a `redactFunction` sees the key it named.
  */
-function findPathInto(paths: RedactPath[], path: string[]): string | undefined {
+export function findPathInto(
+  paths: RedactPath[],
+  path: string[],
+): string | undefined {
   // Nothing addresses the root itself. Paths are rooted *at* the value, so the shortest
   // one names an entry of it, and the prefix test below is vacuously true for every entry
   // when `path` is empty - which made any non-empty `redactedKeys` blank a non-plain value

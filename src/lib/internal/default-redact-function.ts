@@ -1,5 +1,7 @@
 import datamask from 'datamask';
 
+import { isPlainContainer } from './is-plain-container';
+
 /**
  * Substituted for a value whose redaction failed.
  *
@@ -167,13 +169,10 @@ export function matchRedactMaskConfig(value: unknown): RedactMaskConfigMatch {
     // A plain object is the only shape a config comes in. An array or a class instance is
     // not a request - and not a literal either, since no object is: it falls back to the
     // default masking below.
-    if (Array.isArray(value)) {
-      return { kind: 'defaults' };
-    }
-
-    const prototype: unknown = Object.getPrototypeOf(value);
-
-    if (prototype !== Object.prototype && prototype !== null) {
+    //
+    // The shared test rather than a fourth private copy of it, so "what counts as a data
+    // object" cannot mean one thing here and another in the walks.
+    if (!isPlainContainer(value) || Array.isArray(value)) {
       return { kind: 'defaults' };
     }
 

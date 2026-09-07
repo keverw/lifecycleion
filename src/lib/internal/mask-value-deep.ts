@@ -8,6 +8,13 @@ import {
   type ReportRedactionFailure,
 } from './redaction-reporter';
 import { stringifyTemplateValue } from './stringify-template-value';
+import {
+  charge,
+  chargeUnits,
+  createRenderBudget,
+  MAX_RENDER_DEPTH,
+  type RenderBudget,
+} from './render-budget';
 
 /**
  * Applies the caller's masking to one leaf value.
@@ -45,6 +52,16 @@ export type MaskLeaf = (
  * @param seen  Guards against a container that contains itself.
  * @param report Notified of the first leaf whose masking threw, so a broken
  *               `redactFunction` leaves a diagnosis and not only a marker.
+ * @param depth  How far below the named container this call sits. Callers start at the
+ *               default.
+ * @param budget The allowance for this whole mask, shared by every level of it. One
+ *               top-level call gets one allowance, so callers start at the default.
+ *
+ * Bounded in both directions for the reason the renderers are. `seen` is released on the
+ * way out - deliberately, so a value referenced twice side by side is masked both times -
+ * so a shared subtree is walked once per reference: `{ l: child, r: child }` nested 27
+ * levels took 51 seconds and 9.4 GB before these limits, and this runs *before* the
+ * budgeted render sees anything, so bounding only the render left the cost untouched.
  */
 export function maskValueDeep(
   key: string,
@@ -52,6 +69,8 @@ export function maskValueDeep(
   mask: MaskLeaf,
   seen: WeakSet<object> = new WeakSet(),
   report: ReportRedactionFailure = NOOP_REDACTION_REPORTER,
+  depth: number = 0,
+  budget: RenderBudget = createRenderBudget(),
 ): unknown {
   // Only a plain object or an array is walked. Anything else - an `Error`, a `Date`, a
   // `URL`, a class instance - has no shape worth rebuilding, so it is replaced outright
@@ -68,8 +87,18 @@ export function maskValueDeep(
     // a *produced* string, and proportional masking keeps its ends: a card number kept
     // its BIN prefix and last four, a `URL` kept its query.
     const isDerived = typeof value !== 'string';
+    const text = stringifyTemplateValue(value);
 
-    return mask(key, stringifyTemplateValue(value), isDerived);
+    charge(budget, text);
+
+    return mask(key, text, isDerived);
+  }
+
+  // Past either limit nothing of the original survives, which is the safe direction here
+  // and the same answer the cycle below gives. A truncation marker would read as masked
+  // content rather than as the absence of it.
+  if (depth >= MAX_RENDER_DEPTH || budget.remaining <= 0) {
+    return REDACTED_PLACEHOLDER;
   }
 
   if (seen.has(value)) {
@@ -115,7 +144,19 @@ export function maskValueDeep(
         // perfectly well everywhere else lost its shape, and the two walks disagreed
         // about a value they are meant to treat identically.
         try {
-          masked.push(maskValueDeep(key, source[index], mask, seen, report));
+          chargeUnits(budget, 1);
+
+          masked.push(
+            maskValueDeep(
+              key,
+              source[index],
+              mask,
+              seen,
+              report,
+              depth + 1,
+              budget,
+            ),
+          );
         } catch (error) {
           report(error, key);
           masked.push(REDACTION_FAILED_MARKER);
@@ -143,7 +184,17 @@ export function maskValueDeep(
       let entryResult: unknown;
 
       try {
-        entryResult = maskValueDeep(key, entryValue, mask, seen, report);
+        charge(budget, entryKey);
+
+        entryResult = maskValueDeep(
+          key,
+          entryValue,
+          mask,
+          seen,
+          report,
+          depth + 1,
+          budget,
+        );
       } catch (error) {
         report(error, key);
         entryResult = REDACTION_FAILED_MARKER;
