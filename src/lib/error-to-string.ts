@@ -750,24 +750,10 @@ function stringifyValueInner(
       isError = false;
     }
 
-    if (isError) {
-      // A nested error starts a fresh path root; the parent's entries address it as a
-      // whole, which is handled by the caller before recursing here.
-      return errorToASCIITable(
-        value,
-        Math.max(KEY_VALUE_TABLE_MIN_WIDTH, maxRowLength - 4),
-        seen,
-        depth + 1,
-        budget,
-        [],
-        redactFunction,
-        report,
-      );
-    } else if (!isPlainContainer(value)) {
+    if (!isPlainContainer(value)) {
       // Only a plain object or an array is *structure* to be walked; anything else - a
-      // `Date`, a `Map`, a `URL`, a class instance - is a single value, rendered by its
-      // own string form. The shared rule, so redaction and rendering cannot disagree
-      // about what a value is.
+      // `Date`, a `Map`, a `URL`, a class instance, an `Error` - is a single value. The
+      // shared rule, so redaction and rendering cannot disagree about what a value is.
       //
       // Walking these was both wrong and disclosing. A `Date` has no own enumerable
       // properties, so it rendered as an empty nested table instead of its timestamp; and
@@ -778,6 +764,13 @@ function stringifyValueInner(
       // *into* - `session.password` on a `Session` - the whole value is masked here, the
       // same answer the logger's walk gives: it is the only masking whose result still
       // prints the way the original did, one string in place of another.
+      //
+      // Checked ahead of the nested-error branch below, not after it. A nested error is
+      // not structure either, and letting it skip this rule was the one way a named value
+      // still rendered in the clear: `['cause.additionalInfo.apiKey']` matched nothing on
+      // the way down, the nested error then rendered under its *own* empty list, and the
+      // key the caller named was printed. Every other non-plain value failed closed in
+      // that position; this one failed open, and silently.
       const inside = findPathInto(sensitive, path);
 
       if (inside !== undefined) {
@@ -788,6 +781,22 @@ function stringifyValueInner(
           seen,
           depth,
           budget,
+          redactFunction,
+          report,
+        );
+      }
+
+      if (isError) {
+        // Nothing above addresses it, so it starts a fresh path root: the parent's list
+        // addresses it as a whole or not at all, and its own `sensitiveFieldNames` covers
+        // its own contents.
+        return errorToASCIITable(
+          value,
+          Math.max(KEY_VALUE_TABLE_MIN_WIDTH, maxRowLength - 4),
+          seen,
+          depth + 1,
+          budget,
+          [],
           redactFunction,
           report,
         );

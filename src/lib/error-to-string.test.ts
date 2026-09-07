@@ -835,6 +835,61 @@ describe('errorToString', () => {
     });
   });
 
+  describe('a path pointing into a nested error', () => {
+    // A nested error is not structure either, so it gets the same fail-closed answer as a
+    // class instance: named into, it is masked whole. Skipping that rule was the one way
+    // a value the caller had named still rendered in the clear - the path matched nothing
+    // on the way down, and the nested error then rendered under its own empty list.
+    function nestedError(): Error {
+      return Object.assign(new Error('inner'), {
+        additionalInfo: { apiKey: 'TOPSECRET-VALUE' },
+      });
+    }
+
+    it('masks a nested error named into through cause', () => {
+      const error = Object.assign(new Error('outer'), {
+        sensitiveFieldNames: ['cause.additionalInfo.apiKey'],
+      });
+
+      error.cause = nestedError();
+
+      expect(errorToString(error)).not.toContain('TOPSECRET-VALUE');
+    });
+
+    it('masks a nested error named into through additionalInfo', () => {
+      const error = Object.assign(new Error('outer'), {
+        additionalInfo: { err: nestedError() },
+        sensitiveFieldNames: ['err.additionalInfo.apiKey'],
+      });
+
+      expect(errorToString(error)).not.toContain('TOPSECRET-VALUE');
+    });
+
+    it('still renders a nested error nothing addresses', () => {
+      const error = Object.assign(new Error('outer'), {
+        additionalInfo: { err: nestedError() },
+      });
+
+      const rendered = errorToString(error);
+
+      expect(rendered).toContain('AdditionalInfo.apiKey');
+      expect(rendered).toContain('TOPSECRET-VALUE');
+    });
+
+    it("keeps the nested error's own list covering its own contents", () => {
+      const inner = Object.assign(new Error('inner'), {
+        additionalInfo: { apiKey: 'TOPSECRET-VALUE' },
+        sensitiveFieldNames: ['apiKey'],
+      });
+
+      const error = Object.assign(new Error('outer'), {
+        additionalInfo: { err: inner },
+      });
+
+      expect(errorToString(error)).not.toContain('TOPSECRET-VALUE');
+    });
+  });
+
   describe('objects inside an array', () => {
     it("renders an array element's object as the caller's shape", () => {
       // An array joins its elements into one cell, so an element that rendered as
