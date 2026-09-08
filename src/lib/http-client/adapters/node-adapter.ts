@@ -908,11 +908,14 @@ async function streamResponseBody(
         try {
           removeListener('close', onClose);
         } catch {
-          // Same trade as the `'error'` removal above: the listener is still attached, so
-          // the bookkeeping that says so is kept. Deleting the entry anyway would let the
-          // next failure attach a second `onClose` on top of one that never came off,
-          // moving the accumulation this exists to prevent onto the other channel.
-          return;
+          // Not the same trade as the `'error'` removal above, because the `'error'`
+          // listener is already off by the time this runs. Keeping the entry here said
+          // an absorber was attached when none was, so every later failure on this
+          // writable short-circuited and attached nothing - and `cleanup` had taken that
+          // request's own `onWritableError` off too, leaving the late `'error'` event
+          // with no listener at all, which is the uncaught exception this exists to
+          // prevent. A stale `onClose` is the lesser cost and an inert one: it only
+          // calls `detach`, which returns immediately once the entry below is gone.
         }
 
         pendingWritableErrorAbsorbers.delete(writable);
