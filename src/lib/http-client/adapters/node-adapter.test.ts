@@ -2497,6 +2497,65 @@ describe('NodeAdapter.send() — unit branches without server', () => {
     }
   });
 
+  test('a synchronous write failure does not pause the settled response', async () => {
+    // Nothing obliges `write`'s callback to be asynchronous, so a writable can report a
+    // failure through it and *then* return `false` for backpressure. The failure settles
+    // the request from inside the `write` call, and `settle` runs `cleanup`, which
+    // detaches the `'drain'` listener that undoes a pause - so applying one here would
+    // leave the response paused with nothing left able to resume it.
+    const req = new MockClientRequest();
+    const res = new MockIncomingMessage(200, {
+      'content-type': 'application/octet-stream',
+      'content-length': '1',
+    });
+    const writable = new EventEmitter() as unknown as WritableLike;
+    writable.write = (
+      _chunk: unknown,
+      callback?: (err?: Error | null) => void,
+    ) => {
+      callback?.(new Error('disk full'));
+
+      // Backpressure reported after the failure, in the same call.
+      return false;
+    };
+    writable.end = (callback?: (err?: Error | null) => void) => {
+      callback?.();
+    };
+    writable.destroy = () => writable;
+    const requestSpy = spyOn(http, 'request').mockImplementation(
+      (_options, callback) => {
+        const cb = callback as
+          | ((res: http.IncomingMessage) => void)
+          | undefined;
+        queueMicrotask(() => {
+          cb?.(res as unknown as http.IncomingMessage);
+          queueMicrotask(() => {
+            res.emit('data', Buffer.from('a'));
+            res.emit('end');
+          });
+        });
+        return req as unknown as http.ClientRequest;
+      },
+    );
+
+    try {
+      const response = await new NodeAdapter().send({
+        requestURL: 'http://example.test/data',
+        method: 'GET',
+        headers: {},
+        streamResponse: () => writable,
+      });
+
+      expect(response.isStreamError).toBe(true);
+      expect(response.streamErrorCode).toBe('stream_write_error');
+      expect(response.errorCause?.message).toBe('disk full');
+      // The whole point: no pause was applied after the request settled.
+      expect(res.pauseCalls).toBe(0);
+    } finally {
+      requestSpy.mockRestore();
+    }
+  });
+
   test('a throwing errored accessor costs the signal, not the request', async () => {
     // `errored` is read inside `end`'s callback, which a real stream invokes on a later
     // tick with no `try` above it. An unguarded throw there is an uncaught exception that

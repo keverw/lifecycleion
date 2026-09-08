@@ -1096,7 +1096,18 @@ async function streamResponseBody(
         return;
       }
 
-      if (!canContinue) {
+      // `isSettled` as well as the backpressure signal. `WritableLike` allows a write to
+      // fail through the callback given to `write`, and nothing obliges that callback to
+      // be asynchronous: a writable that calls it with an error and then returns `false`
+      // settles this request from inside the `write` above and still arrives here. The
+      // pause would then be applied after `settle` ran `cleanup`, so the `'drain'`
+      // listener that undoes it is already detached and nothing can ever resume the
+      // response. A real Node stream does not do this - it is a hand-written writable
+      // that reports synchronously - and the caller destroys the request on a stream
+      // failure, so today this pauses a response that is about to be torn down anyway.
+      // Pausing a stream whose resume path has been dismantled is wrong regardless of
+      // who cleans up after it.
+      if (!canContinue && !isSettled) {
         // Writable signalled backpressure — pause the readable until the
         // drain event fires (handled above) to keep memory bounded.
         isPaused = true;
