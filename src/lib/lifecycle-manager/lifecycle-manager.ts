@@ -3807,8 +3807,17 @@ export class LifecycleManager
           // Guarded for the same reason as the `try` path above, and it matters more
           // here: this runs inside the `catch`, so a `message` that throws has nothing
           // left above it to catch and escapes as a rejection.
+          //
+          // Both empty cases, not just `undefined`: `componentErrors` holds
+          // `Error | null`, and `null` is how `reportUnexpectedStop()` records a stop
+          // reported without a reason. Handing that `null` to `describeError` gets an
+          // honest answer - `Non-error value thrown: null` - but a non-empty one, which
+          // satisfies the `||` and hands the caller coercion text in place of the
+          // sentence that says what actually happened. `== null` would say this in one
+          // comparison; `eqeqeq` does not allow it. The `error` field below already
+          // treats `null` as absent, so this only makes the two agree.
           reason:
-            (unexpectedStopError === undefined
+            (unexpectedStopError === undefined || unexpectedStopError === null
               ? undefined
               : describeError(unexpectedStopError)) ||
             `Component "${name}" stopped unexpectedly during startup`,

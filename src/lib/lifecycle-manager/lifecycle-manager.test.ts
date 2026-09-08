@@ -2437,6 +2437,56 @@ describe('LifecycleManager - Registration & Individual Lifecycle', () => {
       ).toBe('start rejected after stop signal');
     });
 
+    test('startComponent keeps the descriptive reason when a timed-out component signalled a stop without an error', async () => {
+      // `reportUnexpectedStop()` with no argument records `null`, not `undefined`, so a
+      // guard that screens only for `undefined` hands `null` to `describeError` - which
+      // answers `Non-error value thrown: null`, a non-empty string that then defeats the
+      // `||` fallback below it. The component said nothing about why it stopped, so the
+      // sentence naming it is the whole of what this can honestly report.
+      const lifecycle = new LifecycleManager({ logger });
+
+      class SignalOnlyThenHangingComponent extends BaseComponent {
+        public async start(): Promise<void> {
+          const reportUnexpectedStop = this.getUnexpectedStopReporter();
+
+          setTimeout(() => {
+            reportUnexpectedStop();
+          }, 10);
+
+          // Outlives `startupTimeoutMS`, so the start rejects with
+          // `ComponentStartTimeoutError` after the signal-only stop is recorded.
+          await sleep(200);
+        }
+
+        public stop(): void {}
+      }
+
+      await lifecycle.registerComponent(
+        new SignalOnlyThenHangingComponent(logger, {
+          name: 'signal-only-timeout',
+          startupTimeoutMS: 50,
+        }),
+      );
+
+      const result = await lifecycle.startComponent('signal-only-timeout');
+
+      expect(result.success).toBe(false);
+      expect(result.code).toBe('component_unexpected_stop');
+      expect(result.reason).toBe(
+        'Component "signal-only-timeout" stopped unexpectedly during startup',
+      );
+      expect(result.reason).not.toContain('Non-error value thrown');
+      // `reason` and `error` are built from the same absent value, so they have to tell
+      // the same story - the bug was that only `error` treated `null` as absent.
+      expect(result.error?.message).toBe(
+        'Component "signal-only-timeout" stopped unexpectedly during startup',
+      );
+      expect(lifecycle.isComponentRunning('signal-only-timeout')).toBe(false);
+      expect(lifecycle.getComponentStatus('signal-only-timeout')?.state).toBe(
+        'stopped',
+      );
+    });
+
     test('error is preserved in component status after unexpected stop', async () => {
       const lifecycle = new LifecycleManager({ logger });
 
