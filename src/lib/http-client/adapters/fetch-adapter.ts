@@ -17,7 +17,7 @@ import type {
 // `new Error('Non-error value thrown: <description>', { cause: value })`. So a non-`Error`
 // rejection - `throw 'socket hang up'` - now reaches `AdapterResponse.errorCause` with the
 // prefix on `message` and the original value on `cause`, where before it carried only the
-// coerced text. See the 0.1.0 changelog entry: "HTTP adapters preserve non-`Error`
+// coerced text. See the 1.0.0 changelog entry: "HTTP adapters preserve non-`Error`
 // rejection values on `cause`."
 import { isErrorValue, toError as normalizeError } from '../../to-error';
 // Guard error members for the same reason adapter marker reads are guarded.

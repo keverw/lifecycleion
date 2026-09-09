@@ -23,7 +23,7 @@
 - [0.0.19 (July 24, 2026)](#0019-july-24-2026)
 - [0.0.20 (Aug 21, 2026)](#0020-aug-21-2026)
 - [0.0.21 (Aug 25, 2026)](#0021-aug-25-2026)
-- [0.1.0 (Unreleased)](#010-unreleased)
+- [1.0.0 (Unreleased)](#100-unreleased)
 
 <!-- tocstop -->
 
@@ -178,7 +178,7 @@
 - **The backing event target is re-validated at the moment the globals are bound to it.** `installGlobalEventTarget` validated the shared state's `target` when it read the state, then bound `globalThis.addEventListener` and friends to a second, unguarded read of the same field, the one read in the module that actually matters. The field belongs to an object anything on the global object can reach, so a getter returning a real `EventTarget` when probed and something else afterwards would have bound the three methods to a value that never passed a check, and a getter throwing on that second read turned a perfectly viable install into `'blocked'` with all three methods rolled back, leaving Node with no event methods at all. The bind now takes the target and the three methods off it in one validated pass. Binding a method read later would have been the same gap moved one level in, since a method on somebody else's object is no more ours to trust than the field holding it. A target that no longer vouches for itself is treated as absent: installation proceeds with a fresh one, which orphans nothing, since a target that cannot service the three methods never had listeners registered through this module.
 - Corrected the `retrySuppressedReason` documentation for `adapter_veto`, which said no built-in adapter produces it. `NodeAdapter` and `FetchAdapter` do not, for the reason given, but `MockAdapter` does. `transportError: { isRetryable: false }` leaves the default retryable `status: 0` in place, so the veto is what stops the retry. That is the point of the example the same page already gives.
 
-## 0.1.0 (Unreleased)
+## 1.0.0 (Unreleased)
 
 - **BREAKING: callback and event-handler failures are now reported on the standard global `'error'` event instead of Lifecycleion's custom `'reportError'` event.** Replace `globalThis.addEventListener('reportError', ...)` with an `'error'` listener and call `preventDefault()` when the listener has handled the report. If event dispatch is unavailable, reporting falls back to `globalThis.reportError()` and then `console.error()`; an available but unclaimed dispatch falls directly through to the console.
 - **BREAKING: reported callback errors now keep the thrown value on `event.error.cause`.** The wrapper message identifies the callback but no longer embeds a pre-rendered error table; inspect `cause` or render the wrapper with `errorToString()`.
