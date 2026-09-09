@@ -986,6 +986,55 @@ describe('applyRedaction - fail closed', () => {
     expect(result['keep']).toBe('diagnostic');
   });
 
+  test('a param read once is not read again after it throws', () => {
+    // A getter that throws is marked, not retried. The bag used to be copied twice - an
+    // unguarded pass, then a guarded one only if that threw - so a getter that failed once
+    // and then answered had its second answer stored, and every value was read a second
+    // time whenever any one of them failed. One guarded pass reads each param exactly
+    // once, and a read that threw stays a failure rather than being asked again.
+    let reads = 0;
+    const params: Record<string, unknown> = { password: 'hunter2' };
+
+    Object.defineProperty(params, 'flaky', {
+      get(): string {
+        reads++;
+
+        if (reads === 1) {
+          throw new Error('first read only');
+        }
+
+        return 'second-read-value';
+      },
+      enumerable: true,
+      configurable: true,
+    });
+
+    const result = applyRedaction(params, ['password']);
+
+    expect(reads).toBe(1);
+    expect(result['flaky']).toBe(REDACTION_FAILED_MARKER);
+    expect(result['password']).not.toBe('hunter2');
+  });
+
+  test('a readable param is read exactly once', () => {
+    let reads = 0;
+    const params: Record<string, unknown> = { password: 'hunter2' };
+
+    Object.defineProperty(params, 'counted', {
+      get(): string {
+        reads++;
+
+        return 'value';
+      },
+      enumerable: true,
+      configurable: true,
+    });
+
+    applyRedaction(params, ['password']);
+
+    expect(reads).toBe(1);
+  });
+
   test('a revoked Proxy as params yields markers only', () => {
     const revocable = Proxy.revocable({ password: 'hunter2' }, {});
 

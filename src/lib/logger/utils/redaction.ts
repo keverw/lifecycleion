@@ -48,31 +48,34 @@ export { REDACTION_FAILED_MARKER } from '../../internal/default-redact-function'
  * Defined rather than assigned, because a plain assignment to `__proto__` reparents the
  * object instead of storing the entry.
  *
- * @param unreadable When given, each value is read inside its own guard: a key whose read
- *                   throws holds the failure marker instead and is named here, rather than
- *                   the throw abandoning the whole bag. Omit it for the ordinary attempt,
- *                   where a throwing accessor should abandon the copy so the caller can
- *                   retry key by key - one shared loop rather than two that must agree
- *                   about which keys a bag has.
+ * Every value is read inside its own guard, so one throwing accessor marks its own key
+ * rather than abandoning the bag. This used to be the second of two passes - an unguarded
+ * copy first, this one only if that threw - which read every value twice whenever any of
+ * them failed, and let a getter that throws once and then answers be retried until it
+ * produced a value. Measured across sixteen hostile bags, the two passes agreed on all
+ * but that one case, and marking a getter that threw is the answer redaction should give.
+ *
+ * @param unreadable Collects the keys whose read threw, so the caller can put the marker
+ *                   back after the walk. A key that is *also* named in `redactedKeys`
+ *                   reaches the walk already holding the marker, and the walk masks
+ *                   whatever it finds - turning `***REDACTION FAILED***` into an
+ *                   ordinary-looking `**********`, exactly the disguise the distinct
+ *                   marker exists to prevent.
  */
 function normalizeParamsBag(
   params: Record<string, unknown>,
-  unreadable?: string[],
+  unreadable: string[],
 ): Record<string, unknown> {
   const copy: Record<string, unknown> = {};
 
   for (const key in params) {
     let value: unknown;
 
-    if (unreadable === undefined) {
+    try {
       value = params[key];
-    } else {
-      try {
-        value = params[key];
-      } catch {
-        value = REDACTION_FAILED_MARKER;
-        unreadable.push(key);
-      }
+    } catch {
+      value = REDACTION_FAILED_MARKER;
+      unreadable.push(key);
     }
 
     Object.defineProperty(copy, key, {
@@ -229,10 +232,6 @@ export function applyRedaction(
   // left *entirely alone*, so a key named in `redactedKeys` is never masked and the
   // renderer prints it. Verified rather than assumed - the walk hands back
   // `{ password: 'hunter2secret' }` for a `Session` bag redacted on `['password']`.
-  //
-  // Guarded because a property can be an accessor that throws, and copying abandons the
-  // whole bag at the first one that does. That is the retry below, not a reason to give
-  // up on the params.
   const walk = (
     root: Record<string, unknown>,
   ): Record<string, unknown> | null => {
@@ -258,42 +257,18 @@ export function applyRedaction(
       : null;
   };
 
-  let root: Record<string, unknown> | null;
-
-  try {
-    root = normalizeParamsBag(params);
-  } catch {
-    root = null;
-  }
-
-  if (root !== null) {
-    const walked = walk(root);
-
-    if (walked !== null) {
-      return walked;
-    }
-  }
-
-  // The bag could not be read as it stands - an accessor that throws defeated the spread,
-  // or defeated `Object.entries` inside the walk and collapsed the root to the failure
-  // marker. Retried one key at a time so a throwing param is marked where it is and every
-  // other param, the sensitive one included, is still masked and still logged. Dropping
-  // them all is what the discarded `deepClone` probe used to do, and it hid working
-  // redaction behind an unrelated getter. Values are copied by reference, so this stays a
-  // shallow copy, and it runs only on this failure path.
+  // Guarded because a property can be an accessor that throws: copying one key at a time
+  // marks that one where it is, and every other param - the sensitive one included - is
+  // still masked and still logged. Dropping them all is what a discarded `deepClone` probe
+  // used to do, and it hid working redaction behind an unrelated getter. Values are copied
+  // by reference, so this stays a shallow copy.
   let guarded: Record<string, unknown>;
 
-  // The keys whose read failed, so the marker can be put back after the walk. A key that
-  // is *also* named in `redactedKeys` arrives at the walk already holding the marker, and
-  // the walk masks whatever it finds there - which turns `***REDACTION FAILED***` into an
-  // ordinary-looking `**********`, exactly the disguise the distinct marker exists to
-  // prevent. Nothing but the marker is ever written back, so this cannot restore a value.
+  // The keys whose read failed, so the marker can be put back after the walk. Nothing but
+  // the marker is ever written back, so this cannot restore a value.
   const unreadable: string[] = [];
 
   try {
-    // The same copy as above, in its guarded mode: one loop decides which keys a bag has,
-    // so this path cannot come to mask and print a different set than the attempt before
-    // it did.
     guarded = normalizeParamsBag(params, unreadable);
   } catch {
     // `Object.keys` itself refused - a revoked `Proxy`, an `ownKeys` trap that throws -
