@@ -6,6 +6,7 @@ import { isPlainContainer } from '../../internal/is-plain-container';
 import {
   parseRedactPaths,
   redactMatchedPaths,
+  type RedactPath,
 } from '../../internal/redact-paths';
 import type { RedactFunction } from '../types';
 import {
@@ -87,6 +88,157 @@ function normalizeParamsBag(
   }
 
   return copy;
+}
+
+/**
+ * A container holding exactly the keys `for...in` yields, each forwarding to the original.
+ *
+ * The same normalization {@link normalizeParamsBag} performs on the bag, one level down,
+ * and it exists for the same reason: the walk enumerates, the template renderer looks a
+ * property up, and every key one can reach that the other cannot is a value printed
+ * without being masked.
+ *
+ * Getters are *forwarded* rather than read, unlike the bag's own copy. Nothing is read
+ * here at all, so `Object.entries` in the walk runs the original accessor exactly when it
+ * ran it before and fails the container closed exactly as it did - only the set of keys
+ * changes. An array is rebuilt from its indexes alone, which is what the walk iterates.
+ *
+ * @param copies Every copy made during one normalization, keyed by the object it stands
+ *        for *and by itself*. Keying it by the original is what makes a cycle terminate
+ *        and what lets two paths through the same object share one copy. Keying it by
+ *        itself is what stops a copy from being copied again: the first path through a
+ *        prefix installs its copy in the container, so the second path reads that copy
+ *        back out and asks to normalize *it* - a copy that is already normalized, and
+ *        whose keys are already exactly the ones being asked for. Without this, `n`
+ *        entries sharing a prefix stacked `n` layers of forwarding getters at every step
+ *        of it, so each of the walk's reads ran `n` frames deep and the whole
+ *        normalization went quadratic in the length of `redactedKeys`. Measured on one
+ *        container behind one prefix, 200k reads cost 4.9ms for a single entry and 679ms
+ *        for 256 of them.
+ *
+ * @returns The copy, or `null` when the original refuses to be enumerated - in which case
+ *          the caller leaves it in place and the walk's own guards fail it closed.
+ */
+function forwardingContainerCopy(
+  source: object,
+  copies: Map<object, object>,
+): object | null {
+  const existing = copies.get(source);
+
+  if (existing !== undefined) {
+    return existing;
+  }
+
+  try {
+    if (Array.isArray(source)) {
+      const elements = source as unknown[];
+      const length = elements.length;
+      const copy: unknown[] = [];
+
+      copies.set(source, copy);
+      copies.set(copy, copy);
+
+      for (let index = 0; index < length; index++) {
+        Object.defineProperty(copy, index, {
+          get: () => elements[index],
+          enumerable: true,
+          configurable: true,
+        });
+      }
+
+      return copy;
+    }
+
+    const record = source as Record<string, unknown>;
+    const copy: Record<string, unknown> = {};
+
+    copies.set(source, copy);
+    copies.set(copy, copy);
+
+    // `for...in`, matching the bag's own copy: a key on the prototype is resolvable by the
+    // renderer, so the walk has to see it too.
+    for (const key in record) {
+      Object.defineProperty(copy, key, {
+        get: () => record[key],
+        enumerable: true,
+        configurable: true,
+      });
+    }
+
+    return copy;
+  } catch {
+    copies.delete(source);
+
+    return null;
+  }
+}
+
+/**
+ * Extend the bag's normalization down every path the caller named.
+ *
+ * {@link normalizeParamsBag} settles the walk and the renderer on one set of keys for the
+ * bag itself, and that is where it stopped: values below the bag are passed to the walk by
+ * reference, so a key one level down that `Object.entries` cannot see - a non-enumerable
+ * own property, one a `Proxy` hides from `ownKeys`, a named property on an array - was
+ * never masked, while `CurlyBrackets` resolved it with `in` plus a property read and
+ * printed it. `redactedKeys: ['password']` on such a key renders the fallback;
+ * `['user.password']` on the identical shape one level deeper printed the secret.
+ *
+ * Only the containers a parsed path actually descends through are normalized, so the cost
+ * is bounded by the entries the caller wrote rather than by the size of the payload, and
+ * every other value still reaches the walk - and `redactedParams` - by reference.
+ *
+ * The copy is installed in place of the original, which is safe because the only things
+ * written into are this module's own: the bag from {@link normalizeParamsBag} at the first
+ * step, and a copy made here at every step after it.
+ */
+function normalizeAlongRedactPaths(
+  bag: Record<string, unknown>,
+  paths: RedactPath[],
+): void {
+  const copies = new Map<object, object>();
+
+  for (const { parts } of paths) {
+    let container: Record<string, unknown> = bag;
+
+    // The last segment names the leaf to mask, not a container to descend into.
+    for (let index = 0; index < parts.length - 1; index++) {
+      const key = parts[index];
+
+      let child: unknown;
+
+      try {
+        child = container[key];
+      } catch {
+        break;
+      }
+
+      // Only a plain container is walked as structure. Anything else is masked whole when
+      // a path points into it, so its own keys are never resolved separately.
+      if (!isPlainContainer(child)) {
+        break;
+      }
+
+      const copy = forwardingContainerCopy(child, copies);
+
+      if (copy === null) {
+        break;
+      }
+
+      try {
+        Object.defineProperty(container, key, {
+          value: copy,
+          enumerable: true,
+          writable: true,
+          configurable: true,
+        });
+      } catch {
+        break;
+      }
+
+      container = copy as Record<string, unknown>;
+    }
+  }
 }
 
 /**
@@ -274,6 +426,16 @@ export function applyRedaction(
     // `Object.keys` itself refused - a revoked `Proxy`, an `ownKeys` trap that throws -
     // so there is no key to read safely and nothing to mark but the redacted ones.
     return markAllRedactionFailed(redactedKeys);
+  }
+
+  // The same normalization, continued down the paths the caller named, so the walk and
+  // the renderer agree about a nested key exactly as they already do about a top-level
+  // one. Guarded because it reads caller properties; a failure leaves the originals in
+  // place, where the walk's own guards still apply.
+  try {
+    normalizeAlongRedactPaths(guarded, paths);
+  } catch (error) {
+    report(error, '<params>');
   }
 
   // Never fall through with the originals: a sensitive key still holding its own value is
