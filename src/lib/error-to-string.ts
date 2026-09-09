@@ -106,7 +106,16 @@ function readOwnSensitivePaths(
 ): RedactPath[] | null {
   const raw = readMemberOrThrew(value, 'sensitiveFieldNames');
 
-  if (raw === undefined || raw === null) {
+  // `undefined` only. `null` and `undefined` mean different things in JavaScript: a
+  // property that was never set reads `undefined`, while `null` is a value somebody
+  // assigned - so `sensitiveFieldNames: null` is a caller who asked for masking and did
+  // not say what for, which is precisely the fail-closed case. Folding the two together
+  // made this the one redaction surface that answered differently from the other two for
+  // the same spelling: `redactedKeys: null` blanks the params in the logger and yields
+  // the marker from `stringifyValue`, while `sensitiveFieldNames: null` printed the value
+  // in the clear. `null` now falls through to `parseRedactPaths`, which refuses a
+  // non-array and reports it like any other unusable list.
+  if (raw === undefined) {
     return [];
   }
 
@@ -488,7 +497,28 @@ function errorToASCIITable(
         try {
           keys = Object.keys(info);
         } catch {
-          keys = [];
+          // Said, not swallowed. An empty list here rendered the error as one that simply
+          // carried no `additionalInfo`, which is a different and much more reassuring
+          // claim than "its keys could not be read" - and every other walk marks this
+          // case: `renderContainer` emits `[unrenderable]`, `maskValueDeep` and
+          // `redactPathsInner` the redaction marker, `snapshotValue` its own. This was
+          // the one that degraded silently.
+          table.addRow('AdditionalInfo', '<unrenderable>');
+
+          addErrorTail(
+            table,
+            err,
+            cause,
+            sensitivePaths,
+            maxRowLength,
+            seen,
+            depth,
+            budget,
+            redactFunction,
+            report,
+          );
+
+          return table;
         }
 
         for (const key of keys) {
@@ -864,9 +894,14 @@ function stringifyValueInner(
       // Read the "or threw" way: an accessor that refused is the caller asking for
       // masking without saying what for, so it routes here too and the table fails it
       // closed, rather than being read as absent and walked in the clear.
+      //
+      // `undefined` alone counts as absent, matching `readOwnSensitivePaths`. A `null`
+      // that did not route here was walked as ordinary structure and printed its fields
+      // in the clear - the same leak that function's `null` handling exists to stop, one
+      // level lower down, so the two have to draw the line in the same place.
       const rawOwnList = readMemberOrThrew(asRecord, 'sensitiveFieldNames');
 
-      if (isErrorShaped && rawOwnList !== undefined && rawOwnList !== null) {
+      if (isErrorShaped && rawOwnList !== undefined) {
         return errorToASCIITable(
           value,
           Math.max(KEY_VALUE_TABLE_MIN_WIDTH, maxRowLength - 4),
@@ -890,7 +925,13 @@ function stringifyValueInner(
       try {
         keys = Object.keys(value);
       } catch {
-        keys = [];
+        // The keys themselves cannot be read, so there is no shape to walk and nothing to
+        // degrade per entry. Marked rather than rendered as an empty object: `keys = []`
+        // printed this value as one that genuinely held nothing, which is the silent
+        // collapse the comment above rules out for a *throwing accessor* and then allowed
+        // one line lower for a refused enumeration. `<unrenderable>` is what every other
+        // read failure in this walk already emits.
+        return '<unrenderable>';
       }
 
       // Clamped, not just decremented. `KeyValueASCIITable` throws below its minimum

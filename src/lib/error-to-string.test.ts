@@ -347,6 +347,51 @@ describe('errorToString', () => {
       expect(rendered.includes(SECRET)).toBe(false);
       expect(rendered).toContain('AdditionalInfo.other');
     });
+
+    it('should fail closed when sensitiveFieldNames is null', () => {
+      // `null` and `undefined` are not the same answer. A property nobody set reads
+      // `undefined`; `null` is a value somebody assigned, so it is a caller who asked for
+      // masking without saying what for - the fail-closed case, and the same answer
+      // `redactedKeys: null` already gets from the logger and from `stringifyValue`.
+      const rendered = errorToString(
+        Object.assign(new Error('x'), {
+          additionalInfo: { password: SECRET },
+          sensitiveFieldNames: null,
+        }),
+      );
+
+      expect(rendered.includes(SECRET)).toBe(false);
+    });
+
+    it('should fail closed for a nested object whose sensitiveFieldNames is null', () => {
+      // The same rule one level down. An error-shaped object carrying `null` has to route
+      // through the error table too, or it is walked as ordinary structure and prints the
+      // fields the table would have withheld.
+      const rendered = errorToString(
+        Object.assign(new Error('outer'), {
+          additionalInfo: {
+            child: {
+              additionalInfo: { password: SECRET },
+              sensitiveFieldNames: null,
+            },
+          },
+        }),
+      );
+
+      expect(rendered.includes(SECRET)).toBe(false);
+    });
+
+    it('should still render normally when sensitiveFieldNames is absent', () => {
+      // The other half of the rule above: `undefined` genuinely means nothing was asked
+      // for, so nothing is masked and the payload renders in full.
+      const rendered = errorToString(
+        Object.assign(new Error('x'), {
+          additionalInfo: { note: 'plainvalue' },
+        }),
+      );
+
+      expect(rendered).toContain('plainvalue');
+    });
   });
 
   describe('sensitiveFieldNames redactFunction option', () => {
@@ -658,6 +703,39 @@ describe('errorToString', () => {
       // returns a string, so a `typeof` check passes even with every read guard removed.
       expect(rendered).not.toBe('<error could not be rendered>');
       expect(rendered).toContain('E42');
+    });
+
+    it('should mark additionalInfo whose keys cannot be enumerated', () => {
+      // Said, not swallowed. Collapsing to an empty key list rendered the error as one
+      // that simply carried no `additionalInfo` - a different and far more reassuring
+      // claim than "its keys could not be read". Every other walk in the library marks
+      // this: `stringifyValue` emits `[unrenderable]`, `redactValue` the redaction
+      // marker. Asserted at both levels, since the two reads sit in different functions.
+      const hostile = (): object =>
+        new Proxy(
+          { password: 'hunter2secret' },
+          {
+            ownKeys() {
+              throw new Error('ownKeys refused');
+            },
+          },
+        );
+
+      const nested = errorToString(
+        Object.assign(new Error('boom'), {
+          additionalInfo: { inner: hostile() },
+        }),
+      );
+
+      expect(nested).toContain('boom');
+      expect(nested).toContain('unrenderable');
+
+      const root = errorToString(
+        Object.assign(new Error('boom'), { additionalInfo: hostile() }),
+      );
+
+      expect(root).toContain('boom');
+      expect(root).toContain('unrenderable');
     });
 
     it('should not throw when the stack accessor throws', () => {
