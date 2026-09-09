@@ -1,5 +1,5 @@
 import { getPathParts } from './path-utils';
-import { defineEntry } from './container-entries';
+import { defineEntry, describeContainer } from './container-entries';
 import { isPlainContainer } from './is-plain-container';
 import { maskValueDeep } from './mask-value-deep';
 import { resolveRedaction } from './resolve-redaction';
@@ -219,20 +219,24 @@ function needsFullWalk(
 
   visited.add(value);
 
-  if (Array.isArray(value)) {
-    let length: number;
+  // The shared enumeration, so this scan cannot conclude "nothing below" about a container
+  // the walk itself would have entered - the one property that makes skipping it sound.
+  const shape = describeContainer(value);
 
-    try {
-      length = value.length;
-    } catch {
-      return true;
-    }
+  if (shape.kind === 'unreadable') {
+    // A read that failed says nothing about what is underneath it, so the scan refuses to
+    // clear this subtree and the full walk decides, with its own per-entry guards.
+    return true;
+  }
 
-    for (let index = 0; index < length; index++) {
+  if (shape.kind === 'array') {
+    const elements = value as unknown[];
+
+    for (let index = 0; index < shape.length; index++) {
       let element: unknown;
 
       try {
-        element = value[index];
+        element = elements[index];
       } catch {
         return true;
       }
@@ -245,15 +249,7 @@ function needsFullWalk(
     return false;
   }
 
-  let keys: string[];
-
-  try {
-    keys = Object.keys(value);
-  } catch {
-    return true;
-  }
-
-  for (const key of keys) {
+  for (const key of shape.keys) {
     let entry: unknown;
 
     try {
@@ -488,7 +484,21 @@ function redactPathsInner(
   seen.add(value);
 
   try {
-    if (Array.isArray(value)) {
+    // The shared enumeration, so this walk and the renderer cannot disagree about what a
+    // container holds - the divergence between the two that this design exists to remove.
+    const shape = describeContainer(value);
+
+    if (shape.kind === 'unreadable') {
+      // The walk cannot tell whether something named for redaction sits below. Handing
+      // back the original would risk returning it in the clear, so this one value fails
+      // closed even though nothing under it matched.
+      report(shape.error, path.join('.') || '<root>');
+      state.didFailToRead = true;
+
+      return REDACTION_FAILED_MARKER;
+    }
+
+    if (shape.kind === 'array') {
       const source = value as unknown[];
       let didMask = false;
 
@@ -504,17 +514,6 @@ function redactPathsInner(
       // mutated and its type cannot be reconstructed from outside.
       const copy: unknown[] = [];
 
-      let length: number;
-
-      try {
-        length = source.length;
-      } catch (error) {
-        report(error, path.join('.') || '<root>');
-        state.didFailToRead = true;
-
-        return REDACTION_FAILED_MARKER;
-      }
-
       // A counted index loop, and deliberately not `for...of source.entries()`: `entries`
       // is resolved off the array, so an own property shadowing it is caller code. One
       // that throws took the whole payload down, and one that yields different pairs
@@ -526,7 +525,7 @@ function redactPathsInner(
       // Each element is read and rendered inside its own guard, exactly as the object
       // branch and the renderer both do, so one unreadable element degrades alone instead
       // of turning the entire payload into the marker.
-      for (let index = 0; index < length; index++) {
+      for (let index = 0; index < shape.length; index++) {
         let result: unknown;
 
         // Read once and kept, exactly as the object branch keeps the entry it read.
@@ -590,24 +589,10 @@ function redactPathsInner(
     // runs every getter under one `catch`, so a single unrelated throwing accessor failed
     // the whole container closed and lost every sibling, the one a path named included.
     // The array branch above and the renderer both degrade one entry at a time.
-    let keys: string[];
-
-    try {
-      keys = Object.keys(value);
-    } catch (error) {
-      // The keys cannot be read, so the walk cannot tell whether something named for
-      // redaction sits below. Handing back the original would risk returning it in the
-      // clear, so this one value fails closed even though nothing under it matched.
-      report(error, path.join('.') || '<root>');
-      state.didFailToRead = true;
-
-      return REDACTION_FAILED_MARKER;
-    }
-
     const copy: Record<string, unknown> = {};
     let didMask = false;
 
-    for (const key of keys) {
+    for (const key of shape.keys) {
       let result: unknown;
       let entryValue: unknown;
 
