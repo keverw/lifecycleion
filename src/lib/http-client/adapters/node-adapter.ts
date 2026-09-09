@@ -1030,7 +1030,15 @@ async function streamResponseBody(
     // HTTP status code in an isStreamError response rather than surfacing a
     // thrown error.
     const onWritableError = (error: Error): void => {
-      settle({ code: 'stream_write_error', cause: error });
+      // Normalized like every other failure path in this function. The parameter is typed
+      // `Error` because `WritableLike` declares the listener that way, but the value is
+      // whatever the writable emitted, and a hand-written one is under no obligation to
+      // emit an `Error` at all - so this was the last route by which a non-`Error` could
+      // reach `AdapterResponse.errorCause`, which also declares an `Error`.
+      settle({
+        code: 'stream_write_error',
+        cause: normalizeError(error),
+      });
     };
 
     const onResponseData = (chunk: Buffer): void => {

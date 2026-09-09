@@ -8,7 +8,7 @@ import {
 import { CurlyBrackets } from '../curly-brackets';
 import { isNumber } from '../is-number';
 import { isPromise } from '../is-promise';
-import { describeError, toError } from '../to-error';
+import { describeError, isErrorValue, toError } from '../to-error';
 import { reportToConsole } from '../internal/report-to-console';
 import {
   createRedactionReporter,
@@ -534,23 +534,24 @@ export class Logger extends EventEmitter {
           ? reportedMessage
           : undefined;
 
-      // `isError` rather than a bare `instanceof`: the payload comes from whoever
-      // dispatched the event, and `instanceof` walks a prototype chain, which a revoked
-      // `Proxy` makes throw. A throw here would escape the listener, skipping the
+      // The shared brand check, not a bare `instanceof`, and for two reasons.
+      //
+      // It crosses realms. An error thrown out of an iframe, a `vm` context, or a jsdom
+      // window has a different `Error` constructor and fails this realm's `instanceof`
+      // while being an error in every way a consumer cares about. Wrapping it discarded
+      // its identity, `stack` and `cause` and handed the wrapper to both the sink entry
+      // and the `'logger'` event — the exact case `toError` documents itself as handling,
+      // which this listener had quietly opted out of.
+      //
+      // And it is guarded, which is what the local `try` was for: the payload comes from
+      // whoever dispatched the event, and `instanceof` walks a prototype chain, which a
+      // revoked `Proxy` makes throw. A throw here would escape the listener, skipping the
       // `preventDefault()` below and — on Bun and Node — killing the process from inside
       // the error-reporting path.
-      let isError: boolean;
-
-      try {
-        isError = reported instanceof Error;
-      } catch {
-        isError = false;
-      }
-
       let error: Error;
 
-      if (isError) {
-        error = reported as Error;
+      if (isErrorValue(reported)) {
+        error = reported;
       } else {
         // The reported value is kept reachable as the cause: a browser
         // `throw { code: 'E42' }` puts that object here, and the synthesized message
@@ -562,6 +563,17 @@ export class Logger extends EventEmitter {
         // arbitrary — possibly large or cyclic — payload. The options object is omitted
         // entirely when there was nothing to keep, so an event that genuinely carried no
         // error does not gain a `cause: undefined`.
+        //
+        // `null` counts as nothing here as well as `undefined`, and that is not an
+        // oversight about `throw null`. `ErrorEventInit.error` is declared `any error =
+        // null` by WHATWG, so `null` is the value the platform supplies when *no* error
+        // was given: `new ErrorEvent('error', { message: 'x' }).error` is `null` on Bun
+        // and in browsers (Node answers `undefined`). A genuine `throw null` therefore
+        // arrives indistinguishable from an event that carried no payload at all, so
+        // there is no information to preserve by keeping it - only a `cause: null` on
+        // every payload-less report, which is the noise the omission exists to avoid.
+        // `readEventProperty` also answers `undefined` for a read that threw, which has
+        // nothing to keep either.
         error = new Error(
           resource ?? message ?? 'Unknown error reported by an error event',
           reported === undefined || reported === null

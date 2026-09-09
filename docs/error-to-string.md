@@ -48,6 +48,12 @@ interface ErrorToStringOptions {
 | `maxRowLength` | `number`               | `80`    | Maximum character width for table rows                                   |
 | `options`      | `ErrorToStringOptions` | -       | How sensitive values are masked, and where a masking failure is reported |
 
+A table needs nine characters to draw its own borders and one character of each column, so
+`maxRowLength` is raised to `9` if you ask for less than that. A value that names no width
+at all - `0`, a negative number, `NaN` - falls back to the default `80`. Neither case
+fails: rendering a narrow table is always a better answer than discarding the error's
+message, name, and stack.
+
 `RedactFunctionResult` is the same contract the logger uses - see
 [Choosing how values are masked](#choosing-how-values-are-masked). The value reaching your
 `redactFunction` is always a `string`, already rendered.

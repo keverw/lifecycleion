@@ -2272,3 +2272,110 @@ describe('Logger - a redactedKeys list that will not be read twice', () => {
     expect(sink.logs[0]?.redactedKeys).toEqual(keys);
   });
 });
+
+describe('Logger - what the global error listener does with the payload', () => {
+  test('passes a cross-realm Error through rather than wrapping it', async () => {
+    const vm = await import('node:vm');
+    const sink = new ArraySink();
+    const logger = new Logger({ sinks: [sink] });
+
+    expect(logger.registerReportErrorListener()).toBe('success');
+
+    try {
+      // An error from a `vm` context has a different `Error` constructor, so it fails
+      // this realm's `instanceof` while being an error in every way a consumer cares
+      // about. A bare `instanceof` replaced it with a wrapper, discarding its identity
+      // and stack in both the sink entry and the `'logger'` event - the case `toError`
+      // documents itself as handling and this listener had opted out of.
+      const foreign = vm.default.runInNewContext(
+        'new Error("from another realm")',
+      ) as Error;
+
+      expect(foreign instanceof Error).toBe(false);
+
+      const seen: unknown[] = [];
+
+      logger.on('logger', (data: unknown) => {
+        // Logging emits a `'logger'` event of its own, so filter to the report.
+        const payload = data as { eventType?: string; error: unknown };
+
+        if (payload.eventType === 'uncaughtException') {
+          seen.push(payload.error);
+        }
+      });
+
+      globalThis.dispatchEvent(
+        new ErrorEvent('error', {
+          error: foreign,
+          message: 'from another realm',
+          cancelable: true,
+        }),
+      );
+
+      expect(seen).toHaveLength(1);
+      expect(seen[0]).toBe(foreign);
+      expect(sink.logs[sink.logs.length - 1]?.error).toBe(foreign);
+    } finally {
+      logger.unregisterReportErrorListener();
+      await logger.close();
+    }
+  });
+
+  test('treats a reported null as no payload, not as a thrown null', async () => {
+    const sink = new ArraySink();
+    const logger = new Logger({ sinks: [sink] });
+
+    expect(logger.registerReportErrorListener()).toBe('success');
+
+    try {
+      // `ErrorEventInit.error` is declared `any error = null` by WHATWG, so `null` is
+      // what the platform supplies when no error was given - Bun and browsers both
+      // answer `null` for `new ErrorEvent('error', { message })`. A genuine `throw null`
+      // is therefore indistinguishable from a payload-less event, so keeping it would
+      // only put a meaningless `cause: null` on every one of them.
+      expect(new ErrorEvent('error', { message: 'x' }).error).toBeNull();
+
+      globalThis.dispatchEvent(
+        new ErrorEvent('error', {
+          error: null,
+          message: 'Uncaught null',
+          cancelable: true,
+        }),
+      );
+
+      const reported = sink.logs[sink.logs.length - 1]?.error as Error;
+
+      expect('cause' in reported).toBe(false);
+      expect(reported.message).toContain('Uncaught null');
+    } finally {
+      logger.unregisterReportErrorListener();
+      await logger.close();
+    }
+  });
+
+  test('keeps a non-null non-Error payload on cause', async () => {
+    const sink = new ArraySink();
+    const logger = new Logger({ sinks: [sink] });
+
+    expect(logger.registerReportErrorListener()).toBe('success');
+
+    try {
+      const thrown = { code: 'E42' };
+
+      globalThis.dispatchEvent(
+        new ErrorEvent('error', {
+          error: thrown,
+          message: 'Uncaught [object Object]',
+          cancelable: true,
+        }),
+      );
+
+      const reported = sink.logs[sink.logs.length - 1]?.error as Error;
+
+      expect(reported.cause).toBe(thrown);
+    } finally {
+      logger.unregisterReportErrorListener();
+      await logger.close();
+    }
+  });
+});

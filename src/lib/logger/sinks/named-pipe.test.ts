@@ -654,4 +654,52 @@ describe('NamedPipeSink', () => {
     reader.stop();
     await sink.close();
   });
+
+  test('does not re-render a queued entry whose first render failed', async () => {
+    const pipePath = `${tmpDir.path}/format-failure.pipe`;
+
+    await createNamedPipe(pipePath);
+
+    const reader = startPipeReader(pipePath);
+    const errors: { type: PipeErrorType; error: Error }[] = [];
+
+    const sink = new NamedPipeSink({
+      pipePath,
+      jsonFormat: true,
+      onError: (type, error) => {
+        errors.push({ type, error });
+      },
+    });
+
+    // Queued while the pipe is still opening. The shared-subtree gap: a `BigInt` under
+    // `params.user` fails the render at `write` time, and the caller can then remove it
+    // during the outage - which is what would let a second render succeed and serialize
+    // the token added beside it on the same shared object.
+    const shared: Record<string, unknown> = { name: 'kev', big: 1n };
+
+    const entry: LogEntry = {
+      timestamp: Date.now(),
+      type: 'info',
+      template: 'hi',
+      message: 'hi',
+      redactedParams: { user: shared },
+      redactedKeys: ['user.token'],
+    };
+
+    sink.write(entry);
+
+    delete shared.big;
+    shared.token = 'topsecret-should-never-be-written';
+
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    await sink.close();
+
+    reader.stop();
+
+    expect(reader.data.join('')).not.toContain(
+      'topsecret-should-never-be-written',
+    );
+    expect(errors).toHaveLength(1);
+    expect(errors[0]?.type).toBe(PipeErrorType.WRITE);
+  });
 });

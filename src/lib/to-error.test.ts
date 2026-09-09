@@ -1,5 +1,5 @@
 import { describe, test, expect } from 'bun:test';
-import { toError, describeError } from './to-error';
+import { toError, describeError, isErrorValue } from './to-error';
 
 /** An `Error` whose `message` accessor throws, as a subclass or a `Proxy` can produce. */
 function unreadableError(): Error {
@@ -132,5 +132,59 @@ describe('toError cross-realm errors', () => {
     const wrapped = toError({ message: 'boom' });
 
     expect(wrapped.message).toContain('Non-error value thrown');
+  });
+});
+
+describe('isErrorValue', () => {
+  test('should recognize an ordinary error', () => {
+    expect(isErrorValue(new Error('boom'))).toBe(true);
+    expect(isErrorValue(new TypeError('boom'))).toBe(true);
+  });
+
+  test('should recognize an error built in another realm', async () => {
+    // The reason this is exported rather than kept private: a caller that needs the
+    // question answered - `Logger`'s global `'error'` listener deciding whether to pass a
+    // payload through or wrap it - has to reach the same answer `toError` does, and a
+    // bare `instanceof` does not.
+    const vm = await import('node:vm');
+    const foreign = vm.runInNewContext('new Error("boom")') as Error;
+
+    expect(foreign instanceof Error).toBe(false);
+    expect(isErrorValue(foreign)).toBe(true);
+  });
+
+  test('should reject values that are not errors', () => {
+    for (const value of [
+      null,
+      undefined,
+      'boom',
+      42,
+      { message: 'boom' },
+      [],
+      () => undefined,
+    ]) {
+      expect(isErrorValue(value)).toBe(false);
+    }
+  });
+
+  test('should not throw on a value whose prototype cannot be walked', () => {
+    // `instanceof` walks a prototype chain and `Object.prototype.toString` reads the
+    // brand; a revoked `Proxy` refuses both. This is called from reporting paths that
+    // must not raise an error of their own, so the guard is part of the contract.
+    const revocable = Proxy.revocable({}, {});
+
+    revocable.revoke();
+
+    expect(() => isErrorValue(revocable.proxy)).not.toThrow();
+    expect(isErrorValue(revocable.proxy)).toBe(false);
+  });
+
+  test('should agree with what toError does with the same value', () => {
+    const vmSafe = [new Error('boom'), 'boom', null, { message: 'boom' }];
+
+    for (const value of vmSafe) {
+      // `toError` returns an error unchanged exactly when this says it is one.
+      expect(toError(value) === value).toBe(isErrorValue(value));
+    }
   });
 });

@@ -1183,6 +1183,13 @@ console.log(debugSink.getMinLevel()); // LogLevel.WARN
 
 FileSink automatically retries failed writes up to `maxRetries` times (default: 3). The `onError` callback is invoked for each failure:
 
+> **One failure is never retried.** An entry whose line could not be serialized is
+> reported once and dropped. The line is rendered when `write()` is called, so that the
+> params cannot change underneath it, and re-rendering later is exactly what that
+> prevents - so a second attempt could not come out differently. `onError` receives a
+> `FileSinkError` with the message `Failed to format log entry` and the underlying
+> serialization error on its `cause`.
+
 ```typescript
 import { FileSink, type LogEntry } from 'lifecycleion/logger';
 

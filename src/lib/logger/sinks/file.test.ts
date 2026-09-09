@@ -846,4 +846,54 @@ describe('FileSink', () => {
 
     expect(sink.getMinLevel()).toBe(LogLevel.INFO);
   });
+
+  test('does not re-render a queued entry whose first render failed', async () => {
+    const onError = mock(() => {});
+
+    const sink = new FileSink({
+      logDir: tmpDir.path,
+      basename: 'format-failure',
+      maxSizeMB: 1,
+      jsonFormat: true,
+      onError,
+    });
+
+    // The shared-subtree gap this guards. `redactedParams` hands back the caller's own
+    // nested object wherever nothing under it was masked, so a `BigInt` placed there
+    // fails the render at `write` time and the caller can then remove it - which is
+    // exactly what would let a second render succeed and serialize the token added
+    // beside it, under a `redactedKeys` path that masked nothing because the key did
+    // not exist yet.
+    const shared: Record<string, unknown> = { name: 'kev', big: 1n };
+
+    const entry: LogEntry = {
+      timestamp: Date.now(),
+      type: 'info',
+      template: 'hi',
+      message: 'hi',
+      redactedParams: { user: shared },
+      redactedKeys: ['user.token'],
+    };
+
+    sink.write(entry);
+
+    delete shared.big;
+    shared.token = 'topsecret-should-never-be-written';
+
+    await sink.flush();
+    await sink.close();
+
+    const content = await fsPromises.readFile(
+      `${tmpDir.path}/format-failure-${new Date().toISOString().split('T')[0]}.log`,
+      'utf8',
+    );
+
+    expect(content).not.toContain('topsecret-should-never-be-written');
+    expect(content).toBe('');
+
+    // Reported once, not once per retry: a render this refuses to repeat cannot come
+    // out differently on a second attempt.
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect((onError.mock.calls[0] as unknown[])[3]).toBe(false);
+  });
 });

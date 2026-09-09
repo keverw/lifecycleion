@@ -2305,6 +2305,62 @@ describe('NodeAdapter.send() — unit branches without server', () => {
     }
   });
 
+  test("a writable emitting a non-Error 'error' still yields an Error cause", async () => {
+    const req = new MockClientRequest();
+    const res = new MockIncomingMessage(200, {
+      'content-type': 'application/octet-stream',
+      'content-length': '5',
+    });
+    const writable = new EventEmitter() as unknown as WritableLike;
+    writable.write = () => true;
+    writable.end = (callback?: () => void) => {
+      callback?.();
+    };
+    writable.destroy = () => writable;
+
+    const requestSpy = spyOn(http, 'request').mockImplementation(
+      (_options, callback) => {
+        const cb = callback as
+          ((res: http.IncomingMessage) => void) | undefined;
+        queueMicrotask(() => {
+          cb?.(res as unknown as http.IncomingMessage);
+          queueMicrotask(() => {
+            // `WritableLike` declares the listener as taking an `Error`, but the value is
+            // whatever the writable emitted, and a hand-written one is under no
+            // obligation. This was the last route by which a non-`Error` could reach
+            // `AdapterResponse.errorCause`, which also declares an `Error`.
+            (writable as unknown as EventEmitter).emit('error', 'disk full');
+          });
+        });
+        return req as unknown as http.ClientRequest;
+      },
+    );
+
+    try {
+      const result = await Promise.race([
+        new NodeAdapter().send({
+          requestURL: 'http://example.test/data',
+          method: 'GET',
+          headers: {},
+          streamResponse: () => writable,
+        }),
+        new Promise((resolve) => setTimeout(() => resolve('timeout'), 50)),
+      ]);
+
+      expect(result).not.toBe('timeout');
+
+      const response = result as AdapterResponse;
+
+      expect(response.isStreamError).toBe(true);
+      expect(response.streamErrorCode).toBe('stream_write_error');
+      expect(response.errorCause).toBeInstanceOf(Error);
+      expect(response.errorCause?.message).toContain('disk full');
+      expect((response.errorCause as Error).cause).toBe('disk full');
+    } finally {
+      requestSpy.mockRestore();
+    }
+  });
+
   test('synchronous writable.write throws resolve as stream_write_error', async () => {
     const req = new MockClientRequest();
     const res = new MockIncomingMessage(200, {

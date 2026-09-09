@@ -14,6 +14,7 @@ import {
 } from './internal/default-redact-function';
 import { isPlainContainer } from './internal/is-plain-container';
 import { stringifyTemplateValue } from './internal/stringify-template-value';
+import { isErrorValue } from './to-error';
 import {
   charge,
   chargeUnits,
@@ -334,15 +335,47 @@ export function errorToString(
   }
 }
 
+/** The width `KeyValueASCIITable` falls back to, applied where a caller's is unusable. */
+const DEFAULT_TABLE_WIDTH = 80;
+
+/**
+ * A width the table can actually be built at.
+ *
+ * `maxRowLength` is a public parameter of {@link errorToString}, and the constructor
+ * throws below {@link KEY_VALUE_TABLE_MIN_WIDTH} - a throw the top-level backstop turns
+ * into `<error could not be rendered>`, discarding the error's message, name and stack
+ * because the caller asked for a narrow column. The nested tables have clamped against
+ * that minimum since the constant was introduced; the entry point, where a caller's own
+ * number arrives, was the one place that did not, so `errorToString(err, 5)` rendered
+ * nothing at all.
+ *
+ * A width that names nothing usable - zero, negative, `NaN` - resolves to the table's own
+ * default rather than to the minimum. Zero already meant "use the default" through the
+ * constructor's `|| 80`, and a narrow table is a worse answer than the ordinary one for a
+ * caller who supplied no real width.
+ */
+function resolveTableWidth(maxRowLength: number): number {
+  if (!Number.isFinite(maxRowLength) || maxRowLength <= 0) {
+    return DEFAULT_TABLE_WIDTH;
+  }
+
+  return Math.max(KEY_VALUE_TABLE_MIN_WIDTH, maxRowLength);
+}
+
 function errorToASCIITable(
   error: unknown,
-  maxRowLength: number,
+  requestedRowLength: number,
   seen: WeakSet<object>,
   depth: number,
   budget: RenderBudget,
   redactFunction: RedactFieldFunction | undefined,
   report: ReportRedactionFailure,
 ): KeyValueASCIITable {
+  // Resolved once, and used for everything below: the table this builds, the width handed
+  // to nested values, and the per-row cost charged against the budget. A nested caller has
+  // already clamped, so this is idempotent there.
+  const maxRowLength = resolveTableWidth(requestedRowLength);
+
   const table = new KeyValueASCIITable({
     tableWidth: maxRowLength,
     autoAdjustWidthWhenPossible: true,
@@ -463,7 +496,20 @@ function errorToASCIITable(
             break;
           }
 
+          // The row's framing as well as the key, exactly as the nested walk charges it
+          // and for the same reason: every entry here becomes a table row padded out to
+          // the table width, which is none of the strings this walk produces. Charging
+          // only the key billed roughly eight characters for a row that costs upwards of
+          // a hundred and eighty, so `additionalInfo` holding 500,000 one-character
+          // values rendered 22.5 MB against a 1 MB cap - and 111 MB at
+          // `errorToString(err, 400)`, since the uncharged part scales with the width.
+          // The identical payload one level deeper, where this charge already existed,
+          // came out at 1.5 MB.
           charge(budget, key);
+          chargeUnits(
+            budget,
+            Math.max(MIN_ROW_COST, maxRowLength) * (depth + 1),
+          );
 
           table.addRow(
             `AdditionalInfo.${key}`,
@@ -744,14 +790,13 @@ function stringifyValueInner(
 
     return parts.join(', ');
   } else if (typeof value === 'object' && value !== null) {
-    let isError: boolean;
-
-    try {
-      isError = value instanceof Error;
-    } catch {
-      // `instanceof` walks a prototype chain, which a revoked `Proxy` refuses.
-      isError = false;
-    }
+    // The shared brand check rather than a local `instanceof`, for the reason `toError`
+    // documents: an error from a `vm` context, an iframe, or a jsdom window fails this
+    // realm's `instanceof` while being an error in every respect. One inside
+    // `additionalInfo` was therefore walked as an ordinary object and rendered as a plain
+    // nested table, losing the `message`, `code` and `stack` rows the error branch gives
+    // it. Guarded internally, so the local `try` this replaces is no longer needed.
+    const isError = isErrorValue(value);
 
     if (!isPlainContainer(value)) {
       // Only a plain object or an array is *structure* to be walked; anything else - a

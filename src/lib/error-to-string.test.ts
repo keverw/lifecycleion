@@ -1181,3 +1181,60 @@ describe('errorToString - reporting why redaction failed', () => {
     ).toBe(errorToString(mkError(), 120, { redactFunction }));
   });
 });
+
+describe('errorToString - bounds that hold at the entry point', () => {
+  it('charges the row framing for top-level additionalInfo entries', () => {
+    // Every entry here becomes a table row padded out to the table width, which is none
+    // of the strings the walk produces. Charging only the key billed roughly eight
+    // characters for a row costing upwards of a hundred and eighty, so this payload
+    // rendered 22.5 MB against a 1 MB cap - and the overshoot scaled with the width,
+    // reaching 111 MB at a row length of 400, because the uncharged part *is* the width.
+    const wide: Record<string, string> = {};
+
+    for (let index = 0; index < 200_000; index++) {
+      wide[`k${index}`] = 'v';
+    }
+
+    const error = new Error('wide') as Error & { additionalInfo: unknown };
+
+    error.additionalInfo = wide;
+
+    const atEighty = errorToString(error, 80);
+    const atFourHundred = errorToString(error, 400);
+
+    // The budget is a megabyte and a leaf is emitted whole, so a modest overshoot is
+    // expected; twenty times over is not.
+    expect(atEighty.length).toBeLessThan(4_000_000);
+    expect(atFourHundred.length).toBeLessThan(4_000_000);
+
+    // The bound must not scale with the row width, which is what said the framing was
+    // going uncharged.
+    expect(atFourHundred.length).toBeLessThan(atEighty.length * 3);
+  });
+
+  it('renders at a row length below the table minimum', () => {
+    // `maxRowLength` is a public parameter, and the table constructor throws below its
+    // minimum width - a throw the top-level backstop turned into
+    // `<error could not be rendered>`, discarding the message, name and stack because
+    // the caller asked for a narrow column.
+    for (const width of [1, 5, 8, 9]) {
+      const rendered = errorToString(new Error('boom'), width);
+
+      expect(rendered).not.toBe('<error could not be rendered>');
+      expect(rendered).toContain('b');
+    }
+  });
+
+  it('falls back to the default width for a width that names nothing', () => {
+    // `0` and `NaN` already landed on the default: both are falsy, so the constructor's
+    // `tableWidth && tableWidth < 9` guard never reached its throw and `|| 80` applied.
+    // A negative width and `Infinity` did not - the first threw, and the second built a
+    // table of infinite width that failed further down - so those two are what changed.
+    for (const width of [0, Number.NaN, -10, Number.POSITIVE_INFINITY]) {
+      const rendered = errorToString(new Error('boom'), width);
+
+      expect(rendered).not.toBe('<error could not be rendered>');
+      expect(rendered).toContain('boom');
+    }
+  });
+});

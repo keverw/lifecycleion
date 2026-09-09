@@ -86,7 +86,7 @@ import {
 } from '../process-signal-manager';
 import { isPromise } from '../is-promise';
 import { safeHandleCallback } from '../safe-handle-callback';
-import { describeError, toError } from '../to-error';
+import { describeError, isErrorValue, toError } from '../to-error';
 import { finiteClampMin } from '../clamp';
 
 /**
@@ -5047,16 +5047,14 @@ export class LifecycleManager
     const failure =
       error === undefined || error === null ? null : toError(error);
 
-    // Captured before the normalization above is allowed to blur the distinction. Guarded
-    // for the same reason everything else on this path is: `instanceof` walks a prototype
-    // chain, which a revoked `Proxy` refuses.
-    let didReportError: boolean;
-
-    try {
-      didReportError = error instanceof Error;
-    } catch {
-      didReportError = false;
-    }
+    // Captured before the normalization above is allowed to blur the distinction, and
+    // asked with the same check `toError` just used. A bare `instanceof` contradicted the
+    // line above it: `toError` keeps a cross-realm error - from a `vm` context, an
+    // iframe - as-is, so `componentErrors` held a real error while this recorded that the
+    // component had reported none, and `startComponent`'s overlapping-failure rule read
+    // the wrong answer. Guarded internally, so the local `try` this replaces is no longer
+    // needed.
+    const didReportError = isErrorValue(error);
 
     this.componentUnexpectedStopHadError.set(name, didReportError);
 

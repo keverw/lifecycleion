@@ -1,7 +1,8 @@
 # to-error
 
-Coerce any thrown or rejected value into an `Error`, keeping the original on `cause`, or
-describe it as a string that is safe to read.
+Coerce any thrown or rejected value into an `Error`, keeping the original on `cause`,
+describe it as a string that is safe to read, or ask whether it was an error to begin
+with.
 
 <!-- toc -->
 
@@ -9,6 +10,7 @@ describe it as a string that is safe to read.
 - [API](#api)
   - [toError](#toerror)
   - [describeError](#describeerror)
+  - [isErrorValue](#iserrorvalue)
   - [Which one do I want?](#which-one-do-i-want)
 
 <!-- tocstop -->
@@ -16,7 +18,7 @@ describe it as a string that is safe to read.
 ## Usage
 
 ```typescript
-import { toError, describeError } from 'lifecycleion/to-error';
+import { toError, describeError, isErrorValue } from 'lifecycleion/to-error';
 ```
 
 ## API
@@ -83,6 +85,36 @@ describeError('nope'); // 'Non-error value thrown: nope'
 describeError(null); // 'Non-error value thrown: null'
 ```
 
+### isErrorValue
+
+`isErrorValue(value)` answers whether a value is an error, and is the test `toError` itself
+uses to decide whether to return a value unchanged or wrap it.
+
+Reach for it when you need the _question_ answered rather than an `Error` in hand — a
+branch that passes a genuine error through and wraps everything else, for example.
+
+**It recognizes errors built in another realm.** `instanceof` compares against _this_
+realm's `Error.prototype`, so an error thrown out of a `vm` context, an iframe, or a jsdom
+window fails it while being an error in every respect you care about. This reads the
+internal brand instead, which crosses realms:
+
+```typescript
+import vm from 'node:vm';
+
+const foreign = vm.runInNewContext('new Error("boom")');
+
+foreign instanceof Error; // false
+isErrorValue(foreign); // true
+```
+
+**It never throws.** `instanceof` walks a prototype chain, which a revoked `Proxy` refuses,
+so the check is guarded — you can call it on a reporting path without a `try` of your own.
+
+A hostile object can claim the brand with `Symbol.toStringTag` and will be reported as an
+error. That is the same bargain `instanceof` already offers, since a `Proxy` can forge a
+prototype chain, and it costs nothing: read anything off the result with `describeError` or
+[`errorToString`](./error-to-string.md), both of which guard every read.
+
 ### Which one do I want?
 
 | You need                                                         | Use                                     |
@@ -90,8 +122,9 @@ describeError(null); // 'Non-error value thrown: null'
 | Text for a `console.error`, a template literal, or a log line    | `describeError`                         |
 | The `Error` object itself — to rethrow, or to pass to a callback | `toError`                               |
 | The full multi-line render, with `name`, `code`, and `stack`     | [`errorToString`](./error-to-string.md) |
+| To know whether a value _is_ an error, without coercing it       | `isErrorValue`                          |
 
-All three are safe to call on a reporting path; none of them throws.
+All four are safe to call on a reporting path; none of them throws.
 
 This matters most inside a callback the library hands a failure to and then asks not to
 throw — `logger`'s `onSinkError` and `onEventHandlerError`, for instance. Reach for

@@ -34,6 +34,18 @@ interface QueuedPipeEntry {
   entry: LogEntry;
   /** The rendered line, or `undefined` when rendering it threw at `write` time. */
   formatted: string | undefined;
+  /**
+   * The failure from rendering, kept rather than the chance to render again.
+   *
+   * Re-rendering at flush time is the very thing {@link formatted} exists to avoid, and a
+   * first render that *threw* is not the safe exception it looks like. Whatever made
+   * `JSON.stringify` throw usually sits in one of the subtrees `redactedParams` shares
+   * with the caller's own bag, so the caller removing it during the outage is precisely
+   * what lets the second render succeed - carrying with it any sensitive value added to
+   * that shared subtree since the log call, under a `redactedKeys` path that masked
+   * nothing because the key did not exist yet.
+   */
+  formatError: Error | undefined;
 }
 
 /**
@@ -81,23 +93,25 @@ export class NamedPipeSink implements LogSink {
       return;
     }
 
-    // Queue entry if not initialized
+    // Queue entry if not initialized. Rendered now rather than at flush time, so the
+    // line is fixed while `write` still holds the caller's stack.
     if (!this.isInitialized) {
-      let formatted: string | undefined;
-
-      try {
-        formatted = this.formatEntry(entry);
-      } catch {
-        // Left for the flush to hit again, where `handleError` already reports it.
-        formatted = undefined;
-      }
-
-      this.writeQueue.push({ entry, formatted });
+      this.writeQueue.push(this.renderEntry(entry));
 
       return;
     }
 
-    this.writeEntry(entry);
+    // Nothing to render for. `writeEntry` drops an entry the pipe cannot take, and the
+    // stream `'error'` handler clears `pipeStream` while leaving `isInitialized` set - so
+    // every write after a pipe failure reaches here. Rendering first would run a
+    // caller-supplied `formatter`, side effects and all, for a line that is then thrown
+    // away, which the direct path did not do before it started rendering eagerly.
+    // `writeEntry` still checks for itself, since the queued path arrives by another route.
+    if (!this.pipeStream || this.pipeStream.destroyed) {
+      return;
+    }
+
+    this.writeEntry(this.renderEntry(entry));
   }
 
   /**
@@ -254,15 +268,34 @@ export class NamedPipeSink implements LogSink {
     while (this.writeQueue.length > 0 && !this.closed) {
       const queued = this.writeQueue.shift();
       if (queued) {
-        this.writeEntry(queued.entry, queued.formatted);
+        this.writeEntry(queued);
       }
+    }
+  }
+
+  /**
+   * Render one entry into the line to write, keeping a failure rather than retrying it.
+   *
+   * See {@link QueuedPipeEntry.formatError}: a render is attempted exactly once, while
+   * the caller's stack is still held, whether the entry goes out now or waits for the
+   * pipe.
+   */
+  private renderEntry(entry: LogEntry): QueuedPipeEntry {
+    try {
+      return {
+        entry,
+        formatted: this.formatEntry(entry),
+        formatError: undefined,
+      };
+    } catch (error) {
+      return { entry, formatted: undefined, formatError: toError(error) };
     }
   }
 
   /**
    * Write a single entry
    */
-  private writeEntry(entry: LogEntry, preformatted?: string): void {
+  private writeEntry(queued: QueuedPipeEntry): void {
     if (this.closed) {
       return;
     }
@@ -272,9 +305,16 @@ export class NamedPipeSink implements LogSink {
       return;
     }
 
+    // Reported where the render used to happen, so a failure surfaces exactly as it did
+    // before - but from the single attempt made in `write`, never from a second one.
+    if (queued.formatError !== undefined) {
+      this.handleError(PipeErrorType.WRITE, queued.formatError);
+
+      return;
+    }
+
     try {
-      // Already rendered when the entry was queued, unless that render threw.
-      const messageToWrite = preformatted ?? this.formatEntry(entry);
+      const messageToWrite = queued.formatted ?? '';
 
       // Write to pipe with backpressure handling
       if (!this.pipeStream.write(messageToWrite)) {

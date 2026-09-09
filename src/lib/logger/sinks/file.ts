@@ -59,10 +59,29 @@ interface QueuedEntry {
    * secret added *after* the log call under a key that was named in `redactedKeys`, and
    * wrote params that disagreed with the message rendered beside them.
    *
-   * `undefined` when the render threw, which leaves it to happen again on the write path
-   * where the retry and `onError` handling already live.
+   * `undefined` only when the render threw, in which case {@link formatError} holds the
+   * failure and the line is never rendered again.
    */
   formatted: string | undefined;
+  /**
+   * The failure from rendering at `write` time, kept rather than the chance to try again.
+   *
+   * Re-rendering on the write path is the very thing {@link formatted} exists to avoid,
+   * and a first render that *threw* is not the safe exception it looks like. Leaving it
+   * to happen again reopened the window on precisely the entries most likely to change
+   * underneath it: whatever made `JSON.stringify` throw usually sits in one of the
+   * subtrees `redactedParams` shares with the caller's own bag, so the caller removing it
+   * is what lets the second render succeed - carrying with it anything else that changed
+   * in the meantime. Verified: a `BigInt` under `params.user`, deleted after the log call
+   * along with `params.user.token = '<secret>'` set on the same shared object, wrote that
+   * token to the file in clear text under a `redactedKeys: ['user.token']` that had
+   * masked nothing because the key did not exist yet.
+   *
+   * Carried through the ordinary failure path instead, so `onError`, `lastError` and the
+   * failure counters all see it - but not through the retry, since a render this refuses
+   * to repeat cannot come out differently on a second attempt.
+   */
+  formatError: Error | undefined;
 }
 
 /**
@@ -127,17 +146,19 @@ export class FileSink implements LogSink {
     // `rotateIfNeeded` have been awaited: by then the caller has had the chance to mutate
     // the bag `entry.redactedParams` points at, since redaction no longer copies it.
     let formatted: string | undefined;
+    let formatError: Error | undefined;
 
     try {
       formatted = this.formatEntry(entry);
-    } catch {
-      // Left for `writeEntry` to hit again, so a value that cannot be serialized fails
-      // exactly where it did before, with the retry and `onError` handling around it.
-      formatted = undefined;
+    } catch (error) {
+      // Kept, not retried. See `QueuedEntry.formatError`: rendering again on the write
+      // path is what this render exists to prevent, and a failed first render is the case
+      // where doing so is most likely to serialize something the caller has since added.
+      formatError = toError(error);
     }
 
     // Add to queue with retry tracking
-    this.writeQueue.push({ entry, attempts: 0, formatted });
+    this.writeQueue.push({ entry, attempts: 0, formatted, formatError });
 
     // Process queue if initialized
     if (this.isInitialized) {
@@ -324,7 +345,7 @@ export class FileSink implements LogSink {
         }
 
         try {
-          await this.writeEntry(queuedEntry.entry, queuedEntry.formatted);
+          await this.writeEntry(queuedEntry);
           this.consecutiveFailures = 0;
           this.totalEntriesWritten++;
         } catch (error) {
@@ -338,8 +359,14 @@ export class FileSink implements LogSink {
           this.lastError = err;
           this.consecutiveFailures++;
 
-          // Determine if we should retry
-          const willRetry = queuedEntry.attempts < this.maxRetries;
+          // Determine if we should retry.
+          //
+          // A render that failed is never retried: the line is not re-rendered by design
+          // (see `QueuedEntry.formatError`), so every attempt would raise the same
+          // failure and call `onError` again for one entry that can never be written.
+          const willRetry =
+            queuedEntry.formatError === undefined &&
+            queuedEntry.attempts < this.maxRetries;
 
           // Call error callback if provided
           if (this.onError) {
@@ -374,10 +401,14 @@ export class FileSink implements LogSink {
    * Write a single entry to the file
    * If stream is broken, it will be recreated on next attempt
    */
-  private async writeEntry(
-    entry: LogEntry,
-    preformatted?: string,
-  ): Promise<void> {
+  private async writeEntry(queued: QueuedEntry): Promise<void> {
+    // Before the stream is touched: there is no line to write, and this cannot become one
+    // by trying again. Raised as an ordinary write failure so `onError`, `lastError` and
+    // the counters treat it like any other, rather than re-rendering the entry.
+    if (queued.formatError !== undefined) {
+      throw new FileSinkError('Failed to format log entry', queued.formatError);
+    }
+
     if (this.closed) {
       throw new FileSinkError('Cannot write to closed sink');
     }
@@ -393,8 +424,9 @@ export class FileSink implements LogSink {
     // Check rotation before writing (handles date change and size limit)
     await this.rotateIfNeeded();
 
-    // Format the entry - already done in `write`, unless rendering threw there.
-    const messageToWrite = preformatted ?? this.formatEntry(entry);
+    // Always the line rendered in `write`. A render that threw has already been raised
+    // above, so this is never a second attempt at one.
+    const messageToWrite = queued.formatted ?? '';
     const messageBytes = Buffer.byteLength(messageToWrite, 'utf8');
 
     // Check if writing would exceed limit

@@ -33,17 +33,29 @@
  * returned as-is rather than wrapped. That is the same bargain `instanceof` already
  * offers - a `Proxy` can forge a prototype chain - and it costs nothing here: every read
  * off the result is guarded anyway, by `describeError` or by `errorToString`.
+ *
+ * Exported so a caller that only needs the *question* answered - `Logger`'s global
+ * `'error'` listener, deciding whether to pass a reported payload through or wrap it -
+ * asks it the same way `toError` does. A private copy is how that listener came to use a
+ * bare `instanceof` and replace a genuine iframe or `vm` error with a wrapper.
+ *
+ * Never throws: `instanceof` walks a prototype chain, which a revoked `Proxy` refuses,
+ * and this is called from reporting paths that must not raise an error of their own.
  */
-function isErrorValue(value: unknown): value is Error {
-  if (value instanceof Error) {
-    return true;
-  }
+export function isErrorValue(value: unknown): value is Error {
+  try {
+    if (value instanceof Error) {
+      return true;
+    }
 
-  return (
-    typeof value === 'object' &&
-    value !== null &&
-    Object.prototype.toString.call(value) === '[object Error]'
-  );
+    return (
+      typeof value === 'object' &&
+      value !== null &&
+      Object.prototype.toString.call(value) === '[object Error]'
+    );
+  } catch {
+    return false;
+  }
 }
 
 export function toError(value: unknown): Error {
@@ -56,9 +68,11 @@ export function toError(value: unknown): Error {
 
     description = typeof value === 'string' ? value : String(value);
   } catch {
-    // Both steps run code this module does not own: `instanceof` walks a prototype
-    // chain, which a revoked `Proxy` makes throw, and `String()` invokes
-    // `toString`/`Symbol.toPrimitive`, which are ordinary properties.
+    // `String()` is what reaches here: it invokes `toString`/`Symbol.toPrimitive`, which
+    // are ordinary properties this module does not own. `isErrorValue` guards itself, so
+    // the check above cannot throw - but the guard stays, because the value that makes
+    // that check need one (a revoked `Proxy`) is the same value that makes `String()`
+    // throw a line later.
     description = 'unknown value';
   }
 
