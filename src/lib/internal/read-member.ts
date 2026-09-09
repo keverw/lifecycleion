@@ -26,3 +26,30 @@ export function readMember(source: object, key: string): unknown {
     return undefined;
   }
 }
+
+/**
+ * {@link readMember}, for a source that may not be an object at all.
+ *
+ * The same guarantee with the type check folded in, so a caller holding an `unknown` -
+ * a thrown value, a rejection reason, an adapter marker read off something it did not
+ * construct - does not have to narrow before asking. A primitive, `null` and `undefined`
+ * all answer `undefined` rather than throwing or coercing: reading a member off a string
+ * would otherwise return `String.prototype`'s, which is never what these callers mean.
+ *
+ * Shared for the reason `readMember` is. The HTTP client carried five copies of these two
+ * shapes between `http-client`, three adapters and `tls-error-utils`, on a rule against
+ * importing across module boundaries that the same files now break for `toError`.
+ *
+ * @returns The member's value, or `undefined` when the source cannot hold one or reading
+ *          it threw.
+ */
+export function readUnknownMember(source: unknown, key: string): unknown {
+  if (
+    source === null ||
+    (typeof source !== 'object' && typeof source !== 'function')
+  ) {
+    return undefined;
+  }
+
+  return readMember(source, key);
+}

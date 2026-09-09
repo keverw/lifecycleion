@@ -83,6 +83,7 @@ import type { CookieJar } from './cookie-jar';
 // coerced text. See the 0.1.0 changelog entry: "HTTP adapters preserve non-`Error`
 // rejection values on `cause`."
 import { isErrorValue, toError as normalizeError } from '../to-error';
+import { readUnknownMember as readObjectMember } from '../internal/read-member';
 
 type RemoveFn = () => void;
 
@@ -2780,20 +2781,6 @@ function getEffectiveRequestHeadersFromError(
  * getter and a Proxy trap can throw. An unreadable member is treated as absent so
  * that second error cannot replace the one being normalized.
  */
-function readObjectMember(source: unknown, key: string): unknown {
-  if (
-    (typeof source !== 'object' && typeof source !== 'function') ||
-    source === null
-  ) {
-    return undefined;
-  }
-
-  try {
-    return (source as Record<string, unknown>)[key];
-  } catch {
-    return undefined;
-  }
-}
 
 /**
  * Validate and copy an adapter-provided header record into a plain object.

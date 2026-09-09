@@ -1,5 +1,6 @@
 import fs, { promises as fsPromises } from 'fs';
 import { describeError, toError } from '../../to-error';
+import { renderOnce, type RenderedLine } from './internal/rendered-line';
 import { reportToConsole } from '../../internal/report-to-console';
 import type { LogEntry, LogSink } from '../types';
 import { LogLevel, getLogLevel } from '../types';
@@ -48,41 +49,16 @@ class FileSinkError extends Error {
   }
 }
 
-interface QueuedEntry {
+/**
+ * One entry waiting for the file, with its line already rendered.
+ *
+ * The render policy is {@link RenderedLine}'s, shared with `NamedPipeSink`. What is added
+ * here is this sink's own: the `LogEntry`, because the public `onError` hands it back to the
+ * caller, and the attempt count, because this sink retries a write - though never a render.
+ */
+interface QueuedEntry extends RenderedLine {
   entry: LogEntry;
   attempts: number;
-  /**
-   * The line to write, rendered while `write` still held the caller's stack.
-   *
-   * `entry.redactedParams` is not a snapshot - it is the caller's own bag, or shares
-   * every subtree that held nothing redacted - so serializing it after an `await` writes
-   * whatever the caller has done to it since. A bag reused across calls then wrote a
-   * secret added *after* the log call under a key that was named in `redactedKeys`, and
-   * wrote params that disagreed with the message rendered beside them.
-   *
-   * `undefined` only when the render threw, in which case {@link formatError} holds the
-   * failure and the line is never rendered again.
-   */
-  formatted: string | undefined;
-  /**
-   * The failure from rendering at `write` time, kept rather than the chance to try again.
-   *
-   * Re-rendering on the write path is the very thing {@link formatted} exists to avoid,
-   * and a first render that *threw* is not the safe exception it looks like. Leaving it
-   * to happen again reopened the window on precisely the entries most likely to change
-   * underneath it: whatever made `JSON.stringify` throw usually sits in one of the
-   * subtrees `redactedParams` shares with the caller's own bag, so the caller removing it
-   * is what lets the second render succeed - carrying with it anything else that changed
-   * in the meantime. Verified: a `BigInt` under `params.user`, deleted after the log call
-   * along with `params.user.token = '<secret>'` set on the same shared object, wrote that
-   * token to the file in clear text under a `redactedKeys: ['user.token']` that had
-   * masked nothing because the key did not exist yet.
-   *
-   * Carried through the ordinary failure path instead, so `onError`, `lastError` and the
-   * failure counters all see it - but not through the retry, since a render this refuses
-   * to repeat cannot come out differently on a second attempt.
-   */
-  formatError: Error | undefined;
 }
 
 /**
@@ -146,20 +122,10 @@ export class FileSink implements LogSink {
     // Rendered here rather than on the write path, which runs after `setupLogFile` and
     // `rotateIfNeeded` have been awaited: by then the caller has had the chance to mutate
     // the bag `entry.redactedParams` points at, since redaction no longer copies it.
-    let formatted: string | undefined;
-    let formatError: Error | undefined;
-
-    try {
-      formatted = this.formatEntry(entry);
-    } catch (error) {
-      // Kept, not retried. See `QueuedEntry.formatError`: rendering again on the write
-      // path is what this render exists to prevent, and a failed first render is the case
-      // where doing so is most likely to serialize something the caller has since added.
-      formatError = toError(error);
-    }
+    const rendered = renderOnce(() => this.formatEntry(entry));
 
     // Add to queue with retry tracking
-    this.writeQueue.push({ entry, attempts: 0, formatted, formatError });
+    this.writeQueue.push({ entry, attempts: 0, ...rendered });
 
     // Process queue if initialized
     if (this.isInitialized) {

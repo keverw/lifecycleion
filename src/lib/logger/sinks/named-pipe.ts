@@ -3,6 +3,7 @@ import { promises as fsPromises } from 'fs';
 import * as os from 'os';
 import type { LogEntry, LogSink } from '../types';
 import { describeError, toError } from '../../to-error';
+import { renderOnce, type RenderedLine } from './internal/rendered-line';
 import { reportToConsole } from '../../internal/report-to-console';
 
 /**
@@ -33,31 +34,13 @@ export type ReconnectStatus =
 /**
  * One entry waiting for the pipe, reduced to what the flush actually needs.
  *
- * The `LogEntry` itself is deliberately *not* kept. Rendering now happens at `write` time,
- * so the line is already fixed and nothing on the flush path reads the entry again -
- * holding it would pin the caller's whole params graph (`entry.params` is theirs by
- * reference, and `entry.redactedParams` shares every subtree that held nothing redacted)
- * alongside a complete serialized copy of it, for as long as the queue is stalled. That is
- * roughly double the retained memory during exactly the outage where memory is the
- * concern. `FileSink` keeps its entry because its public `onError` callback hands it to
- * the caller; this sink's `onError` takes only the error type and the pipe path.
+ * {@link RenderedLine} alone: the `LogEntry` is deliberately not kept. Rendering happens at
+ * `write` time, so nothing on the flush path reads the entry again, and holding it would
+ * pin the caller's whole params graph beside a serialized copy of it for as long as the
+ * queue is stalled. `FileSink` keeps its entry because its public `onError` hands it to the
+ * caller; this sink's `onError` takes only the error type and the pipe path.
  */
-interface QueuedPipeEntry {
-  /** The rendered line, or `undefined` when rendering it threw at `write` time. */
-  formatted: string | undefined;
-  /**
-   * The failure from rendering, kept rather than the chance to render again.
-   *
-   * Re-rendering at flush time is the very thing {@link formatted} exists to avoid, and a
-   * first render that *threw* is not the safe exception it looks like. Whatever made
-   * `JSON.stringify` throw usually sits in one of the subtrees `redactedParams` shares
-   * with the caller's own bag, so the caller removing it during the outage is precisely
-   * what lets the second render succeed - carrying with it any sensitive value added to
-   * that shared subtree since the log call, under a `redactedKeys` path that masked
-   * nothing because the key did not exist yet.
-   */
-  formatError: Error | undefined;
-}
+type QueuedPipeEntry = RenderedLine;
 
 /**
  * NamedPipeSink writes logs to a named pipe (FIFO)
@@ -292,14 +275,7 @@ export class NamedPipeSink implements LogSink {
    * pipe.
    */
   private renderEntry(entry: LogEntry): QueuedPipeEntry {
-    try {
-      return {
-        formatted: this.formatEntry(entry),
-        formatError: undefined,
-      };
-    } catch (error) {
-      return { formatted: undefined, formatError: toError(error) };
-    }
+    return renderOnce(() => this.formatEntry(entry));
   }
 
   /**

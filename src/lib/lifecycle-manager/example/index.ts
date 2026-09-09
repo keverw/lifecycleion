@@ -10,6 +10,7 @@
  */
 
 import { Logger, ConsoleSink } from '../../logger';
+import { describeError } from '../../to-error';
 import { sleep } from '../../sleep';
 import { LifecycleManager, BaseComponent } from '../index';
 import type { LifecycleManagerEventMap } from '../events';
@@ -186,7 +187,7 @@ async function main() {
 
 main().catch((error: unknown) => {
   const logger = new Logger();
-  const message = error instanceof Error ? error.message : String(error);
+  const message = describeError(error);
   logger.error(`Failed: ${message}`);
   process.exit(1);
 });

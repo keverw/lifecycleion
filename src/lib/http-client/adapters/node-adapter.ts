@@ -41,6 +41,7 @@ import { resolveDetectedRedirectURL } from '../utils';
 // coerced text. See the 0.1.0 changelog entry: "HTTP adapters preserve non-`Error`
 // rejection values on `cause`."
 import { toError as normalizeError } from '../../to-error';
+import { readUnknownMember as readObjectMember } from '../../internal/read-member';
 
 /**
  * The absorber currently attached to a writable, if any.
@@ -1603,17 +1604,3 @@ function isStreamResponseCancel(value: unknown): value is StreamResponseCancel {
 }
 
 /** Read replaceable/runtime-owned metadata without letting a getter escape. */
-function readObjectMember(source: unknown, key: string): unknown {
-  if (
-    source === null ||
-    (typeof source !== 'object' && typeof source !== 'function')
-  ) {
-    return undefined;
-  }
-
-  try {
-    return (source as Record<string, unknown>)[key];
-  } catch {
-    return undefined;
-  }
-}

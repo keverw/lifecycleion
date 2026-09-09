@@ -5,6 +5,12 @@
 // error was classified as a generic transport failure and retried, though a rejected
 // certificate fails identically every time.
 import { isErrorValue } from '../../to-error';
+// Every field is read through this, since the error is whatever a runtime, a library, or
+// a caller's mocked `fetch` rejected with. This classifier runs inside adapter error
+// handling, where a throwing getter would replace a normalized `status: 0` transport
+// response with the getter's own error, so unreadable is treated as absent on every
+// field rather than only on `cause`.
+import { readMember } from '../../internal/read-member';
 
 const CERT_ERROR_CODES = new Set([
   'UNABLE_TO_VERIFY_LEAF_SIGNATURE',
@@ -139,18 +145,3 @@ function isTLSCertificateErrorSelf(error: Error): boolean {
     : false;
 }
 
-/**
- * Read a field off an error without trusting it.
- *
- * This classifier runs inside adapter error handling, where a throwing getter
- * would replace a normalized `status: 0` transport response with the getter's own
- * error. Unreadable is treated as absent, on every field rather than only on
- * `cause` — the outer error is no more this module's own than the nested one.
- */
-function readMember(error: object, key: string): unknown {
-  try {
-    return (error as Record<string, unknown>)[key];
-  } catch {
-    return undefined;
-  }
-}

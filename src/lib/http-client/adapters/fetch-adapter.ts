@@ -20,6 +20,8 @@ import type {
 // coerced text. See the 0.1.0 changelog entry: "HTTP adapters preserve non-`Error`
 // rejection values on `cause`."
 import { isErrorValue, toError as normalizeError } from '../../to-error';
+// Guard error members for the same reason adapter marker reads are guarded.
+import { readMember as readObjectMember } from '../../internal/read-member';
 
 export class FetchAdapter implements HTTPAdapter {
   public getType(): AdapterType {
@@ -209,15 +211,6 @@ function isAbortError(error: unknown): boolean {
  */
 function asError(value: unknown): Error | undefined {
   return isErrorValue(value) ? value : undefined;
-}
-
-/** Guard error members for the same reason adapter marker reads are guarded. */
-function readObjectMember(source: object, key: string): unknown {
-  try {
-    return (source as Record<string, unknown>)[key];
-  } catch {
-    return undefined;
-  }
 }
 
 function materializeFetchHeaders(
