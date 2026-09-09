@@ -528,8 +528,8 @@ function redactPathsInner(
       for (let index = 0; index < length; index++) {
         let result: unknown;
 
-        // Read once and kept, exactly as the object branch keeps the value
-        // `Object.entries` gave it. Reading again for the `UNCHANGED` path below emitted
+        // Read once and kept, exactly as the object branch keeps the entry it read.
+        // Reading again for the `UNCHANGED` path below emitted
         // a value the walk had never looked at: an element backed by an accessor need not
         // answer the same way twice, so the walk concluded "nothing matched" from the
         // first read and then copied the second - which could be a value a path did
@@ -585,10 +585,14 @@ function redactPathsInner(
       return UNCHANGED;
     }
 
-    let entries: [string, unknown][];
+    // Keys first, then each value read inside its own guard - not `Object.entries`, which
+    // runs every getter under one `catch`, so a single unrelated throwing accessor failed
+    // the whole container closed and lost every sibling, the one a path named included.
+    // The array branch above and the renderer both degrade one entry at a time.
+    let keys: string[];
 
     try {
-      entries = Object.entries(value);
+      keys = Object.keys(value);
     } catch (error) {
       // The keys cannot be read, so the walk cannot tell whether something named for
       // redaction sits below. Handing back the original would risk returning it in the
@@ -602,21 +606,30 @@ function redactPathsInner(
     const copy: Record<string, unknown> = {};
     let didMask = false;
 
-    for (const [key, entryValue] of entries) {
+    for (const key of keys) {
       let result: unknown;
+      let entryValue: unknown;
+
+      // Read once and kept, as the array branch keeps its element: a value read again
+      // for the `UNCHANGED` path below need not answer the same way twice.
+      try {
+        entryValue = (value as Record<string, unknown>)[key];
+      } catch (error) {
+        // The walk never saw what was here, so it cannot conclude nothing matched.
+        report(error, [...path, key].join('.'));
+        state.didFailToRead = true;
+        didMask = true;
+        Object.defineProperty(copy, key, {
+          value: REDACTION_FAILED_MARKER,
+          enumerable: true,
+          writable: true,
+          configurable: true,
+        });
+
+        continue;
+      }
 
       // Guarded per entry, exactly as the array branch above and the renderer both are.
-      //
-      // Defensive rather than a fix for a reproduced failure, and the only guard here
-      // that is: `Object.entries` has already run every getter, so no hostile accessor
-      // reaches this call, and the one thing left that could throw is stack exhaustion on
-      // a payload nested past the recursion limit - which neither redaction walk caps and
-      // which measurement could not actually provoke here (200k levels deep still
-      // completes on Bun 1.4). It stays because the alternative is one branch of one walk
-      // being the single place a throw escapes: `redactValue` and `applyRedaction` would
-      // then fail the *whole* payload closed where the array branch degrades one entry,
-      // and a divergence between these walks is the bug class this design exists to
-      // remove. Costing nothing on the hot path, it is not worth leaving as the exception.
       try {
         result = redactPathsInner(
           entryValue,
@@ -653,7 +666,7 @@ function redactPathsInner(
     // Only a container something was actually masked inside is rebuilt. Anything else is
     // handed back as it came in, so a `Date`, an `Error`, a `Map`, a `RegExp`, a `URL`,
     // or a class instance keeps its type and its contents - including the members a
-    // rebuild would drop, since `Object.entries` sees neither a `Date`'s timestamp nor an
+    // rebuild would drop, since `Object.keys` sees neither a `Date`'s timestamp nor an
     // `Error`'s `message` and `stack`.
     //
     // A container that *was* masked inside is necessarily rebuilt as a plain object: the

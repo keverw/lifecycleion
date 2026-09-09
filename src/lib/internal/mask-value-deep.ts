@@ -166,10 +166,14 @@ export function maskValueDeep(
       return masked;
     }
 
-    let entries: [string, unknown][];
+    // Keys first, then each value read inside its own guard - not `Object.entries`, which
+    // runs every getter under one `catch`, so one throwing accessor collapsed the whole
+    // named container to the failure marker while the array branch above degraded a
+    // single slot. Per entry, as `redactPathsInner` and `renderContainer` do.
+    let keys: string[];
 
     try {
-      entries = Object.entries(value);
+      keys = Object.keys(value);
     } catch (error) {
       // The keys cannot be read, so there is no shape to rebuild and no way to know what
       // is below. Fails closed, as the same read does in `redactPathsInner`.
@@ -180,7 +184,7 @@ export function maskValueDeep(
 
     const masked: Record<string, unknown> = {};
 
-    for (const [entryKey, entryValue] of entries) {
+    for (const entryKey of keys) {
       let entryResult: unknown;
 
       try {
@@ -188,7 +192,7 @@ export function maskValueDeep(
 
         entryResult = maskValueDeep(
           key,
-          entryValue,
+          (value as Record<string, unknown>)[entryKey],
           mask,
           seen,
           report,

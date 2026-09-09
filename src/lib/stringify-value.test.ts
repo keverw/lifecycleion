@@ -384,9 +384,9 @@ describe('stringifyValue / redactValue - fail-closed branches', () => {
   });
 
   test('a sibling whose read throws does not leak the rest', () => {
-    // The walk reads keys to find the paths. If that read fails, returning the value
-    // hands back every sibling in the clear - including the ones named for redaction,
-    // which the walk never reached.
+    // Each value is read inside its own guard, so the one that throws is marked where it
+    // sits and every sibling - the one named for redaction included - is still masked
+    // rather than handed back in the clear or discarded with the container.
     const value: Record<string, unknown> = { password: SECRET };
 
     Object.defineProperty(value, 'boom', {
@@ -396,9 +396,10 @@ describe('stringifyValue / redactValue - fail-closed branches', () => {
       enumerable: true,
     });
 
-    expect(redactValue(value, { redactedKeys: ['password'] })).toBe(
-      '***REDACTION FAILED***',
-    );
+    expect(redactValue(value, { redactedKeys: ['password'] })).toEqual({
+      password: 'h***********t',
+      boom: '***REDACTION FAILED***',
+    });
     expect(stringifyValue(value, { redactedKeys: ['password'] })).not.toContain(
       SECRET,
     );
@@ -875,7 +876,9 @@ describe('redactValue - a subtree no path addresses', () => {
       { redactedKeys: ['password'], onRedactionError: () => {} },
     ) as Record<string, unknown>;
 
-    expect(result['other']).toBe('***REDACTION FAILED***');
+    // The unreadable entry is marked where it sits; the container around it keeps its
+    // shape rather than being failed closed as a whole.
+    expect(result['other']).toEqual({ boom: '***REDACTION FAILED***' });
     expect(result['password']).not.toBe(SECRET);
   });
 
@@ -1276,9 +1279,10 @@ describe('redactValue - a cycle nobody named is left alone', () => {
       enumerable: true,
     });
 
-    expect(redactValue(value, { redactedKeys: ['password'] })).toBe(
-      '***REDACTION FAILED***',
-    );
+    expect(redactValue(value, { redactedKeys: ['password'] })).toEqual({
+      password: 'h***********t',
+      boom: '***REDACTION FAILED***',
+    });
   });
 });
 
@@ -1612,11 +1616,11 @@ describe('redactValue and stringifyValue stay one implementation', () => {
     expect(JSON.stringify(masked)).not.toContain(SECRET);
   });
 
-  test('an unreadable key set fails the container closed in both walks', () => {
-    // `Object.entries` runs every getter, so one that throws hides the whole key set.
-    // Neither walk can tell what is below, so both degrade that container and leave the
-    // rest of the payload alone - the agreement asserted here over the hostile original
-    // in each case, not over a copy one of them already sanitized.
+  test('an unreadable entry is marked where it sits in both walks', () => {
+    // Each value is read inside its own guard, so a getter that throws costs only its
+    // own entry. Both walks mark that entry where it sits and keep every sibling - the
+    // agreement asserted here over the hostile original in each case, not over a copy
+    // one of them already sanitized.
     const hostile = (): Record<string, unknown> => {
       const value: Record<string, unknown> = { good: SECRET };
 
@@ -1641,7 +1645,12 @@ describe('redactValue and stringifyValue stay one implementation', () => {
       { redactedKeys: ['u'] },
     ) as Record<string, unknown>;
 
-    expect(masked['u']).toBe('***REDACTION FAILED***');
+    // A named container is masked leaf by leaf, so the readable entry is masked and only
+    // the one whose read threw carries the failure marker.
+    expect(masked['u']).toEqual({
+      good: 'h***********t',
+      bad: '***REDACTION FAILED***',
+    });
     expect(masked['keep']).toBe('visible');
     expect(stringifyValue(masked)).not.toContain(SECRET);
   });
