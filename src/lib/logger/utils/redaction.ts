@@ -2,6 +2,7 @@ import {
   defaultRedactValue,
   REDACTION_FAILED_MARKER,
 } from '../../internal/default-redact-function';
+import { defineEntry } from '../../internal/container-entries';
 import { isPlainContainer } from '../../internal/is-plain-container';
 import {
   parseRedactPaths,
@@ -79,12 +80,7 @@ function normalizeParamsBag(
       unreadable.push(key);
     }
 
-    Object.defineProperty(copy, key, {
-      value,
-      enumerable: true,
-      writable: true,
-      configurable: true,
-    });
+    defineEntry(copy, key, value);
   }
 
   return copy;
@@ -226,12 +222,7 @@ function normalizeAlongRedactPaths(
       }
 
       try {
-        Object.defineProperty(container, key, {
-          value: copy,
-          enumerable: true,
-          writable: true,
-          configurable: true,
-        });
+        defineEntry(container, key, copy);
       } catch {
         break;
       }
@@ -448,12 +439,7 @@ export function applyRedaction(
 
   for (const key of unreadable) {
     try {
-      Object.defineProperty(walked, key, {
-        value: REDACTION_FAILED_MARKER,
-        enumerable: true,
-        writable: true,
-        configurable: true,
-      });
+      defineEntry(walked, key, REDACTION_FAILED_MARKER);
     } catch {
       // The walk returns either `guarded` itself or a copy it built, both of them plain
       // and writable, so this cannot fail - and if it somehow did, the key already holds

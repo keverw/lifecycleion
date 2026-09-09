@@ -12,6 +12,7 @@ import {
   REDACTION_FAILED_MARKER,
   type RedactValueFunction,
 } from './internal/default-redact-function';
+import { describeContainer } from './internal/container-entries';
 import { isPlainContainer } from './internal/is-plain-container';
 import { readMember } from './internal/read-member';
 import { stringifyTemplateValue } from './internal/stringify-template-value';
@@ -771,15 +772,19 @@ function stringifyValueInner(
     const source = arrayValue;
     const parts: string[] = [];
 
-    let length: number;
+    // The shared enumeration. Called inside the branch rather than once at the top: the
+    // top-level `Array.isArray` above selects between two paths that enumerate different
+    // things, and a value that is *not* a plain container must never be enumerated at all
+    // - a hostile class instance renders by its constructor name, and asking it for keys
+    // here would turn that into `<unrenderable>`. The two branches are exclusive, so this
+    // still runs once per container.
+    const shape = describeContainer(source);
 
-    try {
-      length = source.length;
-    } catch {
+    if (shape.kind !== 'array') {
       return '<unrenderable>';
     }
 
-    for (let index = 0; index < length; index++) {
+    for (let index = 0; index < shape.length; index++) {
       // The separator is charged, not the parts: a part was charged by the call that
       // produced it, and charging it again here would bill a leaf once per level above
       // it and make the cap collapse with depth instead of holding.
@@ -920,19 +925,18 @@ function stringifyValueInner(
       // accessor discarded the whole object and rendered it empty with nothing to say a
       // read had failed - while the array branch beside it, and every other walk, degrade
       // one entry at a time.
-      let keys: string[];
+      // The shared enumeration, reached only for a plain container. `unreadable` is a case
+      // rather than an empty key list: read as `[]`, a container that refused printed as
+      // one that genuinely held nothing, which is the silent collapse the comment above
+      // rules out for a throwing accessor and then allowed one line lower for a refused
+      // enumeration.
+      const shape = describeContainer(value);
 
-      try {
-        keys = Object.keys(value);
-      } catch {
-        // The keys themselves cannot be read, so there is no shape to walk and nothing to
-        // degrade per entry. Marked rather than rendered as an empty object: `keys = []`
-        // printed this value as one that genuinely held nothing, which is the silent
-        // collapse the comment above rules out for a *throwing accessor* and then allowed
-        // one line lower for a refused enumeration. `<unrenderable>` is what every other
-        // read failure in this walk already emits.
+      if (shape.kind === 'unreadable') {
         return '<unrenderable>';
       }
+
+      const keys = shape.kind === 'object' ? shape.keys : [];
 
       // Clamped, not just decremented. `KeyValueASCIITable` throws below its minimum
       // width, so a chain of nested values that kept subtracting four eventually threw

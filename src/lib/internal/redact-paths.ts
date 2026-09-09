@@ -1,4 +1,5 @@
 import { getPathParts } from './path-utils';
+import { defineEntry } from './container-entries';
 import { isPlainContainer } from './is-plain-container';
 import { maskValueDeep } from './mask-value-deep';
 import { resolveRedaction } from './resolve-redaction';
@@ -619,12 +620,7 @@ function redactPathsInner(
         report(error, [...path, key].join('.'));
         state.didFailToRead = true;
         didMask = true;
-        Object.defineProperty(copy, key, {
-          value: REDACTION_FAILED_MARKER,
-          enumerable: true,
-          writable: true,
-          configurable: true,
-        });
+        defineEntry(copy, key, REDACTION_FAILED_MARKER);
 
         continue;
       }
@@ -655,12 +651,7 @@ function redactPathsInner(
       // Defined rather than assigned: a plain assignment to `__proto__` is a no-op for a
       // string and reparents the object for an object, so a payload carrying that key
       // would silently lose the entry or change the shape of the result.
-      Object.defineProperty(copy, key, {
-        value: result === UNCHANGED ? entryValue : result,
-        enumerable: true,
-        writable: true,
-        configurable: true,
-      });
+      defineEntry(copy, key, result === UNCHANGED ? entryValue : result);
     }
 
     // Only a container something was actually masked inside is rebuilt. Anything else is
