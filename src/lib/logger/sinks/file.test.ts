@@ -959,3 +959,121 @@ describe('FileSink', () => {
     }
   });
 });
+
+describe('FileSink - bounded queue', () => {
+  // The queue grows whenever writes fail or stall, and every entry holds its rendered
+  // line *and* the `LogEntry`, whose `params` is the caller's own object by reference. A
+  // sink that cannot write turned a logging loop into unbounded memory growth, on exactly
+  // the unhealthy path where the process can least afford it.
+
+  let tmpDir: TmpDir;
+
+  const makeEntry = (message: string): LogEntry => ({
+    timestamp: Date.now(),
+    type: 'info',
+    serviceName: 'TestService',
+    template: message,
+    message,
+  });
+
+  beforeEach(async () => {
+    tmpDir = new TmpDir({ prefix: 'filesink-queue-' });
+    await tmpDir.initialize();
+  });
+
+  afterEach(async () => {
+    await tmpDir.cleanup().catch(() => {
+      // Best effort - the sinks below may still hold a handle.
+    });
+  });
+
+  test('drops the oldest entries once maxQueueSize is exceeded', async () => {
+    const sink = new FileSink({
+      logDir: tmpDir.path,
+      basename: 'bounded',
+      maxQueueSize: 5,
+    });
+
+    // Written before initialization completes, so they queue rather than drain.
+    for (let index = 0; index < 50; index++) {
+      sink.write(makeEntry(`entry-${index}`));
+    }
+
+    const health = sink.getHealth();
+
+    expect(health.queueSize).toBeLessThanOrEqual(5);
+    expect(health.droppedEntries).toBeGreaterThan(0);
+
+    await sink.close();
+  });
+
+  test('reports the first drop through onError, and only the first', async () => {
+    // An overflowing queue drops continuously, so a callback fired per entry would be its
+    // own flood on a path already in trouble. The running total stays in `getHealth()`.
+    const errors: Error[] = [];
+    const sink = new FileSink({
+      logDir: tmpDir.path,
+      basename: 'bounded-report',
+      maxQueueSize: 3,
+      onError: (error) => errors.push(error),
+    });
+
+    for (let index = 0; index < 40; index++) {
+      sink.write(makeEntry(`entry-${index}`));
+    }
+
+    expect(errors).toHaveLength(1);
+    expect(errors[0]?.message).toContain('maxQueueSize=3');
+    expect(sink.getHealth().droppedEntries).toBeGreaterThan(1);
+
+    await sink.close();
+  });
+
+  test('is unbounded when maxQueueSize is not set', async () => {
+    // The default is what this was before the option existed: nothing is dropped.
+    const sink = new FileSink({
+      logDir: tmpDir.path,
+      basename: 'unbounded',
+    });
+
+    for (let index = 0; index < 200; index++) {
+      sink.write(makeEntry(`entry-${index}`));
+    }
+
+    expect(sink.getHealth().droppedEntries).toBe(0);
+
+    await sink.close();
+  });
+
+  test('still writes every entry when the queue stays under the cap', async () => {
+    // The cap must not cost anything for a sink that is keeping up.
+    const sink = new FileSink({
+      logDir: tmpDir.path,
+      basename: 'under-cap',
+      maxQueueSize: 1000,
+    });
+
+    for (let index = 0; index < 10; index++) {
+      sink.write(makeEntry(`kept-${index}`));
+    }
+
+    await sink.flush();
+
+    expect(sink.getHealth().droppedEntries).toBe(0);
+
+    const files = await fsPromises.readdir(tmpDir.path);
+    const logFile = files.find((name) => name.startsWith('under-cap'));
+
+    expect(logFile).toBeDefined();
+
+    const contents = await fsPromises.readFile(
+      `${tmpDir.path}/${logFile ?? ''}`,
+      'utf8',
+    );
+
+    expect(contents).toContain('kept-0');
+    expect(contents).toContain('kept-9');
+
+    await sink.close();
+  });
+});

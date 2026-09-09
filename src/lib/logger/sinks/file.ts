@@ -13,6 +13,22 @@ export interface FileSinkOptions {
   maxRetries?: number;
   closeTimeoutMS?: number;
   minLevel?: LogLevel;
+  /**
+   * Cap on entries waiting to be written. Unbounded by default, which is what this was
+   * before the option existed.
+   *
+   * The queue grows whenever writes fail or stall - a full disk, a directory that went
+   * away, a slow volume - and every queued entry holds its rendered line *and* the
+   * `LogEntry`, whose `params` is the caller's own object by reference. So a sink that
+   * cannot write turns a logging loop into unbounded memory growth, on exactly the
+   * unhealthy path where the process can least afford it.
+   *
+   * When set, the **oldest** entry is dropped to make room, on the reasoning that during
+   * an outage the newest lines describe what is happening now. Drops are counted in
+   * {@link FileSinkHealth.droppedEntries} and the first one is reported through
+   * `onError`, so a silently truncated log is never the only evidence.
+   */
+  maxQueueSize?: number;
   onError?: (
     error: Error,
     entry: LogEntry,
@@ -27,6 +43,8 @@ export interface FileSinkHealth {
   lastError?: Error;
   consecutiveFailures: number;
   isInitialized: boolean;
+  /** Entries discarded because the queue was at `maxQueueSize`. Always 0 when unset. */
+  droppedEntries: number;
 }
 
 export interface FlushResult {
@@ -81,6 +99,9 @@ export class FileSink implements LogSink {
   private currentLogFile?: string;
   private currentLogSize = 0;
   private writeQueue: QueuedEntry[] = [];
+  private maxQueueSize?: number;
+  private droppedEntries = 0;
+  private didReportDrop = false;
   private isInitialized = false;
   private initPromise?: Promise<void>;
   private isProcessing = false;
@@ -101,6 +122,10 @@ export class FileSink implements LogSink {
     this.closeTimeoutMS = options.closeTimeoutMS ?? 30000;
     this.minLevel = options.minLevel ?? LogLevel.INFO;
     this.onError = options.onError;
+    this.maxQueueSize =
+      typeof options.maxQueueSize === 'number' && options.maxQueueSize > 0
+        ? Math.floor(options.maxQueueSize)
+        : undefined;
 
     // Initialize asynchronously
     this.initPromise = this.initialize();
@@ -126,6 +151,7 @@ export class FileSink implements LogSink {
 
     // Add to queue with retry tracking
     this.writeQueue.push({ entry, attempts: 0, ...rendered });
+    this.enforceQueueLimit();
 
     // Process queue if initialized
     if (this.isInitialized) {
@@ -159,8 +185,10 @@ export class FileSink implements LogSink {
       lastError: this.lastError,
       consecutiveFailures: this.consecutiveFailures,
       isInitialized: this.isInitialized,
+      droppedEntries: this.droppedEntries,
     };
   }
+
 
   /**
    * Flush all pending writes and wait for completion
@@ -360,6 +388,7 @@ export class FileSink implements LogSink {
             // Re-queue with incremented attempt count
             queuedEntry.attempts++;
             this.writeQueue.push(queuedEntry);
+            this.enforceQueueLimit();
           } else {
             // Max retries exceeded - entry is lost
             this.totalEntriesFailed++;
@@ -375,6 +404,51 @@ export class FileSink implements LogSink {
    * Write a single entry to the file
    * If stream is broken, it will be recreated on next attempt
    */
+  /**
+   * Discard the oldest entries once the queue is over `maxQueueSize`.
+   *
+   * A loop rather than a single shift: a re-queued retry can push the length past the cap
+   * by more than one, and a cap that only ever removes one entry per call is not a cap.
+   */
+  private enforceQueueLimit(): void {
+    const limit = this.maxQueueSize;
+
+    if (limit === undefined) {
+      return;
+    }
+
+    while (this.writeQueue.length > limit) {
+      this.writeQueue.shift();
+      this.droppedEntries++;
+    }
+
+    if (this.droppedEntries === 0 || this.didReportDrop) {
+      return;
+    }
+
+    // Reported once, not once per drop: an overflowing queue drops continuously, and a
+    // callback fired per entry would be its own flood on a path already in trouble. The
+    // running total stays visible through `getHealth()`.
+    this.didReportDrop = true;
+
+    const failure = new FileSinkError(
+      `Log queue is full (maxQueueSize=${limit}); dropping the oldest entries`,
+    );
+
+    this.lastError = failure;
+
+    if (this.onError) {
+      try {
+        this.onError(failure, this.writeQueue[0]?.entry ?? ({} as LogEntry), 0, false);
+      } catch (callbackError) {
+        reportToConsole(
+          `FileSink onError callback failed: ${describeError(callbackError)}`,
+          failure,
+        );
+      }
+    }
+  }
+
   private async writeEntry(queued: QueuedEntry): Promise<void> {
     // Before the stream is touched: there is no line to write, and this cannot become one
     // by trying again. Raised as an ordinary write failure so `onError`, `lastError` and

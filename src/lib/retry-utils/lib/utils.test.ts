@@ -242,3 +242,94 @@ describe('getMostCommonError', () => {
     expect(mostCommonError).toBe(dynamicError);
   });
 });
+
+describe('getMostCommonError - values that resist being read', () => {
+  /**
+   * Whether the call completed, as a boolean.
+   *
+   * Not `expect(fn).not.toThrow()`: this function *returns* the hostile value, and the
+   * matcher formats what it receives - which reads the very accessor these tests make
+   * throw, failing the assertion from inside the assertion.
+   */
+  const completes = (fn: () => unknown): boolean => {
+    try {
+      fn();
+
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  // `RetryPolicy.mostCommonError` is a public getter holding whatever the retried
+  // operation threw. An unguarded read here threw out of a property access the caller
+  // made in order to *report* a failure, replacing the failure with one of its own.
+
+  test('survives an error whose message accessor throws', () => {
+    const hostile = new Error('placeholder');
+
+    Object.defineProperty(hostile, 'message', {
+      get() {
+        throw new Error('message refused');
+      },
+    });
+
+    expect(completes(() => getMostCommonError([hostile, hostile]))).toBe(true);
+
+    // Compared as a boolean rather than handed to `expect` directly: the matcher formats
+    // the value it receives, which reads the very accessor this test makes throw.
+    expect(getMostCommonError([hostile, hostile]) === hostile).toBe(true);
+  });
+
+  test('survives a hostile has trap', () => {
+    const hostile = new Proxy(
+      {},
+      {
+        has() {
+          throw new Error('has refused');
+        },
+        get() {
+          throw new Error('get refused');
+        },
+      },
+    );
+
+    expect(completes(() => getMostCommonError([hostile, hostile]))).toBe(true);
+  });
+
+  test('survives a value whose toString throws', () => {
+    const hostile = {
+      toString() {
+        throw new Error('toString refused');
+      },
+    };
+
+    expect(completes(() => getMostCommonError([hostile, {}]))).toBe(true);
+  });
+
+  test('survives a revoked Proxy', () => {
+    const { proxy, revoke } = Proxy.revocable({ message: 'x' }, {});
+
+    revoke();
+
+    expect(completes(() => getMostCommonError([proxy, proxy]))).toBe(true);
+  });
+
+  test('still groups readable errors by message', () => {
+    // The guards must not cost the grouping this function exists to do.
+    const a = new Error('same');
+    const b = new Error('same');
+    const c = new Error('different');
+
+    expect(getMostCommonError([a, b, c]) === a).toBe(true);
+  });
+
+  test('still reads a nested error under an error property', () => {
+    const wrapped = { error: new Error('nested failure') };
+    const other = { error: new Error('nested failure') };
+
+    expect(
+      getMostCommonError([wrapped, other, new Error('x')]) === wrapped,
+    ).toBe(true);
+  });
+});

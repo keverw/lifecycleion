@@ -24,6 +24,19 @@ export interface NamedPipeSinkOptions {
   closeTimeoutMS?: number;
   onError?: (errorType: PipeErrorType, error: Error, pipePath: string) => void;
   formatter?: (entry: LogEntry) => string;
+  /**
+   * Cap on entries queued while the pipe is unavailable. Unbounded by default, which is
+   * what this was before the option existed.
+   *
+   * A named pipe with no reader is the ordinary case for this sink - the reader restarts,
+   * or has not started yet - and every line logged in the meantime is held. Without a cap
+   * an outage of any length is unbounded memory growth.
+   *
+   * When set, the **oldest** entry is dropped to make room: during an outage the newest
+   * lines describe what is happening now. The first drop is reported through `onError` as
+   * a `WRITE` failure, so a silently truncated log is never the only evidence.
+   */
+  maxQueueSize?: number;
 }
 
 export type ReconnectStatus =
@@ -66,6 +79,9 @@ export class NamedPipeSink implements LogSink {
    */
   private writeQueue: QueuedPipeEntry[] = [];
   private isInitialized = false;
+  private maxQueueSize?: number;
+  private droppedEntries = 0;
+  private didReportDrop = false;
   private _isReconnecting = false;
   private initPromise: Promise<void>;
   private closing = false;
@@ -78,6 +94,10 @@ export class NamedPipeSink implements LogSink {
     this.onError = options.onError;
     this.formatter = options.formatter;
     this.closeTimeoutMS = options.closeTimeoutMS ?? 30000;
+    this.maxQueueSize =
+      typeof options.maxQueueSize === 'number' && options.maxQueueSize > 0
+        ? Math.floor(options.maxQueueSize)
+        : undefined;
 
     this.initPromise = this.initializePipe();
   }
@@ -91,6 +111,7 @@ export class NamedPipeSink implements LogSink {
     // line is fixed while `write` still holds the caller's stack.
     if (!this.isInitialized) {
       this.writeQueue.push(this.renderEntry(entry));
+      this.enforceQueueLimit();
 
       return;
     }
@@ -265,6 +286,43 @@ export class NamedPipeSink implements LogSink {
         this.writeEntry(queued);
       }
     }
+  }
+
+  /** Entries discarded because the queue was at `maxQueueSize`. */
+  public get droppedEntryCount(): number {
+    return this.droppedEntries;
+  }
+
+  /**
+   * Discard the oldest entries once the queue is over `maxQueueSize`.
+   *
+   * Reported once rather than per entry: an outage drops continuously, and a callback
+   * fired per line would be its own flood on a path already in trouble.
+   */
+  private enforceQueueLimit(): void {
+    const limit = this.maxQueueSize;
+
+    if (limit === undefined) {
+      return;
+    }
+
+    while (this.writeQueue.length > limit) {
+      this.writeQueue.shift();
+      this.droppedEntries++;
+    }
+
+    if (this.droppedEntries === 0 || this.didReportDrop) {
+      return;
+    }
+
+    this.didReportDrop = true;
+
+    this.handleError(
+      PipeErrorType.WRITE,
+      new Error(
+        `Pipe queue is full (maxQueueSize=${limit}); dropping the oldest entries`,
+      ),
+    );
   }
 
   /**

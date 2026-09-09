@@ -1,3 +1,5 @@
+import { readMember, readUnknownMember } from '../../internal/read-member';
+import { isErrorValue } from '../../to-error';
 import { clamp } from '../../clamp';
 
 interface ExponentialDelayParams {
@@ -34,50 +36,64 @@ export function calculateExponentialDelay({
 
 /**
  * Extracts a string message from an error value for grouping purposes.
+ *
+ * Every read is guarded, and the reason is what this feeds: `getMostCommonError` is
+ * reached from `RetryPolicy.mostCommonError`, a public getter, holding whatever the
+ * retried operation threw. `message` and `error` are ordinary properties a subclass or a
+ * `Proxy` can turn into throwing accessors, `in` is a trappable operation, and `String()`
+ * invokes a `toString` this module does not own - so an unguarded read here threw out of a
+ * property access the caller made in order to *report* a failure, replacing the failure
+ * with one of its own.
+ *
+ * The value is only ever a grouping key, so an unreadable member is treated as absent and
+ * the value falls through to the next strategy. Two errors that both refuse to be read
+ * group together under the same placeholder, which is the honest answer: nothing
+ * distinguishes them from here. Reference-equality grouping runs alongside this in
+ * `getMostCommonError` and is unaffected.
  */
 function extractErrorMessage(error: unknown): string {
-  // Check if it's an Error instance (most common case)
-  if (error instanceof Error) {
-    return error.message;
-  }
+  // The shared brand check rather than a bare `instanceof`: an error from a `vm` context
+  // or an iframe fails this realm's check while being an error in every respect, and the
+  // guarded form also survives a revoked `Proxy`.
+  if (isErrorValue(error)) {
+    const message = readMember(error, 'message');
 
-  // Check if it's an object with a 'message' property
-  if (
-    error !== null &&
-    error !== undefined &&
-    typeof error === 'object' &&
-    'message' in error &&
-    typeof error.message === 'string'
-  ) {
-    return (error as { message: string }).message;
-  }
-
-  // Check if it's an object with an 'error' property (nested error)
-  if (
-    error !== null &&
-    error !== undefined &&
-    typeof error === 'object' &&
-    'error' in error
-  ) {
-    const nested = error.error;
-
-    if (nested instanceof Error) {
-      return nested.message;
-    } else if (
-      nested !== null &&
-      nested !== undefined &&
-      typeof nested === 'object' &&
-      'message' in nested &&
-      typeof nested.message === 'string'
-    ) {
-      return (nested as { message: string }).message;
-    } else {
-      return String(nested);
+    if (typeof message === 'string') {
+      return message;
     }
   }
 
+  // An object carrying a string `message`.
+  const ownMessage = readUnknownMember(error, 'message');
+
+  if (typeof ownMessage === 'string') {
+    return ownMessage;
+  }
+
+  // An object wrapping the real failure under `error`.
+  const nested = readUnknownMember(error, 'error');
+
+  if (nested !== undefined) {
+    const nestedMessage = readUnknownMember(nested, 'message');
+
+    if (typeof nestedMessage === 'string') {
+      return nestedMessage;
+    }
+
+    return describeValue(nested);
+  }
+
   // Fall back to string conversion
-  return String(error);
+  return describeValue(error);
+}
+
+/** `String(value)` without letting a `toString` or `Symbol.toPrimitive` escape. */
+function describeValue(value: unknown): string {
+  try {
+    return String(value);
+  } catch {
+    return '<unreadable error>';
+  }
 }
 
 export function getMostCommonError(errors: unknown[]): unknown {

@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test';
+import * as vm from 'node:vm';
 import {
   serializeError,
   deserializeError,
@@ -203,5 +204,150 @@ describe('isErrorLike', () => {
     expect(isErrorLike(null)).toBe(false);
     expect(isErrorLike('string')).toBe(false);
     expect(isErrorLike(42)).toBe(false);
+  });
+});
+
+describe('serializeError - values that resist serialization', () => {
+  // This runs at an IPC/RPC boundary, usually while already reporting a failure, so a
+  // second failure raised here replaces the one being reported. Every case below threw
+  // before it was hardened.
+
+  test('cuts a cyclic error instead of exhausting the stack', () => {
+    const error: Error & { self?: unknown } = new Error('boom');
+
+    error.self = error;
+
+    const serialized = serializeError(error);
+
+    expect(serialized.message).toBe('boom');
+    expect(serialized['self']).toBe('[max depth exceeded]');
+  });
+
+  test('stops at the depth cap on a payload with no cycle in it', () => {
+    let deep: Record<string, unknown> = { bottom: true };
+
+    for (let index = 0; index < 5000; index++) {
+      deep = { next: deep };
+    }
+
+    const error: Error & { payload?: unknown } = new Error('x');
+
+    error.payload = deep;
+
+    expect(() => serializeError(error)).not.toThrow();
+    expect(JSON.stringify(serializeError(error))).toContain(
+      '[max depth exceeded]',
+    );
+  });
+
+  test('serializes a value referenced twice side by side in full both times', () => {
+    // Releasing `seen` on the way out is what keeps a shared subtree from being mistaken
+    // for a cycle.
+    const shared = { id: 7 };
+    const error: Error & { l?: unknown; r?: unknown } = new Error('x');
+
+    error.l = shared;
+    error.r = shared;
+
+    const serialized = serializeError(error);
+
+    expect(serialized['l']).toEqual({ id: 7 });
+    expect(serialized['r']).toEqual({ id: 7 });
+  });
+
+  test('survives a message accessor that throws', () => {
+    const error = new Error('placeholder');
+
+    Object.defineProperty(error, 'message', {
+      get() {
+        throw new Error('message refused');
+      },
+    });
+
+    expect(() => serializeError(error)).not.toThrow();
+    expect(serializeError(error).name).toBe('Error');
+  });
+
+  test('survives a revoked Proxy', () => {
+    const { proxy, revoke } = Proxy.revocable(new Error('p'), {});
+
+    revoke();
+
+    expect(() => serializeError(proxy)).not.toThrow();
+  });
+
+  test('survives a hostile has trap and a throwing toString', () => {
+    const hostileHas = new Proxy(
+      {},
+      {
+        has() {
+          throw new Error('has refused');
+        },
+      },
+    );
+
+    expect(() => serializeError(hostileHas)).not.toThrow();
+    expect(() =>
+      serializeError({
+        toString() {
+          throw new Error('toString refused');
+        },
+      }),
+    ).not.toThrow();
+  });
+
+  test('recognizes an error built in another realm', () => {
+    // A bare `instanceof` fails across realms, so a `vm` error fell to the error-like
+    // branch and was serialized without its non-enumerable `message` and `stack`.
+    const foreign: unknown = vm.runInNewContext(
+      'new Error("from another realm")',
+    );
+
+    const serialized = serializeError(foreign);
+
+    expect(serialized.message).toBe('from another realm');
+    expect(serialized.stack).toBeDefined();
+  });
+
+  test('marks one unreadable property without discarding its siblings', () => {
+    const error: Error & { good?: unknown } = new Error('x');
+
+    error.good = 'kept';
+    Object.defineProperty(error, 'bad', {
+      get() {
+        throw new Error('property refused');
+      },
+      enumerable: true,
+    });
+
+    const serialized = serializeError(error);
+
+    expect(serialized['good']).toBe('kept');
+    expect(serialized['bad']).toBeUndefined();
+  });
+});
+
+describe('deserializeError - untrusted input', () => {
+  test('stores __proto__ as data instead of reparenting the error', () => {
+    // This runs on whatever arrived over IPC. `Object.assign` uses [[Set]], so a payload
+    // carrying `__proto__` reparented the reconstructed error rather than storing the key.
+    const wire = JSON.parse(
+      '{"name":"E","message":"m","__proto__":{"polluted":true}}',
+    ) as Parameters<typeof deserializeError>[0];
+
+    const error = deserializeError(wire);
+
+    expect(Object.getPrototypeOf(error)).toBe(Error.prototype);
+    expect((({}) as Record<string, unknown>)['polluted']).toBeUndefined();
+  });
+
+  test('tolerates a payload that does not match the declared shape', () => {
+    const error = deserializeError({
+      name: 42,
+      message: null,
+    } as unknown as Parameters<typeof deserializeError>[0]);
+
+    expect(error).toBeInstanceOf(Error);
+    expect(typeof error.message).toBe('string');
   });
 });

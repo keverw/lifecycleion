@@ -1,3 +1,8 @@
+import { defineEntry, describeContainer } from '../../internal/container-entries';
+import { readMember } from '../../internal/read-member';
+import { MAX_RENDER_DEPTH, TRUNCATED } from '../../internal/render-budget';
+import { isErrorValue } from '../../to-error';
+
 export interface SerializedError {
   name: string;
   message: string;
@@ -5,17 +10,46 @@ export interface SerializedError {
   [key: string]: unknown;
 }
 
-/** Check if a value looks like an Error (has name, message, and stack). */
+/** Stands in for a value whose read threw, so the output says so rather than omitting it. */
+const UNSERIALIZABLE = '<unserializable>';
+
+/**
+ * Check if a value looks like an Error (has name, message, and stack).
+ *
+ * Guarded: `in` is a trappable operation, so a `Proxy` with a hostile `has` threw out of
+ * what is only a shape test. This runs on the receiving end of IPC and on error paths, so
+ * asking the question must not raise a failure of its own.
+ */
 export function isErrorLike(
   value: unknown,
 ): value is { name: string; message: string; stack: string } {
-  return (
-    typeof value === 'object' &&
-    value !== null &&
-    'name' in value &&
-    'message' in value &&
-    'stack' in value
-  );
+  try {
+    return (
+      typeof value === 'object' &&
+      value !== null &&
+      'name' in value &&
+      'message' in value &&
+      'stack' in value
+    );
+  } catch {
+    return false;
+  }
+}
+
+/** A member as a string, or `undefined` when it is absent or cannot be read. */
+function readText(source: object, key: string): string | undefined {
+  const value = readMember(source, key);
+
+  return typeof value === 'string' ? value : undefined;
+}
+
+/** `String(value)` without letting a `toString` or `Symbol.toPrimitive` escape. */
+function describeValue(value: unknown): string {
+  try {
+    return String(value);
+  } catch {
+    return UNSERIALIZABLE;
+  }
 }
 
 /**
@@ -23,80 +57,231 @@ export function isErrorLike(
  * plain, JSON-serializable object. All own properties — including the
  * non-enumerable ones that Error hides — are captured. Nested errors
  * are recursively serialized.
+ *
+ * **Never throws, and always terminates.** This is what is handed to `JSON.stringify` at
+ * an IPC or RPC boundary, usually while already reporting a failure, so a second failure
+ * raised here replaces the one being reported. Four things it survives that it did not:
+ *
+ * - **A cycle.** `error.self = error`, or a request object attached to an error that
+ *   points back at it, is ordinary rather than pathological, and it raised a `RangeError`
+ *   through the recursion. Cut with {@link TRUNCATED} where it closes.
+ * - **A payload deeper than {@link MAX_RENDER_DEPTH}**, which raised the same `RangeError`
+ *   without a cycle being involved at all.
+ * - **A read that throws.** `message`, `stack` and every own property are ordinary
+ *   properties a subclass or a `Proxy` can turn into a throwing accessor.
+ * - **A revoked `Proxy`**, which `instanceof` alone refuses to walk.
+ *
+ * An error built in another realm - a `vm` context, an iframe, a jsdom window - is
+ * recognized as an error rather than falling through to the error-like branch, which
+ * serialized it without its non-enumerable `message` and `stack`.
  */
 export function serializeError(error: unknown): SerializedError {
-  if (error instanceof Error) {
+  const seen = new WeakSet<object>();
+
+  // The root is tracked before the walk starts, not left for `deepSerialize` to add when
+  // it reaches it. A nested error arrives here already in `seen`, because the walk added
+  // it on the way in; the root has no such caller, so `error.self = error` serialized a
+  // whole second copy of the error before the cycle was noticed one level lower.
+  if (error !== null && typeof error === 'object') {
+    seen.add(error);
+  }
+
+  return serializeErrorInner(error, seen, 0);
+}
+
+function serializeErrorInner(
+  error: unknown,
+  seen: WeakSet<object>,
+  depth: number,
+): SerializedError {
+  // The shared brand check, so a cross-realm error keeps the error branch - and guarded,
+  // which a bare `instanceof` is not.
+  if (isErrorValue(error)) {
     const result: SerializedError = {
-      name: error.name,
-      message: error.message,
-      stack: error.stack,
+      name: readText(error, 'name') ?? 'Error',
+      message: readText(error, 'message') ?? '',
+      stack: readText(error, 'stack'),
     };
 
-    for (const key of Object.getOwnPropertyNames(error)) {
+    // Own property *names*, including the non-enumerable ones an `Error` hides - which is
+    // the whole point of this module and the reason `describeContainer` is not used here.
+    // Guarded, because `ownKeys` is a trap.
+    let keys: string[];
+
+    try {
+      keys = Object.getOwnPropertyNames(error);
+    } catch {
+      // Nothing further can be enumerated; what was read above still stands.
+      return deepSerializeRecord(result, seen, depth);
+    }
+
+    for (const key of keys) {
       if (!(key in result)) {
-        result[key] = (error as unknown as Record<string, unknown>)[key];
+        // Read through the guard: a custom property is as free to throw as `message` is.
+        result[key] = readMember(error, key);
       }
     }
 
-    return deepSerializeRecord(result);
+    return deepSerializeRecord(result, seen, depth);
   }
 
   if (isErrorLike(error)) {
-    return deepSerializeRecord({
-      ...(error as Record<string, unknown>),
-    } as SerializedError);
+    const source = error as unknown as Record<string, unknown>;
+    const copy: SerializedError = {} as SerializedError;
+
+    // Spread replaced by a guarded per-key copy: a spread runs every own getter under no
+    // guard at all, so one throwing accessor took the whole serialization down.
+    const shape = describeContainer(source);
+
+    if (shape.kind === 'object') {
+      for (const key of shape.keys) {
+        defineEntry(copy, key, readMember(source, key));
+      }
+    }
+
+    return deepSerializeRecord(copy, seen, depth);
   }
 
-  return { name: 'Error', message: String(error) };
+  return { name: 'Error', message: describeValue(error) };
 }
 
 /**
  * Turn a serialized error object back into a throwable Error.
  * Useful on the receiving end of IPC / RPC when you need to re-throw.
+ *
+ * The extras are installed with {@link defineEntry} rather than `Object.assign`. Assign
+ * uses `[[Set]]`, so a payload carrying `__proto__` **reparented the reconstructed error**
+ * instead of storing that key - and this runs on data that arrived over IPC, which is
+ * exactly where an attacker-controlled key would come from.
+ *
+ * `name` and `message` are read defensively for the same reason: the object came off the
+ * wire and is not obliged to match {@link SerializedError}.
  */
 export function deserializeError(obj: SerializedError): Error {
-  const { name, message, stack, ...rest } = obj;
-  const error = new Error(message);
-  error.name = name;
+  // Checked despite the declared type: this runs on data that arrived over IPC, where the
+  // annotation is a claim rather than a guarantee.
+  const source: Record<string, unknown> =
+    obj !== null && typeof obj === 'object' ? obj : {};
 
-  if (stack) {
-    error.stack = stack;
+  const rawMessage = source['message'];
+  const rawName = source['name'];
+  const rawStack = source['stack'];
+
+  const error = new Error(
+    typeof rawMessage === 'string' ? rawMessage : describeValue(rawMessage),
+  );
+
+  if (typeof rawName === 'string') {
+    error.name = rawName;
   }
 
-  Object.assign(error, rest);
+  if (typeof rawStack === 'string') {
+    error.stack = rawStack;
+  }
+
+  for (const key of Object.keys(source)) {
+    if (key === 'name' || key === 'message' || key === 'stack') {
+      continue;
+    }
+
+    defineEntry(error as unknown as Record<string, unknown>, key, source[key]);
+  }
+
   return error;
 }
 
 // ── internal helpers ────────────────────────────────────────────────
 
-function deepSerializeRecord(record: SerializedError): SerializedError {
+function deepSerializeRecord(
+  record: SerializedError,
+  seen: WeakSet<object>,
+  depth: number,
+): SerializedError {
   const result: SerializedError = {} as SerializedError;
 
-  for (const [key, value] of Object.entries(record)) {
-    result[key] = deepSerialize(value);
+  for (const key of Object.keys(record)) {
+    defineEntry(result, key, deepSerialize(record[key], seen, depth));
   }
 
   return result;
 }
 
-function deepSerialize(value: unknown): unknown {
-  if (isErrorLike(value)) {
-    return serializeError(value);
+function deepSerialize(
+  value: unknown,
+  seen: WeakSet<object>,
+  depth: number,
+): unknown {
+  if (value === null || typeof value !== 'object') {
+    return value;
   }
 
-  if (Array.isArray(value)) {
-    return value.map(deepSerialize);
+  // Past the cap nothing further is walked. Without it a payload nested deeper than the
+  // stack raised a `RangeError` out of a function whose whole job is to describe a
+  // failure - and the cap has to be checked before the cycle test, since a deep payload
+  // need not contain a cycle at all.
+  if (depth >= MAX_RENDER_DEPTH) {
+    return TRUNCATED;
   }
 
-  if (typeof value === 'object' && value !== null) {
+  if (seen.has(value)) {
+    // A cycle is cut where it closes rather than recursing until the stack runs out.
+    // `error.self = error` and a request object pointing back at the error it was
+    // attached to are both ordinary, and both raised a `RangeError` here.
+    return TRUNCATED;
+  }
+
+  seen.add(value);
+
+  try {
+    if (isErrorLike(value)) {
+      return serializeErrorInner(value, seen, depth + 1);
+    }
+
+    const shape = describeContainer(value);
+
+    if (shape.kind === 'unreadable') {
+      return UNSERIALIZABLE;
+    }
+
+    if (shape.kind === 'array') {
+      // A counted loop building a plain array, not `value.map`: `map` goes through
+      // `ArraySpeciesCreate`, which calls a subclass's own constructor with a length, and
+      // one that validates its arguments threw from inside the walk.
+      const source = value as unknown[];
+      const copy: unknown[] = [];
+
+      for (let index = 0; index < shape.length; index++) {
+        try {
+          copy.push(deepSerialize(source[index], seen, depth + 1));
+        } catch {
+          copy.push(UNSERIALIZABLE);
+        }
+      }
+
+      return copy;
+    }
+
+    const source = value as Record<string, unknown>;
     const result: Record<string, unknown> = {};
 
-    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
-      result[k] = deepSerialize(v);
+    for (const key of shape.keys) {
+      let entry: unknown;
+
+      // Per entry, so one throwing accessor marks its own key rather than discarding
+      // every sibling beside it.
+      try {
+        entry = deepSerialize(source[key], seen, depth + 1);
+      } catch {
+        entry = UNSERIALIZABLE;
+      }
+
+      defineEntry(result, key, entry);
     }
 
     return result;
+  } finally {
+    // Released on the way out, so a value referenced twice side by side is serialized
+    // both times and only a genuine cycle is cut.
+    seen.delete(value);
   }
-
-  return value;
 }
