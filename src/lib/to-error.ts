@@ -1,27 +1,4 @@
 /**
- * Coerce whatever was thrown or rejected with into an `Error`.
- *
- * `throw` accepts any value and a promise can reject with any value, so a failure path
- * must not assume it was handed an `Error`. Reading `.message` off `null` raises a
- * `TypeError` of its own, and on a reporting path that one escapes into the caller that
- * was only trying to report a failure.
- *
- * Shared rather than per-module: `safe-handle-callback`, `Logger` sinks, `Logger` event
- * handlers, `LifecycleManager`, and the HTTP client's adapters all need the same
- * guarantee, and a second copy would drift.
- *
- * **An `Error` is returned unchanged** - same identity, `stack`, `message`, and `cause` -
- * so a caller that only ever throws `Error`s sees nothing new. "An `Error`" is not only
- * `instanceof Error`: an error built in another realm - a `vm` context, an iframe, a
- * jsdom window - has a different `Error` constructor and fails `instanceof` while being
- * an error in every way the caller cares about, so its internal brand is checked too.
- *
- * **Anything else becomes `Non-error value thrown: <description>`**, with the original
- * value kept on `cause`. The prefix is the point: it says the failure path was handed
- * something that was never an `Error`, which a bare `String(value)` would have disguised.
- * Read `cause`, not the message, to recover the thrown value.
- */
-/**
  * Is this value an error, including one built in another realm?
  *
  * `instanceof` compares against *this* realm's `Error.prototype`, so an error thrown out
@@ -58,6 +35,29 @@ export function isErrorValue(value: unknown): value is Error {
   }
 }
 
+/**
+ * Coerce whatever was thrown or rejected with into an `Error`.
+ *
+ * `throw` accepts any value and a promise can reject with any value, so a failure path
+ * must not assume it was handed an `Error`. Reading `.message` off `null` raises a
+ * `TypeError` of its own, and on a reporting path that one escapes into the caller that
+ * was only trying to report a failure.
+ *
+ * Shared rather than per-module: `safe-handle-callback`, `Logger` sinks, `Logger` event
+ * handlers, `LifecycleManager`, and the HTTP client's adapters all need the same
+ * guarantee, and a second copy would drift.
+ *
+ * **An `Error` is returned unchanged** - same identity, `stack`, `message`, and `cause` -
+ * so a caller that only ever throws `Error`s sees nothing new. "An `Error`" is not only
+ * `instanceof Error`: an error built in another realm - a `vm` context, an iframe, a
+ * jsdom window - has a different `Error` constructor and fails `instanceof` while being
+ * an error in every way the caller cares about, so its internal brand is checked too.
+ *
+ * **Anything else becomes `Non-error value thrown: <description>`**, with the original
+ * value kept on `cause`. The prefix is the point: it says the failure path was handed
+ * something that was never an `Error`, which a bare `String(value)` would have disguised.
+ * Read `cause`, not the message, to recover the thrown value.
+ */
 export function toError(value: unknown): Error {
   let description: string;
 

@@ -70,11 +70,19 @@ import type {
 } from './http-request-builder';
 import type { RetryPolicyOptions } from '../retry-utils';
 import type { CookieJar } from './cookie-jar';
-// The shared coercion, not a fourth copy of it. Each adapter carried a body that
-// was behaviourally identical to this one, message included, on the grounds that the
-// HTTP client should not import across module boundaries - which it already does for
-// `sleep`, `deep-clone` and `retry-utils`. Aliased so the call sites read unchanged.
-import { toError as normalizeError } from '../to-error';
+// The shared coercion, not a fourth copy of it. Each adapter carried a near-identical
+// body, on the grounds that the HTTP client should not import across module boundaries -
+// which it already does for `sleep`, `deep-clone` and `retry-utils`. Aliased so the call
+// sites read unchanged.
+//
+// The *message* is not unchanged, and that is deliberate. The local copies produced
+// `new Error(String(value))`; `toError` produces
+// `new Error('Non-error value thrown: <description>', { cause: value })`. So a non-`Error`
+// rejection - `throw 'socket hang up'` - now reaches `AdapterResponse.errorCause` with the
+// prefix on `message` and the original value on `cause`, where before it carried only the
+// coerced text. See the 0.1.0 changelog entry: "HTTP adapters preserve non-`Error`
+// rejection values on `cause`."
+import { isErrorValue, toError as normalizeError } from '../to-error';
 
 type RemoveFn = () => void;
 
@@ -1642,7 +1650,7 @@ export class BaseHTTPClient {
         }
 
         const responseCauseValue = adapterResponse.errorCause;
-        const responseCause: Error | undefined = asErrorValue(
+        const responseCause: Error | undefined = isErrorValue(
           responseCauseValue,
         )
           ? responseCauseValue
@@ -2709,16 +2717,7 @@ function cloneBodyValue(body: unknown): unknown {
 }
 
 function isAbortError(err: unknown): err is Error {
-  return asErrorValue(err) && readObjectMember(err, 'name') === 'AbortError';
-}
-
-/** Check Error identity without trusting a Proxy's prototype trap. */
-function asErrorValue(value: unknown): value is Error {
-  try {
-    return value instanceof Error;
-  } catch {
-    return false;
-  }
+  return isErrorValue(err) && readObjectMember(err, 'name') === 'AbortError';
 }
 
 /**

@@ -1638,7 +1638,14 @@ describe('redactValue and stringifyValue stay one implementation', () => {
 
     expect(rendered).toContain('[unrenderable]');
     expect(rendered).toContain('visible');
-    expect(rendered).not.toContain(SECRET);
+    // The readable sibling survives, exactly as it does in the array case above. Nothing
+    // asked for masking on this call, so `SECRET` here is an ordinary value and printing
+    // it is the point: the object branch used to read its entries with a single
+    // `Object.entries`, so one throwing getter collapsed the whole object to
+    // `[unrenderable]` and took `good` down with it. That looked like the secret being
+    // withheld and was nothing of the kind - it was every sibling being lost. The masking
+    // guarantee is asserted below, where redaction is actually requested.
+    expect(rendered).toContain(SECRET);
 
     const masked = redactValue(
       { u: hostile(), keep: 'visible' },

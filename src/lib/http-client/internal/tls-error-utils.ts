@@ -1,3 +1,11 @@
+// The shared brand check, for the reason the adapters use it: a local `instanceof` misses
+// an error built in another realm - a `vm` context, an iframe - and the value tested here
+// is exactly that case. Node wraps a TLS failure as `TypeError: fetch failed` and hangs
+// the real error off `cause`, so a cross-realm cause failed the check and its certificate
+// error was classified as a generic transport failure and retried, though a rejected
+// certificate fails identically every time.
+import { isErrorValue } from '../../to-error';
+
 const CERT_ERROR_CODES = new Set([
   'UNABLE_TO_VERIFY_LEAF_SIGNATURE',
   'CERT_HAS_EXPIRED',
@@ -64,15 +72,6 @@ export function isTLSCertificateError(error: Error): boolean {
   const cause = readMember(error, 'cause');
 
   return isErrorValue(cause) ? isTLSCertificateErrorSelf(cause) : false;
-}
-
-/** Check Error identity without trusting a Proxy's prototype trap. */
-function isErrorValue(value: unknown): value is Error {
-  try {
-    return value instanceof Error;
-  } catch {
-    return false;
-  }
 }
 
 /**

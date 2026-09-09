@@ -30,8 +30,19 @@ export type ReconnectStatus =
   | { success: false; reason: 'already_reconnecting' }
   | { success: false; reason: 'error'; error: Error };
 
+/**
+ * One entry waiting for the pipe, reduced to what the flush actually needs.
+ *
+ * The `LogEntry` itself is deliberately *not* kept. Rendering now happens at `write` time,
+ * so the line is already fixed and nothing on the flush path reads the entry again -
+ * holding it would pin the caller's whole params graph (`entry.params` is theirs by
+ * reference, and `entry.redactedParams` shares every subtree that held nothing redacted)
+ * alongside a complete serialized copy of it, for as long as the queue is stalled. That is
+ * roughly double the retained memory during exactly the outage where memory is the
+ * concern. `FileSink` keeps its entry because its public `onError` callback hands it to
+ * the caller; this sink's `onError` takes only the error type and the pipe path.
+ */
 interface QueuedPipeEntry {
-  entry: LogEntry;
   /** The rendered line, or `undefined` when rendering it threw at `write` time. */
   formatted: string | undefined;
   /**
@@ -283,12 +294,11 @@ export class NamedPipeSink implements LogSink {
   private renderEntry(entry: LogEntry): QueuedPipeEntry {
     try {
       return {
-        entry,
         formatted: this.formatEntry(entry),
         formatError: undefined,
       };
     } catch (error) {
-      return { entry, formatted: undefined, formatError: toError(error) };
+      return { formatted: undefined, formatError: toError(error) };
     }
   }
 

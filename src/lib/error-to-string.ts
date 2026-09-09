@@ -139,16 +139,30 @@ function readOwnSensitivePaths(
  * Getters are forwarded rather than read here. Reading now would turn an accessor that
  * throws into `undefined`, which masks to the nine-character word "undefined"; left as an
  * accessor, it throws inside the walk, which fails it closed.
+ *
+ * `for...in`, matching the logger's `normalizeParamsBag`, which normalizes the params bag
+ * for exactly this reason. `Object.keys` sees only own enumerable properties, so a key
+ * carried on the prototype - `Object.create({ requestId: 'r-1' })`, or a class instance
+ * whose prototype holds enumerable fields - was dropped from the bag and stopped being
+ * rendered at all, though the flat `for...in` this replaced printed it. Forwarding the
+ * inherited keys as own ones puts them back where both the walk and the table can see
+ * them, which is the whole point of the bag.
  */
 function asAddressableBag(info: object): object {
   if (isPlainContainer(info)) {
     return info;
   }
 
-  let keys: string[];
+  // Through a `Record` view: `isPlainContainer` is a `value is object` guard, so the early
+  // return above narrows `info` to `never` and `for...in` will not take it directly.
+  const source = info as Record<string, unknown>;
+
+  const keys: string[] = [];
 
   try {
-    keys = Object.keys(info);
+    for (const key in source) {
+      keys.push(key);
+    }
   } catch {
     // A `Proxy` can throw from its `ownKeys` trap. Nothing can be addressed, and nothing
     // can be rendered either, so an empty bag is the whole answer.
@@ -160,7 +174,7 @@ function asAddressableBag(info: object): object {
   for (const key of keys) {
     try {
       Object.defineProperty(bag, key, {
-        get: () => (info as Record<string, unknown>)[key],
+        get: () => source[key],
         enumerable: true,
         configurable: true,
       });
@@ -383,7 +397,12 @@ function errorToASCIITable(
     for (const [label, key] of members) {
       const value = readMember(err, key);
 
-      if (value) {
+      // Absent, not merely falsy. A truthiness test dropped every conventional member
+      // that legitimately holds a falsy value: `code: 0` and `errno: 0` are ordinary on a
+      // syscall failure and lost their rows entirely, and an empty `message` or `name`
+      // went the same way. `readMember` already answers `undefined` for a read that
+      // threw, so an unreadable member still renders nothing.
+      if (value !== undefined && value !== null) {
         table.addRow(label, charge(budget, safeStringify(value)));
       }
     }
@@ -459,8 +478,11 @@ function errorToASCIITable(
 
         const info = masked as Record<string, unknown>;
 
-        // Keys enumerated through a guard: `for...in` walks the prototype chain and a
-        // `Proxy` can throw from its `ownKeys` trap.
+        // `Object.keys` here, not `for...in`, and that is not a disagreement with
+        // `asAddressableBag` above: the bag it returns has already flattened every
+        // inherited enumerable key into an own forwarding one, so own keys are the whole
+        // set by this point. Still enumerated through a guard, because a `Proxy` can
+        // throw from its `ownKeys` trap.
         let keys: string[];
 
         try {

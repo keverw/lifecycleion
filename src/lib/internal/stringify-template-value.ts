@@ -203,12 +203,18 @@ function renderContainer(
     return `[${parts.join(',')}]`;
   }
 
-  let entries: [string, unknown][];
+  // Keys first, then each value read inside its own guard - not `Object.entries`, which
+  // runs every own getter under one `catch`, so a single throwing accessor collapsed the
+  // whole object to `[unrenderable]` and lost every sibling beside it. The array branch
+  // above degrades one element at a time, and so do `maskValueDeep`, `redactPathsInner`
+  // and `errorToString`'s own walk; this was the one that did not.
+  let keys: string[];
 
   try {
-    entries = Object.entries(value);
+    keys = Object.keys(value);
   } catch {
-    // A throwing getter or a revoked `Proxy`: this one value degrades rather than taking
+    // The keys themselves cannot be read - a revoked `Proxy`, an `ownKeys` trap that
+    // throws - so there is no shape to render. This one value degrades rather than taking
     // the whole render with it. Charged for the reason the array branch charges its own.
     return charge(budget, quote('[unrenderable]'));
   }
@@ -219,7 +225,7 @@ function renderContainer(
   // brackets.
   charge(budget, '{}');
 
-  for (const [key, entryValue] of entries) {
+  for (const key of keys) {
     // The separator this entry will be joined with, charged before anything else so it
     // counts even on the truncation path below.
     if (parts.length > 0) {
@@ -237,7 +243,12 @@ function renderContainer(
     // The key and its separator are charged here; the value charges itself as it renders.
     const renderedKey = charge(budget, `${quote(key)}:`);
 
+    // The read is inside the guard with the render, exactly as the array branch reads its
+    // elements inside one: an entry backed by a throwing accessor degrades to a marker in
+    // its own slot instead of taking every sibling with it.
     try {
+      const entryValue = (value as Record<string, unknown>)[key];
+
       parts.push(
         `${renderedKey}${renderNested(entryValue, seen, depth + 1, budget)}`,
       );

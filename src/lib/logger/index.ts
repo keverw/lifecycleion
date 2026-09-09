@@ -610,7 +610,29 @@ export class Logger extends EventEmitter {
       }
     };
 
-    globalThis.addEventListener('error', this._reportErrorListener, useCapture);
+    // Guarded, exactly as the matching `removeEventListener` in
+    // `unregisterReportErrorListener` is. `isReportErrorAvailable()` only probes that the
+    // members *read* as functions; it cannot know whether calling one throws, so a global
+    // that passes the probe and refuses the call would otherwise throw out of a method
+    // whose whole contract is a return code.
+    //
+    // The listener is dropped on failure rather than left assigned: keeping it with
+    // `_reportErrorListenerRegistered` still `false` is worse than not having it, since
+    // `unregisterReportErrorListener` answers `'not_registered'` on that flag, so neither
+    // it nor `close()` could ever take back a listener the add may have partially
+    // installed.
+    try {
+      globalThis.addEventListener(
+        'error',
+        this._reportErrorListener,
+        useCapture,
+      );
+    } catch {
+      this._reportErrorListener = null;
+
+      return 'not_available';
+    }
+
     this._reportErrorListenerCapture = useCapture;
     this._reportErrorListenerRegistered = true;
 

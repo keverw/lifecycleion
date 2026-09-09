@@ -251,21 +251,30 @@ function normalizePercent(value: unknown, fallback: number): number {
  * Never returns the original: a strategy that hides nothing - too short a value, a
  * percent of zero, an address `datamask.email` cannot parse - falls through to the
  * opaque placeholder rather than handing back what it was asked to hide.
+ *
+ * Every setting is read inside the guard, none of them above it. `config` is whatever a
+ * caller's `redactFunction` handed back, so each of these is an ordinary property that can
+ * be an accessor that throws - and `matchRedactMaskConfig` does not settle that on this
+ * function's behalf: it stops reading values at the first defined one, so a later key's
+ * accessor is never exercised there. Read above the `try`, such a config threw out of here
+ * and came back as `***REDACTION FAILED***` even though it named a perfectly usable
+ * setting, and which key it was depended on `Reflect.ownKeys` ordering. Inside, it lands
+ * on the same opaque placeholder every other unusable request does.
  */
 export function maskWithConfig(
   value: string,
   config: RedactMaskConfig,
 ): string {
-  const maskChar =
-    typeof config.maskChar === 'string' && config.maskChar.length > 0
-      ? config.maskChar
-      : '*';
-
-  const percent = normalizePercent(config.percent, DEFAULT_MASK_PERCENT);
-
   let masked: string;
 
   try {
+    const maskChar =
+      typeof config.maskChar === 'string' && config.maskChar.length > 0
+        ? config.maskChar
+        : '*';
+
+    const percent = normalizePercent(config.percent, DEFAULT_MASK_PERCENT);
+
     if (config.strategy === 'email') {
       // The per-part percents go through the same normalization rather than being handed
       // over as given: they are the same caller-supplied number by another name, and

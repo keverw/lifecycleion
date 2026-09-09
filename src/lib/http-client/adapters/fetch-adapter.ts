@@ -7,11 +7,19 @@ import type {
   AdapterResponse,
   AdapterType,
 } from '../types';
-// The shared coercion, not a fourth copy of it. Each adapter carried a body that
-// was behaviourally identical to this one, message included, on the grounds that the
-// HTTP client should not import across module boundaries - which it already does for
-// `sleep`, `deep-clone` and `retry-utils`. Aliased so the call sites read unchanged.
-import { toError as normalizeError } from '../../to-error';
+// The shared coercion, not a fourth copy of it. Each adapter carried a near-identical
+// body, on the grounds that the HTTP client should not import across module boundaries -
+// which it already does for `sleep`, `deep-clone` and `retry-utils`. Aliased so the call
+// sites read unchanged.
+//
+// The *message* is not unchanged, and that is deliberate. The local copies produced
+// `new Error(String(value))`; `toError` produces
+// `new Error('Non-error value thrown: <description>', { cause: value })`. So a non-`Error`
+// rejection - `throw 'socket hang up'` - now reaches `AdapterResponse.errorCause` with the
+// prefix on `message` and the original value on `cause`, where before it carried only the
+// coerced text. See the 0.1.0 changelog entry: "HTTP adapters preserve non-`Error`
+// rejection values on `cause`."
+import { isErrorValue, toError as normalizeError } from '../../to-error';
 
 export class FetchAdapter implements HTTPAdapter {
   public getType(): AdapterType {
@@ -191,13 +199,16 @@ function isAbortError(error: unknown): boolean {
   );
 }
 
-/** Return an Error value without letting a Proxy prototype trap escape. */
+/**
+ * Return an Error value without letting a Proxy prototype trap escape.
+ *
+ * The shared check, not a local `instanceof`, so this answers the same question
+ * `normalizeError` above already answers: an error built in another realm - a `vm`
+ * context, an iframe - fails `instanceof` while being an error in every respect. A
+ * cross-realm `AbortError` was therefore invisible to `isAbortError`.
+ */
 function asError(value: unknown): Error | undefined {
-  try {
-    return value instanceof Error ? value : undefined;
-  } catch {
-    return undefined;
-  }
+  return isErrorValue(value) ? value : undefined;
 }
 
 /** Guard error members for the same reason adapter marker reads are guarded. */
