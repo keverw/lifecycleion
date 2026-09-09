@@ -13,6 +13,7 @@ import {
   type RedactValueFunction,
 } from './internal/default-redact-function';
 import { isPlainContainer } from './internal/is-plain-container';
+import { readMember } from './internal/read-member';
 import { stringifyTemplateValue } from './internal/stringify-template-value';
 import { isErrorValue } from './to-error';
 import {
@@ -68,24 +69,6 @@ export interface ErrorToStringOptions {
    * Do not redact or log from inside it.
    */
   onRedactionError?: RedactionErrorHandler;
-}
-
-/**
- * Read a property off a value without trusting it.
- *
- * The value being rendered is whatever was thrown, and `message`/`stack`/`code` are
- * ordinary properties that a subclass or a `Proxy` can turn into accessors that throw.
- * This module runs on reporting paths that must not raise an error of their own, so an
- * unreadable member is treated as absent.
- *
- * See {@link readMemberOrThrew} where "absent" and "unreadable" have to be told apart.
- */
-function readMember(value: Record<string, unknown>, key: string): unknown {
-  try {
-    return value[key];
-  } catch {
-    return undefined;
-  }
 }
 
 /**
@@ -597,7 +580,7 @@ function addErrorTail(
       const maskedCause =
         maskedWrapper === null || typeof maskedWrapper !== 'object'
           ? maskedWrapper
-          : readMember(maskedWrapper as Record<string, unknown>, 'cause');
+          : readMember(maskedWrapper, 'cause');
 
       table.addRow(
         'Cause',

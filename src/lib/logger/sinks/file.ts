@@ -1,5 +1,6 @@
 import fs, { promises as fsPromises } from 'fs';
-import { toError } from '../../to-error';
+import { describeError, toError } from '../../to-error';
+import { reportToConsole } from '../../internal/report-to-console';
 import type { LogEntry, LogSink } from '../types';
 import { LogLevel, getLogLevel } from '../types';
 
@@ -377,8 +378,15 @@ export class FileSink implements LogSink {
                 queuedEntry.attempts + 1,
                 willRetry,
               );
-            } catch {
-              // Ignore errors in error callback
+            } catch (callbackError) {
+              // Fall through to the console, as `NamedPipeSink.handleError` does for its
+              // own callback. Swallowing it lost both failures at once: the write error
+              // the callback was told about, and the callback's own throw - so a sink
+              // that could not write anything reported nothing anywhere.
+              reportToConsole(
+                `FileSink onError callback failed: ${describeError(callbackError)}`,
+                err,
+              );
             }
           }
 

@@ -4,6 +4,10 @@ import { FileSink } from './file';
 import type { LogEntry } from '../types';
 import { LogLevel } from '../types';
 import { TmpDir } from '../../tmp-dir';
+import {
+  muteConsoleError,
+  restoreConsoleError,
+} from '../../internal/console-test-utils';
 
 let tmpDir: TmpDir;
 
@@ -895,5 +899,63 @@ describe('FileSink', () => {
     // out differently on a second attempt.
     expect(onError).toHaveBeenCalledTimes(1);
     expect((onError.mock.calls[0] as unknown[])[3]).toBe(false);
+  });
+
+  test('a throwing onError callback falls through to the console and does not stop the retry', async () => {
+    // Swallowed, this lost both failures at once: the write error the callback was told
+    // about and the callback's own throw, so a sink that could not write anything
+    // reported nothing anywhere.
+    const captured = muteConsoleError();
+
+    try {
+      const attempts: number[] = [];
+
+      const sink = new FileSink({
+        logDir: tmpDir.path,
+        basename: 'callback-throws',
+        maxSizeMB: 1,
+        jsonFormat: false,
+        maxRetries: 2,
+        onError: (_error, _entry, attempt) => {
+          attempts.push(attempt);
+
+          throw new Error('onError itself blew up');
+        },
+      });
+
+      await new Promise((resolve) => setTimeout(resolve, 100));
+
+      const privateSink = sink as any;
+
+      privateSink.destroyStream();
+      privateSink.setupLogFile = mock(() => {
+        throw new Error('Failed to setup log file');
+      });
+
+      sink.write({
+        timestamp: Date.now(),
+        type: 'info',
+        template: 'will fail',
+        message: 'will fail',
+      });
+
+      await new Promise((resolve) => setTimeout(resolve, 500));
+
+      // The callback ran on every attempt; its throw did not skip the re-queue.
+      expect(attempts).toEqual([1, 2, 3]);
+
+      const reports = captured.filter((line) =>
+        line.includes('FileSink onError callback failed'),
+      );
+
+      expect(reports.length).toBe(3);
+      expect(reports[0]).toContain('onError itself blew up');
+      // The write error the callback was handed rides along, so neither failure is lost.
+      expect(reports[0]).toContain('Failed to setup log file');
+
+      await sink.close();
+    } finally {
+      restoreConsoleError();
+    }
   });
 });

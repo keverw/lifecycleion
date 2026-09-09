@@ -47,15 +47,36 @@ export { REDACTION_FAILED_MARKER } from '../../internal/default-redact-function'
  *
  * Defined rather than assigned, because a plain assignment to `__proto__` reparents the
  * object instead of storing the entry.
+ *
+ * @param unreadable When given, each value is read inside its own guard: a key whose read
+ *                   throws holds the failure marker instead and is named here, rather than
+ *                   the throw abandoning the whole bag. Omit it for the ordinary attempt,
+ *                   where a throwing accessor should abandon the copy so the caller can
+ *                   retry key by key - one shared loop rather than two that must agree
+ *                   about which keys a bag has.
  */
 function normalizeParamsBag(
   params: Record<string, unknown>,
+  unreadable?: string[],
 ): Record<string, unknown> {
   const copy: Record<string, unknown> = {};
 
   for (const key in params) {
+    let value: unknown;
+
+    if (unreadable === undefined) {
+      value = params[key];
+    } else {
+      try {
+        value = params[key];
+      } catch {
+        value = REDACTION_FAILED_MARKER;
+        unreadable.push(key);
+      }
+    }
+
     Object.defineProperty(copy, key, {
-      value: params[key],
+      value,
       enumerable: true,
       writable: true,
       configurable: true,
@@ -270,34 +291,10 @@ export function applyRedaction(
   const unreadable: string[] = [];
 
   try {
-    const source = params;
-
-    guarded = {};
-
-    // `for...in`, matching `normalizeParamsBag`: an inherited enumerable key is one the
-    // renderer resolves, so it has to reach the walk here too or this path would mask
-    // and print a different set of keys than the one above it.
-    for (const key in source) {
-      let copied: unknown;
-
-      try {
-        copied = source[key];
-      } catch {
-        copied = REDACTION_FAILED_MARKER;
-        unreadable.push(key);
-      }
-
-      // Defined rather than assigned, for the reason the walk defines: a plain assignment
-      // to `__proto__` is a no-op for a string and reparents the object for an object, so
-      // a bag carrying that key would silently lose the entry or change the shape of what
-      // is walked.
-      Object.defineProperty(guarded, key, {
-        value: copied,
-        enumerable: true,
-        writable: true,
-        configurable: true,
-      });
-    }
+    // The same copy as above, in its guarded mode: one loop decides which keys a bag has,
+    // so this path cannot come to mask and print a different set than the attempt before
+    // it did.
+    guarded = normalizeParamsBag(params, unreadable);
   } catch {
     // `Object.keys` itself refused - a revoked `Proxy`, an `ownKeys` trap that throws -
     // so there is no key to read safely and nothing to mark but the redacted ones.

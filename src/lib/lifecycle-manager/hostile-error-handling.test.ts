@@ -188,4 +188,111 @@ describe('LifecycleManager - hostile thrown values', () => {
 
     await lifecycle.stopAllComponents();
   });
+
+  test('an unreadable error thrown from start() settles as a failure result', async () => {
+    // `toError` returns an `Error`-branded value unchanged, so the `catch` in
+    // `startComponent` was reading `.message` off the very value whose accessor throws -
+    // with nothing above it left to catch, so the start rejected instead of failing.
+    const lifecycle = new LifecycleManager({ logger });
+
+    class ThrowsUnreadable extends BaseComponent {
+      public start(): void {
+        throw unreadableError();
+      }
+      public stop(): void {}
+    }
+
+    await lifecycle.registerComponent(
+      new ThrowsUnreadable(logger, { name: 'unreadable-start' }),
+    );
+
+    const events: string[] = [];
+
+    lifecycle.on('component:start-failed', () => {
+      events.push('start-failed');
+    });
+
+    const result = await lifecycle.startComponent('unreadable-start');
+
+    expect(result.success).toBe(false);
+    expect(result.code).toBe('unknown_error');
+    expect(result.reason).toBe('<error message could not be read>');
+    expect(events).toEqual(['start-failed']);
+    expect(lifecycle.getComponentStatus('unreadable-start')?.state).toBe(
+      'registered',
+    );
+  });
+
+  test('an unreadable error thrown from stop() settles as a failure result', async () => {
+    // Two reads sat on this path: the graceful `catch` building its result, and the
+    // force phase reading `gracefulError.message` for a component with no
+    // `onShutdownForce` to fall back on.
+    const lifecycle = new LifecycleManager({ logger });
+
+    class StopThrowsUnreadable extends BaseComponent {
+      public start(): void {}
+      public stop(): void {
+        throw unreadableError();
+      }
+    }
+
+    await lifecycle.registerComponent(
+      new StopThrowsUnreadable(logger, { name: 'unreadable-stop' }),
+    );
+    await lifecycle.startComponent('unreadable-stop');
+
+    const events: string[] = [];
+
+    lifecycle.on('component:stalled', () => {
+      events.push('stalled');
+    });
+
+    const result = await lifecycle.stopComponent('unreadable-stop');
+
+    expect(result.success).toBe(false);
+    expect(result.code).toBe('unknown_error');
+    expect(result.reason).toBe('<error message could not be read>');
+    expect(events).toEqual(['stalled']);
+    expect(lifecycle.getComponentStatus('unreadable-stop')?.state).toBe(
+      'stalled',
+    );
+  });
+
+  test('an unreadable error thrown from onShutdownForce() still marks the component stalled', async () => {
+    // The force `catch` compared `err.message` against the timeout text before anything
+    // else, so an accessor that throws there skipped the whole stall path: the component
+    // was never marked stalled and `component:stalled` never fired.
+    const lifecycle = new LifecycleManager({ logger });
+
+    class ForceThrowsUnreadable extends BaseComponent {
+      public start(): void {}
+      public stop(): void {
+        throw new Error('graceful refused');
+      }
+      public onShutdownForce(): void {
+        throw unreadableError();
+      }
+    }
+
+    await lifecycle.registerComponent(
+      new ForceThrowsUnreadable(logger, { name: 'unreadable-force' }),
+    );
+    await lifecycle.startComponent('unreadable-force');
+
+    const events: string[] = [];
+
+    lifecycle.on('component:stalled', () => {
+      events.push('stalled');
+    });
+
+    const result = await lifecycle.stopComponent('unreadable-force');
+
+    expect(result.success).toBe(false);
+    expect(result.code).toBe('unknown_error');
+    expect(result.reason).toBe('<error message could not be read>');
+    expect(events).toEqual(['stalled']);
+    expect(lifecycle.getComponentStatus('unreadable-force')?.state).toBe(
+      'stalled',
+    );
+  });
 });

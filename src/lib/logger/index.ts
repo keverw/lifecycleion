@@ -9,6 +9,7 @@ import { CurlyBrackets } from '../curly-brackets';
 import { isNumber } from '../is-number';
 import { isPromise } from '../is-promise';
 import { describeError, isErrorValue, toError } from '../to-error';
+import { readMember } from '../internal/read-member';
 import { reportToConsole } from '../internal/report-to-console';
 import {
   createRedactionReporter,
@@ -35,23 +36,6 @@ import { LoggerService } from './logger-service';
  * Main Logger class with sink-based architecture and EventEmitter support
  */
 /**
- * Read a property off an event without trusting it.
- *
- * The event reaching a global `'error'` listener was dispatched by whoever chose to
- * dispatch it, and `Event` can be subclassed with accessors of its own. A throw from one
- * of these reads would escape the listener, which outside a browser means the runtime
- * treats it as uncaught and exits — from inside the code whose whole job is reporting a
- * failure.
- */
-function readEventProperty(event: Event, key: string): unknown {
-  try {
-    return (event as unknown as Record<string, unknown>)[key];
-  } catch {
-    return undefined;
-  }
-}
-
-/**
  * Whether the event was dispatched on a DOM element rather than on the global object.
  *
  * A DOM element is identified by a string `tagName`, which the global object and the
@@ -59,7 +43,7 @@ function readEventProperty(event: Event, key: string): unknown {
  * page from a report meant for this library.
  */
 function isElementTarget(event: Event): boolean {
-  const target: unknown = readEventProperty(event, 'target');
+  const target: unknown = readMember(event, 'target');
 
   if (target === null || target === undefined || typeof target !== 'object') {
     return false;
@@ -108,7 +92,7 @@ function isElementTarget(event: Event): boolean {
  *          the event is not a resource failure this can describe.
  */
 function describeResourceTarget(event: Event): string | undefined {
-  const target: unknown = readEventProperty(event, 'target');
+  const target: unknown = readMember(event, 'target');
 
   if (
     target === null ||
@@ -130,7 +114,7 @@ function describeResourceTarget(event: Event): string | undefined {
   // Read through the guard, and compared against `true` rather than coerced: the event is
   // whatever was dispatched, so `isTrusted` may be an accessor that throws or a plain
   // property set to anything at all.
-  if (readEventProperty(event, 'isTrusted') !== true) {
+  if (readMember(event, 'isTrusted') !== true) {
     return undefined;
   }
 
@@ -522,9 +506,9 @@ export class Logger extends EventEmitter {
       // failure is a plain `Event` with neither, so a value is always synthesized
       // rather than logging `undefined`. Read through the guard for the same reason the
       // target is: the event is whatever was dispatched, accessors included.
-      const reported: unknown = readEventProperty(event, 'error');
+      const reported: unknown = readMember(event, 'error');
 
-      const reportedMessage: unknown = readEventProperty(event, 'message');
+      const reportedMessage: unknown = readMember(event, 'message');
 
       // Emptiness is checked, not just `undefined`: `ErrorEvent`'s `message` defaults to
       // `''`, so a plain `new ErrorEvent('error')` would satisfy `??` and produce an
@@ -572,7 +556,7 @@ export class Logger extends EventEmitter {
         // arrives indistinguishable from an event that carried no payload at all, so
         // there is no information to preserve by keeping it - only a `cause: null` on
         // every payload-less report, which is the noise the omission exists to avoid.
-        // `readEventProperty` also answers `undefined` for a read that threw, which has
+        // `readMember` also answers `undefined` for a read that threw, which has
         // nothing to keep either.
         error = new Error(
           resource ?? message ?? 'Unknown error reported by an error event',

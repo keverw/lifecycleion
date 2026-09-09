@@ -3834,6 +3834,11 @@ export class LifecycleManager
       // Store error
       this.componentErrors.set(name, err);
 
+      // Guarded for the same reason as the `component_unexpected_stop` branch above:
+      // `toError` returns a brand-claiming value unchanged, so `.message` can be an
+      // accessor that throws, and here that throw has nothing left above it to catch.
+      const reason = describeError(err);
+
       // Check if it was a timeout
       if (isStartupTimeout) {
         this.componentStates.set(name, 'starting-timed-out'); // Timeout state (observability)
@@ -3846,7 +3851,7 @@ export class LifecycleManager
 
         this.lifecycleEvents.componentStartTimeout(name, err, {
           timeoutMS,
-          reason: err.message,
+          reason,
         });
       } else {
         this.componentStates.set(name, 'registered'); // Reset state
@@ -3858,14 +3863,14 @@ export class LifecycleManager
           });
 
         this.lifecycleEvents.componentStartFailed(name, err, {
-          reason: err.message,
+          reason,
         });
       }
 
       return {
         success: false,
         componentName: name,
-        reason: err.message,
+        reason,
         code:
           err instanceof ComponentStartTimeoutError
             ? 'component_startup_timeout'
@@ -4300,7 +4305,10 @@ export class LifecycleManager
         return {
           success: false,
           componentName: name,
-          reason: err.message,
+          // Guarded: this runs inside the `catch`, and `toError` returns a
+          // brand-claiming value unchanged, so a `message` accessor that throws
+          // here escapes as a rejection instead of this failure result.
+          reason: describeError(err),
           code: 'unknown_error',
           error: err,
           status: this.getComponentStatus(name),
@@ -4381,7 +4389,12 @@ export class LifecycleManager
         componentName: name,
         reason: context.gracefulTimedOut
           ? 'Component stop timed out'
-          : (context.gracefulError?.message ?? 'Graceful shutdown failed'),
+          : // Guarded: `gracefulError` is the `toError` result carried over from the
+            // graceful phase, so its `message` can be an accessor that throws.
+            ((context.gracefulError === undefined
+              ? undefined
+              : describeError(context.gracefulError)) ??
+            'Graceful shutdown failed'),
         code: context.gracefulTimedOut
           ? 'component_shutdown_timeout'
           : 'unknown_error',
@@ -4509,9 +4522,15 @@ export class LifecycleManager
 
       const err = toError(error);
 
+      // Guarded: `toError` returns a brand-claiming value unchanged, so `.message` can
+      // be an accessor that throws. Unguarded, that throw lands on the comparison below
+      // and skips the whole stall path - the component is never marked stalled and
+      // `componentStalled` never fires.
+      const message = describeError(err);
+
       // Determine if timeout or error
       const isTimeout =
-        err.message === LIFECYCLE_MANAGER_MESSAGE_FORCE_SHUTDOWN_TIMED_OUT;
+        message === LIFECYCLE_MANAGER_MESSAGE_FORCE_SHUTDOWN_TIMED_OUT;
 
       // Mark as stalled - force phase failed
       const stallInfo: ComponentStallInfo = {
@@ -4555,7 +4574,7 @@ export class LifecycleManager
         componentName: name,
         reason: isTimeout
           ? LIFECYCLE_MANAGER_MESSAGE_FORCE_SHUTDOWN_TIMED_OUT
-          : err.message,
+          : message,
         code: isTimeout ? 'component_shutdown_timeout' : 'unknown_error',
         error: err,
         status: this.getComponentStatus(name),

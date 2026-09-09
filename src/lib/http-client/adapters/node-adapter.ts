@@ -1145,7 +1145,11 @@ async function streamResponseBody(
           // caller-supplied writable, because this callback runs on a later tick with
           // no `try` above it: a throwing accessor here would be an uncaught exception
           // rather than a failed download.
-          const writeFailure = endError ?? readWritableErrored(writable);
+          // Handed back as-is for the truthiness test and normalization below, rather
+          // than narrowed to `Error` here: a runtime that records a failure as something
+          // other than an `Error` would have its broken download settled as a success.
+          const writeFailure =
+            endError ?? readObjectMember(writable, 'errored');
 
           if (writeFailure) {
             absorbPendingWritableError();
@@ -1452,31 +1456,6 @@ function getWritableListenerRemover(
   }
 
   return null;
-}
-
-/**
- * The writable's `errored`, or `undefined` when it has none this can read.
- *
- * A Node stream exposes it as a plain data property, but {@link WritableLike} is
- * caller-supplied and may define it as an accessor - and the one place it is read is
- * inside the `end` callback, which a real stream invokes on a later tick, outside the
- * `try` that wraps the `end` call itself. An unguarded throw there is an uncaught
- * exception, not a failed download.
- *
- * Whatever it holds is handed back as-is for the caller to test for truthiness and
- * normalize, exactly as reading the member directly did. Narrowing to `Error` here would
- * be a second change riding along with the guard, and the direction it errs in is the
- * worse one: a runtime that records a failure as something other than an `Error` would
- * have its broken download settled as a success.
- */
-function readWritableErrored(writable: WritableLike): unknown {
-  try {
-    return writable.errored;
-  } catch {
-    // Unreadable, so it says nothing about whether the write failed. The `end`
-    // callback's own error argument, and the writable's `'error'` event, both remain.
-    return undefined;
-  }
 }
 
 function removeWritableListener(

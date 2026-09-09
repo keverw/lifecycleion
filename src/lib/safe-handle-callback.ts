@@ -3,7 +3,10 @@ import { isPromise } from './is-promise';
 import { isFunction } from './is-function';
 import { toError } from './to-error';
 import { DOUBLE_EOL } from './constants';
-import { installGlobalEventTarget } from './global-event-target';
+import {
+  installGlobalEventTarget,
+  isGlobalEventTargetAvailable,
+} from './global-event-target';
 import { reportToConsole } from './internal/report-to-console';
 
 // Node.js has a global `ErrorEvent` constructor (Node 25+) but does not make `globalThis`
@@ -42,6 +45,17 @@ type DispatchOutcome = 'handled' | 'unhandled' | 'unavailable';
  * as `logger.registerReportErrorListener()` — could not suppress the console line.
  */
 function dispatchErrorEvent(error: Error): DispatchOutcome {
+  // All three `EventTarget` methods, not only `dispatchEvent`. `installGlobalEventTarget`
+  // leaves a `partial` environment - some methods foreign, some missing - exactly as it
+  // found it, so `dispatchEvent` can be callable while nothing can register a listener
+  // through it. Dispatching there hands the event to an implementation no listener of
+  // ours could have reached, and a foreign `dispatchEvent` returning `false` for reasons
+  // of its own then reads as `'handled'`: the report is dropped, with no console line and
+  // no listener that ever saw it.
+  if (!isGlobalEventTargetAvailable()) {
+    return 'unavailable';
+  }
+
   const dispatchEvent = readGlobal('dispatchEvent');
   const errorEventConstructor = readGlobal('ErrorEvent');
 

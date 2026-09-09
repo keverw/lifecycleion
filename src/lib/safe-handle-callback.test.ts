@@ -505,4 +505,41 @@ describe('safeHandleCallback error channel', () => {
     expect(captured.length).toBe(1);
     expect(String(captured[0][0])).toContain('Dispatch rung boom');
   });
+
+  it('does not dispatch into a partial environment where nothing can listen', () => {
+    // `installGlobalEventTarget` leaves a partial environment as it found it, so
+    // `dispatchEvent` can be callable while no listener of ours could have registered
+    // through it. A foreign `dispatchEvent` answering `false` there read as `'handled'`,
+    // and the report was dropped with no console line and no listener that saw it.
+    const reported: (string | Error)[] = [];
+    let dispatched = 0;
+
+    const claimingDispatch = (): boolean => {
+      dispatched++;
+
+      return false;
+    };
+
+    const captured = withGlobalReplaced('addEventListener', undefined, () =>
+      withGlobalReplaced('dispatchEvent', claimingDispatch, () =>
+        withGlobalReplaced(
+          'reportError',
+          (error: string | Error) => reported.push(error),
+          () =>
+            withCapturedConsoleError((entries) => {
+              safeHandleCallback('partialEnvironmentCallback', () => {
+                throw new Error('Partial rung boom');
+              });
+
+              return entries;
+            }),
+        ),
+      ),
+    );
+
+    expect(dispatched).toBe(0);
+    expect(reported.length).toBe(1);
+    expect(String(reported[0])).toContain('Partial rung boom');
+    expect(captured.length).toBe(0);
+  });
 });
