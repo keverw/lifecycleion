@@ -53,10 +53,64 @@ export function muteConsoleError(): string[] {
   return captured;
 }
 
-/** Put the real `console.error` back. Safe to call when nothing was muted. */
+/**
+ * Replace `console.error` with one that throws, and count the attempts.
+ *
+ * The condition every last-rung reporter has to survive. It is not contrived: Node raises
+ * `EPIPE` writing to a pipe whose reader has gone, a stream destroyed during shutdown
+ * throws on write, and a harness that patches `console.error` to fail a build on warnings
+ * is an ordinary setup. Reporting a failure must never raise one, so a reporter reached
+ * with no handler left has to absorb this rather than replace the failure it was
+ * describing with its own.
+ *
+ * Restored by the same {@link restoreConsoleError} the mute helper uses.
+ *
+ * @returns A live counter of how many times the rung was reached, so a test can assert
+ *          the reporter genuinely tried to write rather than skipping the path entirely.
+ */
+export function breakConsoleError(): { attempts: number } {
+  const calls = { attempts: 0 };
+
+  if (original === null) {
+    // eslint-disable-next-line no-console -- capturing the real one to restore it later
+    original = console.error;
+  }
+
+  // eslint-disable-next-line no-console -- breaking it is the point of this helper
+  console.error = (): never => {
+    calls.attempts++;
+
+    throw new Error('console.error is broken');
+  };
+
+  return calls;
+}
+
+/**
+ * Remove `console.error` entirely, as a runtime with a stripped console would.
+ *
+ * A different failure from {@link breakConsoleError}: the call site raises a `TypeError`
+ * for calling a non-function rather than propagating a thrown `Error`, and a guard that
+ * only anticipated the latter would still let this one through.
+ */
+export function removeConsoleError(): void {
+  if (original === null) {
+    // eslint-disable-next-line no-console -- capturing the real one to restore it later
+    original = console.error;
+  }
+
+  // The cast is what removes it: `no-console` does not fire here because the member is
+  // reached through it rather than as `console.error` directly.
+  (console as { error?: unknown }).error = undefined;
+}
+
+/**
+ * Put the real `console.error` back. Safe to call when nothing was muted, broken or
+ * removed.
+ */
 export function restoreConsoleError(): void {
   if (original !== null) {
-    // eslint-disable-next-line no-console -- restoring what `muteConsoleError` replaced
+    // eslint-disable-next-line no-console -- restoring what the helpers above replaced
     console.error = original;
     original = null;
   }

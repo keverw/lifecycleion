@@ -9,6 +9,7 @@ import { CurlyBrackets } from '../curly-brackets';
 import { isNumber } from '../is-number';
 import { isPromise } from '../is-promise';
 import { describeError, toError } from '../to-error';
+import { reportToConsole } from '../internal/report-to-console';
 import {
   createRedactionReporter,
   type RedactionErrorHandler,
@@ -588,8 +589,12 @@ export class Logger extends EventEmitter {
         // would leave the event uncancelled and, on Bun and Node, terminate the process
         // from a listener whose whole job is reporting a failure. The console is the only
         // rung left, as it is for a failing sink.
-        // eslint-disable-next-line no-console -- last resort on the reporting path
-        console.error(describeError(error_));
+        //
+        // Through `reportToConsole`, because `console.error` is itself a call that can
+        // throw - a broken stdout, or a harness that replaced it - and a throw here defeats
+        // this very guard: it escapes the listener *and* skips the `preventDefault()`
+        // below, so the report is neither logged nor claimed.
+        reportToConsole(describeError(error_));
       } finally {
         // Cleared in `finally` so a sink or handler that throws its way out cannot leave
         // the listener permanently deaf.
@@ -1049,8 +1054,15 @@ export class Logger extends EventEmitter {
       }
     }
 
-    // eslint-disable-next-line no-console -- reporting this any other way reopens the loop
-    console.error(failure.message);
+    // Reporting this any other way reopens the loop, and `reportToConsole` keeps the rung
+    // itself from throwing. `runCallbackSafely` states the requirement outright - "`onError`
+    // must not throw: it runs on the failure path, and there is nothing above it left to
+    // catch" - and this override is what it calls: a throw here escaped `emit` and left
+    // the `logger.info()` that emitted the event, or, for a handler that rejected, became
+    // an unhandled rejection from `result.catch(onError)`.
+    //
+    // `failure` is built here rather than handed in, so its `message` is a plain string.
+    reportToConsole(failure.message);
   }
 
   /**
@@ -1068,7 +1080,14 @@ export class Logger extends EventEmitter {
   }
 
   /**
-   * Handle sink errors by calling the onSinkError callback or falling back to console.error
+   * Handle sink errors by calling the onSinkError callback or falling back to the console.
+   *
+   * Nothing here may throw. This is reached from `handleLog`'s synchronous `catch`, where
+   * a throw leaves the caller's own `logger.info()`; from `result.catch(...)` on a sink
+   * that returned a promise, where it becomes an unhandled rejection; and from `close()`,
+   * where it would reject a shutdown. The console rung goes through `reportToConsole` for
+   * that reason - `console.error` throws on a broken stdout, which is precisely the
+   * condition `close()` runs under.
    */
   private handleSinkError(
     error: unknown,
@@ -1086,15 +1105,13 @@ export class Logger extends EventEmitter {
         this.onSinkError(failure, context, sink);
       } catch {
         // Ignore errors in the error handler to prevent infinite loops
-        // eslint-disable-next-line no-console
-        console.error(
+        reportToConsole(
           `Error in onSinkError handler: ${describeError(failure)}`,
         );
       }
     } else {
-      // Fallback to console.error
-      // eslint-disable-next-line no-console
-      console.error(
+      // Fallback to the console
+      reportToConsole(
         `Error ${context === 'write' ? 'writing to' : 'closing'} sink: ${describeError(failure)}`,
       );
     }

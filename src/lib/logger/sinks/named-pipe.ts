@@ -3,6 +3,7 @@ import { promises as fsPromises } from 'fs';
 import * as os from 'os';
 import type { LogEntry, LogSink } from '../types';
 import { describeError, toError } from '../../to-error';
+import { reportToConsole } from '../../internal/report-to-console';
 
 /**
  * Types of pipe errors that can occur
@@ -352,9 +353,11 @@ export class NamedPipeSink implements LogSink {
       }
     }
 
-    // Default: log to console
-    // eslint-disable-next-line no-console
-    console.error(
+    // Default: log to console, through the guarded rung. The requirement stated above for
+    // `onError` applies just as much to the fall-back beneath it: `console.error` throws
+    // on a broken stdout, and this runs from a Node stream `'error'` handler - where that
+    // is an uncaught exception - and from `initializePipe`'s uncaught promise.
+    reportToConsole(
       `NamedPipeSink error (${errorType}): ${describeError(failure)}`,
     );
   }

@@ -1,4 +1,5 @@
-import { toError } from '../to-error';
+import { describeError, toError } from '../to-error';
+import { reportToConsole } from './report-to-console';
 
 /**
  * Notified when redaction fails for a value.
@@ -84,12 +85,14 @@ export function createRedactionReporter(
       }
     }
 
-    try {
-      // eslint-disable-next-line no-console -- the only channel that cannot re-enter here
-      console.error(`Redaction failed for ${key}: ${failure.message}`);
-    } catch {
-      // Nothing left to try. Redaction must not throw out of whatever was logging.
-    }
+    // The only channel that cannot re-enter here, and guarded by `reportToConsole`:
+    // redaction must not throw out of whatever was logging.
+    //
+    // `describeError`, not `failure.message`. `toError` returns an `Error` unchanged, so
+    // `message` is whatever accessor the caller's own thrown value carries - and a
+    // template literal is evaluated *before* the call, so an unguarded read there would
+    // throw outside `reportToConsole` rather than inside it.
+    reportToConsole(`Redaction failed for ${key}: ${describeError(failure)}`);
   };
 }
 

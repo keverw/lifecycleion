@@ -4,6 +4,7 @@ import { isFunction } from './is-function';
 import { toError } from './to-error';
 import { DOUBLE_EOL } from './constants';
 import { installGlobalEventTarget } from './global-event-target';
+import { reportToConsole } from './internal/report-to-console';
 
 // Node.js has a global `ErrorEvent` constructor (Node 25+) but does not make `globalThis`
 // an EventTarget, so the global event methods must be supplied before anything can be
@@ -157,13 +158,10 @@ function reportToHost(error: Error, renderForConsole?: () => string): void {
     }
   }
 
-  try {
-    // eslint-disable-next-line no-console -- the last reporting rung, by design
-    console.error(renderedReport(error, renderForConsole));
-  } catch {
-    // Nothing left to try. Neither `safeHandleCallback` nor
-    // `safeHandleCallbackAndWait` may throw from this path.
-  }
+  // The last reporting rung, by design, and guarded by `reportToConsole`: neither
+  // `safeHandleCallback` nor `safeHandleCallbackAndWait` may throw from this path.
+  // `renderedReport` guards its own rendering and falls back to the error itself.
+  reportToConsole(renderedReport(error, renderForConsole));
 }
 
 /**
