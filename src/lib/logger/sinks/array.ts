@@ -1,3 +1,7 @@
+import {
+  defineEntry,
+  describeContainer,
+} from '../../internal/container-entries';
 import { isPlainContainer } from '../../internal/is-plain-container';
 import { MAX_RENDER_DEPTH, TRUNCATED } from '../../internal/render-budget';
 import type { ArrayLogTransformer, LogEntry, LogSink } from '../types';
@@ -69,25 +73,28 @@ function snapshotValue(
     return TRUNCATED;
   }
 
-  if (Array.isArray(value)) {
+  // The shared enumeration, so "what does this container hold, and did asking throw" is
+  // answered the same way here as in every other walk. `unreadable` is a case rather than
+  // an empty result, which is what keeps a container that refused from being copied as one
+  // that was genuinely empty.
+  const shape = describeContainer(value);
+
+  if (shape.kind === 'unreadable') {
+    // Nothing can be enumerated, so nothing of the original may survive. Recorded after
+    // this, never before, so a second reference to a container that cannot be read gets
+    // the marker too rather than an empty copy this had started.
+    return UNCOPYABLE_MARKER;
+  }
+
+  if (shape.kind === 'array') {
     const source = value as unknown[];
     const copy: unknown[] = [];
 
-    let length: number;
-
-    try {
-      length = source.length;
-    } catch {
-      return UNCOPYABLE_MARKER;
-    }
-
-    // Recorded only once the container can be enumerated, so a second reference to one
-    // that cannot gets the marker too rather than the empty copy this had started.
     seen.set(value, copy);
 
     // A counted index loop rather than `for...of`, matching the redaction walk: iteration
     // resolves `Symbol.iterator` off the value, which on a subclass is caller code.
-    for (let index = 0; index < length; index++) {
+    for (let index = 0; index < shape.length; index++) {
       try {
         copy.push(snapshotValue(source[index], seen, depth + 1));
       } catch {
@@ -100,17 +107,9 @@ function snapshotValue(
 
   const copy: Record<string, unknown> = {};
 
-  let keys: string[];
-
-  try {
-    keys = Object.keys(value);
-  } catch {
-    return UNCOPYABLE_MARKER;
-  }
-
   seen.set(value, copy);
 
-  for (const key of keys) {
+  for (const key of shape.keys) {
     let entry: unknown;
 
     try {
@@ -125,12 +124,7 @@ function snapshotValue(
 
     // Defined rather than assigned: a plain assignment to `__proto__` reparents the copy
     // instead of storing the entry.
-    Object.defineProperty(copy, key, {
-      value: entry,
-      enumerable: true,
-      writable: true,
-      configurable: true,
-    });
+    defineEntry(copy, key, entry);
   }
 
   return copy;
