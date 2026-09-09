@@ -19,7 +19,7 @@ A collection of foundational TypeScript utilities for managing application lifec
 
 ## Why Lifecycleion?
 
-Lifecycleion provides battle-tested, production-ready utilities that handle the complex orchestration of modern applications. Whether you need graceful shutdowns, robust retry logic, flexible logging, or just reliable helper functions, Lifecycleion has you covered.
+Lifecycleion provides TypeScript utilities for application lifecycle orchestration, logging, retries, events, HTTP requests, and common programming patterns.
 
 ### Key Features
 
@@ -31,7 +31,7 @@ Lifecycleion provides battle-tested, production-ready utilities that handle the 
 - 🛡️ **Error Handling** - Serialize errors for IPC/RPC, format them as readable tables, and handle callbacks safely
 - 🔧 **Common Utilities** - ID generation (UUID, ULID, ObjectID), string manipulation, deep cloning, and more
 - 📦 **Tree-shakeable** - Import only what you need via subpath exports
-- 💪 **TypeScript-first** - Full type safety with comprehensive TypeScript definitions
+- 💪 **TypeScript-first** - TypeScript definitions for every published entry point
 
 ## Installation
 
@@ -54,11 +54,11 @@ import {
   LifecycleManager,
   BaseComponent,
 } from 'lifecycleion/lifecycle-manager';
-import { createLogger } from 'lifecycleion/logger';
+import { ConsoleSink, Logger } from 'lifecycleion/logger';
 import { RetryRunner } from 'lifecycleion/retry-utils';
 
 // Create a logger
-const logger = createLogger({ service: 'my-app' });
+const logger = new Logger({ sinks: [new ConsoleSink()] });
 
 // Set up retry logic
 const runner = new RetryRunner(
@@ -73,6 +73,10 @@ await runner.run(true);
 
 // Manage component lifecycle
 class MyComponent extends BaseComponent {
+  constructor() {
+    super(logger, { name: 'my-component' });
+  }
+
   async start() {
     logger.info('Starting component');
   }
@@ -82,16 +86,26 @@ class MyComponent extends BaseComponent {
   }
 }
 
-const manager = new LifecycleManager();
-manager.registerComponent(new MyComponent('my-component'));
-await manager.startAllComponents();
+const manager = new LifecycleManager({ logger });
+manager.registerComponent(new MyComponent());
+
+const startup = await manager.startAllComponents();
+
+if (!startup.success) {
+  await logger.close();
+  throw new Error(startup.reason);
+}
+
+// Run the application, then release component and logger resources.
+await manager.stopAllComponents();
+await logger.close();
 ```
 
 Tip: listen for `lifecycle-manager:shutdown-completed` when you want one place to react to shutdown results from manual stops, signals like `SIGINT` / `SIGTERM`, or logger-exit hooks. This is the centralized hook for logging or follow-up policy when `timedOut` is `true` or `stalledComponents` is non-empty. If `timedOut` is `true`, the payload reflects the result when the manager stopped waiting. Use repeated shutdown escalation separately when you want additional shutdown requests to retry or force behavior.
 
 ## Available Libraries
 
-Each library has comprehensive documentation in the [docs](./docs) folder. Click on any library name in the table below to view detailed usage examples, API references, and best practices.
+Each library has reference documentation in the [docs](./docs) folder. Click a library name below for its API notes and examples.
 
 | Library                                                            | Import Path                                             | Description                                                                                                                                   |
 | ------------------------------------------------------------------ | ------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |

@@ -21,6 +21,7 @@ A modern, flexible logging library with sink-based architecture, template string
     - [Path Grammar](#path-grammar)
     - [Custom Redaction Function](#custom-redaction-function)
     - [Redaction fails closed](#redaction-fails-closed)
+    - [Finding out _why_ redaction failed](#finding-out-_why_-redaction-failed)
     - [Controlling how a value is masked](#controlling-how-a-value-is-masked)
     - [What the default reveals](#what-the-default-reveals)
   - [Tags for Categorization and Filtering](#tags-for-categorization-and-filtering)
@@ -96,7 +97,7 @@ A modern, flexible logging library with sink-based architecture, template string
 - **File Rotation**: Automatic log file rotation based on size and date
 - **Named Pipe Support**: Write to named pipes for log aggregation (Linux/macOS)
 - **Browser & Node.js**: Works in both environments with appropriate color support
-- **TypeScript**: Fully typed with comprehensive interfaces
+- **TypeScript**: Definitions for the published logger APIs
 
 ## Installation
 
@@ -696,7 +697,7 @@ Masking never returns the original. A request that would hide nothing - a percen
 
 #### What the default reveals
 
-The default masks 90% of a value, so a little survives at each end and the same secret can be correlated across log lines without being readable. A short string (under 8 characters) is replaced with `***REDACTED***` outright, since a proportional mask of something that short hides almost nothing.
+The default masks 90% of strings that are at least 8 characters long, so a little survives at each end and the same secret can be correlated across log lines without being readable. A shorter string is replaced with `***REDACTED***` outright, since a proportional mask of something that short hides almost nothing.
 
 Partial masking applies **only to values that were genuinely strings**. A number, an object, a function, a symbol, and `null` or `undefined` all reach the masker as a _produced_ string, and proportional masking keeps its ends - which for a card number is the BIN prefix and last four, and for a `URL` is the query string. Those are replaced with `***REDACTED***`. This is why deferring on an `undefined` value gives `***REDACTED***` rather than a partial mask of the `[undefined]` text your function was shown: the default is handed the original value, not its rendering. Return a masking request that **names a setting** - `{ percent: 60 }` - to opt a specific value back into partial masking, or a number, which is the same request spelled shorter. That is the deliberate choice the opt-in asks for, which is why an object that does not name a setting - `{}` included - does not count as one: it requests the default, and the default is the replacement.
 

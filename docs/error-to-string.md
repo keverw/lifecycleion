@@ -146,7 +146,7 @@ A dotted or bracketed entry is treated as ambiguous and both readings are covere
 
 #### Choosing how values are masked
 
-Masked values use the same default the logger applies, so a value renders identically whether it went through a log line or a rendered error. That default masks 90% of a value, so a little survives at each end and the same secret can be correlated across log lines without being readable.
+Masked values use the same default the logger applies, so a value renders identically whether it went through a log line or a rendered error. That default masks 90% of strings that are at least 8 characters long, so a little survives at each end and the same secret can be correlated across log lines without being readable. Short strings and values rendered from other types are replaced outright, as described below.
 
 The `redactFunction` here honours the same return contract as the logger's - a string is used literally, `null` defers to the default, a number sets the percent, and an object is always a masking request, never a replacement value. A plain object whose own keys are all masking settings (`strategy`, one of `'string' | 'email' | 'domain'`, plus `percent`, `maskChar`, `userPercent`, `domainPercent`) is masked with those; any other object - `{}`, an unrecognized key, a mixture, an array, a class instance - falls back to the default masking, landing exactly where `null` does, the treatment of non-string values included. The value reaching your function is always a `string`, already rendered. See [the logger docs](./logger.md#controlling-how-a-value-is-masked) for the full table.
 

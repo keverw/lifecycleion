@@ -282,7 +282,7 @@ describe('errorToString', () => {
       expect(render({ cause: inner }, ['cause']).includes(SECRET)).toBe(false);
     });
 
-    it('should honour a thrown plain object\'s own sensitiveFieldNames once it is wrapped as a cause', () => {
+    it("should honour a thrown plain object's own sensitiveFieldNames once it is wrapped as a cause", () => {
       // The reporting paths no longer render a thrown value directly: `reportCallbackError`
       // and the `Logger` error listener both wrap a non-`Error` as `new Error(..., { cause })`.
       // A thrown object naming its own sensitive fields then arrived one level down, was
@@ -315,7 +315,11 @@ describe('errorToString', () => {
       // `additionalInfo: 'text'` and `cause: null` passed a looser gate and then rendered
       // as a completely empty table, losing every key the object had.
       for (const shape of [
-        { additionalInfo: 'not-an-object', sensitiveFieldNames: ['a'], keep: 'KEEPME' },
+        {
+          additionalInfo: 'not-an-object',
+          sensitiveFieldNames: ['a'],
+          keep: 'KEEPME',
+        },
         { cause: null, sensitiveFieldNames: ['a'], keep: 'KEEPME' },
       ]) {
         expect(errorToString(new Error('w', { cause: shape }))).toContain(

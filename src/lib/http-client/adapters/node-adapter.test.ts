@@ -2525,8 +2525,7 @@ describe('NodeAdapter.send() — unit branches without server', () => {
     const requestSpy = spyOn(http, 'request').mockImplementation(
       (_options, callback) => {
         const cb = callback as
-          | ((res: http.IncomingMessage) => void)
-          | undefined;
+          ((res: http.IncomingMessage) => void) | undefined;
         queueMicrotask(() => {
           cb?.(res as unknown as http.IncomingMessage);
           queueMicrotask(() => {
@@ -2699,17 +2698,17 @@ describe('NodeAdapter.send() — unit branches without server', () => {
     const emitter = new EventEmitter();
     const writable = emitter as unknown as WritableLike;
 
-    writable.write = ((
+    writable.write = (
       _chunk: Uint8Array | string,
       cb?: (error?: Error | null) => void,
     ): boolean => {
       cb?.(new Error('write failed'));
 
       return true;
-    });
-    writable.end = ((cb?: (error?: Error | null) => void): void => {
+    };
+    writable.end = (cb?: (error?: Error | null) => void): void => {
       cb?.();
-    });
+    };
     writable.destroy = () => writable;
 
     const req = new MockClientRequest();
@@ -2720,8 +2719,7 @@ describe('NodeAdapter.send() — unit branches without server', () => {
     const requestSpy = spyOn(http, 'request').mockImplementation(
       (_options, callback) => {
         const cb = callback as
-          | ((res: http.IncomingMessage) => void)
-          | undefined;
+          ((res: http.IncomingMessage) => void) | undefined;
 
         queueMicrotask(() => {
           cb?.(res as unknown as http.IncomingMessage);

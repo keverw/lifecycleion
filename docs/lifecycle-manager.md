@@ -112,7 +112,7 @@ npm install lifecycleion
 bun add lifecycleion
 ```
 
-**Note on Logger:** The LifecycleManager requires a Logger instance from the lifecycleion logger. The Logger provides structured logging with sinks, service scoping, and lifecycle integration. The exact import path will be provided in a future release, but the Logger is part of the lifecycleion package.
+**Note on Logger:** The LifecycleManager requires a `Logger` from `lifecycleion/logger`. The logger provides sinks, service scoping, and lifecycle integration.
 
 ## Quick Start
 
@@ -1611,7 +1611,6 @@ The Logger class is part of the Lifecycleion package. Basic usage:
 ```typescript
 import { Logger } from 'lifecycleion/logger';
 
-// Create logger (exact constructor options to be documented with logger export)
 const logger = new Logger({
   // Logger configuration options
 });

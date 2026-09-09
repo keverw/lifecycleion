@@ -8,6 +8,8 @@ Safely execute sync or async callbacks with automatic error reporting on the sta
 - [API](#api)
   - [safeHandleCallback](#safehandlecallback)
   - [safeHandleCallbackAndWait](#safehandlecallbackandwait)
+  - [reportCallbackError](#reportcallbackerror)
+  - [runCallbackSafely](#runcallbacksafely)
 - [The reporting pattern](#the-reporting-pattern)
 - [Runtime Support](#runtime-support)
 
@@ -79,9 +81,30 @@ if (result.success) {
 
 `error` is always a real `Error`, even when the callback did something like `throw null`: the value is normalized with [`toError`](./to-error.md), which keeps whatever was actually thrown on `error.cause`. Reading `result.error.message` is therefore safe against a non-`Error` throw - though see the note below about errors whose `message` accessor itself throws.
 
+### reportCallbackError
+
+```typescript
+function reportCallbackError(callbackName: string, error: unknown): void;
+```
+
+Reports a caught callback failure through the same standard `'error'` channel and fallback chain used by `safeHandleCallback`. The dispatched wrapper identifies `callbackName` and keeps the original thrown value on `event.error.cause`.
+
+### runCallbackSafely
+
+```typescript
+function runCallbackSafely(
+  callbackName: string,
+  callback: unknown,
+  args: unknown[],
+  onError: (error: unknown) => void,
+): void;
+```
+
+Runs a callback without awaiting it, forwarding a synchronous throw, a returned promise's rejection, or a synthesized non-function error to `onError`. The `onError` callback runs on the final failure path and must not throw.
+
 ## The reporting pattern
 
-This is the pattern Lifecycleion uses internally and recommends for any code that catches an error it must not rethrow — your own callback wrappers included. Reporting this way keeps errors visible without deciding the host's control flow, and anything reported through it is picked up by `logger.registerReportErrorListener()`.
+Use `reportCallbackError()` when reporting a callback failure. If you need a different wrapper, the outline below shows the dispatch and fallback order. Lifecycleion's implementation additionally guards reads of mutable globals, event construction, dispatch, host reporting, rendering, and console output so the reporting path cannot throw; include equivalent guards when your caller requires that guarantee.
 
 ```typescript
 function reportToHost(error: Error): void {

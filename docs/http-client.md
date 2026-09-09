@@ -52,6 +52,7 @@ A TypeScript HTTP client with a fluent request builder, request/response interce
   - [XHRAdapter](#xhradapter)
   - [MockAdapter (Testing)](#mockadapter-testing)
 - [Streaming Responses](#streaming-responses)
+  - [Writing your own `WritableLike`](#writing-your-own-writablelike)
   - [Stream Errors and Replay](#stream-errors-and-replay)
     - [Adapter Support](#adapter-support)
     - [Failures Before a Response](#failures-before-a-response)
@@ -661,7 +662,7 @@ await client
 
 ## Cookie Jar
 
-A `CookieJar` provides RFC 6265-compliant cookie storage with Public Suffix List domain matching, path matching, secure-flag enforcement, and expiry handling.
+A `CookieJar` provides cookie storage with Public Suffix List domain matching, path matching, secure-flag enforcement, and expiry handling.
 
 ```typescript
 import { CookieJar, HTTPClient } from 'lifecycleion/http-client';
