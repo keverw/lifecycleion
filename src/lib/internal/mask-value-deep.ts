@@ -2,6 +2,7 @@ import {
   REDACTED_PLACEHOLDER,
   REDACTION_FAILED_MARKER,
 } from './default-redact-function';
+import { defineEntry, describeContainer } from './container-entries';
 import { isPlainContainer } from './is-plain-container';
 import {
   NOOP_REDACTION_REPORTER,
@@ -110,7 +111,20 @@ export function maskValueDeep(
   seen.add(value);
 
   try {
-    if (Array.isArray(value)) {
+    // The shared enumeration, so this walk and the rendering walks cannot disagree about
+    // what a container holds or about a read that refused.
+    const shape = describeContainer(value);
+
+    if (shape.kind === 'unreadable') {
+      // Nothing can be enumerated, so nothing of the original may survive - and there is
+      // no way to know what is below. Fails closed, as the same read does in
+      // `redactPathsInner`.
+      report(shape.error, key);
+
+      return REDACTION_FAILED_MARKER;
+    }
+
+    if (shape.kind === 'array') {
       // A plain `[]` filled by index, not `source.map`, for the reason `redactPathsInner`
       // does the same: `map` goes through `ArraySpeciesCreate`, which calls the value's
       // own subclass constructor with a length. A tuple subclass whose constructor
@@ -122,21 +136,10 @@ export function maskValueDeep(
       const source = value as unknown[];
       const masked: unknown[] = [];
 
-      let length: number;
-
-      try {
-        length = source.length;
-      } catch (error) {
-        // Nothing can be enumerated, so nothing of the original may survive.
-        report(error, key);
-
-        return REDACTION_FAILED_MARKER;
-      }
-
       // A counted index loop, not `for...of`: iteration resolves `Symbol.iterator` off
       // the value, which is caller code on a subclass, free to throw or to yield
       // something other than the elements. Same reason `redactPathsInner` counts.
-      for (let index = 0; index < length; index++) {
+      for (let index = 0; index < shape.length; index++) {
         // Each element read and masked inside its own guard, exactly as
         // `redactPathsInner` and `renderContainer` do. Without this, one throwing
         // accessor anywhere inside a named container collapsed the *whole* container to
@@ -166,25 +169,13 @@ export function maskValueDeep(
       return masked;
     }
 
-    // Keys first, then each value read inside its own guard - not `Object.entries`, which
-    // runs every getter under one `catch`, so one throwing accessor collapsed the whole
-    // named container to the failure marker while the array branch above degraded a
+    // Keys read up front, then each value inside its own guard - never `Object.entries`,
+    // which runs every getter under one `catch`, so one throwing accessor collapsed the
+    // whole named container to the failure marker while the array branch above degraded a
     // single slot. Per entry, as `redactPathsInner` and `renderContainer` do.
-    let keys: string[];
-
-    try {
-      keys = Object.keys(value);
-    } catch (error) {
-      // The keys cannot be read, so there is no shape to rebuild and no way to know what
-      // is below. Fails closed, as the same read does in `redactPathsInner`.
-      report(error, key);
-
-      return REDACTION_FAILED_MARKER;
-    }
-
     const masked: Record<string, unknown> = {};
 
-    for (const entryKey of keys) {
+    for (const entryKey of shape.keys) {
       let entryResult: unknown;
 
       try {
@@ -207,12 +198,7 @@ export function maskValueDeep(
       // Defined rather than assigned: a plain assignment to `__proto__` is a no-op for a
       // string and reparents the rebuilt object for an object, so a payload carrying that
       // key would silently lose the entry or change the shape of the result.
-      Object.defineProperty(masked, entryKey, {
-        value: entryResult,
-        enumerable: true,
-        writable: true,
-        configurable: true,
-      });
+      defineEntry(masked, entryKey, entryResult);
     }
 
     return masked;

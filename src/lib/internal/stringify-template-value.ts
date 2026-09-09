@@ -2,6 +2,7 @@
  * Normalizes values to the same string representation used by template rendering.
  */
 
+import { describeContainer } from './container-entries';
 import { isPlainContainer } from './is-plain-container';
 import {
   charge,
@@ -150,26 +151,28 @@ function renderContainer(
   depth: number,
   budget: RenderBudget,
 ): string {
-  if (Array.isArray(value)) {
+  // The shared enumeration, so a container that refuses to be read is the same case here
+  // as in the redaction walks rather than a locally-invented empty result.
+  const shape = describeContainer(value);
+
+  if (shape.kind === 'unreadable') {
+    // A revoked `Proxy`, an `ownKeys` trap that throws, a `length` that refuses: there is
+    // no shape to render, so this one value degrades rather than taking the whole render
+    // with it. Charged like the same marker inside the loops below - it is a leaf this
+    // render emits, and one per element of the container above would otherwise be free.
+    return charge(budget, quote('[unrenderable]'));
+  }
+
+  if (shape.kind === 'array') {
     const source = value as unknown[];
     const parts: string[] = [];
-
-    let length: number;
-
-    try {
-      length = source.length;
-    } catch {
-      // Charged like the same marker inside the loop: it is a leaf this render emits,
-      // and one per element of the container above would otherwise be free.
-      return charge(budget, quote('[unrenderable]'));
-    }
 
     // The two brackets this branch returns, charged as they are decided on rather than
     // when the result is assembled. See `charge` for why an uncharged delimiter defeats
     // the cap entirely.
     charge(budget, '[]');
 
-    for (let index = 0; index < length; index++) {
+    for (let index = 0; index < shape.length; index++) {
       // The separator this element will be joined with, charged before anything else so
       // it counts even on the truncation path below.
       if (parts.length > 0) {
@@ -203,29 +206,18 @@ function renderContainer(
     return `[${parts.join(',')}]`;
   }
 
-  // Keys first, then each value read inside its own guard - not `Object.entries`, which
-  // runs every own getter under one `catch`, so a single throwing accessor collapsed the
-  // whole object to `[unrenderable]` and lost every sibling beside it. The array branch
+  // Keys up front, then each value read inside its own guard - never `Object.entries`,
+  // which runs every own getter under one `catch`, so a single throwing accessor collapsed
+  // the whole object to `[unrenderable]` and lost every sibling beside it. The array branch
   // above degrades one element at a time, and so do `maskValueDeep`, `redactPathsInner`
   // and `errorToString`'s own walk; this was the one that did not.
-  let keys: string[];
-
-  try {
-    keys = Object.keys(value);
-  } catch {
-    // The keys themselves cannot be read - a revoked `Proxy`, an `ownKeys` trap that
-    // throws - so there is no shape to render. This one value degrades rather than taking
-    // the whole render with it. Charged for the reason the array branch charges its own.
-    return charge(budget, quote('[unrenderable]'));
-  }
-
   const parts: string[] = [];
 
   // The two braces this branch returns, for the reason the array branch charges its
   // brackets.
   charge(budget, '{}');
 
-  for (const key of keys) {
+  for (const key of shape.keys) {
     // The separator this entry will be joined with, charged before anything else so it
     // counts even on the truncation path below.
     if (parts.length > 0) {
