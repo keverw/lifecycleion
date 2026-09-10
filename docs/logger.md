@@ -630,16 +630,20 @@ a value that fails to redact and a value that fails to render are different fail
 collapsing them would hide one.
 
 It is handed the failure, normalized to an `Error`, and the `redactedKeys` entry as you
-wrote it - `user.password`, not the leaf `password`. The logger always supplies a handler for its own work - yours if you set one, a console-writing one if you did not - because everything it renders and redacts runs inside a log call, where reporting anywhere a logger might hear it would be logged, and logging renders. So this **defaults to `console.error`**, and
-a broken redactor is loud rather than silent.
+wrote it - `user.password`, not the leaf `password`. With no handler set it
+**writes to `console.error`**, so a broken redactor is loud rather than silent.
 
 Two things about it are deliberate:
 
-- **It is not the global `'error'` channel**, which is where every other failure in this
-  library goes. Reporting there would loop: `registerReportErrorListener()` logs what it
-  hears, logging renders a message, rendering redacts, and redaction throws again. Each
-  pass is a fresh turn, so no re-entrancy guard closes it. `onEventHandlerError` exists for
-  the same reason and takes the same shape.
+- **The logger never reports its own failures on the global `'error'` channel.** Everything
+  it renders and redacts runs inside a log call, so reporting there would loop:
+  `registerReportErrorListener()` logs what it hears, logging renders a message, rendering
+  redacts, and redaction throws again. Each pass is a fresh turn, so no re-entrancy guard
+  closes it. The logger therefore always supplies a handler for its own work - yours if you
+  set one, a console-writing one if you did not - and `onSinkError` and
+  `onEventHandlerError` are console-only for exactly the same reason. A _standalone_
+  `stringifyValue()` or `errorToString()`, with nothing logging, has no such risk and does
+  use that channel; see the note above.
 - **It fires at most once per redaction pass.** A failure is raised per leaf, so a redactor
   that throws unconditionally would otherwise report once for every value inside a named
   container. The first failure names the cause; the markers left in the output show the
