@@ -189,7 +189,6 @@ export class FileSink implements LogSink {
     };
   }
 
-
   /**
    * Flush all pending writes and wait for completion
    * Returns statistics about the flush operation
@@ -439,7 +438,12 @@ export class FileSink implements LogSink {
 
     if (this.onError) {
       try {
-        this.onError(failure, this.writeQueue[0]?.entry ?? ({} as LogEntry), 0, false);
+        this.onError(
+          failure,
+          this.writeQueue[0]?.entry ?? ({} as LogEntry),
+          0,
+          false,
+        );
       } catch (callbackError) {
         reportToConsole(
           `FileSink onError callback failed: ${describeError(callbackError)}`,

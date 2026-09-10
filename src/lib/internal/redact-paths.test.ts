@@ -76,7 +76,9 @@ describe('matchRedactPath and findPathInto', () => {
   });
 
   test('finds a path pointing strictly inside a value', () => {
-    expect(findPathInto(paths('user.password'), ['user'])).toBe('user.password');
+    expect(findPathInto(paths('user.password'), ['user'])).toBe(
+      'user.password',
+    );
   });
 
   test('never lets a path address the root itself', () => {
@@ -132,11 +134,10 @@ describe('redactMatchedPaths - enumeration failures', () => {
       enumerable: true,
     });
 
-    const result = redactMatchedPaths(
-      value,
-      paths('tok'),
-      undefined,
-    ) as Record<string, unknown>;
+    const result = redactMatchedPaths(value, paths('tok'), undefined) as Record<
+      string,
+      unknown
+    >;
 
     expect(result['bad']).toBe(REDACTION_FAILED_MARKER);
     expect(result['keep']).toBe('visible');

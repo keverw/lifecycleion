@@ -144,4 +144,3 @@ function isTLSCertificateErrorSelf(error: Error): boolean {
     ? /certificate|self signed|unable to verify|altname/i.test(message)
     : false;
 }
-

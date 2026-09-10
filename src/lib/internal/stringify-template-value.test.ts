@@ -193,7 +193,9 @@ describe('stringifyTemplateValue - values that resist rendering', () => {
     }
 
     expect(stringifyTemplateValue(new Session())).toBe('[Session]');
-    expect(stringifyTemplateValue({ s: new Session() })).toBe('{"s":"[Session]"}');
+    expect(stringifyTemplateValue({ s: new Session() })).toBe(
+      '{"s":"[Session]"}',
+    );
   });
 
   test('renders a Date as its ISO form at any depth', () => {
