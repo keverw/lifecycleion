@@ -200,12 +200,28 @@ first is the worst possible outcome. It is written so it cannot:
 
 - Every property read off the value is guarded. `message`, `stack`, `code` and the rest are
   ordinary properties, and a subclass or a `Proxy` can turn any of them into an accessor
-  that throws. An unreadable member is treated as absent.
-- Values that resist rendering become `<unrenderable>` rather than propagating. `String()`
-  invokes `toString`/`Symbol.toPrimitive`, and `JSON.stringify` - used for an object-valued
-  field such as `code` - throws on a cyclic object and on a nested `BigInt`. Note that a
-  `BigInt` inside `additionalInfo` renders normally, since that walk handles each value
-  individually rather than serializing the object whole.
+  that throws. An unreadable conventional member is treated as absent; an unreadable
+  `additionalInfo` entry is marked, so it is never mistaken for one that was not there.
+- Values that resist rendering are marked rather than propagating, and the marker names
+  which half refused:
+
+  | Marker                  | Meaning                                                                                                                                                                             |
+  | ----------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+  | `<unrenderable: keys>`  | The container would not be enumerated — a revoked `Proxy`, a throwing `ownKeys` trap.                                                                                               |
+  | `<unrenderable: value>` | One value would not be read — a throwing accessor, a revoked `Proxy`.                                                                                                               |
+  | `<unrenderable: text>`  | The value was read but could not be turned into text — `String()` invokes `toString`/`Symbol.toPrimitive`, and `JSON.stringify` throws on a cyclic object and on a nested `BigInt`. |
+
+  **The cause is deliberately not in the marker.** The thrown value is yours: a getter is
+  free to throw `new Error('cannot read ' + this.password)`, and a marker carrying that
+  message would put the value into the table, past `sensitiveFieldNames`, and into every
+  sink. These three are library-authored text with nothing of yours in them, which is what
+  makes them safe to render. A cause is only ever handed to a callback — that is what
+  [`onRedactionError`](#additional-info--sensitive-fields) is for — never written into the
+  output.
+
+  Note that a `BigInt` inside `additionalInfo` renders normally, since that walk handles
+  each value individually rather than serializing the object whole.
+
 - The recursive walk of `additionalInfo` tracks the objects on the current path and cuts a
   cycle with `<circular>` rather than exhausting the stack. Only a genuine cycle - an
   object contained within itself - is cut; an object merely referenced twice side by side

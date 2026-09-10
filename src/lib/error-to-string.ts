@@ -137,6 +137,37 @@ function readOwnSensitivePaths(
 }
 
 /**
+ * What replaces a value this could not render, and which half of it refused.
+ *
+ * One marker used to cover five unrelated failures - a container that would not be
+ * enumerated, a getter that threw, a revoked `Proxy`, a `toString` that threw, a
+ * `JSON.stringify` that returned nothing - so an operator reading `<unrenderable>` learned
+ * only that something went wrong, never enough to know whether to look at the payload's
+ * shape or at the code that produces its values. These say which.
+ *
+ * **The cause itself is deliberately not here, and that is a rule rather than an
+ * omission.** The thrown value belongs to the caller: a getter is free to throw
+ * `new Error('cannot read ' + this.password)`, and a marker carrying that message would
+ * put the value into the table, past `sensitiveFieldNames`, and into every sink. Redaction
+ * already settled this - `createRedactionReporter` hands the cause to `onRedactionError`
+ * and warns that it may contain the value, while the output gets only the neutral marker.
+ * These three are library-authored text with no caller input in them, which is what lets
+ * them be rendered at all.
+ *
+ * Named rather than written out, unlike the other markers in this file. Those are each
+ * emitted from one place, where a literal is clearer than an indirection; these are three
+ * similar spellings across ten sites, which is ten chances to write `key` for `keys` and
+ * produce a marker nothing greps for and no test names.
+ */
+const UNRENDERABLE_KEYS = '<unrenderable: keys>';
+
+/** A single value refused to be read - a throwing accessor, a revoked `Proxy`. */
+const UNRENDERABLE_VALUE = '<unrenderable: value>';
+
+/** A value was readable but could not be turned into text. */
+const UNRENDERABLE_TEXT = '<unrenderable: text>';
+
+/**
  * `additionalInfo` as something the paths can actually address.
  *
  * The walk treats a non-plain value - a class instance, an `Error`, a `Map` - as a single
@@ -158,8 +189,9 @@ function readOwnSensitivePaths(
  * inherited keys as own ones puts them back where both the walk and the table can see
  * them, which is the whole point of the bag.
  *
- * @returns The bag, or `<unrenderable>` when the value refuses to be enumerated at all,
- *   which the caller renders as the marker rather than as an absent `additionalInfo`.
+ * @returns The bag, or {@link UNRENDERABLE_KEYS} when the value refuses to be enumerated
+ *   at all, which the caller renders as the marker rather than as an absent
+ *   `additionalInfo`.
  */
 function asAddressableBag(info: object): object | string {
   if (isPlainContainer(info)) {
@@ -182,7 +214,7 @@ function asAddressableBag(info: object): object | string {
     // different and much more reassuring claim than "its keys could not be read" - the
     // same silent collapse the plain-container branch below refuses, and that
     // `renderContainer`, `maskValueDeep`, `redactPathsInner` and `snapshotValue` all mark.
-    return '<unrenderable>';
+    return UNRENDERABLE_KEYS;
   }
 
   const bag: Record<string, unknown> = {};
@@ -274,7 +306,7 @@ function quoteText(value: string): string {
   try {
     return JSON.stringify(value) ?? '""';
   } catch {
-    return '"<unrenderable>"';
+    return `"${UNRENDERABLE_TEXT}"`;
   }
 }
 
@@ -285,7 +317,7 @@ function safeStringify(value: unknown): string {
     // `JSON.stringify` throws on a cyclic object and on a `BigInt` nested inside one,
     // `String()` invokes `toString`/`Symbol.toPrimitive`, and a symbol's own `toString`
     // can be overridden. None of that may escape a rendering call.
-    return '<unrenderable>';
+    return UNRENDERABLE_TEXT;
   }
 }
 
@@ -302,7 +334,7 @@ function stringifyPrimitive(value: unknown): string {
     case 'bigint':
       return String(value);
     case 'object':
-      return JSON.stringify(value) ?? '<unrenderable>';
+      return JSON.stringify(value) ?? UNRENDERABLE_TEXT;
     case 'function':
       return '[Function]';
     case 'symbol':
@@ -514,7 +546,7 @@ function errorToASCIITable(
           // case: `renderContainer` emits `[unrenderable]`, `maskValueDeep` and
           // `redactPathsInner` the redaction marker, `snapshotValue` its own. This was
           // the one that degraded silently.
-          table.addRow('AdditionalInfo', '<unrenderable>');
+          table.addRow('AdditionalInfo', UNRENDERABLE_KEYS);
 
           addErrorTail(
             table,
@@ -557,17 +589,27 @@ function errorToASCIITable(
             Math.max(MIN_ROW_COST, maxRowLength) * (depth + 1),
           );
 
+          // `readMemberOrThrew`, not `readMember`. The plain helper answers `undefined`
+          // for a read that refused, and `undefined` renders as the literal word - so an
+          // entry whose accessor threw came out looking like one that was genuinely
+          // absent, which is the same silent collapse the refused enumeration above is
+          // marked for. The nested walk already marks this one level deeper; the top
+          // level was the one place that did not.
+          const entryValue = readMemberOrThrew(info, key);
+
           table.addRow(
             `AdditionalInfo.${key}`,
-            stringifyValue(
-              readMember(info, key),
-              maxRowLength,
-              seen,
-              depth + 1,
-              budget,
-              redactFunction,
-              report,
-            ),
+            entryValue === READ_THREW
+              ? UNRENDERABLE_VALUE
+              : stringifyValue(
+                  entryValue,
+                  maxRowLength,
+                  seen,
+                  depth + 1,
+                  budget,
+                  redactFunction,
+                  report,
+                ),
           );
         }
       }
@@ -766,7 +808,7 @@ function stringifyValueInner(
     // `Array.isArray` throws on a revoked `Proxy`. Degrade this one leaf rather than
     // letting it escape to the top-level backstop, which would throw away the error's
     // message, name, and stack over a single bad value.
-    return '<unrenderable>';
+    return UNRENDERABLE_VALUE;
   }
 
   if (arrayValue !== null) {
@@ -791,7 +833,7 @@ function stringifyValueInner(
     const shape = describeContainer(source);
 
     if (shape.kind !== 'array') {
-      return '<unrenderable>';
+      return UNRENDERABLE_KEYS;
     }
 
     for (let index = 0; index < shape.length; index++) {
@@ -834,7 +876,7 @@ function stringifyValueInner(
           parts.push(entriesToText(result));
         }
       } catch {
-        parts.push('<unrenderable>');
+        parts.push(UNRENDERABLE_VALUE);
       }
     }
 
@@ -943,7 +985,7 @@ function stringifyValueInner(
       const shape = describeContainer(value);
 
       if (shape.kind === 'unreadable') {
-        return '<unrenderable>';
+        return UNRENDERABLE_KEYS;
       }
 
       const keys = shape.kind === 'object' ? shape.keys : [];
@@ -982,7 +1024,7 @@ function stringifyValueInner(
         try {
           val = (value as Record<string, unknown>)[key];
         } catch {
-          entries.push({ key, value: '<unrenderable>' });
+          entries.push({ key, value: UNRENDERABLE_VALUE });
 
           continue;
         }

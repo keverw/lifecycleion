@@ -728,14 +728,14 @@ describe('errorToString', () => {
       );
 
       expect(nested).toContain('boom');
-      expect(nested).toContain('unrenderable');
+      expect(nested).toContain('<unrenderable: keys>');
 
       const root = errorToString(
         Object.assign(new Error('boom'), { additionalInfo: hostile() }),
       );
 
       expect(root).toContain('boom');
-      expect(root).toContain('unrenderable');
+      expect(root).toContain('<unrenderable: keys>');
     });
 
     it('should mark a non-plain additionalInfo whose keys cannot be enumerated', () => {
@@ -770,7 +770,7 @@ describe('errorToString', () => {
 
       expect(rendered).toContain('boom');
       expect(rendered).toContain('AdditionalInfo');
-      expect(rendered).toContain('<unrenderable>');
+      expect(rendered).toContain('<unrenderable: keys>');
       expect(rendered).not.toContain('hunter2secret');
 
       // The marker leaves through the early-returning branch, which owns the tail rows
@@ -778,6 +778,40 @@ describe('errorToString', () => {
       // missing `Cause` and `Stack`.
       expect(rendered).toContain('root cause');
       expect(rendered).toContain('Stack');
+    });
+
+    it('should name which half of a value refused to be read', () => {
+      // The marker says `keys` when the container would not enumerate and `value` when a
+      // single entry would not be read, and the difference is the whole point of
+      // splitting them: one sends you to the payload's shape, the other to the code
+      // behind that one field. Asserted against each other, so a change that collapsed
+      // them back into one spelling fails here rather than quietly halving the
+      // information.
+      //
+      // The cause is deliberately absent from both. A getter is caller code and free to
+      // throw a message carrying the value it was hiding, so the marker stays
+      // library-authored text; `onRedactionError` is where a cause is allowed to go.
+      const throwingEntry: Record<string, unknown> = { safe: 'kept' };
+
+      Object.defineProperty(throwingEntry, 'password', {
+        get() {
+          throw new Error('accessor refused: hunter2secret');
+        },
+        enumerable: true,
+      });
+
+      const rendered = errorToString(
+        Object.assign(new Error('boom'), { additionalInfo: throwingEntry }),
+      );
+
+      expect(rendered).toContain('<unrenderable: value>');
+      expect(rendered).not.toContain('<unrenderable: keys>');
+
+      // The readable sibling still renders, and the accessor's own message - which
+      // carries the secret - never reaches the table.
+      expect(rendered).toContain('kept');
+      expect(rendered).not.toContain('hunter2secret');
+      expect(rendered).not.toContain('accessor refused');
     });
 
     it('should not throw when the stack accessor throws', () => {
