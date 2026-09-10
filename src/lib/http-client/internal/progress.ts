@@ -1,5 +1,5 @@
 import type { AdapterProgressEvent } from '../types';
-import { reportCallbackError } from '../../safe-handle-callback';
+import { safeHandleCallback } from '../../safe-handle-callback';
 
 /**
  * Wrap a caller's progress callback so a throw from it cannot be mistaken for a transport
@@ -13,9 +13,13 @@ import { reportCallbackError } from '../../safe-handle-callback';
  * misclassification points you somewhere there is nothing to find.
  *
  * Progress reporting is advisory - it never decides whether a request succeeded - so a
- * failing callback must not be able to change the result. It is reported on the standard
+ * failing callback must not be able to change the result. The failure goes to the standard
  * global `'error'` channel, where `safeHandleCallback` already sends every other
  * caller-callback failure, and the transfer carries on.
+ *
+ * The same rule applies to every other purely observational hook, and `onAttemptStart` /
+ * `onAttemptEnd` were worse than these: a throw from one of those took the request down to
+ * `status: 0` and reported nothing at all.
  *
  * @returns A guarded callback, or `undefined` when the caller supplied none, so the
  *          `?.()` call sites downstream stay exactly as they were.
@@ -29,10 +33,11 @@ export function guardProgressCallback(
   }
 
   return (event: AdapterProgressEvent): void => {
-    try {
-      callback(event);
-    } catch (error) {
-      reportCallbackError(label, error);
-    }
+    // `safeHandleCallback`, not a local `try`/`catch`. A hand-rolled guard catches a
+    // synchronous throw and misses the other half: a callback declared `async`, or one
+    // that returns a rejected promise, sails straight past it and becomes an unhandled
+    // rejection. This is the one place in the library that knows how to invoke somebody
+    // else's function, and it covers a non-function, a throw and a rejection alike.
+    safeHandleCallback(label, callback, event);
   };
 }

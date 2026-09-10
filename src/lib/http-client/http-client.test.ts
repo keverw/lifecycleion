@@ -6106,3 +6106,58 @@ describe('HTTPClient — phase-aware interceptors', () => {
     expect(builder.error).toBeNull();
   });
 });
+describe('observational callbacks never change the outcome', () => {
+  // The rule, in one place. `onUploadProgress`, `onDownloadProgress`, `onAttemptStart` and
+  // `onAttemptEnd` exist to *describe* a request, so a bug in one must not be able to
+  // decide whether that request succeeded. Two of them could: called bare, a throw from
+  // `onAttemptStart`/`onAttemptEnd` escaped into the attempt loop and came back as
+  // `status: 0`, and a throwing progress callback was classified as `isNetworkError`. A
+  // caller's telemetry bug was reported to them as a network problem, which is worse than
+  // silence - silence leaves you looking at your own code.
+  //
+  // Rejections are covered as well as throws: an `async` hook that rejects slips past any
+  // local `try`/`catch`, which is why these go through `safeHandleCallback` rather than a
+  // hand-rolled guard.
+  const hooks = [
+    'onUploadProgress',
+    'onDownloadProgress',
+    'onAttemptStart',
+    'onAttemptEnd',
+  ] as const;
+
+  const failures = [
+    [
+      'throws',
+      () => {
+        throw new Error('telemetry bug');
+      },
+    ],
+    ['rejects', () => Promise.reject(new Error('telemetry bug'))],
+  ] as const;
+
+  for (const hook of hooks) {
+    for (const [how, misbehave] of failures) {
+      test(`a ${hook} that ${how} leaves the response untouched`, async () => {
+        const adapter = new MockAdapter();
+
+        adapter.routes.get('/x', () => ({ status: 200, body: { ok: true } }));
+
+        const client = new HTTPClient({
+          adapter,
+          baseURL: 'https://x.test',
+        });
+
+        const builder = client.get('/x');
+
+        (builder as unknown as Record<string, (fn: unknown) => unknown>)[hook](
+          misbehave,
+        );
+
+        const response = await builder.send();
+
+        expect(response.status).toBe(200);
+        expect(response.isNetworkError).toBe(false);
+      });
+    }
+  }
+});

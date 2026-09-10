@@ -1,4 +1,5 @@
 import { generateID } from '../id-helpers';
+import { safeHandleCallback } from '../safe-handle-callback';
 import { deepClone } from '../deep-clone';
 import { RetryPolicy } from '../retry-utils';
 import { FetchAdapter } from './adapters/fetch-adapter';
@@ -1285,7 +1286,13 @@ export class BaseHTTPClient {
         nextRetryAt?: number;
         retrySuppressedReason?: AttemptEndEvent['retrySuppressedReason'];
       }): void => {
-        options.onAttemptEnd?.({
+        // Through `safeHandleCallback`, because this hook is purely observational and
+        // must not be able to change the outcome it is describing. Called bare, a throw
+        // from it escaped into the attempt loop and came back to the caller as
+        // `status: 0` - a request killed by its own telemetry - with nothing reported
+        // anywhere. It also covers a hook that returns a rejected promise, which no local
+        // `try`/`catch` would.
+        safeHandleCallback('onAttemptEnd', options.onAttemptEnd, {
           attemptNumber,
           isRetry,
           nextRetryDelayMS: undefined,
@@ -1313,7 +1320,8 @@ export class BaseHTTPClient {
       callbacks.setAttemptCount(attemptNumber);
       callbacks.setNextRetryDelayMS(null);
       callbacks.setNextRetryAt(null);
-      options.onAttemptStart?.({
+      // Observational only; see `onAttemptEnd` above for why it is guarded.
+      safeHandleCallback('onAttemptStart', options.onAttemptStart, {
         attemptNumber,
         isRetry,
         requestID,
