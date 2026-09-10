@@ -7,6 +7,7 @@ import { isPlainContainer } from '../../internal/is-plain-container';
 import {
   parseRedactPaths,
   redactMatchedPaths,
+  snapshotList,
   type RedactPath,
 } from '../../internal/redact-paths';
 import type { RedactFunction } from '../types';
@@ -279,48 +280,45 @@ export function applyRedaction(
 ): Record<string, unknown> {
   const report = createRedactionReporter(onRedactionError);
 
-  // Read inside the guard, not before it. `redactedKeys` is typed `string[]`, but a
-  // JavaScript caller can hand over anything, and `length` is an ordinary property that a
-  // `Proxy` or an accessor can make throw. Reading it in the function's own head put the
-  // one throw this function could not catch in the one place nothing was watching, which
-  // is why `handleLog` carried a second copy of the fail-closed bag purely to catch it.
-  let requestedCount: number;
+  // Read once, through `snapshotList`, and never asked a second question afterwards.
+  //
+  // `redactedKeys` is typed `string[]`, but a JavaScript caller can hand over anything, and
+  // `length` is an ordinary property an accessor or a `Proxy` can make throw - or simply
+  // lie about. The lie is the one every guard here used to miss: a `Proxy` over a real
+  // array whose `length` reads `0` passes `Array.isArray`, spreads to `[]`, and reports a
+  // count of zero, so the "nothing was asked for" exit below handed the caller's params
+  // straight back with the very values redaction was asked to hide. No throw, no marker, no
+  // report. `snapshotList` refuses it by the invariant a real array cannot break - an own
+  // index key at or beyond its own `length` - and returns a plain array otherwise, so
+  // everything below reads a snapshot rather than the caller's object.
+  let entries: unknown[] | null;
 
   try {
     // Absent, not merely falsy. `undefined` is the caller saying nothing about redaction;
     // `null`, `0`, `''` and `false` are a caller who supplied a list that cannot name a
-    // key, which is the fail-closed case the `Array.isArray` check below reports. Letting
-    // every falsy value take this exit handed those callers their params back untouched,
-    // and said nothing about it - and once `handleLog` started counting a supplied
-    // non-array as a redaction request, it put those unmasked params in
-    // `entry.redactedParams` for every sink under a name that claims they were masked.
+    // key, which is the fail-closed case below. Letting every falsy value take this exit
+    // handed those callers their params back untouched, and said nothing about it.
     if (redactedKeys === undefined) {
       return params;
     }
 
-    // Checked before `length` is read, not after it. A non-array cannot name a key, so
-    // there is no safe way to redact and no key to mark - but the zero-length exit below
-    // returns `params`, so a non-array reaching it hands back the very values the caller
-    // asked to hide. That is not only the plainly bogus `{ length: 0 }`: the length of a
-    // caller-supplied value is read once by `handleLog` and once here, and an accessor
-    // need not answer the same way twice, so an array-like answering 1 then 0 got past
-    // `handleLog`'s check - which does not copy a non-array - and then took this
-    // function's "nothing was asked for" exit, putting the unmasked params in
-    // `entry.redactedParams` for every sink while `redactedKeys` said they were masked.
-    // Asking what the list *is* before asking how long it is settles it in one read.
-    if (!Array.isArray(redactedKeys)) {
-      report(new Error('redactedKeys is not an array'), '<redactedKeys>');
-
-      return {};
-    }
-
-    requestedCount = redactedKeys.length;
+    entries = snapshotList(redactedKeys);
   } catch (error) {
     report(error, '<redactedKeys>');
 
     // Nothing nameable to mark, since the list is what could not be read.
     return {};
   }
+
+  // Not an array, unreadable, or contradicting itself. There is no safe way to redact and
+  // no key to mark, so nothing is returned rather than everything.
+  if (entries === null) {
+    report(new Error('redactedKeys is not a usable list'), '<redactedKeys>');
+
+    return {};
+  }
+
+  const requestedCount = entries.length;
 
   // No redaction needed
   if (requestedCount === 0) {

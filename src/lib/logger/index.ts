@@ -30,6 +30,7 @@ import type { HandleLogOptions } from './internal-types';
 import { ArraySink } from './sinks/array';
 import { ConsoleSink } from './sinks/console';
 import { applyRedaction, markAllRedactionFailed } from './utils/redaction';
+import { snapshotList } from '../internal/redact-paths';
 import { prepareErrorObjectLog } from './utils/error-object';
 import { LoggerService } from './logger-service';
 
@@ -858,10 +859,19 @@ export class Logger extends EventEmitter {
     // a list that refused it threw straight out of the `logger.info()` call after
     // redaction had already succeeded.
     //
-    // Copied only when it is an array: a non-array is passed along as it is, since
-    // spreading `'password'` would turn one plainly unusable list into a list of
-    // characters and lose the `<redactedKeys>` report `applyRedaction` makes of it. A
-    // copy that fails leaves the original in place, where the guards below catch it.
+    // Snapshotted with `snapshotList`, not spread. A spread asks the value to iterate,
+    // and a `Proxy` over an array can answer that with nothing at all while still holding
+    // the entries - `{ get: (t, k) => (k === 'length' ? 0 : t[k]) }` spreads to `[]`. That
+    // read as "an empty list", so this gate concluded no redaction was requested,
+    // `applyRedaction` was never called, and the params went to every sink in the clear
+    // with `redactedKeys` on the entry reading `undefined` and nothing reported. Every
+    // guard here was built for a list that *throws*; that one lies instead.
+    // `snapshotList` catches it by the one invariant a real array cannot break - an own
+    // index key at or beyond its own `length` - and refuses.
+    //
+    // A value it refuses is passed along as it is, since spreading `'password'` would turn
+    // one plainly unusable list into a list of characters and lose the `<redactedKeys>`
+    // report `applyRedaction` makes of it.
     //
     // The copy is also what reaches `entry.redactedKeys`, so a sink is handed an inert
     // array of strings rather than the caller's object with its traps still attached.
@@ -876,24 +886,14 @@ export class Logger extends EventEmitter {
     // sink on that call.
     let inertKeys: string[] | undefined;
 
-    try {
-      if (Array.isArray(requested)) {
-        redactedKeys = [...requested];
-        inertKeys = redactedKeys;
-      }
-    } catch {
-      // Nothing usable came of it, so the original stands and fails closed below.
-    }
+    // Read once, here, and `null` whenever the list cannot be trusted - not an array, a
+    // read that threw, or a length that contradicts the keys.
+    const snapshot = snapshotList(requested);
 
-    // Whether the caller asked for redaction. Guarded, because a list that refused to be
-    // copied is still being read here.
-    //
-    // A read that fails counts as *requested*, not as absent. A list was supplied, so
-    // redaction was asked for and this cannot tell what for; treating it as absent would
-    // render the params in the clear, which is the one outcome redaction exists to
-    // prevent. `params` and `redactedKeys` are both non-`undefined` whenever the read
-    // throws, since the `length` access is reached only after both have been tested.
-    let didRequestRedaction: boolean;
+    if (snapshot !== null) {
+      redactedKeys = snapshot as string[];
+      inertKeys = redactedKeys;
+    }
 
     // The reporter for every fail-closed path below, built on first use so an ordinary
     // log call allocates nothing for it.
@@ -918,22 +918,25 @@ export class Logger extends EventEmitter {
       backstopReporter(error, key);
     };
 
-    // Only an array is asked how long it is. `length` is the wrong question for anything
-    // else: a `Set` of keys, or any object without a numeric `length`, answered
-    // `undefined`, and `undefined > 0` said "no redaction requested" - so the params went
-    // to every sink in the clear, and `applyRedaction`'s fail-closed `Array.isArray`
-    // branch never ran, because this gate had already decided not to call it. A supplied
-    // non-array is a list this cannot use, not a list that is empty; it counts as
-    // requested and fails closed below, where it is also reported.
-    try {
-      didRequestRedaction =
-        params !== undefined &&
-        redactedKeys !== undefined &&
-        (!Array.isArray(redactedKeys) || redactedKeys.length > 0);
-    } catch (error) {
-      didRequestRedaction = true;
-      reportBackstop(error, '<redactedKeys>');
-    }
+    // Decided from the snapshot, never from a second read of the caller's own object.
+    // `length` is the wrong question for anything that is not an array - a `Set` of keys,
+    // or any object without a numeric `length`, answered `undefined`, and `undefined > 0`
+    // said "no redaction requested", so the params went to every sink in the clear and
+    // `applyRedaction`'s fail-closed branch never ran because this gate had already
+    // decided not to call it.
+    //
+    // A list `snapshotList` refused counts as *requested*, not as absent: something was
+    // supplied, so redaction was asked for and this cannot tell what for. Treating it as
+    // absent is what renders the params in the clear. It falls through to
+    // `applyRedaction`, which refuses it again and reports it as `<redactedKeys>`.
+    //
+    // Only a snapshot that came back genuinely empty means "nothing was asked for", and
+    // that is now the one reading of an empty list this can reach: a lying `Proxy` no
+    // longer arrives here wearing it.
+    const didRequestRedaction =
+      params !== undefined &&
+      requested !== undefined &&
+      (snapshot === null || snapshot.length > 0);
 
     let redactedParams: Record<string, unknown> | undefined;
 

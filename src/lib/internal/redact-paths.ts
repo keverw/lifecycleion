@@ -27,6 +27,76 @@ export interface RedactPath {
 }
 
 /**
+ * A caller-supplied list read once into a plain array, or `null` when it cannot be trusted.
+ *
+ * Every guard around `redactedKeys` and `sensitiveFieldNames` was built for a list that
+ * *throws*, and a `Proxy` does not have to throw to be unusable - it can simply lie.
+ * `new Proxy(['password'], { get: (t, k) => (k === 'length' ? 0 : t[k]) })` answers
+ * `Array.isArray` yes, iterates as empty, and spreads to `[]`, so every reader concluded
+ * "the caller asked to redact nothing" and handed the payload back in the clear. No marker,
+ * no `onRedactionError`, and `redactedKeys` on the entry reading `undefined` - the one
+ * outcome redaction exists to prevent, reached without a single exception being raised.
+ *
+ * A consistent liar is undetectable in general, but *this* lie is not, because it breaks an
+ * invariant only an exotic Array object enforces: **a real array never carries an own index
+ * key at or beyond its own `length`.** Push an element and `length` grows with it; shorten
+ * `length` and the elements past it are deleted. Only a `Proxy` can hold `'0'` while
+ * claiming a length of zero, so an index key that sits outside the claimed range is proof
+ * the two answers cannot both be true.
+ *
+ * The check does not fire on anything legitimate. A genuinely empty `[]` has no index keys
+ * at all. A sparse `new Array(3)` with one element has key `'0'` against a length of 3 -
+ * inside the range, so it passes, and its holes read `undefined` and are refused below as
+ * non-strings, which is the existing behaviour.
+ *
+ * Read by index rather than iterated, and returned as a plain array so every later reader
+ * sees one snapshot. Iteration resolves `Symbol.iterator` off the value, which on a
+ * subclass is caller code free to yield something other than the elements; and a value read
+ * twice need not answer the same way twice, which is how a list said "one key" to
+ * `handleLog` and "no keys" to `applyRedaction` a moment later.
+ *
+ * @returns The entries as a plain array, or `null` when the value is not an array, cannot
+ *          be read, or contradicts itself. Callers must treat `null` as a reason to mask
+ *          everything rather than nothing.
+ */
+export function snapshotList(value: unknown): unknown[] | null {
+  try {
+    if (!Array.isArray(value)) {
+      return null;
+    }
+
+    const claimed = (value as unknown[]).length;
+
+    if (!Number.isSafeInteger(claimed) || claimed < 0) {
+      return null;
+    }
+
+    for (const key of Object.keys(value)) {
+      // Own index keys only. A named property on an array - `list.note = 'x'` - is not an
+      // element and says nothing about the length.
+      if (!/^\d+$/.test(key)) {
+        continue;
+      }
+
+      if (Number(key) >= claimed) {
+        return null;
+      }
+    }
+
+    const entries: unknown[] = [];
+
+    for (let index = 0; index < claimed; index++) {
+      entries.push((value as unknown[])[index]);
+    }
+
+    return entries;
+  } catch {
+    // A revoked `Proxy`, a throwing `length`, an `ownKeys` trap that refuses.
+    return null;
+  }
+}
+
+/**
  * Parse redaction entries into matchable paths.
  *
  * Shared so `sensitiveFieldNames` and `stringifyValue`'s `redactedKeys` agree on what an
@@ -40,13 +110,15 @@ export interface RedactPath {
  */
 export function parseRedactPaths(value: unknown): RedactPath[] | null {
   try {
-    if (!Array.isArray(value)) {
+    const entries = snapshotList(value);
+
+    if (entries === null) {
       return null;
     }
 
     const paths: RedactPath[] = [];
 
-    for (const entry of value as unknown[]) {
+    for (const entry of entries) {
       if (typeof entry !== 'string') {
         return null;
       }

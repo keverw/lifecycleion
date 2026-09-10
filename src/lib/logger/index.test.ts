@@ -2215,7 +2215,69 @@ describe('Logger - a redactedKeys list that will not be read twice', () => {
     expect(entry?.params?.['password']).toBe(SECRET);
   });
 
-  test('a list that cannot be read reaches onRedactionError', () => {
+  test('an under-reporting list is refused rather than read as empty', () => {
+    // The lie every guard here used to miss, because every guard was built for a list that
+    // *throws*. A `Proxy` over a real array whose `length` reads `0` passes
+    // `Array.isArray`, spreads to `[]`, and reports a count of zero - so the gate concluded
+    // no redaction was requested, `applyRedaction` was never called, and the secret went to
+    // every sink in clear text with `redactedKeys` reading `undefined` and nothing
+    // reported. Not one exception was raised anywhere in that path.
+    //
+    // It is caught by the one invariant a real array cannot break: an own index key at or
+    // beyond its own `length`.
+    const failures: [string, string][] = [];
+    const sink = new ArraySink();
+    const logger = new Logger({
+      sinks: [sink],
+      callProcessExit: false,
+      onRedactionError: (error, key) => failures.push([key, error.message]),
+    });
+
+    const underReporting = new Proxy(['password'], {
+      get(target, property, receiver): unknown {
+        if (property === 'length') {
+          return 0;
+        }
+
+        return Reflect.get(target, property, receiver) as unknown;
+      },
+    });
+
+    logger.info('login {{password}}', {
+      params: { password: SECRET },
+      redactedKeys: underReporting,
+    });
+
+    expect(failures.length).toBe(1);
+    expect(failures[0]?.[0]).toBe('<redactedKeys>');
+    expect(sink.logs[0]?.message).not.toContain(SECRET);
+    expect(JSON.stringify(sink.logs[0]?.redactedParams)).not.toContain(SECRET);
+  });
+
+  test('a genuinely empty list is still read as "nothing was asked for"', () => {
+    // The counterpart the check above must not break: an empty array has no index keys at
+    // all, so it passes cleanly and means what it says. A sparse array passes too - its
+    // keys are always below its length - and its holes are refused further down as
+    // non-strings, which is unchanged.
+    const failures: [string, string][] = [];
+    const sink = new ArraySink();
+    const logger = new Logger({
+      sinks: [sink],
+      callProcessExit: false,
+      onRedactionError: (error, key) => failures.push([key, error.message]),
+    });
+
+    logger.info('login {{password}}', {
+      params: { password: SECRET },
+      redactedKeys: [],
+    });
+
+    expect(failures.length).toBe(0);
+    expect(sink.logs[0]?.message).toContain(SECRET);
+    expect(sink.logs[0]?.redactedKeys).toBeUndefined();
+  });
+
+  test('a list that cannot be read at all reaches onRedactionError', () => {
     // The fail-closed guards used to swallow the cause, which broke the promise
     // `onRedactionError` keeps on every other surface that redacts - `applyRedaction` for
     // params, `errorToString` for an error's `sensitiveFieldNames`, `redactValue` and
@@ -2232,7 +2294,10 @@ describe('Logger - a redactedKeys list that will not be read twice', () => {
 
     logger.info('login {{password}}', {
       params: { password: SECRET },
-      redactedKeys: lyingLength([1, 'throw']),
+      // Refuses the very first read, so there is no snapshot to be had. A list that
+      // answers once and refuses later is a different case and now succeeds, since it is
+      // only ever asked once - see the sibling test above.
+      redactedKeys: lyingLength(['throw']),
     });
 
     // Once, not once per guard the one unreadable list trips.

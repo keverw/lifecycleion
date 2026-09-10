@@ -973,6 +973,60 @@ describe('errorToString', () => {
       expect(lines[0]).toContain('additionalInfo.k0');
     });
 
+    it('should render a non-object additionalInfo rather than dropping it', () => {
+      // The gate used to require an object, so a string, a number or a `bigint` produced no
+      // `AdditionalInfo` row at all - an error carrying context rendered as one carrying
+      // none. That is the same silent collapse the unreadable cases were fixed for,
+      // reached from the other direction: nothing failed, the value was simply outside the
+      // shape the walk knows and was dropped for it.
+      for (const info of ['failed at stage 3', 42, true, 9007199254740993n]) {
+        const rendered = errorToString(
+          Object.assign(new Error('boom'), { additionalInfo: info }),
+        );
+
+        expect(rendered).toContain('AdditionalInfo');
+        expect(rendered).toContain(String(info));
+      }
+
+      // `null` still counts as absent, matching how `cause` is treated: an explicitly null
+      // `additionalInfo` carries nothing to show.
+      expect(
+        errorToString(
+          Object.assign(new Error('boom'), { additionalInfo: null }),
+        ),
+      ).not.toContain('AdditionalInfo');
+    });
+
+    it('should refuse a sensitiveFieldNames list that under-reports its length', () => {
+      // Every guard around these lists was built for one that *throws*. A `Proxy` over a
+      // real array whose `length` reads `0` does not throw: it passes `Array.isArray`,
+      // iterates as empty, and read as "the caller named nothing", so the value was
+      // rendered in the clear with no marker and nothing reported.
+      const reported: string[] = [];
+
+      const underReporting = new Proxy(['password'], {
+        get(target, property, receiver): unknown {
+          if (property === 'length') {
+            return 0;
+          }
+
+          return Reflect.get(target, property, receiver) as unknown;
+        },
+      });
+
+      const rendered = errorToString(
+        Object.assign(new Error('boom'), {
+          additionalInfo: { password: 'hunter2secret' },
+          sensitiveFieldNames: underReporting,
+        }),
+        80,
+        { onRedactionError: (_error, key) => reported.push(key) },
+      );
+
+      expect(rendered).not.toContain('hunter2secret');
+      expect(reported).toEqual(['<sensitiveFieldNames>']);
+    });
+
     it('should not throw when the stack accessor throws', () => {
       const error = new Error('boom');
 

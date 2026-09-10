@@ -580,8 +580,18 @@ function errorToASCIITable(
     const additionalInfo = readMember(err, 'additionalInfo');
     const cause = readMember(err, 'cause');
 
-    const hasInfo =
-      Boolean(additionalInfo) && typeof additionalInfo === 'object';
+    // Present, not "present and an object". A non-object `additionalInfo` - a string, a
+    // number, a `bigint` - is outside what the documented shape describes, and it was
+    // dropped for it: the row was never added, so an error carrying
+    // `additionalInfo: 'failed at stage 3'` rendered as one carrying no additional info at
+    // all. That is the same silent collapse the unreadable cases were fixed for, arrived
+    // at from the other direction, and it loses something the caller plainly meant to
+    // report. It renders as a single row now, its own value, the way the fail-closed and
+    // failed-redaction paths already render theirs.
+    //
+    // `null` still counts as absent, matching `cause` below: an explicitly null
+    // `additionalInfo` carries nothing to show.
+    const hasInfo = additionalInfo !== undefined && additionalInfo !== null;
     const hasCause = cause !== undefined && cause !== null;
 
     // Parsed once, ahead of both consumers. `cause` is caller data as much as
@@ -616,18 +626,26 @@ function errorToASCIITable(
         // nested error, and a derived value each rendered in the clear here while the
         // logger masked them. Masking first leaves one walk to be right, and the renderer
         // with nothing to decide.
-        const bag = asAddressableBag(
-          additionalInfo as object,
-          joinPath(path, 'additionalInfo'),
-          reportRender,
-        );
+        // Only an object has keys to address, forward, or walk. Anything else is a single
+        // value that renders as one row through the shared exit below - the same exit a
+        // failed redaction and an unreadable bag already take.
+        const bag =
+          typeof additionalInfo === 'object'
+            ? asAddressableBag(
+                additionalInfo,
+                joinPath(path, 'additionalInfo'),
+                reportRender,
+              )
+            : additionalInfo;
 
         // A bag that could not be enumerated at all carries the marker instead, and falls
         // through to the non-object branch below, which renders it as the `AdditionalInfo`
         // value. Nothing is skipped by not walking it: there is nothing readable under it
         // to mask, which is exactly what the marker says.
+        // A non-object never reaches the walk: no path can address the root, so there is
+        // nothing inside one to mask, exactly as for any other non-plain leaf.
         const masked =
-          typeof bag === 'string'
+          bag === null || typeof bag !== 'object'
             ? bag
             : redactAddressedValue(bag, sensitivePaths, redactFunction, report);
 
