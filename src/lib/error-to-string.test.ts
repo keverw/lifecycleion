@@ -738,6 +738,48 @@ describe('errorToString', () => {
       expect(root).toContain('unrenderable');
     });
 
+    it('should mark a non-plain additionalInfo whose keys cannot be enumerated', () => {
+      // The sibling test above traps a *plain* object, which reaches the table's own
+      // `Object.keys` guard. A class instance takes the other road entirely: it is not a
+      // plain container, so it goes through `asAddressableBag`, whose `for...in` is what
+      // the trap refuses. That branch used to answer with an empty bag, and an empty bag
+      // renders zero rows - so the table came out with no `AdditionalInfo` line at all,
+      // reading as an error that simply carried no extra context rather than one whose
+      // context refused to be read. The two roads are asserted separately because they
+      // fail in different functions.
+      class Session {
+        constructor() {
+          (this as unknown as Record<string, unknown>).password =
+            'hunter2secret';
+        }
+      }
+
+      const hostile = new Proxy(new Session(), {
+        ownKeys() {
+          throw new Error('ownKeys refused');
+        },
+      });
+
+      const error = Object.assign(new Error('boom'), {
+        additionalInfo: hostile,
+        sensitiveFieldNames: ['password'],
+        cause: new Error('root cause'),
+      });
+
+      const rendered = errorToString(error);
+
+      expect(rendered).toContain('boom');
+      expect(rendered).toContain('AdditionalInfo');
+      expect(rendered).toContain('<unrenderable>');
+      expect(rendered).not.toContain('hunter2secret');
+
+      // The marker leaves through the early-returning branch, which owns the tail rows
+      // itself. Asserted so the fix cannot trade a missing `AdditionalInfo` row for a
+      // missing `Cause` and `Stack`.
+      expect(rendered).toContain('root cause');
+      expect(rendered).toContain('Stack');
+    });
+
     it('should not throw when the stack accessor throws', () => {
       const error = new Error('boom');
 

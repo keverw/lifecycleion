@@ -136,6 +136,9 @@ function readOwnSensitivePaths(
   return parsed;
 }
 
+/** Emitted wherever a value refuses to be read, so a refusal never reads as an absence. */
+const UNRENDERABLE_MARKER = '<unrenderable>';
+
 /**
  * `additionalInfo` as something the paths can actually address.
  *
@@ -157,8 +160,12 @@ function readOwnSensitivePaths(
  * rendered at all, though the flat `for...in` this replaced printed it. Forwarding the
  * inherited keys as own ones puts them back where both the walk and the table can see
  * them, which is the whole point of the bag.
+ *
+ * @returns The bag, or {@link UNRENDERABLE_MARKER} when the value refuses to be
+ *   enumerated at all, which the caller renders as the marker rather than as an absent
+ *   `additionalInfo`.
  */
-function asAddressableBag(info: object): object {
+function asAddressableBag(info: object): object | string {
   if (isPlainContainer(info)) {
     return info;
   }
@@ -174,9 +181,12 @@ function asAddressableBag(info: object): object {
       keys.push(key);
     }
   } catch {
-    // A `Proxy` can throw from its `ownKeys` trap. Nothing can be addressed, and nothing
-    // can be rendered either, so an empty bag is the whole answer.
-    return {};
+    // A `Proxy` can throw from its `ownKeys` trap. Said, not swallowed: an empty bag here
+    // rendered the error as one that simply carried no `additionalInfo`, which is a
+    // different and much more reassuring claim than "its keys could not be read" - the
+    // same silent collapse the plain-container branch below refuses, and that
+    // `renderContainer`, `maskValueDeep`, `redactPathsInner` and `snapshotValue` all mark.
+    return UNRENDERABLE_MARKER;
   }
 
   const bag: Record<string, unknown> = {};
@@ -456,12 +466,16 @@ function errorToASCIITable(
         // nested error, and a derived value each rendered in the clear here while the
         // logger masked them. Masking first leaves one walk to be right, and the renderer
         // with nothing to decide.
-        const masked = redactAddressedValue(
-          asAddressableBag(additionalInfo as object),
-          sensitivePaths,
-          redactFunction,
-          report,
-        );
+        const bag = asAddressableBag(additionalInfo as object);
+
+        // A bag that could not be enumerated at all carries the marker instead, and falls
+        // through to the non-object branch below, which renders it as the `AdditionalInfo`
+        // value. Nothing is skipped by not walking it: there is nothing readable under it
+        // to mask, which is exactly what the marker says.
+        const masked =
+          typeof bag === 'string'
+            ? bag
+            : redactAddressedValue(bag, sensitivePaths, redactFunction, report);
 
         // The walk can fail the whole value closed, and what it hands back then is the
         // marker string rather than a bag of keys. Enumerating that walks the *string*,
