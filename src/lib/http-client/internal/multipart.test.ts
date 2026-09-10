@@ -652,7 +652,11 @@ describe('serializeMultipartFormData', () => {
     expect(callbackOrder).toEqual(writeOrder);
   });
 
-  test('resolves when req emits close during backpressure wait', async () => {
+  test('rejects when req emits close during backpressure wait', async () => {
+    // It used to resolve, and that reported parts as written when the stream had not
+    // accepted them - leaving a multipart body without its closing `--boundary--`
+    // delimiter while this side called the upload a success. A truncated write is a failed
+    // write; the adapter turns the rejection into a transport error.
     const fd = new FormData();
     fd.append('field', 'value');
 
@@ -674,7 +678,10 @@ describe('serializeMultipartFormData', () => {
     await Promise.resolve();
 
     req.emit('close');
-    await writePromise;
+
+    expect(writePromise).rejects.toThrow(
+      'Request stream closed before the body was fully written',
+    );
   });
 
   test('rejects when req emits error during backpressure wait', async () => {
@@ -710,7 +717,11 @@ describe('serializeMultipartFormData', () => {
     expect(caught?.message).toBe('socket hang up');
   });
 
-  test('resolves immediately when req.destroyed at time drain listeners are registered', async () => {
+  test('rejects immediately when req.destroyed at time drain listeners are registered', async () => {
+    // It used to resolve, and that reported parts as written when the stream had not
+    // accepted them - leaving a multipart body without its closing `--boundary--`
+    // delimiter while this side called the upload a success. A truncated write is a failed
+    // write; the adapter turns the rejection into a transport error.
     const fd = new FormData();
     fd.append('field', 'value');
 
@@ -738,8 +749,13 @@ describe('serializeMultipartFormData', () => {
     };
 
     const boundary = generateMultipartBoundary();
-    // Should complete without hanging — destroyed guard calls onClose() immediately
-    await serializeMultipartFormData(fd, req, boundary);
+
+    // Settles without hanging - the destroyed guard calls `onClose()` immediately - and
+    // settles as a failure, because a write into an already-destroyed stream delivered
+    // nothing.
+    expect(serializeMultipartFormData(fd, req, boundary)).rejects.toThrow(
+      'Request stream closed before the body was fully written',
+    );
   });
 
   test('cancels reader when req.destroyed flips between reader.read() result and write()', async () => {

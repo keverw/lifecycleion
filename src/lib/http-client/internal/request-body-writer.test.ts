@@ -198,7 +198,14 @@ describe('writeRequestBodyChunked', () => {
     expect(callbackOrder).toEqual([0, 1]);
   });
 
-  test('resolves if req emits close while waiting for drain', async () => {
+  test('rejects if req emits close while waiting for drain', async () => {
+    // It used to resolve, and that reported an upload that had not happened. Even here -
+    // where the first chunk's callback fired, so those bytes were accepted - the second
+    // chunk is never written, and `node-adapter` follows a resolve with `req.end()`, so a
+    // truncated body is finalized as though it were complete. A truncated write is a
+    // failed write; the adapter's `.catch` already turns it into a transport error and
+    // deliberately declines to veto a retry, on the grounds that delivery is unproven
+    // rather than disproven.
     const data = Buffer.alloc(REQUEST_BODY_CHUNK_SIZE * 2, 0xaa);
     const req = new EventEmitter() as EventEmitter &
       RequestBodyWritable & { destroyed: boolean };
@@ -217,7 +224,10 @@ describe('writeRequestBodyChunked', () => {
     await Promise.resolve();
 
     req.emit('close');
-    await writePromise;
+
+    expect(writePromise).rejects.toThrow(
+      'Request stream closed before the body was fully written',
+    );
   });
 
   test('rejects if req emits error while waiting for drain', async () => {

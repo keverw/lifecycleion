@@ -99,7 +99,23 @@ function writeChunkWithBackpressure(
 
       isSettled = true;
       cleanup();
-      resolve();
+
+      // Rejects, and that is the whole point of this branch. A stream that closes while a
+      // chunk is still waiting for its callback or its drain has *not* accepted the chunk,
+      // so resolving reported an upload that never happened: the loop above exits on
+      // `!req.destroyed`, `node-adapter` follows with `req.end()`, and a truncated body is
+      // finalized as though it had been sent in full. Measured on a writable that applies
+      // backpressure and then closes: nought bytes accepted, promise resolved, no error
+      // anywhere.
+      //
+      // Usually a real `ClientRequest` also emits `'error'` and the adapter turns that into
+      // a transport failure - but not always, and this file's own neighbour says so:
+      // "some runtimes (e.g. Bun) do not emit 'error' on req.destroy()". In exactly that
+      // case this listener is the only one that runs, so it has to be the one that tells
+      // the truth. A truncated write is a failed write.
+      reject(
+        new Error('Request stream closed before the body was fully written'),
+      );
     };
 
     const onError = (error: Error): void => {

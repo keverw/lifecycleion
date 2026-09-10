@@ -297,7 +297,16 @@ export async function serializeMultipartFormData(
 
       const onClose = (): void => {
         cleanup();
-        resolve();
+
+        // Rejects, for the reason `writeRequestBodyChunked`'s does: a stream that closes
+        // mid-write has not accepted what it was given, and resolving reported a part as
+        // written when it was not. Worse here than there, because the body is assembled
+        // across many writes - a close partway through leaves the multipart payload
+        // without its closing `--boundary--` delimiter, and the server is handed a body it
+        // will read as truncated while this side called it a success.
+        reject(
+          new Error('Request stream closed before the body was fully written'),
+        );
       };
 
       const onError = (error: Error): void => {
