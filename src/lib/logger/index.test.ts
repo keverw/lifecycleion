@@ -2527,3 +2527,117 @@ describe('Logger - where an unhandled render failure goes', () => {
     expect(seen[0]).toContain('u.token');
   });
 });
+describe('Logger - a failure handler may never raise a failure of its own', () => {
+  // One home for a rule that spans four separate callbacks and was only ever asserted a
+  // channel at a time. Every one of them runs on a path whose whole job is to keep a
+  // failure from escaping - `handleLog`'s synchronous `catch`, a sink's `result.catch`, a
+  // stream `'error'` handler - so a throw out of a handler would replace the failure being
+  // reported with a second one, raised from the reporter. And the rung beneath is
+  // `reportToConsole`, so it holds even when `console.error` is itself broken: a closed
+  // stdout during shutdown is exactly when these run.
+  const explode = (): never => {
+    throw new Error('handler exploded');
+  };
+
+  const hostile = (): Record<string, unknown> => {
+    const bag: Record<string, unknown> = {};
+
+    Object.defineProperty(bag, 'token', {
+      get() {
+        throw new Error('accessor refused');
+      },
+      enumerable: true,
+    });
+
+    return bag;
+  };
+
+  const cases: [string, () => void][] = [
+    [
+      'onSinkError',
+      () => {
+        new Logger({
+          sinks: [
+            {
+              write() {
+                throw new Error('sink refused');
+              },
+            },
+          ],
+          callProcessExit: false,
+          onSinkError: explode,
+        }).info('x');
+      },
+    ],
+    [
+      'onEventHandlerError',
+      () => {
+        const logger = new Logger({
+          sinks: [new ArraySink()],
+          callProcessExit: false,
+          onEventHandlerError: explode,
+        });
+
+        logger.on('logger', () => {
+          throw new Error('handler refused');
+        });
+        logger.info('x');
+      },
+    ],
+    [
+      'onRedactionError',
+      () => {
+        new Logger({
+          sinks: [new ArraySink()],
+          callProcessExit: false,
+          onRedactionError: explode,
+        }).info('x', {
+          params: { u: hostile() },
+          redactedKeys: ['u.token'],
+        });
+      },
+    ],
+    [
+      'onRenderError',
+      () => {
+        new Logger({
+          sinks: [new ArraySink()],
+          callProcessExit: false,
+          onRenderError: explode,
+        }).info('{{u}}', { params: { u: hostile() } });
+      },
+    ],
+  ];
+
+  for (const [name, trigger] of cases) {
+    test(`${name} that throws does not escape, and falls to the console`, () => {
+      const consoleError = console.error;
+      const lines: string[] = [];
+
+      console.error = (...args: unknown[]): void => {
+        lines.push(args.map((arg) => String(arg)).join(' '));
+      };
+
+      try {
+        expect(trigger).not.toThrow();
+        expect(lines.length).toBeGreaterThan(0);
+      } finally {
+        console.error = consoleError;
+      }
+    });
+
+    test(`${name} that throws survives a broken console too`, () => {
+      const consoleError = console.error;
+
+      console.error = (): never => {
+        throw new Error('stdout gone');
+      };
+
+      try {
+        expect(trigger).not.toThrow();
+      } finally {
+        console.error = consoleError;
+      }
+    });
+  }
+});

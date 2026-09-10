@@ -1,4 +1,5 @@
 import { describeError, toError } from '../to-error';
+import { reportToConsole } from './report-to-console';
 import { reportToHost } from './report-to-host';
 
 /**
@@ -57,9 +58,11 @@ export type ReportFailure = (error: unknown, subject: string) => void;
  * rung is `reportToConsole`, and the normalization is guarded too.
  *
  * @param label   Names the operation in the console line - `'Redaction'`, `'Render'`.
- * @param handler Called with the first failure. Defaults to `console.error`. A handler
- *                that throws falls back to the console, as `onSinkError` does: a handler
- *                for failures must not be able to turn one into two.
+ * @param handler Called with the first failure. A handler that throws falls back to the
+ *                console - not to the channel below, which a handler's own failure is no
+ *                reason to reach for - as `onSinkError` does: a handler for failures must
+ *                not be able to turn one into two. With no handler at all, see the routing
+ *                above.
  */
 export function createFailureReporter(
   label: string,
@@ -91,7 +94,17 @@ export function createFailureReporter(
 
         return;
       } catch {
-        // Fall through to the console, as `handleSinkError` does for its own callback.
+        // The console, not the channel below - and the distinction is load-bearing. A
+        // handler that just threw is not an argument for broadcasting: reporting a
+        // handler's failure somewhere a logger might hear it is how one failure becomes a
+        // cycle, and the caller who set that handler has already said where they wanted
+        // these. The console is the rung that cannot re-enter anything, and it is what
+        // `handleSinkError` and `handleEventHandlerFailure` fall to for the same reason.
+        reportToConsole(
+          `${label} failed for ${subject}: ${describeError(failure)}`,
+        );
+
+        return;
       }
     }
 
