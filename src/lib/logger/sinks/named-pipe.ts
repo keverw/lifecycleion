@@ -4,7 +4,7 @@ import * as os from 'os';
 import type { LogEntry, LogSink } from '../types';
 import { describeError, toError } from '../../to-error';
 import { renderOnce, type RenderedLine } from './internal/rendered-line';
-import { reportToConsole } from '../../internal/report-to-console';
+import { reportThroughHandler } from '../../internal/failure-reporter';
 
 /**
  * Types of pipe errors that can occur
@@ -423,26 +423,20 @@ export class NamedPipeSink implements LogSink {
     // an `Error`, and `onError` declares one.
     const failure = toError(error);
 
-    if (this.onError) {
-      try {
-        this.onError(errorType, failure, this.pipePath);
-
-        return;
-      } catch {
-        // Fall through to the console, exactly as `FileSink` does for its own callback.
-        // This must not escape: `handleError` is called from a Node stream 'error'
-        // handler, where a throw is an uncaught exception and ends the process, and
-        // from `initializePipe`, whose promise the constructor starts without a
-        // `.catch`, where it would become an unhandled rejection from a constructor.
-      }
-    }
-
-    // Default: log to console, through the guarded rung. The requirement stated above for
-    // `onError` applies just as much to the fall-back beneath it: `console.error` throws
-    // on a broken stdout, and this runs from a Node stream `'error'` handler - where that
-    // is an uncaught exception - and from `initializePipe`'s uncaught promise.
-    reportToConsole(
-      `NamedPipeSink error (${errorType}): ${describeError(failure)}`,
+    // The shared rung, so this channel cannot drift from the logger's four. Nothing here
+    // may escape: `handleError` runs from a Node stream `'error'` handler, where a throw is
+    // an uncaught exception that ends the process, and from `initializePipe`, whose promise
+    // the constructor starts without a `.catch`, where it would be an unhandled rejection
+    // raised out of a constructor. The console rung is guarded for the same reason -
+    // `console.error` throws on a broken stdout, which is exactly the condition a pipe sink
+    // fails under.
+    reportThroughHandler(
+      this.onError === undefined
+        ? undefined
+        : () => {
+            this.onError?.(errorType, failure, this.pipePath);
+          },
+      () => `NamedPipeSink error (${errorType}): ${describeError(failure)}`,
     );
   }
 }

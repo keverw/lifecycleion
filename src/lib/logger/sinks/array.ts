@@ -9,8 +9,7 @@ import {
   type RenderErrorHandler,
   type ReportRenderFailure,
 } from '../../internal/render-reporter';
-import { reportToConsole } from '../../internal/report-to-console';
-import { describeError } from '../../to-error';
+import { consoleFailureHandler } from '../../internal/failure-reporter';
 import type { ArrayLogTransformer, LogEntry, LogSink } from '../types';
 
 /**
@@ -198,12 +197,7 @@ export class ArraySink implements LogSink {
               // would log, reaching this sink again. The console is the only rung that
               // cannot re-enter what is already running.
               createRenderReporter(
-                this.onRenderError ??
-                  ((error, path): void => {
-                    reportToConsole(
-                      `Render failed for ${path}: ${describeError(error)}`,
-                    );
-                  }),
+                this.onRenderError ?? consoleFailureHandler('Render'),
               ),
             ),
           };

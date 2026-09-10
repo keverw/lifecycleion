@@ -50,9 +50,20 @@ export function reportThroughHandler(
       invoke();
 
       return;
-    } catch {
+    } catch (handlerError) {
+      // Both failures, not one. The handler's own throw is the news - it means the channel
+      // the caller chose is broken and every later report will be lost the same way - but
+      // the failure it was told about is what they actually needed, and reporting only the
+      // handler's error would swallow it. `FileSink` said one and `Logger` said the other;
+      // saying both is what neither did.
+      //
       // The console, never a channel a logger might hear: a handler that just threw is no
       // argument for reaching past the caller for a louder rung.
+      reportToConsole(
+        `${line()} (the failure handler also threw: ${describeError(handlerError)})`,
+      );
+
+      return;
     }
   }
 
@@ -103,6 +114,21 @@ export function reportThroughHandler(
  *                not be able to turn one into two. With no handler at all, see the routing
  *                above.
  */
+/**
+ * A handler that writes to the console, for a caller that must always supply one.
+ *
+ * Anything running *inside* a log call has to pass a handler rather than leave the default
+ * routing to decide: the no-handler rung reports on the global `'error'` channel, a
+ * listening logger records what it hears, and logging renders, redacts and writes to sinks
+ * - which is what just failed. `Logger` and `ArraySink` both need this, and both had the
+ * same four lines written out.
+ */
+export function consoleFailureHandler(label: string): FailureHandler {
+  return (error: Error, subject: string): void => {
+    reportToConsole(`${label} failed for ${subject}: ${describeError(error)}`);
+  };
+}
+
 export function createFailureReporter(
   label: string,
   handler?: FailureHandler,

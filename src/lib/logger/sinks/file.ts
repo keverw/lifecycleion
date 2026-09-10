@@ -1,7 +1,7 @@
 import fs, { promises as fsPromises } from 'fs';
 import { describeError, toError } from '../../to-error';
 import { renderOnce, type RenderedLine } from './internal/rendered-line';
-import { reportToConsole } from '../../internal/report-to-console';
+import { reportThroughHandler } from '../../internal/failure-reporter';
 import type { LogEntry, LogSink } from '../types';
 import { LogLevel, getLogLevel } from '../types';
 
@@ -362,25 +362,31 @@ export class FileSink implements LogSink {
             queuedEntry.formatError === undefined &&
             queuedEntry.attempts < this.maxRetries;
 
-          // Call error callback if provided
-          if (this.onError) {
-            try {
-              this.onError(
-                err,
-                queuedEntry.entry,
-                queuedEntry.attempts + 1,
-                willRetry,
-              );
-            } catch (callbackError) {
-              // Fall through to the console, as `NamedPipeSink.handleError` does for its
-              // own callback. Swallowing it lost both failures at once: the write error
-              // the callback was told about, and the callback's own throw - so a sink
-              // that could not write anything reported nothing anywhere.
-              reportToConsole(
-                `FileSink onError callback failed: ${describeError(callbackError)}`,
-                err,
-              );
-            }
+          // The shared rung, which also closes a gap this had and `NamedPipeSink` did
+          // not: the console line lived *inside* the `catch` for a throwing callback, so
+          // a sink with no `onError` at all reported a failed write nowhere. A file sink
+          // that cannot write - a full disk, a directory that went away - said so only
+          // through `getHealth()`, if anyone happened to poll it.
+          // The callback hears every attempt, which is its contract. The console rung only
+          // hears the last one: `maxRetries` defaults to 3, so a sink that cannot write
+          // would otherwise print four lines for every entry, and a disk that filled up
+          // under a logging loop turns that into the flood the fallback is supposed to
+          // rescue you from. One line per entry actually lost says the same thing.
+          if (this.onError !== undefined || !willRetry) {
+            reportThroughHandler(
+              this.onError === undefined
+                ? undefined
+                : () => {
+                    this.onError?.(
+                      err,
+                      queuedEntry.entry,
+                      queuedEntry.attempts + 1,
+                      willRetry,
+                    );
+                  },
+              () =>
+                `FileSink error writing to ${this.currentLogFile ?? this.logDir}: ${describeError(err)}`,
+            );
           }
 
           if (willRetry) {
@@ -436,21 +442,19 @@ export class FileSink implements LogSink {
 
     this.lastError = failure;
 
-    if (this.onError) {
-      try {
-        this.onError(
-          failure,
-          this.writeQueue[0]?.entry ?? ({} as LogEntry),
-          0,
-          false,
-        );
-      } catch (callbackError) {
-        reportToConsole(
-          `FileSink onError callback failed: ${describeError(callbackError)}`,
-          failure,
-        );
-      }
-    }
+    reportThroughHandler(
+      this.onError === undefined
+        ? undefined
+        : () => {
+            this.onError?.(
+              failure,
+              this.writeQueue[0]?.entry ?? ({} as LogEntry),
+              0,
+              false,
+            );
+          },
+      () => describeError(failure),
+    );
   }
 
   private async writeEntry(queued: QueuedEntry): Promise<void> {

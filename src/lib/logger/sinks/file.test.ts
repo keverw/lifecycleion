@@ -945,7 +945,7 @@ describe('FileSink', () => {
       expect(attempts).toEqual([1, 2, 3]);
 
       const reports = captured.filter((line) =>
-        line.includes('FileSink onError callback failed'),
+        line.includes('the failure handler also threw'),
       );
 
       expect(reports.length).toBe(3);

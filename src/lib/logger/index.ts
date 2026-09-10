@@ -11,7 +11,10 @@ import { isPromise } from '../is-promise';
 import { describeError, isErrorValue, toError } from '../to-error';
 import { readMember } from '../internal/read-member';
 import { reportToConsole } from '../internal/report-to-console';
-import { reportThroughHandler } from '../internal/failure-reporter';
+import {
+  consoleFailureHandler,
+  reportThroughHandler,
+} from '../internal/failure-reporter';
 import {
   createRedactionReporter,
   type RedactionErrorHandler,
@@ -1119,11 +1122,7 @@ export class Logger extends EventEmitter {
   private reportFailureToConsole(
     label: string,
   ): (error: Error, subject: string) => void {
-    return (error: Error, subject: string): void => {
-      reportToConsole(
-        `${label} failed for ${subject}: ${describeError(error)}`,
-      );
-    };
+    return consoleFailureHandler(label);
   }
 
   /**
