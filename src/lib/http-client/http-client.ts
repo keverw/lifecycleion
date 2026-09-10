@@ -1292,6 +1292,14 @@ export class BaseHTTPClient {
         // `status: 0` - a request killed by its own telemetry - with nothing reported
         // anywhere. It also covers a hook that returns a rejected promise, which no local
         // `try`/`catch` would.
+        // Only when one was supplied. `safeHandleCallback` reports a non-function as a
+        // failure - correctly, for a caller who meant to pass one - but an absent optional
+        // hook is not a mistake, and reporting it would put two spurious lines on the
+        // global channel for every request anyone ever makes.
+        if (options.onAttemptEnd === undefined) {
+          return;
+        }
+
         safeHandleCallback('onAttemptEnd', options.onAttemptEnd, {
           attemptNumber,
           isRetry,
@@ -1320,16 +1328,19 @@ export class BaseHTTPClient {
       callbacks.setAttemptCount(attemptNumber);
       callbacks.setNextRetryDelayMS(null);
       callbacks.setNextRetryAt(null);
-      // Observational only; see `onAttemptEnd` above for why it is guarded.
-      safeHandleCallback('onAttemptStart', options.onAttemptStart, {
-        attemptNumber,
-        isRetry,
-        requestID,
-        initialURL,
-        ...(hopContext
-          ? { hopNumber: hopContext.hopNumber, redirect: hopContext.redirect }
-          : {}),
-      });
+      // Observational only; see `onAttemptEnd` above for why it is guarded, and why an
+      // absent hook is skipped rather than handed over.
+      if (options.onAttemptStart !== undefined) {
+        safeHandleCallback('onAttemptStart', options.onAttemptStart, {
+          attemptNumber,
+          isRetry,
+          requestID,
+          initialURL,
+          ...(hopContext
+            ? { hopNumber: hopContext.hopNumber, redirect: hopContext.redirect }
+            : {}),
+        });
+      }
 
       // RetryPolicy only tracks exhaustion after the initial try is registered (retry-utils).
       if (attemptNumber === 1 && policy) {

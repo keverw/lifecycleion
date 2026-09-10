@@ -1130,7 +1130,7 @@ expect(response.body).toEqual({ id: '1', name: 'Alice' });
 ```typescript
 interface MockAdapterConfig {
   defaultDelay?: number; // Milliseconds delay added to all responses
-  onError?: (
+  onHandlerError?: (
     req: MockRequest,
     error: unknown,
   ) => MockResponse | Promise<MockResponse>;

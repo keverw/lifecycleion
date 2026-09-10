@@ -169,8 +169,15 @@ export interface MockAdapterConfig {
    * the error response — similar to Fastify's `setErrorHandler`. Falls back to
    * the default `{ status: 500, body: { message: 'Internal Server Error' } }`
    * if this handler is not set or if it also throws.
+   *
+   * Named `onHandlerError` rather than `onError` because it is not a reporting
+   * callback, which is what `onError` means everywhere else in this library -
+   * `FileSink.onError` and `NamedPipeSink.onError` are handed a failure and
+   * return `void`. This one *produces the response*, so it decides the outcome
+   * rather than observing it, and the shared name invited exactly the wrong
+   * expectation. Its own failure is reported on the global `'error'` channel.
    */
-  onError?: (
+  onHandlerError?: (
     req: MockRequest,
     error: unknown,
   ) => MockResponse | Promise<MockResponse>;
@@ -313,8 +320,8 @@ export class MockAdapter implements HTTPAdapter {
     // To customize the 404 body, register a wildcard route:
     //   adapter.routes.get('/*', (req) => ({ status: 404, body: { error: '...' } }))
     //
-    // While if a handler throws → onError (if set),
-    // then falls back to default 500 if onError is unset or also throws.
+    // While if a handler throws -> onHandlerError (if set),
+    // then falls back to default 500 if onHandlerError is unset or also throws.
 
     let mockResponse: MockResponse;
 
@@ -335,10 +342,10 @@ export class MockAdapter implements HTTPAdapter {
           throwAbortError();
         }
 
-        if (this.config.onError) {
+        if (this.config.onHandlerError) {
           try {
             mockResponse = await awaitAbortable(
-              this.config.onError(mockRequest, handlerError),
+              this.config.onHandlerError(mockRequest, handlerError),
               request.signal,
             );
           } catch (error) {
@@ -348,10 +355,10 @@ export class MockAdapter implements HTTPAdapter {
 
             // Said, not swallowed. The 500 is the right recovery - it mirrors what a real
             // server does when its own error handler fails - but it is also exactly what a
-            // caller who configured no `onError` at all gets, so a broken `onError` was
+            // caller who configured no `onHandlerError` at all gets, so a broken `onHandlerError` was
             // indistinguishable from an absent one. In a test suite, which is the only
             // place this adapter runs, that is precisely the thing you want to be told.
-            reportCallbackError('MockAdapter onError', error);
+            reportCallbackError('MockAdapter onHandlerError', error);
 
             mockResponse = {
               status: 500,
@@ -812,7 +819,7 @@ function awaitAbortable<T>(
 
   return new Promise<T>((resolve, reject) => {
     // Cancellation should reject immediately with AbortError, even if the
-    // wrapped handler/onError promise is still pending.
+    // wrapped handler/onHandlerError promise is still pending.
     const onAbort = () => {
       signal.removeEventListener('abort', onAbort);
       reject(new InternalMockAbortError());
