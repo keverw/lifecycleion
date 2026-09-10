@@ -133,6 +133,30 @@ console.log(template({ name: 'Alice' })); // Outputs: "Hello, Alice!"
 console.log(template({})); // Outputs: "Hello, (???)!"
 ```
 
+### Telling an unreadable placeholder from an absent one
+
+Both render the fallback. `{{user.token}}` on an object whose `token` accessor throws
+produces exactly what a typo produces, and until `onRenderError` existed the two were
+indistinguishable:
+
+```typescript
+CurlyBrackets('{{missing.key}} {{user.token}}', { user: hostile }, '(null)', {
+  onRenderError: (error, path) => {
+    // fires once, for 'user.token' - the typo reports nothing, because nothing failed
+  },
+});
+```
+
+The path is rooted at the placeholder as written, so a template with many of them still
+says which one refused. It fires at most once per render of the template - not once per
+placeholder - and defaults to discarding.
+
+The cause is never written into the output: it comes from your own getter and may carry
+the value it was hiding, and the rendered string is going wherever you send it.
+
+`compileTemplate` takes the same options as its third argument, and each render of a
+compiled template gets its own budget.
+
 ### Escaping Utility
 
 You can also use the provided utility to escape brackets in a string:

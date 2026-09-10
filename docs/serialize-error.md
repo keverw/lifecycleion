@@ -40,6 +40,32 @@ throw restored;
 - All own properties from Error subclasses (`errCode`, `statusCode`, whatever)
 - Nested errors are recursively serialized
 
+## When a value cannot be serialized
+
+Serializing degrades rather than failing. A value that refuses to be read - a throwing
+accessor, a revoked `Proxy` - becomes `<unserializable>` and the rest of the payload
+survives, which matters here more than anywhere: this runs at an IPC or RPC boundary,
+usually while already reporting a failure, so a second failure raised here would replace
+the one being reported.
+
+Pass `onRenderError` to receive the cause:
+
+```typescript
+const serialized = serializeError(error, {
+  onRenderError: (cause, path) => {
+    // path:  '<error>.context.token' - structural, never a value
+    // cause: the getter's own throw
+  },
+});
+```
+
+It fires at most once per call and defaults to discarding, so an ordinary
+`serializeError(error)` costs nothing.
+
+**The cause never enters the payload.** It comes from the caller's own getter and may
+carry the value it was hiding, and this object is about to cross a wire - so the marker
+goes in the payload and the cause goes to one handler that asked for it.
+
 ## API
 
 ### isErrorLike
