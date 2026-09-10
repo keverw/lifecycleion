@@ -340,17 +340,31 @@ export class CookieJar {
 
   /**
    * Restores a jar from serialized JSON.
+   *
+   * `setCookie` refuses a cookie with a missing or invalid domain and says so by returning
+   * `false`. This threw that answer away and returned `void`, so a persisted jar could come
+   * back short with nothing to say it had - and every other mutator on this class
+   * (`clear`, `clearExpiredCookies`, `setCookie`) reports what it did.
+   *
+   * @returns How many cookies were restored. Compare against `data.cookies.length` to learn
+   *          whether any were refused.
    */
-  public fromJSON(data: CookieJarJSON): void {
+  public fromJSON(data: CookieJarJSON): number {
     this.buckets.clear();
+
+    let restored = 0;
 
     for (const cookie of data.cookies) {
       if (cookie.expires && !(cookie.expires instanceof Date)) {
         cookie.expires = new Date(cookie.expires);
       }
 
-      this.setCookie(cookie);
+      if (this.setCookie(cookie)) {
+        restored++;
+      }
     }
+
+    return restored;
   }
 
   // --- Private helpers ---

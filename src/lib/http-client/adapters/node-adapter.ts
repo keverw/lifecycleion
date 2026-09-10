@@ -345,7 +345,11 @@ export class NodeAdapter implements HTTPAdapter {
             // best effort to close the newly created writable and stop here.
             if (streamAbort.signal.aborted) {
               if (writable && !isStreamResponseCancel(writable)) {
-                writable.destroy();
+                // `destroyWritableQuietly`, as the two sibling cleanup sites already use.
+                // A bare `destroy()` is caller code: a throw from it lands in the IIFE's
+                // `.catch` below, which calls `reject` on a promise the abort listener has
+                // already settled - a no-op - so the cleanup silently did not happen.
+                destroyWritableQuietly(writable);
               }
 
               return;

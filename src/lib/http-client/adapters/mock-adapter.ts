@@ -29,6 +29,7 @@ import type {
 // coerced text. See the 1.0.0 changelog entry: "HTTP adapters preserve non-`Error`
 // rejection values on `cause`."
 import { isErrorValue, toError as normalizeError } from '../../to-error';
+import { reportCallbackError } from '../../safe-handle-callback';
 import { readUnknownMember as readObjectMember } from '../../internal/read-member';
 
 export interface MockFormData {
@@ -329,6 +330,13 @@ export class MockAdapter implements HTTPAdapter {
             if (isInternalAbortError(error)) {
               throwAbortError();
             }
+
+            // Said, not swallowed. The 500 is the right recovery - it mirrors what a real
+            // server does when its own error handler fails - but it is also exactly what a
+            // caller who configured no `onError` at all gets, so a broken `onError` was
+            // indistinguishable from an absent one. In a test suite, which is the only
+            // place this adapter runs, that is precisely the thing you want to be told.
+            reportCallbackError('MockAdapter onError', error);
 
             mockResponse = {
               status: 500,

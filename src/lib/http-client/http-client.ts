@@ -255,24 +255,36 @@ export class BaseHTTPClient {
 
   // --- Cancellation ---
 
-  public cancel(requestID: string, reason?: string): void {
-    this._tracker.cancel(requestID, reason);
+  /**
+   * Cancel one in-flight request by id.
+   *
+   * @returns How many requests were cancelled - `1`, or `0` when no request with that id
+   *          was in flight. The tracker has always known this and these wrappers used to
+   *          throw the answer away, so `cancel('typo')` was a silent no-op a caller could
+   *          only detect by calling `listRequests()` first.
+   */
+  public cancel(requestID: string, reason?: string): number {
+    return this._tracker.cancel(requestID, reason);
   }
 
-  public cancelAll(reason?: string): void {
-    this._tracker.cancelAll(reason);
+  /** @returns How many requests were cancelled. */
+  public cancelAll(reason?: string): number {
+    return this._tracker.cancelAll(reason);
   }
 
-  public cancelOwn(reason?: string): void {
-    this._tracker.cancelOwn(this._clientID, reason);
+  /** @returns How many requests were cancelled. */
+  public cancelOwn(reason?: string): number {
+    return this._tracker.cancelOwn(this._clientID, reason);
   }
 
-  public cancelAllWithLabel(label: string, reason?: string): void {
-    this._tracker.cancelAllWithLabel(label, reason);
+  /** @returns How many requests were cancelled. */
+  public cancelAllWithLabel(label: string, reason?: string): number {
+    return this._tracker.cancelAllWithLabel(label, reason);
   }
 
-  public cancelOwnWithLabel(label: string, reason?: string): void {
-    this._tracker.cancelOwnWithLabel(this._clientID, label, reason);
+  /** @returns How many requests were cancelled. */
+  public cancelOwnWithLabel(label: string, reason?: string): number {
+    return this._tracker.cancelOwnWithLabel(this._clientID, label, reason);
   }
 
   // --- Request inspection ---

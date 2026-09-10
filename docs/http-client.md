@@ -721,7 +721,9 @@ jar.getStoredDomains(); // [{ domain, count }]
 
 // Serialization
 const data = jar.toJSON();
-jar.fromJSON(data); // Clears existing cookies first, then loads from the serialized snapshot
+const restored = jar.fromJSON(data); // Clears existing cookies first, then loads from the snapshot
+// `fromJSON` returns how many cookies it actually restored. A cookie with a missing or
+// invalid domain is refused, so compare against `data.cookies.length` to detect drops.
 ```
 
 ## Redirect Handling
@@ -794,6 +796,15 @@ client.cancel(builder.requestID);
 client.cancel(builder.requestID, 'shutdown');
 ```
 
+All five cancel methods return **how many requests they cancelled**, so a `cancel()` that
+matched nothing is visible rather than a silent no-op:
+
+```typescript
+if (client.cancel(someID) === 0) {
+  // no request with that id was in flight - already finished, or a stale id
+}
+```
+
 ### Tracker-Wide Cancel
 
 ```typescript
@@ -801,6 +812,9 @@ client.cancelAll(); // Cancel every tracked request (this client + all sub-clien
 client.cancelOwn(); // Cancel only requests from this exact client instance (not sub-clients)
 client.cancelAllWithLabel('my-label'); // Cancel all requests with label (this client + sub-clients)
 client.cancelOwnWithLabel('my-label'); // Cancel own requests with label (not sub-clients)
+
+// Each returns the number cancelled:
+const stopped = client.cancelAllWithLabel('my-label');
 
 // All accept an optional reason string surfaced on HTTPClientError.cancelReason:
 client.cancelAll('app_shutdown');
