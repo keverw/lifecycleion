@@ -679,7 +679,15 @@ describe('serializeMultipartFormData', () => {
 
     req.emit('close');
 
-    expect(writePromise).rejects.toThrow(
+    let caught: Error | undefined;
+
+    try {
+      await writePromise;
+    } catch (error) {
+      caught = error as Error;
+    }
+
+    expect(caught?.message).toBe(
       'Request stream closed before the body was fully written',
     );
   });
@@ -753,7 +761,15 @@ describe('serializeMultipartFormData', () => {
     // Settles without hanging - the destroyed guard calls `onClose()` immediately - and
     // settles as a failure, because a write into an already-destroyed stream delivered
     // nothing.
-    expect(serializeMultipartFormData(fd, req, boundary)).rejects.toThrow(
+    let caught: Error | undefined;
+
+    try {
+      await serializeMultipartFormData(fd, req, boundary);
+    } catch (error) {
+      caught = error as Error;
+    }
+
+    expect(caught?.message).toBe(
       'Request stream closed before the body was fully written',
     );
   });

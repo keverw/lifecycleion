@@ -225,7 +225,15 @@ describe('writeRequestBodyChunked', () => {
 
     req.emit('close');
 
-    expect(writePromise).rejects.toThrow(
+    let caught: Error | undefined;
+
+    try {
+      await writePromise;
+    } catch (error) {
+      caught = error as Error;
+    }
+
+    expect(caught?.message).toBe(
       'Request stream closed before the body was fully written',
     );
   });
