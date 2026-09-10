@@ -105,14 +105,44 @@ export interface ErrorToStringOptions {
  */
 const READ_THREW = Symbol('read-threw');
 
+/**
+ * A read that threw, carrying what it threw.
+ *
+ * The sentinel alone said only *that* the read failed, so the one caller that reports -
+ * the `additionalInfo` row - had nothing to hand over and synthesized a bare
+ * `Error('Value could not be read')`. `serializeError` reports the caller's real error for
+ * the identical input, and two sibling renderers giving different diagnostic quality for
+ * the same payload is the sort of inconsistency the marker vocabulary was unified to end.
+ */
+interface ReadFailure {
+  readonly kind: typeof READ_THREW;
+  readonly error: unknown;
+}
+
+function isReadFailure(value: unknown): value is ReadFailure {
+  // Guarded, because the thing being tested is often a *value* the caller supplied rather
+  // than one of these wrappers - and reading any property off a revoked `Proxy` throws.
+  // The bare `=== READ_THREW` identity test this replaces never touched the value, so the
+  // guard is what keeps the richer sentinel from being a downgrade.
+  try {
+    return (
+      typeof value === 'object' &&
+      value !== null &&
+      (value as ReadFailure).kind === READ_THREW
+    );
+  } catch {
+    return false;
+  }
+}
+
 function readMemberOrThrew(
   value: Record<string, unknown>,
   key: string,
 ): unknown {
   try {
     return value[key];
-  } catch {
-    return READ_THREW;
+  } catch (error) {
+    return { kind: READ_THREW, error } satisfies ReadFailure;
   }
 }
 
@@ -145,7 +175,7 @@ function readOwnSensitivePaths(
     return [];
   }
 
-  const parsed = parseRedactPaths(raw === READ_THREW ? undefined : raw);
+  const parsed = parseRedactPaths(isReadFailure(raw) ? undefined : raw);
 
   // Fails closed. A `sensitiveFieldNames` that is present but is not a usable list of
   // strings - a comma-joined string, a `Set`, a non-string entry, or an accessor that
@@ -370,10 +400,11 @@ function joinPath(...segments: string[]): string {
  * slot to put it in.
  */
 function reportUnrenderableValue(
+  error: unknown,
   path: string,
   reportRender: ReportRenderFailure,
 ): string {
-  reportRender(new Error('Value could not be read'), path);
+  reportRender(error, path);
 
   return UNRENDERABLE_VALUE;
 }
@@ -767,8 +798,9 @@ function errorToASCIITable(
 
           table.addRow(
             `AdditionalInfo.${key}`,
-            entryValue === READ_THREW
+            isReadFailure(entryValue)
               ? reportUnrenderableValue(
+                  entryValue.error,
                   joinPath(path, 'additionalInfo', key),
                   reportRender,
                 )

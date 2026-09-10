@@ -217,7 +217,14 @@ export default [
       ],
       '@typescript-eslint/no-import-type-side-effects': 'error',
       // General code quality rules
-      'no-console': 'warn',
+      // An error, not a warning: a warning does not fail CI, so a stray console call
+      // could land. The two places in the shipped library that legitimately write to the
+      // console - `internal/report-to-console.ts`, the guarded last rung every failure
+      // path funnels into, and `logger/sinks/console.ts`, whose whole purpose it is -
+      // carry per-line `eslint-disable-next-line` comments instead of a file-level
+      // exemption, so each call is justified individually and a *new* stray one in either
+      // file still fails.
+      'no-console': 'error',
       'no-debugger': 'error',
       'prefer-const': 'error',
       'no-var': 'error',

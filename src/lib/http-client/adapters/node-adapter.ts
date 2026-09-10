@@ -1,4 +1,5 @@
 import * as http from 'node:http';
+import { guardProgressCallback } from '../internal/progress';
 import * as https from 'node:https';
 import { urlToHttpOptions } from 'node:url';
 import type {
@@ -171,6 +172,20 @@ export class NodeAdapter implements HTTPAdapter {
   }
 
   public async send(request: AdapterRequest): Promise<AdapterResponse> {
+    // Guarded once, at the boundary, so every call site below is covered - including the
+    // ones handed to `streamResponseBody`, `writeRequestBodyChunked` and
+    // `serializeMultipartFormData`. Progress reporting is advisory and must not be able to
+    // change whether a request succeeded; a throwing callback used to propagate out and be
+    // classified as a transport failure. See `guardProgressCallback`.
+    const guardedUploadProgress = guardProgressCallback(
+      request.onUploadProgress,
+      'onUploadProgress',
+    );
+    const guardedDownloadProgress = guardProgressCallback(
+      request.onDownloadProgress,
+      'onDownloadProgress',
+    );
+
     const parsedURL = new URL(request.requestURL);
     const urlOptions = urlToHttpOptions(parsedURL);
     const isHTTPS = parsedURL.protocol === 'https:';
@@ -269,7 +284,7 @@ export class NodeAdapter implements HTTPAdapter {
           didFireUpload100 = true;
         }
 
-        request.onUploadProgress?.(event);
+        guardedUploadProgress?.(event);
       };
 
       // 0% upload progress before any bytes leave the process
@@ -394,7 +409,7 @@ export class NodeAdapter implements HTTPAdapter {
               res,
               writable,
               totalBytes,
-              request.onDownloadProgress,
+              guardedDownloadProgress,
             );
 
             if (streamResult === true) {
@@ -475,7 +490,7 @@ export class NodeAdapter implements HTTPAdapter {
               didFireDownload100 = true;
             }
 
-            request.onDownloadProgress?.({
+            guardedDownloadProgress?.({
               loaded: loadedBytes,
               // When total is unknown fall back to loaded so the event always
               // has a sensible non-zero total.
@@ -490,7 +505,7 @@ export class NodeAdapter implements HTTPAdapter {
             // Final 100% download event — skipped when the last `data` chunk
             // already reported it (Content-Length known, body filled exactly).
             if (!didFireDownload100) {
-              request.onDownloadProgress?.({
+              guardedDownloadProgress?.({
                 loaded: loadedBytes,
                 total: loadedBytes,
                 progress: 1,

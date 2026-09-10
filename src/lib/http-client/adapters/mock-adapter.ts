@@ -1,4 +1,5 @@
 import Router from 'find-my-way';
+import { guardProgressCallback } from '../internal/progress';
 import qs from 'qs';
 import { sleep } from '../../sleep';
 import { REDIRECT_STATUS_CODES } from '../consts';
@@ -234,6 +235,20 @@ export class MockAdapter implements HTTPAdapter {
   }
 
   public async send(request: AdapterRequest): Promise<AdapterResponse> {
+    // Guarded once, at the boundary, so every call site below is covered - including the
+    // ones handed to `streamResponseBody`, `writeRequestBodyChunked` and
+    // `serializeMultipartFormData`. Progress reporting is advisory and must not be able to
+    // change whether a request succeeded; a throwing callback used to propagate out and be
+    // classified as a transport failure. See `guardProgressCallback`.
+    const guardedUploadProgress = guardProgressCallback(
+      request.onUploadProgress,
+      'onUploadProgress',
+    );
+    const guardedDownloadProgress = guardProgressCallback(
+      request.onDownloadProgress,
+      'onDownloadProgress',
+    );
+
     const { requestURL, method, headers, body } = request;
     const materializedHeaders = materializeMockRequestHeaders(headers);
 
@@ -245,7 +260,7 @@ export class MockAdapter implements HTTPAdapter {
 
     // Signal 0% upload — upload is instant for mock, but we fire the event so
     // progress listeners see the same shape they would from FetchAdapter.
-    request.onUploadProgress?.({ loaded: 0, total: 0, progress: 0 });
+    guardedUploadProgress?.({ loaded: 0, total: 0, progress: 0 });
 
     // --- 2. Parse URL ---
     // Strip host so routes match on path only — same behavior regardless of
@@ -418,13 +433,13 @@ export class MockAdapter implements HTTPAdapter {
     const responseBody = streamErrorCode !== undefined ? null : intendedBody;
 
     // Signal upload complete, then report download size based on serialised body.
-    request.onUploadProgress?.({ loaded: 1, total: 1, progress: 1 });
+    guardedUploadProgress?.({ loaded: 1, total: 1, progress: 1 });
 
     // A simulated stream error reports no terminal download progress: real
     // adapters fail the body read before that point, so `progress: 1` here would
     // signal a completed download for a body that never arrived.
     if (streamErrorCode === undefined) {
-      request.onDownloadProgress?.({
+      guardedDownloadProgress?.({
         loaded: responseBody?.length ?? 0,
         total: responseBody?.length ?? 0,
         progress: 1,

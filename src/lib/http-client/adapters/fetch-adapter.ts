@@ -1,4 +1,5 @@
 import { extractFetchHeaders, resolveDetectedRedirectURL } from '../utils';
+import { guardProgressCallback } from '../internal/progress';
 import { isTLSCertificateError } from '../internal/tls-error-utils';
 import { REDIRECT_STATUS_CODES, RESPONSE_STREAM_ABORT_FLAG } from '../consts';
 import type {
@@ -29,10 +30,24 @@ export class FetchAdapter implements HTTPAdapter {
   }
 
   public async send(request: AdapterRequest): Promise<AdapterResponse> {
+    // Guarded once, at the boundary, so every call site below is covered - including the
+    // ones handed to `streamResponseBody`, `writeRequestBodyChunked` and
+    // `serializeMultipartFormData`. Progress reporting is advisory and must not be able to
+    // change whether a request succeeded; a throwing callback used to propagate out and be
+    // classified as a transport failure. See `guardProgressCallback`.
+    const guardedUploadProgress = guardProgressCallback(
+      request.onUploadProgress,
+      'onUploadProgress',
+    );
+    const guardedDownloadProgress = guardProgressCallback(
+      request.onDownloadProgress,
+      'onDownloadProgress',
+    );
+
     const { requestURL, method, headers, body, signal } = request;
 
     // Fire 0% upload progress
-    request.onUploadProgress?.({ loaded: 0, total: 0, progress: 0 });
+    guardedUploadProgress?.({ loaded: 0, total: 0, progress: 0 });
 
     let response: Response;
 
@@ -88,8 +103,8 @@ export class FetchAdapter implements HTTPAdapter {
       // Even though the client will classify this as redirect_disabled, the
       // browser completed the fetch operation. Emit terminal progress so the
       // browser adapters match the server/mock adapters' completion semantics.
-      request.onUploadProgress?.({ loaded: 1, total: 1, progress: 1 });
-      request.onDownloadProgress?.({ loaded: 0, total: 0, progress: 1 });
+      guardedUploadProgress?.({ loaded: 1, total: 1, progress: 1 });
+      guardedDownloadProgress?.({ loaded: 0, total: 0, progress: 1 });
 
       return {
         status: 0,
@@ -100,7 +115,7 @@ export class FetchAdapter implements HTTPAdapter {
     }
 
     // Fire 100% upload + download progress (fetch has no real per-chunk progress)
-    request.onUploadProgress?.({ loaded: 1, total: 1, progress: 1 });
+    guardedUploadProgress?.({ loaded: 1, total: 1, progress: 1 });
 
     const responseHeadersForBody = extractFetchHeaders(response.headers);
 
@@ -153,7 +168,7 @@ export class FetchAdapter implements HTTPAdapter {
       };
     }
 
-    request.onDownloadProgress?.({
+    guardedDownloadProgress?.({
       loaded: rawBody?.length ?? 0,
       total: rawBody?.length ?? 0,
       progress: 1,

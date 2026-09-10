@@ -1,4 +1,5 @@
 import { XHR_BROWSER_TIMEOUT_FLAG } from '../consts';
+import { guardProgressCallback } from '../internal/progress';
 import type {
   HTTPAdapter,
   AdapterRequest,
@@ -27,6 +28,20 @@ export class XHRAdapter implements HTTPAdapter {
   }
 
   public send(request: AdapterRequest): Promise<AdapterResponse> {
+    // Guarded once, at the boundary, so every call site below is covered - including the
+    // ones handed to `streamResponseBody`, `writeRequestBodyChunked` and
+    // `serializeMultipartFormData`. Progress reporting is advisory and must not be able to
+    // change whether a request succeeded; a throwing callback used to propagate out and be
+    // classified as a transport failure. See `guardProgressCallback`.
+    const guardedUploadProgress = guardProgressCallback(
+      request.onUploadProgress,
+      'onUploadProgress',
+    );
+    const guardedDownloadProgress = guardProgressCallback(
+      request.onDownloadProgress,
+      'onDownloadProgress',
+    );
+
     return new Promise((resolve, reject) => {
       const xhr = new XMLHttpRequest();
 
@@ -87,7 +102,7 @@ export class XHRAdapter implements HTTPAdapter {
       // Fire initial 0% upload progress before any bytes leave the browser,
       // mirroring the FetchAdapter pattern so callers see a consistent first
       // event regardless of adapter.
-      request.onUploadProgress?.({ loaded: 0, total: 0, progress: 0 });
+      guardedUploadProgress?.({ loaded: 0, total: 0, progress: 0 });
 
       // Real per-chunk upload progress — the main advantage over FetchAdapter,
       // which has no streaming upload and can only fire 0% then 100%.
@@ -109,7 +124,7 @@ export class XHRAdapter implements HTTPAdapter {
         uploadedBytes = Math.max(uploadedBytes, event.loaded);
         uploadTotalBytes = Math.max(uploadTotalBytes, event.total);
 
-        request.onUploadProgress?.({
+        guardedUploadProgress?.({
           loaded: event.loaded,
           total: event.total || 0,
           progress,
@@ -134,7 +149,7 @@ export class XHRAdapter implements HTTPAdapter {
         if (!didFireUpload100) {
           const finalLoaded = uploadedBytes > 0 ? uploadedBytes : 1;
           const finalTotal = uploadTotalBytes > 0 ? uploadTotalBytes : 1;
-          request.onUploadProgress?.({
+          guardedUploadProgress?.({
             loaded: finalLoaded,
             total: finalTotal,
             progress: 1,
@@ -165,7 +180,7 @@ export class XHRAdapter implements HTTPAdapter {
         downloadedBytes = Math.max(downloadedBytes, event.loaded);
         downloadTotalBytes = Math.max(downloadTotalBytes, event.total);
 
-        request.onDownloadProgress?.({
+        guardedDownloadProgress?.({
           loaded: event.loaded,
           total: event.total || 0,
           progress,
@@ -196,7 +211,7 @@ export class XHRAdapter implements HTTPAdapter {
           // emit terminal progress before returning the synthetic redirect
           // response.
           if (!didUploadComplete && !didFireUpload100) {
-            request.onUploadProgress?.({
+            guardedUploadProgress?.({
               loaded: uploadedBytes,
               total: uploadTotalBytes,
               progress: 1,
@@ -204,7 +219,7 @@ export class XHRAdapter implements HTTPAdapter {
           }
 
           if (!didFireDownload100) {
-            request.onDownloadProgress?.({
+            guardedDownloadProgress?.({
               loaded: downloadedBytes,
               total: downloadTotalBytes,
               progress: 1,
@@ -228,7 +243,7 @@ export class XHRAdapter implements HTTPAdapter {
         // skipped the event). Ensure callers always see a 100% upload event,
         // unless upload.progress already reported it.
         if (!didUploadComplete && !didFireUpload100) {
-          request.onUploadProgress?.({
+          guardedUploadProgress?.({
             loaded: uploadedBytes,
             total: uploadTotalBytes,
             progress: 1,
@@ -240,7 +255,7 @@ export class XHRAdapter implements HTTPAdapter {
         // Final 100% download progress — skip if a progress event already
         // fired exactly 100% (Content-Length known and final chunk completed it).
         if (!didFireDownload100) {
-          request.onDownloadProgress?.({
+          guardedDownloadProgress?.({
             loaded: body?.length ?? 0,
             total: body?.length ?? 0,
             progress: 1,
