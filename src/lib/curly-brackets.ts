@@ -1,11 +1,42 @@
 import { getPathParts } from './internal/path-utils';
 import { stringifyValue } from './stringify-value';
+import {
+  createRenderReporter,
+  NOOP_RENDER_REPORTER,
+  type RenderErrorHandler,
+} from './internal/render-reporter';
 
 export type TemplateFunction = (locals: Record<string, unknown>) => string;
 
+/** Options shared by {@link CurlyBrackets} and its compiled form. */
+export interface CurlyBracketsOptions {
+  /**
+   * Notified when a placeholder could not be resolved or rendered, so a `(null)` in the
+   * output leaves a diagnosis and not only a gap.
+   *
+   * An unresolvable path and an *unreadable* one produce the same `fallback`, and until
+   * this existed they were indistinguishable: `{{error.message}}` on an error whose
+   * `message` accessor throws rendered exactly like a typo. This is what tells them apart.
+   *
+   * Fires at most once per render. Defaults to discarding rather than to the console: a
+   * template resolving nothing is ordinary, and only a caller that asked for the causes
+   * should pay for them.
+   */
+  onRenderError?: RenderErrorHandler;
+}
+
 interface CurlyBracketsFunction {
-  (str?: string, locals?: Record<string, unknown>, fallback?: string): string;
-  compileTemplate: (str: string, fallback?: string) => TemplateFunction;
+  (
+    str?: string,
+    locals?: Record<string, unknown>,
+    fallback?: string,
+    options?: CurlyBracketsOptions,
+  ): string;
+  compileTemplate: (
+    str: string,
+    fallback?: string,
+    options?: CurlyBracketsOptions,
+  ) => TemplateFunction;
   escape: (str: string) => string;
 }
 
@@ -24,13 +55,14 @@ const CurlyBrackets: CurlyBracketsFunction = function (
   str: string = '',
   locals: Record<string, unknown> = {},
   fallback: string = '(null)',
+  options?: CurlyBracketsOptions,
 ): string {
   // Short-circuit if no brackets - no need to process
   if (!str.includes('{{')) {
     return str;
   }
 
-  const compiled = CurlyBrackets.compileTemplate(str, fallback);
+  const compiled = CurlyBrackets.compileTemplate(str, fallback, options);
 
   return compiled(locals);
 } as CurlyBracketsFunction;
@@ -48,8 +80,38 @@ const CurlyBrackets: CurlyBracketsFunction = function (
 CurlyBrackets.compileTemplate = function (
   str: string,
   fallback: string = '(null)',
+  options?: CurlyBracketsOptions,
 ): TemplateFunction {
   return (locals: Record<string, unknown>): string => {
+    // One reporter per render of the compiled template, not per compile: a compiled
+    // template is reused across calls, and a budget shared between them would report the
+    // first render's failure and stay silent for every render after it.
+    const report =
+      options?.onRenderError === undefined
+        ? NOOP_RENDER_REPORTER
+        : createRenderReporter(options.onRenderError);
+
+    // Forwarded into the shared reporter rather than handed over directly, and rooted at
+    // the placeholder rather than at the anonymous `<value>` a bare render reports.
+    //
+    // Two things this buys. `stringifyValue` builds a reporter of its own per call, so
+    // handing the caller's handler straight down would give every placeholder its own
+    // once-per-call budget - one report per broken placeholder, which is the flood the
+    // bound exists to prevent; routing them through `report` keeps it at one per render of
+    // the template. And a template has many placeholders, so `<value>.token` names the
+    // failure without naming which `{{...}}` produced it, which is most of what the caller
+    // needs to act.
+    const renderOptionsFor = (
+      placeholder: string,
+    ): { onRenderError: RenderErrorHandler } | undefined =>
+      options?.onRenderError === undefined
+        ? undefined
+        : {
+            onRenderError: (error: Error, path: string): void => {
+              report(error, rootPathAt(placeholder, path));
+            },
+          };
+
     return str.replace(PLACEHOLDER_PATTERN, (match, p1: string) => {
       if (typeof p1 !== 'string') {
         return match;
@@ -101,7 +163,11 @@ CurlyBrackets.compileTemplate = function (
             replacement = undefined;
             break;
           }
-        } catch {
+        } catch (error) {
+          // Said, not swallowed. This is the read that makes an unreadable path
+          // indistinguishable from an absent one in the output; the handler is where the
+          // difference survives.
+          report(error, p1.trim());
           replacement = undefined;
           break;
         }
@@ -112,7 +178,7 @@ CurlyBrackets.compileTemplate = function (
       }
 
       try {
-        return stringifyValue(replacement);
+        return stringifyValue(replacement, renderOptionsFor(p1.trim()));
       } catch {
         // `String()` invokes `toString`/`Symbol.toPrimitive`, both ordinary properties.
         return fallback;
@@ -120,6 +186,31 @@ CurlyBrackets.compileTemplate = function (
     });
   };
 };
+
+/**
+ * A render path re-rooted at the placeholder that produced it.
+ *
+ * `stringifyValue` reports against an anonymous root, since it renders a bare value and has
+ * no name for it - `<value>` for the value itself, `<value>.token` for something inside it.
+ * Here there is a name: the placeholder as written. Swapping the root turns
+ * `<value>.token` into `user.token`, which is the path the template author can actually
+ * look up.
+ *
+ * Only the root token is replaced, never anything after it, so the structural segments the
+ * renderer built are passed through untouched.
+ */
+function rootPathAt(placeholder: string, path: string): string {
+  const ANONYMOUS_ROOT = '<value>';
+
+  if (path === ANONYMOUS_ROOT) {
+    return placeholder;
+  }
+
+  return path.startsWith(`${ANONYMOUS_ROOT}.`) ||
+    path.startsWith(`${ANONYMOUS_ROOT}[`)
+    ? `${placeholder}${path.slice(ANONYMOUS_ROOT.length)}`
+    : path;
+}
 
 /**
  * Escapes placeholders in a string by prefixing them with a backslash, preventing them from being replaced when processed.

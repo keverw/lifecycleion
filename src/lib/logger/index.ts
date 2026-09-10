@@ -16,6 +16,7 @@ import {
   type RedactionErrorHandler,
   type ReportRedactionFailure,
 } from '../internal/redaction-reporter';
+import type { RenderErrorHandler } from '../internal/render-reporter';
 import type {
   LogEntry,
   LogSink,
@@ -184,6 +185,7 @@ export class Logger extends EventEmitter {
   ) => void;
   private onEventHandlerError?: (error: Error, event: string) => void;
   private onRedactionError?: RedactionErrorHandler;
+  private onRenderError?: RenderErrorHandler;
 
   private _didExit = false;
   private _exitCode: number = 0;
@@ -206,6 +208,7 @@ export class Logger extends EventEmitter {
     this.onSinkError = options.onSinkError;
     this.onEventHandlerError = options.onEventHandlerError;
     this.onRedactionError = options.onRedactionError;
+    this.onRenderError = options.onRenderError;
   }
 
   public get didExit(): boolean {
@@ -976,8 +979,21 @@ export class Logger extends EventEmitter {
     }
 
     const messageParams = redactedParams ?? params;
+
+    // The logger's own handler, carried into the render. Without it this was the widest
+    // silent surface in the library: every `{{...}}` in every log line goes through here,
+    // and a placeholder whose value refused to be read rendered the same `(null)` a typo
+    // does. The options object is built only when a handler exists, so an ordinary log
+    // call allocates nothing for it.
     const message = messageParams
-      ? CurlyBrackets(template, messageParams)
+      ? CurlyBrackets(
+          template,
+          messageParams,
+          undefined,
+          this.onRenderError === undefined
+            ? undefined
+            : { onRenderError: this.onRenderError },
+        )
       : template;
 
     // Create log entry
@@ -1094,6 +1110,7 @@ export class Logger extends EventEmitter {
       // the way params do and a failure reaches `onRedactionError` rather than the console.
       redactFunction: this.redactFunction,
       onRedactionError: this.onRedactionError,
+      onRenderError: this.onRenderError,
     });
   }
 

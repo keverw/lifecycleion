@@ -47,6 +47,7 @@ interface StringifyValueOptions {
   redactFunction?: (key: string, value: string) => RedactFunctionResult;
   /** Notified when redaction fails. Defaults to `console.error`. */
   onRedactionError?: (error: Error, key: string) => void;
+  onRenderError?: (error: Error, path: string) => void;
 }
 
 /**
@@ -182,3 +183,4 @@ Nothing reaches a log line, because the renderer cannot see it either. But it me
 - `redactValue`, `stringifyValue` and the logger's `redactedKeys` share one implementation, so a `redactFunction` behaves identically in all three.
 - Redaction fails closed. A `redactFunction` that throws, or a value that cannot be read, yields `***REDACTION FAILED***` rather than the original.
 - Pass `onRedactionError` to learn _why_ it failed. The marker says only that it did; this callback is handed the error and the `redactedKeys` entry it happened on. It defaults to `console.error`, fires at most once per call, and is deliberately not the global `'error'` channel - reporting a redaction failure there loops through any logger listening on it.
+- Pass `onRenderError` to learn why a value could not be _rendered_, which is a different failure from a redaction that threw and has its own once-per-call budget. It receives the error and a structural path such as `<value>.user.token`. It defaults to discarding rather than to the console, since rendering degrades by design and a line per marker would flood. The cause is never written into the rendered string: it comes from your own getter and may carry the value it was hiding.

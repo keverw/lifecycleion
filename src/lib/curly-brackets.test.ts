@@ -377,4 +377,40 @@ describe('CurlyBrackets.escape', () => {
 
     expect(CurlyBrackets.escape(input)).toEqual(expected);
   });
+
+  describe('CurlyBrackets onRenderError', () => {
+    it('should tell an unreadable placeholder apart from an absent one', () => {
+      // Both render the fallback, and until this existed they were indistinguishable: a
+      // `{{user.token}}` whose accessor throws looked exactly like a typo. The path is
+      // rooted at the placeholder rather than at an anonymous value, so a template with
+      // many of them still says which one failed.
+      const seen: string[] = [];
+
+      const bag: Record<string, unknown> = {};
+
+      Object.defineProperty(bag, 'token', {
+        get() {
+          throw new Error('accessor refused: hunter2secret');
+        },
+        enumerable: true,
+      });
+
+      const rendered = CurlyBrackets(
+        '{{missing.key}} {{user.token}}',
+        { user: bag },
+        '(null)',
+        {
+          onRenderError: (error, path) => seen.push(`${path}|${error.message}`),
+        },
+      );
+
+      // The typo reports nothing - nothing failed, the path simply is not there.
+      expect(seen).toHaveLength(1);
+      expect(seen[0]).toContain('user.token');
+      expect(seen[0]).toContain('accessor refused');
+
+      expect(rendered).toBe('(null) (null)');
+      expect(rendered).not.toContain('hunter2secret');
+    });
+  });
 });

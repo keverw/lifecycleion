@@ -580,6 +580,39 @@ const logger = new Logger({
 });
 ```
 
+### When a value cannot be rendered
+
+Rendering degrades rather than failing: a param that refuses to be read becomes a marker
+(`[unrenderable]`, `<unrenderable: value>`) and the line still goes out, so one bad param
+never costs you the log entry. That is the right trade, and it used to be completely
+silent — a `{{user.token}}` that rendered `(null)` because its accessor threw looked
+exactly like a typo.
+
+`onRenderError` is where the cause goes:
+
+```ts
+const logger = new Logger({
+  onRenderError: (error, path) => {
+    // path:  'user.token' — structural, built from keys the renderer already holds
+    // error: the getter's own throw
+  },
+});
+```
+
+It fires at most once per render, and defaults to discarding — logging degrades often
+enough that a console line per marker would be its own flood.
+
+**The cause never reaches the log line.** It comes from your own getter or `toString`,
+which were handed the value and are free to put it in the message; a cause written into
+the output would travel to every sink past `redactedKeys`. The marker is
+library-authored text, the cause goes to one handler that asked for it. `path` is always
+structural and never a value.
+
+`errorObject()` renders twice — the error, then the message — so it can report twice, for
+two genuinely different failures. This is a separate budget from `onRedactionError`:
+a value that fails to redact and a value that fails to render are different failures, and
+collapsing them would hide one.
+
 It is handed the failure, normalized to an `Error`, and the `redactedKeys` entry as you
 wrote it - `user.password`, not the leaf `password`. It **defaults to `console.error`**, so
 a broken redactor is loud rather than silent.
@@ -1447,6 +1480,7 @@ interface LoggerOptions {
   sinks?: LogSink[]; // Output destinations
   redactFunction?: (keyName, value: string) => RedactFunctionResult; // Custom redaction (default: masks with asterisks using datamask)
   onRedactionError?: (error, key) => void; // Redaction failed for a param (default: console.error)
+  onRenderError?: (error, path) => void; // A value could not be rendered (default: discard)
   callProcessExit?: boolean; // Actually call process.exit() (default: true, disable for tests/browser)
   beforeExitCallback?: (
     code,

@@ -4,6 +4,12 @@ import {
 } from '../../internal/container-entries';
 import { isPlainContainer } from '../../internal/is-plain-container';
 import { MAX_RENDER_DEPTH, TRUNCATED } from '../../internal/render-budget';
+import {
+  createRenderReporter,
+  NOOP_RENDER_REPORTER,
+  type RenderErrorHandler,
+  type ReportRenderFailure,
+} from '../../internal/render-reporter';
 import type { ArrayLogTransformer, LogEntry, LogSink } from '../types';
 
 /**
@@ -41,8 +47,9 @@ const UNCOPYABLE_MARKER = '<value could not be copied>';
  */
 function snapshotParams(
   params: Record<string, unknown>,
+  report: ReportRenderFailure,
 ): Record<string, unknown> {
-  const snapshot = snapshotValue(params, new WeakMap(), 0);
+  const snapshot = snapshotValue(params, new WeakMap(), 0, '<params>', report);
 
   // The top level is a bag this sink owns, so a marker there would replace the whole
   // thing. Unreadable keys leave an empty bag instead - it carries no caller values.
@@ -55,6 +62,8 @@ function snapshotValue(
   value: unknown,
   seen: WeakMap<object, unknown>,
   depth: number,
+  path: string,
+  report: ReportRenderFailure,
 ): unknown {
   if (!isPlainContainer(value)) {
     return value;
@@ -83,6 +92,8 @@ function snapshotValue(
     // Nothing can be enumerated, so nothing of the original may survive. Recorded after
     // this, never before, so a second reference to a container that cannot be read gets
     // the marker too rather than an empty copy this had started.
+    report(shape.error, path);
+
     return UNCOPYABLE_MARKER;
   }
 
@@ -95,9 +106,14 @@ function snapshotValue(
     // A counted index loop rather than `for...of`, matching the redaction walk: iteration
     // resolves `Symbol.iterator` off the value, which on a subclass is caller code.
     for (let index = 0; index < shape.length; index++) {
+      const elementPath = `${path}[${String(index)}]`;
+
       try {
-        copy.push(snapshotValue(source[index], seen, depth + 1));
-      } catch {
+        copy.push(
+          snapshotValue(source[index], seen, depth + 1, elementPath, report),
+        );
+      } catch (error) {
+        report(error, elementPath);
         copy.push(UNCOPYABLE_MARKER);
       }
     }
@@ -117,8 +133,11 @@ function snapshotValue(
         (value as Record<string, unknown>)[key],
         seen,
         depth + 1,
+        `${path}.${key}`,
+        report,
       );
-    } catch {
+    } catch (error) {
+      report(error, `${path}.${key}`);
       entry = UNCOPYABLE_MARKER;
     }
 
@@ -138,8 +157,19 @@ export class ArraySink implements LogSink {
   private transformer?: ArrayLogTransformer;
   private closed = false;
 
-  constructor(options?: { transformer?: ArrayLogTransformer }) {
+  private onRenderError?: RenderErrorHandler;
+
+  constructor(options?: {
+    transformer?: ArrayLogTransformer;
+    /**
+     * Notified when a param could not be copied into the stored snapshot, so a
+     * `<value could not be copied>` marker leaves a diagnosis and not only a marker.
+     * Defaults to discarding. Fires at most once per entry written.
+     */
+    onRenderError?: RenderErrorHandler;
+  }) {
     this.transformer = options?.transformer;
+    this.onRenderError = options?.onRenderError;
   }
 
   public write(entry: LogEntry): void {
@@ -154,7 +184,18 @@ export class ArraySink implements LogSink {
     const stored =
       entry.redactedParams === undefined
         ? entry
-        : { ...entry, redactedParams: snapshotParams(entry.redactedParams) };
+        : {
+            ...entry,
+            redactedParams: snapshotParams(
+              entry.redactedParams,
+              // One reporter per entry: the bound that matters here is per snapshot, since
+              // a sink writes many entries over its life and a budget shared across all of
+              // them would report the first hostile param and stay silent thereafter.
+              this.onRenderError === undefined
+                ? NOOP_RENDER_REPORTER
+                : createRenderReporter(this.onRenderError),
+            ),
+          };
 
     if (this.transformer) {
       try {

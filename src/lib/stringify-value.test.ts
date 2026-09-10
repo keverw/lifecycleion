@@ -1930,4 +1930,74 @@ describe('a shared subtree costs one walk, not one per route', () => {
     expect(rendered).toContain('"user":"alice"');
     expect(rendered).toContain('"attempts":3');
   });
+
+  describe('onRenderError', () => {
+    test('should report why a value could not be rendered, without leaking it', () => {
+      // The marker in the output says a value refused; this is where the cause goes. The
+      // two are asserted together because the split is the design: a getter is caller
+      // code and may throw a message carrying the value it was hiding, so the rendered
+      // string gets the neutral marker and the handler gets the error.
+      const seen: string[] = [];
+      const hostile = (): Record<string, unknown> => {
+        const bag: Record<string, unknown> = { safe: 'kept' };
+
+        Object.defineProperty(bag, 'token', {
+          get() {
+            throw new Error('accessor refused: hunter2secret');
+          },
+          enumerable: true,
+        });
+
+        return bag;
+      };
+
+      const rendered = stringifyValue(
+        { user: hostile() },
+        {
+          onRenderError: (error, path) => seen.push(`${path}|${error.message}`),
+        },
+      );
+
+      expect(seen).toHaveLength(1);
+      expect(seen[0]).toContain('<value>.user.token');
+      expect(seen[0]).toContain('accessor refused');
+
+      expect(rendered).toContain('[unrenderable]');
+      expect(rendered).toContain('kept');
+      expect(rendered).not.toContain('hunter2secret');
+    });
+
+    test('should stay silent and never throw without a handler', () => {
+      // Rendering degrades constantly and by design, so the default cannot write to the
+      // console: that would turn one hostile payload into a flood on a path whose whole
+      // job is to stay out of the way.
+      const consoleError = console.error;
+      let calls = 0;
+
+      console.error = (): void => {
+        calls++;
+      };
+
+      try {
+        const hostile = (): Record<string, unknown> => {
+          const bag: Record<string, unknown> = { safe: 'kept' };
+
+          Object.defineProperty(bag, 'token', {
+            get() {
+              throw new Error('accessor refused: hunter2secret');
+            },
+            enumerable: true,
+          });
+
+          return bag;
+        };
+
+        expect(() => stringifyValue({ user: hostile() })).not.toThrow();
+      } finally {
+        console.error = consoleError;
+      }
+
+      expect(calls).toBe(0);
+    });
+  });
 });

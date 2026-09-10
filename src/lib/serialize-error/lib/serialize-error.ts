@@ -1,7 +1,32 @@
-import { defineEntry, describeContainer } from '../../internal/container-entries';
+import {
+  defineEntry,
+  describeContainer,
+} from '../../internal/container-entries';
 import { readMember } from '../../internal/read-member';
 import { MAX_RENDER_DEPTH, TRUNCATED } from '../../internal/render-budget';
 import { isErrorValue } from '../../to-error';
+import {
+  createRenderReporter,
+  NOOP_RENDER_REPORTER,
+  type RenderErrorHandler,
+  type ReportRenderFailure,
+} from '../../internal/render-reporter';
+
+/** Options for {@link serializeError}. */
+export interface SerializeErrorOptions {
+  /**
+   * Notified when a value could not be serialized, so an `<unserializable>` marker leaves
+   * a diagnosis and not only a marker. Defaults to discarding.
+   *
+   * This runs at an IPC or RPC boundary, usually while already reporting a failure, so the
+   * marker keeps the payload intact and the cause comes here instead. The cause is
+   * deliberately absent from the marker: it comes from the caller's own getter and may
+   * carry the value it was hiding, and this payload is about to be sent over a wire.
+   *
+   * Fires at most once per call. Do not serialize or log from inside it.
+   */
+  onRenderError?: RenderErrorHandler;
+}
 
 export interface SerializedError {
   name: string;
@@ -75,8 +100,17 @@ function describeValue(value: unknown): string {
  * recognized as an error rather than falling through to the error-like branch, which
  * serialized it without its non-enumerable `message` and `stack`.
  */
-export function serializeError(error: unknown): SerializedError {
+export function serializeError(
+  error: unknown,
+  options?: SerializeErrorOptions,
+): SerializedError {
   const seen = new WeakSet<object>();
+
+  // Built only when a handler was given, so the ordinary call allocates nothing.
+  const report =
+    options?.onRenderError === undefined
+      ? NOOP_RENDER_REPORTER
+      : createRenderReporter(options.onRenderError);
 
   // The root is tracked before the walk starts, not left for `deepSerialize` to add when
   // it reaches it. A nested error arrives here already in `seen`, because the walk added
@@ -86,13 +120,15 @@ export function serializeError(error: unknown): SerializedError {
     seen.add(error);
   }
 
-  return serializeErrorInner(error, seen, 0);
+  return serializeErrorInner(error, seen, 0, '<error>', report);
 }
 
 function serializeErrorInner(
   error: unknown,
   seen: WeakSet<object>,
   depth: number,
+  path: string,
+  report: ReportRenderFailure,
 ): SerializedError {
   // The shared brand check, so a cross-realm error keeps the error branch - and guarded,
   // which a bare `instanceof` is not.
@@ -110,9 +146,11 @@ function serializeErrorInner(
 
     try {
       keys = Object.getOwnPropertyNames(error);
-    } catch {
+    } catch (enumerationError) {
       // Nothing further can be enumerated; what was read above still stands.
-      return deepSerializeRecord(result, seen, depth);
+      report(enumerationError, path);
+
+      return deepSerializeRecord(result, seen, depth, path, report);
     }
 
     for (const key of keys) {
@@ -122,7 +160,7 @@ function serializeErrorInner(
       }
     }
 
-    return deepSerializeRecord(result, seen, depth);
+    return deepSerializeRecord(result, seen, depth, path, report);
   }
 
   if (isErrorLike(error)) {
@@ -139,7 +177,7 @@ function serializeErrorInner(
       }
     }
 
-    return deepSerializeRecord(copy, seen, depth);
+    return deepSerializeRecord(copy, seen, depth, path, report);
   }
 
   return { name: 'Error', message: describeValue(error) };
@@ -196,11 +234,17 @@ function deepSerializeRecord(
   record: SerializedError,
   seen: WeakSet<object>,
   depth: number,
+  path: string,
+  report: ReportRenderFailure,
 ): SerializedError {
   const result: SerializedError = {} as SerializedError;
 
   for (const key of Object.keys(record)) {
-    defineEntry(result, key, deepSerialize(record[key], seen, depth));
+    defineEntry(
+      result,
+      key,
+      deepSerialize(record[key], seen, depth, `${path}.${key}`, report),
+    );
   }
 
   return result;
@@ -210,6 +254,8 @@ function deepSerialize(
   value: unknown,
   seen: WeakSet<object>,
   depth: number,
+  path: string,
+  report: ReportRenderFailure,
 ): unknown {
   if (value === null || typeof value !== 'object') {
     return value;
@@ -234,12 +280,14 @@ function deepSerialize(
 
   try {
     if (isErrorLike(value)) {
-      return serializeErrorInner(value, seen, depth + 1);
+      return serializeErrorInner(value, seen, depth + 1, path, report);
     }
 
     const shape = describeContainer(value);
 
     if (shape.kind === 'unreadable') {
+      report(shape.error, path);
+
       return UNSERIALIZABLE;
     }
 
@@ -251,9 +299,14 @@ function deepSerialize(
       const copy: unknown[] = [];
 
       for (let index = 0; index < shape.length; index++) {
+        const elementPath = `${path}[${String(index)}]`;
+
         try {
-          copy.push(deepSerialize(source[index], seen, depth + 1));
-        } catch {
+          copy.push(
+            deepSerialize(source[index], seen, depth + 1, elementPath, report),
+          );
+        } catch (error) {
+          report(error, elementPath);
           copy.push(UNSERIALIZABLE);
         }
       }
@@ -270,8 +323,15 @@ function deepSerialize(
       // Per entry, so one throwing accessor marks its own key rather than discarding
       // every sibling beside it.
       try {
-        entry = deepSerialize(source[key], seen, depth + 1);
-      } catch {
+        entry = deepSerialize(
+          source[key],
+          seen,
+          depth + 1,
+          `${path}.${key}`,
+          report,
+        );
+      } catch (error) {
+        report(error, `${path}.${key}`);
         entry = UNSERIALIZABLE;
       }
 

@@ -215,9 +215,23 @@ first is the worst possible outcome. It is written so it cannot:
   free to throw `new Error('cannot read ' + this.password)`, and a marker carrying that
   message would put the value into the table, past `sensitiveFieldNames`, and into every
   sink. These three are library-authored text with nothing of yours in them, which is what
-  makes them safe to render. A cause is only ever handed to a callback — that is what
-  [`onRedactionError`](#additional-info--sensitive-fields) is for — never written into the
-  output.
+  makes them safe to render. A cause is only ever handed to a callback, never written into
+  the output: pass **`onRenderError`** to receive it.
+
+  ```ts
+  errorToString(err, 80, {
+    onRenderError: (error, path) => {
+      // path: 'additionalInfo.items[0].token' — structural, never a value
+      // error: the getter's own throw — may contain the value, which is why the
+      //        table above never carries it
+    },
+  });
+  ```
+
+  It fires **at most once per render** (a failure is raised per value, and one report per
+  value would be its own flood) and defaults to discarding, so an ordinary render costs
+  nothing. Paths keep going through a nested error's own table, so a failure inside a
+  `cause` still says `cause.additionalInfo.token`.
 
   Note that a `BigInt` inside `additionalInfo` renders normally, since that walk handles
   each value individually rather than serializing the object whole.

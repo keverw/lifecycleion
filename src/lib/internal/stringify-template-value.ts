@@ -5,6 +5,10 @@
 import { describeContainer } from './container-entries';
 import { isPlainContainer } from './is-plain-container';
 import {
+  NOOP_RENDER_REPORTER,
+  type ReportRenderFailure,
+} from './render-reporter';
+import {
   charge,
   createRenderBudget,
   MAX_RENDER_DEPTH,
@@ -90,9 +94,11 @@ function renderDate(value: unknown): string | null {
  */
 function renderNested(
   value: unknown,
+  path: string,
   seen: WeakSet<object>,
   depth: number,
   budget: RenderBudget,
+  report: ReportRenderFailure,
 ): string {
   if (value === null) {
     return charge(budget, 'null');
@@ -133,7 +139,7 @@ function renderNested(
     seen.add(value);
 
     try {
-      return renderContainer(value, seen, depth, budget);
+      return renderContainer(value, path, seen, depth, budget, report);
     } finally {
       // Released so a value referenced twice side by side renders in full both times, and
       // only an object genuinely contained within itself is cut.
@@ -141,15 +147,17 @@ function renderNested(
     }
   }
 
-  return charge(budget, quote(stringifyTemplateValue(value)));
+  return charge(budget, quote(stringifyTemplateValue(value, path, report)));
 }
 
 /** Render a plain object or array as JSON, its leaves rendered by the shared rules. */
 function renderContainer(
   value: object,
+  path: string,
   seen: WeakSet<object>,
   depth: number,
   budget: RenderBudget,
+  report: ReportRenderFailure,
 ): string {
   // The shared enumeration, so a container that refuses to be read is the same case here
   // as in the redaction walks rather than a locally-invented empty result.
@@ -160,6 +168,8 @@ function renderContainer(
     // no shape to render, so this one value degrades rather than taking the whole render
     // with it. Charged like the same marker inside the loops below - it is a leaf this
     // render emits, and one per element of the container above would otherwise be free.
+    report(shape.error, path);
+
     return charge(budget, quote('[unrenderable]'));
   }
 
@@ -197,8 +207,18 @@ function renderContainer(
       }
 
       try {
-        parts.push(renderNested(source[index], seen, depth + 1, budget));
-      } catch {
+        parts.push(
+          renderNested(
+            source[index],
+            `${path}[${String(index)}]`,
+            seen,
+            depth + 1,
+            budget,
+            report,
+          ),
+        );
+      } catch (error) {
+        report(error, `${path}[${String(index)}]`);
         parts.push(charge(budget, quote('[unrenderable]')));
       }
     }
@@ -242,9 +262,17 @@ function renderContainer(
       const entryValue = (value as Record<string, unknown>)[key];
 
       parts.push(
-        `${renderedKey}${renderNested(entryValue, seen, depth + 1, budget)}`,
+        `${renderedKey}${renderNested(
+          entryValue,
+          joinTemplatePath(path, key),
+          seen,
+          depth + 1,
+          budget,
+          report,
+        )}`,
       );
-    } catch {
+    } catch (error) {
+      report(error, joinTemplatePath(path, key));
       parts.push(`${renderedKey}${charge(budget, quote('[unrenderable]'))}`);
     }
   }
@@ -273,7 +301,30 @@ function describeFunction(value: unknown): string {
   return '[Function]';
 }
 
-export function stringifyTemplateValue(value: unknown): string {
+/**
+ * Where a value sits, for the render reporter alone. Structural segments only - a key the
+ * walk already holds or a bracketed index - so nothing a caller supplied as a *value* can
+ * reach a report. `<value>` names the root, which has no key of its own.
+ */
+function joinTemplatePath(...segments: string[]): string {
+  const parts = segments.filter((segment) => segment.length > 0);
+
+  return parts.length > 0 ? parts.join('.') : '<value>';
+}
+
+/**
+ * @param path   Where this value sits, for {@link report}. A caller rendering a bare value
+ *               passes nothing and gets `<value>`.
+ * @param report Notified of the first value that refuses to render. Defaults to
+ *               discarding, so the path every template render takes allocates nothing:
+ *               rendering degrades constantly and by design, and only a caller that asked
+ *               for the causes should pay for them.
+ */
+export function stringifyTemplateValue(
+  value: unknown,
+  path: string = '',
+  report: ReportRenderFailure = NOOP_RENDER_REPORTER,
+): string {
   if (typeof value === 'string') {
     return value;
   }
@@ -302,8 +353,17 @@ export function stringifyTemplateValue(value: unknown): string {
 
       seen.add(value);
 
-      return renderContainer(value, seen, 0, createRenderBudget());
-    } catch {
+      return renderContainer(
+        value,
+        joinTemplatePath(path),
+        seen,
+        0,
+        createRenderBudget(),
+        report,
+      );
+    } catch (error) {
+      report(error, joinTemplatePath(path));
+
       // Nothing below is expected to throw: every read it makes is guarded, and the
       // depth cap stops recursion before it can exhaust the stack. Kept as a backstop
       // regardless, because nothing here may escape a log call.
@@ -337,7 +397,9 @@ export function stringifyTemplateValue(value: unknown): string {
     // admits an object.
     // eslint-disable-next-line @typescript-eslint/no-base-to-string
     return String(value);
-  } catch {
+  } catch (error) {
+    report(error, joinTemplatePath(path));
+
     return '[unrenderable]';
   }
 }

@@ -338,7 +338,7 @@ describe('deserializeError - untrusted input', () => {
     const error = deserializeError(wire);
 
     expect(Object.getPrototypeOf(error)).toBe(Error.prototype);
-    expect((({}) as Record<string, unknown>)['polluted']).toBeUndefined();
+    expect(({} as Record<string, unknown>)['polluted']).toBeUndefined();
   });
 
   test('tolerates a payload that does not match the declared shape', () => {
@@ -349,5 +349,39 @@ describe('deserializeError - untrusted input', () => {
 
     expect(error).toBeInstanceOf(Error);
     expect(typeof error.message).toBe('string');
+  });
+
+  describe('serializeError onRenderError', () => {
+    test('should report an unserializable value with its path', () => {
+      // This runs at an IPC boundary, usually while already reporting a failure, so the
+      // marker keeps the payload intact and sendable. The cause has nowhere to go but a
+      // handler - and must not ride along in the payload, which is about to cross a wire.
+      const seen: string[] = [];
+
+      const bag: Record<string, unknown> = { safe: 'kept' };
+
+      Object.defineProperty(bag, 'token', {
+        get() {
+          throw new Error('accessor refused: hunter2secret');
+        },
+        enumerable: true,
+      });
+
+      const result = serializeError(
+        Object.assign(new Error('boom'), { context: bag }),
+        {
+          onRenderError: (error, path) => seen.push(`${path}|${error.message}`),
+        },
+      );
+
+      expect(seen).toHaveLength(1);
+      expect(seen[0]).toContain('<error>.context.token');
+
+      const wire = JSON.stringify(result);
+
+      expect(wire).toContain('<unserializable>');
+      expect(wire).toContain('kept');
+      expect(wire).not.toContain('hunter2secret');
+    });
   });
 });

@@ -6,6 +6,11 @@ import {
   type ReportRedactionFailure,
 } from './internal/redaction-reporter';
 import {
+  createRenderReporter,
+  NOOP_RENDER_REPORTER,
+  type RenderErrorHandler,
+} from './internal/render-reporter';
+import {
   REDACTION_FAILED_MARKER,
   type RedactValueFunction,
 } from './internal/default-redact-function';
@@ -43,6 +48,18 @@ export interface StringifyValueOptions {
    * Do not redact or log from inside it.
    */
   onRedactionError?: RedactionErrorHandler;
+  /**
+   * Notified when a value could not be rendered, so an `[unrenderable]` marker leaves a
+   * diagnosis and not only a marker. Defaults to `console.error`.
+   *
+   * Only {@link stringifyValue} renders; {@link redactValue} hands back structure and
+   * never reaches this. The cause is deliberately absent from the marker: it comes from
+   * your own getter or `toString` and may carry the value it was hiding, so writing it
+   * into the output would send it wherever the rendered string goes.
+   *
+   * Fires at most once per call. Do not render or log from inside it.
+   */
+  onRenderError?: RenderErrorHandler;
 }
 
 /**
@@ -183,9 +200,21 @@ export function stringifyValue(
   value: unknown,
   options?: StringifyValueOptions,
 ): string {
+  // Built only when a handler was given, so the no-options call every template render
+  // makes allocates nothing.
+  const report =
+    options?.onRenderError === undefined
+      ? NOOP_RENDER_REPORTER
+      : createRenderReporter(options.onRenderError);
+
   try {
-    return stringifyTemplateValue(redactValue(value, options));
-  } catch {
+    return stringifyTemplateValue(redactValue(value, options), '', report);
+  } catch (error) {
+    // Nothing below is expected to throw - the walk guards every read it owns - but a
+    // `RangeError` from a payload nested past the stack lands here, and returning the
+    // marker without a word is exactly the silence `onRenderError` exists to end.
+    report(error, '<value>');
+
     return '[unrenderable]';
   }
 }
