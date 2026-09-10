@@ -814,6 +814,159 @@ describe('errorToString', () => {
       expect(rendered).not.toContain('accessor refused');
     });
 
+    it('should report a render failure with its path, once per render', () => {
+      // The markers say *that* a value refused and which half; this is where the cause
+      // goes. Both halves are asserted together because the split is the whole design:
+      // the path and the thrown error reach the handler, and neither reaches the table.
+      const seen: string[] = [];
+
+      const leaf = (): Record<string, unknown> => {
+        const bag: Record<string, unknown> = { safe: 'kept' };
+
+        Object.defineProperty(bag, 'token', {
+          get() {
+            throw new Error('accessor refused: hunter2secret');
+          },
+          enumerable: true,
+        });
+
+        return bag;
+      };
+
+      const rendered = errorToString(
+        Object.assign(new Error('boom'), {
+          additionalInfo: { user: leaf(), list: [leaf()] },
+        }),
+        80,
+        {
+          onRenderError: (error, path) => seen.push(`${path}|${error.message}`),
+        },
+      );
+
+      // Once, though several values refused: a failure is raised per value, and a report
+      // per value would be its own flood on a path whose job is to stay out of the way.
+      expect(seen).toHaveLength(1);
+      expect(seen[0]).toContain('additionalInfo.user.token');
+      expect(seen[0]).toContain('accessor refused');
+
+      // The cause reaches the handler and nothing else. A getter is caller code and may
+      // put the value it was hiding in its message, so the table gets the neutral marker.
+      expect(rendered).toContain('<unrenderable: value>');
+      expect(rendered).not.toContain('hunter2secret');
+      expect(rendered).not.toContain('accessor refused');
+
+      // The readable siblings still render.
+      expect(rendered).toContain('kept');
+      expect(rendered).toContain('boom');
+    });
+
+    it('should address a render failure through a cause and an array index', () => {
+      // The path is structural, and it keeps going through a nested error's own table:
+      // a fresh table is not a fresh path, or a failure deep inside a `cause` would say
+      // only that something somewhere refused.
+      const paths: string[] = [];
+
+      const hostile = (): Record<string, unknown> => {
+        const bag: Record<string, unknown> = {};
+
+        Object.defineProperty(bag, 'token', {
+          get() {
+            throw new Error('refused');
+          },
+          enumerable: true,
+        });
+
+        return bag;
+      };
+
+      errorToString(
+        Object.assign(new Error('outer'), {
+          cause: Object.assign(new Error('inner'), {
+            additionalInfo: { items: [hostile()] },
+          }),
+        }),
+        80,
+        { onRenderError: (_error, path) => paths.push(path) },
+      );
+
+      expect(paths[0]).toBe('cause.additionalInfo.items[0].token');
+    });
+
+    it('should not let the render reporter raise a failure of its own', () => {
+      // This runs while something has already gone wrong, and often while stdout is
+      // closing. A throw here would replace the failure being reported with a second one,
+      // out of a call whose whole job was to describe the first. Both rungs are covered:
+      // a handler that throws falls to the console, and a console that throws falls to
+      // nothing at all.
+      const exploding = (): void => {
+        throw new Error('handler exploded');
+      };
+
+      const bag: Record<string, unknown> = {};
+
+      Object.defineProperty(bag, 'token', {
+        get() {
+          throw new Error('refused');
+        },
+        enumerable: true,
+      });
+
+      const build = (): Error =>
+        Object.assign(new Error('boom'), { additionalInfo: bag });
+
+      const consoleError = console.error;
+
+      console.error = () => {
+        throw new Error('stdout gone');
+      };
+
+      try {
+        expect(() =>
+          errorToString(build(), 80, { onRenderError: exploding }),
+        ).not.toThrow();
+      } finally {
+        console.error = consoleError;
+      }
+
+      // And the render still produced the error it was asked for.
+      expect(
+        errorToString(build(), 80, { onRenderError: exploding }),
+      ).toContain('boom');
+    });
+
+    it('should stay silent when no render handler was given', () => {
+      // Rendering degrades constantly and by design, so the default cannot be a console
+      // line per marker - that would turn an ordinary hostile payload into a flood. A
+      // reporter is built only where a caller asked for one.
+      const bag: Record<string, unknown> = {};
+
+      for (let index = 0; index < 20; index++) {
+        Object.defineProperty(bag, `k${String(index)}`, {
+          get() {
+            throw new Error('refused');
+          },
+          enumerable: true,
+        });
+      }
+
+      const consoleError = console.error;
+      let calls = 0;
+
+      console.error = (): void => {
+        calls++;
+      };
+
+      try {
+        errorToString(
+          Object.assign(new Error('boom'), { additionalInfo: bag }),
+        );
+      } finally {
+        console.error = consoleError;
+      }
+
+      expect(calls).toBe(0);
+    });
+
     it('should not throw when the stack accessor throws', () => {
       const error = new Error('boom');
 

@@ -31,6 +31,12 @@ import {
   type RedactionErrorHandler,
   type ReportRedactionFailure,
 } from './internal/redaction-reporter';
+import {
+  createRenderReporter,
+  NOOP_RENDER_REPORTER,
+  type RenderErrorHandler,
+  type ReportRenderFailure,
+} from './internal/render-reporter';
 
 /**
  * Produces the replacement shown for a value named by `sensitiveFieldNames`.
@@ -44,6 +50,7 @@ import {
 export type RedactFieldFunction = RedactValueFunction;
 
 export type { RedactionErrorHandler } from './internal/redaction-reporter';
+export type { RenderErrorHandler } from './internal/render-reporter';
 
 // The return type of a `redactFunction` and the config it may hand back, so this entry
 // point can be used without importing the logger for its types.
@@ -70,6 +77,21 @@ export interface ErrorToStringOptions {
    * Do not redact or log from inside it.
    */
   onRedactionError?: RedactionErrorHandler;
+  /**
+   * Notified when a value could not be rendered, so an `<unrenderable: ...>` marker leaves
+   * a diagnosis and not only a marker. Defaults to `console.error`.
+   *
+   * The marker names which half refused - `keys`, `value`, `text` - and deliberately never
+   * carries the cause: the thrown error comes from your own getter or `toString` and may
+   * carry the value it was hiding, so putting it in the table would send it to every sink
+   * past `sensitiveFieldNames`. It comes here instead.
+   *
+   * Not routed to the global `'error'` channel: reporting there would loop, since a
+   * listening logger logs it and logging renders. Fires at most once per render.
+   *
+   * Do not render or log from inside it.
+   */
+  onRenderError?: RenderErrorHandler;
 }
 
 /**
@@ -193,7 +215,11 @@ const UNRENDERABLE_TEXT = '<unrenderable: text>';
  *   at all, which the caller renders as the marker rather than as an absent
  *   `additionalInfo`.
  */
-function asAddressableBag(info: object): object | string {
+function asAddressableBag(
+  info: object,
+  path: string,
+  reportRender: ReportRenderFailure,
+): object | string {
   if (isPlainContainer(info)) {
     return info;
   }
@@ -208,12 +234,14 @@ function asAddressableBag(info: object): object | string {
     for (const key in source) {
       keys.push(key);
     }
-  } catch {
+  } catch (error) {
     // A `Proxy` can throw from its `ownKeys` trap. Said, not swallowed: an empty bag here
     // rendered the error as one that simply carried no `additionalInfo`, which is a
     // different and much more reassuring claim than "its keys could not be read" - the
     // same silent collapse the plain-container branch below refuses, and that
     // `renderContainer`, `maskValueDeep`, `redactPathsInner` and `snapshotValue` all mark.
+    reportRender(error, path);
+
     return UNRENDERABLE_KEYS;
   }
 
@@ -277,11 +305,21 @@ function redactAddressedValue(
  * `[{"key":"token","value":"x"}]` - the caller's data wearing this module's plumbing.
  * Masking was applied first, so nothing was disclosed by it; it was simply unreadable.
  */
-function entriesToText(entries: NestedKeyValueEntry[]): string {
+function entriesToText(
+  entries: NestedKeyValueEntry[],
+  path: string,
+  reportRender: ReportRenderFailure,
+): string {
   const parts: string[] = [];
 
   for (const entry of entries) {
-    parts.push(`${quoteText(entry.key)}:${renderedValueToText(entry.value)}`);
+    parts.push(
+      `${quoteText(entry.key, path, reportRender)}:${renderedValueToText(
+        entry.value,
+        path,
+        reportRender,
+      )}`,
+    );
   }
 
   return `{${parts.join(',')}}`;
@@ -289,31 +327,88 @@ function entriesToText(entries: NestedKeyValueEntry[]): string {
 
 function renderedValueToText(
   value: string | KeyValueASCIITable | NestedKeyValueEntry[],
+  path: string,
+  reportRender: ReportRenderFailure,
 ): string {
   if (typeof value === 'string') {
-    return quoteText(value);
+    return quoteText(value, path, reportRender);
   }
 
   if (value instanceof KeyValueASCIITable) {
-    return quoteText(value.toString());
+    return quoteText(value.toString(), path, reportRender);
   }
 
-  return entriesToText(value);
+  return entriesToText(value, path, reportRender);
+}
+
+/**
+ * Where a value sits, for the render reporter alone.
+ *
+ * Structural only: every segment is a key the walk already knows or a bracketed index, so
+ * nothing a caller supplied as a *value* can reach it. That is what makes a path safe to
+ * hand to a reporter, and it is the same rule `onRedactionError`'s `key` follows.
+ *
+ * A nested error starts a fresh table but not a fresh path, so a failure deep inside a
+ * `cause` still says where it was: `cause.additionalInfo.token`.
+ */
+function joinPath(...segments: string[]): string {
+  const parts = segments.filter((segment) => segment.length > 0);
+
+  return parts.length > 0 ? parts.join('.') : '<error>';
+}
+
+/**
+ * Report a value failure and hand back the marker, for a site with only an expression
+ * slot to put it in.
+ */
+function reportUnrenderableValue(
+  path: string,
+  reportRender: ReportRenderFailure,
+): string {
+  reportRender(new Error('Value could not be read'), path);
+
+  return UNRENDERABLE_VALUE;
+}
+
+/**
+ * Report a text failure and hand back the marker, so a site that has only an expression
+ * slot can still say what happened.
+ */
+function reportUnrenderableText(
+  reason: string,
+  path: string,
+  reportRender: ReportRenderFailure,
+): string {
+  reportRender(new Error(reason), path);
+
+  return UNRENDERABLE_TEXT;
 }
 
 /** JSON string literal, so a value containing a comma cannot be read as two entries. */
-function quoteText(value: string): string {
+function quoteText(
+  value: string,
+  path: string,
+  reportRender: ReportRenderFailure,
+): string {
   try {
     return JSON.stringify(value) ?? '""';
   } catch {
+    reportRender(new Error('Value could not be quoted'), path);
+
     return `"${UNRENDERABLE_TEXT}"`;
   }
 }
 
-function safeStringify(value: unknown): string {
+function safeStringify(
+  value: unknown,
+  path: string,
+  reportRender: ReportRenderFailure,
+): string {
   try {
-    return stringifyPrimitive(value);
-  } catch {
+    return stringifyPrimitive(value, path, reportRender);
+  } catch (error) {
+    reportRender(error, path);
+
     // `JSON.stringify` throws on a cyclic object and on a `BigInt` nested inside one,
     // `String()` invokes `toString`/`Symbol.toPrimitive`, and a symbol's own `toString`
     // can be overridden. None of that may escape a rendering call.
@@ -321,7 +416,11 @@ function safeStringify(value: unknown): string {
   }
 }
 
-function stringifyPrimitive(value: unknown): string {
+function stringifyPrimitive(
+  value: unknown,
+  path: string,
+  reportRender: ReportRenderFailure,
+): string {
   if (value === null || value === undefined) {
     return String(value);
   }
@@ -334,7 +433,14 @@ function stringifyPrimitive(value: unknown): string {
     case 'bigint':
       return String(value);
     case 'object':
-      return JSON.stringify(value) ?? UNRENDERABLE_TEXT;
+      return (
+        JSON.stringify(value) ??
+        reportUnrenderableText(
+          'Value has no JSON representation',
+          path,
+          reportRender,
+        )
+      );
     case 'function':
       return '[Function]';
     case 'symbol':
@@ -363,15 +469,26 @@ export function errorToString(
 ): string {
   const report = createRedactionReporter(options?.onRedactionError);
 
+  // Built only when a handler was given. The default reporter writes to the console, which
+  // is the right rung for a caller who asked for one and wrong for every ordinary render -
+  // rendering degrades constantly and by design, and a console line per marker would be
+  // its own flood. `NOOP_RENDER_REPORTER` costs nothing on the path every log call takes.
+  const reportRender =
+    options?.onRenderError === undefined
+      ? NOOP_RENDER_REPORTER
+      : createRenderReporter(options.onRenderError);
+
   try {
     const table = errorToASCIITable(
       error,
+      '',
       maxRowLength,
       new WeakSet(),
       0,
       createRenderBudget(),
       options?.redactFunction,
       report,
+      reportRender,
     );
 
     return table.toString();
@@ -409,12 +526,14 @@ function resolveTableWidth(maxRowLength: number): number {
 
 function errorToASCIITable(
   error: unknown,
+  path: string,
   requestedRowLength: number,
   seen: WeakSet<object>,
   depth: number,
   budget: RenderBudget,
   redactFunction: RedactFieldFunction | undefined,
   report: ReportRedactionFailure,
+  reportRender: ReportRenderFailure,
 ): KeyValueASCIITable {
   // Resolved once, and used for everything below: the table this builds, the width handed
   // to nested values, and the per-row cost charged against the budget. A nested caller has
@@ -451,7 +570,13 @@ function errorToASCIITable(
       // went the same way. `readMember` already answers `undefined` for a read that
       // threw, so an unreadable member still renders nothing.
       if (value !== undefined && value !== null) {
-        table.addRow(label, charge(budget, safeStringify(value)));
+        table.addRow(
+          label,
+          charge(
+            budget,
+            safeStringify(value, joinPath(path, key), reportRender),
+          ),
+        );
       }
     }
 
@@ -494,7 +619,11 @@ function errorToASCIITable(
         // nested error, and a derived value each rendered in the clear here while the
         // logger masked them. Masking first leaves one walk to be right, and the renderer
         // with nothing to decide.
-        const bag = asAddressableBag(additionalInfo as object);
+        const bag = asAddressableBag(
+          additionalInfo as object,
+          joinPath(path, 'additionalInfo'),
+          reportRender,
+        );
 
         // A bag that could not be enumerated at all carries the marker instead, and falls
         // through to the non-object branch below, which renders it as the `AdditionalInfo`
@@ -510,19 +639,31 @@ function errorToASCIITable(
         // so a failed redaction rendered as twenty-two rows of `AdditionalInfo.0`,
         // `AdditionalInfo.1` - one per character of `***REDACTION FAILED***`.
         if (masked === null || typeof masked !== 'object') {
-          table.addRow('AdditionalInfo', charge(budget, safeStringify(masked)));
+          table.addRow(
+            'AdditionalInfo',
+            charge(
+              budget,
+              safeStringify(
+                masked,
+                joinPath(path, 'additionalInfo'),
+                reportRender,
+              ),
+            ),
+          );
 
           addErrorTail(
             table,
             err,
             cause,
             sensitivePaths,
+            path,
             maxRowLength,
             seen,
             depth,
             budget,
             redactFunction,
             report,
+            reportRender,
           );
 
           return table;
@@ -539,13 +680,14 @@ function errorToASCIITable(
 
         try {
           keys = Object.keys(info);
-        } catch {
+        } catch (error) {
           // Said, not swallowed. An empty list here rendered the error as one that simply
           // carried no `additionalInfo`, which is a different and much more reassuring
           // claim than "its keys could not be read" - and every other walk marks this
           // case: `renderContainer` emits `[unrenderable]`, `maskValueDeep` and
           // `redactPathsInner` the redaction marker, `snapshotValue` its own. This was
           // the one that degraded silently.
+          reportRender(error, joinPath(path, 'additionalInfo'));
           table.addRow('AdditionalInfo', UNRENDERABLE_KEYS);
 
           addErrorTail(
@@ -553,12 +695,14 @@ function errorToASCIITable(
             err,
             cause,
             sensitivePaths,
+            path,
             maxRowLength,
             seen,
             depth,
             budget,
             redactFunction,
             report,
+            reportRender,
           );
 
           return table;
@@ -600,15 +744,20 @@ function errorToASCIITable(
           table.addRow(
             `AdditionalInfo.${key}`,
             entryValue === READ_THREW
-              ? UNRENDERABLE_VALUE
+              ? reportUnrenderableValue(
+                  joinPath(path, 'additionalInfo', key),
+                  reportRender,
+                )
               : stringifyValue(
                   entryValue,
+                  joinPath(path, 'additionalInfo', key),
                   maxRowLength,
                   seen,
                   depth + 1,
                   budget,
                   redactFunction,
                   report,
+                  reportRender,
                 ),
           );
         }
@@ -620,12 +769,14 @@ function errorToASCIITable(
       err,
       cause,
       sensitivePaths,
+      path,
       maxRowLength,
       seen,
       depth,
       budget,
       redactFunction,
       report,
+      reportRender,
     );
   }
 
@@ -649,12 +800,14 @@ function addErrorTail(
   err: Record<string, unknown>,
   cause: unknown,
   sensitive: RedactPath[] | null,
+  path: string,
   maxRowLength: number,
   seen: WeakSet<object>,
   depth: number,
   budget: RenderBudget,
   redactFunction: RedactFieldFunction | undefined,
   report: ReportRedactionFailure,
+  reportRender: ReportRenderFailure,
 ): void {
   if (cause !== undefined && cause !== null) {
     if (sensitive === null) {
@@ -691,12 +844,14 @@ function addErrorTail(
         'Cause',
         stringifyValue(
           maskedCause,
+          joinPath(path, 'cause'),
           maxRowLength,
           seen,
           depth + 1,
           budget,
           redactFunction,
           report,
+          reportRender,
         ),
       );
     }
@@ -705,7 +860,13 @@ function addErrorTail(
   const stack = readMember(err, 'stack');
 
   if (stack) {
-    table.addValueOnSeparateRow('Stack', charge(budget, safeStringify(stack)));
+    table.addValueOnSeparateRow(
+      'Stack',
+      charge(
+        budget,
+        safeStringify(stack, joinPath(path, 'stack'), reportRender),
+      ),
+    );
   }
 }
 
@@ -721,12 +882,14 @@ const MIN_ROW_COST = 8;
 
 function stringifyValue(
   value: unknown,
+  path: string,
   maxRowLength: number,
   seen: WeakSet<object>,
   depth: number,
   budget: RenderBudget,
   redactFunction: RedactFieldFunction | undefined,
   report: ReportRedactionFailure,
+  reportRender: ReportRenderFailure,
 ): string | KeyValueASCIITable | NestedKeyValueEntry[] {
   if (typeof value === 'string') {
     // Checked before it is charged. A leaf is emitted whole rather than cut mid-string, so
@@ -777,12 +940,14 @@ function stringifyValue(
   try {
     return stringifyValueInner(
       value,
+      path,
       maxRowLength,
       seen,
       depth,
       budget,
       redactFunction,
       report,
+      reportRender,
     );
   } finally {
     if (isTracked) {
@@ -793,21 +958,25 @@ function stringifyValue(
 
 function stringifyValueInner(
   value: unknown,
+  path: string,
   maxRowLength: number,
   seen: WeakSet<object>,
   depth: number,
   budget: RenderBudget,
   redactFunction: RedactFieldFunction | undefined,
   report: ReportRedactionFailure,
+  reportRender: ReportRenderFailure,
 ): string | KeyValueASCIITable | NestedKeyValueEntry[] {
   let arrayValue: unknown[] | null;
 
   try {
     arrayValue = Array.isArray(value) ? (value as unknown[]) : null;
-  } catch {
+  } catch (error) {
     // `Array.isArray` throws on a revoked `Proxy`. Degrade this one leaf rather than
     // letting it escape to the top-level backstop, which would throw away the error's
     // message, name, and stack over a single bad value.
+    reportRender(error, path);
+
     return UNRENDERABLE_VALUE;
   }
 
@@ -833,6 +1002,13 @@ function stringifyValueInner(
     const shape = describeContainer(source);
 
     if (shape.kind !== 'array') {
+      reportRender(
+        shape.kind === 'unreadable'
+          ? shape.error
+          : new Error('Array would not report its length'),
+        path,
+      );
+
       return UNRENDERABLE_KEYS;
     }
 
@@ -857,12 +1033,14 @@ function stringifyValueInner(
 
         const result = stringifyValue(
           item,
+          `${path}[${String(index)}]`,
           maxRowLength,
           seen,
           depth + 1,
           budget,
           redactFunction,
           report,
+          reportRender,
         );
         // Convert complex types to strings for joining. A string element is pushed as
         // it stands rather than quoted, so `['a', 'b']` still renders `a, b`; only a
@@ -873,9 +1051,10 @@ function stringifyValueInner(
         } else if (result instanceof KeyValueASCIITable) {
           parts.push(result.toString());
         } else {
-          parts.push(entriesToText(result));
+          parts.push(entriesToText(result, path, reportRender));
         }
-      } catch {
+      } catch (error) {
+        reportRender(error, `${path}[${String(index)}]`);
         parts.push(UNRENDERABLE_VALUE);
       }
     }
@@ -911,12 +1090,14 @@ function stringifyValueInner(
         // its own contents.
         return errorToASCIITable(
           value,
+          path,
           Math.max(KEY_VALUE_TABLE_MIN_WIDTH, maxRowLength - 4),
           seen,
           depth + 1,
           budget,
           redactFunction,
           report,
+          reportRender,
         );
       }
 
@@ -961,12 +1142,14 @@ function stringifyValueInner(
       if (isErrorShaped && rawOwnList !== undefined) {
         return errorToASCIITable(
           value,
+          path,
           Math.max(KEY_VALUE_TABLE_MIN_WIDTH, maxRowLength - 4),
           seen,
           depth + 1,
           budget,
           redactFunction,
           report,
+          reportRender,
         );
       }
 
@@ -985,6 +1168,8 @@ function stringifyValueInner(
       const shape = describeContainer(value);
 
       if (shape.kind === 'unreadable') {
+        reportRender(shape.error, path);
+
         return UNRENDERABLE_KEYS;
       }
 
@@ -1023,7 +1208,8 @@ function stringifyValueInner(
 
         try {
           val = (value as Record<string, unknown>)[key];
-        } catch {
+        } catch (error) {
+          reportRender(error, joinPath(path, key));
           entries.push({ key, value: UNRENDERABLE_VALUE });
 
           continue;
@@ -1033,12 +1219,14 @@ function stringifyValueInner(
           key,
           value: stringifyValue(
             val,
+            joinPath(path, key),
             nestedRowLength,
             seen,
             depth + 1,
             budget,
             redactFunction,
             report,
+            reportRender,
           ),
         });
       }
@@ -1046,6 +1234,6 @@ function stringifyValueInner(
       return entries;
     }
   } else {
-    return charge(budget, safeStringify(value));
+    return charge(budget, safeStringify(value, path, reportRender));
   }
 }
