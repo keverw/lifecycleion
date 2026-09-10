@@ -491,4 +491,47 @@ describe('ArraySink - redactedParams snapshot', () => {
 
     expect(sink.logs[0]).toBe(entry);
   });
+
+  test('should report a param it could not copy into the snapshot', () => {
+    // Reached by writing the entry directly, which is this sink's own contract: `write`
+    // takes a `LogEntry` from wherever one comes from, and nothing requires
+    // `redactedParams` to have been through redaction on the way. Under a `Logger` with
+    // redaction configured it usually has been, and a hostile getter is already a marker
+    // by the time the snapshot runs - which is exactly why this is asserted at the sink
+    // rather than end to end.
+    const seen: string[] = [];
+
+    const sink = new ArraySink({
+      onRenderError: (error, path) => seen.push(`${path}|${error.message}`),
+    });
+
+    const hostile: Record<string, unknown> = { safe: 'kept' };
+
+    Object.defineProperty(hostile, 'token', {
+      get() {
+        throw new Error('accessor refused: hunter2secret');
+      },
+      enumerable: true,
+    });
+
+    sink.write({
+      timestamp: Date.now(),
+      type: 'info',
+      template: 't',
+      message: 'm',
+      redactedParams: { user: hostile },
+    });
+
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toContain('<params>.user.token');
+    expect(seen[0]).toContain('accessor refused');
+
+    // The marker replaces only the value that refused; its readable sibling is kept, and
+    // the cause reaches the handler rather than the stored entry.
+    const stored = JSON.stringify(sink.logs[0].redactedParams);
+
+    expect(stored).toContain('<value could not be copied>');
+    expect(stored).toContain('kept');
+    expect(stored).not.toContain('hunter2secret');
+  });
 });
