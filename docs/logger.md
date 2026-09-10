@@ -22,6 +22,7 @@ A modern, flexible logging library with sink-based architecture, template string
     - [Custom Redaction Function](#custom-redaction-function)
     - [Redaction fails closed](#redaction-fails-closed)
     - [Finding out _why_ redaction failed](#finding-out-_why_-redaction-failed)
+  - [When a value cannot be rendered](#when-a-value-cannot-be-rendered)
     - [Controlling how a value is masked](#controlling-how-a-value-is-masked)
     - [What the default reveals](#what-the-default-reveals)
   - [Tags for Categorization and Filtering](#tags-for-categorization-and-filtering)
@@ -63,6 +64,10 @@ A modern, flexible logging library with sink-based architecture, template string
       - [Where errors go when the logger cannot log them](#where-errors-go-when-the-logger-cannot-log-them)
     - [Exit Behavior](#exit-behavior)
 - [Capturing Reported Errors](#capturing-reported-errors)
+- [Where Failures Go](#where-failures-go)
+  - [Why the fall-back is the console](#why-the-fall-back-is-the-console)
+  - [Never seeing a console line](#never-seeing-a-console-line)
+  - [Standalone renderers are different](#standalone-renderers-are-different)
 - [EventEmitter Integration](#eventemitter-integration)
   - [Exit Event Phases](#exit-event-phases)
 - [Custom Sinks](#custom-sinks)
@@ -1705,6 +1710,74 @@ logger.isReportErrorAvailable(); // boolean — are the global event primitives 
 ```
 
 `'not_available'` means the global object exposes neither native nor polyfilled event methods. See [global-event-target](./global-event-target.md); on Node.js, Lifecycleion installs them for you.
+
+## Where Failures Go
+
+The logger has four callbacks for things that go wrong while logging. All four behave
+identically: **your handler if you set one, `console.error` if you did not, and
+`console.error` again if yours throws.** Nothing ever escapes into your `logger.info()`
+call, and nothing is ever silently dropped.
+
+| Callback              | Fires when                                                      |
+| --------------------- | --------------------------------------------------------------- |
+| `onSinkError`         | a sink's `write()` or `close()` throws or rejects               |
+| `onEventHandlerError` | one of your `logger.on('logger', …)` handlers throws or rejects |
+| `onRedactionError`    | your `redactFunction` threw, or `redactedKeys` was unusable     |
+| `onRenderError`       | a value refused to be read or turned into text                  |
+
+Individual sinks have their own `onError` with the same three rungs — see
+[Built-In Sinks](#built-in-sinks).
+
+### Why the fall-back is the console
+
+Because it is the only rung that cannot re-enter what just failed. Everything the logger
+renders, redacts and writes happens _inside_ a log call, so reporting a failure anywhere a
+logger might hear it would be logged — and logging renders, redacts and writes to sinks,
+which is what failed a moment ago. Each pass is a fresh turn, so no re-entrancy guard
+closes that loop.
+
+### Never seeing a console line
+
+Set all four. Once every channel has a handler, the library's console rung is unreachable
+from the logger:
+
+```ts
+const report = (what: string) => (error: Error, subject: string) =>
+  metrics.increment('lifecycleion_failure', {
+    what,
+    subject,
+    message: error.message,
+  });
+
+const logger = new Logger({
+  sinks: [/* … */],
+  onSinkError: (error, context, sink) => report('sink')(error, context),
+  onEventHandlerError: report('event-handler'),
+  onRedactionError: report('redaction'),
+  onRenderError: report('render'),
+});
+```
+
+Two caveats worth knowing:
+
+- **A handler that throws still reaches the console**, reporting both the original failure
+  and your handler's own throw. That is deliberate: a handler that just failed is not a
+  reason to reach for a louder channel, and both facts matter — one says the channel you
+  chose is broken, the other is what you needed to know.
+- **`ConsoleSink` is unaffected.** It writes to the console because that is its job; these
+  callbacks are about failures, not output.
+
+### Standalone renderers are different
+
+`stringifyValue()`, `errorToString()` and `serializeError()` can be called with no logger
+involved at all. With no handler, those report on the standard global `'error'` channel
+instead — so `registerReportErrorListener()` picks them up and logs them properly — falling
+back to the console only when nothing claims the event. There is no loop to worry about
+when nothing is logging.
+
+> **If your own sink, formatter or transformer calls one of them, pass it a handler.** It
+> runs inside a log call while looking exactly like a standalone one, so left to the default
+> it broadcasts, your listener logs it, and that logging reaches your sink again.
 
 ## EventEmitter Integration
 

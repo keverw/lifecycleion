@@ -10,6 +10,7 @@
   - [Using a Fallback](#using-a-fallback)
   - [Escaping Brackets](#escaping-brackets)
   - [Compiling Templates](#compiling-templates)
+  - [Telling an unreadable placeholder from an absent one](#telling-an-unreadable-placeholder-from-an-absent-one)
   - [Escaping Utility](#escaping-utility)
 - [Credits / Inspiration](#credits--inspiration)
 

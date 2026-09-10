@@ -8,6 +8,7 @@ Useful for IPC, internal RPCs, and storing errors in a database (e.g. logging fa
 
 - [Usage](#usage)
 - [What It Captures](#what-it-captures)
+- [When a value cannot be serialized](#when-a-value-cannot-be-serialized)
 - [API](#api)
   - [isErrorLike](#iserrorlike)
 - [RESTful API Error Guidelines](#restful-api-error-guidelines)
