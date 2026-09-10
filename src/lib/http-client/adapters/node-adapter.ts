@@ -1602,5 +1602,3 @@ function markResponseStreamAbortError(
 function isStreamResponseCancel(value: unknown): value is StreamResponseCancel {
   return readObjectMember(value, 'cancel') === true;
 }
-
-/** Read replaceable/runtime-owned metadata without letting a getter escape. */

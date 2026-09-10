@@ -5060,9 +5060,10 @@ export class LifecycleManager
     // value at all. It is stored here and dereferenced in several places later — the
     // warning below, `startAllComponents`'s failure summary, `getComponentStatus` — and
     // every one of those reads would otherwise be an unguarded `.message` on user input.
-    // Normalizing once means a bad value cannot strand the manager: the state mutations
-    // directly above have already run, so a throw between here and the events at the
-    // bottom would leave the component recorded as stopped while nothing was emitted.
+    // Normalized here, before a single field is written, and that ordering is the point:
+    // a throw from an unguarded `.message` once the mutations below had run would leave
+    // the component recorded as stopped with none of the events at the bottom emitted.
+    // Taking the bad value's measure first means the only thing it can cost is itself.
     const failure =
       error === undefined || error === null ? null : toError(error);
 
