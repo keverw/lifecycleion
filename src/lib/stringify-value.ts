@@ -37,7 +37,9 @@ export interface StringifyValueOptions {
   redactFunction?: StringifyRedactFunction;
   /**
    * Notified when redaction fails for a value, so a broken `redactFunction` leaves a
-   * diagnosis and not only a `***REDACTION FAILED***` marker. Defaults to `console.error`.
+   * diagnosis and not only a `***REDACTION FAILED***` marker.
+   *
+   * With no handler set, a standalone call reports on the standard global `'error'` channel - so a `logger.registerReportErrorListener()` records it - and falls back to `console.error` only when nothing claims the event. The `Logger` and its sinks always supply a handler for their own work, so this default is never reached from inside a log call.
    *
    * Not routed to the global `'error'` channel: reporting there would loop, since a
    * listening logger logs it, logging renders, rendering redacts, and redaction throws
@@ -49,7 +51,9 @@ export interface StringifyValueOptions {
   onRedactionError?: RedactionErrorHandler;
   /**
    * Notified when a value could not be rendered, so an `[unrenderable]` marker leaves a
-   * diagnosis and not only a marker. Defaults to `console.error`.
+   * diagnosis and not only a marker.
+   *
+   * With no handler set, a standalone call reports on the standard global `'error'` channel - so a `logger.registerReportErrorListener()` records it - and falls back to `console.error` only when nothing claims the event. The `Logger` and its sinks always supply a handler for their own work, so this default is never reached from inside a log call.
    *
    * Only {@link stringifyValue} renders; {@link redactValue} hands back structure and
    * never reaches this. The cause is deliberately absent from the marker: it comes from

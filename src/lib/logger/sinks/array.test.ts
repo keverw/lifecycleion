@@ -535,3 +535,32 @@ describe('ArraySink - redactedParams snapshot', () => {
     expect(stored).not.toContain('hunter2secret');
   });
 });
+test('should report a transformer that throws rather than silently ignoring it', () => {
+  // Falling through to the original entry is the right recovery - a broken transformer
+  // must not cost you the log - but it was also completely silent, so a transformer that
+  // threw on every entry looked exactly like one that had chosen to pass every entry
+  // through untouched.
+  const seen: string[] = [];
+
+  const sink = new ArraySink({
+    transformer: () => {
+      throw new Error('transformer refused');
+    },
+    onRenderError: (error, subject) => seen.push(`${subject}|${error.message}`),
+  });
+
+  sink.write({
+    timestamp: Date.now(),
+    type: 'info',
+    template: 't',
+    message: 'm',
+  });
+
+  expect(seen).toHaveLength(1);
+  expect(seen[0]).toContain('<transformer>');
+  expect(seen[0]).toContain('transformer refused');
+
+  // Unchanged: the entry is still stored.
+  expect(sink.logs.length).toBe(1);
+  expect(sink.logs[0]?.message).toBe('m');
+});

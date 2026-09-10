@@ -63,7 +63,8 @@ export type ReportRenderFailure = (error: unknown, path: string) => void;
  * handler is guarded, the console rung is `reportToConsole`, and the normalization is
  * guarded too.
  *
- * @param handler Called with the first failure. Defaults to `console.error`. A handler
+ * @param handler Called with the first failure; see `createFailureReporter` for where a
+ *                failure goes when none is given. A handler
  *                that throws falls back to the console, as `onSinkError` and
  *                `onRedactionError` do: a handler for failures must not be able to turn
  *                one into two.

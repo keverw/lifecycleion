@@ -1725,8 +1725,9 @@ call, and nothing is ever silently dropped.
 | `onRedactionError`    | your `redactFunction` threw, or `redactedKeys` was unusable     |
 | `onRenderError`       | a value refused to be read or turned into text                  |
 
-Individual sinks have their own `onError` with the same three rungs — see
-[Built-In Sinks](#built-in-sinks).
+`FileSink` and `NamedPipeSink` have their own `onError` with the same three rungs, and
+`ArraySink` has `onRenderError`; `ConsoleSink` has none, since it does not queue or
+transform anything. See [Built-In Sinks](#built-in-sinks).
 
 ### Why the fall-back is the console
 
@@ -1769,8 +1770,8 @@ Two caveats worth knowing:
 
 ### Standalone renderers are different
 
-`stringifyValue()`, `errorToString()` and `serializeError()` can be called with no logger
-involved at all. With no handler, those report on the standard global `'error'` channel
+`stringifyValue()`, `errorToString()`, `serializeError()` and `CurlyBrackets()` can be
+called with no logger involved at all. With no handler, those report on the standard global `'error'` channel
 instead — so `registerReportErrorListener()` picks them up and logs them properly — falling
 back to the console only when nothing claims the event. There is no loop to worry about
 when nothing is logging.

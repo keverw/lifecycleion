@@ -211,8 +211,14 @@ export class ArraySink implements LogSink {
           this.logs.push(transformed);
           return;
         }
-      } catch {
-        // If transformer fails, fall through to store original entry
+      } catch (error) {
+        // Said, not swallowed. Falling through to the original entry is the right
+        // recovery - a broken transformer must not cost you the log - but it was also
+        // completely silent, so a transformer that threw on every entry looked exactly
+        // like one that had chosen to pass every entry through untouched.
+        createRenderReporter(
+          this.onRenderError ?? consoleFailureHandler('Transform'),
+        )(error, '<transformer>');
       }
     }
     // Store the original entry

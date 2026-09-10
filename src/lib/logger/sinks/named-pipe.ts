@@ -375,12 +375,17 @@ export class NamedPipeSink implements LogSink {
    * Format a log entry for pipe output
    */
   private formatEntry(entry: LogEntry): string {
-    // Use custom formatter if provided
+    // Use custom formatter if provided.
+    //
+    // A formatter that throws still falls back to the default format, because losing the
+    // line is the worse failure of the two - but it is reported now rather than swallowed.
+    // Silently falling back meant a caller whose formatter was broken saw perfectly
+    // ordinary log lines and never learned it had not run.
     if (this.formatter) {
       try {
         return this.formatter(entry) + '\n';
-      } catch {
-        // If formatter fails, fall through to default formatting
+      } catch (error) {
+        this.handleError(PipeErrorType.WRITE, error);
       }
     }
 

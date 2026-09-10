@@ -18,7 +18,8 @@ export interface CurlyBracketsOptions {
    * `message` accessor throws rendered exactly like a typo. This is what tells them apart.
    *
    * Fires at most once per render of the template - not once per placeholder - and
-   * defaults to `console.error`, the same three rungs the rest of the library uses. Only
+   * reports on the standard global `'error'` channel when none is set, falling back to
+   * `console.error` when nothing claims it. Only
    * a read that actually threw reaches it; a placeholder that simply is not there reports
    * nothing, which is the distinction this exists to draw.
    */

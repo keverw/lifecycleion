@@ -48,7 +48,8 @@ export type ReportRedactionFailure = (error: unknown, key: string) => void;
  * once over the params - so it can report twice. Those are two genuinely different
  * failures in two different values, and collapsing them would hide one.
  *
- * @param handler Called with the first failure. Defaults to `console.error`. A handler
+ * @param handler Called with the first failure; see `createFailureReporter` for where a
+ *                failure goes when none is given. A handler
  *                that throws falls back to the console, as `onSinkError` does: a handler
  *                for failures must not be able to turn one into two.
  */

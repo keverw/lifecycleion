@@ -15,7 +15,9 @@ import {
 export interface SerializeErrorOptions {
   /**
    * Notified when a value could not be serialized, so an `<unserializable>` marker leaves
-   * a diagnosis and not only a marker. Defaults to `console.error`.
+   * a diagnosis and not only a marker.
+   *
+   * With no handler set, a standalone call reports on the standard global `'error'` channel - so a `logger.registerReportErrorListener()` records it - and falls back to `console.error` only when nothing claims the event. The `Logger` and its sinks always supply a handler for their own work, so this default is never reached from inside a log call.
    *
    * This runs at an IPC or RPC boundary, usually while already reporting a failure, so the
    * marker keeps the payload intact and the cause comes here instead. The cause is

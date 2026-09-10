@@ -2641,3 +2641,39 @@ describe('Logger - a failure handler may never raise a failure of its own', () =
     });
   }
 });
+describe('Logger - a param that cannot be read is reported, not only marked', () => {
+  test('an unreadable param reaches onRedactionError', () => {
+    // The one redaction failure that reached no channel at all. `normalizeParamsBag`
+    // carried the key out so the marker could be put back, and dropped the thrown value on
+    // the floor - so the output said `***REDACTION FAILED***` and the handler documented
+    // to explain exactly that never fired.
+    const failures: [string, string][] = [];
+    const sink = new ArraySink();
+    const logger = new Logger({
+      sinks: [sink],
+      callProcessExit: false,
+      onRedactionError: (error, key) => failures.push([key, error.message]),
+    });
+
+    const bag: Record<string, unknown> = { keep: 'visible' };
+
+    Object.defineProperty(bag, 'oops', {
+      get() {
+        throw new Error('accessor refused');
+      },
+      enumerable: true,
+    });
+
+    logger.info('x {{keep}}', { params: bag, redactedKeys: ['keep'] });
+
+    expect(failures).toHaveLength(1);
+    expect(failures[0]?.[0]).toBe('oops');
+    expect(failures[0]?.[1]).toContain('accessor refused');
+
+    // Unchanged: the marker still stands, and the readable siblings still redact.
+    const stored = JSON.stringify(sink.logs[0]?.redactedParams);
+
+    expect(stored).toContain('***REDACTION FAILED***');
+    expect(stored).toContain('***REDACTED***');
+  });
+});
