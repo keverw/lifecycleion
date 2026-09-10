@@ -1,11 +1,10 @@
-import { describeError, toError } from '../to-error';
-import { reportToConsole } from './report-to-console';
+import { createFailureReporter } from './failure-reporter';
 
 /**
  * Notified when a value could not be rendered.
  *
  * Rendering degrades rather than failing: a value that refuses to be read is replaced with
- * a marker - `<unrenderable: keys>`, `[unrenderable]`, `<unserializable>` - and the render
+ * a marker - `<unrenderable: keys>`, `[unrenderable: value]`, `<unserializable: text>` - and the render
  * carries on, so one bad value never costs an error its `message`, `name` and `stack`. The
  * marker says *that* something refused and which half of it did, never *why*, and the
  * thrown error was discarded - so a payload with one throwing accessor left a marker in
@@ -72,46 +71,9 @@ export type ReportRenderFailure = (error: unknown, path: string) => void;
 export function createRenderReporter(
   handler?: RenderErrorHandler,
 ): ReportRenderFailure {
-  let didReport = false;
-
-  return (error: unknown, path: string): void => {
-    if (didReport) {
-      return;
-    }
-
-    didReport = true;
-
-    // Normalized rather than trusted: the value reaching here was thrown by caller code -
-    // a getter, a trap, a `toString` - and is free to be anything at all, while
-    // `RenderErrorHandler` declares an `Error`.
-    let failure: Error;
-
-    try {
-      failure = toError(error);
-    } catch {
-      failure = new Error('Render failed');
-    }
-
-    if (handler !== undefined) {
-      try {
-        handler(failure, path);
-
-        return;
-      } catch {
-        // Fall through to the console, as `createRedactionReporter` does for its own
-        // callback.
-      }
-    }
-
-    // The only channel that cannot re-enter here, and guarded by `reportToConsole`:
-    // rendering must not throw out of whatever was trying to describe a failure.
-    //
-    // `describeError`, not `failure.message`. `toError` returns an `Error` unchanged, so
-    // `message` is whatever accessor the caller's own thrown value carries - and a
-    // template literal is evaluated *before* the call, so an unguarded read there would
-    // throw outside `reportToConsole` rather than inside it.
-    reportToConsole(`Render failed for ${path}: ${describeError(failure)}`);
-  };
+  // The shared rungs. What is specific to this channel is its types, its documentation and
+  // the label in the console line; the guarantees beneath are one implementation.
+  return createFailureReporter('Render', handler);
 }
 
 /**

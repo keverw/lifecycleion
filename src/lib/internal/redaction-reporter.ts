@@ -1,5 +1,4 @@
-import { describeError, toError } from '../to-error';
-import { reportToConsole } from './report-to-console';
+import { createFailureReporter } from './failure-reporter';
 
 /**
  * Notified when redaction fails for a value.
@@ -56,44 +55,9 @@ export type ReportRedactionFailure = (error: unknown, key: string) => void;
 export function createRedactionReporter(
   handler?: RedactionErrorHandler,
 ): ReportRedactionFailure {
-  let didReport = false;
-
-  return (error: unknown, key: string): void => {
-    if (didReport) {
-      return;
-    }
-
-    didReport = true;
-
-    // Normalized rather than trusted: a `redactFunction` is user code and free to throw
-    // any value at all, and `RedactionErrorHandler` declares an `Error`.
-    let failure: Error;
-
-    try {
-      failure = toError(error);
-    } catch {
-      failure = new Error('Redaction failed');
-    }
-
-    if (handler !== undefined) {
-      try {
-        handler(failure, key);
-
-        return;
-      } catch {
-        // Fall through to the console, as `handleSinkError` does for its own callback.
-      }
-    }
-
-    // The only channel that cannot re-enter here, and guarded by `reportToConsole`:
-    // redaction must not throw out of whatever was logging.
-    //
-    // `describeError`, not `failure.message`. `toError` returns an `Error` unchanged, so
-    // `message` is whatever accessor the caller's own thrown value carries - and a
-    // template literal is evaluated *before* the call, so an unguarded read there would
-    // throw outside `reportToConsole` rather than inside it.
-    reportToConsole(`Redaction failed for ${key}: ${describeError(failure)}`);
-  };
+  // The shared rungs. What is specific to this channel is its types, its documentation and
+  // the label in the console line; the guarantees beneath are one implementation.
+  return createFailureReporter('Redaction', handler);
 }
 
 /**
