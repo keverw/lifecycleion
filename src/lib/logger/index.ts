@@ -914,7 +914,9 @@ export class Logger extends EventEmitter {
     let backstopReporter: ReportRedactionFailure | null = null;
 
     const reportBackstop = (error: unknown, key: string): void => {
-      backstopReporter ??= createRedactionReporter(this.onRedactionError);
+      backstopReporter ??= createRedactionReporter(
+        this.onRedactionError ?? this.reportFailureToConsole('Redaction'),
+      );
       backstopReporter(error, key);
     };
 
@@ -989,14 +991,10 @@ export class Logger extends EventEmitter {
     // does. The options object is built only when a handler exists, so an ordinary log
     // call allocates nothing for it.
     const message = messageParams
-      ? CurlyBrackets(
-          template,
-          messageParams,
-          undefined,
-          this.onRenderError === undefined
-            ? undefined
-            : { onRenderError: this.onRenderError },
-        )
+      ? CurlyBrackets(template, messageParams, undefined, {
+          onRenderError:
+            this.onRenderError ?? this.reportFailureToConsole('Render'),
+        })
       : template;
 
     // Create log entry
@@ -1103,6 +1101,30 @@ export class Logger extends EventEmitter {
   }
 
   /**
+   * The handler this logger supplies when the caller set none.
+   *
+   * Every render and redaction this logger performs runs *inside* a log call, so it must
+   * never reach `createFailureReporter`'s default rung: that broadcasts on the global
+   * `'error'` channel, `registerReportErrorListener()` would log what it hears, logging
+   * renders and redacts, and rendering or redacting is what just failed. Supplying a
+   * handler unconditionally is what keeps this logger off that rung - the user's handler
+   * when they set one, this when they did not.
+   *
+   * The console, because it is the only rung that cannot re-enter what is already running.
+   * A caller who wants these somewhere else sets `onRenderError` / `onRedactionError` and
+   * this is never used.
+   */
+  private reportFailureToConsole(
+    label: string,
+  ): (error: Error, subject: string) => void {
+    return (error: Error, subject: string): void => {
+      reportToConsole(
+        `${label} failed for ${subject}: ${describeError(error)}`,
+      );
+    };
+  }
+
+  /**
    * Render an error for `errorObject`, here and in every `LoggerService` below this.
    *
    * One place, so a service or entity logger cannot drift from the logger that made it.
@@ -1112,8 +1134,11 @@ export class Logger extends EventEmitter {
       // The logger's own masking and its failure handler, so an error rendered here masks
       // the way params do and a failure reaches `onRedactionError` rather than the console.
       redactFunction: this.redactFunction,
-      onRedactionError: this.onRedactionError,
-      onRenderError: this.onRenderError,
+      // Never left to the default: see `reportFailureToConsole`.
+      onRedactionError:
+        this.onRedactionError ?? this.reportFailureToConsole('Redaction'),
+      onRenderError:
+        this.onRenderError ?? this.reportFailureToConsole('Render'),
     });
   }
 

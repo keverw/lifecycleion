@@ -186,7 +186,7 @@ To render a literal null, return the string `'null'`. Returning **nothing** defe
 
 The function is handed the key exactly as you wrote it in `sensitiveFieldNames` (`user.password`, not the leaf `password`) and the value already stringified, which is what the logger passes for the same field - so the same function genuinely serves both, and a mutating function cannot reach into your error object.
 
-Pass `onRedactionError` to find out why a value failed to redact - it receives the error and the `sensitiveFieldNames` entry it happened on, defaults to `console.error`, and fires at most once per call. The same option is on the logger and on `stringifyValue`.
+Pass `onRedactionError` to find out why a value failed to redact - it receives the error and the `sensitiveFieldNames` entry it happened on, fires at most once per call, and with no handler reports on the standard global `'error'` channel so a `logger.registerReportErrorListener()` records it, falling back to `console.error` when nothing claims it. The same option is on the logger and on `stringifyValue`.
 
 If the `redactFunction` throws, or reading the value throws, the result is `***REDACTION FAILED***` - never the original value. That is the same marker the logger uses for the same condition, and it is deliberately distinct from a successful mask so a broken `redactFunction` cannot hide behind output that looks fine.
 
@@ -229,8 +229,7 @@ first is the worst possible outcome. It is written so it cannot:
   ```
 
   It fires **at most once per render** (a failure is raised per value, and one report per
-  value would be its own flood) and defaults to `console.error`, the same three rungs -
-  handler, then console, then nothing - that every other failure channel here uses. Paths keep going through a nested error's own table, so a failure inside a
+  value would be its own flood). With no handler it reports on the standard global `'error'` channel, so a `logger.registerReportErrorListener()` records it, falling back to `console.error` when nothing claims it. The `Logger` and its sinks never use that channel for their own work - they always supply a handler, defaulting to the console, because broadcasting from inside a log call would be logged by the listener, and logging renders. Paths keep going through a nested error's own table, so a failure inside a
   `cause` still says `cause.additionalInfo.token`.
 
   Note that a `BigInt` inside `additionalInfo` renders normally, since that walk handles

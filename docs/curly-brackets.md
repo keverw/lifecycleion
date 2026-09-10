@@ -149,7 +149,7 @@ CurlyBrackets('{{missing.key}} {{user.token}}', { user: hostile }, '(null)', {
 
 The path is rooted at the placeholder as written, so a template with many of them still
 says which one refused. It fires at most once per render of the template - not once per
-placeholder - and defaults to `console.error`.
+placeholder. With no handler it reports on the standard global `'error'` channel, so a `logger.registerReportErrorListener()` records it, falling back to `console.error` when nothing claims it. The `Logger` and its sinks never use that channel for their own work - they always supply a handler, defaulting to the console, because broadcasting from inside a log call would be logged by the listener, and logging renders.
 
 The cause is never written into the output: it comes from your own getter and may carry
 the value it was hiding, and the rendered string is going wherever you send it.

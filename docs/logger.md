@@ -599,10 +599,24 @@ const logger = new Logger({
 });
 ```
 
-It fires at most once per render, and defaults to `console.error`, the same three rungs
-as `onSinkError` and `onRedactionError`. It fires only when a read actually threw — never
-for the ordinary degradations like `[circular]` or `[max depth exceeded]`, which never
-reach a reporter at all — so it is no more chatty than the redaction channel.
+It fires at most once per render, and only when a read actually threw — never for the
+ordinary degradations like `[circular]` or `[max depth exceeded]`, which never reach a
+reporter at all.
+
+With no handler set, **the logger and its sinks write these to `console.error`**, and that
+is deliberate rather than lazy: everything they render runs inside a log call, so reporting
+anywhere a logger might hear it would be logged, and logging renders. The console is the
+only rung that cannot re-enter what is already running.
+
+A **standalone** call — `stringifyValue()` or `errorToString()` invoked directly by you,
+with nothing logging — has no such risk, so with no handler it reports on the standard
+global `'error'` channel instead and a `registerReportErrorListener()` records it like any
+other reported failure.
+
+> **If your own sink, formatter or transformer calls `stringifyValue()`, pass it an
+> `onRenderError`.** It runs inside a log call while looking exactly like a standalone one,
+> so left to the default it broadcasts, your listener logs it, that logging reaches your
+> sink again, and it cycles.
 
 **The cause never reaches the log line.** It comes from your own getter or `toString`,
 which were handed the value and are free to put it in the message; a cause written into
@@ -616,7 +630,7 @@ a value that fails to redact and a value that fails to render are different fail
 collapsing them would hide one.
 
 It is handed the failure, normalized to an `Error`, and the `redactedKeys` entry as you
-wrote it - `user.password`, not the leaf `password`. It **defaults to `console.error`**, so
+wrote it - `user.password`, not the leaf `password`. The logger always supplies a handler for its own work - yours if you set one, a console-writing one if you did not - because everything it renders and redacts runs inside a log call, where reporting anywhere a logger might hear it would be logged, and logging renders. So this **defaults to `console.error`**, and
 a broken redactor is loud rather than silent.
 
 Two things about it are deliberate:

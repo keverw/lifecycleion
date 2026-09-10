@@ -1,5 +1,5 @@
 import { describeError, toError } from '../to-error';
-import { reportToConsole } from './report-to-console';
+import { reportToHost } from './report-to-host';
 
 /**
  * A caller's handler for one kind of failure, and the reporter that feeds it.
@@ -25,12 +25,23 @@ export type ReportFailure = (error: unknown, subject: string) => void;
  * The three rungs every failure channel in this library uses. What varies between callers
  * is only the label in the console line and what `subject` names; the guarantees do not.
  *
- * **Deliberately not the global `'error'` channel**, which is where callback failures go.
- * Reporting there would loop: `logger.registerReportErrorListener()` listens on that
- * channel and logs what it hears, logging renders a message and redacts its params, and
- * rendering or redacting is what just failed. Each pass is a fresh turn, so no re-entrancy
- * guard closes it. A dedicated callback that cannot re-enter the thing that failed is the
- * same answer `onEventHandlerError` reaches for.
+ * With no handler, the report goes to the standard global `'error'` channel - the same
+ * three rungs `safe-handle-callback` uses, so a `logger.registerReportErrorListener()`
+ * picks it up and logs it properly, falling through to the console when nothing claims it.
+ * That is what anyone with a logger actually wants, and a console line nobody reads is a
+ * poor consolation prize.
+ *
+ * **A caller that runs inside logging must not leave this to the default.** Broadcasting
+ * from there is a loop: the listener logs what it hears, logging renders and redacts, and
+ * rendering or redacting is what just failed. Every such caller therefore passes a handler
+ * always - the user's if they set one, and a console-writing one if they did not - so this
+ * function never reaches its broadcast rung on their behalf. `Logger` and `ArraySink` both
+ * do exactly that; see `Logger.reportFailureToConsole`.
+ *
+ * The one gap that leaves is a caller's *own* sink or formatter calling `stringifyValue`
+ * directly: that is inside a log call while looking exactly like standalone use, so it
+ * would broadcast and could cycle. Documented rather than defended - defending it needs
+ * cross-module global state, and the machinery cost more than the hazard.
  *
  * **Fires at most once per operation**, and that bound is the point rather than a nicety.
  * These failures are raised per *value*, so one broken function or one hostile payload
@@ -84,13 +95,19 @@ export function createFailureReporter(
       }
     }
 
-    // The only channel that cannot re-enter here, and guarded by `reportToConsole`: this
-    // must not throw out of whatever was logging, rendering or redacting.
-    //
     // `describeError`, not `failure.message`. `toError` returns an `Error` unchanged, so
     // `message` is whatever accessor the caller's own thrown value carries - and a
     // template literal is evaluated *before* the call, so an unguarded read there would
-    // throw outside `reportToConsole` rather than inside it.
-    reportToConsole(`${label} failed for ${subject}: ${describeError(failure)}`);
+    // throw outside the guard rather than inside it.
+    const line = `${label} failed for ${subject}: ${describeError(failure)}`;
+
+    // The standard channel, so a listening logger records this the way it records a
+    // callback failure. `reportToHost` ends on the guarded console rung itself when
+    // nothing claims the event, so a process with no listener behaves exactly as before.
+    // The cause travels on `cause`; the pre-rendered line is for that console rung.
+    reportToHost(
+      new Error(`${label} failed for ${subject}`, { cause: failure }),
+      () => line,
+    );
   };
 }

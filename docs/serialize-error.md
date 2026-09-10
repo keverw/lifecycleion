@@ -59,8 +59,7 @@ const serialized = serializeError(error, {
 });
 ```
 
-It fires at most once per call and defaults to `console.error`, the same three rungs the
-rest of the library uses.
+It fires at most once per call. With no handler it reports on the standard global `'error'` channel, so a `logger.registerReportErrorListener()` records it, falling back to `console.error` when nothing claims it. The `Logger` and its sinks never use that channel for their own work - they always supply a handler, defaulting to the console, because broadcasting from inside a log call would be logged by the listener, and logging renders.
 
 **The cause never enters the payload.** It comes from the caller's own getter and may
 carry the value it was hiding, and this object is about to cross a wire - so the marker

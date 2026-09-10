@@ -7,6 +7,7 @@ import { Logger } from './index';
 import { ArraySink } from './sinks/array';
 import { sleep } from '../sleep';
 import { safeHandleCallback } from '../safe-handle-callback';
+import { stringifyValue } from '../stringify-value';
 
 // These suites deliberately drive the paths that fall through to `console.error` when
 // nothing claims the report. Captured rather than printed so a real failure in the run
@@ -2442,5 +2443,87 @@ describe('Logger - what the global error listener does with the payload', () => 
       logger.unregisterReportErrorListener();
       await logger.close();
     }
+  });
+});
+describe('Logger - where an unhandled render failure goes', () => {
+  const hostile = (): Record<string, unknown> => {
+    const bag: Record<string, unknown> = { safe: 'kept' };
+
+    Object.defineProperty(bag, 'token', {
+      get() {
+        throw new Error('accessor refused');
+      },
+      enumerable: true,
+    });
+
+    return bag;
+  };
+
+  test('a bare render with no handler reaches a listening logger', () => {
+    // The point of the arrangement. `stringifyValue()` called on its own has no handler
+    // and no logger of its own, and a console line nobody reads is a poor consolation
+    // prize. Nothing is logging, so there is no loop to worry about: it takes the standard
+    // global `'error'` channel and a registered listener records it properly.
+    const sink = new ArraySink();
+    const logger = new Logger({ sinks: [sink], callProcessExit: false });
+
+    expect(logger.registerReportErrorListener('Reported')).toBe('success');
+
+    try {
+      stringifyValue({ user: hostile() });
+    } finally {
+      logger.unregisterReportErrorListener();
+    }
+
+    expect(sink.logs.length).toBe(1);
+    expect(sink.logs[0]?.message).toContain('Render failed');
+    expect(sink.logs[0]?.message).toContain('<value>.user.token');
+  });
+
+  test("the logger's own render failures never take that channel", () => {
+    // The other half, and the one that would loop. Everything the logger renders runs
+    // inside a log call, so it supplies a handler unconditionally - the caller's, or a
+    // console-writing one - and never reaches the broadcast rung. Left to the default, the
+    // listener would log what it hears, that logging would render, and round it goes.
+    const sink = new ArraySink();
+    const logger = new Logger({ sinks: [sink], callProcessExit: false });
+
+    expect(logger.registerReportErrorListener('Reported')).toBe('success');
+
+    const consoleError = console.error;
+    const lines: string[] = [];
+
+    console.error = (...args: unknown[]): void => {
+      lines.push(args.map((arg) => String(arg)).join(' '));
+    };
+
+    try {
+      logger.info('{{u}}', { params: { u: hostile() } });
+    } finally {
+      console.error = consoleError;
+      logger.unregisterReportErrorListener();
+    }
+
+    // One entry - the log call itself. Nothing was fed back through the listener.
+    expect(sink.logs.length).toBe(1);
+    expect(sink.logs[0]?.message).not.toContain('Render failed');
+
+    // It went to the console rung instead, which cannot re-enter anything.
+    expect(lines.some((line) => line.includes('Render failed'))).toBe(true);
+  });
+
+  test('a caller-supplied handler wins over both', () => {
+    const seen: string[] = [];
+    const sink = new ArraySink();
+    const logger = new Logger({
+      sinks: [sink],
+      callProcessExit: false,
+      onRenderError: (error, path) => seen.push(`${path}|${error.message}`),
+    });
+
+    logger.info('{{u}}', { params: { u: hostile() } });
+
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toContain('u.token');
   });
 });

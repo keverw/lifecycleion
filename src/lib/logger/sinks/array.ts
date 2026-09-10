@@ -9,6 +9,8 @@ import {
   type RenderErrorHandler,
   type ReportRenderFailure,
 } from '../../internal/render-reporter';
+import { reportToConsole } from '../../internal/report-to-console';
+import { describeError } from '../../to-error';
 import type { ArrayLogTransformer, LogEntry, LogSink } from '../types';
 
 /**
@@ -190,8 +192,19 @@ export class ArraySink implements LogSink {
               // One reporter per entry: the bound that matters here is per snapshot, since
               // a sink writes many entries over its life and a budget shared across all of
               // them would report the first hostile param and stay silent thereafter.
-              // Defaults to the console, as every other failure channel here does.
-              createRenderReporter(this.onRenderError),
+              // A handler is always supplied, never left to the reporter's own default.
+              // A sink runs *inside* a log call by definition, and that default
+              // broadcasts on the global `'error'` channel - which a listening logger
+              // would log, reaching this sink again. The console is the only rung that
+              // cannot re-enter what is already running.
+              createRenderReporter(
+                this.onRenderError ??
+                  ((error, path): void => {
+                    reportToConsole(
+                      `Render failed for ${path}: ${describeError(error)}`,
+                    );
+                  }),
+              ),
             ),
           };
 
