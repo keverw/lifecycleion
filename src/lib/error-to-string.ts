@@ -257,8 +257,13 @@ function asAddressableBag(
         enumerable: true,
         configurable: true,
       });
-    } catch {
-      // One key that will not forward is dropped rather than failing the whole bag.
+    } catch (error) {
+      // One key that will not forward is dropped rather than failing the whole bag - and
+      // said, matching the refused-enumeration branch above it, which was the one
+      // inconsistent swallow left in this file. Effectively unreachable (a fresh object,
+      // a key `for...in` already yielded) but a dropped key is a missing row, and a
+      // missing row is exactly what the markers here exist to make impossible.
+      reportRender(error, joinPath(path, key));
     }
   }
 

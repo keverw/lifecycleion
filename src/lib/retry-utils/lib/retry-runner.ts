@@ -1,4 +1,5 @@
 import { PromiseProtectedResolver } from '../../promise-protected-resolver';
+import { reportCallbackError } from '../../safe-handle-callback';
 import { generateID } from '../../id-helpers';
 import { isPromise } from '../../is-promise';
 import { isString } from '../../strings';
@@ -983,6 +984,23 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
       // Ensure the result hasn't already been handled
       context.handled
     ) {
+      // Discarding is right - the attempt is over and its outcome is already recorded -
+      // but it used to be silent, and `ReportResult` returns `void`, so an operation that
+      // reported twice, or reported its real failure after the runner had moved on, had no
+      // way to learn its outcome went nowhere. A double report is a caller bug that should
+      // not have to be inferred from a missing event.
+      //
+      // Reported on the global `'error'` channel rather than through this runner's own
+      // events, deliberately: the attempt this belongs to has been settled, so emitting
+      // `attempt:handled` for it now would be inventing a lifecycle event out of order.
+      reportCallbackError(
+        'RetryRunner reportResult (attempt already settled)',
+        valueInfo.error ??
+          new Error(
+            `reportResult('${status}') arrived after the attempt was settled`,
+          ),
+      );
+
       return; // Ensures we only handle the result once per context
     }
 

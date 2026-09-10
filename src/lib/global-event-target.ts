@@ -335,7 +335,10 @@ export function installGlobalEventTarget(): GlobalEventTargetInstallResult {
         try {
           Object.defineProperty(g, GLOBAL_KEY, priorStateDescriptor);
         } catch {
-          // Nothing better to do here: the original could not be put back.
+          // Nothing better to do here: the original could not be put back. Left
+          // unreported deliberately - this runs while *installing* the very channel a
+          // report would travel on, so there is nothing to report through yet, and the
+          // caller is told through the returned install status instead.
         }
 
         continue;

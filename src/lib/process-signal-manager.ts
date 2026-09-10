@@ -1,4 +1,7 @@
-import { safeHandleCallback } from './safe-handle-callback';
+import {
+  reportCallbackError,
+  safeHandleCallback,
+} from './safe-handle-callback';
 import { ulid } from 'ulid';
 import readline from 'readline';
 
@@ -860,8 +863,15 @@ export class ProcessSignalManager {
         // (either raw mode was disabled, or it was already off and doesn't need disabling)
         shared.rawModeOwner = null;
         shared.rawModeEnabledByManager = false;
-      } catch {
-        // If setRawMode(false) fails, ensure there's a non-null owner so future detaches can retry.
+      } catch (error) {
+        // Reported for the reason `restoreStdin`'s twin is: a terminal left in raw mode is
+        // the user's shell broken, and this said nothing about it.
+        reportCallbackError(
+          'ProcessSignalManager stdin raw mode restore',
+          error,
+        );
+
+        // Ensure there's a non-null owner so future detaches can retry.
         // This matters in the edge case where setRawMode(true) threw after enabling raw mode:
         // rawModeOwner would still be null, and without setting it here we'd never retry disabling.
         if (didAttemptRawModeEnable && shared.rawModeOwner === null) {
@@ -940,9 +950,16 @@ export class ProcessSignalManager {
         }
         shared.rawModeOwner = null;
         shared.rawModeEnabledByManager = false;
-      } catch {
-        // If setRawMode fails, leave the owner set so future detaches can retry
-        // Terminal will be restored on process exit anyway
+      } catch (error) {
+        // The owner stays set so a future detach can retry - but this is reported now
+        // rather than left to the exit. "Restored on process exit anyway" is true of a
+        // script and false of the long-lived process this library exists for: `detach()`
+        // returns normally, `getStatus().isAttached` reads `false`, and the terminal is
+        // still in raw mode, so the user's shell is broken and nothing anywhere said so.
+        reportCallbackError(
+          'ProcessSignalManager stdin raw mode restore',
+          error,
+        );
       }
     }
 

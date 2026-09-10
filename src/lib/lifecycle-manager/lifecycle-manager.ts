@@ -1992,8 +1992,17 @@ export class LifecycleManager
           params: { timeoutMS },
         });
         // Prevent unhandled rejection if health check throws after timeout
-        Promise.resolve(healthCheckPromise).catch(() => {
-          // Intentionally ignore errors after timeout
+        // Logged, not discarded. Preventing the unhandled rejection is why this
+        // `catch` exists and it stays; swallowing the *cause* was a separate
+        // decision, and it left the caller knowing the operation timed out and
+        // never why it ultimately failed. The timeout warning is logged just
+        // above, so this is that line's missing second half.
+        Promise.resolve(healthCheckPromise).catch((error: unknown) => {
+          this.logger
+            .entity(name)
+            .debug('Health check failed after it had already timed out', {
+              params: { error: toError(error) },
+            });
         });
       }
       const healthResult: ComponentHealthResult =
@@ -2270,8 +2279,17 @@ export class LifecycleManager
           params: { from, timeoutMS },
         });
         // Prevent unhandled rejection if handler throws after timeout
-        Promise.resolve(handlerPromise).catch(() => {
-          // Intentionally ignore errors after timeout
+        // Logged, not discarded. Preventing the unhandled rejection is why this
+        // `catch` exists and it stays; swallowing the *cause* was a separate
+        // decision, and it left the caller knowing the operation timed out and
+        // never why it ultimately failed. The timeout warning is logged just
+        // above, so this is that line's missing second half.
+        Promise.resolve(handlerPromise).catch((error: unknown) => {
+          this.logger
+            .entity(componentName)
+            .debug('Message handler failed after it had already timed out', {
+              params: { error: toError(error), from },
+            });
         });
         return {
           sent: true,
@@ -3663,8 +3681,17 @@ export class LifecycleManager
             }
 
             // Prevent unhandled rejection if start() throws after timeout
-            Promise.resolve(startPromise).catch(() => {
-              // Intentionally ignore errors after timeout
+            // Logged, not discarded. Preventing the unhandled rejection is why this
+            // `catch` exists and it stays; swallowing the *cause* was a separate
+            // decision, and it left the caller knowing the operation timed out and
+            // never why it ultimately failed. The timeout warning is logged just
+            // above, so this is that line's missing second half.
+            Promise.resolve(startPromise).catch((error: unknown) => {
+              this.logger
+                .entity(name)
+                .debug('start() failed after it had already timed out', {
+                  params: { error: toError(error) },
+                });
             });
             reject(
               new ComponentStartTimeoutError({
@@ -4218,7 +4245,15 @@ export class LifecycleManager
                   ),
                 () => {}, // Intentionally ignore errors after timeout
               )
-              .catch(() => {}); // Suppress any error thrown by handleLateStopResolution itself
+              // Suppressed so it cannot become an unhandled rejection, and logged because
+              // `handleLateStopResolution` mutates state in sequence: a throw partway
+              // leaves the component half-transitioned, which is better said outright than
+              // inferred from a stuck state later.
+              .catch((error: unknown) => {
+                this.logger.entity(name).warn('Late stop resolution failed', {
+                  params: { error: toError(error) },
+                });
+              });
             reject(
               new ComponentStopTimeoutError({
                 componentName: name,
@@ -4446,7 +4481,15 @@ export class LifecycleManager
                   ),
                 () => {}, // Intentionally ignore errors after timeout
               )
-              .catch(() => {}); // Suppress any error thrown by handleLateStopResolution itself
+              // Suppressed so it cannot become an unhandled rejection, and logged because
+              // `handleLateStopResolution` mutates state in sequence: a throw partway
+              // leaves the component half-transitioned, which is better said outright than
+              // inferred from a stuck state later.
+              .catch((error: unknown) => {
+                this.logger.entity(name).warn('Late stop resolution failed', {
+                  params: { error: toError(error) },
+                });
+              });
             reject(
               new Error(LIFECYCLE_MANAGER_MESSAGE_FORCE_SHUTDOWN_TIMED_OUT),
             );
@@ -4776,8 +4819,16 @@ export class LifecycleManager
 
         this.componentStates.set(name, timeoutState);
       })
-      .catch(() => {
-        // If start() eventually rejects after timing out, there is nothing more to clean up.
+      .catch((error: unknown) => {
+        // A rejection from `start()` itself needs nothing further - the component is
+        // already recorded as timed out. But this `catch` also covers the recovery body
+        // above, including the `stopComponentInternal` that exists to stop a late-starting
+        // component, and a failure there means that stop silently did not happen.
+        this.logger
+          .entity(name)
+          .debug('Late startup completion handling ended in a failure', {
+            params: { error: toError(error) },
+          });
       });
   }
 
@@ -6024,8 +6075,20 @@ export class LifecycleManager
             params: { timeoutMS },
           });
           // Prevent unhandled rejection if handler throws after timeout
-          Promise.resolve(handlerPromise).catch(() => {
-            // Intentionally ignore errors after timeout
+          // Logged, not discarded. Preventing the unhandled rejection is why this
+          // `catch` exists and it stays; swallowing the *cause* was a separate
+          // decision, and it left the caller knowing the operation timed out and
+          // never why it ultimately failed. The timeout warning is logged just
+          // above, so this is that line's missing second half.
+          Promise.resolve(handlerPromise).catch((error: unknown) => {
+            this.logger
+              .entity(name)
+              .debug(
+                'Lifecycle handler failed after it had already timed out',
+                {
+                  params: { error: toError(error) },
+                },
+              );
           });
           results.push({
             name,

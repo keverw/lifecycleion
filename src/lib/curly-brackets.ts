@@ -174,8 +174,14 @@ CurlyBrackets.compileTemplate = function (
 
       try {
         return stringifyValue(replacement, renderOptionsFor(p1.trim()));
-      } catch {
+      } catch (error) {
         // `String()` invokes `toString`/`Symbol.toPrimitive`, both ordinary properties.
+        // Dead in practice - `stringifyValue` has its own top-level guard that reports and
+        // returns `[unrenderable]` rather than throwing - but `report` is in scope, and a
+        // backstop that renders the fallback without saying why is the same silence this
+        // whole channel exists to end.
+        report(error, p1.trim());
+
         return fallback;
       }
     });
