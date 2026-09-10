@@ -2,7 +2,6 @@ import { getPathParts } from './internal/path-utils';
 import { stringifyValue } from './stringify-value';
 import {
   createRenderReporter,
-  NOOP_RENDER_REPORTER,
   type RenderErrorHandler,
 } from './internal/render-reporter';
 
@@ -18,9 +17,10 @@ export interface CurlyBracketsOptions {
    * this existed they were indistinguishable: `{{error.message}}` on an error whose
    * `message` accessor throws rendered exactly like a typo. This is what tells them apart.
    *
-   * Fires at most once per render. Defaults to discarding rather than to the console: a
-   * template resolving nothing is ordinary, and only a caller that asked for the causes
-   * should pay for them.
+   * Fires at most once per render of the template - not once per placeholder - and
+   * defaults to `console.error`, the same three rungs the rest of the library uses. Only
+   * a read that actually threw reaches it; a placeholder that simply is not there reports
+   * nothing, which is the distinction this exists to draw.
    */
   onRenderError?: RenderErrorHandler;
 }
@@ -86,10 +86,7 @@ CurlyBrackets.compileTemplate = function (
     // One reporter per render of the compiled template, not per compile: a compiled
     // template is reused across calls, and a budget shared between them would report the
     // first render's failure and stay silent for every render after it.
-    const report =
-      options?.onRenderError === undefined
-        ? NOOP_RENDER_REPORTER
-        : createRenderReporter(options.onRenderError);
+    const report = createRenderReporter(options?.onRenderError);
 
     // Forwarded into the shared reporter rather than handed over directly, and rooted at
     // the placeholder rather than at the anonymous `<value>` a bare render reports.
@@ -103,14 +100,11 @@ CurlyBrackets.compileTemplate = function (
     // needs to act.
     const renderOptionsFor = (
       placeholder: string,
-    ): { onRenderError: RenderErrorHandler } | undefined =>
-      options?.onRenderError === undefined
-        ? undefined
-        : {
-            onRenderError: (error: Error, path: string): void => {
-              report(error, rootPathAt(placeholder, path));
-            },
-          };
+    ): { onRenderError: RenderErrorHandler } => ({
+      onRenderError: (error: Error, path: string): void => {
+        report(error, rootPathAt(placeholder, path));
+      },
+    });
 
     return str.replace(PLACEHOLDER_PATTERN, (match, p1: string) => {
       if (typeof p1 !== 'string') {

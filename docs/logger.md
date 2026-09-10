@@ -599,8 +599,10 @@ const logger = new Logger({
 });
 ```
 
-It fires at most once per render, and defaults to discarding — logging degrades often
-enough that a console line per marker would be its own flood.
+It fires at most once per render, and defaults to `console.error`, the same three rungs
+as `onSinkError` and `onRedactionError`. It fires only when a read actually threw — never
+for the ordinary degradations like `[circular]` or `[max depth exceeded]`, which never
+reach a reporter at all — so it is no more chatty than the redaction channel.
 
 **The cause never reaches the log line.** It comes from your own getter or `toString`,
 which were handed the value and are free to put it in the message; a cause written into
@@ -1480,7 +1482,7 @@ interface LoggerOptions {
   sinks?: LogSink[]; // Output destinations
   redactFunction?: (keyName, value: string) => RedactFunctionResult; // Custom redaction (default: masks with asterisks using datamask)
   onRedactionError?: (error, key) => void; // Redaction failed for a param (default: console.error)
-  onRenderError?: (error, path) => void; // A value could not be rendered (default: discard)
+  onRenderError?: (error, path) => void; // A value could not be rendered (default: console.error)
   callProcessExit?: boolean; // Actually call process.exit() (default: true, disable for tests/browser)
   beforeExitCallback?: (
     code,

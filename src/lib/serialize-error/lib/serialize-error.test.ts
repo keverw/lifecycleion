@@ -379,7 +379,7 @@ describe('deserializeError - untrusted input', () => {
 
       const wire = JSON.stringify(result);
 
-      expect(wire).toContain('<unserializable>');
+      expect(wire).toContain('<unserializable: value>');
       expect(wire).toContain('kept');
       expect(wire).not.toContain('hunter2secret');
     });

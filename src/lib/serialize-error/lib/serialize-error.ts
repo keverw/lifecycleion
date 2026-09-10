@@ -7,7 +7,6 @@ import { MAX_RENDER_DEPTH, TRUNCATED } from '../../internal/render-budget';
 import { isErrorValue } from '../../to-error';
 import {
   createRenderReporter,
-  NOOP_RENDER_REPORTER,
   type RenderErrorHandler,
   type ReportRenderFailure,
 } from '../../internal/render-reporter';
@@ -16,7 +15,7 @@ import {
 export interface SerializeErrorOptions {
   /**
    * Notified when a value could not be serialized, so an `<unserializable>` marker leaves
-   * a diagnosis and not only a marker. Defaults to discarding.
+   * a diagnosis and not only a marker. Defaults to `console.error`.
    *
    * This runs at an IPC or RPC boundary, usually while already reporting a failure, so the
    * marker keeps the payload intact and the cause comes here instead. The cause is
@@ -35,8 +34,25 @@ export interface SerializedError {
   [key: string]: unknown;
 }
 
-/** Stands in for a value whose read threw, so the output says so rather than omitting it. */
-const UNSERIALIZABLE = '<unserializable>';
+/**
+ * Stands in for a value whose read threw, and says which half of it refused.
+ *
+ * Split the way `errorToString` and the template renderer split theirs, and it earns the
+ * detail here more than anywhere: this payload crosses a process boundary, and the
+ * receiving side has no `onRenderError` of its own. The marker is the only thing that
+ * survives the wire, so it is the only diagnosis that reader will ever get.
+ *
+ * **The cause is deliberately not here**, for the same reason it is nowhere else: it comes
+ * from the caller's own getter and may carry the value it was hiding - and this object is
+ * about to be sent somewhere. It goes to `onRenderError` instead.
+ */
+const UNSERIALIZABLE_KEYS = '<unserializable: keys>';
+
+/** A single value refused to be read - a throwing accessor, a revoked `Proxy`. */
+const UNSERIALIZABLE_VALUE = '<unserializable: value>';
+
+/** A value was readable but could not be turned into text. */
+const UNSERIALIZABLE_TEXT = '<unserializable: text>';
 
 /**
  * Check if a value looks like an Error (has name, message, and stack).
@@ -73,7 +89,7 @@ function describeValue(value: unknown): string {
   try {
     return String(value);
   } catch {
-    return UNSERIALIZABLE;
+    return UNSERIALIZABLE_TEXT;
   }
 }
 
@@ -106,11 +122,10 @@ export function serializeError(
 ): SerializedError {
   const seen = new WeakSet<object>();
 
-  // Built only when a handler was given, so the ordinary call allocates nothing.
-  const report =
-    options?.onRenderError === undefined
-      ? NOOP_RENDER_REPORTER
-      : createRenderReporter(options.onRenderError);
+  // Defaults to the console, as every other failure channel in this library does - and it
+  // matters more here than anywhere: this payload crosses a process boundary, and the
+  // receiving side has no callback of its own to learn anything from.
+  const report = createRenderReporter(options?.onRenderError);
 
   // The root is tracked before the walk starts, not left for `deepSerialize` to add when
   // it reaches it. A nested error arrives here already in `seen`, because the walk added
@@ -288,7 +303,7 @@ function deepSerialize(
     if (shape.kind === 'unreadable') {
       report(shape.error, path);
 
-      return UNSERIALIZABLE;
+      return UNSERIALIZABLE_KEYS;
     }
 
     if (shape.kind === 'array') {
@@ -307,7 +322,7 @@ function deepSerialize(
           );
         } catch (error) {
           report(error, elementPath);
-          copy.push(UNSERIALIZABLE);
+          copy.push(UNSERIALIZABLE_VALUE);
         }
       }
 
@@ -332,7 +347,7 @@ function deepSerialize(
         );
       } catch (error) {
         report(error, `${path}.${key}`);
-        entry = UNSERIALIZABLE;
+        entry = UNSERIALIZABLE_VALUE;
       }
 
       defineEntry(result, key, entry);

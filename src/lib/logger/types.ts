@@ -222,7 +222,7 @@ export interface LoggerOptions {
   /**
    * Notified when a value could not be rendered into a log line, so an `[unrenderable]` or
    * `<unrenderable: ...>` marker leaves a diagnosis and not only a marker.
-   * Defaults to discarding.
+   * Defaults to `console.error`.
    *
    * Rendering degrades rather than failing - a value that refuses to be read becomes a
    * marker and the line still goes out, so one bad param never costs you the log entry.

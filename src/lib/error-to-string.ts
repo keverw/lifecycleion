@@ -33,7 +33,6 @@ import {
 } from './internal/redaction-reporter';
 import {
   createRenderReporter,
-  NOOP_RENDER_REPORTER,
   type RenderErrorHandler,
   type ReportRenderFailure,
 } from './internal/render-reporter';
@@ -469,14 +468,12 @@ export function errorToString(
 ): string {
   const report = createRedactionReporter(options?.onRedactionError);
 
-  // Built only when a handler was given. The default reporter writes to the console, which
-  // is the right rung for a caller who asked for one and wrong for every ordinary render -
-  // rendering degrades constantly and by design, and a console line per marker would be
-  // its own flood. `NOOP_RENDER_REPORTER` costs nothing on the path every log call takes.
-  const reportRender =
-    options?.onRenderError === undefined
-      ? NOOP_RENDER_REPORTER
-      : createRenderReporter(options.onRenderError);
+  // Defaults to the console, exactly as the redaction reporter does. The two failures are
+  // equally exceptional: this fires only when a read actually *threw*, never for the
+  // ordinary degradations - `[Function]`, `[circular]`, `[max depth exceeded]` - which
+  // never reach a reporter at all. Silence by default would leave the swallow this channel
+  // exists to end as the behaviour almost everyone gets.
+  const reportRender = createRenderReporter(options?.onRenderError);
 
   try {
     const table = errorToASCIITable(

@@ -229,8 +229,8 @@ first is the worst possible outcome. It is written so it cannot:
   ```
 
   It fires **at most once per render** (a failure is raised per value, and one report per
-  value would be its own flood) and defaults to discarding, so an ordinary render costs
-  nothing. Paths keep going through a nested error's own table, so a failure inside a
+  value would be its own flood) and defaults to `console.error`, the same three rungs -
+  handler, then console, then nothing - that every other failure channel here uses. Paths keep going through a nested error's own table, so a failure inside a
   `cause` still says `cause.additionalInfo.token`.
 
   Note that a `BigInt` inside `additionalInfo` renders normally, since that walk handles

@@ -6,7 +6,6 @@ import { isPlainContainer } from '../../internal/is-plain-container';
 import { MAX_RENDER_DEPTH, TRUNCATED } from '../../internal/render-budget';
 import {
   createRenderReporter,
-  NOOP_RENDER_REPORTER,
   type RenderErrorHandler,
   type ReportRenderFailure,
 } from '../../internal/render-reporter';
@@ -164,7 +163,7 @@ export class ArraySink implements LogSink {
     /**
      * Notified when a param could not be copied into the stored snapshot, so a
      * `<value could not be copied>` marker leaves a diagnosis and not only a marker.
-     * Defaults to discarding. Fires at most once per entry written.
+     * Defaults to `console.error`. Fires at most once per entry written.
      */
     onRenderError?: RenderErrorHandler;
   }) {
@@ -191,9 +190,8 @@ export class ArraySink implements LogSink {
               // One reporter per entry: the bound that matters here is per snapshot, since
               // a sink writes many entries over its life and a budget shared across all of
               // them would report the first hostile param and stay silent thereafter.
-              this.onRenderError === undefined
-                ? NOOP_RENDER_REPORTER
-                : createRenderReporter(this.onRenderError),
+              // Defaults to the console, as every other failure channel here does.
+              createRenderReporter(this.onRenderError),
             ),
           };
 

@@ -18,6 +18,28 @@ import {
 } from './render-budget';
 
 /**
+ * What replaces a value this could not render, and which half of it refused.
+ *
+ * The same three categories `errorToString` emits, in this renderer's own bracket style -
+ * square here, alongside `[circular]` and `[max depth exceeded]`; angle there, alongside
+ * `<circular>`. The split is what a reader gets without wiring anything: `keys` sends you
+ * to the payload's shape, `value` to the code behind one field, `text` to a `toString`.
+ *
+ * **The cause is deliberately not here.** The thrown value belongs to the caller - a
+ * getter may throw `new Error('cannot read ' + this.password)` - and a marker carrying
+ * that message would put the value wherever the rendered string goes, past `redactedKeys`.
+ * These are library-authored text, which is what lets them be rendered at all; the cause
+ * goes to `onRenderError`.
+ */
+const UNRENDERABLE_KEYS = '[unrenderable: keys]';
+
+/** A single value refused to be read - a throwing accessor, a revoked `Proxy`. */
+const UNRENDERABLE_VALUE = '[unrenderable: value]';
+
+/** A value was readable but could not be turned into text. */
+const UNRENDERABLE_TEXT = '[unrenderable: text]';
+
+/**
  * Whether a value carries a `toString` of its own worth using.
  *
  * `Error`, `Date`, `URL` and anything else that overrides `toString` renders something
@@ -170,7 +192,7 @@ function renderContainer(
     // render emits, and one per element of the container above would otherwise be free.
     report(shape.error, path);
 
-    return charge(budget, quote('[unrenderable]'));
+    return charge(budget, quote(UNRENDERABLE_KEYS));
   }
 
   if (shape.kind === 'array') {
@@ -219,7 +241,7 @@ function renderContainer(
         );
       } catch (error) {
         report(error, `${path}[${String(index)}]`);
-        parts.push(charge(budget, quote('[unrenderable]')));
+        parts.push(charge(budget, quote(UNRENDERABLE_VALUE)));
       }
     }
 
@@ -273,7 +295,7 @@ function renderContainer(
       );
     } catch (error) {
       report(error, joinTemplatePath(path, key));
-      parts.push(`${renderedKey}${charge(budget, quote('[unrenderable]'))}`);
+      parts.push(`${renderedKey}${charge(budget, quote(UNRENDERABLE_VALUE))}`);
     }
   }
 
@@ -400,6 +422,6 @@ export function stringifyTemplateValue(
   } catch (error) {
     report(error, joinTemplatePath(path));
 
-    return '[unrenderable]';
+    return UNRENDERABLE_TEXT;
   }
 }

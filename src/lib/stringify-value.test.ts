@@ -713,7 +713,7 @@ describe('stringifyValue - one bad value never costs the rest', () => {
     });
 
     expect(stringifyValue({ user: 'alice', list, note: 'kept' })).toBe(
-      '{"user":"alice","list":[1,"[unrenderable]"],"note":"kept"}',
+      '{"user":"alice","list":[1,"[unrenderable: value]"],"note":"kept"}',
     );
   });
 
@@ -1600,7 +1600,7 @@ describe('redactValue and stringifyValue stay one implementation', () => {
     // The rendering walk, over the hostile value itself: the bad element alone degrades.
     const rendered = stringifyValue({ t: hostileArray() });
 
-    expect(rendered).toContain('[unrenderable]');
+    expect(rendered).toContain('[unrenderable: value]');
     expect(rendered).toContain(SECRET);
 
     // The redaction walk, over an equally hostile value: same place, same shape.
@@ -1636,7 +1636,7 @@ describe('redactValue and stringifyValue stay one implementation', () => {
 
     const rendered = stringifyValue({ u: hostile(), keep: 'visible' });
 
-    expect(rendered).toContain('[unrenderable]');
+    expect(rendered).toContain('[unrenderable: value]');
     expect(rendered).toContain('visible');
     // The readable sibling survives, exactly as it does in the array case above. Nothing
     // asked for masking on this call, so `SECRET` here is an ordinary value and printing
@@ -1962,20 +1962,20 @@ describe('a shared subtree costs one walk, not one per route', () => {
       expect(seen[0]).toContain('<value>.user.token');
       expect(seen[0]).toContain('accessor refused');
 
-      expect(rendered).toContain('[unrenderable]');
+      expect(rendered).toContain('[unrenderable: value]');
       expect(rendered).toContain('kept');
       expect(rendered).not.toContain('hunter2secret');
     });
 
-    test('should stay silent and never throw without a handler', () => {
-      // Rendering degrades constantly and by design, so the default cannot write to the
-      // console: that would turn one hostile payload into a flood on a path whose whole
-      // job is to stay out of the way.
+    test('should fall back to the console without a handler, and never throw', () => {
+      // Handler, then console, then nothing - the same three rungs `onRedactionError`,
+      // `onSinkError` and `onEventHandlerError` all use. The rung itself is
+      // `reportToConsole`, so a broken `console.error` costs the report and not the render.
       const consoleError = console.error;
-      let calls = 0;
+      const lines: string[] = [];
 
-      console.error = (): void => {
-        calls++;
+      console.error = (...args: unknown[]): void => {
+        lines.push(args.map((arg) => String(arg)).join(' '));
       };
 
       try {
@@ -1984,7 +1984,7 @@ describe('a shared subtree costs one walk, not one per route', () => {
 
           Object.defineProperty(bag, 'token', {
             get() {
-              throw new Error('accessor refused: hunter2secret');
+              throw new Error('accessor refused');
             },
             enumerable: true,
           });
@@ -1993,11 +1993,18 @@ describe('a shared subtree costs one walk, not one per route', () => {
         };
 
         expect(() => stringifyValue({ user: hostile() })).not.toThrow();
+        expect(lines).toHaveLength(1);
+        expect(lines[0]).toContain('<value>.user.token');
+
+        // And a console that itself throws must not turn one failure into two.
+        console.error = (): void => {
+          throw new Error('stdout gone');
+        };
+
+        expect(() => stringifyValue({ user: hostile() })).not.toThrow();
       } finally {
         console.error = consoleError;
       }
-
-      expect(calls).toBe(0);
     });
   });
 });

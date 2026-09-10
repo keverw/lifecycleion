@@ -42,9 +42,9 @@ throw restored;
 
 ## When a value cannot be serialized
 
-Serializing degrades rather than failing. A value that refuses to be read - a throwing
-accessor, a revoked `Proxy` - becomes `<unserializable>` and the rest of the payload
-survives, which matters here more than anywhere: this runs at an IPC or RPC boundary,
+Serializing degrades rather than failing. A value that refuses to be read becomes
+`<unserializable: keys>`, `<unserializable: value>` or `<unserializable: text>` - naming
+which half refused - and the rest of the payload survives, which matters here more than anywhere: this runs at an IPC or RPC boundary,
 usually while already reporting a failure, so a second failure raised here would replace
 the one being reported.
 
@@ -59,8 +59,8 @@ const serialized = serializeError(error, {
 });
 ```
 
-It fires at most once per call and defaults to discarding, so an ordinary
-`serializeError(error)` costs nothing.
+It fires at most once per call and defaults to `console.error`, the same three rungs the
+rest of the library uses.
 
 **The cause never enters the payload.** It comes from the caller's own getter and may
 carry the value it was hiding, and this object is about to cross a wire - so the marker

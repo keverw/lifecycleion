@@ -7,7 +7,6 @@ import {
 } from './internal/redaction-reporter';
 import {
   createRenderReporter,
-  NOOP_RENDER_REPORTER,
   type RenderErrorHandler,
 } from './internal/render-reporter';
 import {
@@ -200,12 +199,10 @@ export function stringifyValue(
   value: unknown,
   options?: StringifyValueOptions,
 ): string {
-  // Built only when a handler was given, so the no-options call every template render
-  // makes allocates nothing.
-  const report =
-    options?.onRenderError === undefined
-      ? NOOP_RENDER_REPORTER
-      : createRenderReporter(options.onRenderError);
+  // Defaults to the console, as every other failure channel in this library does. One
+  // small closure per call, which is what `applyRedaction` and `errorToString` already
+  // allocate for their own reporters.
+  const report = createRenderReporter(options?.onRenderError);
 
   try {
     return stringifyTemplateValue(redactValue(value, options), '', report);

@@ -56,7 +56,7 @@ describe('stringifyTemplateValue - values that resist rendering', () => {
 
     expect(rendered).toContain('kept');
     expect(rendered).toContain('"other":2');
-    expect(rendered).toContain('[unrenderable]');
+    expect(rendered).toContain('[unrenderable: value]');
   });
 
   test('marks one unreadable element and keeps every sibling', () => {
@@ -72,7 +72,7 @@ describe('stringifyTemplateValue - values that resist rendering', () => {
     });
 
     expect(stringifyTemplateValue(value)).toBe(
-      '["first","[unrenderable]","third"]',
+      '["first","[unrenderable: value]","third"]',
     );
   });
 
@@ -80,9 +80,11 @@ describe('stringifyTemplateValue - values that resist rendering', () => {
     // The marker is emitted as a JSON string, so at the top level it arrives with its
     // quotes - this walk's leaves are always quoted and the container it stood in for
     // never got the chance to render its own braces.
-    expect(stringifyTemplateValue(hostileKeys())).toBe('"[unrenderable]"');
+    expect(stringifyTemplateValue(hostileKeys())).toBe(
+      '"[unrenderable: keys]"',
+    );
     expect(stringifyTemplateValue({ inner: hostileKeys() })).toBe(
-      '{"inner":"[unrenderable]"}',
+      '{"inner":"[unrenderable: keys]"}',
     );
   });
 
@@ -93,7 +95,7 @@ describe('stringifyTemplateValue - values that resist rendering', () => {
     });
 
     expect(rendered).toContain('visible');
-    expect(rendered).toContain('[unrenderable]');
+    expect(rendered).toContain('[unrenderable: keys]');
   });
 
   test('cuts a cycle where it closes rather than collapsing everything above it', () => {
@@ -151,9 +153,9 @@ describe('stringifyTemplateValue - values that resist rendering', () => {
       }
     }
 
-    expect(stringifyTemplateValue(new Hostile())).toBe('[unrenderable]');
+    expect(stringifyTemplateValue(new Hostile())).toBe('[unrenderable: text]');
     expect(stringifyTemplateValue({ v: new Hostile() })).toBe(
-      '{"v":"[unrenderable]"}',
+      '{"v":"[unrenderable: text]"}',
     );
   });
 

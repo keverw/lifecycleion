@@ -934,10 +934,12 @@ describe('errorToString', () => {
       ).toContain('boom');
     });
 
-    it('should stay silent when no render handler was given', () => {
-      // Rendering degrades constantly and by design, so the default cannot be a console
-      // line per marker - that would turn an ordinary hostile payload into a flood. A
-      // reporter is built only where a caller asked for one.
+    it('should fall back to the console when no render handler was given', () => {
+      // The three rungs every failure channel in this library uses: a handler, then the
+      // console, then nothing. Silence by default would have left the swallow this channel
+      // exists to end as the behaviour almost everyone gets - the reporter fires only when
+      // a read actually threw, never for the ordinary degradations like `[circular]` or
+      // `[max depth exceeded]`, so it is no more chatty than `onRedactionError`.
       const bag: Record<string, unknown> = {};
 
       for (let index = 0; index < 20; index++) {
@@ -950,10 +952,10 @@ describe('errorToString', () => {
       }
 
       const consoleError = console.error;
-      let calls = 0;
+      const lines: string[] = [];
 
-      console.error = (): void => {
-        calls++;
+      console.error = (...args: unknown[]): void => {
+        lines.push(args.map((arg) => String(arg)).join(' '));
       };
 
       try {
@@ -964,7 +966,11 @@ describe('errorToString', () => {
         console.error = consoleError;
       }
 
-      expect(calls).toBe(0);
+      // Once, though twenty values refused: the once-per-render bound holds on the
+      // console rung exactly as it does on a handler.
+      expect(lines).toHaveLength(1);
+      expect(lines[0]).toContain('Render failed for');
+      expect(lines[0]).toContain('additionalInfo.k0');
     });
 
     it('should not throw when the stack accessor throws', () => {
