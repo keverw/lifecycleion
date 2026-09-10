@@ -136,9 +136,6 @@ function readOwnSensitivePaths(
   return parsed;
 }
 
-/** Emitted wherever a value refuses to be read, so a refusal never reads as an absence. */
-const UNRENDERABLE_MARKER = '<unrenderable>';
-
 /**
  * `additionalInfo` as something the paths can actually address.
  *
@@ -161,9 +158,8 @@ const UNRENDERABLE_MARKER = '<unrenderable>';
  * inherited keys as own ones puts them back where both the walk and the table can see
  * them, which is the whole point of the bag.
  *
- * @returns The bag, or {@link UNRENDERABLE_MARKER} when the value refuses to be
- *   enumerated at all, which the caller renders as the marker rather than as an absent
- *   `additionalInfo`.
+ * @returns The bag, or `<unrenderable>` when the value refuses to be enumerated at all,
+ *   which the caller renders as the marker rather than as an absent `additionalInfo`.
  */
 function asAddressableBag(info: object): object | string {
   if (isPlainContainer(info)) {
@@ -186,7 +182,7 @@ function asAddressableBag(info: object): object | string {
     // different and much more reassuring claim than "its keys could not be read" - the
     // same silent collapse the plain-container branch below refuses, and that
     // `renderContainer`, `maskValueDeep`, `redactPathsInner` and `snapshotValue` all mark.
-    return UNRENDERABLE_MARKER;
+    return '<unrenderable>';
   }
 
   const bag: Record<string, unknown> = {};
