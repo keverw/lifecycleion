@@ -21,6 +21,45 @@ export type FailureHandler = (error: Error, subject: string) => void;
 export type ReportFailure = (error: unknown, subject: string) => void;
 
 /**
+ * The handler rung, for a channel whose handler does not take `(error, subject)`.
+ *
+ * `onSinkError` is handed `(error, context, sink)` and `onEventHandlerError` `(error,
+ * event)`, so neither fits {@link ReportFailure} - but the rung beneath them is the same
+ * rule as everywhere else, and it was hand-written once per channel. `invoke` is a closure
+ * the caller builds over its own arguments, so the shape stays theirs and only the
+ * guarantee is shared.
+ *
+ * Those two channels never reach a broadcast rung, and that is structural rather than an
+ * omission: a sink failure and a `'logger'` handler failure can only happen *during* a log
+ * call, and reporting from there anywhere a logger might hear it is how one failure becomes
+ * a cycle - the listener logs it, logging writes to sinks and emits events, and that is
+ * what just failed.
+ *
+ * @param invoke The caller's handler, already bound to its own arguments, or `undefined`
+ *               when none was set.
+ * @param line   What the console rung should say. Built by the caller, since only it knows
+ *               what its arguments mean. Evaluated lazily so an unset handler that
+ *               succeeds costs nothing.
+ */
+export function reportThroughHandler(
+  invoke: (() => void) | undefined,
+  line: () => string,
+): void {
+  if (invoke !== undefined) {
+    try {
+      invoke();
+
+      return;
+    } catch {
+      // The console, never a channel a logger might hear: a handler that just threw is no
+      // argument for reaching past the caller for a louder rung.
+    }
+  }
+
+  reportToConsole(line());
+}
+
+/**
  * Build a reporter for one operation: a handler, then the console, then nothing.
  *
  * The three rungs every failure channel in this library uses. What varies between callers
@@ -89,23 +128,16 @@ export function createFailureReporter(
     }
 
     if (handler !== undefined) {
-      try {
-        handler(failure, subject);
+      // The shared rung, so a handler that throws is answered the same way here as it is
+      // for `onSinkError` and `onEventHandlerError`: the console, never the channel below.
+      // A handler that just threw is no argument for broadcasting, and the caller who set
+      // it has already said where they wanted these to go.
+      reportThroughHandler(
+        () => handler(failure, subject),
+        () => `${label} failed for ${subject}: ${describeError(failure)}`,
+      );
 
-        return;
-      } catch {
-        // The console, not the channel below - and the distinction is load-bearing. A
-        // handler that just threw is not an argument for broadcasting: reporting a
-        // handler's failure somewhere a logger might hear it is how one failure becomes a
-        // cycle, and the caller who set that handler has already said where they wanted
-        // these. The console is the rung that cannot re-enter anything, and it is what
-        // `handleSinkError` and `handleEventHandlerFailure` fall to for the same reason.
-        reportToConsole(
-          `${label} failed for ${subject}: ${describeError(failure)}`,
-        );
-
-        return;
-      }
+      return;
     }
 
     // `describeError`, not `failure.message`. `toError` returns an `Error` unchanged, so

@@ -11,6 +11,7 @@ import { isPromise } from '../is-promise';
 import { describeError, isErrorValue, toError } from '../to-error';
 import { readMember } from '../internal/read-member';
 import { reportToConsole } from '../internal/report-to-console';
+import { reportThroughHandler } from '../internal/failure-reporter';
 import {
   createRedactionReporter,
   type RedactionErrorHandler,
@@ -1078,26 +1079,27 @@ export class Logger extends EventEmitter {
 
     // Not routed through `onSinkError`: that callback is handed the sink that failed, and
     // no sink is involved here, so there would be nothing honest to pass.
-    if (this.onEventHandlerError) {
-      try {
-        this.onEventHandlerError(failure, event);
-
-        return;
-      } catch {
-        // Fall through to the console, as `handleSinkError` does for its own callback.
-        // A handler for failures must not be able to turn one into two.
-      }
-    }
-
-    // Reporting this any other way reopens the loop, and `reportToConsole` keeps the rung
-    // itself from throwing. `runCallbackSafely` states the requirement outright - "`onError`
-    // must not throw: it runs on the failure path, and there is nothing above it left to
-    // catch" - and this override is what it calls: a throw here escaped `emit` and left
-    // the `logger.info()` that emitted the event, or, for a handler that rejected, became
-    // an unhandled rejection from `result.catch(onError)`.
+    // The shared rung, and it never broadcasts - which for this channel is the whole
+    // point. A `'logger'` event is emitted *by* logging, so reporting a handler's failure
+    // anywhere a logger might hear it is logged, which emits again, which fails again:
+    // with a handler that reliably rejects that is an unbounded cycle rather than a stack
+    // overflow, so no re-entrancy guard closes it.
     //
-    // `failure` is built here rather than handed in, so its `message` is a plain string.
-    reportToConsole(failure.message);
+    // `runCallbackSafely` states the requirement this satisfies outright - "`onError` must
+    // not throw: it runs on the failure path, and there is nothing above it left to catch"
+    // - and this override is what it calls: a throw here escaped `emit` and left the
+    // `logger.info()` that emitted the event, or, for a handler that rejected, became an
+    // unhandled rejection from `result.catch(onError)`.
+    //
+    // `failure.message` is a plain string, built here rather than handed in.
+    reportThroughHandler(
+      this.onEventHandlerError === undefined
+        ? undefined
+        : () => {
+            this.onEventHandlerError?.(failure, event);
+          },
+      () => failure.message,
+    );
   }
 
   /**
@@ -1163,21 +1165,19 @@ export class Logger extends EventEmitter {
     // it. Normalizing here also makes `onSinkError`'s declared `Error` parameter honest.
     const failure = toError(error);
 
-    if (this.onSinkError) {
-      try {
-        this.onSinkError(failure, context, sink);
-      } catch {
-        // Ignore errors in the error handler to prevent infinite loops
-        reportToConsole(
-          `Error in onSinkError handler: ${describeError(failure)}`,
-        );
-      }
-    } else {
-      // Fallback to the console
-      reportToConsole(
+    // The shared rung, so this channel cannot drift from the other three. It never
+    // broadcasts, and that is structural: a sink can only fail *during* a log call, so
+    // reporting anywhere a logger might hear it would be logged, and logging writes to
+    // sinks - this one included.
+    reportThroughHandler(
+      this.onSinkError === undefined
+        ? undefined
+        : () => {
+            this.onSinkError?.(failure, context, sink);
+          },
+      () =>
         `Error ${context === 'write' ? 'writing to' : 'closing'} sink: ${describeError(failure)}`,
-      );
-    }
+    );
   }
 
   /**
