@@ -397,9 +397,14 @@ export async function serializeMultipartFormData(
           }
         }
       } finally {
-        if (req.destroyed) {
-          await cancelReaderQuietly(reader);
-        }
+        // Unconditionally, not only when the stream was destroyed. `await write(chunk)`
+        // above can reject without anything being destroyed - the write callback delivers
+        // an error, or an `'error'` event fires - and that rejection leaves this block
+        // with the reader still locked and the blob's underlying stream never cancelled,
+        // which for a disk-backed `File` is a handle held for the life of the process.
+        // Cancelling a reader whose stream has already closed is a no-op, so the ordinary
+        // `isDone` exit costs nothing by coming through here too.
+        await cancelReaderQuietly(reader);
       }
 
       if (!req.destroyed) {
@@ -409,9 +414,32 @@ export async function serializeMultipartFormData(
     }
   }
 
-  if (!req.destroyed) {
-    // Closing delimiter that tells the server there are no more parts.
-    await write(`--${boundary}--\r\n`);
+  // The other exit, and the one every `req.destroyed` break above arrives at. `onClose`
+  // rejects a write that was waiting for its callback or its drain, but a stream destroyed
+  // between writes - with nothing under backpressure, so no `'close'` listener was ever
+  // attached - used to fall through here and resolve. That is worse than the same gap in
+  // `writeRequestBodyChunked`: the body is assembled across many writes, so what is
+  // finalized by `node-adapter`'s following `req.end()` is a payload missing its closing
+  // `--boundary--` delimiter, against an exact `Content-Length`. The server reads it as
+  // truncated while this side called it a success.
+  if (req.destroyed) {
+    throw new Error('Request stream closed before the body was fully written');
+  }
+
+  // Closing delimiter that tells the server there are no more parts.
+  await write(`--${boundary}--\r\n`);
+
+  // Bytes, not just `req.destroyed`, matching what `writeRequestBodyChunked` checks.
+  // `Content-Length` is computed in the sizing pass from each `Blob.size`, but this pass
+  // writes whatever `Blob.stream()` actually yields - and a `File` backed by a file
+  // another process is rotating can yield fewer. The inner loop then exits through
+  // `isDone` with nothing destroyed, every delimiter is written, and the body goes out
+  // short of the length already on the wire. Node does not check a `ClientRequest` for a
+  // Content-Length shortfall, so the server simply waits for bytes that never arrive and
+  // the caller hangs until its own timeout rather than seeing the transport error it
+  // should have.
+  if (uploadedBytes !== totalSize) {
+    throw new Error('Request stream closed before the body was fully written');
   }
 }
 

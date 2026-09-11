@@ -157,8 +157,19 @@ describe('writeRequestBodyChunked', () => {
       },
     };
 
-    await writeRequestBodyChunked(data, req);
+    let caught: Error | undefined;
+    try {
+      await writeRequestBodyChunked(data, req);
+    } catch (error) {
+      caught = error as Error;
+    }
+
+    // Stops writing, and says so. Only one of three chunks was accepted, so resolving
+    // would report a body that was never sent as a successful write.
     expect(writeCalls).toBe(1);
+    expect(caught?.message).toBe(
+      'Request stream closed before the body was fully written',
+    );
   });
 
   test('each write waits for callback before proceeding (sequential writes)', async () => {

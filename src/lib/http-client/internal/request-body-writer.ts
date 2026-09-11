@@ -57,6 +57,17 @@ export async function writeRequestBodyChunked(
       });
     });
   }
+
+  // The loop's other exit. `onClose` rejects a chunk that was waiting for its callback or
+  // its drain, but a stream destroyed between chunks - with nothing under backpressure, so
+  // no `'close'` listener was ever attached - leaves the loop through `!req.destroyed` and
+  // used to resolve. `node-adapter` then follows with `req.end()`, finalizing a body short
+  // of the `Content-Length` it already declared, and on a runtime that does not emit
+  // `'error'` on `req.destroy()` nothing else reports it. A truncated write is a failed
+  // write, whichever exit reached it.
+  if (uploadedBytes < totalSize) {
+    throw new Error('Request stream closed before the body was fully written');
+  }
 }
 
 function writeChunkWithBackpressure(

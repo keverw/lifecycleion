@@ -395,6 +395,52 @@ describe('serializeMultipartFormData', () => {
     expect([...totals][0]).toBe(contentLength);
   });
 
+  test('rejects when a blob yields fewer bytes than its declared size', async () => {
+    // `Content-Length` is computed from `Blob.size` in the sizing pass, but the streaming
+    // pass writes whatever `Blob.stream()` actually yields. A `File` backed by a file
+    // another process is rotating can yield less, and nothing is destroyed - so the inner
+    // loop exits through `isDone`, every delimiter is written, and the body used to go out
+    // short of the length already on the wire. Node does not check a `ClientRequest` for a
+    // shortfall, so the caller hangs on a server waiting for bytes that never come.
+    // A stub rather than a real `FormData`: `append(name, blob, filename)` builds a fresh
+    // `File` from the blob per spec, so a subclass overriding `size` and `stream` does not
+    // survive being put in one. Both passes only ever call `entries()`, then read `name`,
+    // `type`, `size` and `stream()` off the value.
+    const shortFile = {
+      name: 'short.bin',
+      type: 'application/octet-stream',
+      // Claims ten bytes; its stream yields four.
+      size: 10,
+      stream: () =>
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(new Uint8Array([1, 2, 3, 4]));
+            controller.close();
+          },
+        }),
+    };
+
+    const fd = {
+      entries: () => [['file', shortFile]][Symbol.iterator](),
+    } as unknown as FormData;
+
+    const { req, headers } = makeCapture();
+    const boundary = generateMultipartBoundary();
+
+    let caught: Error | undefined;
+    try {
+      await serializeMultipartFormData(fd, req, boundary);
+    } catch (error) {
+      caught = error as Error;
+    }
+
+    expect(req.destroyed).toBe(false);
+    expect(headers['content-length']).toBeDefined();
+    expect(caught?.message).toBe(
+      'Request stream closed before the body was fully written',
+    );
+  });
+
   test('stops writing if req.destroyed is true mid-loop', async () => {
     const fd = new FormData();
     fd.append('a', '1');
@@ -420,8 +466,21 @@ describe('serializeMultipartFormData', () => {
     };
 
     const boundary = generateMultipartBoundary();
-    await serializeMultipartFormData(fd, req, boundary);
+
+    let caught: Error | undefined;
+    try {
+      await serializeMultipartFormData(fd, req, boundary);
+    } catch (error) {
+      caught = error as Error;
+    }
+
+    // Stops writing, and says so: the closing `--boundary--` delimiter was never written,
+    // so resolving would hand the server a body it reads as truncated while this side
+    // called the upload a success.
     expect(writeCalls).toBeLessThan(10);
+    expect(caught?.message).toBe(
+      'Request stream closed before the body was fully written',
+    );
   });
 
   test('cancels an in-flight file reader when req.destroyed flips mid-file', async () => {
@@ -498,12 +557,22 @@ describe('serializeMultipartFormData', () => {
     };
 
     const boundary = generateMultipartBoundary();
-    await serializeMultipartFormData(fd, req, boundary);
+
+    let caught: Error | undefined;
+    try {
+      await serializeMultipartFormData(fd, req, boundary);
+    } catch (error) {
+      caught = error as Error;
+    }
 
     expect(didSeeFirstBinaryChunk).toBe(true);
     expect(readCount).toBeGreaterThanOrEqual(1);
     expect(binaryChunkWriteCount).toBe(1);
     expect(cancelCount).toBe(1);
+    // The reader is cancelled *and* the truncated body is reported as a failed upload.
+    expect(caught?.message).toBe(
+      'Request stream closed before the body was fully written',
+    );
   });
 
   test('rejects when write callback fires an error during string field', async () => {
@@ -824,10 +893,20 @@ describe('serializeMultipartFormData', () => {
     };
 
     const boundary = generateMultipartBoundary();
-    await serializeMultipartFormData(fd, req, boundary);
+
+    let caught: Error | undefined;
+    try {
+      await serializeMultipartFormData(fd, req, boundary);
+    } catch (error) {
+      caught = error as Error;
+    }
 
     expect(readCount).toBe(1);
     expect(cancelCount).toBe(1);
+    // The reader is cancelled *and* the truncated body is reported as a failed upload.
+    expect(caught?.message).toBe(
+      'Request stream closed before the body was fully written',
+    );
   });
 
   test('waits for drain before writing the next multipart chunk', async () => {
