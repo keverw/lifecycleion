@@ -824,10 +824,13 @@ const fileSink = new FileSink({
   basename: 'app',
   maxSizeMB: 10,
   jsonFormat: true,
-  onError: (error, entry, attempt, willRetry) => {
-    console.error(`File write failed (attempt ${attempt}):`, error.message);
+  onError: ({ kind, error, target, entry, attempt, willRetry }) => {
+    console.error(
+      `File ${kind} failed on ${target} (attempt ${attempt}):`,
+      error.message,
+    );
     if (!willRetry) {
-      console.error('Entry lost:', entry.message);
+      console.error('Entry lost:', entry?.message);
     }
   },
 });
@@ -1193,14 +1196,14 @@ new FileSink({
   maxQueueSize: 10_000, // Entries held while writes fail (default: 10,000; -1 = unlimited)
   closeTimeoutMS: 30000, // Timeout for close() in ms (default: 30000)
   minLevel: LogLevel.INFO, // Minimum log level to write (default: INFO)
-  onError: (error, entry, attempt, willRetry) => {
+  onError: ({ kind, error, target, entry, attempt, willRetry }) => {
     console.error(
-      `Write failed (attempt ${attempt}/${maxRetries}):`,
+      `${kind} failed on ${target} (attempt ${attempt}):`,
       error.message,
     );
 
     if (!willRetry) {
-      console.error('Entry will be lost:', entry.message);
+      console.error('Entry will be lost:', entry?.message);
     }
   },
 });
@@ -1266,17 +1269,22 @@ const fileSink = new FileSink({
   logDir: './logs',
   basename: 'app',
   maxRetries: 3,
-  onError: (error, entry, attempt, willRetry) => {
-    // error: The error that occurred
-    // entry: The log entry that failed to write
-    // attempt: Current attempt number (1-based)
-    // willRetry: Whether this entry will be retried
+  onError: (failure) => {
+    // failure.kind: what failed - 'write', 'format', 'setup', 'close', 'queue_full', ...
+    // failure.error: the error itself, always an Error
+    // failure.target: the file being written to at the time (rotation changes it)
+    // failure.entry: the log entry, when the sink still has it
+    // failure.attempt: current attempt number (1-based)
+    // failure.willRetry: whether this entry will be retried
 
-    console.error(`Write failed on attempt ${attempt}:`, error.message);
+    console.error(
+      `${failure.kind} failed on attempt ${failure.attempt}:`,
+      failure.error.message,
+    );
 
-    if (!willRetry) {
+    if (!failure.willRetry) {
       // Entry has exceeded max retries and will be lost
-      console.error('Entry lost after max retries:', entry.message);
+      console.error('Entry lost after max retries:', failure.entry?.message);
       // You could send to a backup sink, alert monitoring, etc.
     }
   },
@@ -1354,7 +1362,7 @@ now reopens on its own, a `reconnect()` that races one of those automatic attemp
 `already_reconnecting` — the reconnection it would have performed is already under way.
 
 ```typescript
-import { NamedPipeSink, PipeErrorType } from 'lifecycleion/logger';
+import { NamedPipeSink, LogLevel } from 'lifecycleion/logger';
 
 const pipeSink = new NamedPipeSink({
   pipePath: '/tmp/app_logs',
@@ -1363,16 +1371,17 @@ const pipeSink = new NamedPipeSink({
   maxRetries: 3, // Retry failed writes (default: 3)
   maxQueueSize: 10_000, // Entries held while the pipe is unusable (default: 10,000; -1 = unlimited)
   closeTimeoutMS: 30000, // Timeout for close() and its final flush (default: 30000)
-  onError: (errorType, err, pipePath) => {
-    console.error(`Pipe error (${errorType}) for ${pipePath}:`, err.message);
+  onError: ({ kind, error, target }) => {
+    console.error(`Pipe ${kind} failed for ${target}:`, error.message);
 
-    // Only reconnect on an error that means the pipe itself is broken. Not every type
-    // does: `FORMAT` says your `formatter` threw and the default format was used
+    // Only reconnect on a failure that means the pipe itself is broken. Not every kind
+    // does: 'format' says your `formatter` threw and the default format was used
     // instead, so the line was written and the pipe is healthy — reconnecting on that
     // would tear the sink down and rebuild it once per log call.
-    // In production, consider adding delays, retry limits, and backoff strategies
-    if (errorType === PipeErrorType.WRITE) {
-      pipeSink.reconnect();
+    //
+    // The sink also reopens on its own, so this is rarely needed; see above.
+    if (kind === 'write') {
+      void pipeSink.reconnect();
     }
   },
 });
@@ -1380,43 +1389,47 @@ const pipeSink = new NamedPipeSink({
 logger.info('This goes to console and named pipe (if available)');
 ```
 
-#### Error Types
+#### Failure Shape
 
-The `onError` callback receives a `PipeErrorType` enum indicating what kind of error occurred:
+Every sink reports a failure in the same shape, so one handler serves both:
 
 ```typescript
-enum PipeErrorType {
-  WRITE = 'write',
-  // A custom `formatter` threw and the default format was used instead. Advisory: the
-  // line was still written and the pipe is healthy, so this is deliberately not `WRITE`
-  // — reconnecting or counting a dropped line here would act on a working sink.
-  FORMAT = 'format',
-  CLOSE = 'close',
-  NOT_FOUND = 'not_found',
-  NOT_A_PIPE = 'not_a_pipe',
-  PERMISSION = 'permission',
-  UNSUPPORTED_PLATFORM = 'unsupported_platform',
+interface SinkFailure {
+  // What failed. 'write' means a line is at risk; 'format' means a custom formatter
+  // threw (NamedPipeSink still wrote the line using its default format, so the pipe is
+  // healthy — reconnecting or counting a lost line here would act on a working sink).
+  kind:
+    | 'write'
+    | 'format'
+    | 'close'
+    | 'setup'
+    | 'queue_full'
+    | 'not_found'
+    | 'not_a_pipe'
+    | 'unsupported_platform';
+  error: Error; // always an Error; the original thrown value is on `cause`
+  target: string; // the pipe path, or the log file being written at the time
+  entry?: LogEntry; // when the sink still has it — never for NamedPipeSink, which
+  // deliberately drops it so a stalled queue cannot pin your params
+  attempt?: number; // 1-based, for a failure tied to an entry
+  willRetry: boolean; // false means the line is gone
 }
 ```
 
 #### Error Handling & Reconnection
 
-When a pipe error occurs (e.g., reader disconnects), the `onError` callback is invoked with the error type, error object, and pipe path. You can use the `reconnect()` method to attempt to reestablish the connection:
+When a pipe error occurs (e.g., reader disconnects), the `onError` callback is invoked with a `SinkFailure`. The sink reopens on its own, but `reconnect()` is available to reestablish the connection on demand:
 
 ```typescript
-import {
-  NamedPipeSink,
-  PipeErrorType,
-  ReconnectStatus,
-} from 'lifecycleion/logger';
+import { NamedPipeSink, type ReconnectStatus } from 'lifecycleion/logger';
 
 const pipeSink = new NamedPipeSink({
   pipePath: '/tmp/app_logs',
-  onError: async (errorType, err, pipePath) => {
-    console.error(`Pipe error (${errorType}) for ${pipePath}:`, err.message);
+  onError: async ({ kind, error, target }) => {
+    console.error(`Pipe ${kind} failed for ${target}:`, error.message);
 
-    // Only reconnect on certain error types
-    if (errorType === PipeErrorType.WRITE) {
+    // Only reconnect on a failure that means the pipe itself is broken
+    if (kind === 'write') {
       // Wait a bit and try to reconnect
       await new Promise((resolve) => setTimeout(resolve, 1000));
 

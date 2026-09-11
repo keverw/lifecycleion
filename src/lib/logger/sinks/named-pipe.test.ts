@@ -4,7 +4,8 @@ import * as fs from 'fs';
 import * as os from 'os';
 import { exec } from 'node:child_process';
 import { promisify } from 'node:util';
-import { NamedPipeSink, PipeErrorType } from './named-pipe';
+import { NamedPipeSink } from './named-pipe';
+import type { SinkFailure, SinkFailureKind } from './internal/sink-failure';
 import { LogLevel } from '../types';
 import type { LogEntry } from '../types';
 import { TmpDir } from '../../tmp-dir';
@@ -214,12 +215,12 @@ describe('NamedPipeSink', () => {
 
   test('should handle error when pipe does not exist', async () => {
     const pipePath = `${tmpDir.path}/nonexistent.pipe`;
-    const errors: Array<{ type: PipeErrorType; error: Error }> = [];
+    const errors: SinkFailure[] = [];
 
     const sink = new NamedPipeSink({
       pipePath,
-      onError: (errorType, error) => {
-        errors.push({ type: errorType, error });
+      onError: (failure) => {
+        errors.push(failure);
       },
     });
 
@@ -228,7 +229,7 @@ describe('NamedPipeSink', () => {
 
     // Should have an error
     expect(errors.length).toBeGreaterThan(0);
-    expect(errors[0].type).toBe(PipeErrorType.NOT_FOUND);
+    expect(errors[0]?.kind).toBe('not_found' satisfies SinkFailureKind);
 
     await sink.close();
   });
@@ -238,19 +239,19 @@ describe('NamedPipeSink', () => {
     const filePath = `${tmpDir.path}/regular-file.txt`;
     await fsPromises.writeFile(filePath, 'not a pipe');
 
-    const errors: Array<{ type: PipeErrorType; error: Error }> = [];
+    const errors: SinkFailure[] = [];
 
     const sink = new NamedPipeSink({
       pipePath: filePath,
-      onError: (errorType, error) => {
-        errors.push({ type: errorType, error });
+      onError: (failure) => {
+        errors.push(failure);
       },
     });
 
     await new Promise((resolve) => setTimeout(resolve, 200));
 
     expect(errors.length).toBeGreaterThan(0);
-    expect(errors[0].type).toBe(PipeErrorType.NOT_A_PIPE);
+    expect(errors[0]?.kind).toBe('not_a_pipe' satisfies SinkFailureKind);
 
     await sink.close();
   });
@@ -616,24 +617,20 @@ describe('NamedPipeSink', () => {
 
   test('should call onError callback when provided', async () => {
     const pipePath = `${tmpDir.path}/nonexistent-error.pipe`;
-    const errors: Array<{
-      type: PipeErrorType;
-      error: Error;
-      path: string;
-    }> = [];
+    const errors: SinkFailure[] = [];
 
     const sink = new NamedPipeSink({
       pipePath,
-      onError: (errorType, error, path) => {
-        errors.push({ type: errorType, error, path });
+      onError: (failure) => {
+        errors.push(failure);
       },
     });
 
     await new Promise((resolve) => setTimeout(resolve, 200));
 
     expect(errors.length).toBeGreaterThan(0);
-    expect(errors[0].type).toBe(PipeErrorType.NOT_FOUND);
-    expect(errors[0].path).toBe(pipePath);
+    expect(errors[0]?.kind).toBe('not_found' satisfies SinkFailureKind);
+    expect(errors[0]?.target).toBe(pipePath);
 
     await sink.close();
   });
@@ -682,13 +679,13 @@ describe('NamedPipeSink', () => {
     await createNamedPipe(pipePath);
 
     const reader = startPipeReader(pipePath);
-    const errors: { type: PipeErrorType; error: Error }[] = [];
+    const errors: SinkFailure[] = [];
 
     const sink = new NamedPipeSink({
       pipePath,
       jsonFormat: true,
-      onError: (type, error) => {
-        errors.push({ type, error });
+      onError: (failure) => {
+        errors.push(failure);
       },
     });
 
@@ -721,7 +718,7 @@ describe('NamedPipeSink', () => {
       'topsecret-should-never-be-written',
     );
     expect(errors).toHaveLength(1);
-    expect(errors[0]?.type).toBe(PipeErrorType.WRITE);
+    expect(errors[0]?.kind).toBe('format' satisfies SinkFailureKind);
   });
   test('holds entries while the pipe is unusable and flushes them on recovery', async () => {
     // The failure this sink used to answer by dropping. `FileSink` queues, retries and
@@ -1012,7 +1009,18 @@ describe('NamedPipeSink', () => {
     expect(health.queueSize).toBe(10);
     expect(health.droppedEntries).toBe(490);
 
+    // Let the pending open finish before leaving. A FIFO open with no reader blocks in
+    // libuv's threadpool - four threads for the whole process - and `destroy()` cannot
+    // cancel one already in flight, so a test that walks away from it takes a thread with
+    // it and every later test waits on file I/O behind it. That was a real source of
+    // flakiness here, not a tidiness point.
+    const readerFd = fs.openSync(
+      pipePath,
+      fs.constants.O_RDONLY | fs.constants.O_NONBLOCK,
+    );
+
     await sink.close();
+    fs.closeSync(readerFd);
   }, 15000);
 
   test('requeues an entry whose write fails asynchronously', async () => {
@@ -1023,43 +1031,58 @@ describe('NamedPipeSink', () => {
     await createNamedPipe(pipePath);
 
     const reader = startPipeReader(pipePath);
-    const sink = new NamedPipeSink({ pipePath });
-
-    expect(await waitForOpenPipe(sink)).toBe(true);
-
-    // A stream that accepts the write and fails it on the next tick, as a real one does.
-    (
-      sink as unknown as {
-        pipeStream: {
-          destroyed: boolean;
-          write: (
-            chunk: string,
-            callback: (error?: Error | null) => void,
-          ) => boolean;
-          end: (callback?: () => void) => void;
-          destroy: () => void;
-        };
-      }
-    ).pipeStream = {
-      destroyed: false,
-      write: (_chunk, callback) => {
-        setTimeout(() => {
-          callback(new Error('EPIPE'));
-        }, 0);
-
-        return true;
-      },
-      // Enough of a stream for `close()` to shut it down without reporting a failure of
-      // its own; the point of the stub is the write callback above.
-      end: (callback?: () => void) => {
-        callback?.();
-      },
-      destroy: () => {
-        // Nothing to tear down.
-      },
-    };
+    const sink = new NamedPipeSink({ pipePath, onError: () => {} });
 
     try {
+      expect(await waitForOpenPipe(sink)).toBe(true);
+
+      const written: string[] = [];
+      let failuresLeft = 1;
+
+      // A stream that fails its first write on the next tick - as a real one does - and
+      // accepts what follows. The connection itself stays up, so the sink's answer is to
+      // try the line again rather than to reconnect.
+      (
+        sink as unknown as {
+          pipeStream: {
+            destroyed: boolean;
+            write: (
+              chunk: string,
+              callback: (error?: Error | null) => void,
+            ) => boolean;
+            end: (callback?: () => void) => void;
+            destroy: () => void;
+          };
+        }
+      ).pipeStream = {
+        destroyed: false,
+        write: (chunk, callback) => {
+          if (failuresLeft > 0) {
+            failuresLeft--;
+
+            setTimeout(() => {
+              callback(new Error('EPIPE'));
+            }, 0);
+
+            return true;
+          }
+
+          written.push(chunk);
+
+          setTimeout(() => {
+            callback(null);
+          }, 0);
+
+          return true;
+        },
+        end: (callback?: () => void) => {
+          callback?.();
+        },
+        destroy: () => {
+          // Nothing to tear down.
+        },
+      };
+
       sink.write({
         timestamp: Date.now(),
         type: 'info',
@@ -1067,16 +1090,18 @@ describe('NamedPipeSink', () => {
         message: 'retried',
       });
 
-      await new Promise((resolve) => setTimeout(resolve, 100));
+      await new Promise((resolve) => setTimeout(resolve, 150));
 
-      // Back on the queue rather than gone: the line is still owed to the caller.
-      expect(sink.getHealth().queueSize).toBe(1);
+      // Written on the second attempt rather than dropped on the first.
+      expect(written.join('')).toContain('retried');
+      expect(sink.getHealth().queueSize).toBe(0);
       expect(sink.getHealth().droppedEntries).toBe(0);
     } finally {
       await sink.close();
       reader.stop();
     }
   }, 15000);
+
   test('keeps entries under the cap when the reader stops consuming', async () => {
     // Backpressure was the third way the managed queue could be bypassed: `write()`
     // returning false means the stream's buffer is over its high-water mark, and ignoring
@@ -1273,6 +1298,48 @@ describe('NamedPipeSink', () => {
       await new Promise((resolve) => setTimeout(resolve, 200));
 
       expect(reader.data.join('')).toContain('now-included');
+    } finally {
+      await sink.close();
+      reader.stop();
+    }
+  }, 15000);
+  test('drains a requeue that arrives from a stream already replaced', async () => {
+    // A write callback can land after `reconnect()` has put a working stream in place.
+    // Its failure belongs to the stream that is gone, so asking `ensureConnection` for
+    // help gets nothing - correctly, the sink is connected - and nothing else drained the
+    // queue, while every later write went straight past it to the new stream.
+    const pipePath = `${tmpDir.path}/replaced-requeue.pipe`;
+    await createNamedPipe(pipePath);
+
+    const reader = startPipeReader(pipePath);
+    const sink = new NamedPipeSink({ pipePath, onError: () => {} });
+
+    try {
+      expect(await waitForOpenPipe(sink)).toBe(true);
+
+      const privateSink = sink as unknown as {
+        requeue: (queued: {
+          formatted: string | undefined;
+          formatError: Error | undefined;
+          attempts: number;
+        }) => void;
+      };
+
+      // Exactly what a late callback from a replaced stream does: the sink is connected,
+      // and an entry it had already taken off the queue comes back.
+      privateSink.requeue({
+        formatted: 'late-callback-from-a-replaced-stream\n',
+        formatError: undefined,
+        attempts: 0,
+      });
+
+      await new Promise((resolve) => setTimeout(resolve, 200));
+
+      expect(sink.getHealth().queueSize).toBe(0);
+      expect(sink.getHealth().droppedEntries).toBe(0);
+      expect(reader.data.join('')).toContain(
+        'late-callback-from-a-replaced-stream',
+      );
     } finally {
       await sink.close();
       reader.stop();

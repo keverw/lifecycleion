@@ -6,8 +6,19 @@ import {
   resolveMaxQueueSize,
   resolveMaxRetries,
 } from './internal/queue-policy';
+import type {
+  SinkErrorHandler,
+  SinkFailureKind,
+} from './internal/sink-failure';
+
 import type { LogEntry, LogSink } from '../types';
 import { LogLevel, getLogLevel } from '../types';
+
+export type {
+  SinkErrorHandler,
+  SinkFailure,
+  SinkFailureKind,
+} from './internal/sink-failure';
 
 export interface FileSinkOptions {
   logDir: string;
@@ -36,12 +47,15 @@ export interface FileSinkOptions {
    * Shared with `NamedPipeSink`, which reads the same option the same way.
    */
   maxQueueSize?: number;
-  onError?: (
-    error: Error,
-    entry: LogEntry,
-    attempt: number,
-    willRetry: boolean,
-  ) => void;
+  /**
+   * Notified when this sink cannot do its job, in the shape every sink reports.
+   *
+   * One object rather than four positional arguments, and the same one `NamedPipeSink`
+   * hands back: `kind` says what failed, `target` which file it was writing to at the
+   * time, `entry` / `attempt` which line and try, and `willRetry` whether the line is
+   * coming back. See {@link SinkFailure}.
+   */
+  onError?: SinkErrorHandler;
 }
 
 export interface FileSinkHealth {
@@ -96,12 +110,7 @@ export class FileSink implements LogSink {
   private jsonFormat: boolean;
   private maxRetries: number;
   private minLevel: LogLevel;
-  private onError?: (
-    error: Error,
-    entry: LogEntry,
-    attempt: number,
-    willRetry: boolean,
-  ) => void;
+  private onError?: SinkErrorHandler;
   private logFileStream?: fs.WriteStream;
   private currentLogFile?: string;
   private currentLogSize = 0;
@@ -381,12 +390,14 @@ export class FileSink implements LogSink {
               this.onError === undefined
                 ? undefined
                 : () => {
-                    this.onError?.(
-                      err,
-                      queuedEntry.entry,
-                      queuedEntry.attempts + 1,
+                    this.onError?.({
+                      kind: this.failureKindFor(err),
+                      error: err,
+                      target: this.currentLogFile ?? this.logDir,
+                      entry: queuedEntry.entry,
+                      attempt: queuedEntry.attempts + 1,
                       willRetry,
-                    );
+                    });
                   },
               () =>
                 `FileSink error writing to ${this.currentLogFile ?? this.logDir}: ${describeError(err)}`,
@@ -458,18 +469,43 @@ export class FileSink implements LogSink {
       this.onError === undefined
         ? undefined
         : () => {
-            this.onError?.(
-              failure,
+            this.onError?.({
+              kind: 'queue_full',
+              error: failure,
+              target: this.currentLogFile ?? this.logDir,
               // A dropped entry, never a surviving one: `willRetry` is `false` here, and
               // a handler that reads that as "this line is gone" and writes it elsewhere
               // would otherwise duplicate an entry still queued for the file.
-              firstDropped ?? ({} as LogEntry),
-              0,
-              false,
-            );
+              entry: firstDropped,
+              willRetry: false,
+            });
           },
       () => describeError(failure),
     );
+  }
+
+  /**
+   * Which kind of failure a thrown `FileSinkError` describes.
+   *
+   * The discriminator this sink never had. Every failure arrived as an `Error` whose
+   * message was the only way to tell a failed rotation from a failed write, so a consumer
+   * that wanted to treat them differently had to match on text.
+   */
+  private failureKindFor(error: Error): SinkFailureKind {
+    const message = describeError(error);
+
+    if (message.startsWith('Failed to format log entry')) {
+      return 'format';
+    }
+
+    if (
+      message.startsWith('Failed to setup log file') ||
+      message.startsWith('Error rotating log file')
+    ) {
+      return 'setup';
+    }
+
+    return 'write';
   }
 
   private async writeEntry(queued: QueuedEntry): Promise<void> {

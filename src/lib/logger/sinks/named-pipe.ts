@@ -10,27 +10,16 @@ import {
   resolveMaxQueueSize,
   resolveMaxRetries,
 } from './internal/queue-policy';
+import type {
+  SinkErrorHandler,
+  SinkFailureKind,
+} from './internal/sink-failure';
 
-/**
- * Types of pipe errors that can occur
- */
-export enum PipeErrorType {
-  WRITE = 'write',
-  /**
-   * A custom `formatter` threw and the default format was used instead.
-   *
-   * Its own type rather than {@link PipeErrorType.WRITE}, because nothing was lost: the
-   * line is still written, and the pipe is healthy. Reported as `WRITE`, a handler that
-   * reads that as "this entry is gone" - reconnecting, or counting a dropped line - acted
-   * on every single entry while the sink was working perfectly.
-   */
-  FORMAT = 'format',
-  CLOSE = 'close',
-  NOT_FOUND = 'not_found',
-  NOT_A_PIPE = 'not_a_pipe',
-  PERMISSION = 'permission',
-  UNSUPPORTED_PLATFORM = 'unsupported_platform',
-}
+export type {
+  SinkErrorHandler,
+  SinkFailure,
+  SinkFailureKind,
+} from './internal/sink-failure';
 
 export interface NamedPipeSinkOptions {
   pipePath: string;
@@ -49,7 +38,19 @@ export interface NamedPipeSinkOptions {
   minLevel?: LogLevel;
   jsonFormat?: boolean;
   closeTimeoutMS?: number;
-  onError?: (errorType: PipeErrorType, error: Error, pipePath: string) => void;
+  /**
+   * Notified when this sink cannot do its job, in the shape every sink reports.
+   *
+   * One object rather than three positional arguments, and the same one `FileSink` hands
+   * back: `kind` says what failed - `'write'` means a line is at risk, `'format'` means
+   * your `formatter` threw and the default format went out in its place - `target` is the
+   * pipe path, and `attempt` / `willRetry` say whether the line is coming back.
+   *
+   * `entry` is always absent here: this sink drops the `LogEntry` once its line is
+   * rendered, so that a queue stalled behind an unusable pipe does not pin the caller's
+   * params graph for the length of the outage. See {@link SinkFailure}.
+   */
+  onError?: SinkErrorHandler;
   formatter?: (entry: LogEntry) => string;
   /**
    * Cap on entries queued while the pipe is unavailable. Defaults to 10,000; pass `-1` to
@@ -172,11 +173,7 @@ const OPEN_WAIT_MS = 2000;
 export class NamedPipeSink implements LogSink {
   private pipePath: string;
   private jsonFormat: boolean;
-  private onError?: (
-    errorType: PipeErrorType,
-    error: Error,
-    pipePath: string,
-  ) => void;
+  private onError?: SinkErrorHandler;
   private formatter?: (entry: LogEntry) => string;
   private pipeStream?: fs.WriteStream;
   /**
@@ -221,6 +218,8 @@ export class NamedPipeSink implements LogSink {
    * them and `getHealth()` reported an empty queue and no drops.
    */
   private isAwaitingDrain = false;
+  /** Whether a drain pass is already running; see `processQueue`. */
+  private isProcessing = false;
   /**
    * When the last automatic reopen was attempted.
    *
@@ -490,7 +489,7 @@ export class NamedPipeSink implements LogSink {
             finish();
           });
         } catch (error) {
-          this.handleError(PipeErrorType.CLOSE, error);
+          this.handleError('close', error);
           finish();
         }
       });
@@ -505,7 +504,7 @@ export class NamedPipeSink implements LogSink {
     const platform = os.platform();
     if (platform !== 'linux' && platform !== 'darwin') {
       this.handleError(
-        PipeErrorType.UNSUPPORTED_PLATFORM,
+        'unsupported_platform',
         new Error(
           `Named pipes are only supported on Linux and macOS, current platform: ${platform}`,
         ),
@@ -519,7 +518,7 @@ export class NamedPipeSink implements LogSink {
       const stats = await fsPromises.stat(this.pipePath);
       if (!stats.isFIFO()) {
         this.handleError(
-          PipeErrorType.NOT_A_PIPE,
+          'not_a_pipe',
           new Error(`${this.pipePath} exists but is not a named pipe (FIFO)`),
         );
         return;
@@ -543,7 +542,7 @@ export class NamedPipeSink implements LogSink {
         const isCurrent =
           this.pendingStream === stream || this.pipeStream === stream;
 
-        this.handleError(PipeErrorType.WRITE, err, {
+        this.handleError('write', err, {
           countsAgainstHealth: isCurrent,
         });
 
@@ -602,7 +601,7 @@ export class NamedPipeSink implements LogSink {
       await this.waitForOpen(stream);
     } catch (error) {
       this.handleError(
-        PipeErrorType.NOT_FOUND,
+        'not_found',
         new Error(
           `Could not open named pipe at ${this.pipePath}: ${describeError(error)}`,
           { cause: error },
@@ -615,6 +614,23 @@ export class NamedPipeSink implements LogSink {
    * Process queued entries
    */
   private processQueue(): void {
+    // Not re-entered. `writeEntry` can fail synchronously, and the `requeue` that follows
+    // asks for a drain - which, without this, would recurse through the same loop for as
+    // many retries as the queue holds. The pass already running picks the entry up.
+    if (this.isProcessing) {
+      return;
+    }
+
+    this.isProcessing = true;
+
+    try {
+      this.drainQueue();
+    } finally {
+      this.isProcessing = false;
+    }
+  }
+
+  private drainQueue(): void {
     while (
       this.writeQueue.length > 0 &&
       !this.closed &&
@@ -686,6 +702,24 @@ export class NamedPipeSink implements LogSink {
 
     this.writeQueue.push({ ...queued, attempts: queued.attempts + 1 });
     this.enforceQueueLimit();
+
+    // Drained through the stream in hand, or reconnected when there is none. A write
+    // callback can arrive after `reconnect()` has already put a working stream in place -
+    // its failure belongs to the stream that is gone - and asking `ensureConnection` for
+    // help then gets nothing, correctly, because the sink is connected. Without this the
+    // requeued entry sat in a queue nothing was draining while every later write went
+    // straight past it to the new stream.
+    if (
+      this.isInitialized &&
+      this.pipeStream !== undefined &&
+      !this.pipeStream.destroyed &&
+      !this.isAwaitingDrain
+    ) {
+      this.processQueue();
+
+      return;
+    }
+
     this.ensureConnection();
   }
 
@@ -830,7 +864,7 @@ export class NamedPipeSink implements LogSink {
     this.didReportDrop = true;
 
     this.handleError(
-      PipeErrorType.WRITE,
+      'write',
       new Error(
         `Pipe queue is full (maxQueueSize=${limit}); dropping the oldest entries`,
       ),
@@ -868,7 +902,12 @@ export class NamedPipeSink implements LogSink {
     // Reported where the render used to happen, so a failure surfaces exactly as it did
     // before - but from the single attempt made in `write`, never from a second one.
     if (queued.formatError !== undefined) {
-      this.handleError(PipeErrorType.WRITE, queued.formatError);
+      // `'format'`, as `FileSink` reports the same failure, and never retried: the line is
+      // rendered once, on purpose, so a second attempt could not come out differently.
+      this.handleError('format', queued.formatError, {
+        attempt: queued.attempts + 1,
+        willRetry: false,
+      });
 
       return;
     }
@@ -892,7 +931,8 @@ export class NamedPipeSink implements LogSink {
       // so treating the synchronous return as delivery meant the one entry that actually
       // failed was the one entry never retried - it had already been dropped from the
       // queue, and the `'error'` handler has no idea which line it belonged to.
-      const canContinue = this.pipeStream.write(messageToWrite, (error) => {
+      const stream = this.pipeStream;
+      const canContinue = stream.write(messageToWrite, (error) => {
         if (error) {
           // Not reported here: the stream raises `'error'` for the same failure and
           // `handleError` answers it once. This is the half that error cannot do - put
@@ -902,14 +942,21 @@ export class NamedPipeSink implements LogSink {
           return;
         }
 
-        this.consecutiveFailures = 0;
+        // Only the stream in hand may clear the failure count. A callback from one that
+        // has since been replaced says nothing about the connection that replaced it.
+        if (this.pipeStream === stream) {
+          this.consecutiveFailures = 0;
+        }
       });
 
       if (!canContinue) {
         this.pauseUntilDrain();
       }
     } catch (error) {
-      this.handleError(PipeErrorType.WRITE, error);
+      this.handleError('write', error, {
+        attempt: queued.attempts + 1,
+        willRetry: queued.attempts < this.maxRetries,
+      });
       // The line never reached the pipe, so it goes back on the queue and out on a later
       // attempt - the same answer `FileSink` gives a throwing write.
       this.requeue(queued);
@@ -934,7 +981,7 @@ export class NamedPipeSink implements LogSink {
         // untouched, so this is advisory. It also keeps the both-threw case honest - if
         // the default format throws too, `writeEntry` reports that as the one `WRITE`
         // failure, so a caller counting lost entries counts one rather than two.
-        this.handleError(PipeErrorType.FORMAT, error);
+        this.handleError('format', error);
       }
     }
 
@@ -972,9 +1019,13 @@ export class NamedPipeSink implements LogSink {
    * Handle errors
    */
   private handleError(
-    errorType: PipeErrorType,
+    kind: SinkFailureKind,
     error: unknown,
-    options?: { countsAgainstHealth?: boolean },
+    options?: {
+      countsAgainstHealth?: boolean;
+      attempt?: number;
+      willRetry?: boolean;
+    },
   ): void {
     // Normalized rather than trusted: `error` reaches here from Node's stream and
     // filesystem callbacks as well as from `catch` blocks, so it is not guaranteed to be
@@ -987,10 +1038,7 @@ export class NamedPipeSink implements LogSink {
     // wrote a line and left the pipe untouched - the distinction the error type itself
     // exists to draw - and a failure delivered late by a stream this sink has already
     // replaced says nothing about the one that replaced it.
-    if (
-      errorType === PipeErrorType.WRITE &&
-      options?.countsAgainstHealth !== false
-    ) {
+    if (kind === 'write' && options?.countsAgainstHealth !== false) {
       this.consecutiveFailures++;
     }
 
@@ -1005,9 +1053,16 @@ export class NamedPipeSink implements LogSink {
       this.onError === undefined
         ? undefined
         : () => {
-            this.onError?.(errorType, failure, this.pipePath);
+            this.onError?.({
+              kind,
+              error: failure,
+              target: this.pipePath,
+              // No `entry`: this sink keeps the rendered line, not the `LogEntry`.
+              attempt: options?.attempt,
+              willRetry: options?.willRetry ?? false,
+            });
           },
-      () => `NamedPipeSink error (${errorType}): ${describeError(failure)}`,
+      () => `NamedPipeSink error (${kind}): ${describeError(failure)}`,
     );
   }
 }

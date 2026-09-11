@@ -1,6 +1,7 @@
 import { describe, test, expect, mock, beforeEach, afterEach } from 'bun:test';
 import { promises as fsPromises } from 'fs';
 import { FileSink } from './file';
+import type { SinkFailure, SinkFailureKind } from './internal/sink-failure';
 import type { LogEntry } from '../types';
 import { LogLevel } from '../types';
 import { TmpDir } from '../../tmp-dir';
@@ -533,9 +534,9 @@ describe('FileSink', () => {
       maxSizeMB: 1,
       jsonFormat: false,
       maxRetries: 3,
-      onError: (error, _entry, attempt, _willRetry: boolean) => {
-        errors.push(error);
-        retryAttempts.push(attempt);
+      onError: (failure) => {
+        errors.push(failure.error);
+        retryAttempts.push(failure.attempt ?? 0);
       },
     });
 
@@ -898,7 +899,13 @@ describe('FileSink', () => {
     // Reported once, not once per retry: a render this refuses to repeat cannot come
     // out differently on a second attempt.
     expect(onError).toHaveBeenCalledTimes(1);
-    expect((onError.mock.calls[0] as unknown[])[3]).toBe(false);
+
+    const failure = (onError.mock.calls[0] as unknown[])[0] as SinkFailure;
+
+    expect(failure.willRetry).toBe(false);
+    // A render that produced no line is a formatting failure, and says so rather than
+    // leaving the caller to match on the message text.
+    expect(failure.kind).toBe('format' satisfies SinkFailureKind);
   });
 
   test('a throwing onError callback falls through to the console and does not stop the retry', async () => {
@@ -916,8 +923,8 @@ describe('FileSink', () => {
         maxSizeMB: 1,
         jsonFormat: false,
         maxRetries: 2,
-        onError: (_error, _entry, attempt) => {
-          attempts.push(attempt);
+        onError: (failure) => {
+          attempts.push(failure.attempt ?? 0);
 
           throw new Error('onError itself blew up');
         },
@@ -1015,7 +1022,7 @@ describe('FileSink - bounded queue', () => {
       logDir: tmpDir.path,
       basename: 'bounded-report',
       maxQueueSize: 3,
-      onError: (error) => errors.push(error),
+      onError: (failure) => errors.push(failure.error),
     });
 
     for (let index = 0; index < 40; index++) {
