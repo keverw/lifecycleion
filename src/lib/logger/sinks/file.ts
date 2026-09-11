@@ -579,10 +579,27 @@ export class FileSink implements LogSink {
         await fsPromises.writeFile(currentLogFile, '', { flag: 'a' });
       }
 
-      this.logFileStream = fs.createWriteStream(currentLogFile, { flags: 'a' });
+      const stream = fs.createWriteStream(currentLogFile, { flags: 'a' });
+
+      this.logFileStream = stream;
       this.currentLogFile = currentLogFile;
 
-      this.logFileStream.on('error', () => {
+      stream.on('error', () => {
+        // The stream that failed, not whatever is current. A rotation replaces this
+        // stream, and the one it replaced can still deliver its error afterwards -
+        // ungated, that late error destroyed the *live* stream, failing whatever write
+        // was in flight on it and forcing a needless reopen. A stream nobody is holding
+        // is simply torn down.
+        if (this.logFileStream !== stream) {
+          try {
+            stream.destroy();
+          } catch {
+            // Nothing further to try for a stream nothing is using.
+          }
+
+          return;
+        }
+
         this.destroyStream();
       });
 

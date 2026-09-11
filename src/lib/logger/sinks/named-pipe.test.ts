@@ -1076,4 +1076,100 @@ describe('NamedPipeSink', () => {
       reader.stop();
     }
   }, 15000);
+  test('keeps entries under the cap when the reader stops consuming', async () => {
+    // Backpressure was the third way the managed queue could be bypassed: `write()`
+    // returning false means the stream's buffer is over its high-water mark, and ignoring
+    // it drained the queue into Node's buffer, which has no cap. Measured before the fix:
+    // 500 entries went there while a cap of 10 held none and `getHealth()` reported an
+    // empty queue with no drops.
+    const pipePath = `${tmpDir.path}/backpressure.pipe`;
+    await createNamedPipe(pipePath);
+
+    // A reader that opens the pipe and never consumes a byte, so the kernel FIFO buffer
+    // fills and everything after it is backpressure.
+    const readerFd = fs.openSync(
+      pipePath,
+      fs.constants.O_RDONLY | fs.constants.O_NONBLOCK,
+    );
+
+    const sink = new NamedPipeSink({
+      pipePath,
+      maxQueueSize: 10,
+      onError: () => {
+        // Expected: the queue fills and reports its first drop.
+      },
+      closeTimeoutMS: 200,
+    });
+
+    try {
+      expect(await waitForOpenPipe(sink)).toBe(true);
+
+      const line = 'x'.repeat(1000);
+
+      for (let index = 0; index < 500; index++) {
+        sink.write({
+          timestamp: Date.now(),
+          type: 'info',
+          template: line,
+          message: line,
+          entityName: `e-${String(index)}`,
+        });
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, 200));
+
+      const health = sink.getHealth();
+
+      // Held under the cap rather than handed to a buffer nothing bounds.
+      expect(health.queueSize).toBe(10);
+      expect(health.droppedEntries).toBeGreaterThan(0);
+    } finally {
+      await sink.close();
+      fs.closeSync(readerFd);
+    }
+  }, 15000);
+
+  test('a late error from a replaced stream does not unseat the live one', async () => {
+    // A stream ended by `reconnect()` can deliver its error after the replacement has
+    // opened, and its handler is a closure over the stream it was attached to. Ungated,
+    // that late error marked the fresh connection uninitialized and sent every later
+    // entry to the queue - and counted against a stream that was working.
+    const pipePath = `${tmpDir.path}/stale-error.pipe`;
+    await createNamedPipe(pipePath);
+
+    const reader = startPipeReader(pipePath);
+    const sink = new NamedPipeSink({ pipePath, onError: () => {} });
+
+    try {
+      expect(await waitForOpenPipe(sink)).toBe(true);
+
+      // The listeners the sink attached to the stream it is about to replace.
+      const replaced = (sink as unknown as { pipeStream: fs.WriteStream })
+        .pipeStream;
+      const staleHandlers = replaced.listeners('error') as ((
+        error: Error,
+      ) => void)[];
+
+      expect(staleHandlers.length).toBeGreaterThan(0);
+
+      const status = await sink.reconnect();
+
+      expect(status.success).toBe(true);
+      expect(sink.getHealth().isInitialized).toBe(true);
+
+      // The replaced stream reports its failure now, one turn too late.
+      for (const handler of staleHandlers) {
+        handler(new Error('late EPIPE from a stream we replaced'));
+      }
+
+      const health = sink.getHealth();
+
+      expect(health.isInitialized).toBe(true);
+      expect(health.consecutiveFailures).toBe(0);
+      expect(health.isHealthy).toBe(true);
+    } finally {
+      await sink.close();
+      reader.stop();
+    }
+  }, 15000);
 });

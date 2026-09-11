@@ -1029,6 +1029,54 @@ describe('FileSink - bounded queue', () => {
     await sink.close();
   });
 
+  test('a late error from a replaced stream does not destroy the live one', async () => {
+    // Rotation replaces the stream, and the one it replaced can still deliver its error
+    // afterwards. The handler destroyed whatever was current rather than the stream that
+    // failed, so a late error tore down a healthy stream, failed the write in flight on
+    // it, and forced a needless reopen.
+    const sink = new FileSink({
+      logDir: tmpDir.path,
+      basename: 'stale-stream',
+      onError: () => {
+        // Nothing here should fail; the assertion is that the live stream survives.
+      },
+    });
+
+    await sink.flush();
+
+    const privateSink = sink as unknown as {
+      logFileStream?: { listeners: (event: string) => ((e: Error) => void)[] };
+    };
+
+    const replaced = privateSink.logFileStream;
+
+    expect(replaced).toBeDefined();
+
+    const staleHandlers = replaced?.listeners('error') ?? [];
+
+    expect(staleHandlers.length).toBeGreaterThan(0);
+
+    // Swap in a fresh stream, as a rotation does, then let the old one report.
+    await (sink as unknown as { rotateFile: () => Promise<void> }).rotateFile();
+
+    const live = privateSink.logFileStream;
+
+    for (const handler of staleHandlers) {
+      handler(new Error('late write error from the rotated-away stream'));
+    }
+
+    expect(privateSink.logFileStream).toBe(live);
+
+    // And the sink still writes through it.
+    sink.write(makeEntry('after-stale-error'));
+
+    await sink.flush();
+
+    expect(sink.getHealth().droppedEntries).toBe(0);
+
+    await sink.close();
+  });
+
   test('caps the queue at 10,000 entries by default', async () => {
     // Unbounded was the wrong default for a queue that only grows when something is
     // already wrong, and it was the default on both sinks. They share one policy now.

@@ -197,6 +197,16 @@ export class NamedPipeSink implements LogSink {
   private lastError?: Error;
   private consecutiveFailures = 0;
   /**
+   * Whether the stream has told us to stop and wait for `'drain'`.
+   *
+   * Backpressure is the third way this sink's own queue could be bypassed. `write()`
+   * returning `false` means the stream's buffer is over its high-water mark, and ignoring
+   * it drains the managed queue into Node's buffer, which has no cap: with a reader
+   * attached but not consuming, 500 entries went there while `maxQueueSize` held none of
+   * them and `getHealth()` reported an empty queue and no drops.
+   */
+  private isAwaitingDrain = false;
+  /**
    * When the last automatic reopen was attempted.
    *
    * A reopen costs a `stat` and an `open`, and an outage is exactly when the log loop is
@@ -237,7 +247,14 @@ export class NamedPipeSink implements LogSink {
     // uncounted, unreported, and not recoverable by the `reconnect()` the class documents,
     // since there was nothing left to flush. `FileSink` answers the identical failure by
     // queueing, retrying and reopening; there was never a reason for the two to differ.
-    if (!this.isInitialized || !this.pipeStream || this.pipeStream.destroyed) {
+    if (
+      !this.isInitialized ||
+      !this.pipeStream ||
+      this.pipeStream.destroyed ||
+      // Under backpressure the stream will take it, into a buffer with no cap. It waits
+      // here instead, where `maxQueueSize` applies and `getHealth()` can see it.
+      this.isAwaitingDrain
+    ) {
       this.writeQueue.push({ ...this.renderEntry(entry), attempts: 0 });
       this.enforceQueueLimit();
       this.ensureConnection();
@@ -292,6 +309,9 @@ export class NamedPipeSink implements LogSink {
         this.pipeStream.end();
         this.pipeStream = undefined;
       }
+
+      // Whatever the old stream was waiting to drain is no longer anyone's business.
+      this.isAwaitingDrain = false;
 
       // And abandon an open still in flight, which a caller asking to reconnect has
       // implicitly given up on. Left in place it would make the attempt below a no-op.
@@ -461,15 +481,29 @@ export class NamedPipeSink implements LogSink {
       this.pendingStream = stream;
 
       stream.on('error', (err) => {
-        this.handleError(PipeErrorType.WRITE, err);
+        // A stream this sink has already moved on from - ended by `reconnect()`, replaced
+        // after a failure - can still deliver its error afterwards, and that error says
+        // nothing about the connection now in hand. Reported, because it did happen, but
+        // it changes no state and is not counted against the health of a stream that is
+        // working: left ungated, an error arriving a tick after `reconnect()` succeeded
+        // marked the fresh connection uninitialized and sent every later entry to the
+        // queue.
+        const isCurrent =
+          this.pendingStream === stream || this.pipeStream === stream;
 
-        if (this.pendingStream === stream) {
-          this.pendingStream = undefined;
+        this.handleError(PipeErrorType.WRITE, err, {
+          countsAgainstHealth: isCurrent,
+        });
+
+        if (!isCurrent) {
+          return;
         }
 
-        if (this.pipeStream === stream) {
-          this.pipeStream = undefined;
-        }
+        this.pendingStream = undefined;
+        this.pipeStream = undefined;
+        // Nothing is going to drain now, so a later stream is not made to wait on a
+        // `'drain'` this one will never emit.
+        this.isAwaitingDrain = false;
 
         // Uninitialized as well as streamless, so `write` queues what comes next instead
         // of discarding it. Leaving this set was what made a single pipe error terminal:
@@ -482,7 +516,16 @@ export class NamedPipeSink implements LogSink {
       // nowhere to put a line that Node would not buffer without limit, so entries wait
       // in this sink's own queue, under its own cap, where `getHealth()` can see them.
       stream.on('open', () => {
-        if (this.closed || this.closing) {
+        // Only the stream this sink is still waiting on may be promoted. An open that
+        // completes after `reconnect()` abandoned it belongs to nothing, and installing it
+        // would replace a live connection with one nobody is holding.
+        if (this.closed || this.closing || this.pendingStream !== stream) {
+          try {
+            stream.destroy();
+          } catch {
+            // Nothing further to try for a stream nothing is using.
+          }
+
           return;
         }
 
@@ -512,12 +555,47 @@ export class NamedPipeSink implements LogSink {
    * Process queued entries
    */
   private processQueue(): void {
-    while (this.writeQueue.length > 0 && !this.closed) {
+    while (
+      this.writeQueue.length > 0 &&
+      !this.closed &&
+      // Stops at backpressure rather than emptying the managed queue into Node's
+      // unbounded one. `'drain'` resumes it; see `pauseUntilDrain`.
+      !this.isAwaitingDrain &&
+      this.pipeStream !== undefined &&
+      !this.pipeStream.destroyed
+    ) {
       const queued = this.writeQueue.shift();
       if (queued) {
         this.writeEntry(queued);
       }
     }
+  }
+
+  /**
+   * Hold the queue until the stream asks for more.
+   *
+   * One listener at a time, which is what the flag is for: a `'drain'` listener per
+   * backpressured write is the leak this sink had before, and it handled nothing.
+   */
+  private pauseUntilDrain(): void {
+    const stream = this.pipeStream;
+
+    if (this.isAwaitingDrain || stream === undefined) {
+      return;
+    }
+
+    this.isAwaitingDrain = true;
+
+    stream.once('drain', () => {
+      // The stream may have been replaced while this was pending, in which case its
+      // successor decides when to drain and this one's `'drain'` means nothing.
+      if (this.pipeStream !== stream) {
+        return;
+      }
+
+      this.isAwaitingDrain = false;
+      this.processQueue();
+    });
   }
 
   /**
@@ -722,7 +800,7 @@ export class NamedPipeSink implements LogSink {
       // so treating the synchronous return as delivery meant the one entry that actually
       // failed was the one entry never retried - it had already been dropped from the
       // queue, and the `'error'` handler has no idea which line it belonged to.
-      this.pipeStream.write(messageToWrite, (error) => {
+      const canContinue = this.pipeStream.write(messageToWrite, (error) => {
         if (error) {
           // Not reported here: the stream raises `'error'` for the same failure and
           // `handleError` answers it once. This is the half that error cannot do - put
@@ -734,6 +812,10 @@ export class NamedPipeSink implements LogSink {
 
         this.consecutiveFailures = 0;
       });
+
+      if (!canContinue) {
+        this.pauseUntilDrain();
+      }
     } catch (error) {
       this.handleError(PipeErrorType.WRITE, error);
       // The line never reached the pipe, so it goes back on the queue and out on a later
@@ -797,7 +879,11 @@ export class NamedPipeSink implements LogSink {
   /**
    * Handle errors
    */
-  private handleError(errorType: PipeErrorType, error: unknown): void {
+  private handleError(
+    errorType: PipeErrorType,
+    error: unknown,
+    options?: { countsAgainstHealth?: boolean },
+  ): void {
     // Normalized rather than trusted: `error` reaches here from Node's stream and
     // filesystem callbacks as well as from `catch` blocks, so it is not guaranteed to be
     // an `Error`, and `onError` declares one.
@@ -805,10 +891,14 @@ export class NamedPipeSink implements LogSink {
 
     this.lastError = failure;
 
-    // Write failures only. A `FORMAT` failure still wrote a line and left the pipe
-    // untouched, so counting it would report a healthy sink as failing - the same
-    // distinction the error type itself exists to draw.
-    if (errorType === PipeErrorType.WRITE) {
+    // Write failures only, and only from the stream in hand. A `FORMAT` failure still
+    // wrote a line and left the pipe untouched - the distinction the error type itself
+    // exists to draw - and a failure delivered late by a stream this sink has already
+    // replaced says nothing about the one that replaced it.
+    if (
+      errorType === PipeErrorType.WRITE &&
+      options?.countsAgainstHealth !== false
+    ) {
       this.consecutiveFailures++;
     }
 
