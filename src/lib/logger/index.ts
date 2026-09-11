@@ -180,12 +180,20 @@ export class Logger extends EventEmitter {
     exitCode: number,
     isFirstExit: boolean,
   ) => BeforeExitResult | Promise<BeforeExitResult>;
+  // `void | Promise<void>`, matching the options they come from: these are invoked
+  // through `reportThroughHandler`, which follows a returned promise, so an `async`
+  // handler that rejects reaches the console rung instead of becoming an unhandled
+  // rejection. Narrowed to `void` here, storing the caller's own option was a
+  // `no-misused-promises` error.
   private onSinkError?: (
     error: Error,
     context: 'write' | 'close',
     sink: LogSink,
-  ) => void;
-  private onEventHandlerError?: (error: Error, event: string) => void;
+  ) => void | Promise<void>;
+  private onEventHandlerError?: (
+    error: Error,
+    event: string,
+  ) => void | Promise<void>;
   private onFormatError?: FormatErrorHandler;
 
   private _didExit = false;
@@ -1116,9 +1124,9 @@ export class Logger extends EventEmitter {
     reportThroughHandler(
       this.onEventHandlerError === undefined
         ? undefined
-        : () => {
-            this.onEventHandlerError?.(failure, event);
-          },
+        : // Returned, so an `async` handler that rejects reaches the console rung rather
+          // than becoming an unhandled rejection out of a log call.
+          () => this.onEventHandlerError?.(failure, event),
       () => failure.message,
     );
   }
@@ -1183,9 +1191,8 @@ export class Logger extends EventEmitter {
     reportThroughHandler(
       this.onSinkError === undefined
         ? undefined
-        : () => {
-            this.onSinkError?.(failure, context, sink);
-          },
+        : // Returned, for the reason `onEventHandlerError` above is.
+          () => this.onSinkError?.(failure, context, sink),
       () =>
         `Error ${context === 'write' ? 'writing to' : 'closing'} sink: ${describeError(failure)}`,
     );

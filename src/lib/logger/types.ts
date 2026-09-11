@@ -182,7 +182,7 @@ export interface LoggerOptions {
     error: Error,
     context: 'write' | 'close',
     sink: LogSink,
-  ) => void;
+  ) => void | Promise<void>;
 
   /**
    * Handle a failure thrown or rejected by one of this logger's own `'logger'` event
@@ -195,7 +195,7 @@ export interface LoggerOptions {
    *
    * Do not call this logger's own log methods from here.
    */
-  onEventHandlerError?: (error: Error, event: string) => void;
+  onEventHandlerError?: (error: Error, event: string) => void | Promise<void>;
 
   /**
    * Notified when a value could not be formatted for a log line, so a

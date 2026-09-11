@@ -1,4 +1,5 @@
 import { describeError, toError } from '../to-error';
+import { isPromise } from '../is-promise';
 import { reportToConsole } from './report-to-console';
 import { reportToHost } from './report-to-host';
 
@@ -37,18 +38,34 @@ export type ReportFailure = (error: unknown, subject: string) => void;
  * what just failed.
  *
  * @param invoke The caller's handler, already bound to its own arguments, or `undefined`
- *               when none was set.
+ *               when none was set. A handler that returns a promise is followed: a
+ *               rejection is reported on the console rung, exactly as a throw is.
  * @param line   What the console rung should say. Built by the caller, since only it knows
  *               what its arguments mean. Evaluated lazily so an unset handler that
  *               succeeds costs nothing.
  */
 export function reportThroughHandler(
-  invoke: (() => void) | undefined,
+  invoke: (() => unknown) | undefined,
   line: () => string,
 ): void {
   if (invoke !== undefined) {
     try {
-      invoke();
+      const result: unknown = invoke();
+
+      // A handler is free to be `async` - the named-pipe docs show one - and a rejected
+      // promise sails straight past a `try`/`catch`. Unfollowed, that is an unhandled
+      // rejection raised out of an error path, which under Node's default
+      // `--unhandled-rejections=throw` ends the process: a logging failure taking down the
+      // application, from the one function whose contract is that reporting a failure may
+      // never raise one. Followed, it lands on the console rung like any other broken
+      // handler.
+      if (isPromise(result)) {
+        result.catch((handlerError: unknown) => {
+          reportToConsole(
+            `${line()} (the failure handler also rejected: ${describeError(handlerError)})`,
+          );
+        });
+      }
 
       return;
     } catch (handlerError) {

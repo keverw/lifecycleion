@@ -389,7 +389,10 @@ export class FileSink implements LogSink {
             reportThroughHandler(
               this.onError === undefined
                 ? undefined
-                : () => {
+                : // The handler's result is returned, not dropped: `reportThroughHandler`
+                  // follows a promise so an `async` handler that rejects lands on the
+                  // console rung instead of becoming an unhandled rejection.
+                  () =>
                     this.onError?.({
                       kind: this.failureKindFor(err),
                       error: err,
@@ -397,8 +400,7 @@ export class FileSink implements LogSink {
                       entry: queuedEntry.entry,
                       attempt: queuedEntry.attempts + 1,
                       disposition: willRetry ? 'retrying' : 'lost',
-                    });
-                  },
+                    }),
               () =>
                 `FileSink error writing to ${this.currentLogFile ?? this.logDir}: ${describeError(err)}`,
             );
@@ -468,7 +470,7 @@ export class FileSink implements LogSink {
     reportThroughHandler(
       this.onError === undefined
         ? undefined
-        : () => {
+        : () =>
             this.onError?.({
               kind: 'queue_full',
               error: failure,
@@ -478,8 +480,7 @@ export class FileSink implements LogSink {
               // would otherwise duplicate an entry still queued for the file.
               entry: firstDropped,
               disposition: 'lost',
-            });
-          },
+            }),
       () => describeError(failure),
     );
   }

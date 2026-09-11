@@ -908,6 +908,60 @@ describe('FileSink', () => {
     expect(failure.kind).toBe('format' satisfies SinkFailureKind);
   });
 
+  test('an async onError that rejects is caught, not left unhandled', async () => {
+    // A handler is free to be `async` - the named-pipe docs show one - and a rejected
+    // promise sails straight past the `try`/`catch` that guards a throw. Unfollowed, that
+    // is an unhandled rejection raised out of an error path, which under Node's default
+    // `--unhandled-rejections=throw` ends the process: a logging failure taking down the
+    // application.
+    const captured = muteConsoleError();
+
+    try {
+      const sink = new FileSink({
+        logDir: tmpDir.path,
+        basename: 'callback-rejects',
+        maxSizeMB: 1,
+        maxRetries: 0,
+        onError: async () => {
+          await Promise.resolve();
+
+          throw new Error('onError rejected');
+        },
+      });
+
+      await new Promise((resolve) => setTimeout(resolve, 100));
+
+      const privateSink = sink as any;
+
+      privateSink.destroyStream();
+      privateSink.setupLogFile = mock(() => {
+        throw new Error('Failed to setup log file');
+      });
+
+      sink.write({
+        timestamp: Date.now(),
+        type: 'info',
+        template: 'will fail',
+        message: 'will fail',
+      });
+
+      await new Promise((resolve) => setTimeout(resolve, 300));
+
+      const reports = captured.filter((line) =>
+        line.includes('the failure handler also rejected'),
+      );
+
+      expect(reports.length).toBeGreaterThan(0);
+      expect(reports[0]).toContain('onError rejected');
+      // The failure the handler was told about rides along, as it does for a throw.
+      expect(reports[0]).toContain('Failed to setup log file');
+
+      await sink.close();
+    } finally {
+      restoreConsoleError();
+    }
+  });
+
   test('a throwing onError callback falls through to the console and does not stop the retry', async () => {
     // Swallowed, this lost both failures at once: the write error the callback was told
     // about and the callback's own throw, so a sink that could not write anything
@@ -1022,7 +1076,9 @@ describe('FileSink - bounded queue', () => {
       logDir: tmpDir.path,
       basename: 'bounded-report',
       maxQueueSize: 3,
-      onError: (failure) => errors.push(failure.error),
+      onError: (failure) => {
+        errors.push(failure.error);
+      },
     });
 
     for (let index = 0; index < 40; index++) {

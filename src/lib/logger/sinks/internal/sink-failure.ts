@@ -114,7 +114,10 @@ export interface SinkFailure {
  * including a failed write that a stream reports twice, once through the write callback
  * and again as an `'error'` event.
  *
- * A handler that throws is reported to the console rather than being allowed to turn one
- * failure into two - see `reportThroughHandler`.
+ * May be `async`. A handler that throws *or rejects* is reported to the console rather
+ * than being allowed to turn one failure into two - see `reportThroughHandler`. Declaring
+ * the return type as `void | Promise<void>` is part of that: typed `void`, an `async`
+ * handler was a `no-misused-promises` error in the caller's own lint run, for a shape the
+ * sink docs demonstrate and the reporter supports.
  */
-export type SinkErrorHandler = (failure: SinkFailure) => void;
+export type SinkErrorHandler = (failure: SinkFailure) => void | Promise<void>;

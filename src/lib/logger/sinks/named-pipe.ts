@@ -1129,7 +1129,8 @@ export class NamedPipeSink implements LogSink {
     reportThroughHandler(
       this.onError === undefined
         ? undefined
-        : () => {
+        : // Returned, not dropped, so a promise from an `async` handler can be followed.
+          () =>
             this.onError?.({
               kind,
               error: failure,
@@ -1137,8 +1138,7 @@ export class NamedPipeSink implements LogSink {
               // No `entry`: this sink keeps the rendered line, not the `LogEntry`.
               attempt: options?.attempt,
               disposition: options?.disposition ?? 'no_entry',
-            });
-          },
+            }),
       () => `NamedPipeSink error (${kind}): ${describeError(failure)}`,
     );
   }
