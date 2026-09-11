@@ -143,6 +143,11 @@ function writeChunkWithBackpressure(
       chunk,
       (error: Error | null | undefined): void => {
         if (error) {
+          // Settled, as `onClose` and `onError` mark themselves. Left unmarked, a later
+          // `'close'` or `'error'` ran its whole body again - `cleanup()` a second time and
+          // a second `reject` on a promise already rejected - and the registration below
+          // could not tell that there was nothing left to wait for.
+          isSettled = true;
           cleanup();
           reject(error);
           return;
@@ -156,7 +161,15 @@ function writeChunkWithBackpressure(
     );
     hasWriteReturned = true;
 
-    if (!canContinue) {
+    // `!isSettled` as well as `!canContinue`, the same guard `serializeMultipartFormData`
+    // keeps. The callback above can run synchronously with an error - a `ClientRequest`
+    // already destroyed answers that way - and it settles the write before any listener
+    // exists. Attaching three afterwards armed nothing that could take them off again: the
+    // `req.destroyed` guard calls `onClose`, which returns on `isSettled`, so `onDrain`,
+    // `onClose` and `onError` stayed on `req` for the life of the request - once per failing
+    // chunk, which is the `MaxListenersExceededWarning` path. There is nothing to wait for
+    // once the write has already been rejected.
+    if (!canContinue && !isSettled) {
       isDrainDone = false;
       req.once('drain', onDrain);
       req.once('close', onClose);

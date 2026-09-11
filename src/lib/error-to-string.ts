@@ -530,6 +530,23 @@ export function errorToString(
 const DEFAULT_TABLE_WIDTH = 80;
 
 /**
+ * Ceiling for a caller's `maxRowLength`.
+ *
+ * The lower clamp exists so a narrow width cannot discard the error; this is the same
+ * failure from the other end. Every row is padded out to the table width, and that framing
+ * is charged against {@link MAX_RENDER_LENGTH} only for the `AdditionalInfo` rows - never
+ * for the fixed Message/Name/Code/Stack/Cause rows or the borders around them. So the
+ * width, not the payload, decided the size of the result: `errorToString(new Error('x'),
+ * 10_000_000)` returned 120,000,011 characters against a one-megabyte cap, and at `1e9` the
+ * table renderer itself threw and the top-level backstop answered `<error could not be
+ * rendered>` - the whole error lost to a number the caller passed.
+ *
+ * Ten thousand is far past any terminal or log column worth rendering into and still leaves
+ * the clamp invisible to every caller not asking for something pathological.
+ */
+const MAX_TABLE_WIDTH = 10_000;
+
+/**
  * A width the table can actually be built at.
  *
  * `maxRowLength` is a public parameter of {@link errorToString}, and the constructor
@@ -544,13 +561,19 @@ const DEFAULT_TABLE_WIDTH = 80;
  * default rather than to the minimum. Zero already meant "use the default" through the
  * constructor's `|| 80`, and a narrow table is a worse answer than the ordinary one for a
  * caller who supplied no real width.
+ *
+ * Bounded above by {@link MAX_TABLE_WIDTH} as well, which is the same failure reached from
+ * the other end - see that constant.
  */
 function resolveTableWidth(maxRowLength: number): number {
   if (!Number.isFinite(maxRowLength) || maxRowLength <= 0) {
     return DEFAULT_TABLE_WIDTH;
   }
 
-  return Math.max(KEY_VALUE_TABLE_MIN_WIDTH, maxRowLength);
+  return Math.min(
+    MAX_TABLE_WIDTH,
+    Math.max(KEY_VALUE_TABLE_MIN_WIDTH, maxRowLength),
+  );
 }
 
 function errorToASCIITable(
@@ -591,13 +614,28 @@ function errorToASCIITable(
     ];
 
     for (const [label, key] of members) {
-      const value = readMember(err, key);
+      // `readMemberOrThrew`, not `readMember`, for the reason the `additionalInfo` entries
+      // below use it: the plain helper answers `undefined` for a read that refused, and the
+      // absence test below then dropped the row - so an error whose `message` accessor
+      // threw rendered as one that simply had no message, and nothing was reported. That
+      // is the silent collapse every other level of this renderer is marked for, and the
+      // error's own members were the last place still taking it.
+      const read = readMemberOrThrew(err, key);
+
+      if (isReadFailure(read)) {
+        reportRender(read.error, joinPath(path, key));
+        table.addRow(label, UNRENDERABLE_VALUE);
+
+        continue;
+      }
+
+      const value = read;
 
       // Absent, not merely falsy. A truthiness test dropped every conventional member
       // that legitimately holds a falsy value: `code: 0` and `errno: 0` are ordinary on a
       // syscall failure and lost their rows entirely, and an empty `message` or `name`
-      // went the same way. `readMember` already answers `undefined` for a read that
-      // threw, so an unreadable member still renders nothing.
+      // went the same way. A read that threw has already been marked above, so the only
+      // thing this drops is a member that is genuinely absent.
       if (value !== undefined && value !== null) {
         table.addRow(
           label,
@@ -609,8 +647,25 @@ function errorToASCIITable(
       }
     }
 
-    const additionalInfo = readMember(err, 'additionalInfo');
-    const cause = readMember(err, 'cause');
+    // Read the way the conventional members above are, and for the same reason: with
+    // `readMember` a `cause` or `additionalInfo` accessor that threw came back `undefined`
+    // and was dropped by the absence tests below, so the error rendered as one carrying
+    // neither - reported to nobody. The failure is carried rather than flattened, so the
+    // marker rows below can say which of the two refused.
+    const additionalInfoRead = readMemberOrThrew(err, 'additionalInfo');
+    const cause = readMemberOrThrew(err, 'cause');
+    const isInfoUnreadable = isReadFailure(additionalInfoRead);
+    const additionalInfo = isInfoUnreadable ? undefined : additionalInfoRead;
+
+    if (isReadFailure(additionalInfoRead)) {
+      reportRender(additionalInfoRead.error, joinPath(path, 'additionalInfo'));
+    }
+
+    if (isReadFailure(cause)) {
+      // Reported here, where the error that was thrown is in hand; `addErrorTail` renders
+      // the marker row for it, so the `Cause` row keeps its place after `AdditionalInfo`.
+      reportRender(cause.error, joinPath(path, 'cause'));
+    }
 
     // Present, not "present and an object". A non-object `additionalInfo` - a string, a
     // number, a `bigint` - is outside what the documented shape describes, and it was
@@ -624,7 +679,8 @@ function errorToASCIITable(
     // `null` still counts as absent, matching `cause` below: an explicitly null
     // `additionalInfo` carries nothing to show.
     const hasInfo = additionalInfo !== undefined && additionalInfo !== null;
-    const hasCause = cause !== undefined && cause !== null;
+    const hasCause =
+      !isReadFailure(cause) && cause !== undefined && cause !== null;
 
     // Parsed once, ahead of both consumers. `cause` is caller data as much as
     // `additionalInfo` is, so it is covered by the same list and by the same fail-closed
@@ -644,6 +700,13 @@ function errorToASCIITable(
     // addressed by the parent's entries as a whole or not at all - the parent's walk has
     // already run by the time this is reached - and its own list covers its own contents.
     const sensitivePaths = ownPaths;
+
+    // Marked, not dropped. `hasInfo` is false for a read that refused, so this is the row
+    // that keeps an unreadable `additionalInfo` from rendering as an absent one. The
+    // report has already gone out at the read.
+    if (isInfoUnreadable) {
+      table.addRow('AdditionalInfo', UNRENDERABLE_VALUE);
+    }
 
     if (hasInfo) {
       if (sensitivePaths === null) {
@@ -865,7 +928,11 @@ function addErrorTail(
   report: ReportFormatFailure,
   reportRender: ReportFormatFailure,
 ): void {
-  if (cause !== undefined && cause !== null) {
+  if (isReadFailure(cause)) {
+    // Already reported by the caller that did the read. Rendered rather than skipped,
+    // because a `cause` accessor that threw is not an error without a cause.
+    table.addRow('Cause', UNRENDERABLE_VALUE);
+  } else if (cause !== undefined && cause !== null) {
     if (sensitive === null) {
       // The same fail-closed answer `additionalInfo` gets. Rendering the cause here while
       // refusing to render `additionalInfo` two rows above would disclose exactly what
@@ -913,9 +980,16 @@ function addErrorTail(
     }
   }
 
-  const stack = readMember(err, 'stack');
+  // `readMemberOrThrew` for the reason every other read in this table uses it: a `stack`
+  // accessor that threw answered `undefined` under `readMember` and the truthiness test
+  // below dropped the row, so the one member an operator reaches for first went missing
+  // with nothing said about it.
+  const stack = readMemberOrThrew(err, 'stack');
 
-  if (stack) {
+  if (isReadFailure(stack)) {
+    reportRender(stack.error, joinPath(path, 'stack'));
+    table.addValueOnSeparateRow('Stack', UNRENDERABLE_VALUE);
+  } else if (stack) {
     table.addValueOnSeparateRow(
       'Stack',
       chargeText(
@@ -1201,9 +1275,27 @@ function stringifyValueInner(
       // is why this gate does *not* simply track the widened `hasInfo` at the top of the
       // table.
       const asRecord = value as Record<string, unknown>;
-      const ownInfo = readMember(asRecord, 'additionalInfo');
-      const ownCause = readMember(asRecord, 'cause');
+      const ownInfo = readMemberOrThrew(asRecord, 'additionalInfo');
+      const ownCause = readMemberOrThrew(asRecord, 'cause');
+
+      // Read the "or threw" way, like `sensitiveFieldNames` below and for the same reason.
+      // Under a plain guarded read an accessor that refused came back `undefined`, so the
+      // gate answered "not error-shaped" and the object went to the walk below and printed
+      // its keys in the clear - the one route on which a present-but-unusable
+      // `sensitiveFieldNames` could no longer fail it closed, because the gate it depends on
+      // had already been decided by the read that threw. A member that refuses counts as
+      // present: the table is the branch that can fail it closed.
+      if (isReadFailure(ownInfo)) {
+        reportRender(ownInfo.error, joinPath(path, 'additionalInfo'));
+      }
+
+      if (isReadFailure(ownCause)) {
+        reportRender(ownCause.error, joinPath(path, 'cause'));
+      }
+
       const isErrorShaped =
+        isReadFailure(ownInfo) ||
+        isReadFailure(ownCause) ||
         (Boolean(ownInfo) && typeof ownInfo === 'object') ||
         (ownCause !== undefined && ownCause !== null);
 

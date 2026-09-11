@@ -356,7 +356,14 @@ export async function serializeMultipartFormData(
       });
       hasWriteReturned = true;
 
-      if (!canContinue) {
+      // `!isSettled` as well as `!canContinue`. The write callback can run synchronously
+      // with an error - a `ClientRequest` already destroyed answers that way - and it sets
+      // `isSettled` and runs `cleanup()` before any listener exists. Attaching three
+      // listeners afterwards then armed nothing that could take them off again: the
+      // `req.destroyed` guard called `onClose()`, which returns early on `isSettled`, so
+      // `onDrain`, `onClose` and `onError` stayed on `req` for the life of the request.
+      // There is nothing to wait for once the write has already been rejected.
+      if (!canContinue && !isSettled) {
         isDrainDone = false;
         req.once('drain', onDrain);
         req.once('close', onClose);

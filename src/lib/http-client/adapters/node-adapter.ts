@@ -60,6 +60,44 @@ import { readUnknownMember as readObjectMember } from '../../internal/read-membe
 const PENDING_WRITABLE_ERROR_WINDOW_MS = 1000;
 
 /**
+ * The longest an absorber may stay attached however many requests keep asking for it.
+ *
+ * {@link PENDING_WRITABLE_ERROR_WINDOW_MS} is per *request*, and it has to be: one absorber
+ * covers every request sharing the writable, so a request that settles while it is already
+ * attached needs a full window of its own - see {@link PendingWritableErrorEntry}. Restarted
+ * without a ceiling, though, that is a deadline that never arrives: `cleanup` asks on every
+ * settle of every request, so a caller streaming steadily into `process.stdout` or a pooled
+ * sink - the very writables that never error and never close - pushes it out forever, and
+ * the absorber stays for the life of the process swallowing the caller's own first genuine
+ * error and pinning the *first* request's scope with it. That is the hazard the window
+ * exists for, reached by extension rather than by never bounding it at all.
+ *
+ * Counted from when the absorber was attached, so it bounds the listener's whole life
+ * rather than any one request's share of it. Five windows: enough that an ordinary burst of
+ * concurrent requests each gets its full second, short enough that "forever" is still never
+ * the answer.
+ */
+const MAX_PENDING_WRITABLE_ERROR_LIFETIME_MS =
+  PENDING_WRITABLE_ERROR_WINDOW_MS * 5;
+
+/**
+ * One writable's absorber, and the means to push its deadline out.
+ *
+ * `extend` is carried alongside the listener because the absorber is shared but its
+ * {@link PENDING_WRITABLE_ERROR_WINDOW_MS} backstop was not: only the request that
+ * *attached* it scheduled one. A later request finding an absorber already in place
+ * inherited whatever was left of the first request's second - which for a request settling
+ * at the end of that window is no window at all - and its own `onWritableError` had just
+ * been taken off by `cleanup`, so the late `'error'` it was covering for arrived with no
+ * listener at all. Every request that relies on the absorber pushes the deadline out, up to
+ * {@link MAX_PENDING_WRITABLE_ERROR_LIFETIME_MS}.
+ */
+interface PendingWritableErrorEntry {
+  readonly absorb: (error: Error) => void;
+  readonly extend: () => void;
+}
+
+/**
  * The absorber currently attached to a writable, if any.
  *
  * Module-level and keyed on the writable, because `streamResponse` may hand the same sink
@@ -68,7 +106,7 @@ const PENDING_WRITABLE_ERROR_WINDOW_MS = 1000;
  */
 const pendingWritableErrorAbsorbers = new WeakMap<
   WritableLike,
-  (error: Error) => void
+  PendingWritableErrorEntry
 >();
 
 type StreamResponseBodyResult =
@@ -916,8 +954,14 @@ async function streamResponseBody(
       }
 
       try {
-        if (pendingWritableErrorAbsorbers.has(writable)) {
-          // One is already attached to this writable and still absorbing.
+        const existing = pendingWritableErrorAbsorbers.get(writable);
+
+        if (existing !== undefined) {
+          // One is already attached to this writable and still absorbing. Its deadline is
+          // pushed out to a full window from *here*, because this request is now relying
+          // on it and has no listener of its own left.
+          existing.extend();
+
           return;
         }
       } catch {
@@ -930,7 +974,7 @@ async function streamResponseBody(
       // already run, does nothing.
       const detach = (): void => {
         try {
-          if (pendingWritableErrorAbsorbers.get(writable) !== absorb) {
+          if (pendingWritableErrorAbsorbers.get(writable)?.absorb !== absorb) {
             return;
           }
         } catch {
@@ -962,6 +1006,12 @@ async function streamResponseBody(
         }
 
         pendingWritableErrorAbsorbers.delete(writable);
+
+        // Nothing left for it to do, and it holds this closure until it fires otherwise.
+        if (backstop !== undefined) {
+          clearTimeout(backstop);
+          backstop = undefined;
+        }
       };
 
       // Detach on the next turn of the loop rather than now, so an error delivered in
@@ -997,9 +1047,52 @@ async function streamResponseBody(
         detach();
       };
 
+      // Restarts the backstop from now, within the absorber's own lifetime cap. Called once
+      // below for the request that attaches the absorber, and again by every later request
+      // that finds it already in place, so the window each of them gets is its own full one
+      // rather than the remainder of the first request's.
+      let backstop: ReturnType<typeof setTimeout> | undefined;
+      const attachedAt = Date.now();
+
+      const extend = (): void => {
+        const remainingLifetime =
+          MAX_PENDING_WRITABLE_ERROR_LIFETIME_MS - (Date.now() - attachedAt);
+
+        // Out of lifetime, so this is the last word rather than another window: see
+        // `MAX_PENDING_WRITABLE_ERROR_LIFETIME_MS` for why an unconditional restart is a
+        // deadline that never arrives.
+        if (remainingLifetime <= 0) {
+          detach();
+
+          return;
+        }
+
+        try {
+          // Scheduled before the old one is cleared, never after. A `setTimeout` that
+          // refuses would otherwise leave this absorber with the bound it already had
+          // cleared and no replacement - unbounded, by way of the code that bounds it.
+          const next = setTimeout(
+            detach,
+            Math.min(PENDING_WRITABLE_ERROR_WINDOW_MS, remainingLifetime),
+          );
+
+          next.unref?.();
+
+          if (backstop !== undefined) {
+            clearTimeout(backstop);
+          }
+
+          backstop = next;
+        } catch {
+          // No way to schedule it. Whatever was already pending still stands, and on the
+          // attach path that is nothing - the two signals above are the bound, which is the
+          // behaviour that shipped before this one existed.
+        }
+      };
+
       try {
         writable.on('error', absorb);
-        pendingWritableErrorAbsorbers.set(writable, absorb);
+        pendingWritableErrorAbsorbers.set(writable, { absorb, extend });
       } catch {
         // A writable that will not take a listener cannot be protected. Nothing else
         // here depends on it.
@@ -1052,14 +1145,7 @@ async function streamResponseBody(
       // which a `setImmediate` lands before - and short enough that "for the life of the
       // process" is never the answer. `unref` so a pending removal cannot hold the process
       // open on its own.
-      try {
-        const backstop = setTimeout(detach, PENDING_WRITABLE_ERROR_WINDOW_MS);
-
-        backstop.unref?.();
-      } catch {
-        // No way to schedule it. The two signals above are still in place, which is the
-        // behaviour that shipped before this bound existed.
-      }
+      extend();
     };
 
     const cleanup = (): void => {

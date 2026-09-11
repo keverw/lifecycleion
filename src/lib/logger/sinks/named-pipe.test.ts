@@ -1848,6 +1848,129 @@ describe('NamedPipeSink', () => {
     expect(sink.getHealth().consecutiveFailures).toBe(0);
   }, 15000);
 
+  test('a write that fails inside the close drain is still counted', async () => {
+    // `close()` sets `closing` before running its drain loop, and `requeue` returned early
+    // on that flag - so an entry the drain had already shifted off the queue, whose write
+    // then failed, was dropped on the floor: not put back, not counted in
+    // `droppedEntries`, and `abandonQueueOnClose()` afterwards saw an empty queue and
+    // reported nothing. `getHealth().droppedEntries` means "lines this sink did not
+    // deliver", and this was the one shutdown failure it did not know about.
+    const pipePath = `${tmpDir.path}/close-drain-failure.pipe`;
+    await createNamedPipe(pipePath);
+
+    const readerFd = fs.openSync(
+      pipePath,
+      fs.constants.O_RDONLY | fs.constants.O_NONBLOCK,
+    );
+    const failures: SinkFailure[] = [];
+    const sink = new NamedPipeSink({
+      pipePath,
+      closeTimeoutMS: 1000,
+      // One attempt each, so the first failure inside the drain is the last one.
+      maxRetries: 0,
+      onError: (failure) => {
+        failures.push(failure);
+      },
+    });
+
+    try {
+      expect(await waitForOpenPipe(sink)).toBe(true);
+
+      const internals = sink as unknown as {
+        writeQueue: { formatted: string; attempts: number }[];
+        pipeStream?: { write: (...args: unknown[]) => boolean };
+      };
+
+      // Parked directly, because this is about the drain loop's own writes: entries handed
+      // to `write()` while the pipe is healthy go straight out.
+      for (let index = 0; index < 3; index++) {
+        internals.writeQueue.push({
+          formatted: `drain-${String(index)}\n`,
+          attempts: 0,
+        });
+      }
+
+      // The reader going away mid-shutdown, which is exactly when this happens for real.
+      const stream = internals.pipeStream;
+
+      expect(stream).toBeDefined();
+
+      if (stream) {
+        stream.write = (): boolean => {
+          throw new Error('reader vanished');
+        };
+      }
+
+      await sink.close();
+
+      expect(sink.getHealth().queueSize).toBe(0);
+      expect(sink.getHealth().droppedEntries).toBe(3);
+      expect(
+        failures.filter((entry) => entry.kind === 'write'),
+      ).not.toHaveLength(0);
+    } finally {
+      fs.closeSync(readerFd);
+    }
+  }, 15000);
+
+  test('the close drain retries a failed write and reports what it still cannot send', async () => {
+    // The other half of the same fix: with retries left the entry goes back on the queue
+    // rather than being counted immediately, so `close()`'s drain loop gets to try it
+    // again - and whatever the loop still cannot deliver is counted *and* reported by
+    // `abandonQueueOnClose()`, instead of having silently evaporated before it ran.
+    const pipePath = `${tmpDir.path}/close-drain-retry.pipe`;
+    await createNamedPipe(pipePath);
+
+    const readerFd = fs.openSync(
+      pipePath,
+      fs.constants.O_RDONLY | fs.constants.O_NONBLOCK,
+    );
+    const failures: SinkFailure[] = [];
+    const sink = new NamedPipeSink({
+      pipePath,
+      closeTimeoutMS: 1000,
+      maxRetries: 2,
+      onError: (failure) => {
+        failures.push(failure);
+      },
+    });
+
+    try {
+      expect(await waitForOpenPipe(sink)).toBe(true);
+
+      const internals = sink as unknown as {
+        writeQueue: { formatted: string; attempts: number }[];
+        pipeStream?: { write: (...args: unknown[]) => boolean };
+      };
+
+      internals.writeQueue.push({ formatted: 'retried\n', attempts: 0 });
+
+      const stream = internals.pipeStream;
+
+      expect(stream).toBeDefined();
+
+      let attempts = 0;
+
+      if (stream) {
+        stream.write = (): boolean => {
+          attempts++;
+
+          throw new Error('reader vanished');
+        };
+      }
+
+      await sink.close();
+
+      // Three writes for one entry: the first, then one per retry. The loop terminates -
+      // `maxRetries` is finite, so the work is bounded whatever the drain does.
+      expect(attempts).toBe(3);
+      expect(sink.getHealth().queueSize).toBe(0);
+      expect(sink.getHealth().droppedEntries).toBe(1);
+    } finally {
+      fs.closeSync(readerFd);
+    }
+  }, 15000);
+
   test('close() reports nothing when the queue is empty', async () => {
     const pipePath = `${tmpDir.path}/close-clean.pipe`;
     await createNamedPipe(pipePath);
@@ -1897,14 +2020,16 @@ describe('NamedPipeSink', () => {
 
     const opened: string[] = [];
     const realCreateWriteStream = fs.createWriteStream.bind(fs);
-    const createSpy = spyOn(fs, 'createWriteStream').mockImplementation(((
-      target: fs.PathLike,
-      options?: Parameters<typeof fs.createWriteStream>[1],
-    ): fs.WriteStream => {
-      opened.push(String(target));
+    const createSpy = spyOn(fs, 'createWriteStream').mockImplementation(
+      (
+        target: fs.PathLike,
+        options?: Parameters<typeof fs.createWriteStream>[1],
+      ): fs.WriteStream => {
+        opened.push(String(target));
 
-      return realCreateWriteStream(target, options);
-    }));
+        return realCreateWriteStream(target, options);
+      },
+    );
 
     const readerFd = fs.openSync(
       pipePath,

@@ -67,7 +67,8 @@ export interface NamedPipeSinkOptions {
    * The **oldest** entry is dropped to make room: during an outage the newest lines
    * describe what is happening now. Drops are counted in
    * {@link NamedPipeSinkHealth.droppedEntries} and the first one is reported through
-   * `onError` as a `WRITE` failure, so a silently truncated log is never the only
+   * `onError` as a `'queue_full'` failure carrying `disposition: 'lost'` - it is about the
+   * oldest lines and they are gone - so a silently truncated log is never the only
    * evidence.
    *
    * Shared with `FileSink`, which reads the same option the same way.
@@ -100,8 +101,9 @@ export interface NamedPipeSinkHealth {
   /** Entries rendered and waiting for the pipe. */
   queueSize: number;
   /**
-   * Entries this sink did not deliver - evicted at `maxQueueSize`, out of retries, or
-   * still queued when `close()` gave up on them.
+   * Entries this sink did not deliver - evicted at `maxQueueSize`, out of retries, still
+   * queued when `close()` gave up on them, or failed by a write that was already in flight
+   * when `close()` finished.
    *
    * The same meaning as `FileSinkHealth.droppedEntries`.
    */
@@ -832,7 +834,12 @@ export class NamedPipeSink implements LogSink {
    * reason.
    */
   private requeue(queued: QueuedPipeEntry): void {
-    if (this.closed || this.closing) {
+    if (this.closed) {
+      // Past `abandonQueueOnClose()`, so nothing is going to carry this one any further.
+      // Counted rather than dropped silently, because the entry was already shifted off
+      // `writeQueue` and so was not among the ones that call reported.
+      this.droppedEntries++;
+
       return;
     }
 
@@ -844,6 +851,21 @@ export class NamedPipeSink implements LogSink {
 
     this.writeQueue.push({ ...queued, attempts: queued.attempts + 1 });
     this.enforceQueueLimit();
+
+    // `closing`, but not yet `closed`: `close()` sets the flag before its drain loop runs,
+    // and that loop is what is driving this write. Returning early here - as this did for
+    // both flags together - dropped the entry on the floor: not put back, not counted, and
+    // `abandonQueueOnClose()` afterwards saw an empty queue and reported nothing, so a
+    // failure during the shutdown the drain loop was added to improve was the one failure
+    // `droppedEntries` did not know about. Put back so the loop can try it again, and
+    // counted and reported by `abandonQueueOnClose()` if the loop runs out of time.
+    //
+    // No reconnect and no `processQueue()` from here: the loop calls `processQueue()`
+    // itself every pass, and `close()` has already decided this sink is not opening
+    // another pipe.
+    if (this.closing) {
+      return;
+    }
 
     // Drained through the stream in hand, or reconnected when there is none. A write
     // callback can arrive after `reconnect()` has already put a working stream in place -

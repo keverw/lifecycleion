@@ -1565,6 +1565,102 @@ describe('errorToString - reporting why redaction failed', () => {
   });
 });
 
+describe('errorToString - a member of the error itself that will not be read', () => {
+  it('marks and reports a conventional member whose accessor throws', () => {
+    // The identical accessor one level deeper has always rendered `<unrenderable: value>`
+    // *and* reported. The error's own members read through the plain guarded helper, which
+    // answers `undefined` for a read that threw, and the absence test then dropped the row
+    // - so an error whose `message` refused rendered as one that simply had none, with
+    // `onFormatError` never called at all.
+    const error = new Error('never read');
+
+    Object.defineProperty(error, 'message', {
+      get(): never {
+        throw new Error('message refused');
+      },
+      configurable: true,
+    });
+    Object.defineProperty(error, 'code', {
+      get(): never {
+        throw new Error('code refused');
+      },
+      enumerable: true,
+      configurable: true,
+    });
+
+    const seen: [string, string][] = [];
+    const rendered = errorToString(error, 80, {
+      onFormatError: (failure, kind, path) => {
+        seen.push([kind, path]);
+      },
+    });
+
+    expect(rendered).toContain('| Message | <unrenderable: value>');
+    expect(rendered).toContain('| Code    | <unrenderable: value>');
+
+    // One per operation, by the reporter's own bound, so the first failure is what lands.
+    expect(seen.length).toBe(1);
+    expect(seen[0][0]).toBe('render');
+    expect(seen[0][1]).toBe('message');
+  });
+
+  it('marks and reports an unreadable stack, additionalInfo and cause', () => {
+    for (const member of ['stack', 'additionalInfo', 'cause']) {
+      const error = new Error('boom');
+
+      Object.defineProperty(error, member, {
+        get(): never {
+          throw new Error(`${member} refused`);
+        },
+        configurable: true,
+      });
+
+      const seen: string[] = [];
+      const rendered = errorToString(error, 80, {
+        onFormatError: (failure, kind, path) => {
+          seen.push(path);
+        },
+      });
+
+      // The error's own message survives - one unreadable member never costs the rest -
+      // and the member that refused says so rather than looking absent.
+      expect(rendered).toContain('boom');
+      expect(rendered).toContain('<unrenderable: value>');
+      expect(seen).toEqual([member]);
+    }
+  });
+});
+
+describe('errorToString - a nested object whose gate members refuse', () => {
+  it('fails a nested object closed when its cause accessor throws', () => {
+    // The `isErrorShaped` gate read `additionalInfo` and `cause` through a plain guarded
+    // read, so an accessor that threw answered "absent" and the object went to the ordinary
+    // walk - the one route on which its own `sensitiveFieldNames` could no longer fail it
+    // closed, because the gate it depends on had already been decided by the read that
+    // threw.
+    const nested: Record<string, unknown> = {
+      sensitiveFieldNames: null,
+      token: 'SUPERSECRET',
+    };
+
+    Object.defineProperty(nested, 'cause', {
+      get(): never {
+        throw new Error('cause refused');
+      },
+      enumerable: false,
+      configurable: true,
+    });
+
+    const error = new Error('outer') as Error & { additionalInfo: unknown };
+
+    error.additionalInfo = { nested };
+
+    const rendered = errorToString(error, 120);
+
+    expect(rendered).not.toContain('SUPERSECRET');
+  });
+});
+
 describe('errorToString - bounds that hold at the entry point', () => {
   it('charges the row framing for top-level additionalInfo entries', () => {
     // Every entry here becomes a table row padded out to the table width, which is none
@@ -1606,6 +1702,25 @@ describe('errorToString - bounds that hold at the entry point', () => {
       expect(rendered).not.toBe('<error could not be rendered>');
       expect(rendered).toContain('b');
     }
+  });
+
+  it('clamps a width far above the render cap', () => {
+    // The low clamp exists so a narrow width cannot discard the error; this is the same
+    // failure from the other end. Row framing is padded out to the table width and is
+    // charged against the budget only for `additionalInfo` rows, so the width - not the
+    // payload - decided the size of the result: this call returned 120,000,011 characters
+    // against a one-megabyte cap, and at `1e9` the table renderer threw and the backstop
+    // answered `<error could not be rendered>`, losing the error entirely.
+    const rendered = errorToString(new Error('boom'), 10_000_000);
+
+    expect(rendered).not.toBe('<error could not be rendered>');
+    expect(rendered).toContain('boom');
+    expect(rendered.length).toBeLessThan(1_000_000);
+
+    const enormous = errorToString(new Error('boom'), 1e9);
+
+    expect(enormous).not.toBe('<error could not be rendered>');
+    expect(enormous).toContain('boom');
   });
 
   it('falls back to the default width for a width that names nothing', () => {

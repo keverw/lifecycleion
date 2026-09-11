@@ -46,8 +46,14 @@ export function reportCallbackError(
     // rather than throwing; `reportToHost` catches regardless, because rendering must
     // never turn one failure into a second one thrown out of `safeHandleCallback`,
     // `safeHandleCallbackAndWait`, or `EventEmitterProtected.emit`.
+    //
+    // Renders `report`, not `error`. `errorToString` emits rows only for an object, so a
+    // non-object throw - `throw 'boom'`, `throw 42`, a rejected promise carrying a string -
+    // rendered as a three-line empty table with the thrown value nowhere in it. The
+    // wrapper is always an `Error`, and `errorToString` renders its `cause`, so the value
+    // comes back on the `Cause` row whatever it is.
     () =>
-      `Error in a callback ${callbackName}: ${DOUBLE_EOL}${errorToString(error)}`,
+      `Error in a callback ${callbackName}: ${DOUBLE_EOL}${errorToString(report)}`,
   );
 }
 

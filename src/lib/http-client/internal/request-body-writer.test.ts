@@ -135,6 +135,51 @@ describe('writeRequestBodyChunked', () => {
     expect(caught?.message).toBe('Simulated write error');
   });
 
+  test('leaves no listeners behind when a write callback errors synchronously', async () => {
+    // `write` answering `false` *and* invoking its callback with an error in the same turn
+    // settled the write before any listener existed, then attached `drain`, `close` and
+    // `error` anyway - once per failing chunk, with nothing left to take them off, because
+    // the `req.destroyed` guard's `onClose()` returns early on a settled write. The same
+    // defect `serializeMultipartFormData` carried, and this one had no `isSettled` mark on
+    // the error branch at all.
+    const attached: string[] = [];
+    const removed: string[] = [];
+    let writeCount = 0;
+    const req: RequestBodyWritable = {
+      get destroyed() {
+        return writeCount > 0;
+      },
+      setHeader() {},
+      write(_data, callback) {
+        writeCount++;
+        callback?.(new Error('write refused'));
+
+        return false;
+      },
+      once(event: string) {
+        attached.push(event);
+
+        return this;
+      },
+      off(event: string) {
+        removed.push(event);
+
+        return this;
+      },
+    };
+
+    let caught: Error | undefined;
+
+    try {
+      await writeRequestBodyChunked(Buffer.from('some data'), req);
+    } catch (error) {
+      caught = error as Error;
+    }
+
+    expect(caught?.message).toBe('write refused');
+    expect(attached).toEqual([]);
+  });
+
   test('stops writing if req.destroyed becomes true mid-loop', async () => {
     const data = Buffer.alloc(REQUEST_BODY_CHUNK_SIZE * 3, 0x00);
     let writeCalls = 0;

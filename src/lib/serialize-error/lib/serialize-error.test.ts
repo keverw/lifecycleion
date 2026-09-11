@@ -309,6 +309,31 @@ describe('serializeError - values that resist serialization', () => {
     expect(serialized.stack).toBeDefined();
   });
 
+  test('marks and reports an unreadable message instead of emptying it', () => {
+    // Across a process boundary, where the receiver has no `onFormatError` of its own. A
+    // guarded read answering `undefined` met `?? ''` and produced a well-formed error whose
+    // message simply was not there - indistinguishable, on the far side of the wire, from
+    // an error genuinely raised with no message.
+    const error = new Error('never read');
+
+    Object.defineProperty(error, 'message', {
+      get(): never {
+        throw new Error('message refused');
+      },
+      configurable: true,
+    });
+
+    const seen: [string, string][] = [];
+    const serialized = serializeError(error, {
+      onFormatError: (failure, kind, path) => {
+        seen.push([kind, path]);
+      },
+    });
+
+    expect(serialized.message).toBe('<unserializable: text>');
+    expect(seen).toEqual([['render', '<error>.message']]);
+  });
+
   test('marks one unreadable property without discarding its siblings', () => {
     const error: Error & { good?: unknown } = new Error('x');
 
@@ -323,7 +348,12 @@ describe('serializeError - values that resist serialization', () => {
     const serialized = serializeError(error);
 
     expect(serialized['good']).toBe('kept');
-    expect(serialized['bad']).toBeUndefined();
+
+    // Marked, as the test's name says, not dropped. `undefined` was the old answer and it
+    // did not survive `JSON.stringify`: the property vanished from the wire entirely, so
+    // the peer saw a field the error had never carried rather than one that refused to be
+    // read.
+    expect(serialized['bad']).toBe('<unserializable: value>');
   });
 });
 

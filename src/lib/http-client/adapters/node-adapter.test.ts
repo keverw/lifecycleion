@@ -2305,6 +2305,79 @@ describe('NodeAdapter.send() — unit branches without server', () => {
     }
   });
 
+  test('a second request sharing a writable gets its own absorber window', async () => {
+    // One absorber covers every request sharing the writable, and only the request that
+    // *attached* it scheduled the backstop that takes it off. A later request settling near
+    // the end of that window inherited whatever was left of it - which can be no window at
+    // all - while `cleanup` had just removed its own `'error'` listener, so the late error
+    // the absorber exists for arrived with nothing attached. Each request that relies on it
+    // now pushes the deadline out, and an absolute lifetime keeps "pushes it out" from
+    // meaning "forever".
+    const writable = new EventEmitter() as unknown as WritableLike;
+
+    writable.write = () => true;
+    writable.end = (callback?: () => void) => {
+      callback?.();
+    };
+    writable.destroy = () => writable;
+
+    const countErrorListeners = (): number =>
+      (writable as unknown as EventEmitter).listenerCount('error');
+
+    const sendOne = async (): Promise<void> => {
+      const req = new MockClientRequest();
+      const res = new MockIncomingMessage(200, {
+        'content-type': 'application/octet-stream',
+        'content-length': '0',
+      });
+      const requestSpy = spyOn(http, 'request').mockImplementation(
+        (_options, callback) => {
+          const cb = callback as
+            ((res: http.IncomingMessage) => void) | undefined;
+
+          queueMicrotask(() => {
+            cb?.(res as unknown as http.IncomingMessage);
+            queueMicrotask(() => {
+              res.emit('end');
+            });
+          });
+
+          return req as unknown as http.ClientRequest;
+        },
+      );
+
+      try {
+        await new NodeAdapter().send({
+          requestURL: 'http://example.test/data',
+          method: 'GET',
+          headers: {},
+          streamResponse: () => writable,
+        });
+      } finally {
+        requestSpy.mockRestore();
+      }
+    };
+
+    await sendOne();
+
+    // The absorber, with the request's own `onWritableError` already removed by `cleanup`.
+    expect(countErrorListeners()).toBe(1);
+
+    await new Promise((resolve) => setTimeout(resolve, 800));
+    await sendOne();
+
+    // 700 ms after the second request settled, and 1.5 s after the first: the first
+    // request's one-second backstop has passed, and the second's has not.
+    await new Promise((resolve) => setTimeout(resolve, 700));
+
+    expect(countErrorListeners()).toBe(1);
+
+    // And it does come off - the extension is a new window, not the removal of the bound.
+    await new Promise((resolve) => setTimeout(resolve, 600));
+
+    expect(countErrorListeners()).toBe(0);
+  }, 15000);
+
   test("a writable emitting a non-Error 'error' still yields an Error cause", async () => {
     const req = new MockClientRequest();
     const res = new MockIncomingMessage(200, {

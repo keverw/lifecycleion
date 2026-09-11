@@ -912,6 +912,60 @@ describe('serializeMultipartFormData', () => {
     );
   });
 
+  test('leaves no listeners behind when a write callback errors synchronously', async () => {
+    // `write` answering `false` *and* invoking its callback with an error in the same turn
+    // settled the write before any listener existed, then attached `drain`, `close` and
+    // `error` anyway - and the `req.destroyed` guard's `onClose()` returned early on
+    // `isSettled` instead of cleaning up. The three listeners stayed on the request with
+    // nothing left to remove them.
+    const fd = new FormData();
+    fd.append('field', 'value');
+
+    const attached: string[] = [];
+    const removed: string[] = [];
+    let writeCount = 0;
+    const req: RequestBodyWritable = {
+      // Destroyed the moment the first write has been refused, which is what makes the
+      // `req.destroyed` guard below the listener registration run.
+      get destroyed() {
+        return writeCount > 0;
+      },
+      setHeader() {},
+      write(_data, callback) {
+        writeCount++;
+        callback?.(new Error('write refused'));
+
+        return false;
+      },
+      once(event: string) {
+        attached.push(event);
+
+        return this;
+      },
+      off(event: string) {
+        removed.push(event);
+
+        return this;
+      },
+    };
+
+    const boundary = generateMultipartBoundary();
+    let caught: Error | undefined;
+
+    try {
+      await serializeMultipartFormData(fd, req, boundary);
+    } catch (error) {
+      caught = error as Error;
+    }
+
+    expect(caught?.message).toBe('write refused');
+
+    // Nothing to wait for once the write has already been rejected, so nothing is armed -
+    // and therefore nothing is left armed.
+    expect(attached).toEqual([]);
+    expect(attached.filter((event) => !removed.includes(event))).toEqual([]);
+  });
+
   test('cancels reader when req.destroyed flips between reader.read() result and write()', async () => {
     let readCount = 0;
     let cancelCount = 0;

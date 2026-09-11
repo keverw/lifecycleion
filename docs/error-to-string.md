@@ -54,9 +54,12 @@ interface ErrorToStringOptions {
 
 A table needs nine characters to draw its own borders and one character of each column, so
 `maxRowLength` is raised to `9` if you ask for less than that. A value that names no width
-at all - `0`, a negative number, `NaN` - falls back to the default `80`. Neither case
-fails: rendering a narrow table is always a better answer than discarding the error's
-message, name, and stack.
+at all - `0`, a negative number, `NaN` - falls back to the default `80`. It is also capped
+above, at `10,000`: every row is padded out to the table width, so the width alone - not
+the payload - decided the size of the output, and `errorToString(err, 10_000_000)` returned
+a 120 MB string against the one-megabyte render cap. None of the three cases fails:
+rendering at a clamped width is always a better answer than discarding the error's message,
+name, and stack.
 
 `RedactFunctionResult` is the same contract the logger uses - see
 [Choosing how values are masked](#choosing-how-values-are-masked). The value reaching your
@@ -204,8 +207,10 @@ first is the worst possible outcome. It is written so it cannot:
 
 - Every property read off the value is guarded. `message`, `stack`, `code` and the rest are
   ordinary properties, and a subclass or a `Proxy` can turn any of them into an accessor
-  that throws. An unreadable conventional member is treated as absent; an unreadable
-  `additionalInfo` entry is marked, so it is never mistaken for one that was not there.
+  that throws. Every one of them is marked rather than dropped - a conventional member,
+  `stack`, `additionalInfo`, `cause`, or an entry inside `additionalInfo` - and the failure
+  is reported on the `'render'` channel, so a member that refused to be read is never
+  mistaken for one that was not there.
 - Values that resist rendering are marked rather than propagating, and the marker names
   which half refused:
 

@@ -2,7 +2,6 @@ import {
   defineEntry,
   describeContainer,
 } from '../../internal/container-entries';
-import { readMember } from '../../internal/read-member';
 import { MAX_RENDER_DEPTH, TRUNCATED } from '../../internal/render-budget';
 import { isErrorValue } from '../../to-error';
 import {
@@ -84,11 +83,56 @@ export function isErrorLike(
   }
 }
 
-/** A member as a string, or `undefined` when it is absent or cannot be read. */
-function readText(source: object, key: string): string | undefined {
-  const value = readMember(source, key);
+/**
+ * A member as a string, or `undefined` when it is absent or not one.
+ *
+ * A read that *threw* is neither: it answers {@link UNSERIALIZABLE_TEXT} and reports. The
+ * plain guarded read this replaces answered `undefined`, which the `?? ''` and
+ * `?? 'Error'` defaults below turned into an ordinary empty member - and this payload
+ * crosses a process boundary, so the receiver was handed a well-formed error whose message
+ * simply was not there, with nothing on either side saying a read had refused. The
+ * identical accessor one level deeper has always produced a marker *and* a report.
+ */
+function readText(
+  source: object,
+  key: string,
+  path: string,
+  report: ReportFormatFailure,
+): string | undefined {
+  let value: unknown;
+
+  try {
+    value = (source as Record<string, unknown>)[key];
+  } catch (error) {
+    report(error, `${path}.${key}`);
+
+    return UNSERIALIZABLE_TEXT;
+  }
 
   return typeof value === 'string' ? value : undefined;
+}
+
+/**
+ * An own property, with a read that throws marked rather than dropped.
+ *
+ * A guarded read that answers `undefined` is indistinguishable from an absent property here, and
+ * worse than indistinguishable once `JSON.stringify` runs: an `undefined` value is omitted
+ * from the JSON entirely, so a custom field whose accessor threw reached the peer as a
+ * field the error never carried.
+ */
+function readOwnMember(
+  source: object,
+  key: string,
+  path: string,
+  report: ReportFormatFailure,
+): unknown {
+  try {
+    return (source as Record<string, unknown>)[key];
+  } catch (error) {
+    report(error, `${path}.${key}`);
+
+    return UNSERIALIZABLE_VALUE;
+  }
 }
 
 /** `String(value)` without letting a `toString` or `Symbol.toPrimitive` escape. */
@@ -159,9 +203,9 @@ function serializeErrorInner(
   // which a bare `instanceof` is not.
   if (isErrorValue(error)) {
     const result: SerializedError = {
-      name: readText(error, 'name') ?? 'Error',
-      message: readText(error, 'message') ?? '',
-      stack: readText(error, 'stack'),
+      name: readText(error, 'name', path, report) ?? 'Error',
+      message: readText(error, 'message', path, report) ?? '',
+      stack: readText(error, 'stack', path, report),
     };
 
     // Own property *names*, including the non-enumerable ones an `Error` hides - which is
@@ -181,7 +225,7 @@ function serializeErrorInner(
     for (const key of keys) {
       if (!(key in result)) {
         // Read through the guard: a custom property is as free to throw as `message` is.
-        result[key] = readMember(error, key);
+        result[key] = readOwnMember(error, key, path, report);
       }
     }
 
@@ -198,7 +242,7 @@ function serializeErrorInner(
 
     if (shape.kind === 'object') {
       for (const key of shape.keys) {
-        defineEntry(copy, key, readMember(source, key));
+        defineEntry(copy, key, readOwnMember(source, key, path, report));
       }
     }
 

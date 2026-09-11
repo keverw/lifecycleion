@@ -1355,9 +1355,10 @@ Both queueing sinks — `FileSink` and `NamedPipeSink` — answer a failed write
   drop is reported through `onError`
 - `getHealth().droppedEntries` means "lines this sink did not deliver": evicted at the
   cap, still queued when `close()` gave up on them, and for `NamedPipeSink` also out of
-  retries (`FileSink` counts those in its own `flush()` result instead). A close that
-  abandons a queue reports it once as a `'close'` failure with `disposition: 'lost'`
-  rather than once per entry
+  retries and failed by a write still in flight when `close()` finished (`FileSink` counts
+  its retry drops in its own `flush()` result instead). A close that abandons a queue
+  reports it once as a `'close'` failure with `disposition: 'lost'` rather than once per
+  entry
 - a broken stream is reopened automatically on a later write, so neither sink needs an API
   call to recover
 - `minLevel` / `setMinLevel()` / `getMinLevel()` filter by level, defaulting to

@@ -345,6 +345,31 @@ describe('safeHandleCallback error channel', () => {
     expect(String(captured[0][0])).toContain('Unclaimed boom');
   });
 
+  it('renders a non-object throw through the wrapper, not bare', () => {
+    // The console rung used to render the *thrown value*, and `errorToString` emits rows
+    // only for an object - so `throw 'boom-string'` printed a three-line empty table with
+    // the value nowhere in it. The wrapper is always an `Error` and `errorToString` renders
+    // its `cause`, which is where the value belongs.
+    for (const value of ['boom-string', 42, Symbol('sigil')]) {
+      const captured = withCapturedConsoleError((entries) => {
+        safeHandleCallback('nonObjectThrowCallback', () => {
+          // eslint-disable-next-line @typescript-eslint/only-throw-error -- the point of the test
+          throw value;
+        });
+
+        return entries;
+      });
+
+      expect(captured.length).toBe(1);
+
+      const line = String(captured[0][0]);
+
+      expect(line).toContain('nonObjectThrowCallback');
+      expect(line).toContain('| Cause');
+      expect(line).toContain(String(value));
+    }
+  });
+
   it('reports a value it cannot render instead of throwing out of the callback', () => {
     // Rendering the thrown value runs code this library does not own: `errorToString`
     // reads `message`/`stack` off it and walks `additionalInfo`. Each of these makes
@@ -385,8 +410,27 @@ describe('safeHandleCallback error channel', () => {
 
       // Still reported, and still named, even though the value itself could not be
       // described.
-      expect(captured.length).toBe(1);
-      expect(String(captured[0][0])).toContain('unrenderableCallback');
+      //
+      // Counted by the lines that name the callback rather than by every line written:
+      // rendering a value whose own members refuse to be read now says so on the render
+      // channel too - `hostileStack`'s `stack` getter throws, and that diagnosis reaches
+      // the console alongside the report instead of being swallowed. One report is still
+      // one report.
+      const named = captured.filter((entry) =>
+        String(entry[0]).includes('unrenderableCallback'),
+      );
+
+      expect(named.length).toBe(1);
+
+      // Everything else is a render diagnosis, and there is at most one: the format
+      // reporter fires once per kind per render. Bounded so a future regression that
+      // floods the console cannot pass by being filtered out.
+      expect(captured.length).toBeLessThanOrEqual(2);
+      expect(
+        captured
+          .filter((entry) => !String(entry[0]).includes('unrenderableCallback'))
+          .every((entry) => String(entry[0]).startsWith('Render failed for ')),
+      ).toBe(true);
     }
   });
 
