@@ -902,7 +902,7 @@ describe('FileSink', () => {
 
     const failure = (onError.mock.calls[0] as unknown[])[0] as SinkFailure;
 
-    expect(failure.willRetry).toBe(false);
+    expect(failure.disposition).toBe('lost');
     // A render that produced no line is a formatting failure, and says so rather than
     // leaving the caller to match on the message text.
     expect(failure.kind).toBe('format' satisfies SinkFailureKind);

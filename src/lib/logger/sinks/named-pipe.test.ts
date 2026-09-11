@@ -1345,4 +1345,121 @@ describe('NamedPipeSink', () => {
       reader.stop();
     }
   }, 15000);
+  test('reports a failed write with the line it belongs to and its real retry state', async () => {
+    // A stream delivers one failed write twice - through the callback and as an `'error'`
+    // event - and only the callback knows which line it was. Reported from the event, it
+    // came out as `attempt: undefined` with nothing to retry, for a line the sink was
+    // about to retry: a handler writing a fallback copy duplicated it. Reported from the
+    // callback, and said once.
+    const pipePath = `${tmpDir.path}/write-report.pipe`;
+    await createNamedPipe(pipePath);
+
+    const reader = startPipeReader(pipePath);
+    const failures: SinkFailure[] = [];
+    const sink = new NamedPipeSink({
+      pipePath,
+      onError: (failure) => {
+        failures.push(failure);
+      },
+    });
+
+    try {
+      expect(await waitForOpenPipe(sink)).toBe(true);
+
+      const live = (sink as unknown as { pipeStream: fs.WriteStream })
+        .pipeStream;
+      const failure = new Error('EPIPE');
+
+      (
+        live as unknown as {
+          write: (
+            chunk: string,
+            callback?: (error?: Error | null) => void,
+          ) => boolean;
+        }
+      ).write = (_chunk, callback) => {
+        // On the next tick, as a real stream reports: the callback first, then the same
+        // error instance as an `'error'` event.
+        setTimeout(() => {
+          callback?.(failure);
+          live.emit('error', failure);
+        }, 0);
+
+        return true;
+      };
+
+      sink.write({
+        timestamp: Date.now(),
+        type: 'info',
+        template: 'reported-once',
+        message: 'reported-once',
+      });
+
+      await new Promise((resolve) => setTimeout(resolve, 150));
+
+      const writeFailures = failures.filter((entry) => entry.kind === 'write');
+
+      // Every write failure describes the line it belongs to. The `'error'` event used to
+      // add one of its own for the same failure, with no attempt and nothing to retry -
+      // which is what made a handler write a fallback copy of a line the sink was about to
+      // resend. Counted rather than asserted at one, because a retry against a stream that
+      // has not yet reported its error is a genuine second attempt.
+      expect(writeFailures.length).toBeGreaterThan(0);
+
+      for (const entry of writeFailures) {
+        expect(entry.attempt).toBeGreaterThan(0);
+        expect(entry.disposition).not.toBe('no_entry');
+        expect(entry.target).toBe(pipePath);
+      }
+
+      expect(writeFailures[0]?.attempt).toBe(1);
+      expect(writeFailures[0]?.disposition).toBe('retrying');
+    } finally {
+      await sink.close();
+      reader.stop();
+    }
+  }, 15000);
+
+  test('a formatter that threw is reported as written, not lost', async () => {
+    // The sink falls back to its own default format, so the line goes out. Reported as
+    // though it were lost, a handler that writes lost lines elsewhere duplicated it.
+    const pipePath = `${tmpDir.path}/formatter-written.pipe`;
+    await createNamedPipe(pipePath);
+
+    const reader = startPipeReader(pipePath);
+    const failures: SinkFailure[] = [];
+    const sink = new NamedPipeSink({
+      pipePath,
+      formatter: () => {
+        throw new Error('formatter blew up');
+      },
+      onError: (failure) => {
+        failures.push(failure);
+      },
+    });
+
+    try {
+      expect(await waitForOpenPipe(sink)).toBe(true);
+
+      sink.write({
+        timestamp: Date.now(),
+        type: 'info',
+        template: 'still-written',
+        message: 'still-written',
+      });
+
+      await new Promise((resolve) => setTimeout(resolve, 150));
+
+      const formatFailures = failures.filter(
+        (entry) => entry.kind === 'format',
+      );
+
+      expect(formatFailures).toHaveLength(1);
+      expect(formatFailures[0]?.disposition).toBe('written');
+      expect(reader.data.join('')).toContain('still-written');
+    } finally {
+      await sink.close();
+      reader.stop();
+    }
+  }, 15000);
 });

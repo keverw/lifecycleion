@@ -824,12 +824,12 @@ const fileSink = new FileSink({
   basename: 'app',
   maxSizeMB: 10,
   jsonFormat: true,
-  onError: ({ kind, error, target, entry, attempt, willRetry }) => {
+  onError: ({ kind, error, target, entry, attempt, disposition }) => {
     console.error(
       `File ${kind} failed on ${target} (attempt ${attempt}):`,
       error.message,
     );
-    if (!willRetry) {
+    if (disposition === 'lost') {
       console.error('Entry lost:', entry?.message);
     }
   },
@@ -1196,13 +1196,13 @@ new FileSink({
   maxQueueSize: 10_000, // Entries held while writes fail (default: 10,000; -1 = unlimited)
   closeTimeoutMS: 30000, // Timeout for close() in ms (default: 30000)
   minLevel: LogLevel.INFO, // Minimum log level to write (default: INFO)
-  onError: ({ kind, error, target, entry, attempt, willRetry }) => {
+  onError: ({ kind, error, target, entry, attempt, disposition }) => {
     console.error(
       `${kind} failed on ${target} (attempt ${attempt}):`,
       error.message,
     );
 
-    if (!willRetry) {
+    if (disposition === 'lost') {
       console.error('Entry will be lost:', entry?.message);
     }
   },
@@ -1275,16 +1275,19 @@ const fileSink = new FileSink({
     // failure.target: the file being written to at the time (rotation changes it)
     // failure.entry: the log entry, when the sink still has it
     // failure.attempt: current attempt number (1-based)
-    // failure.willRetry: whether this entry will be retried
+    // failure.disposition: what became of the line - 'retrying', 'lost', 'written'
+    //   (the failure was advisory) or 'no_entry' (not about a particular line)
 
     console.error(
       `${failure.kind} failed on attempt ${failure.attempt}:`,
       failure.error.message,
     );
 
-    if (!failure.willRetry) {
-      // Entry has exceeded max retries and will be lost
-      console.error('Entry lost after max retries:', failure.entry?.message);
+    // 'lost' is the only disposition that means write it somewhere else. Reacting to
+    // 'retrying' duplicates a line the sink is about to resend, and 'written' means the
+    // line went out despite the failure.
+    if (failure.disposition === 'lost') {
+      console.error('Entry lost:', failure.entry?.message);
       // You could send to a backup sink, alert monitoring, etc.
     }
   },
@@ -1412,7 +1415,14 @@ interface SinkFailure {
   entry?: LogEntry; // when the sink still has it — never for NamedPipeSink, which
   // deliberately drops it so a stalled queue cannot pin your params
   attempt?: number; // 1-based, for a failure tied to an entry
-  willRetry: boolean; // false means the line is gone
+
+  // What became of the line. This, not `kind`, is what says whether to write it
+  // somewhere else:
+  //   'retrying'  — the sink will try again; a fallback write here duplicates it
+  //   'lost'      — it will not arrive: out of retries, unrenderable, or dropped at the cap
+  //   'written'   — it went out anyway (a custom formatter threw; the default format was used)
+  //   'no_entry'  — the failure is not about a particular line (open, rotate, close)
+  disposition: 'retrying' | 'lost' | 'written' | 'no_entry';
 }
 ```
 

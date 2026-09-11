@@ -396,7 +396,7 @@ export class FileSink implements LogSink {
                       target: this.currentLogFile ?? this.logDir,
                       entry: queuedEntry.entry,
                       attempt: queuedEntry.attempts + 1,
-                      willRetry,
+                      disposition: willRetry ? 'retrying' : 'lost',
                     });
                   },
               () =>
@@ -477,7 +477,7 @@ export class FileSink implements LogSink {
               // a handler that reads that as "this line is gone" and writes it elsewhere
               // would otherwise duplicate an entry still queued for the file.
               entry: firstDropped,
-              willRetry: false,
+              disposition: 'lost',
             });
           },
       () => describeError(failure),

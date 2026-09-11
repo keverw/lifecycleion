@@ -12,12 +12,14 @@ import {
 } from './internal/queue-policy';
 import type {
   SinkErrorHandler,
+  SinkFailureDisposition,
   SinkFailureKind,
 } from './internal/sink-failure';
 
 export type {
   SinkErrorHandler,
   SinkFailure,
+  SinkFailureDisposition,
   SinkFailureKind,
 } from './internal/sink-failure';
 
@@ -44,7 +46,8 @@ export interface NamedPipeSinkOptions {
    * One object rather than three positional arguments, and the same one `FileSink` hands
    * back: `kind` says what failed - `'write'` means a line is at risk, `'format'` means
    * your `formatter` threw and the default format went out in its place - `target` is the
-   * pipe path, and `attempt` / `willRetry` say whether the line is coming back.
+   * pipe path, and `attempt` / `disposition` say which try this was and what became of
+   * the line.
    *
    * `entry` is always absent here: this sink drops the `LogEntry` once its line is
    * rendered, so that a queue stalled behind an unusable pipe does not pin the caller's
@@ -220,6 +223,16 @@ export class NamedPipeSink implements LogSink {
   private isAwaitingDrain = false;
   /** Whether a drain pass is already running; see `processQueue`. */
   private isProcessing = false;
+  /**
+   * A failure already reported from a write callback, so the stream's own `'error'` event
+   * does not report it a second time.
+   *
+   * A stream delivers one failed write through both channels, and they know different
+   * halves of it: the callback knows the line and the retry, the event knows the
+   * connection. Reporting both put two entries in a consumer's hands for one failure, the
+   * second contradicting the first about whether the line was coming back.
+   */
+  private suppressedWriteError?: unknown;
   /**
    * When the last automatic reopen was attempted.
    *
@@ -542,9 +555,21 @@ export class NamedPipeSink implements LogSink {
         const isCurrent =
           this.pendingStream === stream || this.pipeStream === stream;
 
-        this.handleError('write', err, {
-          countsAgainstHealth: isCurrent,
-        });
+        // Already said, by the write callback that knew which line it was.
+        const wasReported = this.suppressedWriteError === err;
+
+        this.suppressedWriteError = undefined;
+
+        if (!wasReported) {
+          this.handleError('write', err, {
+            countsAgainstHealth: isCurrent,
+          });
+        } else if (isCurrent) {
+          // The report is spoken for, but the failure still counts against this
+          // connection's health, which `handleError` would otherwise have done.
+          this.lastError = toError(err);
+          this.consecutiveFailures++;
+        }
 
         if (!isCurrent) {
           return;
@@ -906,7 +931,8 @@ export class NamedPipeSink implements LogSink {
       // rendered once, on purpose, so a second attempt could not come out differently.
       this.handleError('format', queued.formatError, {
         attempt: queued.attempts + 1,
-        willRetry: false,
+        // No line was produced, and rendering is never repeated, so this one is gone.
+        disposition: 'lost',
       });
 
       return;
@@ -934,9 +960,22 @@ export class NamedPipeSink implements LogSink {
       const stream = this.pipeStream;
       const canContinue = stream.write(messageToWrite, (error) => {
         if (error) {
-          // Not reported here: the stream raises `'error'` for the same failure and
-          // `handleError` answers it once. This is the half that error cannot do - put
-          // the line back.
+          // Reported here, not left to the `'error'` event. Both describe the same
+          // failure, but only this one knows *which line* it was and whether it is coming
+          // back - the event reported `attempt: undefined` and a disposition of
+          // `'no_entry'`, which reads as "nothing to retry" for a line the sink was about
+          // to retry, so a handler writing a fallback copy duplicated it.
+          //
+          // The event is told to keep quiet about this particular error; it still does the
+          // connection bookkeeping, which is the half it does know about.
+          this.suppressedWriteError = error;
+
+          this.handleError('write', error, {
+            attempt: queued.attempts + 1,
+            disposition:
+              queued.attempts < this.maxRetries ? 'retrying' : 'lost',
+          });
+
           this.requeue(queued);
 
           return;
@@ -955,7 +994,7 @@ export class NamedPipeSink implements LogSink {
     } catch (error) {
       this.handleError('write', error, {
         attempt: queued.attempts + 1,
-        willRetry: queued.attempts < this.maxRetries,
+        disposition: queued.attempts < this.maxRetries ? 'retrying' : 'lost',
       });
       // The line never reached the pipe, so it goes back on the queue and out on a later
       // attempt - the same answer `FileSink` gives a throwing write.
@@ -981,7 +1020,9 @@ export class NamedPipeSink implements LogSink {
         // untouched, so this is advisory. It also keeps the both-threw case honest - if
         // the default format throws too, `writeEntry` reports that as the one `WRITE`
         // failure, so a caller counting lost entries counts one rather than two.
-        this.handleError('format', error);
+        // The default format below still produces a line, so nothing is lost - which is
+        // exactly what a consumer needs to know before writing a fallback copy of it.
+        this.handleError('format', error, { disposition: 'written' });
       }
     }
 
@@ -1024,7 +1065,7 @@ export class NamedPipeSink implements LogSink {
     options?: {
       countsAgainstHealth?: boolean;
       attempt?: number;
-      willRetry?: boolean;
+      disposition?: SinkFailureDisposition;
     },
   ): void {
     // Normalized rather than trusted: `error` reaches here from Node's stream and
@@ -1059,7 +1100,7 @@ export class NamedPipeSink implements LogSink {
               target: this.pipePath,
               // No `entry`: this sink keeps the rendered line, not the `LogEntry`.
               attempt: options?.attempt,
-              willRetry: options?.willRetry ?? false,
+              disposition: options?.disposition ?? 'no_entry',
             });
           },
       () => `NamedPipeSink error (${kind}): ${describeError(failure)}`,

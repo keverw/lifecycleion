@@ -22,8 +22,11 @@ import type { LogEntry } from '../../types';
  * set is closed.
  *
  * - `'write'` - a line could not be written. The one kind that means an entry is at risk.
- * - `'format'` - a custom `formatter` threw; the default format was used instead, so the
- *   line still went out and the destination is healthy.
+ * - `'format'` - a line could not be formatted. `disposition` says what that cost:
+ *   `'written'` when a custom `formatter` threw and the sink fell back to its own default
+ *   format, `'lost'` when no line could be produced at all. Never retried either way: a
+ *   line is rendered once, on purpose, so a second attempt could not come out
+ *   differently.
  * - `'close'` - shutting the destination down failed.
  * - `'setup'` - the destination could not be opened, created, or rotated.
  * - `'queue_full'` - entries were discarded to stay under `maxQueueSize`.
@@ -40,6 +43,10 @@ export type SinkFailureKind =
   | 'not_found'
   | 'not_a_pipe'
   | 'unsupported_platform';
+
+/** What became of the line a failure is about. See {@link SinkFailure.disposition}. */
+export type SinkFailureDisposition =
+  'retrying' | 'lost' | 'written' | 'no_entry';
 
 /** One failure, as a sink reports it. */
 export interface SinkFailure {
@@ -71,18 +78,35 @@ export interface SinkFailure {
   /** Which attempt this was, 1-based, for a failure that is tied to an entry. */
   attempt?: number;
   /**
-   * Whether the sink will try this entry again.
+   * What became of the line this failure is about.
    *
-   * `false` means the line is gone: out of retries, unusable, or discarded to stay under
-   * the queue cap. That is the signal to write it somewhere else if it matters.
+   * One field rather than a `willRetry` boolean, because the boolean could not say what a
+   * consumer actually needs to know. `willRetry: false` was documented as "the line is
+   * gone", and then `NamedPipeSink` reported a `formatter` that threw with `false` and
+   * went on to write the line using its own default format - so a handler following that
+   * documentation wrote a duplicate. Retry intent and delivery are two questions, and
+   * only the second decides whether to write the line somewhere else.
+   *
+   * - `'retrying'` - the sink will try this line again. Do nothing; a fallback write here
+   *   duplicates it.
+   * - `'lost'` - the line will not arrive: out of retries, unrenderable, or dropped to
+   *   stay under the queue cap. **This is the one that means write it somewhere else.**
+   * - `'written'` - the line went out despite the failure. `NamedPipeSink` reports this
+   *   when a custom `formatter` threw and its default format was used instead: worth
+   *   knowing, since your formatter is not running, but nothing was lost.
+   * - `'no_entry'` - the failure belongs to no particular line: a pipe that could not be
+   *   opened, a rotation that failed, a close that did not complete.
    */
-  willRetry: boolean;
+  disposition: SinkFailureDisposition;
 }
 
 /**
  * Notified when a sink cannot do its job.
  *
- * Never called for an ordinary success, and never called more than once for one failure.
+ * Never called for an ordinary success, and never called more than once for one failure -
+ * including a failed write that a stream reports twice, once through the write callback
+ * and again as an `'error'` event.
+ *
  * A handler that throws is reported to the console rather than being allowed to turn one
  * failure into two - see `reportThroughHandler`.
  */
