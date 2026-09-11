@@ -1275,8 +1275,9 @@ const fileSink = new FileSink({
     // failure.target: the file being written to at the time (rotation changes it)
     // failure.entry: the log entry, when the sink still has it
     // failure.attempt: current attempt number (1-based)
-    // failure.disposition: what became of the line - 'retrying', 'lost', 'written'
-    //   (the failure was advisory) or 'no_entry' (not about a particular line)
+    // failure.disposition: what became of the line - 'retrying', 'lost', 'fallback'
+    //   (the sink substituted its own format and carried on) or 'no_entry' (the failure
+    //   is not about a particular line)
 
     console.error(
       `${failure.kind} failed on attempt ${failure.attempt}:`,
@@ -1284,8 +1285,8 @@ const fileSink = new FileSink({
     );
 
     // 'lost' is the only disposition that means write it somewhere else. Reacting to
-    // 'retrying' duplicates a line the sink is about to resend, and 'written' means the
-    // line went out despite the failure.
+    // 'retrying' duplicates a line the sink is about to resend, and 'fallback' means the
+    // sink substituted its own format and carried on with the line.
     if (failure.disposition === 'lost') {
       console.error('Entry lost:', failure.entry?.message);
       // You could send to a backup sink, alert monitoring, etc.
@@ -1420,9 +1421,10 @@ interface SinkFailure {
   // somewhere else:
   //   'retrying'  — the sink will try again; a fallback write here duplicates it
   //   'lost'      — it will not arrive: out of retries, unrenderable, or dropped at the cap
-  //   'written'   — it went out anyway (a custom formatter threw; the default format was used)
+  //   'fallback'  — the sink substituted its own format and carried on with the line
+  //                  (a custom formatter threw); a later failure is reported separately
   //   'no_entry'  — the failure is not about a particular line (open, rotate, close)
-  disposition: 'retrying' | 'lost' | 'written' | 'no_entry';
+  disposition: 'retrying' | 'lost' | 'fallback' | 'no_entry';
 }
 ```
 

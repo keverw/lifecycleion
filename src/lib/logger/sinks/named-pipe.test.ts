@@ -709,6 +709,11 @@ describe('NamedPipeSink', () => {
     delete shared.big;
     shared.token = 'topsecret-should-never-be-written';
 
+    // Waited for rather than guessed at: the queued entry is only processed - and its
+    // render failure only reported - once the pipe is actually open, and how long that
+    // takes depends on when the reader's own open completes.
+    expect(await waitForOpenPipe(sink)).toBe(true);
+
     await new Promise((resolve) => setTimeout(resolve, 200));
     await sink.close();
 
@@ -1420,7 +1425,7 @@ describe('NamedPipeSink', () => {
     }
   }, 15000);
 
-  test('a formatter that threw is reported as written, not lost', async () => {
+  test('a formatter that threw is reported as a fallback, not a loss', async () => {
     // The sink falls back to its own default format, so the line goes out. Reported as
     // though it were lost, a handler that writes lost lines elsewhere duplicated it.
     const pipePath = `${tmpDir.path}/formatter-written.pipe`;
@@ -1455,8 +1460,69 @@ describe('NamedPipeSink', () => {
       );
 
       expect(formatFailures).toHaveLength(1);
-      expect(formatFailures[0]?.disposition).toBe('written');
+      expect(formatFailures[0]?.disposition).toBe('fallback');
       expect(reader.data.join('')).toContain('still-written');
+    } finally {
+      await sink.close();
+      reader.stop();
+    }
+  }, 15000);
+  test('counts one failed write once', async () => {
+    // The write callback reports the failure, and the stream's `'error'` event delivers
+    // the same one a moment later. With the event's report suppressed, its bookkeeping
+    // counted the failure a second time, so one failed attempt read as two in
+    // `getHealth()`.
+    const pipePath = `${tmpDir.path}/failure-count.pipe`;
+    await createNamedPipe(pipePath);
+
+    const reader = startPipeReader(pipePath);
+    // No retries, so the failure below is the only write there is, and recovery is held
+    // off so a successful write cannot reset the tally before it is read.
+    const sink = new NamedPipeSink({
+      pipePath,
+      maxRetries: 0,
+      onError: () => {},
+    });
+
+    try {
+      expect(await waitForOpenPipe(sink)).toBe(true);
+
+      (sink as unknown as { ensureConnection: () => void }).ensureConnection =
+        () => {
+          // Intentionally empty: recovery is not what this test is about.
+        };
+
+      const live = (sink as unknown as { pipeStream: fs.WriteStream })
+        .pipeStream;
+      const failure = new Error('EPIPE');
+
+      (
+        live as unknown as {
+          write: (
+            chunk: string,
+            callback?: (error?: Error | null) => void,
+          ) => boolean;
+        }
+      ).write = (_chunk, callback) => {
+        setTimeout(() => {
+          callback?.(failure);
+          // The same instance, through both channels, exactly as a stream reports it.
+          live.emit('error', failure);
+        }, 0);
+
+        return true;
+      };
+
+      sink.write({
+        timestamp: Date.now(),
+        type: 'info',
+        template: 'counted-once',
+        message: 'counted-once',
+      });
+
+      await new Promise((resolve) => setTimeout(resolve, 100));
+
+      expect(sink.getHealth().consecutiveFailures).toBe(1);
     } finally {
       await sink.close();
       reader.stop();

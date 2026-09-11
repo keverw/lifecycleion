@@ -564,12 +564,11 @@ export class NamedPipeSink implements LogSink {
           this.handleError('write', err, {
             countsAgainstHealth: isCurrent,
           });
-        } else if (isCurrent) {
-          // The report is spoken for, but the failure still counts against this
-          // connection's health, which `handleError` would otherwise have done.
-          this.lastError = toError(err);
-          this.consecutiveFailures++;
         }
+        // When it was reported, nothing further is recorded here: the write callback's
+        // own `handleError` already set `lastError` and counted the failure. Counting it
+        // again made one failed write read as two in `getHealth()` until a later success
+        // reset the tally.
 
         if (!isCurrent) {
           return;
@@ -888,11 +887,16 @@ export class NamedPipeSink implements LogSink {
 
     this.didReportDrop = true;
 
+    // `'queue_full'` and `'lost'`, as `FileSink` reports the same event. Sent as a
+    // `'write'` failure it was counted against the connection's health - which is fine -
+    // and carried the default `'no_entry'` disposition, which says the failure is about no
+    // particular line. It is about several: the oldest ones, and they are gone.
     this.handleError(
-      'write',
+      'queue_full',
       new Error(
         `Pipe queue is full (maxQueueSize=${limit}); dropping the oldest entries`,
       ),
+      { disposition: 'lost' },
     );
   }
 
@@ -1020,9 +1024,12 @@ export class NamedPipeSink implements LogSink {
         // untouched, so this is advisory. It also keeps the both-threw case honest - if
         // the default format throws too, `writeEntry` reports that as the one `WRITE`
         // failure, so a caller counting lost entries counts one rather than two.
-        // The default format below still produces a line, so nothing is lost - which is
-        // exactly what a consumer needs to know before writing a fallback copy of it.
-        this.handleError('format', error, { disposition: 'written' });
+        // `'fallback'`, not a claim that the line was written: this runs *inside*
+        // rendering, before the default format has been produced and long before anything
+        // reaches the pipe. What is true at this moment is only that the sink substituted
+        // its own format; the line then takes the ordinary path, and if it is queued,
+        // evicted, or fails to write, that is reported on its own terms.
+        this.handleError('format', error, { disposition: 'fallback' });
       }
     }
 

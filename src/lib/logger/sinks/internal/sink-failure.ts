@@ -23,7 +23,7 @@ import type { LogEntry } from '../../types';
  *
  * - `'write'` - a line could not be written. The one kind that means an entry is at risk.
  * - `'format'` - a line could not be formatted. `disposition` says what that cost:
- *   `'written'` when a custom `formatter` threw and the sink fell back to its own default
+ *   `'fallback'` when a custom `formatter` threw and the sink substituted its own default
  *   format, `'lost'` when no line could be produced at all. Never retried either way: a
  *   line is rendered once, on purpose, so a second attempt could not come out
  *   differently.
@@ -46,7 +46,7 @@ export type SinkFailureKind =
 
 /** What became of the line a failure is about. See {@link SinkFailure.disposition}. */
 export type SinkFailureDisposition =
-  'retrying' | 'lost' | 'written' | 'no_entry';
+  'retrying' | 'lost' | 'fallback' | 'no_entry';
 
 /** One failure, as a sink reports it. */
 export interface SinkFailure {
@@ -91,9 +91,16 @@ export interface SinkFailure {
    *   duplicates it.
    * - `'lost'` - the line will not arrive: out of retries, unrenderable, or dropped to
    *   stay under the queue cap. **This is the one that means write it somewhere else.**
-   * - `'written'` - the line went out despite the failure. `NamedPipeSink` reports this
-   *   when a custom `formatter` threw and its default format was used instead: worth
-   *   knowing, since your formatter is not running, but nothing was lost.
+   * - `'fallback'` - the sink substituted something of its own and carried on with the
+   *   line. `NamedPipeSink` reports this when a custom `formatter` threw and its default
+   *   format was used instead: worth knowing, since your formatter is not running, but
+   *   the line is not lost *by this failure*.
+   *
+   *   Deliberately not `'written'`. That would be a promise made too early - the
+   *   substitution happens while the line is still being rendered, before anything
+   *   reaches the destination - and a line that is afterwards queued, evicted at the cap,
+   *   or failed on is reported again on its own terms. Nothing to do here either way:
+   *   `'lost'` is what asks for a fallback write.
    * - `'no_entry'` - the failure belongs to no particular line: a pipe that could not be
    *   opened, a rotation that failed, a close that did not complete.
    */
