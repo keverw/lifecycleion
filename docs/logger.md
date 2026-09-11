@@ -1399,9 +1399,10 @@ Every sink reports a failure in the same shape, so one handler serves both:
 
 ```typescript
 interface SinkFailure {
-  // What failed. 'write' means a line is at risk; 'format' means a custom formatter
-  // threw (NamedPipeSink still wrote the line using its default format, so the pipe is
-  // healthy — reconnecting or counting a lost line here would act on a working sink).
+  // What failed. 'write' means a line is at risk; 'format' means a line could not be
+  // formatted — `disposition` says what that cost, since NamedPipeSink substitutes its
+  // own default format and carries on, while a line that could not be rendered at all is
+  // gone. Either way the pipe itself is healthy: reconnecting here acts on a working sink.
   kind:
     | 'write'
     | 'format'

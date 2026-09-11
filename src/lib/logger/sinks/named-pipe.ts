@@ -224,15 +224,25 @@ export class NamedPipeSink implements LogSink {
   /** Whether a drain pass is already running; see `processQueue`. */
   private isProcessing = false;
   /**
-   * A failure already reported from a write callback, so the stream's own `'error'` event
-   * does not report it a second time.
+   * Failures already reported from a write callback, so the stream's own `'error'` event
+   * does not report them a second time.
    *
    * A stream delivers one failed write through both channels, and they know different
    * halves of it: the callback knows the line and the retry, the event knows the
    * connection. Reporting both put two entries in a consumer's hands for one failure, the
    * second contradicting the first about whether the line was coming back.
+   *
+   * A set keyed on the error itself, not a single slot holding the last one. One slot was
+   * wrong in two directions: a *different* error arriving in between - a stale stream
+   * emitting while a current callback waited for its event - cleared the entry and let the
+   * real one be reported twice, and two failed callbacks in flight together overwrote each
+   * other, so the first was reported twice as well. Identity is what actually pairs the
+   * two channels, so identity is what this tracks.
+   *
+   * Weak, so remembering a failure cannot keep the error - or whatever its `cause` holds -
+   * alive; an entry that never sees its event is simply collected.
    */
-  private suppressedWriteError?: unknown;
+  private readonly suppressedWriteErrors = new WeakSet<object>();
   /**
    * When the last automatic reopen was attempted.
    *
@@ -555,10 +565,18 @@ export class NamedPipeSink implements LogSink {
         const isCurrent =
           this.pendingStream === stream || this.pipeStream === stream;
 
-        // Already said, by the write callback that knew which line it was.
-        const wasReported = this.suppressedWriteError === err;
+        // Already said, by the write callback that knew which line it was. Consumed only
+        // when it matches: clearing on any error at all is what let an unrelated one -
+        // from a stream this sink had already replaced - unsuppress the report that was
+        // waiting for its own event.
+        const wasReported =
+          typeof err === 'object' &&
+          err !== null &&
+          this.suppressedWriteErrors.has(err);
 
-        this.suppressedWriteError = undefined;
+        if (wasReported) {
+          this.suppressedWriteErrors.delete(err);
+        }
 
         if (!wasReported) {
           this.handleError('write', err, {
@@ -972,7 +990,12 @@ export class NamedPipeSink implements LogSink {
           //
           // The event is told to keep quiet about this particular error; it still does the
           // connection bookkeeping, which is the half it does know about.
-          this.suppressedWriteError = error;
+          // Remembered by identity, so the `'error'` event carrying this same failure can
+          // recognize it. A non-object is not trackable and is simply not suppressed: the
+          // event then reports it, which is noisier than ideal but never silent.
+          if (typeof error === 'object') {
+            this.suppressedWriteErrors.add(error);
+          }
 
           this.handleError('write', error, {
             attempt: queued.attempts + 1,

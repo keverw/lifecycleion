@@ -1536,4 +1536,84 @@ describe('NamedPipeSink', () => {
       reader.stop();
     }
   }, 15000);
+  test('an unrelated stream error does not unsuppress a pending report', async () => {
+    // The suppression used to be one slot holding the last error, cleared by whatever
+    // error arrived next. A stale stream emitting between a write callback and its own
+    // event cleared the entry, and the real failure was then reported a second time - with
+    // no attempt and nothing to retry, which is the duplicate the pairing exists to stop.
+    const pipePath = `${tmpDir.path}/suppression.pipe`;
+    await createNamedPipe(pipePath);
+
+    const readerFd = fs.openSync(
+      pipePath,
+      fs.constants.O_RDONLY | fs.constants.O_NONBLOCK,
+    );
+    const failures: SinkFailure[] = [];
+    const sink = new NamedPipeSink({
+      pipePath,
+      maxRetries: 0,
+      onError: (failure) => {
+        failures.push(failure);
+      },
+    });
+
+    try {
+      expect(await waitForOpenPipe(sink)).toBe(true);
+
+      (sink as unknown as { ensureConnection: () => void }).ensureConnection =
+        () => {
+          // Recovery is not what this test is about.
+        };
+
+      const live = (sink as unknown as { pipeStream: fs.WriteStream })
+        .pipeStream;
+      const errorHandlers = live.listeners('error') as ((
+        error: Error,
+      ) => void)[];
+      const ours = new Error('EPIPE from the current stream');
+
+      (
+        live as unknown as {
+          write: (
+            chunk: string,
+            callback?: (error?: Error | null) => void,
+          ) => boolean;
+        }
+      ).write = (_chunk, callback) => {
+        setTimeout(() => {
+          callback?.(ours);
+
+          // A stream this sink replaced long ago reports in the gap, before our own
+          // event arrives.
+          for (const handler of errorHandlers) {
+            handler(new Error('late EPIPE from somewhere else'));
+          }
+
+          live.emit('error', ours);
+        }, 0);
+
+        return true;
+      };
+
+      sink.write({
+        timestamp: Date.now(),
+        type: 'info',
+        template: 'reported-once',
+        message: 'reported-once',
+      });
+
+      await new Promise((resolve) => setTimeout(resolve, 100));
+
+      // Our failure is described once, by the callback that knew the line. The unrelated
+      // error is reported too - it did happen - but it cannot make ours be said twice.
+      const ownFailures = failures.filter((entry) => entry.error === ours);
+
+      expect(ownFailures).toHaveLength(1);
+      expect(ownFailures[0]?.attempt).toBe(1);
+      expect(ownFailures[0]?.disposition).toBe('lost');
+    } finally {
+      await sink.close();
+      fs.closeSync(readerFd);
+    }
+  }, 15000);
 });
