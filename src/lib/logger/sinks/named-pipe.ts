@@ -11,6 +11,15 @@ import { reportThroughHandler } from '../../internal/failure-reporter';
  */
 export enum PipeErrorType {
   WRITE = 'write',
+  /**
+   * A custom `formatter` threw and the default format was used instead.
+   *
+   * Its own type rather than {@link PipeErrorType.WRITE}, because nothing was lost: the
+   * line is still written, and the pipe is healthy. Reported as `WRITE`, a handler that
+   * reads that as "this entry is gone" - reconnecting, or counting a dropped line - acted
+   * on every single entry while the sink was working perfectly.
+   */
+  FORMAT = 'format',
   CLOSE = 'close',
   NOT_FOUND = 'not_found',
   NOT_A_PIPE = 'not_a_pipe',
@@ -385,7 +394,11 @@ export class NamedPipeSink implements LogSink {
       try {
         return this.formatter(entry) + '\n';
       } catch (error) {
-        this.handleError(PipeErrorType.WRITE, error);
+        // `FORMAT`, not `WRITE`: the fallback below still produces a line and the pipe is
+        // untouched, so this is advisory. It also keeps the both-threw case honest - if
+        // the default format throws too, `writeEntry` reports that as the one `WRITE`
+        // failure, so a caller counting lost entries counts one rather than two.
+        this.handleError(PipeErrorType.FORMAT, error);
       }
     }
 

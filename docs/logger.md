@@ -1351,6 +1351,10 @@ The `onError` callback receives a `PipeErrorType` enum indicating what kind of e
 ```typescript
 enum PipeErrorType {
   WRITE = 'write',
+  // A custom `formatter` threw and the default format was used instead. Advisory: the
+  // line was still written and the pipe is healthy, so this is deliberately not `WRITE`
+  // — reconnecting or counting a dropped line here would act on a working sink.
+  FORMAT = 'format',
   CLOSE = 'close',
   NOT_FOUND = 'not_found',
   NOT_A_PIPE = 'not_a_pipe',
