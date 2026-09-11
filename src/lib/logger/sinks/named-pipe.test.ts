@@ -1226,7 +1226,15 @@ describe('NamedPipeSink', () => {
     const pipePath = `${tmpDir.path}/stale-error.pipe`;
     await createNamedPipe(pipePath);
 
-    const reader = startPipeReader(pipePath);
+    // A raw descriptor rather than `startPipeReader`, and it is the difference between
+    // this test passing and hanging. `reconnect()` ends the old write stream, which leaves
+    // the FIFO with no writer; a `createReadStream` reader sees EOF and closes, and the
+    // replacement stream then has no reader to open against and blocks. A descriptor held
+    // open for the whole test keeps a reader attached across the swap.
+    const readerFd = fs.openSync(
+      pipePath,
+      fs.constants.O_RDONLY | fs.constants.O_NONBLOCK,
+    );
     const sink = new NamedPipeSink({ pipePath, onError: () => {} });
 
     try {
@@ -1261,7 +1269,7 @@ describe('NamedPipeSink', () => {
       expect(health.isHealthy).toBe(true);
     } finally {
       await sink.close();
-      reader.stop();
+      fs.closeSync(readerFd);
     }
   }, 15000);
   test('filters by minLevel, and always writes a raw entry', async () => {
