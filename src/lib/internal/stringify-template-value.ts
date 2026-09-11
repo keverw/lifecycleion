@@ -10,7 +10,7 @@ import {
 } from './format-reporter';
 import {
   charge,
-  chargeText,
+  chargeUnits,
   createRenderBudget,
   MAX_RENDER_DEPTH,
   TRUNCATED,
@@ -83,6 +83,57 @@ function quote(value: string): string {
 }
 
 /**
+ * Quote a leaf, cut so the *encoded* result fits what is left of the budget.
+ *
+ * Two things {@link chargeText} alone does not cover, both of which let a single value
+ * run past the cap:
+ *
+ * - **What is charged has to be what is emitted.** Cutting the raw string and quoting
+ *   afterwards charges the cut length and emits the escaped one, and escaping is not
+ *   free: a million NUL characters become `\u0000` six times over, so a value cut to a
+ *   megabyte was written out as six. The budget is a bound on output, so the encoded form
+ *   is what has to fit.
+ * - **Every variable-length leaf, not only a raw string.** A class whose `toString()`
+ *   returns ten megabytes arrives here as text like any other, and went out whole because
+ *   this path merely charged it.
+ *
+ * Cut by ratio rather than by search: one pass usually lands it, since the expansion is
+ * uniform enough, and the loop is bounded so a pathological mixture costs a few
+ * re-encodings rather than a binary search. The marker always survives - a budget with
+ * nothing left still says it ran out rather than emitting an empty string.
+ */
+function quoteWithinBudget(budget: RenderBudget, text: string): string {
+  const full = quote(text);
+
+  if (full.length <= budget.remaining) {
+    return charge(budget, full);
+  }
+
+  const allowance = Math.max(0, budget.remaining);
+
+  let keep = Math.min(text.length, allowance);
+  let encoded = quote(`${text.slice(0, keep)}${TRUNCATED_LENGTH}`);
+
+  // The marker itself, quoted, is the floor: below that there is nothing to say.
+  const floor = quote(TRUNCATED_LENGTH).length;
+
+  for (
+    let attempt = 0;
+    attempt < 4 && keep > 0 && encoded.length > Math.max(allowance, floor);
+    attempt++
+  ) {
+    const ratio = Math.max(allowance, floor) / encoded.length;
+
+    keep = Math.floor(keep * ratio);
+    encoded = quote(`${text.slice(0, keep)}${TRUNCATED_LENGTH}`);
+  }
+
+  chargeUnits(budget, encoded.length);
+
+  return encoded;
+}
+
+/**
  * A `Date` as an ISO timestamp, or `null` when it is not one this can render.
  *
  * ISO rather than `String(date)` because the locale form is timezone-dependent and neither
@@ -134,14 +185,13 @@ function renderNested(
       // `NaN` and the infinities have no JSON form; `null` is the conventional stand-in.
       return charge(budget, Number.isFinite(value) ? String(value) : 'null');
     case 'string':
-      // Cut at the budget rather than emitted whole. The quoting happens after the cut,
-      // so what comes out is still one JSON string literal - a value truncated inside the
-      // quotes, carrying the marker that says so.
-      return quote(chargeText(budget, value));
+      // Cut to fit the budget *after* escaping, and still one JSON string literal: a value
+      // truncated inside the quotes, carrying the marker that says so.
+      return quoteWithinBudget(budget, value);
     case 'bigint':
       // Rendered as text rather than thrown on, which is what `JSON.stringify` does.
       // Cut like a string leaf: a `BigInt` has no bounded length either.
-      return quote(chargeText(budget, String(value)));
+      return quoteWithinBudget(budget, String(value));
     default:
       break;
   }
@@ -174,7 +224,11 @@ function renderNested(
     }
   }
 
-  return charge(budget, quote(stringifyTemplateValue(value, path, report)));
+  // Bounded like any other leaf. Everything that reaches here renders through its own
+  // `toString` - a `URL`, a `Map`, a class instance - and a `toString` has no length limit:
+  // one returning ten megabytes was emitted whole, since this path only ever charged for
+  // what it had already produced.
+  return quoteWithinBudget(budget, stringifyTemplateValue(value, path, report));
 }
 
 /** Render a plain object or array as JSON, its leaves rendered by the shared rules. */

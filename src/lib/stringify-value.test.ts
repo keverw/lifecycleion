@@ -1929,6 +1929,34 @@ describe('a shared subtree costs one walk, not one per route', () => {
     expect(rendered).toContain('[max length exceeded]');
   });
 
+  test('a leaf that renders through its own toString is bounded too', () => {
+    // Not a raw string, so it reached the budget only as something already produced: a
+    // `toString` returning ten megabytes was charged for and emitted whole.
+    class Huge {
+      public toString(): string {
+        return 'h'.repeat(10_000_000);
+      }
+    }
+
+    const rendered = stringifyValue({ v: new Huge() });
+
+    expect(rendered.length).toBeLessThan(1_100_000);
+    expect(rendered).toContain('[max length exceeded]');
+  });
+
+  test('escaping cannot expand a cut leaf past the budget', () => {
+    // Cutting the raw value and quoting afterwards charges the cut length and emits the
+    // escaped one. A million NUL characters escape to six bytes each, so a value cut to a
+    // megabyte went out as six.
+    const nul = String.fromCharCode(0).repeat(1_000_000);
+
+    const rendered = stringifyValue({ v: nul });
+
+    expect(rendered.length).toBeLessThan(1_100_000);
+    expect(rendered).toContain('[max length exceeded]');
+    expect(() => JSON.parse(rendered) as unknown).not.toThrow();
+  });
+
   test('a truncated object is still JSON', () => {
     // The truncation marker is the value of the key it cut, not an entry of its own.
     // Pushed bare among `"key":value` parts it produced `{"a":"...","[max length
