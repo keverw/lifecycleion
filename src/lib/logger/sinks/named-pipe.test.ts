@@ -1475,6 +1475,89 @@ describe('NamedPipeSink', () => {
       reader.stop();
     }
   }, 15000);
+  test('a line that could not be rendered is counted, not just reported', async () => {
+    // `disposition: 'lost'` and a `droppedEntries` that never moved disagreed about the
+    // same entry: three unrenderable lines reported three `format`/`lost` failures while
+    // `getHealth()` still answered `droppedEntries: 0` and `isHealthy: true`, so an
+    // operator polling health saw a sink in perfect condition that had delivered nothing.
+    const pipePath = `${tmpDir.path}/format-lost-counted.pipe`;
+    await createNamedPipe(pipePath);
+
+    const reader = startPipeReader(pipePath);
+    const failures: SinkFailure[] = [];
+    const sink = new NamedPipeSink({
+      pipePath,
+      jsonFormat: true,
+      onError: (failure) => {
+        failures.push(failure);
+      },
+    });
+
+    try {
+      expect(await waitForOpenPipe(sink)).toBe(true);
+
+      for (let index = 0; index < 3; index++) {
+        sink.write({
+          timestamp: Date.now(),
+          type: 'info',
+          template: 'unrenderable',
+          message: 'unrenderable',
+          // `JSON.stringify` refuses a `BigInt`, so the default format throws too and
+          // there is no fallback left to produce a line.
+          redactedParams: { size: BigInt(1) },
+        });
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, 150));
+
+      const lostFormats = failures.filter(
+        (entry) => entry.kind === 'format' && entry.disposition === 'lost',
+      );
+
+      expect(lostFormats).toHaveLength(3);
+      expect(sink.getHealth().droppedEntries).toBe(3);
+    } finally {
+      await sink.close();
+      reader.stop();
+    }
+  }, 15000);
+
+  test('a closed sink does not report itself healthy, and refuses to reconnect', async () => {
+    // `isHealthy` is `consecutiveFailures === 0 && isInitialized`, and `close()` left
+    // `isInitialized` set - so a sink with no stream, discarding everything written to it,
+    // answered a polling supervisor exactly as a working one does.
+    //
+    // And `reconnect()` was the one public entry point without the closed guard the rest
+    // carry. After `close()` it re-opened the FIFO, and on this sink's ordinary failure
+    // that open never completes: `close()` had already run its `pendingStream` cleanup, so
+    // the fresh descriptor and the libuv threadpool slot behind it were held for the life
+    // of the process, for a sink nothing can write to again.
+    const pipePath = `${tmpDir.path}/closed-not-healthy.pipe`;
+    await createNamedPipe(pipePath);
+
+    const reader = startPipeReader(pipePath);
+    const sink = new NamedPipeSink({ pipePath });
+
+    try {
+      expect(await waitForOpenPipe(sink)).toBe(true);
+      expect(sink.getHealth().isHealthy).toBe(true);
+
+      await sink.close();
+
+      const health = sink.getHealth();
+
+      expect(health.isHealthy).toBe(false);
+      expect(health.isInitialized).toBe(false);
+
+      const status = await sink.reconnect();
+
+      expect(status).toEqual({ success: false, reason: 'closed' });
+      expect(sink.getHealth().isInitialized).toBe(false);
+    } finally {
+      reader.stop();
+    }
+  }, 15000);
+
   test('counts one failed write once', async () => {
     // The write callback reports the failure, and the stream's `'error'` event delivers
     // the same one a moment later. With the event's report suppressed, its bookkeeping

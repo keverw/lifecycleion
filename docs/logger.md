@@ -1386,7 +1386,7 @@ const pipeSink = new NamedPipeSink({
   minLevel: LogLevel.INFO, // Minimum log level to write (default: INFO)
   maxRetries: 3, // Retry failed writes (default: 3)
   maxQueueSize: 10_000, // Entries held while the pipe is unusable (default: 10,000; -1 = unlimited)
-  closeTimeoutMS: 30000, // Timeout for close() and its final flush (default: 30000)
+  closeTimeoutMS: 30000, // Budget shared by all of close(): the init wait, the queue drain, and the final flush (default: 30000)
   onError: ({ kind, error, target }) => {
     console.error(`Pipe ${kind} failed for ${target}:`, error.message);
 
@@ -1463,6 +1463,8 @@ const pipeSink = new NamedPipeSink({
         console.log('Reconnected successfully');
       } else if (status.reason === 'already_reconnecting') {
         console.log('Reconnect already in progress');
+      } else if (status.reason === 'closed') {
+        console.log('Sink is closed; not reconnecting');
       } else {
         console.error('Reconnect failed:', status.error.message);
       }

@@ -189,6 +189,23 @@ export function maskValueDeep(
     const masked: Record<string, unknown> = {};
 
     for (const entryKey of shape.keys) {
+      // The same stop the array branch makes, and for the same reason. Past the budget
+      // every remaining entry masks to the placeholder anyway - the guard at the top of
+      // this function says so for a container, and a *leaf* does not even reach it: the
+      // non-container path above returns before the check, so it renders and masks its
+      // value in full no matter how much budget is left. A million-key object of string
+      // leaves therefore cost 969 ms and some sixty megabytes of mask text, while the
+      // equivalent array stopped after fifteen thousand elements in seven. One
+      // placeholder stands for the tail, which is what the rest would have been.
+      if (budget.remaining <= 0) {
+        // `defineEntry`, like every other write in this loop: a plain assignment to
+        // `__proto__` is a no-op for a string, so a budget that ran out on exactly that
+        // key would have dropped the marker and made the truncation invisible.
+        defineEntry(masked, entryKey, REDACTED_PLACEHOLDER);
+
+        break;
+      }
+
       let entryResult: unknown;
 
       try {

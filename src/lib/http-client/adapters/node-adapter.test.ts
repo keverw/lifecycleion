@@ -2812,8 +2812,25 @@ describe('NodeAdapter.send() — unit branches without server', () => {
     // first - so the error it was attached to absorb arrived to no listener at all and
     // killed the process. Counting from delivery instead keeps the siblings above covered
     // and still bounds the listener's life.
+    //
+    // *Unless* a later request renewed it in the meantime, which the twelve above did.
+    // The deferred release is a guess that nothing further is expected, and a renewal is
+    // the evidence that it was wrong: releasing anyway took the absorber off the very
+    // requests that had just been told they were covered by it, and `cleanup` had removed
+    // each of their own `onWritableError` - the uncaught `'error'` this exists to prevent,
+    // reached from the other side. The renewed backstop below is what bounds it instead.
     await new Promise<void>((done) => {
       setImmediate(done);
+    });
+
+    expect(emitter.listenerCount('error')).toBe(1);
+
+    // And it is a bound, not a reprieve: the window the renewals restarted runs out with
+    // no further request asking, and the absorber comes off on its own.
+    await new Promise<void>((done) => {
+      // `PENDING_WRITABLE_ERROR_WINDOW_MS` plus room for the timer, spelled out because
+      // the constant is module-private to the adapter.
+      setTimeout(done, 1000 + 250);
     });
 
     expect(emitter.listenerCount('error')).toBe(0);

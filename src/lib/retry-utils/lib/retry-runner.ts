@@ -975,6 +975,14 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
       data?: T;
       error?: unknown;
     },
+    // Set only by the `catch` around `this.operation`, which routes a thrown error here
+    // as `'error'`. It changes nothing about how a live attempt is handled and only names
+    // the already-settled case correctly: an operation that reports its outcome and *then*
+    // throws never called `reportResult` twice, so telling its author that a second report
+    // "arrived after the attempt was settled" points at code they did not write. The
+    // throw is still reported - a failure after a successful report is exactly the kind
+    // that otherwise disappears - it is simply reported as what it is.
+    didOperationThrow: boolean = false,
   ): void {
     // Guard against multiple calls to reportResult
     if (
@@ -1016,10 +1024,14 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
 
       if (!wasAborted) {
         reportCallbackError(
-          'RetryRunner reportResult (attempt already settled)',
+          didOperationThrow
+            ? 'RetryRunner operation threw after the attempt was settled'
+            : 'RetryRunner reportResult (attempt already settled)',
           valueInfo.error ??
             new Error(
-              `reportResult('${status}') arrived after the attempt was settled`,
+              didOperationThrow
+                ? 'the operation threw after the attempt was settled'
+                : `reportResult('${status}') arrived after the attempt was settled`,
             ),
         );
       }
@@ -1213,9 +1225,14 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
         }
       } catch (error) {
         // Treat thrown errors as retryable errors by default.
-        this.handleReportResult(context, 'error', {
-          error: error,
-        });
+        this.handleReportResult(
+          context,
+          'error',
+          {
+            error: error,
+          },
+          true,
+        );
       }
     }
   }

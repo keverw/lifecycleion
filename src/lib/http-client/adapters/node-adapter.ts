@@ -72,10 +72,17 @@ const PENDING_WRITABLE_ERROR_WINDOW_MS = 1000;
  * error and pinning the *first* request's scope with it. That is the hazard the window
  * exists for, reached by extension rather than by never bounding it at all.
  *
- * Counted from when the absorber was attached, so it bounds the listener's whole life
+ * Counted from when the absorber was attached, so it bounds one listener's whole life
  * rather than any one request's share of it. Five windows: enough that an ordinary burst of
  * concurrent requests each gets its full second, short enough that "forever" is still never
  * the answer.
+ *
+ * A cap on each absorber, not on how many a writable may see. A request arriving after the
+ * cap has expired attaches a *fresh* one - it must, or it would settle with no `'error'`
+ * listener at all - so a caller failing continuously into one long-lived sink does keep a
+ * listener on it continuously. That is the same coverage a continuous stream of requests
+ * gets anyway, and it is the closure behind it, not the listener, that this bounds: no
+ * single request's scope is pinned to the writable for longer than this.
  */
 const MAX_PENDING_WRITABLE_ERROR_LIFETIME_MS =
   PENDING_WRITABLE_ERROR_WINDOW_MS * 5;
@@ -94,7 +101,19 @@ const MAX_PENDING_WRITABLE_ERROR_LIFETIME_MS =
  */
 interface PendingWritableErrorEntry {
   readonly absorb: (error: Error) => void;
-  readonly extend: () => void;
+  /**
+   * Push this absorber's deadline out, and say whether it survived.
+   *
+   * `false` means the absorber has spent its
+   * {@link MAX_PENDING_WRITABLE_ERROR_LIFETIME_MS} and detached itself, so the caller is
+   * covered by nothing and must attach one of its own. Returning it is what closes the
+   * gap: the extension was treated as unconditional, so a request finding an expired
+   * absorber had it torn down on its behalf and then returned satisfied, while `cleanup`
+   * took its own `onWritableError` off a turn later - leaving the writable with no
+   * `'error'` listener at all, which is the uncaught exception this whole mechanism
+   * exists to prevent.
+   */
+  readonly extend: () => boolean;
 }
 
 /**
@@ -956,18 +975,34 @@ async function streamResponseBody(
       try {
         const existing = pendingWritableErrorAbsorbers.get(writable);
 
-        if (existing !== undefined) {
+        if (existing !== undefined && existing.extend()) {
           // One is already attached to this writable and still absorbing. Its deadline is
           // pushed out to a full window from *here*, because this request is now relying
           // on it and has no listener of its own left.
-          existing.extend();
-
           return;
         }
+
+        // `extend` answered that the absorber was out of lifetime and took itself off, so
+        // there is nothing on this writable now. Falling through attaches a fresh one,
+        // which is exactly the path a writable with no absorber at all takes - a new
+        // request getting its own window is what the cap is for, as against one absorber
+        // extending itself forever.
       } catch {
         // Not a usable `WeakMap` key, so it cannot be tracked or protected.
         return;
       }
+
+      // Whether the `WeakMap` still names this absorber. A read that throws answers `true`
+      // - the safe direction, since the cost of believing an absorber is present is one
+      // late error absorbed twice, and the cost of believing it is gone is a second
+      // listener attached on top of one that never came off.
+      const isStillAttached = (): boolean => {
+        try {
+          return pendingWritableErrorAbsorbers.get(writable)?.absorb === absorb;
+        } catch {
+          return true;
+        }
+      };
 
       // Takes the absorber back off, whichever signal got here first. Guarded on the
       // `WeakMap` still naming this absorber so a second call, or a removal that has
@@ -1017,9 +1052,25 @@ async function streamResponseBody(
       // Detach on the next turn of the loop rather than now, so an error delivered in
       // this one still finds the listener. `unref` so a pending removal cannot hold the
       // process open.
+      //
+      // Cancelled by a renewal, which is what `generation` counts. The queued removal
+      // only knows that *at the time it was scheduled* nothing further was expected; a
+      // request settling in the meantime calls `extend` and is handed a fresh window, and
+      // tearing the absorber down anyway left that request covered by nothing - the same
+      // uncaught-`'error'` gap, reached from the other side. The `'close'` and backstop
+      // paths call `detach` directly and are unaffected: those are deliveries, not
+      // guesses about one.
       const scheduleDetach = (): void => {
+        const scheduledAt = generation;
+
         try {
-          const removal = setImmediate(detach);
+          const removal = setImmediate(() => {
+            if (generation !== scheduledAt) {
+              return;
+            }
+
+            detach();
+          });
 
           removal.unref?.();
         } catch {
@@ -1054,7 +1105,18 @@ async function streamResponseBody(
       let backstop: ReturnType<typeof setTimeout> | undefined;
       const attachedAt = Date.now();
 
-      const extend = (): void => {
+      // Bumped by every renewal, so a `detach` already queued by `scheduleDetach` knows
+      // its answer is stale. See `scheduleDetach`.
+      let generation = 0;
+
+      /**
+       * @param isRenewal Whether a *later* request is asking, rather than the attach below.
+       *        Only a renewal invalidates a queued detach: the attach path runs after the
+       *        `'close'` fallback may have scheduled one, and that fallback is the only
+       *        bound a writable refusing listeners has.
+       * @returns Whether an absorber is still attached afterwards.
+       */
+      const extend = (isRenewal: boolean = false): boolean => {
         const remainingLifetime =
           MAX_PENDING_WRITABLE_ERROR_LIFETIME_MS - (Date.now() - attachedAt);
 
@@ -1064,7 +1126,11 @@ async function streamResponseBody(
         if (remainingLifetime <= 0) {
           detach();
 
-          return;
+          // Not simply `false`: `detach` returns early when the writable refuses to give
+          // the listener back, and the bookkeeping is deliberately kept in that case
+          // because the listener really is still attached and still absorbing. The caller
+          // is covered, so it must not add a second one on top.
+          return isStillAttached();
         }
 
         try {
@@ -1083,16 +1149,25 @@ async function streamResponseBody(
           }
 
           backstop = next;
+
+          if (isRenewal) {
+            generation++;
+          }
         } catch {
           // No way to schedule it. Whatever was already pending still stands, and on the
           // attach path that is nothing - the two signals above are the bound, which is the
           // behaviour that shipped before this one existed.
         }
+
+        return true;
       };
 
       try {
         writable.on('error', absorb);
-        pendingWritableErrorAbsorbers.set(writable, { absorb, extend });
+        pendingWritableErrorAbsorbers.set(writable, {
+          absorb,
+          extend: () => extend(true),
+        });
       } catch {
         // A writable that will not take a listener cannot be protected. Nothing else
         // here depends on it.

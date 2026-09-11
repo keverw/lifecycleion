@@ -126,6 +126,7 @@ export interface NamedPipeSinkHealth {
 export type ReconnectStatus =
   | { success: true }
   | { success: false; reason: 'already_reconnecting' }
+  | { success: false; reason: 'closed' }
   | { success: false; reason: 'error'; error: Error };
 
 /**
@@ -159,6 +160,18 @@ interface QueuedPipeEntry extends RenderedLine {
  * A second is short enough that a reader restarting is picked up promptly and long enough
  * that a pipe which is never coming back costs nothing to keep asking about.
  */
+/**
+ * The least time `close()`'s final flush is given, however little of `closeTimeoutMS` is
+ * left by the time it is reached.
+ *
+ * The init wait, the drain loop and the flush share one deadline, which is what keeps a
+ * documented thirty-second close from taking sixty. Shared exactly, though, the flush can
+ * be handed zero - and a zero-millisecond destroy registered before `end()` is called in
+ * the same tick beats a `'finish'` that cannot fire synchronously, so the flush would not
+ * merely be short but impossible. This is the floor that keeps it a flush.
+ */
+const MIN_CLOSE_FLUSH_MS = 100;
+
 const REOPEN_COOLDOWN_MS = 1000;
 
 /**
@@ -385,6 +398,16 @@ export class NamedPipeSink implements LogSink {
    */
 
   public async reconnect(): Promise<ReconnectStatus> {
+    // The guard every other entry point carries - `write`, `ensureConnection`,
+    // `scheduleReopen`, `writeEntry` - and the only public one that was missing it. A
+    // `reconnect()` after `close()` re-opened the FIFO, and on the sink's ordinary failure
+    // that open never completes: `close()` had already run its `pendingStream` cleanup, so
+    // the fresh descriptor and the libuv threadpool slot behind it were held for the life
+    // of the process, for a sink nothing can write to again.
+    if (this.closed || this.closing) {
+      return { success: false, reason: 'closed' };
+    }
+
     // If already reconnecting, just wait for the existing attempt
     if (this._isReconnecting) {
       await this.initPromise;
@@ -498,6 +521,11 @@ export class NamedPipeSink implements LogSink {
 
     this.closed = true;
 
+    // `isHealthy` is `consecutiveFailures === 0 && isInitialized`, so a sink that closed
+    // cleanly went on reporting itself healthy to anything polling `getHealth()` - with no
+    // stream, and `write()` discarding everything handed to it. Closed is not healthy.
+    this.isInitialized = false;
+
     this.abandonQueueOnClose();
 
     if (this.reopenTimer !== undefined) {
@@ -523,9 +551,28 @@ export class NamedPipeSink implements LogSink {
     if (this.pipeStream && !this.pipeStream.destroyed) {
       const stream = this.pipeStream;
 
+      // What is left of the *whole* close's budget, not a fresh one. `closeTimeoutMS`
+      // counted from here on top of the drain loop above - which counts from `startTime`
+      // and spins its full length against a reader that has stalled - made a documented
+      // thirty-second bound a sixty-second one, which is the stall a shutdown timeout
+      // exists to prevent. Measured from `startTime`, so the init wait, the drain, and
+      // this flush share one deadline.
+      //
+      // Floored rather than allowed to reach zero. The drain loop exits on the same
+      // deadline, so a stalled reader arrives here with nothing left, and a `0` ms timer
+      // registered before `end()` is called in the same tick always wins the race against
+      // a `'finish'` that cannot fire synchronously - which would make the final flush
+      // unreachable for the very stream that has a reader again by the time it is asked.
+      // The floor is what the whole close can overshoot by, and it is a tenth of a second
+      // against a default of thirty.
+      const remainingCloseMS = Math.max(
+        MIN_CLOSE_FLUSH_MS,
+        this.closeTimeoutMS - (Date.now() - startTime),
+      );
+
       return new Promise<void>((resolve) => {
-        // Bounded by `closeTimeoutMS`, which until now covered only the wait for
-        // *initialization* and not the close itself. `end()` flushes before it calls back,
+        // Bounded, by `remainingCloseMS` above. Until this existed the close itself had no
+        // timeout at all - `closeTimeoutMS` covered only the wait for *initialization*. `end()` flushes before it calls back,
         // and a FIFO with no reader cannot flush - so on the sink's most ordinary failure
         // this callback never fired and `close()` never resolved, hanging whatever was
         // shutting the process down. The timeout matters more now that the sink reopens on
@@ -553,7 +600,7 @@ export class NamedPipeSink implements LogSink {
           }
 
           finish();
-        }, this.closeTimeoutMS);
+        }, remainingCloseMS);
 
         timeoutHandle.unref?.();
 
@@ -713,6 +760,22 @@ export class NamedPipeSink implements LogSink {
         // entry sat until some unrelated later write happened along, which in a quiet
         // process is never.
         this.ensureConnection();
+
+        // And a backstop, because the call above is refused for the one failure it matters
+        // most for. This handler is registered before `waitForOpen` attaches its own
+        // `once('error')`, so a stream that errors *during* the open window runs it while
+        // `isOpening` - and, on every path but the constructor's, `_isReconnecting` - is
+        // still set, and `ensureConnection` returns having scheduled nothing at all. A pipe
+        // that failed while opening had no retry pending, and whatever its failed write had
+        // requeued waited for unrelated traffic that a quiet process never produces.
+        //
+        // A timer rather than a second direct call, because a timer is the one thing those
+        // flags cannot refuse: it fires after the open window has closed and they are down.
+        // Bounded the way every other reopen is - `scheduleReopen` holds one timer at a
+        // time and `ensureConnection` still applies its own cooldown when it fires - and a
+        // no-op when the call above already did the work, since by then there is either a
+        // connection or an open in flight.
+        this.scheduleReopen(REOPEN_COOLDOWN_MS);
       });
 
       // Initialized means *open*, not merely constructed. Until this fires there is
@@ -723,6 +786,14 @@ export class NamedPipeSink implements LogSink {
         // completes after `reconnect()` abandoned it belongs to nothing, and installing it
         // would replace a live connection with one nobody is holding.
         if (this.closed || this.closing || this.pendingStream !== stream) {
+          // Cleared when it is this sink's own pending stream being turned away, not only
+          // when it belongs to nobody. Left set, it named a stream that had just been
+          // destroyed, so `ensureConnection` went on seeing an open in flight and refused
+          // every later attempt - and `close()`'s own cleanup had already run.
+          if (this.pendingStream === stream) {
+            this.pendingStream = undefined;
+          }
+
           try {
             stream.destroy();
           } catch {
@@ -1087,6 +1158,13 @@ export class NamedPipeSink implements LogSink {
     if (queued.formatError !== undefined) {
       // `'format'`, as `FileSink` reports the same failure, and never retried: the line is
       // rendered once, on purpose, so a second attempt could not come out differently.
+      // Counted, like every other line this sink does not deliver. `disposition: 'lost'`
+      // and a `droppedEntries` that never moved disagreed about the same entry: three
+      // failed renders reported three `format`/`lost` callbacks while `getHealth()` still
+      // answered `{ isHealthy: true, queueSize: 0, droppedEntries: 0 }`, so an operator
+      // polling health saw a sink in perfect condition that had delivered nothing.
+      this.droppedEntries++;
+
       this.handleError('format', queued.formatError, {
         attempt: queued.attempts + 1,
         // No line was produced, and rendering is never repeated, so this one is gone.

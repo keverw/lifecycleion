@@ -259,4 +259,41 @@ describe('redactMatchedPaths - shape of a masked container', () => {
     expect(Array.isArray(result['tokens'])).toBe(true);
     expect(result['tokens']).toHaveLength(2);
   });
+
+  test('one large sibling does not spend the budget the next one needs', () => {
+    // The candidate scan and the walk read the same containers. Charged to one counter,
+    // *measuring* the first array was subtracted from the budget for walking the second:
+    // `a` came back intact and `b` collapsed to a single failure marker, though nothing
+    // about `b` was any larger.
+    const payload = {
+      password: SECRET,
+      a: new Array(600_000).fill(1),
+      b: new Array(600_000).fill(1),
+    };
+
+    const result = redactMatchedPaths(
+      payload,
+      paths('password'),
+      undefined,
+    ) as Record<string, unknown>;
+
+    expect(result['password']).not.toBe(SECRET);
+    expect(result['a']).toHaveLength(600_000);
+    expect(result['b']).toHaveLength(600_000);
+    expect(result['b']).not.toContain(REDACTION_FAILED_MARKER);
+  });
+
+  test('refuses a redaction list claiming a length it would cost the memory to read', () => {
+    // The self-contradiction check only catches a list lying *downward* about `length` -
+    // an own index key past the end - so a claim in the tens of millions passed every
+    // test and was then materialized, element by element, before anything could refuse
+    // it. Answered without allocating for it, and fail-closed as every refusal here is.
+    const start = Date.now();
+
+    expect(parseRedactPaths(new Array(50_000_000))).toBeNull();
+    expect(Date.now() - start).toBeLessThan(1_000);
+
+    // Nothing a real configuration would hit.
+    expect(parseRedactPaths(['password', 'token'])).toHaveLength(2);
+  });
 });

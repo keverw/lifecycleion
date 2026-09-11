@@ -67,7 +67,14 @@ export function resolveMaxQueueSize(requested?: number): number | undefined {
 
   // `Infinity` is accepted as another spelling of unlimited rather than floored into a
   // cap no queue can reach.
-  return Number.isFinite(requested) ? Math.floor(requested) : undefined;
+  //
+  // Floored to at least one, because `Math.floor` otherwise reached the very answer the
+  // `requested === 0` guard above rejects: any fraction in `(0, 1)` - `0.5` - came out as
+  // `0`, and `enforceQueueLimit`'s `while (queue.length > 0)` then evicted every entry as
+  // it was queued. A cap of zero is refused however it is spelled.
+  return Number.isFinite(requested)
+    ? Math.max(1, Math.floor(requested))
+    : undefined;
 }
 
 /**

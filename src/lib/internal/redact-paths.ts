@@ -112,6 +112,17 @@ function namedArrayKeys(source: object): string[] {
  */
 const MAX_REDACTION_ENTRIES = 1_000_000;
 
+/**
+ * Most entries a redaction list may hold before it is refused outright.
+ *
+ * A bound on `redactedKeys` and `sensitiveFieldNames`, which are configuration rather
+ * than payload: a caller naming this many fields has not written a list, and reading one
+ * costs the memory of every element before anything can decide it is unusable. Far past
+ * any real configuration, and low enough that a value claiming a length in the millions
+ * is answered without allocating for it. See {@link snapshotList}.
+ */
+const MAX_REDACT_LIST_ENTRIES = 100_000;
+
 /** One parsed redaction entry, kept with the text the caller wrote. */
 export interface RedactPath {
   /** Parsed segments, used for matching. */
@@ -165,6 +176,22 @@ export function snapshotList(value: unknown): unknown[] | null {
     const claimed = (value as unknown[]).length;
 
     if (!Number.isSafeInteger(claimed) || claimed < 0) {
+      return null;
+    }
+
+    // Refused before a single element is read, because the loop below materializes the
+    // claimed length and nothing above bounds it. The self-contradiction check only
+    // catches a list lying *downward* about `length` - an index key past the end - so a
+    // `Proxy` answering `20_000_000` passes every test here and then costs eight seconds
+    // and the array to go with it, synchronously inside `logger.info()`. A plain
+    // `new Array(50_000_000)` does the same without a `Proxy` at all.
+    //
+    // The cap is on a list of *redaction entries*, not on payload data: these are the
+    // names a caller configured, and a configuration with more than this many of them is
+    // not one this could match against a payload in reasonable time either. Refused
+    // rather than truncated, for the reason every other refusal here is - a half-read
+    // list masks a subset and reads as success.
+    if (claimed > MAX_REDACT_LIST_ENTRIES) {
       return null;
     }
 
@@ -383,10 +410,11 @@ function needsFullWalk(
     return true;
   }
 
-  // The scan reads the same unbounded `length` the walk does, so it needs the same cap -
-  // and here "walk it properly" is the conservative answer, which is what the walk's own
-  // budget then decides. See {@link MAX_REDACTION_ENTRIES}.
-  if (state.entriesLeft <= 0) {
+  // The scan reads the same unbounded `length` the walk does, so it needs a cap of its
+  // own - and here "walk it properly" is the conservative answer, which is what the walk's
+  // own budget then decides. Charged to {@link RedactState.scanLeft} rather than to the
+  // walk's counter, for the reason that field documents.
+  if (state.scanLeft <= 0) {
     return true;
   }
 
@@ -410,11 +438,11 @@ function needsFullWalk(
     const elements = value as unknown[];
 
     for (let index = 0; index < shape.length; index++) {
-      if (state.entriesLeft <= 0) {
+      if (state.scanLeft <= 0) {
         return true;
       }
 
-      state.entriesLeft--;
+      state.scanLeft--;
 
       let element: unknown;
 
@@ -436,7 +464,7 @@ function needsFullWalk(
     // invisible to the cycle guard. `root.items.back = root` rendered the secret in the
     // clear, which is precisely the leak class the alias map exists to close. The object
     // branch below never had the hole; the array branch did.
-    if (state.entriesLeft <= 0) {
+    if (state.scanLeft <= 0) {
       return true;
     }
 
@@ -449,11 +477,11 @@ function needsFullWalk(
     }
 
     for (const name of names) {
-      if (state.entriesLeft <= 0) {
+      if (state.scanLeft <= 0) {
         return true;
       }
 
-      state.entriesLeft--;
+      state.scanLeft--;
 
       let named: unknown;
 
@@ -472,11 +500,11 @@ function needsFullWalk(
   }
 
   for (const key of shape.keys) {
-    if (state.entriesLeft <= 0) {
+    if (state.scanLeft <= 0) {
       return true;
     }
 
-    state.entriesLeft--;
+    state.scanLeft--;
 
     let entry: unknown;
 
@@ -589,6 +617,23 @@ interface RedactState {
    * one array of a million does, and a per-container cap would wave it through.
    */
   entriesLeft: number;
+  /**
+   * Entries left to *scan* in this pass. See {@link MAX_REDACTION_ENTRIES}.
+   *
+   * Separate from `entriesLeft`, and that separation is the point. The scan and the walk
+   * read the same containers, so charging both to one counter made the scan's work
+   * subtract from the walk's: a payload of `{ secret, a: [600k], b: [600k] }` masked
+   * `secret`, passed `a` through intact, and then collapsed `b` to a single
+   * {@link REDACTION_FAILED_MARKER} - because scanning `a` had already spent the budget
+   * the walk of `b` needed. Nothing about `b` was too large; the *measuring* of `a` was
+   * charged to it.
+   *
+   * Still a bound, and still per pass: the scan cannot exceed it either, and answers
+   * "walk it properly" the moment it does, which is the conservative direction. The total
+   * work a pass can do is two counters' worth rather than one, which is what a cap on each
+   * of two distinct traversals means.
+   */
+  scanLeft: number;
   /**
    * Copies standing in for the containers they forward to. See {@link ForwardingAliases}.
    *
@@ -872,6 +917,22 @@ function redactPathsInner(
           state.didFailToRead = true;
           didMask = true;
         }
+      } else if (shape.length === 0) {
+        // Counted as a failed read, not as an absence. With the budget spent this branch
+        // cannot ask whether there are named properties at all - `namedArrayKeys` *is*
+        // the enumeration the cap exists to refuse - so anything here is dropped from the
+        // rebuilt array with no per-key marker to show for it, unlike every other
+        // exhaustion path in this walk. Saying so on the pass is what is affordable: it
+        // keeps `redactMatchedPaths` from taking the "nothing changed, hand back the
+        // original" shortcut and surfaces the truncation to the caller, where a marker on
+        // a key this cannot name would have to be invented.
+        //
+        // Narrowed to the empty array, because that is the only shape with no other
+        // signal. An array with elements has already had its index loop refuse the first
+        // of them and write a marker there, which says the same thing in the place a
+        // reader is looking.
+        state.didFailToRead = true;
+        didMask = true;
       }
 
       for (const namedKey of namedKeys) {
@@ -1083,6 +1144,7 @@ export function redactMatchedPaths(
     didFailToRead: false,
     noMatchUnchanged: new WeakSet(),
     entriesLeft: MAX_REDACTION_ENTRIES,
+    scanLeft: MAX_REDACTION_ENTRIES,
     aliases,
   };
 
