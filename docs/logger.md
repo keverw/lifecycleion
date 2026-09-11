@@ -1337,6 +1337,15 @@ Both queueing sinks — `FileSink` and `NamedPipeSink` — answer a failed write
   drop is reported through `onError`
 - a broken stream is reopened automatically on a later write, so neither sink needs an API
   call to recover
+- entries stay in the sink's own queue until the destination is genuinely writable, so the
+  cap and `getHealth().queueSize` mean what they say
+
+For `NamedPipeSink`, "writable" means the FIFO has actually opened, which does not happen
+until something opens the read end. Until then `getHealth().isInitialized` is `false` and
+lines accumulate under `maxQueueSize` rather than in Node's own unbounded stream buffer.
+A `reconnect()` with nothing reading the pipe therefore reports failure after a short wait
+rather than claiming success — the open is left running, and the sink promotes it and
+flushes the queue if a reader turns up later.
 
 `NamedPipeSink.reconnect()` remains available for reconnecting on demand. Because the sink
 now reopens on its own, a `reconnect()` that races one of those automatic attempts answers

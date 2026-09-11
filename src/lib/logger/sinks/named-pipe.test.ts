@@ -46,6 +46,26 @@ function startPipeReader(pipePath: string): {
   };
 }
 
+// The write side of a FIFO does not open until a reader has opened the read side, and the
+// reader's own open is asynchronous too - so tests that need an open pipe wait for it
+// rather than guessing at a delay.
+async function waitForOpenPipe(
+  sink: NamedPipeSink,
+  timeoutMS = 5000,
+): Promise<boolean> {
+  const deadline = Date.now() + timeoutMS;
+
+  while (Date.now() < deadline) {
+    if (sink.getHealth().isInitialized) {
+      return true;
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+
+  return false;
+}
+
 describe('NamedPipeSink', () => {
   // Only run these tests on supported platforms
   const platform = os.platform();
@@ -788,8 +808,11 @@ describe('NamedPipeSink', () => {
   test('caps the queue at 10,000 entries by default', async () => {
     // Both sinks default to a cap now. Unbounded is the wrong default for a queue that
     // only grows when something is already wrong.
+    // A path with no FIFO at it: the sink cannot initialize, which is the state this
+    // exercises, and - unlike a real pipe with no reader - it leaves no `open` blocked in
+    // libuv's threadpool, which has four threads and is what every other file operation
+    // in this suite needs.
     const pipePath = `${tmpDir.path}/default-cap.pipe`;
-    await createNamedPipe(pipePath);
 
     const sink = new NamedPipeSink({
       pipePath,
@@ -830,8 +853,8 @@ describe('NamedPipeSink', () => {
   }, 15000);
 
   test('holds everything when maxQueueSize is -1', async () => {
+    // No FIFO at this path either; see the test above.
     const pipePath = `${tmpDir.path}/unlimited.pipe`;
-    await createNamedPipe(pipePath);
 
     const sink = new NamedPipeSink({
       pipePath,
@@ -951,5 +974,106 @@ describe('NamedPipeSink', () => {
     reader.stop();
 
     expect(reader.data.join('')).toContain('still-written');
+  }, 15000);
+  test('keeps entries in its own queue until the pipe is genuinely open', async () => {
+    // `createWriteStream` returns before the open completes, and a FIFO does not open
+    // until a reader arrives. Treating the stream as usable at creation handed every
+    // queued line to Node, which buffers without limit - so `maxQueueSize` bounded
+    // nothing and `getHealth().queueSize` read zero while memory grew. Measured before
+    // the fix: a cap of 10 held 0 entries and dropped none of 500.
+    const pipePath = `${tmpDir.path}/no-reader.pipe`;
+    await createNamedPipe(pipePath);
+
+    const sink = new NamedPipeSink({
+      pipePath,
+      maxQueueSize: 10,
+      onError: () => {
+        // Expected: the queue fills and reports its first drop.
+      },
+      closeTimeoutMS: 200,
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 200));
+
+    for (let index = 0; index < 500; index++) {
+      sink.write({
+        timestamp: Date.now(),
+        type: 'info',
+        template: `entry-${String(index)}`,
+        message: `entry-${String(index)}`,
+      });
+    }
+
+    const health = sink.getHealth();
+
+    // Nothing is reading, so the pipe never opened and the sink says so.
+    expect(health.isInitialized).toBe(false);
+    expect(health.queueSize).toBe(10);
+    expect(health.droppedEntries).toBe(490);
+
+    await sink.close();
+  }, 15000);
+
+  test('requeues an entry whose write fails asynchronously', async () => {
+    // A stream reports `EPIPE` through the write callback and an `'error'` event, not by
+    // throwing, so treating `write()` returning as delivery meant the one entry that
+    // actually failed was the one never retried.
+    const pipePath = `${tmpDir.path}/async-fail.pipe`;
+    await createNamedPipe(pipePath);
+
+    const reader = startPipeReader(pipePath);
+    const sink = new NamedPipeSink({ pipePath });
+
+    expect(await waitForOpenPipe(sink)).toBe(true);
+
+    // A stream that accepts the write and fails it on the next tick, as a real one does.
+    (
+      sink as unknown as {
+        pipeStream: {
+          destroyed: boolean;
+          write: (
+            chunk: string,
+            callback: (error?: Error | null) => void,
+          ) => boolean;
+          end: (callback?: () => void) => void;
+          destroy: () => void;
+        };
+      }
+    ).pipeStream = {
+      destroyed: false,
+      write: (_chunk, callback) => {
+        setTimeout(() => {
+          callback(new Error('EPIPE'));
+        }, 0);
+
+        return true;
+      },
+      // Enough of a stream for `close()` to shut it down without reporting a failure of
+      // its own; the point of the stub is the write callback above.
+      end: (callback?: () => void) => {
+        callback?.();
+      },
+      destroy: () => {
+        // Nothing to tear down.
+      },
+    };
+
+    try {
+      sink.write({
+        timestamp: Date.now(),
+        type: 'info',
+        template: 'retried',
+        message: 'retried',
+      });
+
+      await new Promise((resolve) => setTimeout(resolve, 100));
+
+      // Back on the queue rather than gone: the line is still owed to the caller.
+      expect(sink.getHealth().queueSize).toBe(1);
+      expect(sink.getHealth().droppedEntries).toBe(0);
+    } finally {
+      await sink.close();
+      reader.stop();
+    }
   }, 15000);
 });

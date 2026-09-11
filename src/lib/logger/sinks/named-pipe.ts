@@ -141,6 +141,17 @@ interface QueuedPipeEntry extends RenderedLine {
 const REOPEN_COOLDOWN_MS = 1000;
 
 /**
+ * How long an open is waited on before the caller is told it has not completed.
+ *
+ * Opening a FIFO for writing does not complete until a reader opens the other end, and a
+ * reader may never come. The open itself is left running - it costs one pending
+ * descriptor, and if a reader does appear the sink promotes the stream and flushes - but
+ * nobody is made to wait on it indefinitely: `reconnect()` answers, and the constructor's
+ * `initPromise` settles, whether or not the pipe opened.
+ */
+const OPEN_WAIT_MS = 2000;
+
+/**
  * NamedPipeSink writes logs to a named pipe (FIFO)
  * Only supported on Linux and macOS
  */
@@ -154,6 +165,21 @@ export class NamedPipeSink implements LogSink {
   ) => void;
   private formatter?: (entry: LogEntry) => string;
   private pipeStream?: fs.WriteStream;
+  /**
+   * A stream that has been created but whose `open` has not completed.
+   *
+   * `createWriteStream` returns before the file is open, and for a FIFO that open waits
+   * for a reader. Treating the stream as usable at creation time is what let the queue
+   * cap be bypassed: every queued entry was handed straight to the stream, where Node
+   * buffers without limit, so `maxQueueSize` bounded nothing and `getHealth().queueSize`
+   * read zero while memory grew. Entries now stay in this sink's own queue until the pipe
+   * is genuinely open.
+   *
+   * Kept rather than abandoned on a timeout, and never joined by a second: one pending
+   * open costs one descriptor and one libuv threadpool slot (four by default), and it
+   * still promotes itself if a reader arrives later.
+   */
+  private pendingStream?: fs.WriteStream;
   /**
    * Entries waiting for the pipe, each with the line already rendered.
    *
@@ -267,6 +293,20 @@ export class NamedPipeSink implements LogSink {
         this.pipeStream = undefined;
       }
 
+      // And abandon an open still in flight, which a caller asking to reconnect has
+      // implicitly given up on. Left in place it would make the attempt below a no-op.
+      if (this.pendingStream) {
+        const pending = this.pendingStream;
+
+        this.pendingStream = undefined;
+
+        try {
+          pending.destroy();
+        } catch {
+          // Nothing further to try; a new stream is about to replace it.
+        }
+      }
+
       this.isInitialized = false;
       this.initPromise = this.initializePipe();
       await this.initPromise;
@@ -320,6 +360,21 @@ export class NamedPipeSink implements LogSink {
     }
 
     this.closed = true;
+
+    // An open still waiting for a reader is abandoned rather than waited on: it cannot
+    // complete without the reader that never came, and holding it would keep a descriptor
+    // and a threadpool slot for the life of the process.
+    if (this.pendingStream) {
+      const pending = this.pendingStream;
+
+      this.pendingStream = undefined;
+
+      try {
+        pending.destroy();
+      } catch {
+        // Nothing further to try; the sink is closing either way.
+      }
+    }
 
     if (this.pipeStream && !this.pipeStream.destroyed) {
       const stream = this.pipeStream;
@@ -399,13 +454,23 @@ export class NamedPipeSink implements LogSink {
       }
 
       // Create write stream
-      this.pipeStream = fs.createWriteStream(this.pipePath, {
+      const stream = fs.createWriteStream(this.pipePath, {
         flags: 'a', // Append mode
       });
 
-      this.pipeStream.on('error', (err) => {
+      this.pendingStream = stream;
+
+      stream.on('error', (err) => {
         this.handleError(PipeErrorType.WRITE, err);
-        this.pipeStream = undefined;
+
+        if (this.pendingStream === stream) {
+          this.pendingStream = undefined;
+        }
+
+        if (this.pipeStream === stream) {
+          this.pipeStream = undefined;
+        }
+
         // Uninitialized as well as streamless, so `write` queues what comes next instead
         // of discarding it. Leaving this set was what made a single pipe error terminal:
         // the sink looked ready, had nowhere to write, and silently lost every entry until
@@ -413,10 +478,25 @@ export class NamedPipeSink implements LogSink {
         this.isInitialized = false;
       });
 
-      this.isInitialized = true;
+      // Initialized means *open*, not merely constructed. Until this fires there is
+      // nowhere to put a line that Node would not buffer without limit, so entries wait
+      // in this sink's own queue, under its own cap, where `getHealth()` can see them.
+      stream.on('open', () => {
+        if (this.closed || this.closing) {
+          return;
+        }
 
-      // Process any queued writes
-      this.processQueue();
+        this.pendingStream = undefined;
+        this.pipeStream = stream;
+        this.isInitialized = true;
+
+        // Process any queued writes
+        this.processQueue();
+      });
+
+      // Bounded: a reader may never arrive, and the caller asked a question that has to be
+      // answered. The open is left in flight either way - see `pendingStream`.
+      await this.waitForOpen(stream);
     } catch (error) {
       this.handleError(
         PipeErrorType.NOT_FOUND,
@@ -472,6 +552,43 @@ export class NamedPipeSink implements LogSink {
   }
 
   /**
+   * Wait for a freshly created stream to open, fail, or take too long.
+   *
+   * Resolves rather than rejecting in every case: the caller's contract is a status, and
+   * "the pipe has not opened yet" is one of the answers, not a failure to report. Which
+   * of the three happened is read off `isInitialized` afterwards.
+   */
+  private async waitForOpen(stream: fs.WriteStream): Promise<void> {
+    if (stream.destroyed) {
+      return;
+    }
+
+    await new Promise<void>((resolve) => {
+      let isSettled = false;
+
+      const finish = (): void => {
+        if (isSettled) {
+          return;
+        }
+
+        isSettled = true;
+        clearTimeout(timeoutHandle);
+        stream.off('open', finish);
+        stream.off('error', finish);
+        resolve();
+      };
+
+      const timeoutHandle = setTimeout(finish, OPEN_WAIT_MS);
+
+      // So a pending open cannot hold the process open on its own.
+      timeoutHandle.unref?.();
+
+      stream.once('open', finish);
+      stream.once('error', finish);
+    });
+  }
+
+  /**
    * Reopen the pipe if it is not usable, at most one attempt at a time.
    *
    * `initializePipe` flushes the queue itself once it succeeds, so recovery needs nothing
@@ -489,7 +606,10 @@ export class NamedPipeSink implements LogSink {
       this.closed ||
       this.closing ||
       this.isInitialized ||
-      this._isReconnecting
+      this._isReconnecting ||
+      // An open is already in flight. Starting a second would add a descriptor and a
+      // threadpool slot for an answer the first one is going to give.
+      this.pendingStream !== undefined
     ) {
       return;
     }
@@ -595,10 +715,25 @@ export class NamedPipeSink implements LogSink {
       // reached Node's listener-leak warning within a few thousand entries. Queueing
       // instead of dropping makes that path far busier, which is what turned a harmless
       // no-op into a real leak.
-      this.pipeStream.write(messageToWrite);
-      // Handed to the stream, which is as far as this sink can see: what the pipe does
-      // with it afterwards arrives as an `'error'` event, not as a return value.
-      this.consecutiveFailures = 0;
+      //
+      // The *callback* is where a write is confirmed, and it is why this entry is not
+      // considered delivered yet. `write` returning is not success: a stream reports
+      // `EPIPE` and its kin asynchronously, through this callback and an `'error'` event,
+      // so treating the synchronous return as delivery meant the one entry that actually
+      // failed was the one entry never retried - it had already been dropped from the
+      // queue, and the `'error'` handler has no idea which line it belonged to.
+      this.pipeStream.write(messageToWrite, (error) => {
+        if (error) {
+          // Not reported here: the stream raises `'error'` for the same failure and
+          // `handleError` answers it once. This is the half that error cannot do - put
+          // the line back.
+          this.requeue(queued);
+
+          return;
+        }
+
+        this.consecutiveFailures = 0;
+      });
     } catch (error) {
       this.handleError(PipeErrorType.WRITE, error);
       // The line never reached the pipe, so it goes back on the queue and out on a later
