@@ -98,17 +98,30 @@ export function consoleFailureHandler(label: string): FailureHandler {
  * That is what anyone with a logger actually wants, and a console line nobody reads is a
  * poor consolation prize.
  *
- * **A caller that runs inside logging must not leave this to the default.** Broadcasting
- * from there is a loop: the listener logs what it hears, logging renders and redacts, and
- * rendering or redacting is what just failed. Every such caller therefore passes a handler
- * always - the user's if they set one, and a console-writing one if they did not - so this
- * function never reaches its broadcast rung on their behalf. `Logger` and `ArraySink` both
- * do exactly that; see `Logger.reportFailureToConsole`.
+ * **A caller that runs inside logging should not leave this to the default**, and the
+ * reason is routing rather than danger. Broadcasting from there sends the report out to
+ * the global channel and straight back into the logger that was already running, which is
+ * a long way around to reach a rung the caller could have named itself - and it lands the
+ * failure wherever a listener decides rather than where the caller asked for it. Every
+ * such caller therefore passes a handler always - the user's if they set one, and a
+ * console-writing one if they did not - so this function never reaches its broadcast rung
+ * on their behalf. `Logger` and `ArraySink` both do exactly that; see
+ * `Logger.formatErrorHandler`.
  *
- * The one gap that leaves is a caller's *own* sink or formatter calling `stringifyValue`
- * directly: that is inside a log call while looking exactly like standalone use, so it
- * would broadcast and could cycle. Documented rather than defended - defending it needs
- * cross-module global state, and the machinery cost more than the hazard.
+ * What that leaves is bounded rather than open. A caller's *own* sink or formatter calling
+ * `stringifyValue` directly is inside a log call while looking exactly like standalone use,
+ * so it does broadcast - but `Logger`'s listener holds `_isHandlingReportedError` across
+ * the whole of its own logging, so a report raised while it logs is dropped instead of
+ * logged again. Verified: a sink whose formatter fails on every value it is given costs
+ * two sink writes and stops.
+ *
+ * That guard is per-logger, so it does not bound *several* loggers that have each
+ * registered a listener - each blocks only its own re-entry, and one failing log call then
+ * costs `a(n) = n * a(n-1) + 1` sink writes, synchronously: 5 at two loggers, 326 at five,
+ * 109,601 at eight. Left undefended on purpose. Registering the global listener is a
+ * deliberate opt-in and only one listener can usefully claim a report, so one per process
+ * is the ordinary shape; bounding the rest needs a process-wide re-entrancy flag on the
+ * broadcast rung, which is machinery for a shape nobody builds.
  *
  * **Fires at most once per operation**, and that bound is the point rather than a nicety.
  * These failures are raised per *value*, so one broken function or one hostile payload

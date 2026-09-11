@@ -5,8 +5,8 @@ import { reportToConsole } from './report-to-console';
 /**
  * Which stage of formatting a value failed.
  *
- * Redaction and rendering used to be two callbacks, `onFormatError` and
- * `onFormatError`, and the split did not survive inspection: both were handed
+ * Redaction and rendering used to be two callbacks, `onRedactionError` and
+ * `onRenderError`, and the split did not survive inspection: both were handed
  * `(error, path)`, both built that path the same way - dot-joined segments, array indices
  * included, `<bracketed>` names for whole inputs - and both fired from the same walk over
  * the same value. The only thing that actually differed was *which stage* threw, which is
