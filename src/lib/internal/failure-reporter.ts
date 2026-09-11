@@ -72,21 +72,6 @@ export function reportThroughHandler(
 }
 
 /**
- * A handler that writes to the console, for a caller that must always supply one.
- *
- * Anything running *inside* a log call has to pass a handler rather than leave the default
- * routing to decide: the no-handler rung reports on the global `'error'` channel, a
- * listening logger records what it hears, and logging renders, redacts and writes to sinks
- * - which is what just failed. `Logger` and `ArraySink` both need this, and both had the
- * same four lines written out.
- */
-export function consoleFailureHandler(label: string): FailureHandler {
-  return (error: Error, subject: string): void => {
-    reportToConsole(`${label} failed for ${subject}: ${describeError(error)}`);
-  };
-}
-
-/**
  * Build a reporter for one operation: a handler, then the console, then nothing.
  *
  * The three rungs every failure channel in this library uses. What varies between callers
