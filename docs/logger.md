@@ -1335,9 +1335,15 @@ const pipeSink = new NamedPipeSink({
   closeTimeoutMS: 30000, // Timeout for close() in ms (default: 30000)
   onError: (errorType, err, pipePath) => {
     console.error(`Pipe error (${errorType}) for ${pipePath}:`, err.message);
-    // Optionally attempt to reconnect
+
+    // Only reconnect on an error that means the pipe itself is broken. Not every type
+    // does: `FORMAT` says your `formatter` threw and the default format was used
+    // instead, so the line was written and the pipe is healthy — reconnecting on that
+    // would tear the sink down and rebuild it once per log call.
     // In production, consider adding delays, retry limits, and backoff strategies
-    pipeSink.reconnect();
+    if (errorType === PipeErrorType.WRITE) {
+      pipeSink.reconnect();
+    }
   },
 });
 
