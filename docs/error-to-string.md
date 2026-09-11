@@ -132,17 +132,17 @@ const err = new Error('auth failed');
 (err as any).additionalInfo = {
   apiKey: 'sk_12345',
   user: { password: 'hunter2' },
-  items: [{ token: 'abc' }],
+  items: [{ token: 'abc' }, { token: 'def' }],
 };
 (err as any).sensitiveFieldNames = [
   'apiKey',
   'user.password',
-  'items[0].token',
+  'items[*].token',
 ];
 
 // AdditionalInfo.apiKey → *******5
 // AdditionalInfo.user   → password: ***REDACTED***
-// AdditionalInfo.items  → [{"key":"token","value":"***REDACTED***"}]
+// AdditionalInfo.items  → every element's token masked
 ```
 
 A bare name does **not** match at depth. `sensitiveFieldNames: ['password']` masks `additionalInfo.password` and leaves `additionalInfo.user.password` rendered, exactly as `redactedKeys: ['password']` does in the logger. Name the path to reach it.
@@ -153,7 +153,9 @@ A bare name is taken literally, so `sensitiveFieldNames: ['password-hash']` mask
 
 An unquoted path segment is a run of name characters - letters, digits, combining marks, `_`, `$`, `@` and `-` - so ordinary key names need no quoting inside a path either: `user.password-hash`, `user.@id`, and `users[0].api-key` all work. A key that contains anything else, including a delimiter, whitespace, or any other punctuation, needs the quoted bracket form, which is the only way to disambiguate it: `user["a.b"]`, `user["my key"]`, `user["a+b"]`.
 
-Entries the grammar rejects mask **nothing at all**, silently. That covers wildcard selectors such as `users[*].password`, which are not supported, along with a trailing dot and an unterminated bracket. The logger's `redactedKeys` behaves identically.
+A wildcard segment addresses **every element of an array**, with `*` and `[*]` the same rule written two ways - so `users[*].password` and `users.*.password` both mask the password of every user. It stands in for an array index and only for one: against a plain object it is the key literally spelled `*`, and an array's named properties are not expanded over either. The quoted `["*"]` is the same segment rather than an escape hatch, for the reason quoting never changes a segment's meaning: `users[0]`, `users["0"]` and `users.0` are already one entry too. See [Wildcards Over Arrays](./logger.md#wildcards-over-arrays), which covers this surface too.
+
+Entries the grammar rejects mask **nothing at all**, silently. That covers a trailing dot, an unterminated bracket, and a partial wildcard such as `us*rs`. The logger's `redactedKeys` behaves identically.
 
 A dotted or bracketed entry is treated as ambiguous and both readings are covered, the same way the logger's `redactedKeys` does: `'user.password'` masks the nested `additionalInfo.user.password` _and_ a literal key spelled `'user.password'`, when either exists.
 

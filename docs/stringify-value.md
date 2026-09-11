@@ -143,7 +143,7 @@ stringifyValue(
 // '{"user":{"password":"h***********t"}}'
 ```
 
-A bare name addresses a top-level key; `user.password` and `items[0].token` address one location. Naming a plain object or array masks each value inside it and keeps the shape.
+A bare name addresses a top-level key; `user.password` and `items[0].token` address one location; `items[*].token` and `items.*.token` address every element of an array. Naming a plain object or array masks each value inside it and keeps the shape. See [Wildcards Over Arrays](./logger.md#wildcards-over-arrays) for what a wildcard does and does not expand over.
 
 A path names a **location, not a value**, so one object reachable by two paths is masked only where it was named: `redactValue({ a, b: { ref: a } }, { redactedKeys: ['a.secret'] })` masks `a.secret` and hands `b.ref.secret` back as it came in. Name both to mask both. See [A Path Names a Location, Not a Value](./logger.md#a-path-names-a-location-not-a-value) for why, which covers this surface too.
 

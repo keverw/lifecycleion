@@ -1,4 +1,4 @@
-import { getPathParts } from './path-utils';
+import { getRedactPathParts, WILDCARD_PATH_SEGMENT } from './path-utils';
 import {
   defineEntry,
   describeContainer,
@@ -195,8 +195,9 @@ export function snapshotList(value: unknown): unknown[] | null {
  * Parse redaction entries into matchable paths.
  *
  * Shared so `sensitiveFieldNames` and `stringifyValue`'s `redactedKeys` agree on what an
- * entry means, and on the logger's syntax: a bare name is a top-level key, and
- * `user.password` or `items[0].token` addresses one location.
+ * entry means, and on the logger's syntax: a bare name is a top-level key,
+ * `user.password` or `items[0].token` addresses one location, and `users.*.password` or
+ * `items[*].token` addresses every element of an array.
  *
  * @returns `null` when the list itself is unusable - not an array, or holding a
  *          non-string. Callers must treat that as a reason to mask everything rather
@@ -220,14 +221,18 @@ export function parseRedactPaths(value: unknown): RedactPath[] | null {
 
       // A bare name is a top-level key and is taken literally, without going through the
       // path grammar. An unquoted segment must not contain a delimiter, so an ordinary
-      // name like `password-hash` is fine here but would need quoting inside a path.
+      // name like `password-hash` is fine here but would need quoting inside a path. A
+      // bare `*` is one segment either way, so it follows the same rule as any other
+      // wildcard: the key spelled `*` on an object bag - which is what the logger always
+      // hands the walk - and every element when the redacted value is itself an array,
+      // which `redactValue` and `stringifyValue` can be given.
       paths.push({ parts: [entry], entry });
 
       if (entry.includes('.') || entry.includes('[')) {
         // An entry with path syntax is ambiguous: it can name a nested location or one
         // literal key spelled that way. Both readings are covered, since leaving either
         // unmasked is the outcome redaction exists to prevent.
-        const parts = getPathParts(entry);
+        const parts = getRedactPathParts(entry);
 
         if (parts !== null && parts.length > 0) {
           paths.push({ parts, entry });
@@ -306,22 +311,149 @@ function redactPathIndex(paths: RedactPath[]): RedactPathNode {
   return root;
 }
 
-/** The node `path` names, or `undefined` when no entry runs through it. */
-function findRedactPathNode(
+/**
+ * The parsed list as a prefix tree, for a caller that has to descend the paths itself.
+ *
+ * Only the shape of the paths, deliberately: which entry ends where is this module's
+ * business, and a caller walking the prefixes has no use for it. A node with no children
+ * is a leaf, which names a value rather than a container to descend into.
+ */
+export interface RedactPrefixNode {
+  /** The segments any entry continues with here, as `segment -> the node below it`. */
+  children: ReadonlyMap<string, RedactPrefixNode>;
+}
+
+/**
+ * The prefix tree {@link redactPathIndex} builds, as {@link RedactPrefixNode}.
+ *
+ * Built once per list and cached on it, so a caller descending it pays nothing the walk
+ * has not already paid. `applyRedaction` uses it to normalize the containers a path passes
+ * through: descending the tree visits a shared prefix once, where descending the list
+ * visits it once per entry - which with a wildcard means once per entry *per array
+ * element*, and that difference is the difference between a bound that measures work and
+ * one that charges the same work repeatedly until it runs out.
+ */
+export function redactPathPrefixes(paths: RedactPath[]): RedactPrefixNode {
+  return redactPathIndex(paths);
+}
+
+/**
+ * One step the walk has taken, as the index needs to see it.
+ *
+ * The key on its own is not enough, because a wildcard expands over an array's *indexes*
+ * and over nothing else. `users.*.password` has to reach `users[0].password` when `users`
+ * is an array, and has to mean the key literally named `*` when `users` is a plain object
+ * - including one whose keys happen to read as numbers, `{ '0': { password } }`, which is
+ * not an array and whose entries a wildcard therefore does not address. Only the walk
+ * knows which container it was standing in, so it says so here rather than leaving the
+ * index to guess it back from the shape of the key.
+ *
+ * `isArrayIndex` is `isArrayIndexKey` answered about the container the walk was in: an
+ * element of an array is one, and an array's *named* properties - which `namedArrayKeys`
+ * selects with that same predicate - are not. So `items[*]` masks the elements of `items`
+ * and leaves `items.note` alone, exactly as `items[0]` does.
+ */
+export interface RedactPathStep {
+  /** The key as the container holds it. */
+  key: string;
+  /** Whether the container was an array and `key` addresses one of its slots. */
+  isArrayIndex: boolean;
+}
+
+/** A step onto a plain object's key, an array's named property, or any other literal key. */
+export function literalStep(key: string): RedactPathStep {
+  return { key, isArrayIndex: false };
+}
+
+/** A step onto one element of an array. */
+export function indexStep(index: string): RedactPathStep {
+  return { key: index, isArrayIndex: true };
+}
+
+/** The path as the failure reports spell it. */
+function pathText(path: readonly RedactPathStep[]): string {
+  return path.map((step) => step.key).join('.');
+}
+
+/**
+ * Every node `path` can be standing on, following wildcards where they apply.
+ *
+ * A wildcard makes this a walk of a small NFA rather than of a trie: at an array element
+ * both the literal index child and the `*` child can continue, so the lookup carries a set
+ * of nodes instead of one. It grows past a single node only where the caller wrote both a
+ * concrete index and a wildcard through the same prefix - `['items[0].a', 'items[*].b']` -
+ * so an ordinary list still costs one node per step, exactly as it did before wildcards
+ * existed.
+ *
+ * The width is bounded by how many nodes the index holds at that depth, which is bounded
+ * by the length of the list: a set of `n` nodes needs `n` entries enumerating that many
+ * distinct literal/wildcard interleavings through one prefix. A *configuration* written to
+ * do that - 8,192 entries covering every combination over 13 array levels - restores some
+ * of the `paths x nodes` product the prefix tree removed, measured at 268 ms. No ordinary
+ * list approaches it, and no payload can provoke it on its own, so it is left as a
+ * property of the grammar rather than bounded by dropping nodes, which would silently
+ * fail open.
+ *
+ * The literal child is pushed first at every step, so where both match it is the concrete
+ * entry rather than the wildcard that a `redactFunction` is handed as the key the caller
+ * wrote.
+ */
+function findRedactPathNodes(
   paths: RedactPath[],
-  path: string[],
-): RedactPathNode | undefined {
-  let node: RedactPathNode | undefined = redactPathIndex(paths);
+  path: readonly RedactPathStep[],
+): RedactPathNode[] {
+  let nodes: RedactPathNode[] = [redactPathIndex(paths)];
 
-  for (const part of path) {
-    node = node.children.get(part);
+  for (const step of path) {
+    const next: RedactPathNode[] = [];
 
-    if (node === undefined) {
-      return undefined;
+    for (const node of nodes) {
+      const literal = node.children.get(step.key);
+
+      if (literal !== undefined) {
+        next.push(literal);
+      }
+
+      // Only over an array slot. A plain object's keys are never expanded over, and
+      // neither are an array's named properties, so against either of those a `*` in the
+      // list is the literal key matched just above and nothing more.
+      //
+      // The second test is belt and braces: an array index key is a run of digits, so it
+      // cannot also be `*`, and this only makes it impossible to push one node twice.
+      if (step.isArrayIndex && step.key !== WILDCARD_PATH_SEGMENT) {
+        const wildcard = node.children.get(WILDCARD_PATH_SEGMENT);
+
+        if (wildcard !== undefined) {
+          next.push(wildcard);
+        }
+      }
+    }
+
+    if (next.length === 0) {
+      return next;
+    }
+
+    nodes = next;
+  }
+
+  return nodes;
+}
+
+/** The first entry `pick` answers with, over the nodes `path` can be standing on. */
+function firstEntryAt(
+  paths: RedactPath[],
+  path: readonly RedactPathStep[],
+  pick: (node: RedactPathNode) => string | undefined,
+): string | undefined {
+  for (const node of findRedactPathNodes(paths, path)) {
+    const entry = pick(node);
+
+    if (entry !== undefined) {
+      return entry;
     }
   }
 
-  return node;
+  return undefined;
 }
 
 /**
@@ -332,9 +464,9 @@ function findRedactPathNode(
  */
 export function matchRedactPath(
   paths: RedactPath[],
-  path: string[],
+  path: readonly RedactPathStep[],
 ): string | undefined {
-  return findRedactPathNode(paths, path)?.exact;
+  return firstEntryAt(paths, path, (node) => node.exact);
 }
 
 /**
@@ -355,7 +487,7 @@ export function matchRedactPath(
  */
 export function findPathInto(
   paths: RedactPath[],
-  path: string[],
+  path: readonly RedactPathStep[],
 ): string | undefined {
   // Nothing addresses the root itself. Paths are rooted *at* the value, so the shortest
   // one names an entry of it, and the prefix test below is vacuously true for every entry
@@ -381,9 +513,9 @@ export function findPathInto(
  */
 function pathPointingBelow(
   paths: RedactPath[],
-  path: string[],
+  path: readonly RedactPathStep[],
 ): string | undefined {
-  return findRedactPathNode(paths, path)?.below;
+  return firstEntryAt(paths, path, (node) => node.below);
 }
 
 /**
@@ -716,7 +848,7 @@ interface RedactState {
 function redactPathsInner(
   value: unknown,
   paths: RedactPath[],
-  path: string[],
+  path: readonly RedactPathStep[],
   redactFunction: RedactLeafFunction | undefined,
   seen: WeakSet<object>,
   state: RedactState,
@@ -865,7 +997,7 @@ function redactPathsInner(
       // The walk cannot tell whether something named for redaction sits below. Handing
       // back the original would risk returning it in the clear, so this one value fails
       // closed even though nothing under it matched.
-      report(shape.error, path.join('.') || '<root>');
+      report(shape.error, pathText(path) || '<root>');
       state.didFailToRead = true;
 
       return REDACTION_FAILED_MARKER;
@@ -913,6 +1045,11 @@ function redactPathsInner(
 
         state.entriesLeft--;
 
+        // An array slot, so a `*` in the list expands onto it. Built once and reused for
+        // both the reports and the recursion below, which is what the index and the
+        // failure paths each need.
+        const elementPath = [...path, indexStep(String(index))];
+
         let result: unknown;
 
         // Read once and kept, exactly as the object branch keeps the entry it read.
@@ -927,7 +1064,7 @@ function redactPathsInner(
         try {
           element = source[index];
         } catch (error) {
-          report(error, [...path, String(index)].join('.'));
+          report(error, pathText(elementPath));
           state.didFailToRead = true;
           didMask = true;
           copy.push(REDACTION_FAILED_MARKER);
@@ -939,7 +1076,7 @@ function redactPathsInner(
           result = redactPathsInner(
             element,
             paths,
-            [...path, String(index)],
+            elementPath,
             redactFunction,
             seen,
             state,
@@ -947,7 +1084,7 @@ function redactPathsInner(
             shouldSkipScanBelow,
           );
         } catch (error) {
-          report(error, [...path, String(index)].join('.'));
+          report(error, pathText(elementPath));
           state.didFailToRead = true;
           didMask = true;
           copy.push(REDACTION_FAILED_MARKER);
@@ -983,7 +1120,7 @@ function redactPathsInner(
         try {
           namedKeys = namedArrayKeys(source);
         } catch (error) {
-          report(error, path.join('.') || '<root>');
+          report(error, pathText(path) || '<root>');
           state.didFailToRead = true;
           didMask = true;
         }
@@ -1024,13 +1161,18 @@ function redactPathsInner(
 
         state.entriesLeft--;
 
+        // A *named* property of an array, which `namedArrayKeys` selected precisely
+        // because `isArrayIndexKey` says it is not a slot - so a `*` in the list does not
+        // expand onto it, and reaches it only as the key literally spelled `*`.
+        const namedPath = [...path, literalStep(namedKey)];
+
         let namedResult: unknown;
         let namedValue: unknown;
 
         try {
           namedValue = (source as unknown as Record<string, unknown>)[namedKey];
         } catch (error) {
-          report(error, [...path, namedKey].join('.'));
+          report(error, pathText(namedPath));
           state.didFailToRead = true;
           didMask = true;
           defineEntry(
@@ -1046,7 +1188,7 @@ function redactPathsInner(
           namedResult = redactPathsInner(
             namedValue,
             paths,
-            [...path, namedKey],
+            namedPath,
             redactFunction,
             seen,
             state,
@@ -1054,7 +1196,7 @@ function redactPathsInner(
             shouldSkipScanBelow,
           );
         } catch (error) {
-          report(error, [...path, namedKey].join('.'));
+          report(error, pathText(namedPath));
           state.didFailToRead = true;
           namedResult = REDACTION_FAILED_MARKER;
         }
@@ -1109,6 +1251,11 @@ function redactPathsInner(
 
       state.entriesLeft--;
 
+      // A plain object's key, never an array slot, so a `*` in the list reaches it only
+      // as the key literally spelled `*` - including on an object whose keys read as
+      // numbers, which is not an array and which a wildcard therefore does not address.
+      const entryPath = [...path, literalStep(key)];
+
       let result: unknown;
       let entryValue: unknown;
 
@@ -1118,7 +1265,7 @@ function redactPathsInner(
         entryValue = (value as Record<string, unknown>)[key];
       } catch (error) {
         // The walk never saw what was here, so it cannot conclude nothing matched.
-        report(error, [...path, key].join('.'));
+        report(error, pathText(entryPath));
         state.didFailToRead = true;
         didMask = true;
         defineEntry(copy, key, REDACTION_FAILED_MARKER);
@@ -1131,7 +1278,7 @@ function redactPathsInner(
         result = redactPathsInner(
           entryValue,
           paths,
-          [...path, key],
+          entryPath,
           redactFunction,
           seen,
           state,
@@ -1140,7 +1287,7 @@ function redactPathsInner(
         );
       } catch (error) {
         // The walk never saw what was below, so it cannot conclude nothing matched there.
-        report(error, [...path, key].join('.'));
+        report(error, pathText(entryPath));
         state.didFailToRead = true;
         result = REDACTION_FAILED_MARKER;
       }

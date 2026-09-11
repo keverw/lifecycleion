@@ -541,11 +541,178 @@ describe('applyRedaction - non-identifier key names', () => {
     );
   });
 
-  test('still redacts nothing for genuinely unsupported syntax', () => {
-    // Wildcards remain unsupported, as documented.
+  test('redacts every element of an array named by a wildcard', () => {
+    // One rule, two spellings: a wildcard stands in for an array index.
+    for (const entry of ['users[*].password', 'users.*.password']) {
+      expect(
+        applyRedaction(
+          { users: [{ password: 'hunter2' }, { password: 'hunter3' }] },
+          [entry],
+        ),
+      ).toEqual({
+        users: [{ password: '***REDACTED***' }, { password: '***REDACTED***' }],
+      });
+    }
+  });
+
+  test('reads a wildcard over a plain object as the key spelled *', () => {
+    // No set of array slots to expand over, so the only other reading available is the
+    // key literally named `*` - and never every key of the bag.
+    expect(
+      applyRedaction(
+        {
+          users: { '*': { password: 'hunter2' }, ana: { password: 'keepme' } },
+        },
+        ['users[*].password'],
+      ),
+    ).toEqual({
+      users: {
+        '*': { password: '***REDACTED***' },
+        ana: { password: 'keepme' },
+      },
+    });
+
+    // A key that merely reads as a number is still an object key, not an array slot.
+    expect(
+      applyRedaction({ users: { '0': { password: 'hunter2' } } }, [
+        'users[*].password',
+      ]),
+    ).toEqual({ users: { '0': { password: 'hunter2' } } });
+  });
+
+  test('does not let one wide wildcard starve the entries after it', () => {
+    // The pre-walk normalization is bounded, and the bound has to measure *work* rather
+    // than entries. Walked as a list, entries sharing one wildcard prefix each re-descend
+    // the same array, so three of them over a 400k array charged 1.2M against a 1M cap and
+    // the normalization simply stopped - leaving every later entry's container
+    // un-normalized, which is not a safe direction: a key only a property read can reach
+    // is then handed to the renderer instead of being dropped. Here `user.password` is the
+    // later entry, and the proxy hides it from enumeration while still answering a read.
+    const hidden = new Proxy(
+      { name: 'Alice', password: 'secret123' },
+      { ownKeys: () => ['name'] },
+    );
+
+    const result = applyRedaction(
+      { arr: new Array(400_000).fill(0), user: hidden },
+      ['arr[*].a', 'arr[*].b', 'arr[*].c', 'user.password'],
+    ) as Record<string, Record<string, unknown>>;
+
+    // Normalized: the copy carries exactly the keys enumeration can see, so the hidden one
+    // is neither masked nor printed. Un-normalized, this reads `'secret123'`.
+    expect(result['user']['password']).toBeUndefined();
+    expect(result['user']['name']).toBe('Alice');
+  });
+
+  test('does not let a wildcard over primitives starve a sibling entry', () => {
+    // The bound has to count containers descended into, not keys inspected. `items[*].x`
+    // normalizes nothing at all - every slot holds a number - so charging it a million
+    // exhausted the budget and abandoned the `user` branch with it, leaving the renderer
+    // the original object and a key only a property read can reach. Worse than the walk's
+    // own truncation, which at least plants a marker and reports.
+    const hidden = new Proxy(
+      { name: 'Alice', password: 'secret123' },
+      { ownKeys: () => ['name'] },
+    );
+
+    const result = applyRedaction(
+      { user: { profile: hidden }, items: new Array(1_000_000).fill(0) },
+      ['user.profile.password', 'items[*].x'],
+    ) as Record<string, Record<string, Record<string, unknown>>>;
+
+    expect(result['user']['profile']['password']).toBeUndefined();
+    expect(result['user']['profile']['name']).toBe('Alice');
+  });
+
+  test('scans a container reachable from many aliases once, not once per alias', () => {
+    // `copies` deduplicates the copy but not the *descent*, so one array reachable from
+    // four thousand places was pushed four thousand times and rescanned in full each time:
+    // 76 seconds synchronously inside `logger.info()`, on a payload of a few hundred
+    // kilobytes and a budget barely touched. The frames are deduplicated on
+    // `(container, node)` now, which is why this is flat in the number of aliases.
+    const items = new Array(100_000).fill(0);
+    const orders = Array.from({ length: 4_000 }, () => ({ items }));
+
+    const started = Date.now();
+
+    applyRedaction({ orders }, ['orders[*].items[*].card']);
+
+    // Deliberately loose: it fails only on a return to the per-alias rescan.
+    expect(Date.now() - started).toBeLessThan(15_000);
+  });
+
+  test('repoints every parent holding an alias, not just the one descended', () => {
+    // The descent is deduplicated; installing the copy is not, and this is the difference.
+    // A parent skipped before its `defineEntry` keeps a forwarding getter onto the
+    // caller's own container - and when nothing beneath matches, the walk returns the
+    // value it was given by reference, so that original lands in `redactedParams` with
+    // every key a property read can reach still on it.
+    //
+    // Nothing here matches `card`, deliberately: a match rebuilds the container from
+    // `Object.keys` and both orderings converge on the same output, which is what made a
+    // first version of this test pass either way.
+    const shared = new Proxy({ hidden: 'leaked' }, { ownKeys: () => [] });
+
+    const result = applyRedaction({ orders: [{ s: shared }, { s: shared }] }, [
+      'orders[*].s.card',
+    ]) as { orders: { s: Record<string, unknown> }[] };
+
+    // Both parents point at the copy, which carries no key at all - so the hidden one is
+    // neither masked nor printed. Left holding the original, either reads `'leaked'`.
+    expect(result.orders[0].s['hidden']).toBeUndefined();
+    expect(result.orders[1].s['hidden']).toBeUndefined();
+  });
+
+  test('masks through every alias of a shared container', () => {
+    const items = [{ card: 'hunter2' }];
+
+    const result = applyRedaction({ orders: [{ items }, { items }] }, [
+      'orders[*].items[*].card',
+    ]) as { orders: { items: { card: string }[] }[] };
+
+    expect(result.orders[0].items[0].card).toBe('***REDACTED***');
+    expect(result.orders[1].items[0].card).toBe('***REDACTED***');
+  });
+
+  test('bounds a payload that fans out through itself', () => {
+    // The other side of the same bound: frames are charged, so an array holding only
+    // itself cannot reach a billion of them three wildcards deep.
+    const arr: unknown[] = [];
+
+    for (let index = 0; index < 1_000; index++) {
+      arr.push(arr);
+    }
+
+    const started = Date.now();
+
+    applyRedaction({ a: arr }, ['a[*][*][*].p']);
+
+    expect(Date.now() - started).toBeLessThan(30_000);
+  });
+
+  test('reads a quoted wildcard exactly as an unquoted one', () => {
+    // Quoting disambiguates a key containing a delimiter and never changes what a segment
+    // means - the same reason `users[0]` and `users["0"]` are one entry - so `["*"]` is
+    // not an escape hatch for addressing a key named `*` on an array.
     expect(
       applyRedaction({ users: [{ password: 'hunter2' }] }, [
-        'users[*].password',
+        'users["*"].password',
+      ]),
+    ).toEqual({ users: [{ password: '***REDACTED***' }] });
+
+    // And the precedent it follows: a quoted index still reaches an array slot.
+    expect(
+      applyRedaction({ users: [{ password: 'hunter2' }] }, [
+        'users["0"].password',
+      ]),
+    ).toEqual({ users: [{ password: '***REDACTED***' }] });
+  });
+
+  test('still redacts nothing for genuinely unsupported syntax', () => {
+    // A trailing dot is still unparseable, so it names nothing and warns about nothing.
+    expect(
+      applyRedaction({ users: [{ password: 'hunter2' }] }, [
+        'users[0].password.',
       ]),
     ).toEqual({ users: [{ password: 'hunter2' }] });
   });

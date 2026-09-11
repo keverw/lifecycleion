@@ -432,6 +432,80 @@ describe('Logger', () => {
       expect(redacted.users[0].password).toBe('********3');
     });
 
+    test('should redact every array element named by a wildcard', () => {
+      for (const entry of ['users[*].password', 'users.*.password']) {
+        arraySink.logs.length = 0;
+
+        logger.info('User {{users[1].name}} authenticated', {
+          params: {
+            users: [
+              { name: 'Alice', password: 'secret123' },
+              { name: 'Bob', password: 'secret456' },
+            ],
+          },
+          redactedKeys: [entry],
+        });
+
+        const redacted = arraySink.logs[0].redactedParams as any;
+
+        expect(arraySink.logs[0].message).toBe('User Bob authenticated');
+        expect(redacted.users[0].name).toBe('Alice');
+        expect(redacted.users[1].name).toBe('Bob');
+        expect(redacted.users[0].password).toBe('********3');
+        expect(redacted.users[1].password).toBe('********6');
+      }
+    });
+
+    test('should widen a wildcard element the way a concrete index does', () => {
+      // Every container a path descends through is normalized before the walk, so the
+      // walk and the template renderer are handed one set of keys rather than two - a key
+      // only property lookup can reach is dropped instead of being printed unmasked. That
+      // normalization follows the parsed path, so a wildcard has to reach the same
+      // containers a concrete index does, or it would cover strictly less than the path it
+      // generalizes.
+      for (const entry of ['users[*].password', 'users[0].password']) {
+        arraySink.logs.length = 0;
+
+        const hidden = new Proxy(
+          { name: 'Alice', password: 'secret123' },
+          { ownKeys: () => ['name'] },
+        );
+
+        logger.info('User {{users[0].name}} authenticated', {
+          params: { users: [hidden] },
+          redactedKeys: [entry],
+        });
+
+        const redacted = arraySink.logs[0].redactedParams as any;
+
+        expect(redacted.users[0].name).toBe('Alice');
+        // The element is replaced by a copy carrying exactly the keys enumeration can
+        // see, so the hidden one is neither masked nor printed. Left un-normalized, the
+        // original is handed back by reference and a sink reads `'secret123'` off it.
+        expect(redacted.users[0].password).toBeUndefined();
+        expect(arraySink.logs[0].message).not.toContain('secret123');
+      }
+    });
+
+    test('should read a wildcard over a plain object as the key spelled *', () => {
+      logger.info('Bag', {
+        params: {
+          users: {
+            '*': { password: 'secret123' },
+            alice: { password: 'secret456' },
+          },
+        },
+        redactedKeys: ['users.*.password'],
+      });
+
+      const redacted = arraySink.logs[0].redactedParams as any;
+
+      expect(redacted.users['*'].password).toBe('********3');
+      // Never widened across an object's keys: naming one field must not quietly mask
+      // the bag it sits in.
+      expect(redacted.users.alice.password).toBe('secret456');
+    });
+
     test('should redact quoted bracket-key paths', () => {
       logger.info('User {{users[0]["display-name"]}} authenticated', {
         params: {

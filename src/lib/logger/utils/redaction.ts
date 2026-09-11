@@ -4,13 +4,16 @@ import {
 } from '../../internal/default-redact-function';
 import { defineEntry } from '../../internal/container-entries';
 import { isPlainContainer } from '../../internal/is-plain-container';
+import { WILDCARD_PATH_SEGMENT } from '../../internal/path-utils';
 import {
   MAX_REDACTION_ENTRIES,
   parseRedactPaths,
   redactMatchedPaths,
+  redactPathPrefixes,
   snapshotList,
   type ForwardingAliases,
   type RedactPath,
+  type RedactPrefixNode,
 } from '../../internal/redact-paths';
 import type { RedactFunction } from '../types';
 import {
@@ -255,8 +258,11 @@ function forwardingContainerCopy(
  * `['user.password']` on the identical shape one level deeper printed the secret.
  *
  * Only the containers a parsed path actually descends through are normalized, so the cost
- * is bounded by the entries the caller wrote rather than by the size of the payload, and
- * every other value still reaches the walk - and `redactedParams` - by reference.
+ * is bounded by what the caller named rather than by the size of the payload, and every
+ * other value still reaches the walk - and `redactedParams` - by reference. A wildcard is
+ * the one segment that widens that: `items[*].token` descends through every element of
+ * `items`, exactly as `items[0].token` descends through one, which is what keeps a
+ * wildcard from covering less than the path it generalizes.
  *
  * The copy is installed in place of the original, which is safe because the only things
  * written into are this module's own: the bag from {@link normalizeParamsBag} at the first
@@ -269,41 +275,189 @@ function normalizeAlongRedactPaths(
 ): void {
   const copies = new Map<object, object>();
 
-  for (const { parts } of paths) {
-    let container: Record<string, unknown> = bag;
+  // The paths as a prefix *tree*, walked once, rather than as a list walked once per
+  // entry. Both reach the same containers, and the difference is what each costs: five
+  // entries under `arr[*]` descend one shared prefix five times as a list, so a bound on
+  // the work charges the same array five times over and runs out four times sooner than
+  // the work warrants. Charged once here, which is what makes the budget below a measure
+  // of containers normalized rather than of entries written.
+  const stack: {
+    container: Record<string, unknown>;
+    node: RedactPrefixNode;
+  }[] = [{ container: bag, node: redactPathPrefixes(paths) }];
 
-    // The last segment names the leaf to mask, not a container to descend into.
-    for (let index = 0; index < parts.length - 1; index++) {
-      const key = parts[index];
+  // A wildcard turns a path from a chain into a fan-out - `a[*].b[*].c` reaches the
+  // product of two array lengths - and this runs *before* the walk that
+  // {@link MAX_REDACTION_ENTRIES} bounds, so without a cap of its own it would spend on
+  // forwarding copies exactly the time that cap exists to refuse. Per pass rather than per
+  // entry, exactly like the walk's own counter.
+  //
+  // Charged per container actually descended into, and nowhere else. A slot holding a
+  // primitive is free, and that is the whole difference between this and a counter that
+  // charges per key *inspected*: `items[*].x` over a million numbers normalizes nothing,
+  // and charging it a million abandoned every frame still on the stack - including, in bag
+  // order, a container the caller had separately named. That failure is worse than the
+  // walk's own truncation, because it plants no marker and reports nothing. The renderer
+  // is simply handed the original, with a key only a property read can reach still on it.
+  //
+  // The cap alone does not bound what those frames then *inspect*, which is the length of
+  // the container each one descends into, so `descended` below deduplicates them. One
+  // array reachable from many places was pushed once per alias and rescanned in full each
+  // time - four thousand orders sharing one hundred-thousand-element array under
+  // `orders[*].items[*].card` cost 76 seconds synchronously inside `logger.info()`, for
+  // about four thousand charges, on a payload of a few hundred kilobytes. `copies`
+  // deduplicates the copy; it does not deduplicate the descent, and the descent is where
+  // the time goes.
+  //
+  // Inspecting a slot is still uncharged, and is not free: the copy's index is a
+  // forwarding getter, so this re-enters the caller's own `get` trap when the source is a
+  // `Proxy`. What the two bounds together buy is that it happens once per distinct
+  // container *per prefix node* - the dedupe key is the pair - rather than once per route
+  // to it, and that the frames doing it are capped, which is what stops a payload that
+  // fans out through itself: a thousand-element array holding only itself would otherwise
+  // reach a billion frames three wildcards deep.
+  //
+  // "Per prefix node" is the part a hostile *configuration* can still buy width with, and
+  // it is left that way deliberately. A single 3 KB entry - `a` followed by a thousand
+  // `[*]` - is a thousand prefix nodes over one array, and rescans it once for each: 20
+  // seconds on an 800 KB payload. A thousand entries with distinct prefixes onto one
+  // shared array cost the same. Nothing caps the length of an entry or the number of
+  // distinct prefixes, and nothing sensibly could without refusing lists that are merely
+  // long. It is the same class as the width bound on `findRedactPathNodes`: a cost a
+  // developer's own `redactedKeys` can write, and one no payload can provoke on its own.
+  // There is no payload-only shape left that stalls.
+  //
+  // Running out still normalizes fewer containers than asked, and that is a real loss
+  // rather than a safe one - but there is no cheaper answer, since refusing the whole bag
+  // would leave every key already widened half-applied.
+  let budget = MAX_REDACTION_ENTRIES;
 
-      let child: unknown;
+  // The `(container, node)` pairs already descended. Re-descending one is a strict no-op -
+  // the copy comes back from `copies`, `defineEntry` rewrites the identical value, and the
+  // same children are pushed again - so skipping it gives up nothing but the rescan. The
+  // one thing it does give up is a second chance for a getter that throws once and then
+  // answers, which is the policy `normalizeParamsBag` already settles: marking a getter
+  // that threw is the answer redaction should give.
+  const descended = new WeakMap<object, Set<RedactPrefixNode>>();
 
-      try {
-        child = container[key];
-      } catch {
-        break;
+  while (stack.length > 0) {
+    const { container, node } = stack.pop() as {
+      container: Record<string, unknown>;
+      node: RedactPrefixNode;
+    };
+
+    for (const [part, child] of node.children) {
+      // A leaf names the value to mask, not a container to descend into.
+      if (child.children.size === 0) {
+        continue;
       }
 
-      // Only a plain container is walked as structure. Anything else is masked whole when
-      // a path points into it, so its own keys are never resolved separately.
-      if (!isPlainContainer(child)) {
-        break;
+      for (const key of stepKeys(container, part)) {
+        if (budget <= 0) {
+          return;
+        }
+
+        let value: unknown;
+
+        try {
+          value = container[key];
+        } catch {
+          continue;
+        }
+
+        // Only a plain container is walked as structure. Anything else is masked whole
+        // when a path points into it, so its own keys are never resolved separately.
+        if (!isPlainContainer(value)) {
+          continue;
+        }
+
+        const copy = forwardingContainerCopy(value, copies, aliases);
+
+        if (copy === null) {
+          continue;
+        }
+
+        // Installed into *this* parent regardless of whether the descent below is a
+        // repeat, and the order matters. A parent skipped before this keeps a forwarding
+        // getter onto the caller's own container, and where nothing beneath matches the
+        // walk hands that value back by reference - so the original reaches
+        // `redactedParams` with every key a property read can still resolve on it, while
+        // the parent that was descended holds a copy carrying none of them.
+        try {
+          defineEntry(container, key, copy);
+        } catch {
+          continue;
+        }
+
+        let alreadyUnder = descended.get(copy);
+
+        if (alreadyUnder === undefined) {
+          alreadyUnder = new Set();
+          descended.set(copy, alreadyUnder);
+        }
+
+        if (alreadyUnder.has(child)) {
+          continue;
+        }
+
+        alreadyUnder.add(child);
+
+        budget--;
+        stack.push({ container: copy as Record<string, unknown>, node: child });
       }
-
-      const copy = forwardingContainerCopy(child, copies, aliases);
-
-      if (copy === null) {
-        break;
-      }
-
-      try {
-        defineEntry(container, key, copy);
-      } catch {
-        break;
-      }
-
-      container = copy as Record<string, unknown>;
     }
+  }
+}
+
+/**
+ * The keys `part` addresses on `container` - one, or every slot of an array under a `*`.
+ *
+ * Answers the same question `redact-paths` answers during the walk, and has to answer it
+ * the same way: this pass and the walk disagreeing about what an entry addresses is how a
+ * container gets widened for a path that never reaches it, or - the direction that leaks -
+ * how a path reaches a container whose hidden keys were never widened for it. So a
+ * wildcard expands over an array's indexes only. Against a plain object, including one
+ * whose keys merely read as numbers, it is the key literally spelled `*`, which is the
+ * literal step this yields for every other segment.
+ *
+ * An array's own `*` named property is yielded alongside its slots, for the same reason:
+ * the walk reaches it as a literal key, so this has to offer it as one too. It comes first
+ * so the literal reading is offered before a long run of slots.
+ *
+ * Yielded rather than collected, so a wildcard over a wide array costs one string at a
+ * time instead of a million-entry key list built before the caller looks at any of it.
+ */
+function* stepKeys(container: object, part: string): Generator<string> {
+  if (part !== WILDCARD_PATH_SEGMENT) {
+    yield part;
+
+    return;
+  }
+
+  let length: number;
+
+  try {
+    if (!Array.isArray(container)) {
+      yield part;
+
+      return;
+    }
+
+    length = (container as unknown[]).length;
+  } catch {
+    // A revoked `Proxy`, or a `length` that refuses. Nothing to descend into, and the
+    // walk's own guards fail the container closed when it reaches it.
+    return;
+  }
+
+  yield part;
+
+  if (!Number.isSafeInteger(length) || length <= 0) {
+    return;
+  }
+
+  for (let index = 0; index < length; index++) {
+    yield String(index);
   }
 }
 

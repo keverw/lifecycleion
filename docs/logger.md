@@ -17,6 +17,7 @@ A modern, flexible logging library with sink-based architecture, template string
     - [Nested Object Support](#nested-object-support)
   - [Redaction of Sensitive Data](#redaction-of-sensitive-data)
     - [Nested Object Redaction](#nested-object-redaction)
+    - [Wildcards Over Arrays](#wildcards-over-arrays)
     - [A Path Names a Location, Not a Value](#a-path-names-a-location-not-a-value)
     - [Path Grammar](#path-grammar)
     - [Custom Redaction Function](#custom-redaction-function)
@@ -52,7 +53,7 @@ A modern, flexible logging library with sink-based architecture, template string
     - [Health Monitoring](#health-monitoring)
     - [Flush Pending Writes](#flush-pending-writes)
   - [NamedPipeSink](#namedpipesink)
-    - [Error Types](#error-types)
+    - [Failure Shape](#failure-shape)
     - [Error Handling & Reconnection](#error-handling--reconnection)
     - [Custom Formatter](#custom-formatter)
     - [Setup](#setup)
@@ -465,9 +466,38 @@ logger.info('User login attempt', {
 });
 ```
 
-**Note:** Redaction paths are exact matches. Dot notation, array indexes, and quoted bracket keys like `users[0]["password-hash"]` are supported, but wildcard selectors such as `users[*].password` are not. Quoting is only required for a key that contains `.`, `[` or `]`; `users[0].password-hash` resolves the same as `users[0]["password-hash"]`.
+**Note:** Dot notation, array indexes, quoted bracket keys like `users[0]["password-hash"]`, and the array wildcard `users[*].password` are all supported. Quoting is only required for a key that contains `.`, `[` or `]`; `users[0].password-hash` resolves the same as `users[0]["password-hash"]`.
 
 A bare name therefore addresses a top-level key only: `redactedKeys: ['password']` masks `params.password` and leaves `params.user.password` rendered. Name the path to reach it.
+
+#### Wildcards Over Arrays
+
+A wildcard segment addresses **every element of an array**. `*` and `[*]` are the same rule written two ways, so `users.*.password` and `users[*].password` are interchangeable:
+
+```typescript
+logger.info('User login attempt', {
+  params: {
+    users: [
+      { username: 'alice', password: 'secret123' }, // Will be masked
+      { username: 'bob', password: 'secret456' }, // Will be masked
+    ],
+  },
+  redactedKeys: ['users[*].password'],
+});
+```
+
+It stands in for an array **index**, and only for one. That has two consequences worth knowing:
+
+- **A plain object is not expanded over.** Where the parent is an object, a wildcard is the key literally spelled `*` - the same key `users["*"]` addresses - and nothing else. Naming one field never quietly masks the whole bag it sits in. An object whose keys happen to read as numbers, `{ users: { '0': { password } } }`, is still an object and is still not expanded over.
+- **An array's named properties are not expanded over either.** `items[*]` masks the elements of `items` and leaves a property such as `items.note` alone, exactly as `items[0]` does.
+
+`*`, `[*]` and the quoted `["*"]` are all the same segment, so quoting is **not** an escape hatch: `items["*"]` expands over every element when `items` is an array, exactly as `items[*]` does.
+
+That is the grammar's existing rule rather than a wildcard exception. Quoting disambiguates a key that contains a delimiter; it never changes what a segment means. The same is already true of numbers - `users[0]`, `users["0"]`, `users['0']` and `users.0` are one entry, and that one entry addresses both an array's slot `0` and a plain object's key `"0"`, because the parser does not distinguish an index from a name and the container decides. The consequence for wildcards is simply that there is no spelling which addresses only a named property called `*` on an array.
+
+Concrete paths are unchanged: `users[0].password` still masks that one element, and where both a concrete entry and a wildcard match the same location, the concrete one is the key handed to a [`redactFunction`](#custom-redaction-function).
+
+A wildcard that resolves to nothing - the parent is missing, or is not a container - masks nothing and does not warn, exactly as an unreachable concrete path does. It adds no failure mode of its own: a container that genuinely refuses to be read still fails closed and still reports, wildcard or not.
 
 #### A Path Names a Location, Not a Value
 
@@ -494,7 +524,11 @@ This falls out of what a path means and is not an oversight to work around. Mask
 
 #### Path Grammar
 
-An unquoted path segment is a run of name characters - letters, digits, combining marks, `_`, `$`, `@` and `-` - so ordinary key names need no quoting: `user.password-hash` and `users[0].api-key` both work. A key that contains anything else, including a delimiter, whitespace, or any other punctuation, needs the quoted bracket form, which is the only way to disambiguate it: `user["a.b"]`, `user["my key"]`, `user["a+b"]`. An entry the grammar rejects, such as the unsupported wildcard form or a trailing dot, redacts **nothing** and does not warn.
+An unquoted path segment is a run of name characters - letters, digits, combining marks, `_`, `$`, `@` and `-` - so ordinary key names need no quoting: `user.password-hash` and `users[0].api-key` both work. A key that contains anything else, including a delimiter, whitespace, or any other punctuation, needs the quoted bracket form, which is the only way to disambiguate it: `user["a.b"]`, `user["my key"]`, `user["a+b"]`. An entry the grammar rejects, such as a trailing dot or an unterminated bracket, redacts **nothing** and does not warn.
+
+`*` and `[*]` are segments of their own, and only as a whole segment: `users[*].password` and `users.*.password` parse, while a partial wildcard such as `us*rs` or `a.*b` does not and therefore redacts nothing. The quoted `["*"]` is the same segment rather than an escape hatch - see [Wildcards Over Arrays](#wildcards-over-arrays).
+
+This is the redaction grammar. A `{{placeholder}}` in a message template uses the same syntax minus the wildcard, since a placeholder renders one value and there is nothing for `{{users[*].name}}` to print - it is left in the message verbatim, as any unparseable placeholder is.
 
 [`errorToString`](./error-to-string.md#additional-info--sensitive-fields) uses this same syntax for the `sensitiveFieldNames` list it reads off an error, so one mental model covers both. The two agree on bare names, dotted paths, array indexes, and quoted bracket keys; they differ only in what happens when the list itself is unusable, where `errorToString` drops `additionalInfo` wholesale.
 

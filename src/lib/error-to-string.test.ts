@@ -249,11 +249,36 @@ describe('errorToString', () => {
       ).not.toContain(SECRET);
     });
 
+    it('should mask every element of an array named by a wildcard', () => {
+      // `users[*].password` and `users.*.password` are one rule written two ways: a
+      // wildcard stands in for an array index, so it reaches every slot of `users`.
+      for (const entry of ['users[*].password', 'users.*.password']) {
+        const rendered = render(
+          { users: [{ password: SECRET }, { password: `${SECRET}-2` }] },
+          [entry],
+        );
+
+        expect(rendered).not.toContain(SECRET);
+      }
+    });
+
+    it('should read a wildcard over a plain object as the key spelled *', () => {
+      // There is no set of slots to expand over, so the only other reading available is
+      // the literal key - and an object whose keys merely read as numbers is not an array.
+      expect(
+        render({ users: { '*': { password: SECRET } } }, ['users.*.password']),
+      ).not.toContain(SECRET);
+
+      expect(
+        render({ users: { '0': { password: SECRET } } }, ['users[*].password']),
+      ).toContain(SECRET);
+    });
+
     it('should mask nothing for genuinely unsupported syntax', () => {
-      // Wildcards are not supported, and an unparseable entry is not the fail-closed
-      // case: it masks nothing and leaves the other fields rendering.
+      // A trailing dot is still unparseable, and an unparseable entry is not the
+      // fail-closed case: it masks nothing and leaves the other fields rendering.
       const rendered = render({ users: [{ password: SECRET }], keep: 'diag' }, [
-        'users[*].password',
+        'users[0].password.',
       ]);
 
       expect(rendered).toContain(SECRET);

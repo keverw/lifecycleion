@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { getPathParts } from './path-utils';
+import { getPathParts, getRedactPathParts } from './path-utils';
 
 describe('getPathParts', () => {
   test('should parse dot-only paths', () => {
@@ -64,8 +64,11 @@ describe('getPathParts', () => {
   });
 
   test('should reject unsupported path syntax', () => {
-    // Wildcards are still not supported, and a malformed path is still rejected.
+    // A malformed path is still rejected - and so is a wildcard, which this grammar
+    // deliberately does not admit: a placeholder renders one value, so there is nothing
+    // for `{{users[*].name}}` to print. Redaction has `getRedactPathParts` for that.
     expect(getPathParts('users[*].password')).toBeNull();
+    expect(getPathParts('users.*.password')).toBeNull();
     expect(getPathParts('user.')).toBeNull();
     expect(getPathParts('user]name')).toBeNull();
     expect(getPathParts('user[0')).toBeNull();
@@ -103,5 +106,95 @@ describe('getPathParts', () => {
     // stray surrogates, and the sticky `lastIndex` still lands on the next delimiter.
     expect(getPathParts('x.𝐀bc')).toEqual(['x', '𝐀bc']);
     expect(getPathParts('user.日本語')).toEqual(['user', '日本語']);
+  });
+});
+
+describe('getRedactPathParts', () => {
+  test('should parse both spellings of a wildcard to the same segment', () => {
+    // One rule written two ways, which is how `users.*.password` and `users[*].password`
+    // read to anyone writing a `redactedKeys` list.
+    expect(getRedactPathParts('users[*].password')).toEqual([
+      'users',
+      '*',
+      'password',
+    ]);
+    expect(getRedactPathParts('users.*.password')).toEqual([
+      'users',
+      '*',
+      'password',
+    ]);
+  });
+
+  test('should accept a wildcard anywhere a segment goes', () => {
+    expect(getRedactPathParts('*')).toEqual(['*']);
+    expect(getRedactPathParts('items[*]')).toEqual(['items', '*']);
+    expect(getRedactPathParts('a[*].b[*].c')).toEqual([
+      'a',
+      '*',
+      'b',
+      '*',
+      'c',
+    ]);
+  });
+
+  test('should admit the wildcard only as a whole segment', () => {
+    // Widening the grammar for redaction must not widen what counts as a name, so a `*`
+    // touching anything else is rejected exactly as a stray character always was.
+    expect(getRedactPathParts('us*rs')).toBeNull();
+    expect(getRedactPathParts('a.*b')).toBeNull();
+    expect(getRedactPathParts('a.b*')).toBeNull();
+    expect(getRedactPathParts('**')).toBeNull();
+    expect(getRedactPathParts('a[*')).toBeNull();
+    expect(getRedactPathParts('a[**]')).toBeNull();
+  });
+
+  test('should still reject everything the value grammar rejects', () => {
+    expect(getRedactPathParts('user.')).toBeNull();
+    expect(getRedactPathParts('user]name')).toBeNull();
+    expect(getRedactPathParts('user[0')).toBeNull();
+    expect(getRedactPathParts('Hello world')).toBeNull();
+    expect(getRedactPathParts('oops!')).toBeNull();
+  });
+
+  test('should parse a concrete path exactly as the value grammar does', () => {
+    for (const path of [
+      'user.profile.name',
+      'users[0].roles[1].name',
+      'users[0]["display-name"]',
+      'user.password-hash',
+      "u['my key']",
+      'x.𝐀bc',
+    ]) {
+      expect(getRedactPathParts(path)).toEqual(getPathParts(path));
+    }
+  });
+
+  test('should treat quoting as disambiguation, never as a literal marker', () => {
+    // Quoting exists to address a key containing a delimiter; it has never changed what a
+    // segment *means*. Numbers are the precedent: all four spellings are one part, and
+    // that part addresses an array slot and an object key named `0` alike, because the
+    // parser does not distinguish an index from a name - the container does. The wildcard
+    // follows the same rule, which is why `["*"]` is not an escape hatch.
+    const index = ['users', '0', 'password'];
+
+    expect(getRedactPathParts('users[0].password')).toEqual(index);
+    expect(getRedactPathParts('users["0"].password')).toEqual(index);
+    expect(getRedactPathParts("users['0'].password")).toEqual(index);
+    expect(getRedactPathParts('users.0.password')).toEqual(index);
+
+    const wildcard = ['users', '*', 'password'];
+
+    expect(getRedactPathParts('users[*].password')).toEqual(wildcard);
+    expect(getRedactPathParts('users["*"].password')).toEqual(wildcard);
+    expect(getRedactPathParts("users['*'].password")).toEqual(wildcard);
+    expect(getRedactPathParts('users.*.password')).toEqual(wildcard);
+  });
+
+  test('should read the quoted form as the key literally named *', () => {
+    // Which is the same part a bare `*` parses to, deliberately: against a plain object
+    // there is no set of array slots to expand over, so that key is the only other
+    // reading available.
+    expect(getRedactPathParts('user["*"]')).toEqual(['user', '*']);
+    expect(getRedactPathParts('user.*')).toEqual(['user', '*']);
   });
 });
