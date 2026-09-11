@@ -351,7 +351,7 @@ describe('deserializeError - untrusted input', () => {
     expect(typeof error.message).toBe('string');
   });
 
-  describe('serializeError onRenderError', () => {
+  describe('serializeError onFormatError', () => {
     test('should report an unserializable value with its path', () => {
       // This runs at an IPC boundary, usually while already reporting a failure, so the
       // marker keeps the payload intact and sendable. The cause has nowhere to go but a
@@ -370,7 +370,8 @@ describe('deserializeError - untrusted input', () => {
       const result = serializeError(
         Object.assign(new Error('boom'), { context: bag }),
         {
-          onRenderError: (error, path) => seen.push(`${path}|${error.message}`),
+          onFormatError: (error, _kind, path) =>
+            seen.push(`${path}|${error.message}`),
         },
       );
 

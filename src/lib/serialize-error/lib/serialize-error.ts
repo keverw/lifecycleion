@@ -6,10 +6,15 @@ import { readMember } from '../../internal/read-member';
 import { MAX_RENDER_DEPTH, TRUNCATED } from '../../internal/render-budget';
 import { isErrorValue } from '../../to-error';
 import {
-  createRenderReporter,
-  type RenderErrorHandler,
-  type ReportRenderFailure,
-} from '../../internal/render-reporter';
+  createFormatReporter,
+  type FormatErrorHandler,
+  type ReportFormatFailure,
+} from '../../internal/format-reporter';
+
+export type {
+  FormatErrorHandler,
+  FormatFailureKind,
+} from '../../internal/format-reporter';
 
 /** Options for {@link serializeError}. */
 export interface SerializeErrorOptions {
@@ -26,7 +31,7 @@ export interface SerializeErrorOptions {
    *
    * Fires at most once per call. Do not serialize or log from inside it.
    */
-  onRenderError?: RenderErrorHandler;
+  onFormatError?: FormatErrorHandler;
 }
 
 export interface SerializedError {
@@ -41,12 +46,12 @@ export interface SerializedError {
  *
  * Split the way `errorToString` and the template renderer split theirs, and it earns the
  * detail here more than anywhere: this payload crosses a process boundary, and the
- * receiving side has no `onRenderError` of its own. The marker is the only thing that
+ * receiving side has no `onFormatError` of its own. The marker is the only thing that
  * survives the wire, so it is the only diagnosis that reader will ever get.
  *
  * **The cause is deliberately not here**, for the same reason it is nowhere else: it comes
  * from the caller's own getter and may carry the value it was hiding - and this object is
- * about to be sent somewhere. It goes to `onRenderError` instead.
+ * about to be sent somewhere. It goes to `onFormatError` instead.
  */
 const UNSERIALIZABLE_KEYS = '<unserializable: keys>';
 
@@ -127,7 +132,7 @@ export function serializeError(
   // Defaults to the console, as every other failure channel in this library does - and it
   // matters more here than anywhere: this payload crosses a process boundary, and the
   // receiving side has no callback of its own to learn anything from.
-  const report = createRenderReporter(options?.onRenderError);
+  const report = createFormatReporter('render', options?.onFormatError);
 
   // The root is tracked before the walk starts, not left for `deepSerialize` to add when
   // it reaches it. A nested error arrives here already in `seen`, because the walk added
@@ -145,7 +150,7 @@ function serializeErrorInner(
   seen: WeakSet<object>,
   depth: number,
   path: string,
-  report: ReportRenderFailure,
+  report: ReportFormatFailure,
 ): SerializedError {
   // The shared brand check, so a cross-realm error keeps the error branch - and guarded,
   // which a bare `instanceof` is not.
@@ -252,7 +257,7 @@ function deepSerializeRecord(
   seen: WeakSet<object>,
   depth: number,
   path: string,
-  report: ReportRenderFailure,
+  report: ReportFormatFailure,
 ): SerializedError {
   const result: SerializedError = {} as SerializedError;
 
@@ -272,7 +277,7 @@ function deepSerialize(
   seen: WeakSet<object>,
   depth: number,
   path: string,
-  report: ReportRenderFailure,
+  report: ReportFormatFailure,
 ): unknown {
   if (value === null || typeof value !== 'object') {
     return value;

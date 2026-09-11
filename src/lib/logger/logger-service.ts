@@ -14,7 +14,7 @@ export class LoggerService {
    * Renders an error for `errorObject`, supplied by the `Logger` that made this.
    *
    * Handed down rather than called here, so a service logger masks with the logger's own
-   * `redactFunction` and reports a redaction failure to its `onRedactionError`. Calling
+   * `redactFunction` and reports a redaction failure to its `onFormatError`. Calling
    * the shared helper directly instead left this the one surface that rendered an error
    * with the library defaults - masking differently from the same logger's `errorObject`
    * and from its params, and writing failures to the console the caller had replaced.

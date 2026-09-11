@@ -1,9 +1,16 @@
 import { getPathParts } from './internal/path-utils';
 import { stringifyValue } from './stringify-value';
 import {
-  createRenderReporter,
-  type RenderErrorHandler,
-} from './internal/render-reporter';
+  createFormatReporter,
+  type FormatErrorHandler,
+  type FormatFailureKind,
+  type ReportFormatFailure,
+} from './internal/format-reporter';
+
+export type {
+  FormatErrorHandler,
+  FormatFailureKind,
+} from './internal/format-reporter';
 
 export type TemplateFunction = (locals: Record<string, unknown>) => string;
 
@@ -23,7 +30,7 @@ export interface CurlyBracketsOptions {
    * a read that actually threw reaches it; a placeholder that simply is not there reports
    * nothing, which is the distinction this exists to draw.
    */
-  onRenderError?: RenderErrorHandler;
+  onFormatError?: FormatErrorHandler;
 }
 
 interface CurlyBracketsFunction {
@@ -87,7 +94,7 @@ CurlyBrackets.compileTemplate = function (
     // One reporter per render of the compiled template, not per compile: a compiled
     // template is reused across calls, and a budget shared between them would report the
     // first render's failure and stay silent for every render after it.
-    const report = createRenderReporter(options?.onRenderError);
+    const report = createFormatReporter('render', options?.onFormatError);
 
     // Forwarded into the shared reporter rather than handed over directly, and rooted at
     // the placeholder rather than at the anonymous `<value>` a bare render reports.
@@ -99,11 +106,30 @@ CurlyBrackets.compileTemplate = function (
     // the template. And a template has many placeholders, so `<value>.token` names the
     // failure without naming which `{{...}}` produced it, which is most of what the caller
     // needs to act.
+    // One reporter per kind, built on first use. `report` above is the `'render'` one;
+    // a nested `stringifyValue` can also raise `'redaction'`, and the two must not share a
+    // budget - a redaction failure and a render failure in the same template are two
+    // different things and collapsing them would hide one.
+    const byKind = new Map<FormatFailureKind, ReportFormatFailure>([
+      ['render', report],
+    ]);
+
     const renderOptionsFor = (
       placeholder: string,
-    ): { onRenderError: RenderErrorHandler } => ({
-      onRenderError: (error: Error, path: string): void => {
-        report(error, rootPathAt(placeholder, path));
+    ): { onFormatError: FormatErrorHandler } => ({
+      onFormatError: (
+        error: Error,
+        kind: FormatFailureKind,
+        path: string,
+      ): void => {
+        let forKind = byKind.get(kind);
+
+        if (forKind === undefined) {
+          forKind = createFormatReporter(kind, options?.onFormatError);
+          byKind.set(kind, forKind);
+        }
+
+        forKind(error, rootPathAt(placeholder, path));
       },
     });
 

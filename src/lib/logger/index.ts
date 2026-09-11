@@ -11,16 +11,13 @@ import { isPromise } from '../is-promise';
 import { describeError, isErrorValue, toError } from '../to-error';
 import { readMember } from '../internal/read-member';
 import { reportToConsole } from '../internal/report-to-console';
+import { reportThroughHandler } from '../internal/failure-reporter';
 import {
-  consoleFailureHandler,
-  reportThroughHandler,
-} from '../internal/failure-reporter';
-import {
-  createRedactionReporter,
-  type RedactionErrorHandler,
-  type ReportRedactionFailure,
-} from '../internal/redaction-reporter';
-import type { RenderErrorHandler } from '../internal/render-reporter';
+  consoleFormatHandler,
+  createFormatReporter,
+  type FormatErrorHandler,
+  type ReportFormatFailure,
+} from '../internal/format-reporter';
 import type {
   LogEntry,
   LogSink,
@@ -189,8 +186,7 @@ export class Logger extends EventEmitter {
     sink: LogSink,
   ) => void;
   private onEventHandlerError?: (error: Error, event: string) => void;
-  private onRedactionError?: RedactionErrorHandler;
-  private onRenderError?: RenderErrorHandler;
+  private onFormatError?: FormatErrorHandler;
 
   private _didExit = false;
   private _exitCode: number = 0;
@@ -212,8 +208,7 @@ export class Logger extends EventEmitter {
     this.beforeExitCallback = options.beforeExitCallback;
     this.onSinkError = options.onSinkError;
     this.onEventHandlerError = options.onEventHandlerError;
-    this.onRedactionError = options.onRedactionError;
-    this.onRenderError = options.onRenderError;
+    this.onFormatError = options.onFormatError;
   }
 
   public get didExit(): boolean {
@@ -902,7 +897,7 @@ export class Logger extends EventEmitter {
     // The reporter for every fail-closed path below, built on first use so an ordinary
     // log call allocates nothing for it.
     //
-    // These paths were silent, which broke the promise `onRedactionError` makes
+    // These paths were silent, which broke the promise `onFormatError` makes
     // everywhere else: a failure leaves a diagnosis and not only a marker. The other four
     // surfaces keep it - `applyRedaction` for params, `errorToString` for an error's
     // `sensitiveFieldNames`, `redactValue` and `stringifyValue` - because each builds a
@@ -912,14 +907,15 @@ export class Logger extends EventEmitter {
     //
     // One reporter shared across all of them, so the several guards a single unreadable
     // list trips report once rather than once each - the same once-per-pass bound
-    // `createRedactionReporter` gives every other caller. It is handed to `applyRedaction`
+    // `createFormatReporter` gives every other caller. It is handed to `applyRedaction`
     // as well, so that function's own reporter nests inside this one instead of carrying a
     // second budget: the params are one pass, and one pass reports once.
-    let backstopReporter: ReportRedactionFailure | null = null;
+    let backstopReporter: ReportFormatFailure | null = null;
 
     const reportBackstop = (error: unknown, key: string): void => {
-      backstopReporter ??= createRedactionReporter(
-        this.onRedactionError ?? this.reportFailureToConsole('Redaction'),
+      backstopReporter ??= createFormatReporter(
+        'redaction',
+        this.formatErrorHandler(),
       );
       backstopReporter(error, key);
     };
@@ -965,9 +961,15 @@ export class Logger extends EventEmitter {
           // One reporter for the whole params pass, rather than one here and another
           // inside `applyRedaction`. Both are once-per-pass, so nesting them keeps that
           // bound: the several guards a single unreadable list trips report once between
-          // them, which is what `createRedactionReporter` promises and what two
+          // them, which is what `createFormatReporter` promises and what two
           // independent budgets quietly broke.
-          reportBackstop,
+          // Adapted, not handed over: `reportBackstop` is a reporter bound to
+          // `'redaction'` already, and this slot takes a handler. Dropping the `kind` is
+          // correct rather than lossy - every failure `applyRedaction` raises is a
+          // redaction failure, which is the kind the backstop reports under.
+          (error, _kind, key) => {
+            reportBackstop(error, key);
+          },
         );
       } catch (error) {
         // Belt and braces. `applyRedaction` guards every step it owns, its own head read
@@ -996,8 +998,7 @@ export class Logger extends EventEmitter {
     // call allocates nothing for it.
     const message = messageParams
       ? CurlyBrackets(template, messageParams, undefined, {
-          onRenderError:
-            this.onRenderError ?? this.reportFailureToConsole('Render'),
+          onFormatError: this.formatErrorHandler(),
         })
       : template;
 
@@ -1014,7 +1015,7 @@ export class Logger extends EventEmitter {
       // The decision made above, not a second read of `redactedKeys`, and the inert copy
       // rather than the caller's object. A list too hostile to copy leaves this
       // `undefined`: the redaction itself has already failed closed and said so through
-      // `onRedactionError`, and `redactedParams` carries the marker, so there is nothing
+      // `onFormatError`, and `redactedParams` carries the marker, so there is nothing
       // this field could honestly name.
       redactedKeys: didRequestRedaction ? inertKeys : undefined,
       error: options?.error,
@@ -1108,7 +1109,7 @@ export class Logger extends EventEmitter {
   /**
    * The handler this logger supplies when the caller set none.
    *
-   * Every render and redaction this logger performs runs *inside* a log call, so it must
+   * Every format this logger performs runs *inside* a log call, so it must
    * never reach `createFailureReporter`'s default rung: that broadcasts on the global
    * `'error'` channel, `registerReportErrorListener()` would log what it hears, logging
    * renders and redacts, and rendering or redacting is what just failed. Supplying a
@@ -1116,13 +1117,10 @@ export class Logger extends EventEmitter {
    * when they set one, this when they did not.
    *
    * The console, because it is the only rung that cannot re-enter what is already running.
-   * A caller who wants these somewhere else sets `onRenderError` / `onRedactionError` and
-   * this is never used.
+   * A caller who wants these somewhere else sets `onFormatError` and this is never used.
    */
-  private reportFailureToConsole(
-    label: string,
-  ): (error: Error, subject: string) => void {
-    return consoleFailureHandler(label);
+  private formatErrorHandler(): FormatErrorHandler {
+    return this.onFormatError ?? consoleFormatHandler();
   }
 
   /**
@@ -1133,13 +1131,10 @@ export class Logger extends EventEmitter {
   private renderErrorObject(prefix: string, error: unknown): string {
     return prepareErrorObjectLog(prefix, error, {
       // The logger's own masking and its failure handler, so an error rendered here masks
-      // the way params do and a failure reaches `onRedactionError` rather than the console.
+      // the way params do and a failure reaches `onFormatError` rather than the console.
       redactFunction: this.redactFunction,
-      // Never left to the default: see `reportFailureToConsole`.
-      onRedactionError:
-        this.onRedactionError ?? this.reportFailureToConsole('Redaction'),
-      onRenderError:
-        this.onRenderError ?? this.reportFailureToConsole('Render'),
+      // Never left to the default: see `formatErrorHandler`.
+      onFormatError: this.formatErrorHandler(),
     });
   }
 

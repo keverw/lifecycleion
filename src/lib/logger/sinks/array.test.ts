@@ -502,7 +502,8 @@ describe('ArraySink - redactedParams snapshot', () => {
     const seen: string[] = [];
 
     const sink = new ArraySink({
-      onRenderError: (error, path) => seen.push(`${path}|${error.message}`),
+      onFormatError: (error, _kind, path) =>
+        seen.push(`${path}|${error.message}`),
     });
 
     const hostile: Record<string, unknown> = { safe: 'kept' };
@@ -546,7 +547,8 @@ test('should report a transformer that throws rather than silently ignoring it',
     transformer: () => {
       throw new Error('transformer refused');
     },
-    onRenderError: (error, subject) => seen.push(`${subject}|${error.message}`),
+    onFormatError: (error, kind, subject) =>
+      seen.push(`${kind}|${subject}|${error.message}`),
   });
 
   sink.write({
@@ -557,7 +559,9 @@ test('should report a transformer that throws rather than silently ignoring it',
   });
 
   expect(seen).toHaveLength(1);
-  expect(seen[0]).toContain('<transformer>');
+  // `'transform'`, not `'render'`: the entry was formatted fine and the caller's own
+  // transformer is what refused, which is a different thing to fix.
+  expect(seen[0]).toContain('transform|<transformer>');
   expect(seen[0]).toContain('transformer refused');
 
   // Unchanged: the entry is still stored.

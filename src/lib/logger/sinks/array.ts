@@ -5,11 +5,11 @@ import {
 import { isPlainContainer } from '../../internal/is-plain-container';
 import { MAX_RENDER_DEPTH, TRUNCATED } from '../../internal/render-budget';
 import {
-  createRenderReporter,
-  type RenderErrorHandler,
-  type ReportRenderFailure,
-} from '../../internal/render-reporter';
-import { consoleFailureHandler } from '../../internal/failure-reporter';
+  consoleFormatHandler,
+  createFormatReporter,
+  type FormatErrorHandler,
+  type ReportFormatFailure,
+} from '../../internal/format-reporter';
 import type { ArrayLogTransformer, LogEntry, LogSink } from '../types';
 
 /**
@@ -47,7 +47,7 @@ const UNCOPYABLE_MARKER = '<value could not be copied>';
  */
 function snapshotParams(
   params: Record<string, unknown>,
-  report: ReportRenderFailure,
+  report: ReportFormatFailure,
 ): Record<string, unknown> {
   const snapshot = snapshotValue(params, new WeakMap(), 0, '<params>', report);
 
@@ -63,7 +63,7 @@ function snapshotValue(
   seen: WeakMap<object, unknown>,
   depth: number,
   path: string,
-  report: ReportRenderFailure,
+  report: ReportFormatFailure,
 ): unknown {
   if (!isPlainContainer(value)) {
     return value;
@@ -157,19 +157,22 @@ export class ArraySink implements LogSink {
   private transformer?: ArrayLogTransformer;
   private closed = false;
 
-  private onRenderError?: RenderErrorHandler;
+  private onFormatError?: FormatErrorHandler;
 
   constructor(options?: {
     transformer?: ArrayLogTransformer;
     /**
-     * Notified when a param could not be copied into the stored snapshot, so a
-     * `<value could not be copied>` marker leaves a diagnosis and not only a marker.
-     * Defaults to `console.error`. Fires at most once per entry written.
+     * Notified when a param could not be copied into the stored snapshot (`kind` is
+     * `'render'`), or when the `transformer` threw and the untransformed entry was stored
+     * instead (`kind` is `'transform'`, `path` is `<transformer>`), so a
+     * `<value could not be copied>` marker or a silently passed-through entry leaves a
+     * diagnosis. Defaults to `console.error`. Fires at most once per kind per entry
+     * written.
      */
-    onRenderError?: RenderErrorHandler;
+    onFormatError?: FormatErrorHandler;
   }) {
     this.transformer = options?.transformer;
-    this.onRenderError = options?.onRenderError;
+    this.onFormatError = options?.onFormatError;
   }
 
   public write(entry: LogEntry): void {
@@ -196,8 +199,9 @@ export class ArraySink implements LogSink {
               // broadcasts on the global `'error'` channel - which a listening logger
               // would log, reaching this sink again. The console is the only rung that
               // cannot re-enter what is already running.
-              createRenderReporter(
-                this.onRenderError ?? consoleFailureHandler('Render'),
+              createFormatReporter(
+                'render',
+                this.onFormatError ?? consoleFormatHandler(),
               ),
             ),
           };
@@ -216,8 +220,9 @@ export class ArraySink implements LogSink {
         // recovery - a broken transformer must not cost you the log - but it was also
         // completely silent, so a transformer that threw on every entry looked exactly
         // like one that had chosen to pass every entry through untouched.
-        createRenderReporter(
-          this.onRenderError ?? consoleFailureHandler('Transform'),
+        createFormatReporter(
+          'transform',
+          this.onFormatError ?? consoleFormatHandler(),
         )(error, '<transformer>');
       }
     }

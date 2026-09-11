@@ -5,9 +5,9 @@ import {
 import { defineEntry, describeContainer } from './container-entries';
 import { isPlainContainer } from './is-plain-container';
 import {
-  NOOP_REDACTION_REPORTER,
-  type ReportRedactionFailure,
-} from './redaction-reporter';
+  NOOP_FORMAT_REPORTER,
+  type ReportFormatFailure,
+} from './format-reporter';
 import { stringifyTemplateValue } from './stringify-template-value';
 import {
   charge,
@@ -69,7 +69,7 @@ export function maskValueDeep(
   value: unknown,
   mask: MaskLeaf,
   seen: WeakSet<object> = new WeakSet(),
-  report: ReportRedactionFailure = NOOP_REDACTION_REPORTER,
+  report: ReportFormatFailure = NOOP_FORMAT_REPORTER,
   depth: number = 0,
   budget: RenderBudget = createRenderBudget(),
 ): unknown {

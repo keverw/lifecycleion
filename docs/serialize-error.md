@@ -49,11 +49,12 @@ which half refused - and the rest of the payload survives, which matters here mo
 usually while already reporting a failure, so a second failure raised here would replace
 the one being reported.
 
-Pass `onRenderError` to receive the cause:
+Pass `onFormatError` to receive the cause:
 
 ```typescript
 const serialized = serializeError(error, {
-  onRenderError: (cause, path) => {
+  onFormatError: (cause, kind, path) => {
+    // kind:  'render' - serializeError never redacts, so it raises no other kind
     // path:  '<error>.context.token' - structural, never a value
     // cause: the getter's own throw
   },

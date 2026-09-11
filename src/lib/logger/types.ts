@@ -1,12 +1,13 @@
 import type { RedactValueFunction } from '../internal/default-redact-function';
-import type { RedactionErrorHandler } from '../internal/redaction-reporter';
-import type { RenderErrorHandler } from '../internal/render-reporter';
+import type { FormatErrorHandler } from '../internal/format-reporter';
 
 // Re-exported, not merely imported: it is half of what a `redactFunction` may return, so
 // a caller cannot annotate one without it.
 export type { RedactMaskConfig } from '../internal/default-redact-function';
-export type { RedactionErrorHandler } from '../internal/redaction-reporter';
-export type { RenderErrorHandler } from '../internal/render-reporter';
+export type {
+  FormatErrorHandler,
+  FormatFailureKind,
+} from '../internal/format-reporter';
 /**
  * Log level enum for filtering logs by severity
  * Lower numbers = more important/higher priority
@@ -197,55 +198,41 @@ export interface LoggerOptions {
   onEventHandlerError?: (error: Error, event: string) => void;
 
   /**
-   * Notified when redaction fails for a param, so a broken `redactFunction` leaves a
-   * diagnosis and not only a `***REDACTION FAILED***` marker in the output.
-   * Defaults to `console.error`.
+   * Notified when a value could not be formatted for a log line, so a
+   * `***REDACTION FAILED***`, `[unrenderable]` or `<unrenderable: ...>` marker leaves a
+   * diagnosis and not only a marker. Defaults to `console.error`.
    *
-   * Deliberately not the global `'error'` channel, for the reason `onEventHandlerError`
-   * is not either: a listening logger would log the report, logging renders a message,
-   * rendering redacts, and redaction throws again - a cycle no re-entrancy guard closes,
-   * since each pass is a fresh turn.
+   * `kind` says which stage threw. `'redaction'` means your `redactFunction` failed, so a
+   * value fell back to the fail-closed marker rather than the mask you asked for.
+   * `'render'` means a value refused to be read or stringified, so the line still went out
+   * with a marker in its place - one bad param never costs you the entry. Both used to be
+   * their own callback, and both are handed the same structural `path` from the same walk
+   * over the same value, so they are one callback with a discriminator.
    *
-   * Fires at most once per redaction pass. A failure is raised per leaf, so an
-   * unconditionally throwing `redactFunction` would otherwise report once for every value
-   * inside a named container. The markers left in the output show the full extent; this
-   * names the cause. `errorObject()` redacts twice - the error it renders, and the params -
-   * so it can report twice, for two genuinely different failures.
-   *
-   * The error may contain the value: it is your `redactFunction`'s own, and that function
-   * was handed the value. The `key` never does.
-   *
-   * Do not call this logger's own log methods from here.
-   */
-  onRedactionError?: RedactionErrorHandler;
-
-  /**
-   * Notified when a value could not be rendered into a log line, so an `[unrenderable]` or
-   * `<unrenderable: ...>` marker leaves a diagnosis and not only a marker.
-   * Defaults to `console.error`.
-   *
-   * Rendering degrades rather than failing - a value that refuses to be read becomes a
-   * marker and the line still goes out, so one bad param never costs you the log entry.
-   * That is the right trade and it was also completely silent: a `{{user.token}}` that
-   * rendered `(null)` because its accessor threw looked exactly like a typo, and an
+   * Rendering being silent was the gap this closes: a `{{user.token}}` that rendered
+   * `(null)` because its accessor threw looked exactly like a typo, and an
    * `additionalInfo` entry behind a revoked `Proxy` looked like a key that was never set.
-   * This is where the cause goes.
    *
-   * Deliberately not the global `'error'` channel, for the reason `onRedactionError` is
-   * not either: a listening logger would log the report, and logging renders, which is
-   * what just failed.
+   * Deliberately not the global `'error'` channel, for the reason `onEventHandlerError` is
+   * not either: a listening logger would log the report, logging renders and redacts, and
+   * that is what just failed - a cycle no re-entrancy guard closes, since each pass is a
+   * fresh turn.
    *
-   * The error may contain the value - it came from your own getter or `toString`, which
-   * were handed it. The `path` never does: it is structural, built from keys the renderer
-   * already holds. That asymmetry is why the marker in the log line carries no cause at
-   * all; a cause written into the output would travel to every sink past `redactedKeys`.
+   * The error may contain the value: it came from your own `redactFunction`, getter or
+   * `toString`, all of which were handed it. The `path` never does - it is structural,
+   * built from keys the walk already holds. That asymmetry is why the marker in the log
+   * line carries no cause at all; a cause written into the output would travel to every
+   * sink past `redactedKeys`.
    *
-   * Fires at most once per render. `errorObject()` renders twice - the error, then the
-   * message - so it can report twice, for two genuinely different failures.
+   * Fires at most once per kind per operation. A failure is raised per leaf, so an
+   * unconditionally throwing `redactFunction` would otherwise report once for every value
+   * inside a named container; the markers left in the output show the full extent, and
+   * this names the cause. `errorObject()` formats twice - the error, then the params - so
+   * it can report twice per kind, for genuinely different failures.
    *
    * Do not call this logger's own log methods from here.
    */
-  onRenderError?: RenderErrorHandler;
+  onFormatError?: FormatErrorHandler;
 }
 
 /**

@@ -2,7 +2,7 @@
  * Test-only helper: keep a deliberate `console.error` fall-through out of the run output.
  *
  * Several features here report to `console.error` when the caller supplies no handler -
- * `onRedactionError`, `onSinkError`, `onEventHandlerError`, and `safe-handle-callback`'s
+ * `onFormatError`, `onSinkError`, `onEventHandlerError`, and `safe-handle-callback`'s
  * last rung. Tests that exercise those defaults are doing the right thing, but a suite
  * that prints dozens of real-looking error lines buries the ones that mean something.
  *

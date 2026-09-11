@@ -45,9 +45,12 @@ interface StringifyValueOptions {
   redactedKeys?: string[];
   /** Decides how a matched value is replaced. */
   redactFunction?: (key: string, value: string) => RedactFunctionResult;
-  /** Notified when redaction fails. Defaults to `console.error`. */
-  onRedactionError?: (error: Error, key: string) => void;
-  onRenderError?: (error: Error, path: string) => void;
+  /** Notified when redaction or rendering fails. Defaults to `console.error`. */
+  onFormatError?: (
+    error: Error,
+    kind: 'redaction' | 'render',
+    path: string,
+  ) => void;
 }
 
 /**
@@ -182,5 +185,9 @@ Nothing reaches a log line, because the renderer cannot see it either. But it me
 - The same rendering backs template interpolation in [curly-brackets](./curly-brackets.md) and the logger's message text, so a value reads the same everywhere.
 - `redactValue`, `stringifyValue` and the logger's `redactedKeys` share one implementation, so a `redactFunction` behaves identically in all three.
 - Redaction fails closed. A `redactFunction` that throws, or a value that cannot be read, yields `***REDACTION FAILED***` rather than the original.
-- Pass `onRedactionError` to learn _why_ it failed. The marker says only that it did; this callback is handed the error and the `redactedKeys` entry it happened on. It fires at most once per call. With no handler it reports on the standard global `'error'` channel, so a `logger.registerReportErrorListener()` records it, falling back to `console.error` when nothing claims it. The `Logger` and its sinks never use that channel for their own work - they always supply a handler, defaulting to the console, because broadcasting from inside a log call would be logged by the listener, and logging renders.
-- Pass `onRenderError` to learn why a value could not be _rendered_, which is a different failure from a redaction that threw and has its own once-per-call budget. It receives the error and a structural path such as `<value>.user.token`. It fires only when a read actually threw, never for the ordinary degradations. With no handler it reports on the standard global `'error'` channel, so a `logger.registerReportErrorListener()` records it, falling back to `console.error` when nothing claims it. The `Logger` and its sinks never use that channel for their own work - they always supply a handler, defaulting to the console, because broadcasting from inside a log call would be logged by the listener, and logging renders. **Pass a handler when calling this from inside a sink or formatter** - that runs within a log call while looking standalone, and the default channel would be logged by your listener, whose logging reaches the same sink again. The cause is never written into the rendered string: it comes from your own getter and may carry the value it was hiding.
+- Pass `onFormatError` to learn _why_ a value failed. The markers say only that something did; this callback is handed the error, which stage threw, and the structural path it happened on - `password`, `<value>.user.token`.
+  - `kind: 'redaction'` means your `redactFunction` threw, or a value could not be read to mask it.
+  - `kind: 'render'` means a value refused to be read or turned into text. Only `stringifyValue` can raise it; `redactValue` hands back structure and never renders. It fires only when a read actually threw, never for the ordinary degradations.
+  - Both come from the same walk over the same value and address it the same way, which is why they are one callback with a discriminator rather than two. Each kind carries its own once-per-call budget, so a value that fails both ways is reported both ways.
+  - With no handler it reports on the standard global `'error'` channel, so a `logger.registerReportErrorListener()` records it, falling back to `console.error` when nothing claims it. The `Logger` and its sinks never use that channel for their own work - they always supply a handler, defaulting to the console, because broadcasting from inside a log call would be logged by the listener, and logging renders. **Pass a handler when calling this from inside a sink or formatter** - that runs within a log call while looking standalone, and the default channel would be logged by your listener, whose logging reaches the same sink again.
+  - The cause is never written into the rendered string: it comes from your own getter or `redactFunction` and may carry the value it was hiding.

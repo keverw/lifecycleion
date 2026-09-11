@@ -5,9 +5,9 @@
 import { describeContainer } from './container-entries';
 import { isPlainContainer } from './is-plain-container';
 import {
-  NOOP_RENDER_REPORTER,
-  type ReportRenderFailure,
-} from './render-reporter';
+  NOOP_FORMAT_REPORTER,
+  type ReportFormatFailure,
+} from './format-reporter';
 import {
   charge,
   createRenderBudget,
@@ -29,7 +29,7 @@ import {
  * getter may throw `new Error('cannot read ' + this.password)` - and a marker carrying
  * that message would put the value wherever the rendered string goes, past `redactedKeys`.
  * These are library-authored text, which is what lets them be rendered at all; the cause
- * goes to `onRenderError`.
+ * goes to `onFormatError`.
  */
 const UNRENDERABLE_KEYS = '[unrenderable: keys]';
 
@@ -120,7 +120,7 @@ function renderNested(
   seen: WeakSet<object>,
   depth: number,
   budget: RenderBudget,
-  report: ReportRenderFailure,
+  report: ReportFormatFailure,
 ): string {
   if (value === null) {
     return charge(budget, 'null');
@@ -179,7 +179,7 @@ function renderContainer(
   seen: WeakSet<object>,
   depth: number,
   budget: RenderBudget,
-  report: ReportRenderFailure,
+  report: ReportFormatFailure,
 ): string {
   // The shared enumeration, so a container that refuses to be read is the same case here
   // as in the redaction walks rather than a locally-invented empty result.
@@ -345,7 +345,7 @@ function joinTemplatePath(...segments: string[]): string {
 export function stringifyTemplateValue(
   value: unknown,
   path: string = '',
-  report: ReportRenderFailure = NOOP_RENDER_REPORTER,
+  report: ReportFormatFailure = NOOP_FORMAT_REPORTER,
 ): string {
   if (typeof value === 'string') {
     return value;

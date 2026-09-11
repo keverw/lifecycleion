@@ -378,7 +378,7 @@ describe('CurlyBrackets.escape', () => {
     expect(CurlyBrackets.escape(input)).toEqual(expected);
   });
 
-  describe('CurlyBrackets onRenderError', () => {
+  describe('CurlyBrackets onFormatError', () => {
     it('should tell an unreadable placeholder apart from an absent one', () => {
       // Both render the fallback, and until this existed they were indistinguishable: a
       // `{{user.token}}` whose accessor throws looked exactly like a typo. The path is
@@ -400,7 +400,8 @@ describe('CurlyBrackets.escape', () => {
         { user: bag },
         '(null)',
         {
-          onRenderError: (error, path) => seen.push(`${path}|${error.message}`),
+          onFormatError: (error, _kind, path) =>
+            seen.push(`${path}|${error.message}`),
         },
       );
 

@@ -27,15 +27,10 @@ import {
   type RenderBudget,
 } from './internal/render-budget';
 import {
-  createRedactionReporter,
-  type RedactionErrorHandler,
-  type ReportRedactionFailure,
-} from './internal/redaction-reporter';
-import {
-  createRenderReporter,
-  type RenderErrorHandler,
-  type ReportRenderFailure,
-} from './internal/render-reporter';
+  createFormatReporter,
+  type FormatErrorHandler,
+  type ReportFormatFailure,
+} from './internal/format-reporter';
 
 /**
  * Produces the replacement shown for a value named by `sensitiveFieldNames`.
@@ -48,8 +43,10 @@ import {
  */
 export type RedactFieldFunction = RedactValueFunction;
 
-export type { RedactionErrorHandler } from './internal/redaction-reporter';
-export type { RenderErrorHandler } from './internal/render-reporter';
+export type {
+  FormatErrorHandler,
+  FormatFailureKind,
+} from './internal/format-reporter';
 
 // The return type of a `redactFunction` and the config it may hand back, so this entry
 // point can be used without importing the logger for its types.
@@ -66,35 +63,28 @@ export interface ErrorToStringOptions {
    */
   redactFunction?: RedactFieldFunction;
   /**
-   * Notified when redaction fails for a value, so a broken `redactFunction` leaves a
-   * diagnosis and not only a `***REDACTION FAILED***` marker.
+   * Notified when a value could not be formatted, so a `***REDACTION FAILED***` or
+   * `<unrenderable: ...>` marker leaves a diagnosis and not only a marker.
    *
-   * With no handler set, a standalone call reports on the standard global `'error'` channel - so a `logger.registerReportErrorListener()` records it - and falls back to `console.error` only when nothing claims the event. The `Logger` and its sinks always supply a handler for their own work, so this default is never reached from inside a log call.
+   * `kind` says which stage threw: `'redaction'` for a broken `redactFunction`,
+   * `'render'` for a value that refused to be read or stringified. Both come from the same
+   * walk over the same value and address it with the same path, which is why they are one
+   * callback with a discriminator rather than two.
    *
-   * Not routed to the global `'error'` channel: reporting there would loop, since a
-   * listening logger logs it, logging renders, rendering redacts, and redaction throws
-   * again. Fires at most once per call.
+   * The markers name which half refused - `keys`, `value`, `text` - and deliberately never
+   * carry the cause: the thrown error comes from your own getter, `toString` or
+   * `redactFunction` and may carry the value it was hiding, so putting it in the table
+   * would send it to every sink past `sensitiveFieldNames`. It comes here instead.
    *
-   * Do not redact or log from inside it.
+   * With no handler set, a standalone call reports on the standard global `'error'`
+   * channel - so a `logger.registerReportErrorListener()` records it - and falls back to
+   * `console.error` only when nothing claims the event. The `Logger` and its sinks always
+   * supply a handler for their own work, so this default is never reached from inside a
+   * log call.
+   *
+   * Fires at most once per kind per call. Do not redact, render or log from inside it.
    */
-  onRedactionError?: RedactionErrorHandler;
-  /**
-   * Notified when a value could not be rendered, so an `<unrenderable: ...>` marker leaves
-   * a diagnosis and not only a marker.
-   *
-   * With no handler set, a standalone call reports on the standard global `'error'` channel - so a `logger.registerReportErrorListener()` records it - and falls back to `console.error` only when nothing claims the event. The `Logger` and its sinks always supply a handler for their own work, so this default is never reached from inside a log call.
-   *
-   * The marker names which half refused - `keys`, `value`, `text` - and deliberately never
-   * carries the cause: the thrown error comes from your own getter or `toString` and may
-   * carry the value it was hiding, so putting it in the table would send it to every sink
-   * past `sensitiveFieldNames`. It comes here instead.
-   *
-   * Not routed to the global `'error'` channel: reporting there would loop, since a
-   * listening logger logs it and logging renders. Fires at most once per render.
-   *
-   * Do not render or log from inside it.
-   */
-  onRenderError?: RenderErrorHandler;
+  onFormatError?: FormatErrorHandler;
 }
 
 /**
@@ -158,7 +148,7 @@ function readMemberOrThrew(
  */
 function readOwnSensitivePaths(
   value: Record<string, unknown>,
-  report: ReportRedactionFailure,
+  report: ReportFormatFailure,
 ): RedactPath[] | null {
   const raw = readMemberOrThrew(value, 'sensitiveFieldNames');
 
@@ -204,7 +194,7 @@ function readOwnSensitivePaths(
  * omission.** The thrown value belongs to the caller: a getter is free to throw
  * `new Error('cannot read ' + this.password)`, and a marker carrying that message would
  * put the value into the table, past `sensitiveFieldNames`, and into every sink. Redaction
- * already settled this - `createRedactionReporter` hands the cause to `onRedactionError`
+ * already settled this - `createFormatReporter` hands the cause to `onFormatError`
  * and warns that it may contain the value, while the output gets only the neutral marker.
  * These three are library-authored text with no caller input in them, which is what lets
  * them be rendered at all.
@@ -251,7 +241,7 @@ const UNRENDERABLE_TEXT = '<unrenderable: text>';
 function asAddressableBag(
   info: object,
   path: string,
-  reportRender: ReportRenderFailure,
+  reportRender: ReportFormatFailure,
 ): object | string {
   if (isPlainContainer(info)) {
     return info;
@@ -316,7 +306,7 @@ function redactAddressedValue(
   value: unknown,
   paths: RedactPath[],
   redactFunction: RedactFieldFunction | undefined,
-  report: ReportRedactionFailure,
+  report: ReportFormatFailure,
 ): unknown {
   if (paths.length === 0) {
     return value;
@@ -346,7 +336,7 @@ function redactAddressedValue(
 function entriesToText(
   entries: NestedKeyValueEntry[],
   path: string,
-  reportRender: ReportRenderFailure,
+  reportRender: ReportFormatFailure,
 ): string {
   const parts: string[] = [];
 
@@ -366,7 +356,7 @@ function entriesToText(
 function renderedValueToText(
   value: string | KeyValueASCIITable | NestedKeyValueEntry[],
   path: string,
-  reportRender: ReportRenderFailure,
+  reportRender: ReportFormatFailure,
 ): string {
   if (typeof value === 'string') {
     return quoteText(value, path, reportRender);
@@ -384,7 +374,7 @@ function renderedValueToText(
  *
  * Structural only: every segment is a key the walk already knows or a bracketed index, so
  * nothing a caller supplied as a *value* can reach it. That is what makes a path safe to
- * hand to a reporter, and it is the same rule `onRedactionError`'s `key` follows.
+ * hand to a reporter, and it is the same rule `onFormatError`'s `key` follows.
  *
  * A nested error starts a fresh table but not a fresh path, so a failure deep inside a
  * `cause` still says where it was: `cause.additionalInfo.token`.
@@ -402,7 +392,7 @@ function joinPath(...segments: string[]): string {
 function reportUnrenderableValue(
   error: unknown,
   path: string,
-  reportRender: ReportRenderFailure,
+  reportRender: ReportFormatFailure,
 ): string {
   reportRender(error, path);
 
@@ -416,7 +406,7 @@ function reportUnrenderableValue(
 function reportUnrenderableText(
   reason: string,
   path: string,
-  reportRender: ReportRenderFailure,
+  reportRender: ReportFormatFailure,
 ): string {
   reportRender(new Error(reason), path);
 
@@ -427,7 +417,7 @@ function reportUnrenderableText(
 function quoteText(
   value: string,
   path: string,
-  reportRender: ReportRenderFailure,
+  reportRender: ReportFormatFailure,
 ): string {
   try {
     return JSON.stringify(value) ?? '""';
@@ -441,7 +431,7 @@ function quoteText(
 function safeStringify(
   value: unknown,
   path: string,
-  reportRender: ReportRenderFailure,
+  reportRender: ReportFormatFailure,
 ): string {
   try {
     return stringifyPrimitive(value, path, reportRender);
@@ -458,7 +448,7 @@ function safeStringify(
 function stringifyPrimitive(
   value: unknown,
   path: string,
-  reportRender: ReportRenderFailure,
+  reportRender: ReportFormatFailure,
 ): string {
   if (value === null || value === undefined) {
     return String(value);
@@ -506,14 +496,14 @@ export function errorToString(
   maxRowLength = 80,
   options?: ErrorToStringOptions,
 ): string {
-  const report = createRedactionReporter(options?.onRedactionError);
+  const report = createFormatReporter('redaction', options?.onFormatError);
 
   // Defaults to the console, exactly as the redaction reporter does. The two failures are
   // equally exceptional: this fires only when a read actually *threw*, never for the
   // ordinary degradations - `[Function]`, `[circular]`, `[max depth exceeded]` - which
   // never reach a reporter at all. Silence by default would leave the swallow this channel
   // exists to end as the behaviour almost everyone gets.
-  const reportRender = createRenderReporter(options?.onRenderError);
+  const reportRender = createFormatReporter('render', options?.onFormatError);
 
   try {
     const table = errorToASCIITable(
@@ -569,8 +559,8 @@ function errorToASCIITable(
   depth: number,
   budget: RenderBudget,
   redactFunction: RedactFieldFunction | undefined,
-  report: ReportRedactionFailure,
-  reportRender: ReportRenderFailure,
+  report: ReportFormatFailure,
+  reportRender: ReportFormatFailure,
 ): KeyValueASCIITable {
   // Resolved once, and used for everything below: the table this builds, the width handed
   // to nested values, and the per-row cost charged against the budget. A nested caller has
@@ -862,8 +852,8 @@ function addErrorTail(
   depth: number,
   budget: RenderBudget,
   redactFunction: RedactFieldFunction | undefined,
-  report: ReportRedactionFailure,
-  reportRender: ReportRenderFailure,
+  report: ReportFormatFailure,
+  reportRender: ReportFormatFailure,
 ): void {
   if (cause !== undefined && cause !== null) {
     if (sensitive === null) {
@@ -944,8 +934,8 @@ function stringifyValue(
   depth: number,
   budget: RenderBudget,
   redactFunction: RedactFieldFunction | undefined,
-  report: ReportRedactionFailure,
-  reportRender: ReportRenderFailure,
+  report: ReportFormatFailure,
+  reportRender: ReportFormatFailure,
 ): string | KeyValueASCIITable | NestedKeyValueEntry[] {
   if (typeof value === 'string') {
     // Checked before it is charged. A leaf is emitted whole rather than cut mid-string, so
@@ -1020,8 +1010,8 @@ function stringifyValueInner(
   depth: number,
   budget: RenderBudget,
   redactFunction: RedactFieldFunction | undefined,
-  report: ReportRedactionFailure,
-  reportRender: ReportRenderFailure,
+  report: ReportFormatFailure,
+  reportRender: ReportFormatFailure,
 ): string | KeyValueASCIITable | NestedKeyValueEntry[] {
   let arrayValue: unknown[] | null;
 

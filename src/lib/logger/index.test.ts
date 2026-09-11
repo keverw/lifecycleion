@@ -199,7 +199,7 @@ describe('Logger', () => {
       const failures: string[] = [];
       const strictLogger = new Logger({
         sinks: [arraySink],
-        onRedactionError: (error, key) => {
+        onFormatError: (error, _kind, key) => {
           failures.push(key);
         },
       });
@@ -232,7 +232,7 @@ describe('Logger', () => {
 
       const strictLogger = new Logger({
         sinks: [arraySink],
-        onRedactionError: () => {},
+        onFormatError: () => {},
       });
 
       strictLogger.info('pw={{password}}', {
@@ -255,7 +255,7 @@ describe('Logger', () => {
         let reports = 0;
         const strictLogger = new Logger({
           sinks: [sink],
-          onRedactionError: () => {
+          onFormatError: () => {
             reports++;
           },
         });
@@ -2036,7 +2036,7 @@ describe('Logger - errorObject redaction reaches the caller, not the console', (
   // own `redactFunction` did not apply and a redaction failure went to `console.error`
   // even when the caller had supplied a handler - and did so *alongside* the params
   // report, twice for one call, one of them uninterceptable.
-  test('a redaction failure while rendering the error reaches onRedactionError', () => {
+  test('a redaction failure while rendering the error reaches onFormatError', () => {
     const keys: string[] = [];
     const consoleLines: string[] = [];
     const realError = console.error;
@@ -2056,7 +2056,7 @@ describe('Logger - errorObject redaction reaches the caller, not the console', (
 
       const logger = new Logger({
         sinks: [new ArraySink()],
-        onRedactionError: (_error, key) => keys.push(key),
+        onFormatError: (_error, _kind, key) => keys.push(key),
       });
 
       logger.errorObject('prefix', error);
@@ -2100,7 +2100,7 @@ describe('Logger - errorObject redaction reaches the caller, not the console', (
     const logger = new Logger({
       sinks: [sink],
       redactFunction: () => '[CUSTOM]',
-      onRedactionError: (_error, key) => keys.push(key),
+      onFormatError: (_error, _kind, key) => keys.push(key),
     });
 
     const makeError = (): Error => {
@@ -2197,7 +2197,7 @@ describe('Logger - a redactedKeys list that will not be read twice', () => {
     const logger = new Logger({
       sinks: [sink],
       callProcessExit: false,
-      onRedactionError: () => {},
+      onFormatError: () => {},
     });
 
     expect(() => {
@@ -2231,7 +2231,7 @@ describe('Logger - a redactedKeys list that will not be read twice', () => {
     const logger = new Logger({
       sinks: [sink],
       callProcessExit: false,
-      onRedactionError: (error, key) => failures.push([key, error.message]),
+      onFormatError: (error, _kind, key) => failures.push([key, error.message]),
     });
 
     const underReporting = new Proxy(['password'], {
@@ -2265,7 +2265,7 @@ describe('Logger - a redactedKeys list that will not be read twice', () => {
     const logger = new Logger({
       sinks: [sink],
       callProcessExit: false,
-      onRedactionError: (error, key) => failures.push([key, error.message]),
+      onFormatError: (error, _kind, key) => failures.push([key, error.message]),
     });
 
     logger.info('login {{password}}', {
@@ -2278,9 +2278,9 @@ describe('Logger - a redactedKeys list that will not be read twice', () => {
     expect(sink.logs[0]?.redactedKeys).toBeUndefined();
   });
 
-  test('a list that cannot be read at all reaches onRedactionError', () => {
+  test('a list that cannot be read at all reaches onFormatError', () => {
     // The fail-closed guards used to swallow the cause, which broke the promise
-    // `onRedactionError` keeps on every other surface that redacts - `applyRedaction` for
+    // `onFormatError` keeps on every other surface that redacts - `applyRedaction` for
     // params, `errorToString` for an error's `sensitiveFieldNames`, `redactValue` and
     // `stringifyValue`. All of those hand a failure to the handler; these guards, which
     // exist precisely for input nothing below them can read, left an operator with a
@@ -2290,7 +2290,7 @@ describe('Logger - a redactedKeys list that will not be read twice', () => {
     const logger = new Logger({
       sinks: [sink],
       callProcessExit: false,
-      onRedactionError: (error, key) => failures.push([key, error.message]),
+      onFormatError: (error, _kind, key) => failures.push([key, error.message]),
     });
 
     logger.info('login {{password}}', {
@@ -2313,7 +2313,7 @@ describe('Logger - a redactedKeys list that will not be read twice', () => {
     const logger = new Logger({
       sinks: [sink],
       callProcessExit: false,
-      onRedactionError: (error, key) => failures.push([key, error.message]),
+      onFormatError: (error, _kind, key) => failures.push([key, error.message]),
     });
 
     logger.info('login {{password}}', {
@@ -2518,7 +2518,8 @@ describe('Logger - where an unhandled render failure goes', () => {
     const logger = new Logger({
       sinks: [sink],
       callProcessExit: false,
-      onRenderError: (error, path) => seen.push(`${path}|${error.message}`),
+      onFormatError: (error, _kind, path) =>
+        seen.push(`${path}|${error.message}`),
     });
 
     logger.info('{{u}}', { params: { u: hostile() } });
@@ -2585,12 +2586,12 @@ describe('Logger - a failure handler may never raise a failure of its own', () =
       },
     ],
     [
-      'onRedactionError',
+      'onFormatError',
       () => {
         new Logger({
           sinks: [new ArraySink()],
           callProcessExit: false,
-          onRedactionError: explode,
+          onFormatError: explode,
         }).info('x', {
           params: { u: hostile() },
           redactedKeys: ['u.token'],
@@ -2598,12 +2599,12 @@ describe('Logger - a failure handler may never raise a failure of its own', () =
       },
     ],
     [
-      'onRenderError',
+      'onFormatError',
       () => {
         new Logger({
           sinks: [new ArraySink()],
           callProcessExit: false,
-          onRenderError: explode,
+          onFormatError: explode,
         }).info('{{u}}', { params: { u: hostile() } });
       },
     ],
@@ -2642,7 +2643,7 @@ describe('Logger - a failure handler may never raise a failure of its own', () =
   }
 });
 describe('Logger - a param that cannot be read is reported, not only marked', () => {
-  test('an unreadable param reaches onRedactionError', () => {
+  test('an unreadable param reaches onFormatError', () => {
     // The one redaction failure that reached no channel at all. `normalizeParamsBag`
     // carried the key out so the marker could be put back, and dropped the thrown value on
     // the floor - so the output said `***REDACTION FAILED***` and the handler documented
@@ -2652,7 +2653,7 @@ describe('Logger - a param that cannot be read is reported, not only marked', ()
     const logger = new Logger({
       sinks: [sink],
       callProcessExit: false,
-      onRedactionError: (error, key) => failures.push([key, error.message]),
+      onFormatError: (error, _kind, key) => failures.push([key, error.message]),
     });
 
     const bag: Record<string, unknown> = { keep: 'visible' };

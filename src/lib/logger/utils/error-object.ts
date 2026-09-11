@@ -5,7 +5,7 @@ import type { ErrorToStringOptions } from '../../error-to-string';
 /**
  * Prepare an error object for logging with an optional prefix.
  *
- * `options` carries the logger's own `redactFunction` and `onRedactionError` through to
+ * `options` carries the logger's own `redactFunction` and `onFormatError` through to
  * the render. Without them this rendered the error with the library defaults, so an error
  * logged through `errorObject()` masked differently from the same values logged as params,
  * and a redaction failure here went to `console.error` even when the caller had provided a

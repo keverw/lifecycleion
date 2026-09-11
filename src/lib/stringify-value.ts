@@ -1,18 +1,19 @@
 import { parseRedactPaths, redactMatchedPaths } from './internal/redact-paths';
 import { stringifyTemplateValue } from './internal/stringify-template-value';
 import {
-  createRedactionReporter,
-  type RedactionErrorHandler,
-  type ReportRedactionFailure,
-} from './internal/redaction-reporter';
-import {
-  createRenderReporter,
-  type RenderErrorHandler,
-} from './internal/render-reporter';
+  createFormatReporter,
+  type FormatErrorHandler,
+  type ReportFormatFailure,
+} from './internal/format-reporter';
 import {
   REDACTION_FAILED_MARKER,
   type RedactValueFunction,
 } from './internal/default-redact-function';
+
+export type {
+  FormatErrorHandler,
+  FormatFailureKind,
+} from './internal/format-reporter';
 
 export type {
   RedactFunctionResult,
@@ -36,33 +37,29 @@ export interface StringifyValueOptions {
    */
   redactFunction?: StringifyRedactFunction;
   /**
-   * Notified when redaction fails for a value, so a broken `redactFunction` leaves a
-   * diagnosis and not only a `***REDACTION FAILED***` marker.
+   * Notified when a value could not be formatted, so a `***REDACTION FAILED***` or
+   * `[unrenderable]` marker leaves a diagnosis and not only a marker.
    *
-   * With no handler set, a standalone call reports on the standard global `'error'` channel - so a `logger.registerReportErrorListener()` records it - and falls back to `console.error` only when nothing claims the event. The `Logger` and its sinks always supply a handler for their own work, so this default is never reached from inside a log call.
+   * `kind` says which stage threw: `'redaction'` for a broken `redactFunction`,
+   * `'render'` for a value that refused to be read or stringified. Only
+   * {@link stringifyValue} can raise `'render'`; {@link redactValue} hands back structure
+   * and never renders.
    *
-   * Not routed to the global `'error'` channel: reporting there would loop, since a
-   * listening logger logs it, logging renders, rendering redacts, and redaction throws
-   * again. Fires at most once per call - a failure is raised per leaf, so an unconditional
-   * throw would otherwise report thousands of times for one broken function.
+   * The cause is deliberately absent from the markers: it comes from your own getter,
+   * `toString` or `redactFunction` and may carry the value it was hiding, so writing it
+   * into the output would send it wherever that output goes. It comes here instead.
    *
-   * Do not redact or log from inside it.
+   * With no handler set, a standalone call reports on the standard global `'error'`
+   * channel - so a `logger.registerReportErrorListener()` records it - and falls back to
+   * `console.error` only when nothing claims the event. The `Logger` and its sinks always
+   * supply a handler for their own work, so this default is never reached from inside a
+   * log call.
+   *
+   * Fires at most once per kind per call - a failure is raised per leaf, so an
+   * unconditional throw would otherwise report thousands of times for one broken
+   * function. Do not redact, render or log from inside it.
    */
-  onRedactionError?: RedactionErrorHandler;
-  /**
-   * Notified when a value could not be rendered, so an `[unrenderable]` marker leaves a
-   * diagnosis and not only a marker.
-   *
-   * With no handler set, a standalone call reports on the standard global `'error'` channel - so a `logger.registerReportErrorListener()` records it - and falls back to `console.error` only when nothing claims the event. The `Logger` and its sinks always supply a handler for their own work, so this default is never reached from inside a log call.
-   *
-   * Only {@link stringifyValue} renders; {@link redactValue} hands back structure and
-   * never reaches this. The cause is deliberately absent from the marker: it comes from
-   * your own getter or `toString` and may carry the value it was hiding, so writing it
-   * into the output would send it wherever the rendered string goes.
-   *
-   * Fires at most once per call. Do not render or log from inside it.
-   */
-  onRenderError?: RenderErrorHandler;
+  onFormatError?: FormatErrorHandler;
 }
 
 /**
@@ -101,9 +98,9 @@ export function redactValue(
 ): unknown {
   // Declared out here so the `catch` can reach it, as `applyRedaction` does: a failure
   // that escapes the guarded region below must still leave a diagnosis and not only the
-  // marker, which is the whole promise `onRedactionError` makes. Assigned rather than
+  // marker, which is the whole promise `onFormatError` makes. Assigned rather than
   // built here, so the no-options hot path still allocates nothing.
-  let report: ReportRedactionFailure | null = null;
+  let report: ReportFormatFailure | null = null;
 
   try {
     const entries = options?.redactedKeys;
@@ -115,7 +112,7 @@ export function redactValue(
       return value;
     }
 
-    report = createRedactionReporter(options?.onRedactionError);
+    report = createFormatReporter('redaction', options?.onFormatError);
 
     // Whether the list is usable and whether it is empty are both asked of
     // `parseRedactPaths`, rather than of `entries.length` up here.
@@ -155,7 +152,7 @@ export function redactValue(
     // throw - `parseRedactPaths` is guarded throughout and the walk guards every read it
     // owns - but a `RangeError` from a payload nested past the stack, or a
     // `redactFunction` read that is an accessor and throws, both land here, and returning
-    // the marker without a word is exactly the silence `onRedactionError` exists to end.
+    // the marker without a word is exactly the silence `onFormatError` exists to end.
     //
     // Keyed `<value>`, the way `applyRedaction` keys a walk that refused entirely
     // `<params>`: everything that can arrive here failed while redacting the value, not
@@ -206,14 +203,14 @@ export function stringifyValue(
   // Defaults to the console, as every other failure channel in this library does. One
   // small closure per call, which is what `applyRedaction` and `errorToString` already
   // allocate for their own reporters.
-  const report = createRenderReporter(options?.onRenderError);
+  const report = createFormatReporter('render', options?.onFormatError);
 
   try {
     return stringifyTemplateValue(redactValue(value, options), '', report);
   } catch (error) {
     // Nothing below is expected to throw - the walk guards every read it owns - but a
     // `RangeError` from a payload nested past the stack lands here, and returning the
-    // marker without a word is exactly the silence `onRenderError` exists to end.
+    // marker without a word is exactly the silence `onFormatError` exists to end.
     report(error, '<value>');
 
     return '[unrenderable]';

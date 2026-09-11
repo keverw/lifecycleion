@@ -12,9 +12,9 @@ import {
 } from '../../internal/redact-paths';
 import type { RedactFunction } from '../types';
 import {
-  createRedactionReporter,
-  type RedactionErrorHandler,
-} from '../../internal/redaction-reporter';
+  createFormatReporter,
+  type FormatErrorHandler,
+} from '../../internal/format-reporter';
 
 /**
  * Default redaction function using datamask
@@ -62,7 +62,7 @@ export { REDACTION_FAILED_MARKER } from '../../internal/default-redact-function'
  *                   the caller can put the marker back after the walk and report the
  *                   cause. Carrying only the key left this the one redaction failure with
  *                   no channel at all: the marker landed in the output and
- *                   `onRedactionError` never fired, which is exactly the silence that
+ *                   `onFormatError` never fired, which is exactly the silence that
  *                   handler exists to end. A key that is *also* named in `redactedKeys`
  *                   reaches the walk already holding the marker, and the walk masks
  *                   whatever it finds - turning `***REDACTION FAILED***` into an
@@ -280,9 +280,9 @@ export function applyRedaction(
   params: Record<string, unknown>,
   redactedKeys?: string[],
   redactFunction?: RedactFunction,
-  onRedactionError?: RedactionErrorHandler,
+  onFormatError?: FormatErrorHandler,
 ): Record<string, unknown> {
-  const report = createRedactionReporter(onRedactionError);
+  const report = createFormatReporter('redaction', onFormatError);
 
   // Read once, through `snapshotList`, and never asked a second question afterwards.
   //
@@ -442,7 +442,7 @@ export function applyRedaction(
   for (const { key, error } of unreadable) {
     // Reported, not only marked. The reporter is once-per-pass, so a bag of forty
     // unreadable params still says one thing - but it says it, which is the whole promise
-    // `onRedactionError` makes on every other surface that redacts.
+    // `onFormatError` makes on every other surface that redacts.
     report(error, key);
 
     try {

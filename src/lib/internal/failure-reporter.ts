@@ -5,15 +5,16 @@ import { reportToHost } from './report-to-host';
 /**
  * A caller's handler for one kind of failure, and the reporter that feeds it.
  *
- * Two channels in this library report the same shape - `onRedactionError` and
- * `onRenderError` - and they had the same body written out twice, differing only in two
- * identifiers and two message strings. That is the duplication `report-to-console` argues
- * against for its own rung: *the guarantee is one rule*, and a copy of it that someone
- * forgets to update is how a channel comes to be subtly less safe than its twin.
+ * The rungs every failure channel in this library stands on, written once. Redaction and
+ * rendering each had this body copied out, differing only in two identifiers and two
+ * message strings, which is the duplication `report-to-console` argues against for its own
+ * rung: *the guarantee is one rule*, and a copy of it that someone forgets to update is how
+ * a channel comes to be subtly less safe than its twin. Those two are now one public
+ * callback - see `format-reporter` - and this stays the shared floor beneath it and beneath
+ * `onSinkError` and `onEventHandlerError`.
  *
- * The channels keep their own names, types and documentation - a redaction failure and a
- * render failure are different things to a caller, and `subject` means a redaction entry
- * in one and a path in the other - but the rungs beneath them are this one function.
+ * `subject` is whatever the caller's channel names a failure by: a redaction entry, a
+ * render path, a sink context.
  */
 export type FailureHandler = (error: Error, subject: string) => void;
 

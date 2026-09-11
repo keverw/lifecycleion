@@ -8,9 +8,9 @@ import {
   type RedactValueFunction,
 } from './default-redact-function';
 import {
-  NOOP_REDACTION_REPORTER,
-  type ReportRedactionFailure,
-} from './redaction-reporter';
+  NOOP_FORMAT_REPORTER,
+  type ReportFormatFailure,
+} from './format-reporter';
 
 /** Decides the replacement for a redacted value. */
 export type RedactLeafFunction = RedactValueFunction;
@@ -34,7 +34,7 @@ export interface RedactPath {
  * `new Proxy(['password'], { get: (t, k) => (k === 'length' ? 0 : t[k]) })` answers
  * `Array.isArray` yes, iterates as empty, and spreads to `[]`, so every reader concluded
  * "the caller asked to redact nothing" and handed the payload back in the clear. No marker,
- * no `onRedactionError`, and `redactedKeys` on the entry reading `undefined` - the one
+ * no `onFormatError`, and `redactedKeys` on the entry reading `undefined` - the one
  * outcome redaction exists to prevent, reached without a single exception being raised.
  *
  * A consistent liar is undetectable in general, but *this* lie is not, because it breaks an
@@ -449,7 +449,7 @@ function redactPathsInner(
   redactFunction: RedactLeafFunction | undefined,
   seen: WeakSet<object>,
   state: RedactState,
-  report: ReportRedactionFailure,
+  report: ReportFormatFailure,
   shouldSkipCandidateScan = false,
 ): unknown {
   const matched = matchRedactPath(paths, path);
@@ -771,7 +771,7 @@ export function redactMatchedPaths(
   value: unknown,
   paths: RedactPath[],
   redactFunction: RedactLeafFunction | undefined,
-  report: ReportRedactionFailure = NOOP_REDACTION_REPORTER,
+  report: ReportFormatFailure = NOOP_FORMAT_REPORTER,
 ): unknown {
   const state: RedactState = {
     didMaskAnything: false,

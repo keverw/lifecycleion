@@ -483,7 +483,7 @@ describe('applyRedaction - non-identifier key names', () => {
       { password: 'hunter2secret' },
       hostile,
       undefined,
-      (_error, key) => failures.push(key),
+      (_error, _kind, key) => failures.push(key),
     );
 
     expect(result).toEqual({});
@@ -826,7 +826,7 @@ describe('applyRedaction - fail closed', () => {
       { password: 'hunter2secret' },
       { length: 0 } as unknown as string[],
       undefined,
-      (_error, key) => {
+      (_error, _kind, key) => {
         reported.push(key);
       },
     );
@@ -1178,14 +1178,14 @@ describe('applyRedaction - reporting why redaction failed', () => {
     throw new Error('redactor exploded');
   };
 
-  test('a throwing redactFunction reaches onRedactionError', () => {
+  test('a throwing redactFunction reaches onFormatError', () => {
     const reports: [string, string][] = [];
 
     const result = applyRedaction(
       { password: SECRET },
       ['password'],
       boom,
-      (error, key) => reports.push([key, error.message]),
+      (error, _kind, key) => reports.push([key, error.message]),
     );
 
     expect(reports).toEqual([['password', 'redactor exploded']]);
@@ -1202,7 +1202,7 @@ describe('applyRedaction - reporting why redaction failed', () => {
         { password: SECRET },
         'password' as unknown as string[],
         undefined,
-        (_error, key) => reports.push(key),
+        (_error, _kind, key) => reports.push(key),
       ),
     ).toEqual({});
     expect(reports).toEqual(['<redactedKeys>']);

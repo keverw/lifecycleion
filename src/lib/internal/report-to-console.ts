@@ -2,7 +2,7 @@
  * Write to `console.error` without letting it throw.
  *
  * This is the last rung of every reporting path in the library - what runs once a caller's
- * `onSinkError`, `onEventHandlerError`, `onRedactionError`, or `'error'` listener is
+ * `onSinkError`, `onEventHandlerError`, `onFormatError`, or `'error'` listener is
  * absent or has itself failed. Being last is precisely what makes an unguarded call here
  * dangerous: there is nothing above it left to catch, so the failure it was reporting is
  * replaced by a second one thrown from the reporter.

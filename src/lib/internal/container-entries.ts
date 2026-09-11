@@ -26,7 +26,7 @@
  * What a container will admit to holding, or that asking threw.
  *
  * `'unreadable'` carries the thrown value because two callers report it -
- * `maskValueDeep` and `redactPathsInner` both hand it to a `ReportRedactionFailure` so a
+ * `maskValueDeep` and `redactPathsInner` both hand it to a `ReportFormatFailure` so a
  * broken payload leaves a diagnosis and not only a marker. Callers that have nothing to
  * report with simply ignore it.
  */

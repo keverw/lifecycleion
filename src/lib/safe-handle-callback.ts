@@ -26,7 +26,7 @@ installGlobalEventTarget();
  * here settled questions that belong to whoever receives the report: it applied this
  * module's default masking, so a `Logger` with its own `redactFunction` could not use it;
  * it sent a broken `sensitiveFieldNames` to `console.error` instead of that logger's
- * `onRedactionError`; the logger then rendered the already-rendered table a second time,
+ * `onFormatError`; the logger then rendered the already-rendered table a second time,
  * one table nested inside another; and a structured sink reading `entry.error` had no way
  * back to the original. `errorToString` renders `cause`, so the wrapper still says
  * everything the pre-rendered form did - under the settings of whoever renders it.

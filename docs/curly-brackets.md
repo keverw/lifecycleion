@@ -137,13 +137,14 @@ console.log(template({})); // Outputs: "Hello, (???)!"
 ### Telling an unreadable placeholder from an absent one
 
 Both render the fallback. `{{user.token}}` on an object whose `token` accessor throws
-produces exactly what a typo produces, and until `onRenderError` existed the two were
+produces exactly what a typo produces, and until `onFormatError` existed the two were
 indistinguishable:
 
 ```typescript
 CurlyBrackets('{{missing.key}} {{user.token}}', { user: hostile }, '(null)', {
-  onRenderError: (error, path) => {
-    // fires once, for 'user.token' - the typo reports nothing, because nothing failed
+  onFormatError: (error, kind, path) => {
+    // fires once, for 'user.token' - the typo reports nothing, because nothing failed.
+    // `kind` is 'render' here; a nested redaction failure arrives as 'redaction'.
   },
 });
 ```

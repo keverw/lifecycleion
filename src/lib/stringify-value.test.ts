@@ -329,7 +329,7 @@ describe('stringifyValue / redactValue - fail-closed branches', () => {
     // The emptiness test is the one exit that hands the value back in the clear, so it is
     // asked of an array and of nothing else. A non-array answering `0` otherwise took
     // that exit and never reached the fail-closed branch, so the caller who asked for
-    // masking got the value rendered whole and no `onRedactionError` to say so.
+    // masking got the value rendered whole and no `onFormatError` to say so.
     const value = { password: SECRET };
     const redactedKeys = { length: 0 } as unknown as string[];
     const reported: string[] = [];
@@ -337,14 +337,14 @@ describe('stringifyValue / redactValue - fail-closed branches', () => {
     expect(
       redactValue(value, {
         redactedKeys,
-        onRedactionError: (_error, key) => {
+        onFormatError: (_error, _kind, key) => {
           reported.push(key);
         },
       }),
     ).toBe('***REDACTION FAILED***');
     expect(reported).toEqual(['<redactedKeys>']);
     expect(
-      stringifyValue(value, { redactedKeys, onRedactionError: () => {} }),
+      stringifyValue(value, { redactedKeys, onFormatError: () => {} }),
     ).toBe('***REDACTION FAILED***');
   });
 
@@ -873,7 +873,7 @@ describe('redactValue - a subtree no path addresses', () => {
 
     const result = redactValue(
       { password: SECRET, other },
-      { redactedKeys: ['password'], onRedactionError: () => {} },
+      { redactedKeys: ['password'], onFormatError: () => {} },
     ) as Record<string, unknown>;
 
     // The unreadable entry is marked where it sits; the container around it keeps its
@@ -1686,7 +1686,7 @@ describe('redactValue - reporting why redaction failed', () => {
     const result = redactValue(value, {
       redactedKeys,
       redactFunction,
-      onRedactionError: (error: Error, key: string) =>
+      onFormatError: (error: Error, _kind: string, key: string) =>
         reports.push([key, error.message]),
     } as unknown as StringifyValueOptions);
 
@@ -1743,7 +1743,7 @@ describe('redactValue - reporting why redaction failed', () => {
         {
           redactedKeys: ['password'],
           redactFunction: boom,
-          onRedactionError: () => {
+          onFormatError: () => {
             throw new Error('handler exploded');
           },
         },
@@ -1755,7 +1755,7 @@ describe('redactValue - reporting why redaction failed', () => {
       {
         redactedKeys: ['password'],
         redactFunction: boom,
-        onRedactionError: () => {
+        onFormatError: () => {
           throw new Error('handler exploded');
         },
       },
@@ -1931,7 +1931,7 @@ describe('a shared subtree costs one walk, not one per route', () => {
     expect(rendered).toContain('"attempts":3');
   });
 
-  describe('onRenderError', () => {
+  describe('onFormatError', () => {
     test('should report why a value could not be rendered, without leaking it', () => {
       // The marker in the output says a value refused; this is where the cause goes. The
       // two are asserted together because the split is the design: a getter is caller
@@ -1954,7 +1954,8 @@ describe('a shared subtree costs one walk, not one per route', () => {
       const rendered = stringifyValue(
         { user: hostile() },
         {
-          onRenderError: (error, path) => seen.push(`${path}|${error.message}`),
+          onFormatError: (error, _kind, path) =>
+            seen.push(`${path}|${error.message}`),
         },
       );
 
@@ -1967,8 +1968,50 @@ describe('a shared subtree costs one walk, not one per route', () => {
       expect(rendered).not.toContain('hunter2secret');
     });
 
+    test('tells a redaction failure apart from a render failure by kind', () => {
+      // The whole reason these are one callback rather than two: both come from the same
+      // walk over the same value and address it with the same structural path, so the only
+      // thing that ever differed was which stage threw. A caller who cares about that - a
+      // broken `redactFunction` is a masking bug, an unreadable value is not - reads
+      // `kind`; a caller who does not gets one handler instead of two.
+      //
+      // Two calls rather than one value that fails both ways: a redaction failure fails
+      // closed over the whole container, so nothing is left for the render to trip on.
+      const seen: [string, string][] = [];
+      const record = (_error: Error, kind: string, path: string): void => {
+        seen.push([kind, path]);
+      };
+
+      stringifyValue(
+        { password: 'hunter2' },
+        {
+          redactedKeys: ['password'],
+          redactFunction: () => {
+            throw new Error('redactor refused');
+          },
+          onFormatError: record,
+        },
+      );
+
+      const bag: Record<string, unknown> = { safe: 'kept' };
+
+      Object.defineProperty(bag, 'token', {
+        get() {
+          throw new Error('accessor refused');
+        },
+        enumerable: true,
+      });
+
+      stringifyValue(bag, { onFormatError: record });
+
+      expect(seen).toEqual([
+        ['redaction', 'password'],
+        ['render', '<value>.token'],
+      ]);
+    });
+
     test('should fall back to the console without a handler, and never throw', () => {
-      // Handler, then console, then nothing - the same three rungs `onRedactionError`,
+      // Handler, then console, then nothing - the same three rungs `onFormatError`,
       // `onSinkError` and `onEventHandlerError` all use. The rung itself is
       // `reportToConsole`, so a broken `console.error` costs the report and not the render.
       const consoleError = console.error;

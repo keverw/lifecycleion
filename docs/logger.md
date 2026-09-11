@@ -573,17 +573,21 @@ constant rather than hard-coding the literal.
 #### Finding out _why_ redaction failed
 
 The marker says that redaction failed, never why - the thrown error was discarded. Pass
-`onRedactionError` to get the cause:
+`onFormatError` to get the cause:
 
 ```typescript
 const logger = new Logger({
   redactFunction: myRedactor,
-  onRedactionError: (error, key) => {
-    metrics.increment('redaction.failed', { key });
+  onFormatError: (error, kind, path) => {
+    if (kind !== 'redaction') return;
+
+    metrics.increment('redaction.failed', { path });
     // `error.message` is the throw from `myRedactor`; the original is on `error.cause`.
   },
 });
 ```
+
+`kind` is `'redaction'` here and `'render'` when a value refused to be read - see below.
 
 ### When a value cannot be rendered
 
@@ -593,18 +597,23 @@ never costs you the log entry. That is the right trade, and it used to be comple
 silent — a `{{user.token}}` that rendered `(null)` because its accessor threw looked
 exactly like a typo.
 
-`onRenderError` is where the cause goes:
+`onFormatError` is where the cause goes:
 
 ```ts
 const logger = new Logger({
-  onRenderError: (error, path) => {
+  onFormatError: (error, kind, path) => {
+    // kind:  'render' here, 'redaction' when a redactFunction is what threw
     // path:  'user.token' — structural, built from keys the renderer already holds
     // error: the getter's own throw
   },
 });
 ```
 
-It fires at most once per render, and only when a read actually threw — never for the
+Both stages report through the one callback because both come from the same walk over the
+same value and address it with the same structural path; `kind` is the only thing that ever
+differed between them.
+
+It fires at most once per kind per operation, and only when a read actually threw — never for the
 ordinary degradations like `[circular]` or `[max depth exceeded]`, which never reach a
 reporter at all.
 
@@ -619,7 +628,7 @@ global `'error'` channel instead and a `registerReportErrorListener()` records i
 other reported failure.
 
 > **If your own sink, formatter or transformer calls `stringifyValue()`, pass it an
-> `onRenderError`.** It runs inside a log call while looking exactly like a standalone one,
+> `onFormatError`.** It runs inside a log call while looking exactly like a standalone one,
 > so left to the default it broadcasts, your listener logs it, that logging reaches your
 > sink again, and it cycles.
 
@@ -629,13 +638,14 @@ the output would travel to every sink past `redactedKeys`. The marker is
 library-authored text, the cause goes to one handler that asked for it. `path` is always
 structural and never a value.
 
-`errorObject()` renders twice — the error, then the message — so it can report twice, for
-two genuinely different failures. This is a separate budget from `onRedactionError`:
-a value that fails to redact and a value that fails to render are different failures, and
-collapsing them would hide one.
+`errorObject()` formats twice — the error, then the params — so it can report twice per
+kind, for genuinely different failures. Each kind carries its own budget: a value that
+fails to redact and a value that fails to render are different failures, and collapsing
+them would hide one.
 
-It is handed the failure, normalized to an `Error`, and the `redactedKeys` entry as you
-wrote it - `user.password`, not the leaf `password`. With no handler set it
+It is handed the failure normalized to an `Error`, the kind, and the path - the
+`redactedKeys` entry as you wrote it for a redaction failure (`user.password`, not the leaf
+`password`), the renderer's structural path for a render failure. With no handler set it
 **writes to `console.error`**, so a broken redactor is loud rather than silent.
 
 Two things about it are deliberate:
@@ -1504,8 +1514,7 @@ interface LogOptions {
 interface LoggerOptions {
   sinks?: LogSink[]; // Output destinations
   redactFunction?: (keyName, value: string) => RedactFunctionResult; // Custom redaction (default: masks with asterisks using datamask)
-  onRedactionError?: (error, key) => void; // Redaction failed for a param (default: console.error)
-  onRenderError?: (error, path) => void; // A value could not be rendered (default: console.error)
+  onFormatError?: (error, kind: 'redaction' | 'render', path) => void; // Redaction or rendering failed (default: console.error)
   callProcessExit?: boolean; // Actually call process.exit() (default: true, disable for tests/browser)
   beforeExitCallback?: (
     code,
@@ -1557,8 +1566,9 @@ Some failures cannot be written to the sinks, because the sinks are either the t
 | Your `onSinkError` itself throws                                                                | `console.error`                                                      |
 | A `'logger'` event handler of this logger throws or rejects                                     | `onEventHandlerError`, or `console.error` if you did not provide one |
 | Your `onEventHandlerError` itself throws                                                        | `console.error`                                                      |
-| Your `redactFunction` throws, or a value cannot be read to redact it                            | `onRedactionError`, or `console.error` if you did not provide one    |
-| Your `onRedactionError` itself throws                                                           | `console.error`                                                      |
+| Your `redactFunction` throws, or a value cannot be read to redact it                            | `onFormatError` with `kind: 'redaction'`, or `console.error`         |
+| A value refuses to be read or turned into text                                                  | `onFormatError` with `kind: 'render'`, or `console.error`            |
+| Your `onFormatError` itself throws                                                              | `console.error`                                                      |
 | A new error is reported while `registerReportErrorListener()` is still logging the previous one | `console.error`                                                      |
 
 The third and fifth rows are the ones that would otherwise loop. Logging emits a `'logger'` event, so reporting that handler's failure through the logger would emit again; and logging renders a message, which redacts, so reporting a redaction failure through the logger would redact again and throw again. Neither loop is a stack overflow that a re-entrancy guard could catch - each pass is a fresh turn - which is why both get a callback that cannot re-enter the logger. It gets its own callback rather than `onSinkError` because no sink was involved, and there would be nothing honest to pass as that callback's `sink` argument:
@@ -1576,7 +1586,7 @@ const logger = new Logger({
 
 Everything else — errors reported by other Lifecycleion modules, and by your own code using [the reporting pattern](./safe-handle-callback.md#the-reporting-pattern) — reaches your sinks normally through `registerReportErrorListener()`.
 
-> Do not call this logger's own log methods from inside `onSinkError`, `onEventHandlerError`, or `onRedactionError`. If the sink is what failed, logging from the handler asks the same sink to write again; logging from `onEventHandlerError` re-emits the very event whose handler just failed; and logging from `onRedactionError` runs the same redaction that just threw.
+> Do not call this logger's own log methods from inside `onSinkError`, `onEventHandlerError`, or `onFormatError`. If the sink is what failed, logging from the handler asks the same sink to write again; logging from `onEventHandlerError` re-emits the very event whose handler just failed; and logging from `onFormatError` runs the same redaction or rendering that just threw.
 
 > **Do not read `.message` directly inside these callbacks.** Both are handed a real `Error`, but the value a sink or handler threw is not yours, and `message` is an ordinary property that a subclass or a `Proxy` can turn into an accessor that throws. Reading it raises a second failure from inside the callback that was handling the first.
 
@@ -1592,11 +1602,11 @@ onSinkError: (error, context, sink) => {
 
 The callbacks are handed differently shaped errors, which matters if you log or group on them:
 
-| Callback              | Receives                                                                                                                                                             |
-| --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `onSinkError`         | The sink's own error, unwrapped. `cause` is set only when the sink threw a non-`Error` value                                                                         |
-| `onEventHandlerError` | A **wrapped** error, `Error in a logger event handler for <event>: <message>`, with the handler's original failure on `cause`                                        |
-| `onRedactionError`    | The `redactFunction`'s own error, normalized. `cause` is set only when it threw a non-`Error` value. The second argument is the `redactedKeys` entry as you wrote it |
+| Callback              | Receives                                                                                                                                                                                                                                                                                       |
+| --------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `onSinkError`         | The sink's own error, unwrapped. `cause` is set only when the sink threw a non-`Error` value                                                                                                                                                                                                   |
+| `onEventHandlerError` | A **wrapped** error, `Error in a logger event handler for <event>: <message>`, with the handler's original failure on `cause`                                                                                                                                                                  |
+| `onFormatError`       | The `redactFunction`'s, getter's or `toString`'s own error, normalized. `cause` is set only when it threw a non-`Error` value. The second argument is the kind, the third the path - the `redactedKeys` entry as you wrote it for `'redaction'`, the renderer's structural path for `'render'` |
 
 This allows you to:
 
@@ -1713,20 +1723,25 @@ logger.isReportErrorAvailable(); // boolean — are the global event primitives 
 
 ## Where Failures Go
 
-The logger has four callbacks for things that go wrong while logging. All four behave
+The logger has three callbacks for things that go wrong while logging. All three behave
 identically: **your handler if you set one, `console.error` if you did not, and
 `console.error` again if yours throws.** Nothing ever escapes into your `logger.info()`
 call, and nothing is ever silently dropped.
 
-| Callback              | Fires when                                                      |
-| --------------------- | --------------------------------------------------------------- |
-| `onSinkError`         | a sink's `write()` or `close()` throws or rejects               |
-| `onEventHandlerError` | one of your `logger.on('logger', …)` handlers throws or rejects |
-| `onRedactionError`    | your `redactFunction` threw, or `redactedKeys` was unusable     |
-| `onRenderError`       | a value refused to be read or turned into text                  |
+| Callback              | Fires when                                                        |
+| --------------------- | ----------------------------------------------------------------- |
+| `onSinkError`         | a sink's `write()` or `close()` throws or rejects                 |
+| `onEventHandlerError` | one of your `logger.on('logger', …)` handlers throws or rejects   |
+| `onFormatError`       | a value could not be formatted - see `kind` for which stage threw |
+
+`onFormatError`'s `kind` is `'redaction'` when your `redactFunction` threw or
+`redactedKeys` was unusable, and `'render'` when a value refused to be read or turned into
+text. They are one callback rather than two because both come from the same walk over the
+same value and address it with the same structural path.
 
 `FileSink` and `NamedPipeSink` have their own `onError` with the same three rungs, and
-`ArraySink` has `onRenderError`; `ConsoleSink` has none, since it does not queue or
+`ArraySink` has `onFormatError` (which also reports a throwing `transformer`, under
+`kind: 'transform'`); `ConsoleSink` has none, since it does not queue or
 transform anything. See [Built-In Sinks](#built-in-sinks).
 
 ### Why the fall-back is the console
@@ -1739,7 +1754,7 @@ closes that loop.
 
 ### Never seeing a console line
 
-Set all four. Once every channel has a handler, the library's console rung is unreachable
+Set all three. Once every channel has a handler, the library's console rung is unreachable
 from the logger:
 
 ```ts
@@ -1754,8 +1769,7 @@ const logger = new Logger({
   sinks: [/* … */],
   onSinkError: (error, context, sink) => report('sink')(error, context),
   onEventHandlerError: report('event-handler'),
-  onRedactionError: report('redaction'),
-  onRenderError: report('render'),
+  onFormatError: (error, kind, path) => report(kind)(error, path),
 });
 ```
 

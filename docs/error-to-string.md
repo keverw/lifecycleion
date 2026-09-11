@@ -37,8 +37,12 @@ function errorToString(
 interface ErrorToStringOptions {
   /** Decides how a value named by `sensitiveFieldNames` is replaced. */
   redactFunction?: (key: string, value: string) => RedactFunctionResult;
-  /** Notified when redaction fails. Defaults to `console.error`. */
-  onRedactionError?: (error: Error, key: string) => void;
+  /** Notified when redaction or rendering fails. Defaults to `console.error`. */
+  onFormatError?: (
+    error: Error,
+    kind: 'redaction' | 'render',
+    path: string,
+  ) => void;
 }
 ```
 
@@ -186,7 +190,7 @@ To render a literal null, return the string `'null'`. Returning **nothing** defe
 
 The function is handed the key exactly as you wrote it in `sensitiveFieldNames` (`user.password`, not the leaf `password`) and the value already stringified, which is what the logger passes for the same field - so the same function genuinely serves both, and a mutating function cannot reach into your error object.
 
-Pass `onRedactionError` to find out why a value failed to redact - it receives the error and the `sensitiveFieldNames` entry it happened on, fires at most once per call, and with no handler reports on the standard global `'error'` channel so a `logger.registerReportErrorListener()` records it, falling back to `console.error` when nothing claims it. The same option is on the logger and on `stringifyValue`.
+Pass `onFormatError` to find out why a value failed to redact - it receives the error, `kind: 'redaction'`, and the `sensitiveFieldNames` entry it happened on. The same callback also reports rendering failures under `kind: 'render'`; both come from the same walk over the same value and address it the same way, which is why they are one callback with a discriminator rather than two. It fires at most once per kind per call, and with no handler reports on the standard global `'error'` channel so a `logger.registerReportErrorListener()` records it, falling back to `console.error` when nothing claims it. The same option is on the logger and on `stringifyValue`.
 
 If the `redactFunction` throws, or reading the value throws, the result is `***REDACTION FAILED***` - never the original value. That is the same marker the logger uses for the same condition, and it is deliberately distinct from a successful mask so a broken `redactFunction` cannot hide behind output that looks fine.
 
@@ -216,12 +220,13 @@ first is the worst possible outcome. It is written so it cannot:
   message would put the value into the table, past `sensitiveFieldNames`, and into every
   sink. These three are library-authored text with nothing of yours in them, which is what
   makes them safe to render. A cause is only ever handed to a callback, never written into
-  the output: pass **`onRenderError`** to receive it.
+  the output: pass **`onFormatError`** to receive it.
 
   ```ts
   errorToString(err, 80, {
-    onRenderError: (error, path) => {
-      // path: 'additionalInfo.items[0].token' — structural, never a value
+    onFormatError: (error, kind, path) => {
+      // kind: 'render' here; 'redaction' when a redactFunction is what threw
+      // path: 'additionalInfo.items.0.token' — structural, never a value
       // error: the getter's own throw — may contain the value, which is why the
       //        table above never carries it
     },

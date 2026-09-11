@@ -790,7 +790,7 @@ describe('errorToString', () => {
       //
       // The cause is deliberately absent from both. A getter is caller code and free to
       // throw a message carrying the value it was hiding, so the marker stays
-      // library-authored text; `onRedactionError` is where a cause is allowed to go.
+      // library-authored text; `onFormatError` is where a cause is allowed to go.
       const throwingEntry: Record<string, unknown> = { safe: 'kept' };
 
       Object.defineProperty(throwingEntry, 'password', {
@@ -839,7 +839,8 @@ describe('errorToString', () => {
         }),
         80,
         {
-          onRenderError: (error, path) => seen.push(`${path}|${error.message}`),
+          onFormatError: (error, _kind, path) =>
+            seen.push(`${path}|${error.message}`),
         },
       );
 
@@ -886,7 +887,7 @@ describe('errorToString', () => {
           }),
         }),
         80,
-        { onRenderError: (_error, path) => paths.push(path) },
+        { onFormatError: (_error, _kind, path) => paths.push(path) },
       );
 
       expect(paths[0]).toBe('cause.additionalInfo.items[0].token');
@@ -922,7 +923,7 @@ describe('errorToString', () => {
 
       try {
         expect(() =>
-          errorToString(build(), 80, { onRenderError: exploding }),
+          errorToString(build(), 80, { onFormatError: exploding }),
         ).not.toThrow();
       } finally {
         console.error = consoleError;
@@ -930,7 +931,7 @@ describe('errorToString', () => {
 
       // And the render still produced the error it was asked for.
       expect(
-        errorToString(build(), 80, { onRenderError: exploding }),
+        errorToString(build(), 80, { onFormatError: exploding }),
       ).toContain('boom');
     });
 
@@ -939,7 +940,7 @@ describe('errorToString', () => {
       // console, then nothing. Silence by default would have left the swallow this channel
       // exists to end as the behaviour almost everyone gets - the reporter fires only when
       // a read actually threw, never for the ordinary degradations like `[circular]` or
-      // `[max depth exceeded]`, so it is no more chatty than `onRedactionError`.
+      // `[max depth exceeded]`, so it is no more chatty than `onFormatError`.
       const bag: Record<string, unknown> = {};
 
       for (let index = 0; index < 20; index++) {
@@ -1020,7 +1021,7 @@ describe('errorToString', () => {
           sensitiveFieldNames: underReporting,
         }),
         80,
-        { onRedactionError: (_error, key) => reported.push(key) },
+        { onFormatError: (_error, _kind, key) => reported.push(key) },
       );
 
       expect(rendered).not.toContain('hunter2secret');
@@ -1233,7 +1234,7 @@ describe('errorToString', () => {
       error.cause = { password: 'hunter2secret' };
 
       const rendered = errorToString(error, 80, {
-        onRedactionError: () => undefined,
+        onFormatError: () => undefined,
       });
 
       expect(rendered).not.toContain('hunter2secret');
@@ -1510,7 +1511,7 @@ describe('errorToString - reporting why redaction failed', () => {
       redactFunction: (() => {
         throw new Error('redactor exploded');
       }) as unknown as RedactFieldFunction,
-      onRedactionError: (error, key) => reports.push([key, error.message]),
+      onFormatError: (error, _kind, key) => reports.push([key, error.message]),
     });
 
     expect(reports).toEqual([['password', 'redactor exploded']]);
@@ -1527,7 +1528,7 @@ describe('errorToString - reporting why redaction failed', () => {
 
     const reports: string[] = [];
     const rendered = errorToString(error, 120, {
-      onRedactionError: (_error, key) => reports.push(key),
+      onFormatError: (_error, _kind, key) => reports.push(key),
     });
 
     expect(reports).toEqual(['<sensitiveFieldNames>']);
@@ -1543,7 +1544,7 @@ describe('errorToString - reporting why redaction failed', () => {
     expect(
       errorToString(mkError(), 120, {
         redactFunction,
-        onRedactionError: () => undefined,
+        onFormatError: () => undefined,
       }),
     ).toBe(errorToString(mkError(), 120, { redactFunction }));
   });
