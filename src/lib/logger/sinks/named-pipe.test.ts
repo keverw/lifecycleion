@@ -2506,6 +2506,53 @@ describe('NamedPipeSink', () => {
     await sink.close();
   }, 15000);
 
+  test('a path that flaps reports each distinct state once, not once per change', async () => {
+    // The reason the sink remembers every failure of an outage rather than just the last
+    // one. Remembering only the previous failure reports on every *change*, so a path
+    // genuinely thrashing - a deploy script creating and removing it, a mount coming and
+    // going - is a callback per transition, and at one attempt a second that is the flood
+    // again by another route.
+    //
+    // Here the path cycles missing -> regular file -> missing. Three states to diagnose,
+    // two of them distinct, and the third is one the sink has already reported this outage.
+    const pipePath = `${tmpDir.path}/flapping.pipe`;
+    const kinds: SinkFailureKind[] = [];
+
+    const sink = new NamedPipeSink({
+      pipePath,
+      closeTimeoutMS: 500,
+      onError: (failure: SinkFailure) => {
+        kinds.push(failure.kind);
+      },
+    });
+
+    sink.write({
+      timestamp: Date.now(),
+      type: 'info',
+      template: 'flap',
+      message: 'flap',
+    });
+
+    // Missing.
+    await new Promise((resolve) => setTimeout(resolve, 1200));
+
+    // Now a regular file.
+    await fsPromises.writeFile(pipePath, 'not a fifo', 'utf8');
+    await new Promise((resolve) => setTimeout(resolve, 1200));
+
+    // And missing again - a state already reported, so it must not be reported twice.
+    await fsPromises.unlink(pipePath);
+    await new Promise((resolve) => setTimeout(resolve, 1200));
+
+    expect(kinds.filter((kind) => kind === 'not_found').length).toBe(1);
+    expect(kinds.filter((kind) => kind === 'not_a_pipe').length).toBe(1);
+
+    // Two facts, two callbacks, across three state changes and several attempts each.
+    expect(kinds.length).toBe(2);
+
+    await sink.close();
+  }, 20000);
+
   test('recovers a pipe that only appears later, with no further traffic', async () => {
     // Three ways an open can fail - no reader on the FIFO, the open itself refused, the
     // `stat` finding nothing there - and only the first ever had a timer behind it. The

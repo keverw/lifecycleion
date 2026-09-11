@@ -189,6 +189,21 @@ const REOPEN_COOLDOWN_MS = 1000;
 const NO_READER_ERRNO = 'ENXIO';
 
 /**
+ * How many distinct open failures are reported before one outage has said enough.
+ *
+ * The set in {@link NamedPipeSink.reportedOpenFailures} is what bounds reporting, and in
+ * practice it bounds it at three or four: three kinds, and a small number of `errno`s each.
+ * This is the guard for the case where that assumption does not hold - a message that
+ * varies for reasons the sink cannot see - which without a cap is a set that grows for as
+ * long as the outage does, on the one path whose whole job is to survive a long outage
+ * quietly.
+ *
+ * Eight, so the realistic ceiling is never the one reached, and the sink says when it is
+ * rather than falling silent.
+ */
+const MAX_REPORTED_OPEN_FAILURES = 8;
+
+/**
  * How long an open is waited on before the caller is told it has not completed.
  *
  * The open the sink commits to is only started once a reader is known to be there - see
@@ -278,7 +293,8 @@ export class NamedPipeSink implements LogSink {
    */
   private reportedAbandonedOpenCap = false;
   /**
-   * The open failure this sink last reported, so one outage is not reported every second.
+   * The open failures reported during this outage, so one outage is not reported every
+   * second.
    *
    * Every failed open now schedules another attempt - see `scheduleReopen` - which is what
    * makes recovery independent of traffic, and which without this would make a mistyped
@@ -286,16 +302,32 @@ export class NamedPipeSink implements LogSink {
    * reporting the sink already does elsewhere works exactly this way: `didReportDrop` for
    * the queue cap, {@link reportedAbandonedOpenCap} for the open cap.
    *
-   * The failure itself rather than a boolean, so a *different* one still gets through: a
-   * path that goes from missing to present-but-unreadable is a new fact, and a consumer
-   * watching this channel is entitled to it. Both the kind and the message, since the two
+   * A set rather than a boolean, so a *different* failure still gets through: a path that
+   * goes from missing to present-but-unreadable is a new fact, and a consumer watching this
+   * channel is entitled to it. Keyed on the kind as well as the message, since the two
    * messages share a prefix. Every open failure participates - `not_found`, `not_a_pipe`
-   * and `setup` - so this really is the last one, as the name says.
+   * and `setup`.
+   *
+   * A set rather than just the last one, which is the stricter of the two and the reason
+   * this is a hard ceiling. Remembering only the previous failure reports on every
+   * *change*, so a path genuinely flapping between two states - a deploy script creating
+   * and removing it - is a report per transition, which at one attempt a second is the
+   * flood again by another route. Remembering all of them means a state already reported
+   * this outage stays quiet however many times it comes back, and one outage costs at most
+   * {@link MAX_REPORTED_OPEN_FAILURES} callbacks however long it lasts or how it thrashes.
    *
    * Cleared when the pipe opens, so the next outage speaks up again, and cleared by
    * `reconnect()`, which is an attempt the caller asked for and is owed an answer to.
    */
-  private lastReportedOpenFailure?: string;
+  private readonly reportedOpenFailures = new Set<string>();
+  /**
+   * Whether {@link MAX_REPORTED_OPEN_FAILURES} has been reported, so it is said once.
+   *
+   * Said at all, rather than the sink simply going quiet at the cap, for the reason
+   * {@link reportedAbandonedOpenCap} exists: a sink that has stopped telling you things has
+   * to tell you that.
+   */
+  private reportedOpenFailureCap = false;
   /**
    * Entries waiting for the pipe, each with the line already rendered.
    *
@@ -538,7 +570,8 @@ export class NamedPipeSink implements LogSink {
       // driven by the application, not by a timer, so it cannot run away - and the caller
       // has nowhere else to read the diagnosis, since `ReconnectStatus.error` is a generic
       // `Failed to initialize pipe connection` rather than the underlying failure.
-      this.lastReportedOpenFailure = undefined;
+      this.reportedOpenFailures.clear();
+      this.reportedOpenFailureCap = false;
 
       this.initPromise = this.initializePipe();
       await this.initPromise;
@@ -1039,8 +1072,9 @@ export class NamedPipeSink implements LogSink {
         this.isInitialized = true;
 
         // A later outage is a new fact and is reported as one. See
-        // {@link lastReportedOpenFailure}.
-        this.lastReportedOpenFailure = undefined;
+        // {@link reportedOpenFailures}.
+        this.reportedOpenFailures.clear();
+        this.reportedOpenFailureCap = false;
 
         // Process any queued writes
         this.processQueue();
@@ -1085,11 +1119,12 @@ export class NamedPipeSink implements LogSink {
   }
 
   /**
-   * Report a failed open, once per outage rather than once per attempt.
+   * Report a failed open, once per distinct failure per outage rather than once per
+   * attempt.
    *
-   * See {@link lastReportedOpenFailure}. The retry behind every failed open is what makes
-   * this necessary: without it a path that is never coming back is a callback a second,
-   * forever, from a sink whose whole job on this path is to wait quietly and keep trying.
+   * See {@link reportedOpenFailures}. The retry behind every failed open is what makes this
+   * necessary: without it a path that is never coming back is a callback a second, forever,
+   * from a sink whose whole job on this path is to wait quietly and keep trying.
    */
   private reportOpenFailure(
     kind: SinkFailureKind,
@@ -1103,11 +1138,29 @@ export class NamedPipeSink implements LogSink {
     // cannot afford to miss.
     const key = `${kind}\u0000${message}`;
 
-    if (this.lastReportedOpenFailure === key) {
+    // Already said this outage. Not "already said last time": see
+    // {@link reportedOpenFailures} for why a path that flaps between two states must not
+    // report on every transition.
+    if (this.reportedOpenFailures.has(key)) {
       return;
     }
 
-    this.lastReportedOpenFailure = key;
+    if (this.reportedOpenFailures.size >= MAX_REPORTED_OPEN_FAILURES) {
+      if (!this.reportedOpenFailureCap) {
+        this.reportedOpenFailureCap = true;
+
+        this.handleError(
+          'setup',
+          new Error(
+            `Reported ${String(MAX_REPORTED_OPEN_FAILURES)} distinct failures opening the named pipe at ${this.pipePath}; further ones are not reported until it opens`,
+          ),
+        );
+      }
+
+      return;
+    }
+
+    this.reportedOpenFailures.add(key);
 
     this.handleError(kind, new Error(message, { cause }));
   }
