@@ -2,8 +2,9 @@ import { describe, test, expect, beforeEach, afterEach, spyOn } from 'bun:test';
 import { promises as fsPromises } from 'fs';
 import * as fs from 'fs';
 import * as os from 'os';
-import { exec } from 'node:child_process';
+import { exec, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
+import { fileURLToPath } from 'node:url';
 import { NamedPipeSink } from './named-pipe';
 import type { SinkFailure, SinkFailureKind } from './internal/sink-failure';
 import { LogLevel } from '../types';
@@ -2201,4 +2202,367 @@ describe('NamedPipeSink', () => {
       fs.closeSync(readerFd);
     }
   }, 20000);
+
+  test('a FIFO with no reader does not pin the process open', async () => {
+    // The failure this is here for was not a wrong value anywhere - every assertion in
+    // this file passed while it was true. `fs.createWriteStream` on a FIFO issues a
+    // blocking `open(2)`, which for a pipe nobody is reading never returns, and
+    // `destroy()` cannot cancel a syscall already in flight. A pending threadpool request
+    // keeps the event loop alive, so `await sink.close()` resolved, the queue was
+    // abandoned and reported, the sink said everything it was supposed to say - and the
+    // process then sat there until something sent it `SIGKILL`.
+    //
+    // Only observable from outside, hence the child: in-process the sink looks closed.
+    const pipePath = `${tmpDir.path}/no-reader-exit.pipe`;
+    await createNamedPipe(pipePath);
+
+    const sinkModulePath = fileURLToPath(
+      new URL('./named-pipe.ts', import.meta.url),
+    );
+    const scriptPath = `${tmpDir.path}/no-reader-exit.ts`;
+
+    await fsPromises.writeFile(
+      scriptPath,
+      [
+        `import { NamedPipeSink } from ${JSON.stringify(sinkModulePath)};`,
+        '',
+        'const sink = new NamedPipeSink({',
+        `  pipePath: ${JSON.stringify(pipePath)},`,
+        '  closeTimeoutMS: 500,',
+        '  onError: () => {',
+        '    // Expected: the line cannot be delivered to a pipe nobody is reading.',
+        '  },',
+        '});',
+        '',
+        'sink.write({',
+        '  timestamp: Date.now(),',
+        "  type: 'info',",
+        "  template: 'never-delivered',",
+        "  message: 'never-delivered',",
+        '});',
+        '',
+        'await sink.close();',
+        '',
+        "console.log('closed');",
+        '',
+      ].join('\n'),
+      'utf8',
+    );
+
+    // `process.execPath` is the runtime running this suite, which is the one that knows
+    // how to load the sink's TypeScript directly.
+    const child = spawn(process.execPath, [scriptPath], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+
+    let stdout = '';
+
+    child.stdout.setEncoding('utf8');
+    child.stdout.on('data', (chunk: string) => {
+      stdout += chunk;
+    });
+
+    // Captured rather than merely drained. Without it a child that failed for an unrelated
+    // reason - an import that did not resolve, a throw before `close()` - shows up only as
+    // "stdout did not contain 'closed'", with the actual diagnosis discarded.
+    let stderr = '';
+
+    child.stderr.setEncoding('utf8');
+    child.stderr.on('data', (chunk: string) => {
+      stderr += chunk;
+    });
+
+    const exitTimeoutMS = 10000;
+    const outcome = await new Promise<number | 'did_not_exit'>((resolve) => {
+      const timer = setTimeout(() => {
+        resolve('did_not_exit');
+      }, exitTimeoutMS);
+
+      child.once('exit', (code) => {
+        clearTimeout(timer);
+        resolve(code ?? -1);
+      });
+    });
+
+    if (outcome === 'did_not_exit') {
+      // The `SIGKILL` this test exists to make unnecessary. Sent anyway, so a regression
+      // fails the assertion below rather than leaving a stuck child behind it.
+      child.kill('SIGKILL');
+    }
+
+    // `close()` resolved *and* the process was then free to leave. The first was already
+    // true before the non-blocking probe; the second was not.
+    //
+    // `stderr` is folded into the first assertion rather than checked separately, so a
+    // child that died on its way to `close()` fails with its own error in the message.
+    expect(
+      stdout + (stderr === '' ? '' : `\n[child stderr] ${stderr}`),
+    ).toContain('closed');
+    expect(outcome).toBe(0);
+  }, 20000);
+
+  test('a pipe that never appears is reported once, not once per retry', async () => {
+    // The cost of making recovery independent of traffic. Every failed open schedules
+    // another attempt now, so a mistyped `pipePath` is retried once a second for the life
+    // of the process - and reported on every one of them, it would call the caller's
+    // `onError` 86,400 times a day for a sink whose whole job on this path is to wait
+    // quietly and keep trying. One report per outage, the way the queue cap and the
+    // abandoned-open cap already report.
+    const pipePath = `${tmpDir.path}/never/going/to/exist.pipe`;
+    const kinds: SinkFailureKind[] = [];
+
+    const sink = new NamedPipeSink({
+      pipePath,
+      closeTimeoutMS: 500,
+      onError: (failure: SinkFailure) => {
+        kinds.push(failure.kind);
+      },
+    });
+
+    sink.write({
+      timestamp: Date.now(),
+      type: 'info',
+      template: 'nowhere-to-go',
+      message: 'nowhere-to-go',
+    });
+
+    // Several cooldowns' worth of attempts, with nothing written after the first.
+    await new Promise((resolve) => setTimeout(resolve, 3500));
+
+    expect(kinds.filter((kind) => kind === 'not_found').length).toBe(1);
+
+    // Still counted and still visible, which is the part that must not be traded away for
+    // the quiet: the report is deduplicated, the state is not.
+    expect(sink.getHealth().isInitialized).toBe(false);
+    expect(sink.getHealth().lastError).toBeDefined();
+    expect(sink.getHealth().queueSize).toBe(1);
+
+    await sink.close();
+  }, 15000);
+
+  test('a path that is not a FIFO is reported once, and does not trap the sink', async () => {
+    // This one was both a flood and a dead end. Reporting directly rather than through the
+    // once-per-outage path meant six callbacks in four seconds against an ordinary file,
+    // and returning with no retry scheduled made it absorbing: the retry chain that
+    // recovers a missing path walks straight into it the moment the path exists as
+    // something else, and stops there for good.
+    //
+    // `rm pipe; touch pipe; rm pipe; mkfifo pipe` is an ordinary deploy fumble, and it left
+    // the sink uninitialized for the life of a quiet process - a live reader on a perfectly
+    // good FIFO, and nothing looking at it.
+    const pipePath = `${tmpDir.path}/not-a-fifo.pipe`;
+    const kinds: SinkFailureKind[] = [];
+
+    // Step one: the path is a regular file.
+    await fsPromises.writeFile(pipePath, 'not a fifo', 'utf8');
+
+    const sink = new NamedPipeSink({
+      pipePath,
+      closeTimeoutMS: 2000,
+      onError: (failure: SinkFailure) => {
+        kinds.push(failure.kind);
+      },
+    });
+
+    sink.write({
+      timestamp: Date.now(),
+      type: 'info',
+      template: 'waiting-for-a-real-pipe',
+      message: 'waiting-for-a-real-pipe',
+    });
+
+    // Several cooldowns, nothing written after the first line.
+    await new Promise((resolve) => setTimeout(resolve, 2500));
+
+    expect(kinds.filter((kind) => kind === 'not_a_pipe').length).toBe(1);
+    expect(sink.getHealth().isInitialized).toBe(false);
+
+    // Step two: the file is replaced by a real FIFO with a real reader, and still nothing
+    // is written. The sink has to have kept looking.
+    await fsPromises.unlink(pipePath);
+    await createNamedPipe(pipePath);
+
+    const reader = spawn('cat', [pipePath], {
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+
+    let received = '';
+
+    reader.stdout.setEncoding('utf8');
+    reader.stdout.on('data', (chunk: string) => {
+      received += chunk;
+    });
+
+    try {
+      expect(await waitForOpenPipe(sink)).toBe(true);
+
+      await new Promise((resolve) => setTimeout(resolve, 250));
+
+      expect(received).toContain('waiting-for-a-real-pipe');
+      expect(sink.getHealth().droppedEntries).toBe(0);
+    } finally {
+      await sink.close();
+      reader.kill('SIGKILL');
+    }
+  }, 20000);
+
+  test('reconnect() reports the failure every time it is asked', async () => {
+    // The deduplication that keeps an automatic retry quiet must not silence an attempt the
+    // caller made by name. `docs/logger.md` promises that a failed `reconnect()` calls
+    // `onError` again with the details, and `ReconnectStatus.error` is a generic
+    // `Failed to initialize pipe connection` - so suppressing the report leaves the caller
+    // with no way at all to learn why. It cannot run away either: this is driven by the
+    // application, not by a timer.
+    const pipePath = `${tmpDir.path}/reconnect-reports.pipe`;
+    const kinds: SinkFailureKind[] = [];
+
+    const sink = new NamedPipeSink({
+      pipePath,
+      closeTimeoutMS: 500,
+      onError: (failure: SinkFailure) => {
+        kinds.push(failure.kind);
+      },
+    });
+
+    // Let the constructor's own attempt settle and report.
+    await new Promise((resolve) => setTimeout(resolve, 150));
+
+    kinds.length = 0;
+
+    const first = await sink.reconnect();
+    const second = await sink.reconnect();
+
+    expect(first.success).toBe(false);
+    expect(second.success).toBe(false);
+
+    // Both asks answered, not just the first.
+    expect(kinds.filter((kind) => kind === 'not_found').length).toBe(2);
+
+    await sink.close();
+  }, 15000);
+
+  test('recovers a pipe that only appears later, with no further traffic', async () => {
+    // Three ways an open can fail - no reader on the FIFO, the open itself refused, the
+    // `stat` finding nothing there - and only the first ever had a timer behind it. The
+    // other two waited for the next `write()` to ask, which is a retry policy only for a
+    // process that is still logging. A deploy that lays the pipe down a moment after the
+    // service starts, or a `rm pipe; mkfifo pipe` during a quiet minute, was picked up
+    // whenever traffic happened to resume, and by a process that had gone quiet, never.
+    //
+    // Nothing is written after the first line here, deliberately: the recovery under test
+    // is the one that happens with no help from the caller at all.
+    const pipePath = `${tmpDir.path}/late-arrival.pipe`;
+    const kinds: SinkFailureKind[] = [];
+
+    const sink = new NamedPipeSink({
+      pipePath,
+      closeTimeoutMS: 2000,
+      onError: (failure: SinkFailure) => {
+        kinds.push(failure.kind);
+      },
+    });
+
+    // The FIFO does not exist yet, so the `stat` fails and the sink says so.
+    sink.write({
+      timestamp: Date.now(),
+      type: 'info',
+      template: 'queued-before-the-pipe-existed',
+      message: 'queued-before-the-pipe-existed',
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 150));
+
+    expect(kinds).toContain('not_found');
+    expect(sink.getHealth().isInitialized).toBe(false);
+    expect(sink.getHealth().queueSize).toBe(1);
+
+    // Now the pipe and its reader turn up. No further `write()`.
+    await createNamedPipe(pipePath);
+
+    const reader = spawn('cat', [pipePath], {
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+
+    let received = '';
+
+    reader.stdout.setEncoding('utf8');
+    reader.stdout.on('data', (chunk: string) => {
+      received += chunk;
+    });
+
+    try {
+      // Opened by the retry timer alone - `waitForOpenPipe` only polls `getHealth()`.
+      expect(await waitForOpenPipe(sink)).toBe(true);
+
+      await new Promise((resolve) => setTimeout(resolve, 250));
+
+      // And the line that was queued the whole time went out.
+      expect(received).toContain('queued-before-the-pipe-existed');
+      expect(sink.getHealth().droppedEntries).toBe(0);
+    } finally {
+      await sink.close();
+      reader.kill('SIGKILL');
+    }
+  }, 15000);
+
+  test('opening the pipe does not hand the reader an end of input', async () => {
+    // A FIFO's reader sees EOF when the *last* writer closes it. The non-blocking probe
+    // that keeps a blocking open from ever starting is itself a writer, so releasing it
+    // before the real stream has a descriptor of its own leaves a moment with no writer at
+    // all - and `cat < pipe`, like every other reader that treats end of input as end of
+    // job, exits in that moment. Measured while writing this: the reader hung up before
+    // the first line was ever written to it.
+    //
+    // `cat` in a child process rather than an in-process `fs.createReadStream`, and that
+    // is not incidental. Opening a FIFO for *reading* blocks until a writer arrives, so a
+    // reader living in this process sits in the runtime's file-I/O thread pool waiting for
+    // the writer that only this sink's probe - another file-I/O call, queued behind it -
+    // is going to provide. Under Bun that deadlocks outright. A separate process has its
+    // own pool and none of that applies, which is also what every real deployment of this
+    // sink looks like.
+    const pipePath = `${tmpDir.path}/no-eof.pipe`;
+    await createNamedPipe(pipePath);
+
+    const reader = spawn('cat', [pipePath], {
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+
+    let received = '';
+    let readerExitCode: number | null | 'still_running' = 'still_running';
+
+    reader.stdout.setEncoding('utf8');
+    reader.stdout.on('data', (chunk: string) => {
+      received += chunk;
+    });
+
+    reader.once('exit', (code) => {
+      readerExitCode = code;
+    });
+
+    const sink = new NamedPipeSink({ pipePath, closeTimeoutMS: 2000 });
+
+    try {
+      expect(await waitForOpenPipe(sink)).toBe(true);
+
+      sink.write({
+        timestamp: Date.now(),
+        type: 'info',
+        template: 'after-probe',
+        message: 'after-probe',
+      });
+
+      await new Promise((resolve) => setTimeout(resolve, 250));
+
+      // Still the same reader, and it got the line: the probe never handed it an EOF to
+      // exit on.
+      expect(readerExitCode).toBe('still_running');
+      expect(received).toContain('after-probe');
+    } finally {
+      await sink.close();
+
+      if (readerExitCode === 'still_running') {
+        reader.kill('SIGKILL');
+      }
+    }
+  }, 15000);
 });

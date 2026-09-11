@@ -53,6 +53,7 @@ A TypeScript HTTP client with a fluent request builder, request/response interce
   - [MockAdapter (Testing)](#mockadapter-testing)
 - [Streaming Responses](#streaming-responses)
   - [Writing your own `WritableLike`](#writing-your-own-writablelike)
+    - [How long that listener stays](#how-long-that-listener-stays)
   - [Stream Errors and Replay](#stream-errors-and-replay)
     - [Adapter Support](#adapter-support)
     - [Failures Before a Response](#failures-before-a-response)
@@ -1297,13 +1298,14 @@ Two expectations the adapter relies on:
 - **Report a failed write.** Either call the callback passed to `write` / `end` with the
   error, or emit `'error'` — which is what a Node stream does. A write that fails destroys
   the stream and its `'error'` often arrives after the request has already settled, so the
-  adapter holds a listener across that gap to keep it from becoming an uncaught exception.
-  There is no deadline: a real `fs.WriteStream` closes its file descriptor asynchronously
-  before it emits, and any deadline short enough to be useful expired first — which turned
-  the very error the listener existed to absorb into an uncaught exception.
+  adapter keeps an `'error'` listener on your sink across that gap to stop the event from
+  becoming an uncaught exception. The wait is bounded but not brief: a real
+  `fs.WriteStream` closes its file descriptor asynchronously before it emits, so the error
+  lands a poll phase later, and a removal counted in turns of the loop expired first —
+  which turned the very error the listener existed to absorb into an uncaught exception.
+  See [How long that listener stays](#how-long-that-listener-stays).
 - **Emit `'close'` when you are finished.** That is how the adapter learns nothing further
-  is coming and releases the listener. A sink that emits neither an `'error'` nor a
-  `'close'` after a failed write keeps one listener attached for as long as it lives.
+  is coming and takes the listener off at once, instead of waiting out the timers below.
 - **Set `errored` if you can, but you need not.** A Node stream records the error it failed
   with there, and the adapter reads it as a second signal when `end`'s callback reports
   success on a stream that was destroyed underneath it. It is optional, and a sink without
@@ -1312,6 +1314,42 @@ Two expectations the adapter relies on:
   inside `end`'s callback, a tick after the call, where an escaping throw would be an
   uncaught exception rather than a failed download. That is not a general licence to throw:
   a sink whose `on` or `destroy` throws still fails the request.
+
+##### How long that listener stays
+
+Worth knowing, because the writable is yours and the adapter is holding a listener on it.
+
+Nothing can promise "no more errors, ever." The operating system does not offer that
+guarantee and a writable is free to emit an hour from now, so the adapter does not wait for
+an answer it cannot get — **it waits for a bounded time and then lets go.**
+
+One `'error'` listener is shared per writable rather than per request, so ten concurrent
+downloads into one sink attach one listener between them, not ten. It comes off at the
+first of these:
+
+| Signal                             | What happens                                                                                                                                                                                                                            |
+| ---------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| The `'error'` arrives              | Absorbed, and reported through the host error reporter unless the request already handed it to you as `errorCause`. Released one turn later, so a sibling request's late error is still covered                                         |
+| `'close'`                          | The stream has finished tearing down and nothing further is coming, so it is released immediately                                                                                                                                       |
+| ~1 second with neither             | The per-request window. Every request that settles while the listener is already attached restarts it, so each gets a window of its own rather than the remainder of the first one's — clamped by whatever is left of the ceiling below |
+| ~5 seconds since it first attached | The absolute ceiling on one listener, which no amount of restarting extends                                                                                                                                                             |
+
+That last row is the one to hold on to: **the absorber does not live forever, and it is not
+per process.** Without the ceiling, a caller streaming continuously into `process.stdout` or
+a pooled sink — exactly the writables that never error and never close — would push the
+window out on every settle and keep the _first_ request's closure pinned to that stream for
+the life of the process.
+
+When the ceiling is reached the listener detaches, and the next request to settle on that
+writable attaches a fresh one with a fresh ceiling. Continuous traffic therefore does keep a
+listener on the sink continuously; what it cannot do is keep any one request's scope alive
+behind it.
+
+The practical consequence for a sink you wrote: an error emitted more than a few seconds
+after the last request touching it settled is yours to handle. On a Node stream with no
+`'error'` listener of your own, that is an uncaught exception — the ordinary contract for a
+stream you own, and the reason the two points above ask for an `'error'` or a `'close'`
+rather than silence.
 
 Return `null` or `{ cancel: true, reason? }` from the factory to cancel the request (produces `isCancelled: true`, error code `cancelled`). The `reason` string is surfaced on `HTTPClientError.cancelReason`. If the factory throws, the error code is `stream_setup_error` instead.
 

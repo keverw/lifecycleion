@@ -45,6 +45,38 @@ import { toError as normalizeError } from '../../to-error';
 import { reportToHost } from '../../internal/report-to-host';
 import { readUnknownMember as readObjectMember } from '../../internal/read-member';
 
+// The pending-error absorber, in one place, because the shape of it is easy to misread.
+//
+// **What it is.** A writable handed to `streamResponse` belongs to the caller. A failed
+// write destroys it and emits `'error'` on a later tick - for a real `fs.WriteStream`, a
+// whole poll phase later, after its `fs.close(fd)` - by which time the request has settled
+// and `cleanup` has taken its own listeners off. An `'error'` with no listener is an
+// uncaught exception that ends the process, so one listener stays behind to catch it.
+//
+// **One per writable, not one per request.** `streamResponse` may hand the same sink to a
+// dozen concurrent requests; a listener each is the `MaxListenersExceededWarning` this
+// exists to avoid. Keyed through {@link pendingWritableErrorAbsorbers}, attached with `on`
+// rather than `once` so it keeps covering siblings after the first error.
+//
+// **It is not a guarantee, it is a bound.** Nothing can establish that a stream will never
+// emit again - the OS does not offer that, and a caller's sink may emit an hour from now.
+// So this does not wait for certainty. It waits for the first of: the error arriving
+// ({@link PendingWritableErrorEntry.absorb}, released a turn later so siblings are still
+// covered), `'close'` (released at once), {@link PENDING_WRITABLE_ERROR_WINDOW_MS} with
+// neither, or {@link MAX_PENDING_WRITABLE_ERROR_LIFETIME_MS} since it attached.
+//
+// **It does not live forever.** That last bound is the one that makes the statement true:
+// every request relying on the absorber restarts the window, and a caller streaming
+// steadily into `process.stdout` or a pooled sink would otherwise restart it forever. The
+// ceiling is per absorber, not per writable and not per process - a request settling after
+// it attaches a *fresh* absorber with a fresh ceiling - so continuous traffic does keep a
+// listener on the sink continuously, while no single request's closure is pinned to the
+// caller's stream for longer than the ceiling.
+//
+// An error arriving past all of that is the caller's to handle, which is the ordinary
+// contract for a stream they own. Documented for them under "Writing your own
+// `WritableLike`" in `docs/http-client.md`; keep the two in step.
+
 /**
  * How long a pending-error absorber may stay on a caller's writable.
  *

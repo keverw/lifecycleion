@@ -1404,9 +1404,13 @@ Both queueing sinks — `FileSink` and `NamedPipeSink` — answer a failed write
 For `NamedPipeSink`, "writable" means the FIFO has actually opened, which does not happen
 until something opens the read end. Until then `getHealth().isInitialized` is `false` and
 lines accumulate under `maxQueueSize` rather than in Node's own unbounded stream buffer.
-A `reconnect()` with nothing reading the pipe therefore reports failure after a short wait
-rather than claiming success — the open is left running, and the sink promotes it and
-flushes the queue if a reader turns up later.
+A `reconnect()` with nothing reading the pipe therefore reports failure rather than claiming
+success, and it reports it immediately: the sink asks whether a reader is there with a
+non-blocking open before it performs the real one, and gets `ENXIO` straight back when
+there is none. That is also what keeps a reader-less FIFO from parking a file-I/O thread
+and holding the whole process open — a blocking open of a pipe nobody is reading never
+returns and cannot be cancelled. The sink keeps asking on an `unref`'d one-second timer, so
+it opens and flushes the queue on its own if a reader turns up later.
 
 `NamedPipeSink.reconnect()` remains available for reconnecting on demand. Because the sink
 now reopens on its own, a `reconnect()` that races one of those automatic attempts answers
