@@ -19,6 +19,13 @@
 // genuinely contains a space - or a comma, or any other punctuation - takes the quoted
 // bracket form, `u['my key']`, for the same reason a key containing a delimiter does.
 //
+// `-` and `@` are the two admitted with that cost accepted rather than avoided, so the
+// rule above does not read as covering them: a hyphenated phrase has no space to save it,
+// and `{{Hello-world}}`, `{{opt-in}}`, `{{2024-01-01}}` and `{{@mention}}` now render the
+// fallback where they previously round-tripped verbatim. Admitted anyway because a key
+// named `password-hash` or `@type` is ordinary and silently redacting nothing for one is
+// the worse of the two failures - the reason this grammar was widened at all.
+//
 // Genuinely unsupported syntax is still rejected, which is what the grammar was tightened
 // for: a wildcard such as `users[*].password`, a trailing dot, and an unterminated
 // bracket all still fail to parse. A key that really does contain `.`, `[`, or `]` still

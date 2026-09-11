@@ -110,7 +110,7 @@ function namedArrayKeys(source: object): string[] {
  * that was not. A million entries is far past any payload worth logging and leaves the cap
  * invisible to every pass that is not running away.
  */
-const MAX_REDACTION_ENTRIES = 1_000_000;
+export const MAX_REDACTION_ENTRIES = 1_000_000;
 
 /**
  * Most entries a redaction list may hold before it is refused outright.
@@ -771,6 +771,20 @@ function redactPathsInner(
     // ancestor this points back at is still being walked, and if anything under it does
     // match, the copy being built would carry a reference to the *unmasked* original
     // instead of to the rebuilt version.
+    //
+    // Recorded as a failed read when a path points below this node, because that is what
+    // it is: the walk was asked to reach something through this back-edge and refused, so
+    // it never saw whether a redacted key sits there. Without the flag, a path whose only
+    // resolution runs through the cycle produced a rebuild that `redactMatchedPaths` then
+    // discarded - nothing had masked and nothing had failed - and handed the caller's own
+    // container back with the named secret in the clear, while `entry.redactedKeys` still
+    // claimed it was masked and no error was reported. `shouldSkipScanBelow` is exactly
+    // the "no path points below" answer already computed above, so an incidental cycle in
+    // a payload this list matches none of still takes the untouched-original shortcut.
+    if (!shouldSkipScanBelow) {
+      state.didFailToRead = true;
+    }
+
     return REDACTION_FAILED_MARKER;
   }
 
@@ -917,7 +931,7 @@ function redactPathsInner(
           state.didFailToRead = true;
           didMask = true;
         }
-      } else if (shape.length === 0) {
+      } else {
         // Counted as a failed read, not as an absence. With the budget spent this branch
         // cannot ask whether there are named properties at all - `namedArrayKeys` *is*
         // the enumeration the cap exists to refuse - so anything here is dropped from the
@@ -927,10 +941,14 @@ function redactPathsInner(
         // original" shortcut and surfaces the truncation to the caller, where a marker on
         // a key this cannot name would have to be invented.
         //
-        // Narrowed to the empty array, because that is the only shape with no other
-        // signal. An array with elements has already had its index loop refuse the first
-        // of them and write a marker there, which says the same thing in the place a
-        // reader is looking.
+        // Every exhausted shape, not just the empty array. The narrowing this replaces
+        // argued that an array with elements has already had its index loop refuse one and
+        // write a marker, which is true unless the budget ran out on the *last* element:
+        // the loop then exits normally, having written no marker and set no flag, and the
+        // named properties were dropped silently while the original came back by
+        // reference with a named secret unmasked and unreported - the one exhaustion path
+        // in this walk that failed open. Setting it again where a marker was written costs
+        // nothing, since it is already true there.
         state.didFailToRead = true;
         didMask = true;
       }

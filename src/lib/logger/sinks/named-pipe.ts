@@ -186,6 +186,32 @@ const REOPEN_COOLDOWN_MS = 1000;
 const OPEN_WAIT_MS = 2000;
 
 /**
+ * How long a pending open may stay in flight before `ensureConnection` gives up on it.
+ *
+ * An open that has outlived this is not slow, it is stuck: `waitForOpen` already answered
+ * at {@link OPEN_WAIT_MS}, so anything still pending has had several times that. The case
+ * that matters is a reader that recreates the FIFO - `rm pipe; mkfifo pipe` - which leaves
+ * the blocked open pointing at an unlinked inode, so it can never emit `'open'` or
+ * `'error'` and `pendingStream` is never cleared. Every later `write()` and every
+ * `scheduleReopen` then returned at `ensureConnection`'s in-flight guard, and the sink sat
+ * wedged with a growing queue, `lastError` undefined and `onError` silent - dropping the
+ * oldest lines once the cap was reached, for the life of the process.
+ */
+const STALE_OPEN_MS = OPEN_WAIT_MS * 3;
+
+/**
+ * How many abandoned opens may be outstanding before no further attempt is made.
+ *
+ * `destroy()` cannot cancel an `open(2)` already blocked in the libuv threadpool, so each
+ * abandoned attempt holds one of the four default slots until the kernel releases it -
+ * possibly never. Retrying without a cap would trade a wedged sink for a process whose
+ * every other file operation is starved, which is the worse of the two. Two leaves half
+ * the pool for the rest of the process, and the sink reports rather than falls silent once
+ * it is reached.
+ */
+const MAX_ABANDONED_OPENS = 2;
+
+/**
  * NamedPipeSink writes logs to a named pipe (FIFO)
  * Only supported on Linux and macOS
  */
@@ -210,6 +236,18 @@ export class NamedPipeSink implements LogSink {
    * still promotes itself if a reader arrives later.
    */
   private pendingStream?: fs.WriteStream;
+  /**
+   * When {@link pendingStream} was created, so {@link STALE_OPEN_MS} can be measured.
+   */
+  private pendingStreamSince?: number;
+  /**
+   * Opens abandoned as stale and still unaccounted for. See {@link MAX_ABANDONED_OPENS}.
+   */
+  private abandonedOpens = 0;
+  /**
+   * Whether {@link MAX_ABANDONED_OPENS} has already been reported, so it is said once.
+   */
+  private reportedAbandonedOpenCap = false;
   /**
    * Entries waiting for the pipe, each with the line already rendered.
    *
@@ -432,6 +470,7 @@ export class NamedPipeSink implements LogSink {
         const pending = this.pendingStream;
 
         this.pendingStream = undefined;
+        this.pendingStreamSince = undefined;
 
         try {
           pending.destroy();
@@ -540,6 +579,7 @@ export class NamedPipeSink implements LogSink {
       const pending = this.pendingStream;
 
       this.pendingStream = undefined;
+      this.pendingStreamSince = undefined;
 
       try {
         pending.destroy();
@@ -702,6 +742,7 @@ export class NamedPipeSink implements LogSink {
       });
 
       this.pendingStream = stream;
+      this.pendingStreamSince = Date.now();
 
       stream.on('error', (err) => {
         // A stream this sink has already moved on from - ended by `reconnect()`, replaced
@@ -742,6 +783,7 @@ export class NamedPipeSink implements LogSink {
         }
 
         this.pendingStream = undefined;
+        this.pendingStreamSince = undefined;
         this.pipeStream = undefined;
         // Nothing is going to drain now, so a later stream is not made to wait on a
         // `'drain'` this one will never emit.
@@ -792,6 +834,7 @@ export class NamedPipeSink implements LogSink {
           // every later attempt - and `close()`'s own cleanup had already run.
           if (this.pendingStream === stream) {
             this.pendingStream = undefined;
+            this.pendingStreamSince = undefined;
           }
 
           try {
@@ -804,6 +847,7 @@ export class NamedPipeSink implements LogSink {
         }
 
         this.pendingStream = undefined;
+        this.pendingStreamSince = undefined;
         this.pipeStream = stream;
         this.isInitialized = true;
 
@@ -1020,6 +1064,80 @@ export class NamedPipeSink implements LogSink {
   }
 
   /**
+   * Give up on an open that has been in flight too long, so recovery can start again.
+   *
+   * `destroy()` does not cancel the underlying `open(2)`; it only stops this sink from
+   * waiting on a descriptor that is never going to answer. The stream's own `'open'` and
+   * `'error'` handlers already refuse to promote anything that is no longer
+   * `pendingStream`, so abandoning one here is safe whenever it does eventually settle.
+   *
+   * Bounded by {@link MAX_ABANDONED_OPENS}, and reported either way: the failure this
+   * exists for was silent, and a sink that has stopped trying has to say so.
+   */
+  private releaseStalePendingOpen(): void {
+    const pending = this.pendingStream;
+    const since = this.pendingStreamSince;
+
+    if (pending === undefined || since === undefined) {
+      return;
+    }
+
+    if (Date.now() - since < STALE_OPEN_MS) {
+      return;
+    }
+
+    if (this.abandonedOpens >= MAX_ABANDONED_OPENS) {
+      // Said once, not on every `write()` that arrives afterwards: this state persists for
+      // as long as the kernel holds those opens, and a sink already in trouble must not
+      // become its own flood. Without it the cap put the sink straight back into the
+      // wedged-and-silent state `STALE_OPEN_MS` exists to end - refusing every attempt with
+      // nothing anywhere saying it had stopped trying.
+      if (!this.reportedAbandonedOpenCap) {
+        this.reportedAbandonedOpenCap = true;
+
+        this.handleError(
+          'write',
+          new Error(
+            `Gave up reopening named pipe at ${this.pipePath}: ${String(MAX_ABANDONED_OPENS)} opens are still blocked and will not be retried until one of them returns`,
+          ),
+          { countsAgainstHealth: false },
+        );
+      }
+
+      return;
+    }
+
+    this.pendingStream = undefined;
+    this.pendingStreamSince = undefined;
+    this.abandonedOpens++;
+
+    // Decremented if the kernel ever releases it, so a pipe that recovers after a long
+    // outage is not held against the cap forever. `'close'` fires once `destroy()` has
+    // been able to run, which for a blocked open is when that open finally returns.
+    pending.once('close', () => {
+      this.abandonedOpens--;
+
+      // Armed again, because the sink is no longer at the cap: a later outage that reaches
+      // it is a new fact and has to be reported as one.
+      this.reportedAbandonedOpenCap = false;
+    });
+
+    try {
+      pending.destroy();
+    } catch {
+      // Nothing further to try for a stream this sink has already let go of.
+    }
+
+    this.handleError(
+      'write',
+      new Error(
+        `Open of named pipe at ${this.pipePath} did not complete within ${String(STALE_OPEN_MS)}ms and was abandoned; retrying`,
+      ),
+      { countsAgainstHealth: false },
+    );
+  }
+
+  /**
    * Reopen the pipe if it is not usable, at most one attempt at a time.
    *
    * `initializePipe` flushes the queue itself once it succeeds, so recovery needs nothing
@@ -1033,9 +1151,15 @@ export class NamedPipeSink implements LogSink {
    * `write`, which during an outage is called as often as the application logs.
    */
   private ensureConnection(): void {
+    if (this.closed || this.closing) {
+      return;
+    }
+
+    // Before the in-flight guard below, because that guard is what a stuck open turns into
+    // a permanent refusal. See {@link STALE_OPEN_MS}.
+    this.releaseStalePendingOpen();
+
     if (
-      this.closed ||
-      this.closing ||
       this.isInitialized ||
       this._isReconnecting ||
       // An open is already in flight. Starting a second would add a descriptor and a

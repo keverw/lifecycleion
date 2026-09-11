@@ -486,7 +486,15 @@ export class FileSink implements LogSink {
             this.enforceQueueLimit();
           } else {
             // Max retries exceeded - entry is lost
+            //
+            // Counted as a drop too, matching `NamedPipeSink`. `totalEntriesFailed` is read
+            // only by `flush()`, and `FileSinkHealth` does not expose it, so an entry lost
+            // to an exhausted retry or a failed render reported `disposition: 'lost'` while
+            // `getHealth()` still answered `{ isHealthy: true, droppedEntries: 0 }` - against
+            // that field's own documented meaning, "lines this sink did not deliver". An
+            // operator polling health rather than calling `flush()` could not see the loss.
             this.totalEntriesFailed++;
+            this.droppedEntries++;
           }
         }
       }
@@ -626,8 +634,17 @@ export class FileSink implements LogSink {
 
     // Write to file
     return new Promise<void>((resolve, reject) => {
+      // Rejected, not resolved. The stream can disappear *after* the check above: its
+      // `'error'` handler calls `destroyStream` on a `nextTick`, which lands while this
+      // method is suspended in `rotateIfNeeded` or `rotateFile` - both awaited after that
+      // check. Resolving here reported the loss as a successful write, so `processQueue`
+      // cleared `consecutiveFailures` and incremented `totalEntriesWritten`, `flush`
+      // answered `{ entriesWritten: 0, entriesFailed: 0, success: true }`, `getHealth` stayed
+      // healthy with `droppedEntries: 0`, and `onError` never fired for a line that was
+      // never written. Failing here instead routes it through the ordinary write-failure
+      // path, which retries it and, if that runs out, reports it.
       if (!this.logFileStream) {
-        return resolve();
+        return reject(new FileSinkError('No log file stream available'));
       }
 
       this.logFileStream.write(messageToWrite, (err) => {

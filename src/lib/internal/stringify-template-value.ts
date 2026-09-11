@@ -50,9 +50,15 @@ const UNRENDERABLE_TEXT = '[unrenderable: text]';
  */
 export function hasOwnStringForm(value: object): boolean {
   try {
-    return (
-      (value as { toString?: unknown }).toString !== Object.prototype.toString
-    );
+    const own = (value as { toString?: unknown }).toString;
+
+    // Callable, and not the inherited one. "Not `Object.prototype.toString`" alone is also
+    // true for a value that has *no* `toString` at all - `Object.create(Object.create(null))`
+    // reads `undefined` - so such a value skipped `describeByConstructor`, reached
+    // `String(value)`, and threw `TypeError: No default value`. It then rendered
+    // `[unrenderable: text]` *and* spent the once-per-operation render-failure budget on a
+    // value that is perfectly describable, suppressing the report for whatever failed next.
+    return typeof own === 'function' && own !== Object.prototype.toString;
   } catch {
     return false;
   }

@@ -5,6 +5,7 @@ import {
 import { defineEntry } from '../../internal/container-entries';
 import { isPlainContainer } from '../../internal/is-plain-container';
 import {
+  MAX_REDACTION_ENTRIES,
   parseRedactPaths,
   redactMatchedPaths,
   snapshotList,
@@ -146,6 +147,21 @@ function forwardingContainerCopy(
     if (Array.isArray(source)) {
       const elements = source as unknown[];
       const length = elements.length;
+
+      // Bounded exactly as the walk is, and for the same reason. This runs *before* the
+      // walk that `MAX_REDACTION_ENTRIES` bounds, one `defineProperty` per element, so any
+      // entry descending into a large array paid the cost the cap exists to refuse: a
+      // three-million-element array cost 4 seconds and about a gigabyte synchronously
+      // inside `logger.info()`, and `Array.isArray` being true for a `Proxy` whose `length`
+      // trap answers `2 ** 32 - 1` made it a permanent hang on the main thread - the same
+      // lie the walk already defends against. Refusing the copy rather than truncating it:
+      // a partial copy would be installed in place of the original and silently drop every
+      // element past the bound, where `null` leaves the caller's container alone and the
+      // walk's own guards fail it closed.
+      if (length > MAX_REDACTION_ENTRIES) {
+        return null;
+      }
+
       const copy: unknown[] = [];
 
       copies.set(source, copy);
@@ -198,7 +214,20 @@ function forwardingContainerCopy(
 
     // `for...in`, matching the bag's own copy: a key on the prototype is resolvable by the
     // renderer, so the walk has to see it too.
+    //
+    // Counted against the same bound as the array branch above, since an `ownKeys` trap is
+    // as free to invent a million keys as a `length` trap is to invent a million elements.
+    let defined = 0;
+
     for (const key in record) {
+      if (defined >= MAX_REDACTION_ENTRIES) {
+        copies.delete(source);
+
+        return null;
+      }
+
+      defined++;
+
       Object.defineProperty(copy, key, {
         get: () => record[key],
         enumerable: true,

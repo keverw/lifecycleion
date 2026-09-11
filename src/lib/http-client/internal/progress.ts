@@ -25,10 +25,17 @@ import { safeHandleCallback } from '../../safe-handle-callback';
  *          `?.()` call sites downstream stay exactly as they were.
  */
 export function guardProgressCallback(
-  callback: ((event: AdapterProgressEvent) => void) | undefined,
+  callback: ((event: AdapterProgressEvent) => void) | undefined | null,
   label: string,
 ): ((event: AdapterProgressEvent) => void) | undefined {
-  if (callback === undefined) {
+  // `== null`, so `null` is "none" as well as `undefined`. The bare `?.()` call sites this
+  // replaced skipped a `null` hook exactly as they skipped an absent one, and narrowing the
+  // check to `undefined` turned that silent no-op into a `safeHandleCallback` report of a
+  // non-function on the global `'error'` channel - once per progress event, for a JavaScript
+  // caller who simply passed `null`. `BaseHTTPClient` normalizes falsy hooks before they
+  // reach here, so this is the direct-adapter path, but the doc above says "when the caller
+  // supplied none" and `null` is that.
+  if (callback === undefined || callback === null) {
     return undefined;
   }
 
