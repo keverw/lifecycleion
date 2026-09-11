@@ -18,6 +18,7 @@ import { readMember } from './internal/read-member';
 import { stringifyTemplateValue } from './internal/stringify-template-value';
 import { isErrorValue } from './to-error';
 import {
+  capKey,
   charge,
   chargeText,
   chargeUnits,
@@ -773,7 +774,15 @@ function errorToASCIITable(
           // `errorToString(err, 400)`, since the uncharged part scales with the width.
           // The identical payload one level deeper, where this charge already existed,
           // came out at 1.5 MB.
-          charge(budget, key);
+          // `capKey` first. `charge` bills a string and hands it back *whole*, which
+          // bounds how many keys a render emits and says nothing about how long one of
+          // them is - and a key is as attacker-shaped as a value, since a payload parsed
+          // from JSON carries whatever key names arrived. A single five-megabyte key blew
+          // straight through the one-megabyte cap, amplified here by the row framing: the
+          // same payload as `additionalInfo` rendered 11,251,061 characters. Values were
+          // bounded when the cap went in; keys were the leaf nobody cut.
+          const renderedKey = charge(budget, capKey(key));
+
           chargeUnits(
             budget,
             Math.max(MIN_ROW_COST, maxRowLength) * (depth + 1),
@@ -788,7 +797,7 @@ function errorToASCIITable(
           const entryValue = readMemberOrThrew(info, key);
 
           table.addRow(
-            `AdditionalInfo.${key}`,
+            `AdditionalInfo.${renderedKey}`,
             isReadFailure(entryValue)
               ? reportUnrenderableValue(
                   entryValue.error,
@@ -1148,7 +1157,21 @@ function stringifyValueInner(
         );
       }
 
-      return chargeText(budget, stringifyTemplateValue(value));
+      // `reportRender`, not the default no-op. It is in scope and threaded into every
+      // other degradation site in this file, and omitting it here made this the one place
+      // a value that *refused* to render - a `toString` that throws, a getter that blows
+      // up - emitted its marker and told nobody: `onFormatError` documents `'render'` as
+      // exactly this case and was never called for it.
+      //
+      // The marker itself stays `stringifyTemplateValue`'s `[unrenderable: ...]` rather
+      // than this file's `<unrenderable: ...>`, deliberately: this branch hands the whole
+      // value to that renderer, so every marker *inside* the result is already spelled its
+      // way, and respelling only the outermost one would make a single rendered value
+      // disagree with itself.
+      return chargeText(
+        budget,
+        stringifyTemplateValue(value, path, reportRender),
+      );
     } else {
       // An error-shaped plain object renders as an error, under its own
       // `sensitiveFieldNames`.
@@ -1169,6 +1192,14 @@ function stringifyValueInner(
       // `cause: null` passed a looser gate here and then rendered as a completely empty
       // table, dropping every key it had. An object this cannot address stays on the walk
       // below, where its keys still render.
+      //
+      // The cost of staying on the walk is that such an object's *sibling* keys are printed
+      // rather than dropped, and `sensitiveFieldNames` cannot mask them: the list names
+      // paths into `additionalInfo`, so it never addressed them on the table path either -
+      // they were merely invisible there, because the table prints four rows and not the
+      // object's own keys. Keeping them is the deliberate trade this release made, and it
+      // is why this gate does *not* simply track the widened `hasInfo` at the top of the
+      // table.
       const asRecord = value as Record<string, unknown>;
       const ownInfo = readMember(asRecord, 'additionalInfo');
       const ownCause = readMember(asRecord, 'cause');
@@ -1248,7 +1279,11 @@ function stringifyValueInner(
         // content let a payload of one-character keys build a million rows against a
         // budget it had barely touched, and charging a flat row let twenty levels of it
         // amplify to eighteen megabytes.
-        charge(budget, key);
+        // `capKey` first, for the reason the `additionalInfo` walk above does it: a key is
+        // a variable-length leaf like any value, and billing one without cutting it leaves
+        // the cap unenforced against a payload whose *keys* are large.
+        const renderedKey = charge(budget, capKey(key));
+
         chargeUnits(budget, Math.max(MIN_ROW_COST, maxRowLength) * (depth + 1));
 
         let val: unknown;
@@ -1257,13 +1292,13 @@ function stringifyValueInner(
           val = (value as Record<string, unknown>)[key];
         } catch (error) {
           reportRender(error, joinPath(path, key));
-          entries.push({ key, value: UNRENDERABLE_VALUE });
+          entries.push({ key: renderedKey, value: UNRENDERABLE_VALUE });
 
           continue;
         }
 
         entries.push({
-          key,
+          key: renderedKey,
           value: stringifyValue(
             val,
             joinPath(path, key),

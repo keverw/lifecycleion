@@ -10,6 +10,7 @@
 
 import { describe, expect, test, beforeEach } from 'bun:test';
 import { Logger } from '../logger';
+import type { LoggerService } from '../logger/logger-service';
 import { ArraySink } from '../logger/sinks/array';
 import { BaseComponent } from './base-component';
 import { LifecycleManager } from './lifecycle-manager';
@@ -157,6 +158,94 @@ describe('LifecycleManager - hostile thrown values', () => {
     expect(result.success).toBe(false);
     expect(result.reason).toContain('real startup failure');
     expect(result.code).not.toBe('component_unexpected_stop');
+  });
+
+  test('a logger that throws while reporting a late failure is not fatal', async () => {
+    // Seven detached `Promise.resolve(x).catch(...)` chains had their previously-empty
+    // handler bodies changed to call `this.logger.entity(name).debug/warn(...)`. Nothing
+    // retains those chains, so a throw out of the reporting handler becomes an unhandled
+    // rejection mid-lifecycle - fatal under Node's default `--unhandled-rejections=throw`.
+    // `this.logger` is the caller's own object, so "logging does not throw" is their
+    // guarantee to keep, not this file's to assume; the shutdown-warning chain already
+    // carried a terminal `.catch()` for exactly this and the other seven did not.
+    const throwingLogger = new Logger({
+      sinks: [arraySink],
+      callProcessExit: false,
+    });
+
+    // Everything else on the logger keeps working; only the `entity(...)` call these
+    // detached chains report through throws. `LifecycleManager` takes
+    // `rootLogger.service(name)` once in its constructor, so the service it is handed is
+    // where this goes.
+    const realService = throwingLogger.service.bind(throwingLogger);
+
+    // Armed only for the window the late rejection lands in. Broken from the start, the
+    // manager's ordinary logging throws too and the test stops being about the detached
+    // chain at all.
+    let isLoggerBroken = false;
+
+    throwingLogger.service = (serviceName: string): LoggerService => {
+      const service = realService(serviceName);
+      const realEntity = service.entity.bind(service);
+
+      service.entity = (entityName: string): LoggerService => {
+        if (isLoggerBroken) {
+          throw new Error('the logger itself is broken');
+        }
+
+        return realEntity(entityName);
+      };
+
+      return service;
+    };
+
+    const lifecycle = new LifecycleManager({ logger: throwingLogger });
+
+    class LateFailingHealthCheck extends BaseComponent {
+      public start(): void {}
+      public stop(): void {}
+      public async healthCheck(): Promise<boolean> {
+        // Past `healthCheckTimeoutMS`, then rejects - which is the chain the detached
+        // `.catch()` exists to report.
+        await new Promise((resolve) => setTimeout(resolve, 120));
+
+        throw new Error('health check failed long after it timed out');
+      }
+    }
+
+    const rejections: unknown[] = [];
+    const onUnhandled = (reason: unknown): void => {
+      rejections.push(reason);
+    };
+
+    process.on('unhandledRejection', onUnhandled);
+
+    try {
+      await lifecycle.registerComponent(
+        new LateFailingHealthCheck(logger, {
+          name: 'late-health',
+          healthCheckTimeoutMS: 20,
+        }),
+      );
+
+      await lifecycle.startComponent('late-health');
+
+      // Returns on the timeout, well before the health check itself rejects.
+      await lifecycle.checkComponentHealth('late-health');
+
+      isLoggerBroken = true;
+
+      // Long enough for the late rejection, and its reporting handler, to land.
+      await new Promise((resolve) => setTimeout(resolve, 250));
+
+      isLoggerBroken = false;
+
+      expect(rejections).toEqual([]);
+
+      await lifecycle.stopAllComponents();
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
   });
 
   test('an unreadable error from onStartupAborted does not escape the timer', async () => {

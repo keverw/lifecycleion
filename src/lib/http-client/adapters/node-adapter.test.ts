@@ -3383,6 +3383,120 @@ describe('NodeAdapter.send() — unit branches without server', () => {
     }
   });
 
+  test('a writable that fails after a successful stream does not kill the process', async () => {
+    // `cleanup` removes this request's own `onWritableError` on *every* settle path, but
+    // only the three `write`/`end` throw sites asked for the shared absorber - so the
+    // ordinary success path left the writable with no `'error'` listener at all. A real
+    // `fs.WriteStream` closes its descriptor asynchronously *after* `'finish'`, so
+    // streaming a 200 to a file and then having `fs.close(fd)` fail with `EIO` or
+    // `ENOSPC` emitted `'error'` into exactly that gap: an uncaught exception, from the
+    // stream failure this adapter had already reported correctly.
+    const writable = new EventEmitter() as EventEmitter & WritableLike;
+    writable.write = () => true;
+    writable.end = (callback?: () => void) => {
+      callback?.();
+    };
+    writable.destroy = () => {};
+
+    const requestSpy = spyOn(http, 'request').mockImplementation(
+      (_options, callback) => {
+        const req = new MockClientRequest();
+        const res = new MockIncomingMessage(200, {
+          'content-type': 'application/octet-stream',
+          'content-length': '3',
+        });
+        const cb = callback as
+          ((res: http.IncomingMessage) => void) | undefined;
+
+        queueMicrotask(() => {
+          cb?.(res as unknown as http.IncomingMessage);
+          queueMicrotask(() => {
+            res.emit('data', Buffer.from('abc'));
+            res.emit('end');
+          });
+        });
+
+        return req as unknown as http.ClientRequest;
+      },
+    );
+
+    try {
+      const adapter = new NodeAdapter();
+
+      const result = await adapter.send({
+        requestURL: 'http://example.test/data',
+        method: 'GET',
+        headers: {},
+        streamResponse: () => writable,
+      });
+
+      expect(result.isStreamed).toBe(true);
+
+      // The descriptor's asynchronous close fails, a turn after everything settled.
+      expect(() =>
+        writable.emit('error', new Error('ENOSPC on close')),
+      ).not.toThrow();
+    } finally {
+      requestSpy.mockRestore();
+    }
+  });
+
+  test('the absorber lets go of a writable that never closes', async () => {
+    // The absorber is attached to the *caller's* writable, and a writable handed to
+    // `streamResponse` may well outlive the request without ever emitting `'close'` -
+    // `process.stdout`, a pooled sink, a long-lived socket. Unbounded, it would stay for
+    // the life of the process: swallowing the caller's own later errors, and pinning the
+    // request scope it closes over to the stream's lifetime.
+    const writable = new EventEmitter() as EventEmitter & WritableLike;
+    writable.write = () => true;
+    writable.end = (callback?: () => void) => {
+      callback?.();
+    };
+    writable.destroy = () => {};
+
+    const requestSpy = spyOn(http, 'request').mockImplementation(
+      (_options, callback) => {
+        const req = new MockClientRequest();
+        const res = new MockIncomingMessage(200, {
+          'content-type': 'application/octet-stream',
+          'content-length': '3',
+        });
+        const cb = callback as
+          ((res: http.IncomingMessage) => void) | undefined;
+
+        queueMicrotask(() => {
+          cb?.(res as unknown as http.IncomingMessage);
+          queueMicrotask(() => {
+            res.emit('data', Buffer.from('abc'));
+            res.emit('end');
+          });
+        });
+
+        return req as unknown as http.ClientRequest;
+      },
+    );
+
+    try {
+      const adapter = new NodeAdapter();
+
+      await adapter.send({
+        requestURL: 'http://example.test/data',
+        method: 'GET',
+        headers: {},
+        streamResponse: () => writable,
+      });
+
+      // This mock emits neither `'error'` nor `'close'`, so only the backstop can take the
+      // absorber off.
+      await new Promise((resolve) => setTimeout(resolve, 1_300));
+
+      expect(writable.listenerCount('error')).toBe(0);
+      expect(writable.listenerCount('close')).toBe(0);
+    } finally {
+      requestSpy.mockRestore();
+    }
+  }, 10_000);
+
   test('reused streamResponse writables do not retain listeners between requests', async () => {
     const writable = new EventEmitter() as EventEmitter & WritableLike;
     writable.write = () => true;
@@ -3426,7 +3540,28 @@ describe('NodeAdapter.send() — unit branches without server', () => {
 
         expect(result.isStreamed).toBe(true);
         expect(writable.listenerCount('drain')).toBe(0);
-        expect(writable.listenerCount('error')).toBe(0);
+
+        // At most one `'error'` listener, and the same one every time - not zero.
+        //
+        // `cleanup` now leaves the shared pending-error absorber attached on every settle
+        // path, because it takes this request's own `onWritableError` off on all of them
+        // and an `'error'` event with no listener ends the process. A real `fs.WriteStream`
+        // closes its descriptor *after* `'finish'`, so a failing `fs.close(fd)` lands
+        // exactly in that gap on the ordinary success path.
+        //
+        // What this test is named for is accumulation, and that is what is asserted: the
+        // absorber is keyed on the writable through a `WeakMap`, so three requests over one
+        // reused writable attach one listener between them rather than three. A real stream
+        // emits `'close'` and it comes straight back off; this mock emits neither `'close'`
+        // nor `'error'`, which is the one shape that holds it - inert, bounded, and never
+        // more than one.
+        expect(writable.listenerCount('error')).toBeLessThanOrEqual(1);
+
+        // And the absorber is doing its job: an `'error'` with no listener at all is an
+        // uncaught exception, which `EventEmitter` raises synchronously from `emit`.
+        expect(() =>
+          writable.emit('error', new Error('late close failed')),
+        ).not.toThrow();
       }
     } finally {
       requestSpy.mockRestore();

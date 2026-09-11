@@ -260,6 +260,24 @@ export class NamedPipeSink implements LogSink {
    */
   private reopenTimer?: NodeJS.Timeout;
   private _isReconnecting = false;
+  /**
+   * Whether an open is in flight, from the moment one is asked for.
+   *
+   * Separate from `_isReconnecting`, which `getHealth` reports and which means what it
+   * says - a *re*-open after a failure. This covers the constructor's first open too, and
+   * covers all of them from the synchronous instant the attempt starts rather than from
+   * whenever `pendingStream` is finally assigned.
+   *
+   * That gap was the whole bug. `ensureConnection` refuses a second open on
+   * `_isReconnecting` and `pendingStream`, but the constructor's `initializePipe()` sets
+   * neither until *after* its `await fsPromises.stat()` - so a `write()` in the same tick
+   * as `new NamedPipeSink(...)`, which is the ordinary case, walked through every guard
+   * and started a second open of the same FIFO. Opening a FIFO with no reader does not
+   * fail, it blocks: two of libuv's four threadpool slots held indefinitely, and an
+   * orphaned stream destroyed only if its open ever completes. That is exactly the
+   * starvation the guards' own documentation says they prevent.
+   */
+  private isOpening = false;
   private initPromise: Promise<void>;
   private closing = false;
   private closed = false;
@@ -419,6 +437,8 @@ export class NamedPipeSink implements LogSink {
   public async close(): Promise<void> {
     this.closing = true;
 
+    const startTime = Date.now();
+
     // Wait for initialization with timeout
     let timeoutHandle: NodeJS.Timeout | undefined;
     const timeoutSentinel = { timedOut: true } as const;
@@ -447,6 +467,31 @@ export class NamedPipeSink implements LogSink {
       if (timeoutHandle) {
         clearTimeout(timeoutHandle);
       }
+    }
+
+    // Drain what the pipe can still take before giving up on it, the way
+    // `FileSink.close()` has always waited on its own queue. This sink went straight to
+    // `abandonQueueOnClose()` with no attempt at all, so a backlog present at `close()` was
+    // discarded even with the pipe open and a reader actively consuming: measured at 200
+    // writes, 192 still queued, `droppedEntries: 192` after an `await close()` that could
+    // have written every one of them. A graceful shutdown losing the tail of the log it is
+    // shutting down is the one moment those lines matter most.
+    //
+    // Conditioned on the stream, which is what makes this different from `FileSink`'s
+    // wait. A FIFO with no reader cannot flush, and there is no progress to wait for: with
+    // the stream gone or destroyed the queue is abandoned immediately, exactly as before,
+    // rather than holding a shutdown for `closeTimeoutMS` to achieve nothing.
+    while (
+      (this.writeQueue.length > 0 || this.isProcessing) &&
+      this.pipeStream !== undefined &&
+      !this.pipeStream.destroyed &&
+      Date.now() - startTime <= this.closeTimeoutMS
+    ) {
+      // Asked for explicitly: nothing else drives a pass while this loop is awaiting, and
+      // the queue may have been left parked by a failed write rather than by backpressure.
+      this.processQueue();
+
+      await new Promise((resolve) => setTimeout(resolve, 10));
     }
 
     this.closed = true;
@@ -558,7 +603,26 @@ export class NamedPipeSink implements LogSink {
   /**
    * Initialize the named pipe connection
    */
+  /**
+   * Open the pipe, refusing to let two opens overlap.
+   *
+   * The flag is set here rather than at each call site because the call sites are what
+   * kept getting it wrong: `ensureConnection` guards, `reconnect` guards, and the
+   * constructor did not. An `async` function body runs synchronously up to its first
+   * `await`, so setting it here closes the window for every caller at once - including the
+   * constructor's, where there is no `await` in front of it to hide behind.
+   */
   private async initializePipe(): Promise<void> {
+    this.isOpening = true;
+
+    try {
+      await this.openPipe();
+    } finally {
+      this.isOpening = false;
+    }
+  }
+
+  private async openPipe(): Promise<void> {
     // Check platform support
     const platform = os.platform();
     if (platform !== 'linux' && platform !== 'darwin') {
@@ -883,6 +947,12 @@ export class NamedPipeSink implements LogSink {
       this._isReconnecting ||
       // An open is already in flight. Starting a second would add a descriptor and a
       // threadpool slot for an answer the first one is going to give.
+      //
+      // `isOpening` as well as `pendingStream`, because `pendingStream` is only assigned
+      // once the `stat` has come back: the constructor's open is in flight from the
+      // instant it is asked for, and a `write()` in that same tick is the ordinary case,
+      // not an edge one.
+      this.isOpening ||
       this.pendingStream !== undefined
     ) {
       return;

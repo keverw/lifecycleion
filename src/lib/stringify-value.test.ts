@@ -2106,3 +2106,33 @@ describe('a shared subtree costs one walk, not one per route', () => {
     });
   });
 });
+
+describe('a key is a variable-length leaf too', () => {
+  test('an enormous key cannot blow past the length cap', () => {
+    // `charge` bills a string and hands it back *whole*, which bounds how many keys a
+    // render emits and says nothing about the length of one. The commit that cut "every
+    // variable-length leaf" applied that to values and left keys on the billing-only
+    // path: a five-megabyte key returned 5,000,028 characters against a 1,000,000 cap.
+    const rendered = stringifyValue({ ['k'.repeat(5_000_000)]: 1 });
+
+    expect(rendered.length).toBeLessThan(1_100_000);
+    // Still JSON, because the cut happens inside the quotes rather than to them.
+    expect(() => JSON.parse(rendered) as unknown).not.toThrow();
+  });
+
+  test('the output does not scale with how large the key was', () => {
+    const small = stringifyValue({ ['k'.repeat(5_000_000)]: 1 }).length;
+    const large = stringifyValue({ ['k'.repeat(20_000_000)]: 1 }).length;
+
+    expect(large).toBe(small);
+  });
+
+  test('an ordinary key is never touched, whatever the budget is doing', () => {
+    // A key does not only carry text, it names *where* the render stopped. Cutting it
+    // against a budget that is already spent replaced that name with the marker too.
+    const huge = 'y'.repeat(600_000);
+    const rendered = stringifyValue({ a: huge, b: huge, c: 'tail' });
+
+    expect(rendered).toContain('"c":"[max length exceeded]"');
+  });
+});

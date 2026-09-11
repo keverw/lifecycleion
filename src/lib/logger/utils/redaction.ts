@@ -8,6 +8,7 @@ import {
   parseRedactPaths,
   redactMatchedPaths,
   snapshotList,
+  type ForwardingAliases,
   type RedactPath,
 } from '../../internal/redact-paths';
 import type { RedactFunction } from '../types';
@@ -72,8 +73,18 @@ export { REDACTION_FAILED_MARKER } from '../../internal/default-redact-function'
 function normalizeParamsBag(
   params: Record<string, unknown>,
   unreadable: { key: string; error: unknown }[],
+  aliases: ForwardingAliases,
 ): Record<string, unknown> {
   const copy: Record<string, unknown> = {};
+
+  // The walk's cycle guard keys on object identity, and this hands it a *different* object
+  // than the one the payload's own back-edges point at. Unmarked, `const c = { password:
+  // 'secret' }; c.self = c;` walked `copy`, reached `c` through `self`, found it unseen,
+  // and - since no path pointed below `self` - handed the original subtree back by
+  // reference: the renderer printed the secret and `redactedParams.self.password` carried
+  // it to every structured sink. Marked, the walk adds both to `seen` and the back-edge is
+  // recognized as the node it is already inside.
+  aliases.set(copy, params);
 
   for (const key in params) {
     let value: unknown;
@@ -123,6 +134,7 @@ function normalizeParamsBag(
 function forwardingContainerCopy(
   source: object,
   copies: Map<object, object>,
+  aliases: ForwardingAliases,
 ): object | null {
   const existing = copies.get(source);
 
@@ -138,10 +150,37 @@ function forwardingContainerCopy(
 
       copies.set(source, copy);
       copies.set(copy, copy);
+      aliases.set(copy, source);
 
       for (let index = 0; index < length; index++) {
         Object.defineProperty(copy, index, {
           get: () => elements[index],
+          enumerable: true,
+          configurable: true,
+        });
+      }
+
+      // An array's *named* properties too, and not only its indexes. The copy replaces the
+      // original in the container above it, so anything this branch does not carry over is
+      // simply gone - and `CurlyBrackets` resolves `items.note` by property read, so
+      // redacting an unrelated sibling with `redactedKeys: ['items[0]']` turned a perfectly
+      // ordinary `items.note` from `request-42` into the fallback. The object branch
+      // already used `for...in` for exactly this reason; the array branch stopped at the
+      // indexes the walk iterates and forgot that the renderer does not.
+      // `Object.keys` rather than `for...in`: the indexes are already defined above, so
+      // what is wanted here is exactly the own enumerable keys that are not indexes - and
+      // the lint rule against `for...in` over an array is making the same point.
+      const asRecord = elements as unknown as Record<string, unknown>;
+
+      for (const key of Object.keys(asRecord)) {
+        if (Object.prototype.hasOwnProperty.call(copy, key)) {
+          continue;
+        }
+
+        const named = key;
+
+        Object.defineProperty(copy, named, {
+          get: () => asRecord[named],
           enumerable: true,
           configurable: true,
         });
@@ -155,6 +194,7 @@ function forwardingContainerCopy(
 
     copies.set(source, copy);
     copies.set(copy, copy);
+    aliases.set(copy, source);
 
     // `for...in`, matching the bag's own copy: a key on the prototype is resolvable by the
     // renderer, so the walk has to see it too.
@@ -196,6 +236,7 @@ function forwardingContainerCopy(
 function normalizeAlongRedactPaths(
   bag: Record<string, unknown>,
   paths: RedactPath[],
+  aliases: ForwardingAliases,
 ): void {
   const copies = new Map<object, object>();
 
@@ -220,7 +261,7 @@ function normalizeAlongRedactPaths(
         break;
       }
 
-      const copy = forwardingContainerCopy(child, copies);
+      const copy = forwardingContainerCopy(child, copies, aliases);
 
       if (copy === null) {
         break;
@@ -390,13 +431,18 @@ export function applyRedaction(
   // left *entirely alone*, so a key named in `redactedKeys` is never masked and the
   // renderer prints it. Verified rather than assumed - the walk hands back
   // `{ password: 'hunter2secret' }` for a `Session` bag redacted on `['password']`.
+  // Built here and read only by the walk it is handed to, so the copies below can stand in
+  // for the caller's containers without anything being written onto the caller's values.
+  // See `ForwardingAliases` for why this is a parameter rather than a mark on the object.
+  const aliases: ForwardingAliases = new WeakMap();
+
   const walk = (
     root: Record<string, unknown>,
   ): Record<string, unknown> | null => {
     let result: unknown;
 
     try {
-      result = redactMatchedPaths(root, paths, redactFunction, report);
+      result = redactMatchedPaths(root, paths, redactFunction, report, aliases);
     } catch (error) {
       // The walk guards every step it owns, so reaching here means something beneath it
       // refused entirely.
@@ -427,7 +473,7 @@ export function applyRedaction(
   const unreadable: { key: string; error: unknown }[] = [];
 
   try {
-    guarded = normalizeParamsBag(params, unreadable);
+    guarded = normalizeParamsBag(params, unreadable, aliases);
   } catch {
     // `Object.keys` itself refused - a revoked `Proxy`, an `ownKeys` trap that throws -
     // so there is no key to read safely and nothing to mark but the redacted ones.
@@ -439,7 +485,7 @@ export function applyRedaction(
   // one. Guarded because it reads caller properties; a failure leaves the originals in
   // place, where the walk's own guards still apply.
   try {
-    normalizeAlongRedactPaths(guarded, paths);
+    normalizeAlongRedactPaths(guarded, paths, aliases);
   } catch (error) {
     report(error, '<params>');
   }

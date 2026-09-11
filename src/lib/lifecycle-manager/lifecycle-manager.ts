@@ -1997,13 +1997,23 @@ export class LifecycleManager
         // decision, and it left the caller knowing the operation timed out and
         // never why it ultimately failed. The timeout warning is logged just
         // above, so this is that line's missing second half.
-        Promise.resolve(healthCheckPromise).catch((error: unknown) => {
-          this.logger
-            .entity(name)
-            .debug('Health check failed after it had already timed out', {
-              params: { error: toError(error) },
-            });
-        });
+        Promise.resolve(healthCheckPromise)
+          .catch((error: unknown) => {
+            this.logger
+              .entity(name)
+              .debug('Health check failed after it had already timed out', {
+                params: { error: toError(error) },
+              });
+          })
+          // Terminal, for the reason the shutdown-warning chain carries one: nothing
+          // retains this chain, so a throw out of the reporting handler above becomes an
+          // unhandled rejection mid-lifecycle - fatal under Node's default
+          // `--unhandled-rejections=throw`. `this.logger` is the caller's own object, so
+          // "logging does not throw" is their guarantee to keep, not this file's to
+          // assume.
+          .catch(() => {
+            // Nothing left to report with.
+          });
       }
       const healthResult: ComponentHealthResult =
         typeof result === 'boolean' ? { healthy: result } : result;
@@ -2284,13 +2294,23 @@ export class LifecycleManager
         // decision, and it left the caller knowing the operation timed out and
         // never why it ultimately failed. The timeout warning is logged just
         // above, so this is that line's missing second half.
-        Promise.resolve(handlerPromise).catch((error: unknown) => {
-          this.logger
-            .entity(componentName)
-            .debug('Message handler failed after it had already timed out', {
-              params: { error: toError(error), from },
-            });
-        });
+        Promise.resolve(handlerPromise)
+          .catch((error: unknown) => {
+            this.logger
+              .entity(componentName)
+              .debug('Message handler failed after it had already timed out', {
+                params: { error: toError(error), from },
+              });
+          })
+          // Terminal, for the reason the shutdown-warning chain carries one: nothing
+          // retains this chain, so a throw out of the reporting handler above becomes an
+          // unhandled rejection mid-lifecycle - fatal under Node's default
+          // `--unhandled-rejections=throw`. `this.logger` is the caller's own object, so
+          // "logging does not throw" is their guarantee to keep, not this file's to
+          // assume.
+          .catch(() => {
+            // Nothing left to report with.
+          });
         return {
           sent: true,
           componentFound: true,
@@ -3686,13 +3706,23 @@ export class LifecycleManager
             // decision, and it left the caller knowing the operation timed out and
             // never why it ultimately failed. The timeout warning is logged just
             // above, so this is that line's missing second half.
-            Promise.resolve(startPromise).catch((error: unknown) => {
-              this.logger
-                .entity(name)
-                .debug('start() failed after it had already timed out', {
-                  params: { error: toError(error) },
-                });
-            });
+            Promise.resolve(startPromise)
+              .catch((error: unknown) => {
+                this.logger
+                  .entity(name)
+                  .debug('start() failed after it had already timed out', {
+                    params: { error: toError(error) },
+                  });
+              })
+              // Terminal, for the reason the shutdown-warning chain carries one: nothing
+              // retains this chain, so a throw out of the reporting handler above becomes an
+              // unhandled rejection mid-lifecycle - fatal under Node's default
+              // `--unhandled-rejections=throw`. `this.logger` is the caller's own object, so
+              // "logging does not throw" is their guarantee to keep, not this file's to
+              // assume.
+              .catch(() => {
+                // Nothing left to report with.
+              });
             reject(
               new ComponentStartTimeoutError({
                 componentName: name,
@@ -4253,6 +4283,15 @@ export class LifecycleManager
                 this.logger.entity(name).warn('Late stop resolution failed', {
                   params: { error: toError(error) },
                 });
+              })
+              // Terminal, for the reason the shutdown-warning chain carries one: nothing
+              // retains this chain, so a throw out of the reporting handler above becomes an
+              // unhandled rejection mid-lifecycle - fatal under Node's default
+              // `--unhandled-rejections=throw`. `this.logger` is the caller's own object, so
+              // "logging does not throw" is their guarantee to keep, not this file's to
+              // assume.
+              .catch(() => {
+                // Nothing left to report with.
               });
             reject(
               new ComponentStopTimeoutError({
@@ -4489,6 +4528,15 @@ export class LifecycleManager
                 this.logger.entity(name).warn('Late stop resolution failed', {
                   params: { error: toError(error) },
                 });
+              })
+              // Terminal, for the reason the shutdown-warning chain carries one: nothing
+              // retains this chain, so a throw out of the reporting handler above becomes an
+              // unhandled rejection mid-lifecycle - fatal under Node's default
+              // `--unhandled-rejections=throw`. `this.logger` is the caller's own object, so
+              // "logging does not throw" is their guarantee to keep, not this file's to
+              // assume.
+              .catch(() => {
+                // Nothing left to report with.
               });
             reject(
               new Error(LIFECYCLE_MANAGER_MESSAGE_FORCE_SHUTDOWN_TIMED_OUT),
@@ -4829,6 +4877,15 @@ export class LifecycleManager
           .debug('Late startup completion handling ended in a failure', {
             params: { error: toError(error) },
           });
+      })
+      // Terminal, for the reason the shutdown-warning chain carries one: nothing
+      // retains this chain, so a throw out of the reporting handler above becomes an
+      // unhandled rejection mid-lifecycle - fatal under Node's default
+      // `--unhandled-rejections=throw`. `this.logger` is the caller's own object, so
+      // "logging does not throw" is their guarantee to keep, not this file's to
+      // assume.
+      .catch(() => {
+        // Nothing left to report with.
       });
   }
 
@@ -5157,20 +5214,18 @@ export class LifecycleManager
     timestamps.stoppedAt = Date.now();
     this.componentTimestamps.set(name, timestamps);
 
-    this.logger
-      .entity(name)
-      .warn(
-        // A placeholder, never the message concatenated in. The component's own text
-        // becomes the *template* otherwise, and the path grammar admits ordinary name
-        // punctuation - `-`, `@`, `$` - so a failure reported as
-        // `Cannot reach {{svc-a}}` parses as a placeholder, resolves to nothing, and is
-        // rendered as the `(null)` fallback. Substituted text is not re-scanned, so the
-        // message survives verbatim here however it is spelled.
-        failure
-          ? 'Component stopped unexpectedly: {{error.message}}'
-          : 'Component stopped unexpectedly',
-        { params: { error: failure } },
-      );
+    this.logger.entity(name).warn(
+      // A placeholder, never the message concatenated in. The component's own text
+      // becomes the *template* otherwise, and the path grammar admits ordinary name
+      // punctuation - `-`, `@`, `$` - so a failure reported as
+      // `Cannot reach {{svc-a}}` parses as a placeholder, resolves to nothing, and is
+      // rendered as the `(null)` fallback. Substituted text is not re-scanned, so the
+      // message survives verbatim here however it is spelled.
+      failure
+        ? 'Component stopped unexpectedly: {{error.message}}'
+        : 'Component stopped unexpectedly',
+      { params: { error: failure } },
+    );
 
     // Model this the same as other terminal transitions: emit the abnormal-cause
     // event first, then the canonical stopped-state event that generic listeners
@@ -6086,16 +6141,26 @@ export class LifecycleManager
           // decision, and it left the caller knowing the operation timed out and
           // never why it ultimately failed. The timeout warning is logged just
           // above, so this is that line's missing second half.
-          Promise.resolve(handlerPromise).catch((error: unknown) => {
-            this.logger
-              .entity(name)
-              .debug(
-                'Lifecycle handler failed after it had already timed out',
-                {
-                  params: { error: toError(error) },
-                },
-              );
-          });
+          Promise.resolve(handlerPromise)
+            .catch((error: unknown) => {
+              this.logger
+                .entity(name)
+                .debug(
+                  'Lifecycle handler failed after it had already timed out',
+                  {
+                    params: { error: toError(error) },
+                  },
+                );
+            })
+            // Terminal, for the reason the shutdown-warning chain carries one: nothing
+            // retains this chain, so a throw out of the reporting handler above becomes an
+            // unhandled rejection mid-lifecycle - fatal under Node's default
+            // `--unhandled-rejections=throw`. `this.logger` is the caller's own object, so
+            // "logging does not throw" is their guarantee to keep, not this file's to
+            // assume.
+            .catch(() => {
+              // Nothing left to report with.
+            });
           results.push({
             name,
             called: true,

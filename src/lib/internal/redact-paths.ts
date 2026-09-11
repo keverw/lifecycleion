@@ -15,6 +15,103 @@ import {
 /** Decides the replacement for a redacted value. */
 export type RedactLeafFunction = RedactValueFunction;
 
+/**
+ * Copies that stand in for another container, as `copy -> the container it forwards to`.
+ *
+ * `normalizeParamsBag` and `forwardingContainerCopy` hand the walk a *copy* whose keys
+ * forward to the caller's container, and install that copy in place of the original. The
+ * walk's cycle guard keys on object identity, so a back-edge elsewhere in the payload -
+ * still pointing at the original - was no longer recognized as the node being walked. The
+ * guard never fired, the original subtree was handed back by reference, and a key named in
+ * `redactedKeys` reached every sink in clear text: `const c = { password: 's' }; c.self =
+ * c;` rendered the secret through `self`.
+ *
+ * **Passed in, not marked on the object, and that is deliberate.** The obvious
+ * implementation is a symbol property on the copy, and it is wrong three ways here:
+ *
+ * - `tsup` builds this package with `splitting: false` across 39 entry points in both CJS
+ *   and ESM, so this module is *copied into every bundle that reaches it*. A
+ *   `Symbol('...')` is evaluated once per copy, so `dist/lib/logger` and
+ *   `dist/lib/stringify-value` would hold different symbols for the same concept - and a
+ *   mark written by one copy and read by another reads as absent, silently restoring the
+ *   leak above. `Symbol.for` would fix that and give up the next two points.
+ * - A registry symbol is forgeable. A caller could stamp their own payload and steer the
+ *   cycle guard; harmless in direction (it only ever over-redacts) but not something to
+ *   hand out.
+ * - A property on the copy is a strong reference to the *unmasked original*, riding along
+ *   on the `redactedParams` a sink receives. Nothing enumerates it, but there is no reason
+ *   to put it there at all.
+ *
+ * A map built by the caller that made the copies, and read only during the walk it was
+ * built for, has none of those properties: no module identity, nothing to forge, and
+ * nothing left on the result.
+ */
+export type ForwardingAliases = WeakMap<object, object>;
+
+/** Whether the walk is already inside `value`, counting the container it forwards to. */
+function isSeen(
+  value: object,
+  seen: WeakSet<object>,
+  aliases: ForwardingAliases | undefined,
+): boolean {
+  if (seen.has(value)) {
+    return true;
+  }
+
+  const origin = aliases?.get(value);
+
+  return origin !== undefined && seen.has(origin);
+}
+
+/**
+ * The largest value that is an array *index* rather than an ordinary named property.
+ *
+ * An index is a key whose `ToString(ToUint32(key))` is the key itself, which stops one
+ * short of `length`'s own maximum. `"-1"` and `"4294967296"` are therefore named
+ * properties, not indexes - and a `parseInt` round-trip calls both of them indexes, which
+ * is how a first cut of the named-property pass below silently dropped them.
+ */
+const MAX_ARRAY_INDEX = 2 ** 32 - 2;
+
+/** Whether `key` addresses an array slot, as opposed to being a name that merely looks numeric. */
+function isArrayIndexKey(key: string): boolean {
+  const asNumber = Number(key);
+
+  return (
+    Number.isInteger(asNumber) &&
+    asNumber >= 0 &&
+    asNumber <= MAX_ARRAY_INDEX &&
+    String(asNumber) === key
+  );
+}
+
+/**
+ * An array's own enumerable keys that are *not* indexes.
+ *
+ * `describeContainer` reports an array as a length, which is what both walks iterate - so
+ * a named property on an array is invisible to them while the renderer resolves it with an
+ * ordinary property read. That divergence is the whole reason this exists.
+ */
+function namedArrayKeys(source: object): string[] {
+  return Object.keys(source).filter((key) => !isArrayIndexKey(key));
+}
+
+/**
+ * How many container entries one redaction pass will visit before it fails closed.
+ *
+ * The walks iterate an array by `shape.length`, and `length` is not a fact: `Array.isArray`
+ * is true for a `Proxy` over an array, and `length` is an ordinary writable property a
+ * `get` trap may answer with any number. A proxy reporting `5_000_000` spun `applyRedaction`
+ * for 1.3 seconds *synchronously inside `logger.info()`*, and `2 ** 32 - 1` is about twenty
+ * minutes of it. A real `new Array(20_000_000)` costs the same, for the same reason.
+ *
+ * Every other walk over caller data in this library is bounded - `renderContainer` breaks
+ * on `budget.remaining <= 0`, `maskValueDeep` charges per element - and this was the one
+ * that was not. A million entries is far past any payload worth logging and leaves the cap
+ * invisible to every pass that is not running away.
+ */
+const MAX_REDACTION_ENTRIES = 1_000_000;
+
 /** One parsed redaction entry, kept with the text the caller wrote. */
 export interface RedactPath {
   /** Parsed segments, used for matching. */
@@ -276,12 +373,20 @@ function needsFullWalk(
   value: unknown,
   seen: WeakSet<object>,
   visited: Set<object>,
+  state: RedactState,
 ): boolean {
   if (!isPlainContainer(value)) {
     return false;
   }
 
-  if (seen.has(value)) {
+  if (isSeen(value, seen, state.aliases)) {
+    return true;
+  }
+
+  // The scan reads the same unbounded `length` the walk does, so it needs the same cap -
+  // and here "walk it properly" is the conservative answer, which is what the walk's own
+  // budget then decides. See {@link MAX_REDACTION_ENTRIES}.
+  if (state.entriesLeft <= 0) {
     return true;
   }
 
@@ -305,6 +410,12 @@ function needsFullWalk(
     const elements = value as unknown[];
 
     for (let index = 0; index < shape.length; index++) {
+      if (state.entriesLeft <= 0) {
+        return true;
+      }
+
+      state.entriesLeft--;
+
       let element: unknown;
 
       try {
@@ -313,7 +424,46 @@ function needsFullWalk(
         return true;
       }
 
-      if (needsFullWalk(element, seen, visited)) {
+      if (needsFullWalk(element, seen, visited, state)) {
+        return true;
+      }
+    }
+
+    // An array's *named* properties, which this scan iterated past entirely. The scan is
+    // the gate: answering "nothing below needs a walk" makes `redactPathsInner` return
+    // `UNCHANGED`, and the caller then keeps the **original** subtree by reference - so
+    // the walk's own named-property pass never runs and a back-edge parked on one is
+    // invisible to the cycle guard. `root.items.back = root` rendered the secret in the
+    // clear, which is precisely the leak class the alias map exists to close. The object
+    // branch below never had the hole; the array branch did.
+    if (state.entriesLeft <= 0) {
+      return true;
+    }
+
+    let names: string[];
+
+    try {
+      names = namedArrayKeys(value);
+    } catch {
+      return true;
+    }
+
+    for (const name of names) {
+      if (state.entriesLeft <= 0) {
+        return true;
+      }
+
+      state.entriesLeft--;
+
+      let named: unknown;
+
+      try {
+        named = (value as Record<string, unknown>)[name];
+      } catch {
+        return true;
+      }
+
+      if (needsFullWalk(named, seen, visited, state)) {
         return true;
       }
     }
@@ -322,6 +472,12 @@ function needsFullWalk(
   }
 
   for (const key of shape.keys) {
+    if (state.entriesLeft <= 0) {
+      return true;
+    }
+
+    state.entriesLeft--;
+
     let entry: unknown;
 
     try {
@@ -330,7 +486,7 @@ function needsFullWalk(
       return true;
     }
 
-    if (needsFullWalk(entry, seen, visited)) {
+    if (needsFullWalk(entry, seen, visited, state)) {
       return true;
     }
   }
@@ -339,12 +495,16 @@ function needsFullWalk(
 }
 
 /** {@link needsFullWalk}, with a payload too deep to scan counting as "walk it". */
-function mustWalkInFull(value: unknown, seen: WeakSet<object>): boolean {
+function mustWalkInFull(
+  value: unknown,
+  seen: WeakSet<object>,
+  state: RedactState,
+): boolean {
   try {
     // A fresh set per scan, not one shared across the walk: `seen` differs between
     // scans, so a node that answered `false` under one ancestor chain is not answering
     // the same question under another.
-    return needsFullWalk(value, seen, new Set());
+    return needsFullWalk(value, seen, new Set(), state);
   } catch {
     // A `RangeError` from a payload nested past the stack, and nothing else: every read
     // the scan makes is already guarded.
@@ -421,6 +581,22 @@ interface RedactState {
    *   every route that walks it, this one included.
    */
   noMatchUnchanged: WeakSet<object>;
+  /**
+   * Entries left to visit in this pass. See {@link MAX_REDACTION_ENTRIES}.
+   *
+   * On the state rather than a parameter because the bound is per *pass*, not per
+   * container: a payload of ten thousand arrays of a hundred elements costs exactly what
+   * one array of a million does, and a per-container cap would wave it through.
+   */
+  entriesLeft: number;
+  /**
+   * Copies standing in for the containers they forward to. See {@link ForwardingAliases}.
+   *
+   * On the state because it is read at every level of the walk and set once per pass, like
+   * everything else here - and never on the values themselves, for the reasons that type
+   * documents.
+   */
+  aliases: ForwardingAliases | undefined;
 }
 
 /**
@@ -536,14 +712,14 @@ function redactPathsInner(
     !shouldSkipCandidateScan &&
     pathPointingBelow(paths, path) === undefined
   ) {
-    if (!mustWalkInFull(value, seen)) {
+    if (!mustWalkInFull(value, seen, state)) {
       return UNCHANGED;
     }
 
     shouldSkipScanBelow = true;
   }
 
-  if (seen.has(value)) {
+  if (isSeen(value, seen, state.aliases)) {
     // A cycle counts as a change, so the parent is rebuilt around this marker.
     //
     // Passing the original through would be wrong here in a way it is not elsewhere: the
@@ -553,7 +729,17 @@ function redactPathsInner(
     return REDACTION_FAILED_MARKER;
   }
 
+  // Both the node and whatever it forwards to. A back-edge in the payload still points at
+  // the *original* container, never at the copy standing in for it, so tracking only the
+  // copy left the guard above unable to recognize the node it was already inside. See
+  // {@link ForwardingAliases}.
+  const origin = state.aliases?.get(value);
+
   seen.add(value);
+
+  if (origin !== undefined) {
+    seen.add(origin);
+  }
 
   try {
     // The shared enumeration, so this walk and the renderer cannot disagree about what a
@@ -598,6 +784,20 @@ function redactPathsInner(
       // branch and the renderer both do, so one unreadable element degrades alone instead
       // of turning the entire payload into the marker.
       for (let index = 0; index < shape.length; index++) {
+        // Fails closed on the tail rather than dropping it. The walk cannot see what is
+        // in the elements it never reached, so handing them back by reference would risk
+        // returning a named key in the clear - the same reasoning as the unreadable
+        // branch above. See {@link MAX_REDACTION_ENTRIES}.
+        if (state.entriesLeft <= 0) {
+          state.didFailToRead = true;
+          didMask = true;
+          copy.push(REDACTION_FAILED_MARKER);
+
+          break;
+        }
+
+        state.entriesLeft--;
+
         let result: unknown;
 
         // Read once and kept, exactly as the object branch keeps the entry it read.
@@ -648,6 +848,93 @@ function redactPathsInner(
         }
       }
 
+      // An array's *named* properties, which `describeContainer` reports as a length and
+      // this branch therefore rebuilt without. It only mattered once something inside was
+      // masked - a rebuilt array is what the caller receives, and anything not carried
+      // over is simply gone - so redacting one index blanked an unrelated sibling:
+      // `items.note` rendered `request-42` until `redactedKeys: ['items[0]']` was added,
+      // and then rendered the fallback. Walked rather than copied across, so a path may
+      // name one exactly as it names a key on an object.
+      //
+      // Behind the budget check, not beside it. `namedArrayKeys` calls `Object.keys`, which
+      // materializes *every own index key as a string* - on a dense five-million-element
+      // array that is 2.7 seconds and some 600 MB, synchronously inside `logger.info()`,
+      // which is the exact stall {@link MAX_REDACTION_ENTRIES} exists to bound. Run
+      // unconditionally after the index loop had already broken on an exhausted budget, it
+      // defeated the cap it was written next to.
+      let namedKeys: string[] = [];
+
+      if (state.entriesLeft > 0) {
+        try {
+          namedKeys = namedArrayKeys(source);
+        } catch (error) {
+          report(error, path.join('.') || '<root>');
+          state.didFailToRead = true;
+          didMask = true;
+        }
+      }
+
+      for (const namedKey of namedKeys) {
+        if (state.entriesLeft <= 0) {
+          state.didFailToRead = true;
+          didMask = true;
+          defineEntry(
+            copy as unknown as Record<string, unknown>,
+            namedKey,
+            REDACTION_FAILED_MARKER,
+          );
+
+          continue;
+        }
+
+        state.entriesLeft--;
+
+        let namedResult: unknown;
+        let namedValue: unknown;
+
+        try {
+          namedValue = (source as unknown as Record<string, unknown>)[namedKey];
+        } catch (error) {
+          report(error, [...path, namedKey].join('.'));
+          state.didFailToRead = true;
+          didMask = true;
+          defineEntry(
+            copy as unknown as Record<string, unknown>,
+            namedKey,
+            REDACTION_FAILED_MARKER,
+          );
+
+          continue;
+        }
+
+        try {
+          namedResult = redactPathsInner(
+            namedValue,
+            paths,
+            [...path, namedKey],
+            redactFunction,
+            seen,
+            state,
+            report,
+            shouldSkipScanBelow,
+          );
+        } catch (error) {
+          report(error, [...path, namedKey].join('.'));
+          state.didFailToRead = true;
+          namedResult = REDACTION_FAILED_MARKER;
+        }
+
+        if (namedResult !== UNCHANGED) {
+          didMask = true;
+        }
+
+        defineEntry(
+          copy as unknown as Record<string, unknown>,
+          namedKey,
+          namedResult === UNCHANGED ? namedValue : namedResult,
+        );
+      }
+
       if (didMask) {
         return copy;
       }
@@ -665,6 +952,19 @@ function redactPathsInner(
     let didMask = false;
 
     for (const key of shape.keys) {
+      // `Object.keys` builds a fresh array, so this branch cannot be lied to about its
+      // own length - but the budget is per pass, not per container, and a payload of many
+      // small objects spends it exactly as one huge array does.
+      if (state.entriesLeft <= 0) {
+        state.didFailToRead = true;
+        didMask = true;
+        defineEntry(copy, key, REDACTION_FAILED_MARKER);
+
+        continue;
+      }
+
+      state.entriesLeft--;
+
       let result: unknown;
       let entryValue: unknown;
 
@@ -732,6 +1032,10 @@ function redactPathsInner(
     return UNCHANGED;
   } finally {
     seen.delete(value);
+
+    if (origin !== undefined) {
+      seen.delete(origin);
+    }
   }
 }
 
@@ -772,11 +1076,14 @@ export function redactMatchedPaths(
   paths: RedactPath[],
   redactFunction: RedactLeafFunction | undefined,
   report: ReportFormatFailure = NOOP_FORMAT_REPORTER,
+  aliases?: ForwardingAliases,
 ): unknown {
   const state: RedactState = {
     didMaskAnything: false,
     didFailToRead: false,
     noMatchUnchanged: new WeakSet(),
+    entriesLeft: MAX_REDACTION_ENTRIES,
+    aliases,
   };
 
   const result = redactPathsInner(

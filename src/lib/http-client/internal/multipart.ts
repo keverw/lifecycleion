@@ -269,6 +269,16 @@ export async function serializeMultipartFormData(
       let hasWriteReturned = false;
       let isWriteCallbackDone = false;
       let isDrainDone = true;
+      // The same guard `writeRequestBodyChunked` keeps, and for the same reason. Every
+      // path here settles the one promise, and a settled promise ignores a second call -
+      // but `maybeResolve` does more than resolve: it advances `uploadedBytes` and fires
+      // `onProgress`. Now that `onClose` *rejects*, the two can both run. Under
+      // backpressure a `'drain'` may arrive before the write callback, so `cleanup` has not
+      // run and the listeners are still attached; `req` then emits `'close'` and the upload
+      // rejects; the write callback lands afterwards and `maybeResolve` fires an
+      // upload-progress event for a request already reported as a transport error, having
+      // counted bytes the stream never accepted.
+      let isSettled = false;
 
       const cleanup = (): void => {
         req.off('drain', onDrain);
@@ -277,17 +287,20 @@ export async function serializeMultipartFormData(
       };
 
       const maybeResolve = (): void => {
-        if (isWriteCallbackDone && isDrainDone) {
-          cleanup();
-          uploadedBytes += Buffer.byteLength(data);
-
-          onProgress?.({
-            loaded: uploadedBytes,
-            total: totalSize,
-            progress: uploadedBytes / totalSize,
-          });
-          resolve();
+        if (isSettled || !isWriteCallbackDone || !isDrainDone) {
+          return;
         }
+
+        isSettled = true;
+        cleanup();
+        uploadedBytes += Buffer.byteLength(data);
+
+        onProgress?.({
+          loaded: uploadedBytes,
+          total: totalSize,
+          progress: uploadedBytes / totalSize,
+        });
+        resolve();
       };
 
       const onDrain = (): void => {
@@ -296,6 +309,11 @@ export async function serializeMultipartFormData(
       };
 
       const onClose = (): void => {
+        if (isSettled) {
+          return;
+        }
+
+        isSettled = true;
         cleanup();
 
         // Rejects, for the reason `writeRequestBodyChunked`'s does: a stream that closes
@@ -310,12 +328,22 @@ export async function serializeMultipartFormData(
       };
 
       const onError = (error: Error): void => {
+        if (isSettled) {
+          return;
+        }
+
+        isSettled = true;
         cleanup();
         reject(error);
       };
 
       const canContinue = req.write(data, (error: Error | null | undefined) => {
         if (error) {
+          if (isSettled) {
+            return;
+          }
+
+          isSettled = true;
           cleanup();
           reject(error);
           return;

@@ -761,6 +761,75 @@ describe('serializeMultipartFormData', () => {
     );
   });
 
+  test('no upload progress is reported after the write has already rejected', async () => {
+    // `maybeResolve` does more than resolve: it advances `uploadedBytes` and fires
+    // `onProgress`. Its sibling in `request-body-writer` keeps an `isSettled` guard and
+    // this one did not, which only started to matter once `onClose` began *rejecting*.
+    // Under backpressure a `'drain'` can arrive before the write callback - so `cleanup`
+    // has not run and the listeners are still attached - then `'close'` rejects the
+    // upload, and the write callback lands afterwards and reports progress for a request
+    // already surfaced to the caller as a transport error, counting bytes the stream
+    // never accepted.
+    const fd = new FormData();
+    fd.append('field', 'value');
+
+    const req = new EventEmitter() as EventEmitter &
+      RequestBodyWritable & { destroyed: boolean };
+    req.destroyed = false;
+    req.setHeader = () => {};
+
+    let pendingCallback: ((error?: Error | null) => void) | undefined;
+    let writeIndex = 0;
+
+    req.write = (_data, callback) => {
+      const index = writeIndex++;
+
+      if (index === 0) {
+        // Backpressure, with the callback deliberately held back.
+        pendingCallback = callback;
+
+        return false;
+      }
+
+      callback?.(null);
+
+      return true;
+    };
+
+    const progress: number[] = [];
+    const boundary = generateMultipartBoundary();
+    const writePromise = serializeMultipartFormData(fd, req, boundary, (e) => {
+      progress.push(e.loaded);
+    });
+
+    await Promise.resolve();
+
+    // `'drain'` first, while the write callback is still outstanding.
+    req.emit('drain');
+    req.emit('close');
+
+    let caught: Error | undefined;
+
+    try {
+      await writePromise;
+    } catch (error) {
+      caught = error as Error;
+    }
+
+    expect(caught?.message).toBe(
+      'Request stream closed before the body was fully written',
+    );
+
+    const afterRejection = progress.length;
+
+    // The held-back callback lands last, on a write that was already reported as failed.
+    pendingCallback?.(null);
+
+    await Promise.resolve();
+
+    expect(progress.length).toBe(afterRejection);
+  });
+
   test('rejects when req emits error during backpressure wait', async () => {
     const fd = new FormData();
     fd.append('field', 'value');

@@ -10,6 +10,10 @@ import {
 import type { RetryPolicyOptionsStrategyFixed } from './types';
 import { sleep } from '../../sleep';
 import {
+  muteConsoleError,
+  restoreConsoleError,
+} from '../../internal/console-test-utils';
+import {
   RetryUtilsErrRunnerAlreadyCompleted,
   RetryUtilsErrRunnerAlreadyRunning,
   RetryUtilsErrRunnerNotPaused,
@@ -596,6 +600,93 @@ describe('RetryRunner', () => {
 
       expect(result.status).toBe('attempt_success');
       expect(attemptCount).toBe(2); // Original was aborted, forced attempt ran
+    });
+
+    test('an aborted attempt reporting its abort is not called a double report', async () => {
+      // `reportResult` discards a result whose context is no longer current, and the
+      // discard is reported on the global `'error'` channel so a genuine double report is
+      // not left to be inferred from a missing event. But the id no longer matching *is*
+      // this API's documented abort flow: `forceTry({ shouldAbortRunning: true })` aborts
+      // the running context and moves on, and the contract tells the operation to call
+      // `reportResult('skip', 'aborted')` when it notices `signal.aborted`. Doing exactly
+      // what it was asked dispatched a synthetic uncaught error - which in a browser also
+      // reaches `window.onerror` and any monitoring attached to it.
+      const captured = muteConsoleError();
+      const events: unknown[] = [];
+      const onGlobalError = (event: unknown): void => {
+        events.push(event);
+      };
+
+      globalThis.addEventListener?.('error', onGlobalError);
+
+      try {
+        const operation = async (
+          reportResult: ReportResult,
+          signal: AbortSignal,
+        ): Promise<void> => {
+          await sleep(50);
+
+          if (signal.aborted) {
+            reportResult('skip', 'aborted');
+          } else {
+            reportResult('success', 'completed');
+          }
+        };
+
+        const runner = new RetryRunner(policy, operation);
+        void runner.run(false);
+
+        await sleep(10);
+
+        await runner.forceTry({
+          shouldWaitForCompletion: true,
+          shouldAbortRunning: true,
+        });
+
+        // Long enough for the aborted attempt's own `reportResult` to land.
+        await sleep(100);
+
+        expect(
+          captured.filter((line) => line.includes('already settled')),
+        ).toEqual([]);
+        expect(events).toEqual([]);
+      } finally {
+        globalThis.removeEventListener?.('error', onGlobalError);
+        restoreConsoleError();
+      }
+    });
+
+    test('a genuine double report on an unaborted attempt is still surfaced', async () => {
+      // The other half of the same rule: nothing here was aborted, so a second
+      // `reportResult` is the caller bug this diagnostic exists for.
+      const captured = muteConsoleError();
+      const events: unknown[] = [];
+      const onGlobalError = (event: unknown): void => {
+        events.push(event);
+      };
+
+      globalThis.addEventListener?.('error', onGlobalError);
+
+      try {
+        const operation = (reportResult: ReportResult): void => {
+          reportResult('success', 'first');
+          reportResult('success', 'second');
+        };
+
+        const runner = new RetryRunner(policy, operation);
+
+        await runner.run(true);
+        await sleep(10);
+
+        const didSurface =
+          captured.some((line) => line.includes('already settled')) ||
+          events.length > 0;
+
+        expect(didSurface).toBe(true);
+      } finally {
+        globalThis.removeEventListener?.('error', onGlobalError);
+        restoreConsoleError();
+      }
     });
 
     test('should throw error if already completed', async () => {

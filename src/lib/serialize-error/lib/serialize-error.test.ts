@@ -386,3 +386,66 @@ describe('deserializeError - untrusted input', () => {
     });
   });
 });
+
+describe('serializeError terminates on payloads nothing else bounds', () => {
+  // The depth cap bounds how deep the walk goes, the cycle cut bounds loops, and neither
+  // bounds how much the walk *emits*. `seen` is released as the walk leaves a node -
+  // deliberately - so a shared subtree is serialized once per reference, which is
+  // exponential in depth rather than linear in size.
+
+  const diamond = (levels: number): unknown => {
+    let child: unknown = { leaf: 'x' };
+
+    for (let index = 0; index < levels; index++) {
+      child = { l: child, r: child };
+    }
+
+    return child;
+  };
+
+  test('a shared subtree does not grow the output exponentially with depth', () => {
+    const twenty = new Error('boom') as Error & { data?: unknown };
+    const thirty = new Error('boom') as Error & { data?: unknown };
+
+    twenty.data = diamond(20);
+    thirty.data = diamond(30);
+
+    const twentySize = JSON.stringify(serializeError(twenty)).length;
+    const thirtySize = JSON.stringify(serializeError(thirty)).length;
+
+    // Ten more levels is 1024x the routes through the graph. Unbounded, twenty levels
+    // produced 22 MB and thirty ran out of memory.
+    expect(twentySize).toBeLessThan(4_000_000);
+    expect(thirtySize).toBeLessThan(4_000_000);
+  });
+
+  test('a huge sparse array is not materialized in full', () => {
+    // Every slot is a hole, so every read answers `undefined` and costs nothing to walk -
+    // which is exactly why a per-container charge was not enough on its own.
+    const error = new Error('boom') as Error & { data?: unknown };
+
+    error.data = new Array(20_000_000);
+
+    const startedAt = Date.now();
+    const serialized = serializeError(error) as unknown as {
+      data: unknown[];
+    };
+
+    expect(Date.now() - startedAt).toBeLessThan(5_000);
+    expect(serialized.data.length).toBeLessThan(1_000_000);
+  });
+
+  test('an ordinary error payload is untouched by the cap', () => {
+    const error = new Error('boom') as Error & { data?: unknown };
+
+    error.data = { user: 'alice', attempts: [1, 2, 3], meta: { ok: true } };
+
+    const serialized = serializeError(error) as unknown as { data: unknown };
+
+    expect(serialized.data).toEqual({
+      user: 'alice',
+      attempts: [1, 2, 3],
+      meta: { ok: true },
+    });
+  });
+});

@@ -1257,3 +1257,162 @@ describe('applyRedaction - reporting why redaction failed', () => {
     expect(withHandler).toEqual(withoutHandler);
   });
 });
+
+describe('a forwarding copy still answers to the walk as the container it stands for', () => {
+  const SECRET = 'hunter2secret';
+
+  // `normalizeParamsBag` and `forwardingContainerCopy` hand the walk a *copy* whose keys
+  // forward to the caller's container, and install that copy in place of the original.
+  // The walk's cycle guard keys on object identity, so a back-edge in the payload - which
+  // still points at the original - stopped being recognized as the node the walk was
+  // already inside. The guard never fired and the original subtree went back by
+  // reference, in the clear.
+
+  test('a self-referencing bag does not hand its own secret back through the cycle', () => {
+    const params: Record<string, unknown> = { password: SECRET };
+
+    params.self = params;
+
+    const redacted = applyRedaction(params, ['password']);
+
+    // The named key is masked, as it always was.
+    expect(redacted.password).not.toBe(SECRET);
+
+    // And the back-edge is the cycle it is, rather than a second route to the original.
+    expect(redacted.self).toBe(REDACTION_FAILED_MARKER);
+    expect(JSON.stringify(redacted)).not.toContain(SECRET);
+  });
+
+  test('a reference back up into an ancestor is a cycle one level down too', () => {
+    const parent: Record<string, unknown> = { p: { password: SECRET } };
+
+    (parent.p as Record<string, unknown>).up = parent;
+
+    const redacted = applyRedaction(parent, ['p.password']);
+    const p = redacted.p as Record<string, unknown>;
+
+    expect(p.password).not.toBe(SECRET);
+    expect(p.up).toBe(REDACTION_FAILED_MARKER);
+    expect(JSON.stringify(redacted)).not.toContain(SECRET);
+  });
+});
+
+describe("an array's named properties survive redaction of one of its indexes", () => {
+  const SECRET = 'hunter2secret';
+
+  test('redacting a sibling index does not blank an unrelated named key', () => {
+    // The copy replaces the original, and the walk rebuilds an array from its indexes
+    // alone - so a named property on an array was dropped the moment anything inside it
+    // was masked. `items.note` rendered normally until `redactedKeys: ['items[0]']` was
+    // added, and then rendered the fallback: an output regression caused by redacting a
+    // completely unrelated sibling.
+    const items: unknown[] = ['a', 'b'];
+
+    (items as unknown as Record<string, unknown>).note = 'request-42';
+
+    const redacted = applyRedaction({ items }, ['items[0]']);
+    const out = redacted.items as unknown[] & Record<string, unknown>;
+
+    expect(out[0]).not.toBe('a');
+    expect(out[1]).toBe('b');
+    expect(out.note).toBe('request-42');
+  });
+
+  test('a back-edge parked on an array named property is still a cycle', () => {
+    // The candidate *scan* is the gate: if it answers "nothing below needs a walk",
+    // `redactPathsInner` returns `UNCHANGED` and the caller keeps the **original** subtree
+    // by reference - so teaching only the walk about an array's named properties left the
+    // scan iterating indexes alone and the back-edge invisible to the cycle guard. The
+    // object branch never had the hole; the array branch did.
+    const root: Record<string, unknown> = { password: SECRET, items: [] };
+
+    (root.items as Record<string, unknown>).back = root;
+
+    const redacted = applyRedaction(root, ['password']);
+    const items = redacted.items as unknown[] & Record<string, unknown>;
+
+    expect(redacted.password).not.toBe(SECRET);
+    expect(items.back).not.toBe(root);
+    expect(JSON.stringify(redacted)).not.toContain(SECRET);
+  });
+
+  test('a named key that merely looks numeric is not mistaken for an index', () => {
+    // `"-1"` and `"4294967296"` are ordinary named properties: neither is a valid array
+    // index, which stops one short of `length`'s own maximum. A `parseInt` round-trip
+    // calls both of them indexes and filtered them out of the rebuilt array - the same
+    // "anything not carried over is simply gone" data loss the named pass exists to fix.
+    const items: unknown[] = ['a', 'b'];
+    const named = items as unknown as Record<string, unknown>;
+
+    named.note = 'request-42';
+    named['-1'] = 'neg-prop';
+    named['4294967296'] = 'big-prop';
+
+    const redacted = applyRedaction({ items }, ['items[0]']);
+    const out = redacted.items as unknown[] & Record<string, unknown>;
+
+    expect(out.note).toBe('request-42');
+    expect(out['-1']).toBe('neg-prop');
+    expect(out['4294967296']).toBe('big-prop');
+    expect(out[1]).toBe('b');
+  });
+
+  test('a named property is walked, so a path may address it', () => {
+    const items: unknown[] = ['a'];
+
+    (items as unknown as Record<string, unknown>).token = SECRET;
+
+    const redacted = applyRedaction({ items }, ['items.token']);
+    const out = redacted.items as unknown[] & Record<string, unknown>;
+
+    expect(out.token).not.toBe(SECRET);
+  });
+});
+
+describe('the redaction walk is bounded by entries, not by a reported length', () => {
+  const SECRET = 'hunter2secret';
+
+  test('an array that lies about its length cannot stall the walk', () => {
+    // `Array.isArray` is true for a `Proxy` over an array and `length` is an ordinary
+    // writable property a `get` trap may answer with any number. A proxy reporting five
+    // million spun `applyRedaction` synchronously inside `logger.info()` for well over a
+    // second; `2 ** 32 - 1` is about twenty minutes of it.
+    const lying = new Proxy([1, 2, 3], {
+      get: (target, key) =>
+        key === 'length' ? 2 ** 32 - 1 : Reflect.get(target, key),
+    });
+
+    const startedAt = Date.now();
+    const redacted = applyRedaction({ lying, password: SECRET }, ['password']);
+
+    expect(Date.now() - startedAt).toBeLessThan(5_000);
+    expect(redacted.password).not.toBe(SECRET);
+  });
+
+  test('a dense array is not enumerated again after the budget is spent', () => {
+    // `namedArrayKeys` calls `Object.keys`, which materializes every own index key as a
+    // string: on a dense five-million-element array that is seconds and hundreds of
+    // megabytes, synchronously inside `logger.info()` - the exact stall the budget exists
+    // to bound, run unconditionally right after the index loop had already stopped for it.
+    const arr = new Array<number>(5_000_000).fill(1);
+
+    const startedAt = Date.now();
+    const redacted = applyRedaction({ arr, password: SECRET }, ['password']);
+
+    expect(Date.now() - startedAt).toBeLessThan(5_000);
+    // Fails closed rather than leaking: the budget ran out before the key was reached.
+    expect(redacted.password).not.toBe(SECRET);
+  });
+
+  test('an ordinary payload is nowhere near the entry cap', () => {
+    const items = Array.from({ length: 1_000 }, (_, index) => ({
+      index,
+      note: `n${String(index)}`,
+    }));
+
+    const redacted = applyRedaction({ items, password: SECRET }, ['password']);
+
+    expect(redacted.password).not.toBe(SECRET);
+    expect(redacted.items).toEqual(items);
+  });
+});

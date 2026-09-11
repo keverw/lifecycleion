@@ -140,6 +140,19 @@ export function maskValueDeep(
       // the value, which is caller code on a subclass, free to throw or to yield
       // something other than the elements. Same reason `redactPathsInner` counts.
       for (let index = 0; index < shape.length; index++) {
+        // `shape.length` is the caller's own `length`, and that is not a fact:
+        // `Array.isArray` is true for a `Proxy` over an array, and a `get` trap may answer
+        // any number at all. Once the budget is spent every remaining element masks to the
+        // placeholder anyway - the guard at the top of this function says so - so spinning
+        // through five million of them to emit five million placeholders buys nothing but
+        // the stall. One placeholder stands for the tail, which is what the rest would
+        // have been.
+        if (budget.remaining <= 0) {
+          masked.push(REDACTED_PLACEHOLDER);
+
+          break;
+        }
+
         // Each element read and masked inside its own guard, exactly as
         // `redactPathsInner` and `renderContainer` do. Without this, one throwing
         // accessor anywhere inside a named container collapsed the *whole* container to

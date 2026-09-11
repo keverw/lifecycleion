@@ -112,9 +112,13 @@ export function createFormatReporter(
   const bound: FailureHandler | undefined =
     handler === undefined
       ? undefined
-      : (error: Error, path: string): void => {
-          handler(error, kind, path);
-        };
+      : // Expression-bodied on purpose. A block body would discard the handler's return
+        // value, and an `async` handler that rejects would then sail past every rung as an
+        // unhandled rejection - fatal under Node's default `--unhandled-rejections=throw`,
+        // raised out of the one path whose contract is that reporting a failure may never
+        // raise one. Returned, `reportThroughHandler` follows the promise and lands a
+        // rejection on the console rung exactly as it lands a throw.
+        (error: Error, path: string): void => handler(error, kind, path);
 
   return createFailureReporter(LABELS[kind], bound);
 }

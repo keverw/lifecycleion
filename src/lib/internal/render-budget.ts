@@ -41,6 +41,35 @@ export const MAX_RENDER_LENGTH = 1_000_000;
 /** Emitted where the budget ran out, so a truncated render never looks complete. */
 export const TRUNCATED_LENGTH = '[max length exceeded]';
 
+/**
+ * Cut `text` to the whole render's allowance, independent of what is left of it.
+ *
+ * For the one leaf that is not a value: a container's *keys*. {@link charge} bills a key
+ * and emits it whole, which bounds how many keys a render produces and says nothing about
+ * the length of one - and a key is as attacker-shaped as a value, since an object parsed
+ * from JSON carries whatever names arrived. `stringifyValue({ ['k'.repeat(5_000_000)]: 1 })`
+ * returned 5,000,028 characters against a 1,000,000 cap.
+ *
+ * Cut against {@link MAX_RENDER_LENGTH} rather than `budget.remaining`, which is what
+ * separates this from {@link chargeText}. A key does not only carry text, it *names where
+ * the render stopped*: the truncation branch emits `"c":"[max length exceeded]"` so a
+ * reader learns which entry was cut, and cutting the key against a budget that is already
+ * spent replaced that name with the marker too, leaving `"[max length exceeded]":"[max
+ * length exceeded]"` and no way to tell where the render got to. An ordinary key is
+ * therefore never touched, whatever the budget is doing, and only a key that could not fit
+ * the cap even on its own is cut.
+ *
+ * Charging is left to the caller, which knows whether its key needs quoting, a separator,
+ * or row framing around it.
+ */
+export function capKey(text: string): string {
+  if (text.length <= MAX_RENDER_LENGTH) {
+    return text;
+  }
+
+  return `${text.slice(0, MAX_RENDER_LENGTH)}${TRUNCATED_LENGTH}`;
+}
+
 /** Remaining output allowance for one render, shared by every level of it. */
 export interface RenderBudget {
   remaining: number;

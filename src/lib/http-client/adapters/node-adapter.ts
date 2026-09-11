@@ -45,6 +45,21 @@ import { toError as normalizeError } from '../../to-error';
 import { readUnknownMember as readObjectMember } from '../../internal/read-member';
 
 /**
+ * How long a pending-error absorber may stay on a caller's writable.
+ *
+ * The absorber's own signals - the error arriving, or `'close'` - bound it for any stream
+ * that eventually says something. This bounds it for one that does not: a writable handed
+ * to `streamResponse` is the caller's, and `process.stdout` or a pooled sink neither errors
+ * nor closes. Without a ceiling the absorber outlives the request by the life of the
+ * process, swallowing the caller's own later errors and pinning the request scope it closes
+ * over.
+ *
+ * A second is far past the poll-phase delay this exists to cover - `fs.WriteStream` closes
+ * its descriptor asynchronously and emits after it - and far short of forever.
+ */
+const PENDING_WRITABLE_ERROR_WINDOW_MS = 1000;
+
+/**
  * The absorber currently attached to a writable, if any.
  *
  * Module-level and keyed on the writable, because `streamResponse` may hand the same sink
@@ -1020,9 +1035,52 @@ async function streamResponseBody(
         // is not one.
         scheduleDetach();
       }
+
+      // A last bound, because the two above only cover streams that eventually say
+      // something. A writable handed to `streamResponse` belongs to the *caller* and may
+      // well outlive the request without ever closing - `process.stdout`, a pooled sink, a
+      // long-lived socket - and for one of those neither `'error'` nor `'close'` is coming.
+      // Left unbounded, this absorber would stay on the caller's stream for the life of the
+      // process: swallowing the first genuine error it emits long after this request
+      // succeeded, and pinning the whole request scope - `res`, its listeners, the
+      // accumulated state - to the stream it closes over. That is the hazard the comment
+      // above names, and it applied to the throw paths before this was reached from
+      // `cleanup` on every settle.
+      //
+      // Long enough for the case the `'close'` listener exists for - a real `fs.WriteStream`
+      // destroys itself through an asynchronous `fs.close(fd)` and emits a poll phase later,
+      // which a `setImmediate` lands before - and short enough that "for the life of the
+      // process" is never the answer. `unref` so a pending removal cannot hold the process
+      // open on its own.
+      try {
+        const backstop = setTimeout(detach, PENDING_WRITABLE_ERROR_WINDOW_MS);
+
+        backstop.unref?.();
+      } catch {
+        // No way to schedule it. The two signals above are still in place, which is the
+        // behaviour that shipped before this bound existed.
+      }
     };
 
     const cleanup = (): void => {
+      // Before the removal, and on *every* settle path rather than only the three that
+      // asked for it explicitly. `cleanup` takes `onWritableError` off unconditionally, so
+      // the moment it runs the writable has no `'error'` listener of ours left - and an
+      // `'error'` event with no listener is an uncaught exception that ends the process.
+      //
+      // The three call sites that asked were the ones where a `write`/`end` throw made the
+      // late error obvious, which left the ordinary paths uncovered: `settle(true)` on
+      // success, and all four response-side settles. A real `fs.WriteStream` closes its
+      // descriptor asynchronously *after* `'finish'`, so streaming a 200 to a file, then
+      // having `fs.close(fd)` fail with `EIO` or `ENOSPC`, emitted `'error'` into exactly
+      // that gap. Nothing about that path throws, so nothing about it looked like it
+      // needed an absorber.
+      //
+      // Cheap and idempotent to call here: it is keyed on the writable through a `WeakMap`,
+      // returns immediately when one is already attached, and takes itself back off on
+      // delivery or on `'close'`.
+      absorbPendingWritableError();
+
       removeWritableListener(writable, 'drain', onWritableDrain);
       removeWritableListener(writable, 'error', onWritableError);
 

@@ -993,13 +993,36 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
       // Reported on the global `'error'` channel rather than through this runner's own
       // events, deliberately: the attempt this belongs to has been settled, so emitting
       // `attempt:handled` for it now would be inventing a lifecycle event out of order.
-      reportCallbackError(
-        'RetryRunner reportResult (attempt already settled)',
-        valueInfo.error ??
-          new Error(
-            `reportResult('${status}') arrived after the attempt was settled`,
-          ),
-      );
+      //
+      // Only for an attempt that was *not* aborted, which is what separates a caller bug
+      // from this API's own documented flow. `forceTry({ shouldAbortRunning: true })` and
+      // `cancel()`'s grace period both abort the running context and then move on, and the
+      // contract tells the operation to call `reportResult('skip', 'aborted')` when it
+      // notices `signal.aborted` - so the ordinary, correct, documented response to being
+      // aborted was dispatching a global `'error'` `ErrorEvent` and printing a full console
+      // table. In a browser that also reaches `window.onerror` and any error monitoring
+      // attached to it, as a synthetic uncaught error, for an operation that did exactly
+      // what it was asked. The runner's own suite reports it: "should abort running attempt
+      // when shouldAbortRunning is true".
+      let wasAborted = false;
+
+      try {
+        wasAborted = context.abortController.signal.aborted;
+      } catch {
+        // A context whose controller cannot be read is not one this can clear, so it falls
+        // through to being reported - the safe direction, since a genuine double report is
+        // what this exists to surface.
+      }
+
+      if (!wasAborted) {
+        reportCallbackError(
+          'RetryRunner reportResult (attempt already settled)',
+          valueInfo.error ??
+            new Error(
+              `reportResult('${status}') arrived after the attempt was settled`,
+            ),
+        );
+      }
 
       return; // Ensures we only handle the result once per context
     }

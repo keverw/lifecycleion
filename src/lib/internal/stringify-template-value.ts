@@ -9,6 +9,7 @@ import {
   type ReportFormatFailure,
 } from './format-reporter';
 import {
+  capKey,
   charge,
   chargeUnits,
   createRenderBudget,
@@ -326,7 +327,15 @@ function renderContainer(
     }
 
     // The key and its separator are charged here; the value charges itself as it renders.
-    const renderedKey = charge(budget, `${quote(key)}:`);
+    //
+    // `capKey` first. `charge` bills text and hands it back *whole*, which bounds how many
+    // keys are emitted and says nothing about the length of one - and the commit that cut
+    // "every variable-length leaf" applied that reasoning to values and left keys on the
+    // billing-only path. A key is no less variable and no less attacker-shaped: an object
+    // parsed from JSON carries whatever names arrived, and
+    // `stringifyValue({ ['k'.repeat(5_000_000)]: 1 })` returned 5,000,028 characters
+    // against a 1,000,000 cap. Cut inside the quotes, so the result is still JSON.
+    const renderedKey = charge(budget, `${quote(capKey(key))}:`);
 
     // Stops the loop rather than only this entry, for the reason the array branch does:
     // the entries still to come would each be walked in full to no purpose.

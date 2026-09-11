@@ -1,4 +1,4 @@
-import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
+import { describe, test, expect, beforeEach, afterEach, spyOn } from 'bun:test';
 import { promises as fsPromises } from 'fs';
 import * as fs from 'fs';
 import * as os from 'os';
@@ -1884,4 +1884,52 @@ describe('NamedPipeSink', () => {
       fs.closeSync(readerFd);
     }
   }, 15000);
+
+  test('a write in the same tick as construction does not open the pipe twice', async () => {
+    // `ensureConnection` refuses a second open on `_isReconnecting` and `pendingStream`,
+    // but the constructor's own `initializePipe()` set neither until after its
+    // `await fsPromises.stat()` - so a `write()` in the same tick as `new NamedPipeSink()`,
+    // which is the ordinary case, walked through every guard and started a second open.
+    // Opening a FIFO with no reader does not fail, it *blocks*, holding one of libuv's
+    // four threadpool slots for as long as it waits.
+    const pipePath = `${tmpDir.path}/single-open.pipe`;
+    await createNamedPipe(pipePath);
+
+    const opened: string[] = [];
+    const realCreateWriteStream = fs.createWriteStream.bind(fs);
+    const createSpy = spyOn(fs, 'createWriteStream').mockImplementation(((
+      target: fs.PathLike,
+      options?: Parameters<typeof fs.createWriteStream>[1],
+    ): fs.WriteStream => {
+      opened.push(String(target));
+
+      return realCreateWriteStream(target, options);
+    }));
+
+    const readerFd = fs.openSync(
+      pipePath,
+      fs.constants.O_RDONLY | fs.constants.O_NONBLOCK,
+    );
+
+    try {
+      const sink = new NamedPipeSink({ pipePath, closeTimeoutMS: 2000 });
+
+      // The same tick as the constructor, deliberately: this is what every caller does.
+      sink.write({
+        timestamp: Date.now(),
+        type: 'info',
+        template: 'first line',
+        message: 'first line',
+      });
+
+      expect(await waitForOpenPipe(sink)).toBe(true);
+
+      expect(opened.filter((target) => target === pipePath).length).toBe(1);
+
+      await sink.close();
+    } finally {
+      createSpy.mockRestore();
+      fs.closeSync(readerFd);
+    }
+  }, 20000);
 });

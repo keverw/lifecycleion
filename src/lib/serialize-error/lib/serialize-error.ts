@@ -142,7 +142,9 @@ export function serializeError(
     seen.add(error);
   }
 
-  return serializeErrorInner(error, seen, 0, '<error>', report);
+  return serializeErrorInner(error, seen, 0, '<error>', report, {
+    remaining: MAX_SERIALIZED_NODES,
+  });
 }
 
 function serializeErrorInner(
@@ -151,6 +153,7 @@ function serializeErrorInner(
   depth: number,
   path: string,
   report: ReportFormatFailure,
+  budget: NodeBudget,
 ): SerializedError {
   // The shared brand check, so a cross-realm error keeps the error branch - and guarded,
   // which a bare `instanceof` is not.
@@ -172,7 +175,7 @@ function serializeErrorInner(
       // Nothing further can be enumerated; what was read above still stands.
       report(enumerationError, path);
 
-      return deepSerializeRecord(result, seen, depth, path, report);
+      return deepSerializeRecord(result, seen, depth, path, report, budget);
     }
 
     for (const key of keys) {
@@ -182,7 +185,7 @@ function serializeErrorInner(
       }
     }
 
-    return deepSerializeRecord(result, seen, depth, path, report);
+    return deepSerializeRecord(result, seen, depth, path, report, budget);
   }
 
   if (isErrorLike(error)) {
@@ -199,7 +202,7 @@ function serializeErrorInner(
       }
     }
 
-    return deepSerializeRecord(copy, seen, depth, path, report);
+    return deepSerializeRecord(copy, seen, depth, path, report, budget);
   }
 
   return { name: 'Error', message: describeValue(error) };
@@ -261,12 +264,41 @@ export function deserializeError(obj: SerializedError): Error {
 
 // ── internal helpers ────────────────────────────────────────────────
 
+/**
+ * How many values one serialization will visit before it stops.
+ *
+ * The depth cap bounds how *deep* the walk goes and the cycle cut bounds loops; neither
+ * bounds how much the walk *emits*, and those are three different limits. `seen` is
+ * released as the walk leaves a node - deliberately, so a value referenced twice side by
+ * side is serialized both times rather than the second being called circular - which means
+ * a shared subtree is serialized once per reference, and that is exponential in depth
+ * rather than linear in size. A diamond of `{ l: child, r: child }` twenty levels deep
+ * produced 22 MB in 303 ms and ran out of memory at about thirty. Nothing about that
+ * payload is pathological: reusing one object under two keys is ordinary.
+ *
+ * The array branch has the same gap from the other direction - it iterates the caller's
+ * own `length`, which `Array.isArray` does not make honest and which a plain
+ * `new Array(20_000_000)` makes expensive without any proxy at all.
+ *
+ * This is the failure-reporting path, and it promises to terminate and never to throw;
+ * an `OOM` on the way to describing an error is the worst possible way to break that.
+ * A hundred thousand nodes is far past any error payload worth sending across a process
+ * boundary and leaves the cap invisible to every serialization that is not running away.
+ */
+const MAX_SERIALIZED_NODES = 100_000;
+
+/** Values left to visit in one serialization. See {@link MAX_SERIALIZED_NODES}. */
+interface NodeBudget {
+  remaining: number;
+}
+
 function deepSerializeRecord(
   record: SerializedError,
   seen: WeakSet<object>,
   depth: number,
   path: string,
   report: ReportFormatFailure,
+  budget: NodeBudget,
 ): SerializedError {
   const result: SerializedError = {} as SerializedError;
 
@@ -274,7 +306,7 @@ function deepSerializeRecord(
     defineEntry(
       result,
       key,
-      deepSerialize(record[key], seen, depth, `${path}.${key}`, report),
+      deepSerialize(record[key], seen, depth, `${path}.${key}`, report, budget),
     );
   }
 
@@ -287,6 +319,7 @@ function deepSerialize(
   depth: number,
   path: string,
   report: ReportFormatFailure,
+  budget: NodeBudget,
 ): unknown {
   if (value === null || typeof value !== 'object') {
     return value;
@@ -307,11 +340,20 @@ function deepSerialize(
     return TRUNCATED;
   }
 
+  // Charged per value entered, which is the only count that bounds what the walk emits:
+  // depth bounds the stack and `seen` bounds loops, and a shared subtree is neither deep
+  // nor circular. See {@link MAX_SERIALIZED_NODES}.
+  if (budget.remaining <= 0) {
+    return TRUNCATED;
+  }
+
+  budget.remaining--;
+
   seen.add(value);
 
   try {
     if (isErrorLike(value)) {
-      return serializeErrorInner(value, seen, depth + 1, path, report);
+      return serializeErrorInner(value, seen, depth + 1, path, report, budget);
     }
 
     const shape = describeContainer(value);
@@ -330,11 +372,34 @@ function deepSerialize(
       const copy: unknown[] = [];
 
       for (let index = 0; index < shape.length; index++) {
+        // `shape.length` is the caller's own `length` - writable, and answerable by a
+        // `Proxy` trap over a value `Array.isArray` still calls an array. Stopped rather
+        // than spun through, and marked so a truncated payload never looks complete.
+        if (budget.remaining <= 0) {
+          copy.push(TRUNCATED);
+
+          break;
+        }
+
+        // Charged per *slot*, not only per container entered. A primitive costs nothing to
+        // walk and so charges nothing on the way in, which left the one shape this branch
+        // most needed to bound unbounded: `new Array(20_000_000)` is entirely holes, every
+        // read answers `undefined`, and the budget was still untouched after twenty million
+        // of them.
+        budget.remaining--;
+
         const elementPath = `${path}[${String(index)}]`;
 
         try {
           copy.push(
-            deepSerialize(source[index], seen, depth + 1, elementPath, report),
+            deepSerialize(
+              source[index],
+              seen,
+              depth + 1,
+              elementPath,
+              report,
+              budget,
+            ),
           );
         } catch (error) {
           report(error, elementPath);
@@ -349,6 +414,17 @@ function deepSerialize(
     const result: Record<string, unknown> = {};
 
     for (const key of shape.keys) {
+      if (budget.remaining <= 0) {
+        defineEntry(result, key, TRUNCATED);
+
+        continue;
+      }
+
+      // Per key, for the reason the array branch charges per slot: an object of a hundred
+      // thousand primitive values costs nothing on the way in and is exactly the size this
+      // is meant to bound.
+      budget.remaining--;
+
       let entry: unknown;
 
       // Per entry, so one throwing accessor marks its own key rather than discarding
@@ -360,6 +436,7 @@ function deepSerialize(
           depth + 1,
           `${path}.${key}`,
           report,
+          budget,
         );
       } catch (error) {
         report(error, `${path}.${key}`);
