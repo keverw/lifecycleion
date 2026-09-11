@@ -1616,4 +1616,75 @@ describe('NamedPipeSink', () => {
       fs.closeSync(readerFd);
     }
   }, 15000);
+  test('a late callback from a replaced stream does not mark the live one unhealthy', async () => {
+    // The write callback runs later than the write that started it, and `reconnect()` can
+    // put a working stream in place in between. The failure belongs to the stream that is
+    // gone - the `'error'` handler has always asked that question, and this one did not,
+    // so a late callback marked the healthy replacement unhealthy.
+    const pipePath = `${tmpDir.path}/stale-callback.pipe`;
+    await createNamedPipe(pipePath);
+
+    const readerFd = fs.openSync(
+      pipePath,
+      fs.constants.O_RDONLY | fs.constants.O_NONBLOCK,
+    );
+    const failures: SinkFailure[] = [];
+    const sink = new NamedPipeSink({
+      pipePath,
+      onError: (failure) => {
+        failures.push(failure);
+      },
+    });
+
+    try {
+      expect(await waitForOpenPipe(sink)).toBe(true);
+
+      const replaced = (sink as unknown as { pipeStream: fs.WriteStream })
+        .pipeStream;
+      let deliverFailure: ((error: Error) => void) | undefined;
+
+      // A write whose callback is held until after the stream has been replaced.
+      (
+        replaced as unknown as {
+          write: (
+            chunk: string,
+            callback?: (error?: Error | null) => void,
+          ) => boolean;
+        }
+      ).write = (_chunk, callback) => {
+        deliverFailure = (error: Error) => {
+          callback?.(error);
+        };
+
+        return true;
+      };
+
+      sink.write({
+        timestamp: Date.now(),
+        type: 'info',
+        template: 'held',
+        message: 'held',
+      });
+
+      await sink.reconnect();
+
+      expect(await waitForOpenPipe(sink)).toBe(true);
+      expect(sink.getHealth().consecutiveFailures).toBe(0);
+
+      // The stream that is gone reports its failure now.
+      deliverFailure?.(new Error('EPIPE from the replaced stream'));
+
+      await new Promise((resolve) => setTimeout(resolve, 100));
+
+      const health = sink.getHealth();
+
+      // Reported - the line is still owed - but charged to nobody's health.
+      expect(failures.some((entry) => entry.kind === 'write')).toBe(true);
+      expect(health.consecutiveFailures).toBe(0);
+      expect(health.isHealthy).toBe(true);
+    } finally {
+      await sink.close();
+      fs.closeSync(readerFd);
+    }
+  }, 20000);
 });

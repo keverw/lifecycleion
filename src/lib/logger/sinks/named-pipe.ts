@@ -1001,6 +1001,12 @@ export class NamedPipeSink implements LogSink {
             attempt: queued.attempts + 1,
             disposition:
               queued.attempts < this.maxRetries ? 'retrying' : 'lost',
+            // Only the stream still in hand may be marked unhealthy by this. The callback
+            // runs later than the write that started it, and `reconnect()` may have put a
+            // working stream in place in between - the failure belongs to the one that is
+            // gone, exactly as it does in the `'error'` handler, which has always asked
+            // this question. Reported either way: the line is still owed.
+            countsAgainstHealth: this.pipeStream === stream,
           });
 
           this.requeue(queued);
