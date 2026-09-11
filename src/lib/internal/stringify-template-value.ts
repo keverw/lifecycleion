@@ -10,6 +10,7 @@ import {
 } from './format-reporter';
 import {
   charge,
+  chargeText,
   createRenderBudget,
   MAX_RENDER_DEPTH,
   TRUNCATED,
@@ -133,10 +134,14 @@ function renderNested(
       // `NaN` and the infinities have no JSON form; `null` is the conventional stand-in.
       return charge(budget, Number.isFinite(value) ? String(value) : 'null');
     case 'string':
-      return charge(budget, quote(value));
+      // Cut at the budget rather than emitted whole. The quoting happens after the cut,
+      // so what comes out is still one JSON string literal - a value truncated inside the
+      // quotes, carrying the marker that says so.
+      return quote(chargeText(budget, value));
     case 'bigint':
       // Rendered as text rather than thrown on, which is what `JSON.stringify` does.
-      return charge(budget, quote(String(value)));
+      // Cut like a string leaf: a `BigInt` has no bounded length either.
+      return quote(chargeText(budget, String(value)));
     default:
       break;
   }
@@ -266,16 +271,24 @@ function renderContainer(
       charge(budget, ',');
     }
 
+    // The key and its separator are charged here; the value charges itself as it renders.
+    const renderedKey = charge(budget, `${quote(key)}:`);
+
     // Stops the loop rather than only this entry, for the reason the array branch does:
     // the entries still to come would each be walked in full to no purpose.
+    //
+    // Emitted as this key's *value*, below the key rather than in place of the whole
+    // entry. A bare `"[max length exceeded]"` pushed among parts that are all `"key":value`
+    // produced `{"a":"...","[max length exceeded]"}`, which is not JSON - `JSON.parse`
+    // refuses it with "Expected ':' before value in object property definition", though
+    // this function's whole contract is that a plain object renders as JSON. The array
+    // branch above has no such problem, since a bare element is legal there. Naming the
+    // key also says *where* the render stopped rather than only that it did.
     if (budget.remaining <= 0) {
-      parts.push(charge(budget, quote(TRUNCATED_LENGTH)));
+      parts.push(`${renderedKey}${charge(budget, quote(TRUNCATED_LENGTH))}`);
 
       break;
     }
-
-    // The key and its separator are charged here; the value charges itself as it renders.
-    const renderedKey = charge(budget, `${quote(key)}:`);
 
     // The read is inside the guard with the render, exactly as the array branch reads its
     // elements inside one: an entry backed by a throwing accessor degrades to a marker in

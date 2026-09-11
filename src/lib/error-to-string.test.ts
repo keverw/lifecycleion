@@ -1158,6 +1158,21 @@ describe('errorToString', () => {
       expect(rendered.length).toBeLessThan(2_000_000);
     });
 
+    it('should cut one oversized value rather than render it whole', () => {
+      // A single huge leaf is the case charging-without-cutting never bounded: the marker
+      // landed only on the entry after an oversized one, so this rendered 15 MB against a
+      // one-megabyte budget and kept the error's message and stack company with it.
+      const error = Object.assign(new Error('boom'), {
+        additionalInfo: { blob: 'x'.repeat(10_000_000) },
+      });
+
+      const rendered = errorToString(error);
+
+      expect(rendered).toContain('boom');
+      expect(rendered).toContain('[max length exceeded]');
+      expect(rendered.length).toBeLessThan(2_000_000);
+    });
+
     it('should not throw on a BigInt nested in additionalInfo', () => {
       const error = Object.assign(new Error('boom'), {
         additionalInfo: { big: { nested: 10n } },

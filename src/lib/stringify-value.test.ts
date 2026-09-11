@@ -1919,6 +1919,33 @@ describe('a shared subtree costs one walk, not one per route', () => {
     expect(rendered).toContain('[max length exceeded]');
   });
 
+  test('one oversized leaf is cut at the cap rather than emitted whole', () => {
+    // The case the cap used to miss entirely. The marker only ever landed on the entry
+    // *after* an oversized one, so a single huge value - the only key, or the last one -
+    // rendered in full and said nothing: 10 MB out of a 1 MB budget.
+    const rendered = stringifyValue({ blob: 'x'.repeat(10_000_000) });
+
+    expect(rendered.length).toBeLessThan(1_100_000);
+    expect(rendered).toContain('[max length exceeded]');
+  });
+
+  test('a truncated object is still JSON', () => {
+    // The truncation marker is the value of the key it cut, not an entry of its own.
+    // Pushed bare among `"key":value` parts it produced `{"a":"...","[max length
+    // exceeded]"}`, which `JSON.parse` refuses - though rendering a plain object as JSON
+    // is this function's whole contract. An array never had the problem: a bare element
+    // is legal there.
+    const huge = 'y'.repeat(600_000);
+
+    const object = stringifyValue({ a: huge, b: huge, c: 'tail' });
+    const array = stringifyValue([huge, huge, 'tail']);
+
+    expect(() => JSON.parse(object) as unknown).not.toThrow();
+    expect(() => JSON.parse(array) as unknown).not.toThrow();
+    // The key that was cut is named, so the reader learns where the render stopped.
+    expect(object).toContain('"c":"[max length exceeded]"');
+  });
+
   test('an ordinary value is nowhere near the length cap', () => {
     const rendered = stringifyValue({
       user: 'alice',

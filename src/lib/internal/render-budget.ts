@@ -83,3 +83,44 @@ export function charge(budget: RenderBudget, text: string): string {
 export function chargeUnits(budget: RenderBudget, amount: number): void {
   budget.remaining -= amount;
 }
+
+/**
+ * Charge a variable-length leaf, cutting it at whatever budget is left.
+ *
+ * {@link charge} bills a leaf and emits it whole, which bounds how *many* leaves a render
+ * produces and says nothing about how large one of them is. That was deliberate for a
+ * leaf that overshoots by a little - cutting a value mid-string to save a few hundred
+ * characters is a worse trade than going slightly over - but it leaves the one case that
+ * produces the most output as the one nothing bounds: a single ten-megabyte string param
+ * rendered in full against a one-megabyte cap, and the render that emitted it said so
+ * nowhere. The marker only ever landed on the *next* entry, so a leaf with nothing after
+ * it - the last key, the only key, a bare value - overshot silently.
+ *
+ * What is emitted is therefore bounded and self-describing: as much of the leaf as the
+ * budget still allows, then {@link TRUNCATED_LENGTH}. A reader sees where it stopped
+ * rather than inferring it from a length.
+ *
+ * Billed by what it emits rather than by what it was handed, so the budget lands just
+ * past zero and every sibling after it truncates rather than being billed for text that
+ * was never written.
+ *
+ * Truncation is not a failure and is never reported: it is an ordinary degradation like
+ * `[circular]` and `[max depth exceeded]`, and the marker in the output is the whole of
+ * the diagnosis. Only a value that *refused* to render reaches a reporter.
+ */
+export function chargeText(budget: RenderBudget, text: string): string {
+  if (text.length <= budget.remaining) {
+    return charge(budget, text);
+  }
+
+  // `Math.max`, because the budget can already be negative: a container's delimiters and
+  // keys are charged before its values, so a leaf can arrive with nothing left at all,
+  // and `slice` reads a negative end as counting back from the end of the string - which
+  // would emit the wrong part of the value rather than none of it.
+  const kept = text.slice(0, Math.max(0, budget.remaining));
+  const emitted = `${kept}${TRUNCATED_LENGTH}`;
+
+  chargeUnits(budget, emitted.length);
+
+  return emitted;
+}

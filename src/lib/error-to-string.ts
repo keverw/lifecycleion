@@ -19,6 +19,7 @@ import { stringifyTemplateValue } from './internal/stringify-template-value';
 import { isErrorValue } from './to-error';
 import {
   charge,
+  chargeText,
   chargeUnits,
   createRenderBudget,
   MAX_RENDER_DEPTH,
@@ -599,7 +600,7 @@ function errorToASCIITable(
       if (value !== undefined && value !== null) {
         table.addRow(
           label,
-          charge(
+          chargeText(
             budget,
             safeStringify(value, joinPath(path, key), reportRender),
           ),
@@ -686,7 +687,7 @@ function errorToASCIITable(
         if (masked === null || typeof masked !== 'object') {
           table.addRow(
             'AdditionalInfo',
-            charge(
+            chargeText(
               budget,
               safeStringify(
                 masked,
@@ -908,7 +909,7 @@ function addErrorTail(
   if (stack) {
     table.addValueOnSeparateRow(
       'Stack',
-      charge(
+      chargeText(
         budget,
         safeStringify(stack, joinPath(path, 'stack'), reportRender),
       ),
@@ -938,14 +939,14 @@ function stringifyValue(
   reportRender: ReportFormatFailure,
 ): string | KeyValueASCIITable | NestedKeyValueEntry[] {
   if (typeof value === 'string') {
-    // Checked before it is charged. A leaf is emitted whole rather than cut mid-string, so
-    // the total can overshoot by one value; what it cannot do is emit an unbounded number
-    // of them, which is what charging without checking allowed.
-    if (budget.remaining <= 0) {
-      return TRUNCATED_LENGTH;
-    }
-
-    return charge(budget, value);
+    // Cut at whatever budget is left, rather than emitted whole and merely charged for.
+    // Charging without cutting bounded how *many* leaves this walk emits and nothing about
+    // the size of one: a single ten-megabyte `additionalInfo` string rendered in full
+    // against a one-megabyte cap, and said so nowhere, since the marker only ever landed
+    // on the entry *after* it. `chargeText` handles the exhausted-budget case this used to
+    // check for separately - with nothing left it keeps none of the value and emits the
+    // marker alone.
+    return chargeText(budget, value);
   }
 
   // A payload that points back at itself would otherwise recurse until the stack runs
@@ -1147,7 +1148,7 @@ function stringifyValueInner(
         );
       }
 
-      return charge(budget, stringifyTemplateValue(value));
+      return chargeText(budget, stringifyTemplateValue(value));
     } else {
       // An error-shaped plain object renders as an error, under its own
       // `sensitiveFieldNames`.
@@ -1280,6 +1281,6 @@ function stringifyValueInner(
       return entries;
     }
   } else {
-    return charge(budget, safeStringify(value, path, reportRender));
+    return chargeText(budget, safeStringify(value, path, reportRender));
   }
 }
