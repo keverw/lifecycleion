@@ -1337,6 +1337,8 @@ Both queueing sinks — `FileSink` and `NamedPipeSink` — answer a failed write
   drop is reported through `onError`
 - a broken stream is reopened automatically on a later write, so neither sink needs an API
   call to recover
+- `minLevel` / `setMinLevel()` / `getMinLevel()` filter by level, defaulting to
+  `LogLevel.INFO` as `ConsoleSink` does; a `raw` entry is always written
 - entries stay in the sink's own queue until the destination is genuinely writable, so the
   cap and `getHealth().queueSize` mean what they say
 
@@ -1357,6 +1359,7 @@ import { NamedPipeSink, PipeErrorType } from 'lifecycleion/logger';
 const pipeSink = new NamedPipeSink({
   pipePath: '/tmp/app_logs',
   jsonFormat: true,
+  minLevel: LogLevel.INFO, // Minimum log level to write (default: INFO)
   maxRetries: 3, // Retry failed writes (default: 3)
   maxQueueSize: 10_000, // Entries held while the pipe is unusable (default: 10,000; -1 = unlimited)
   closeTimeoutMS: 30000, // Timeout for close() and its final flush (default: 30000)

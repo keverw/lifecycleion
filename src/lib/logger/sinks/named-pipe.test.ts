@@ -5,6 +5,7 @@ import * as os from 'os';
 import { exec } from 'node:child_process';
 import { promisify } from 'node:util';
 import { NamedPipeSink, PipeErrorType } from './named-pipe';
+import { LogLevel } from '../types';
 import type { LogEntry } from '../types';
 import { TmpDir } from '../../tmp-dir';
 
@@ -1210,10 +1211,13 @@ describe('NamedPipeSink', () => {
 
       expect(staleHandlers.length).toBeGreaterThan(0);
 
-      const status = await sink.reconnect();
+      await sink.reconnect();
 
-      expect(status.success).toBe(true);
-      expect(sink.getHealth().isInitialized).toBe(true);
+      // The connection, not `reconnect()`'s verdict: a busy threadpool can push the open
+      // past the wait `reconnect()` is willing to give it, and it answers honestly that
+      // the pipe is not open *yet* while the open it started goes on to succeed. What
+      // this test is about is what a stale error does to the connection that results.
+      expect(await waitForOpenPipe(sink)).toBe(true);
 
       // The replaced stream reports its failure now, one turn too late.
       for (const handler of staleHandlers) {
@@ -1225,6 +1229,50 @@ describe('NamedPipeSink', () => {
       expect(health.isInitialized).toBe(true);
       expect(health.consecutiveFailures).toBe(0);
       expect(health.isHealthy).toBe(true);
+    } finally {
+      await sink.close();
+      reader.stop();
+    }
+  }, 15000);
+  test('filters by minLevel, and always writes a raw entry', async () => {
+    // The sink had no level filtering at all, so a debug line went down the pipe whatever
+    // the reader wanted. It now matches `FileSink` and `ConsoleSink`, default included.
+    const pipePath = `${tmpDir.path}/min-level.pipe`;
+    await createNamedPipe(pipePath);
+
+    const reader = startPipeReader(pipePath);
+    const sink = new NamedPipeSink({ pipePath });
+
+    try {
+      expect(await waitForOpenPipe(sink)).toBe(true);
+      expect(sink.getMinLevel()).toBe(LogLevel.INFO);
+
+      const entryOf = (type: LogEntry['type'], message: string): LogEntry => ({
+        timestamp: Date.now(),
+        type,
+        template: message,
+        message,
+      });
+
+      sink.write(entryOf('debug', 'below-the-default'));
+      sink.write(entryOf('info', 'at-the-default'));
+      sink.write(entryOf('raw', 'raw-is-always-written'));
+
+      await new Promise((resolve) => setTimeout(resolve, 200));
+
+      const written = reader.data.join('');
+
+      expect(written).not.toContain('below-the-default');
+      expect(written).toContain('at-the-default');
+      expect(written).toContain('raw-is-always-written');
+
+      // And it can be widened, as on the other sinks.
+      sink.setMinLevel(LogLevel.DEBUG);
+      sink.write(entryOf('debug', 'now-included'));
+
+      await new Promise((resolve) => setTimeout(resolve, 200));
+
+      expect(reader.data.join('')).toContain('now-included');
     } finally {
       await sink.close();
       reader.stop();

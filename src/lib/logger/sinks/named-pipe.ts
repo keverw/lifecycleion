@@ -2,6 +2,7 @@ import * as fs from 'fs';
 import { promises as fsPromises } from 'fs';
 import * as os from 'os';
 import type { LogEntry, LogSink } from '../types';
+import { LogLevel, getLogLevel } from '../types';
 import { describeError, toError } from '../../to-error';
 import { renderOnce, type RenderedLine } from './internal/rendered-line';
 import { reportThroughHandler } from '../../internal/failure-reporter';
@@ -33,6 +34,19 @@ export enum PipeErrorType {
 
 export interface NamedPipeSinkOptions {
   pipePath: string;
+  /**
+   * Lowest level this sink writes. Defaults to {@link LogLevel.INFO}, matching `FileSink`
+   * and `ConsoleSink`.
+   *
+   * This sink had no level filtering at all, so every entry went down the pipe on the
+   * reasoning that whatever is reading it decides. That is still a reasonable posture for
+   * an aggregator - pass `LogLevel.DEBUG` to restore it - but a sink that cannot be told
+   * what to send was the odd one out of the three, and the asymmetry is paid for in
+   * bandwidth to a reader that is only going to discard it.
+   *
+   * A `raw` entry is written whatever this is set to, as in the other sinks.
+   */
+  minLevel?: LogLevel;
   jsonFormat?: boolean;
   closeTimeoutMS?: number;
   onError?: (errorType: PipeErrorType, error: Error, pipePath: string) => void;
@@ -192,6 +206,7 @@ export class NamedPipeSink implements LogSink {
   private isInitialized = false;
   private maxQueueSize?: number;
   private maxRetries: number;
+  private minLevel: LogLevel;
   private droppedEntries = 0;
   private didReportDrop = false;
   private lastError?: Error;
@@ -235,6 +250,7 @@ export class NamedPipeSink implements LogSink {
     this.closeTimeoutMS = options.closeTimeoutMS ?? 30000;
     this.maxQueueSize = resolveMaxQueueSize(options.maxQueueSize);
     this.maxRetries = resolveMaxRetries(options.maxRetries);
+    this.minLevel = options.minLevel ?? LogLevel.INFO;
 
     this.initPromise = this.initializePipe();
   }
@@ -242,6 +258,16 @@ export class NamedPipeSink implements LogSink {
   public write(entry: LogEntry): void {
     if (this.closing || this.closed) {
       return;
+    }
+
+    // Before the render, so a filtered entry never runs a caller's `formatter`. Checked
+    // the way the other sinks check it, `raw` included.
+    if (entry.type !== 'raw') {
+      const logLevel = getLogLevel(entry.type);
+
+      if (logLevel > this.minLevel) {
+        return;
+      }
     }
 
     // Queued whenever there is nowhere to put it *yet* - before the first open, and after
@@ -270,6 +296,20 @@ export class NamedPipeSink implements LogSink {
     }
 
     this.writeEntry({ ...this.renderEntry(entry), attempts: 0 });
+  }
+
+  /**
+   * Set the minimum log level for this sink
+   */
+  public setMinLevel(level: LogLevel): void {
+    this.minLevel = level;
+  }
+
+  /**
+   * Get the current minimum log level
+   */
+  public getMinLevel(): LogLevel {
+    return this.minLevel;
   }
 
   /**
