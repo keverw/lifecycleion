@@ -354,6 +354,13 @@ export function applyRedaction(
 ): Record<string, unknown> {
   const report = createFormatReporter('redaction', onFormatError);
 
+  // A second channel, for the other way a mask can fail: the leaf renders through
+  // `stringifyTemplateValue` on its way to the mask, and a `toString` that throws there is
+  // a `'render'` failure, not a `'redaction'` one. Sharing `report` mislabelled its kind
+  // and, since each reporter fires once per operation, let an unrenderable value consume
+  // the report a genuinely broken `redactFunction` still needed.
+  const reportRender = createFormatReporter('render', onFormatError);
+
   // Read once, through `snapshotList`, and never asked a second question afterwards.
   //
   // `redactedKeys` is typed `string[]`, but a JavaScript caller can hand over anything, and
@@ -471,7 +478,14 @@ export function applyRedaction(
     let result: unknown;
 
     try {
-      result = redactMatchedPaths(root, paths, redactFunction, report, aliases);
+      result = redactMatchedPaths(
+        root,
+        paths,
+        redactFunction,
+        report,
+        aliases,
+        reportRender,
+      );
     } catch (error) {
       // The walk guards every step it owns, so reaching here means something beneath it
       // refused entirely.

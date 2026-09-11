@@ -146,7 +146,17 @@ export function redactValue(
       return value;
     }
 
-    return redactMatchedPaths(value, paths, options?.redactFunction, report);
+    return redactMatchedPaths(
+      value,
+      paths,
+      options?.redactFunction,
+      report,
+      undefined,
+      // Its own `'render'` reporter: a leaf that refuses to render while being masked is a
+      // render failure, and reporting it through `report` would label it `'redaction'` and
+      // spend the single redaction report a broken `redactFunction` still needs.
+      createFormatReporter('render', options?.onFormatError),
+    );
   } catch (error) {
     // Reported when there is a reporter to report with. Nothing above is expected to
     // throw - `parseRedactPaths` is guarded throughout and the walk guards every read it

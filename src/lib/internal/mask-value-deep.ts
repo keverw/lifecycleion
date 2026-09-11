@@ -61,6 +61,14 @@ export type MaskLeaf = (
  *               default.
  * @param budget The allowance for this whole mask, shared by every level of it. One
  *               top-level call gets one allowance, so callers start at the default.
+ * @param reportRender Notified when a leaf refuses to *render* - a `toString` that throws
+ *               - which is a different failure from a `redactFunction` that throws and
+ *               carries its own `'render'` kind and its own once-per-operation budget.
+ *               Kept separate from `report` for the reason `errorToString` keeps the two
+ *               apart: routing a render failure into the redaction channel mislabels its
+ *               kind and burns the one redaction report a genuinely broken
+ *               `redactFunction` still needs. Defaults to discarding, so a caller with no
+ *               render channel is exactly where it was.
  *
  * Bounded in both directions for the reason the renderers are. `seen` is released on the
  * way out - deliberately, so a value referenced twice side by side is masked both times -
@@ -76,6 +84,7 @@ export function maskValueDeep(
   report: ReportFormatFailure = NOOP_FORMAT_REPORTER,
   depth: number = 0,
   budget: RenderBudget = createRenderBudget(),
+  reportRender: ReportFormatFailure = NOOP_FORMAT_REPORTER,
 ): unknown {
   // Only a plain object or an array is walked. Anything else - an `Error`, a `Date`, a
   // `URL`, a class instance - has no shape worth rebuilding, so it is replaced outright
@@ -92,7 +101,13 @@ export function maskValueDeep(
     // a *produced* string, and proportional masking keeps its ends: a card number kept
     // its BIN prefix and last four, a `URL` kept its query.
     const isDerived = typeof value !== 'string';
-    const text = stringifyTemplateValue(value);
+
+    // Reported under `key`, on the render channel the other `stringifyTemplateValue` call
+    // sites use. Called bare, a leaf that refused to render - a `toString` that throws -
+    // emitted its `[unrenderable: ...]` marker into the masked output and told nobody, so
+    // an installed `onFormatError` never fired for the one surface where a failure to
+    // render is also a failure to redact.
+    const text = stringifyTemplateValue(value, key, reportRender);
 
     charge(budget, text);
 
@@ -180,6 +195,7 @@ export function maskValueDeep(
               report,
               depth + 1,
               budget,
+              reportRender,
             ),
           );
         } catch (error) {
@@ -249,6 +265,7 @@ export function maskValueDeep(
                 report,
                 depth + 1,
                 budget,
+                reportRender,
               ),
             );
           } catch (error) {
@@ -302,6 +319,7 @@ export function maskValueDeep(
           report,
           depth + 1,
           budget,
+          reportRender,
         );
       } catch (error) {
         report(error, key);

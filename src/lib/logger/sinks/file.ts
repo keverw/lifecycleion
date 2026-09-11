@@ -320,6 +320,13 @@ export class FileSink implements LogSink {
 
     this.closed = true;
 
+    // `isHealthy` is `consecutiveFailures === 0 && isInitialized`, computed identically in
+    // both sinks, so a file sink that closed cleanly went on reporting itself healthy to
+    // anything polling `getHealth()` - with no stream, and `write()` discarding every line
+    // at the `closing || closed` guard without even counting it as dropped. Closed is not
+    // healthy, the same answer `NamedPipeSink.close()` gives.
+    this.isInitialized = false;
+
     this.abandonQueueOnClose();
 
     // Close stream

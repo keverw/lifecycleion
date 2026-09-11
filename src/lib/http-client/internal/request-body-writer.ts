@@ -143,6 +143,16 @@ function writeChunkWithBackpressure(
       chunk,
       (error: Error | null | undefined): void => {
         if (error) {
+          // Guarded on the way in as well as marked on the way out, the same pair
+          // `serializeMultipartFormData`'s write callback keeps. This callback can fire
+          // *after* `onClose` or `onError` already settled - a chunk under backpressure
+          // whose socket dies delivers `'close'` first and the pending `ECONNRESET`
+          // second - and running on regardless meant a second `cleanup()` and a second
+          // `reject` on a promise that was already rejected.
+          if (isSettled) {
+            return;
+          }
+
           // Settled, as `onClose` and `onError` mark themselves. Left unmarked, a later
           // `'close'` or `'error'` ran its whole body again - `cleanup()` a second time and
           // a second `reject` on a promise already rejected - and the registration below

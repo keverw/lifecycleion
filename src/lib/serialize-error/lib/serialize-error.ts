@@ -501,10 +501,20 @@ function deepSerialize(
     const result: Record<string, unknown> = {};
 
     for (const key of shape.keys) {
+      // Stopped rather than spun through, exactly as the array branch above stops: the
+      // budget is what bounds the work, and `continue` left it bounding nothing. A nested
+      // bag of two million keys - `err.payload`, say - spent the budget after the first
+      // hundred thousand and then performed one `defineProperty` per remaining key anyway,
+      // handing `JSON.stringify` a two-million-entry object: the synchronous stall the cap
+      // exists to prevent. One marker, so a truncated payload never looks complete.
+      //
+      // Bounds this walk, not the error's own top-level enumeration above, which is
+      // deliberately uncharged: `name`, `message` and `stack` come from it, so stopping it
+      // early could hand back a `SerializedError` with no name at all.
       if (budget.remaining <= 0) {
         defineEntry(result, key, TRUNCATED);
 
-        continue;
+        break;
       }
 
       // Per key, for the reason the array branch charges per slot: an object of a hundred

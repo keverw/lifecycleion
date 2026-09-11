@@ -309,13 +309,25 @@ function redactAddressedValue(
   paths: RedactPath[],
   redactFunction: RedactFieldFunction | undefined,
   report: ReportFormatFailure,
+  reportRender: ReportFormatFailure,
 ): unknown {
   if (paths.length === 0) {
     return value;
   }
 
   try {
-    return redactMatchedPaths(value, paths, redactFunction, report);
+    // `reportRender` as well as `report`, the same split this file already keeps
+    // everywhere else: a leaf renders on its way to the mask, and a `toString` that throws
+    // there is a `'render'` failure. Passing only `report` labelled it `'redaction'` and
+    // spent the one redaction report a broken `redactFunction` still needs.
+    return redactMatchedPaths(
+      value,
+      paths,
+      redactFunction,
+      report,
+      undefined,
+      reportRender,
+    );
   } catch (error) {
     report(error, '<sensitiveFieldNames>');
 
@@ -742,7 +754,13 @@ function errorToASCIITable(
         const masked =
           bag === null || typeof bag !== 'object'
             ? bag
-            : redactAddressedValue(bag, sensitivePaths, redactFunction, report);
+            : redactAddressedValue(
+                bag,
+                sensitivePaths,
+                redactFunction,
+                report,
+                reportRender,
+              );
 
         // The walk can fail the whole value closed, and what it hands back then is the
         // marker string rather than a bag of keys. Enumerating that walks the *string*,
@@ -952,6 +970,7 @@ function addErrorTail(
         sensitive,
         redactFunction,
         report,
+        reportRender,
       );
 
       // The same guard the `additionalInfo` branch carries. A walk that fails the whole

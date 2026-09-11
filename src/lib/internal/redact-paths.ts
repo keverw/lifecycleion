@@ -680,6 +680,18 @@ interface RedactState {
    * documents.
    */
   aliases: ForwardingAliases | undefined;
+  /**
+   * The `'render'`-kind channel, for a leaf whose `toString` throws while it is being
+   * masked.
+   *
+   * Carried on the state rather than passed alongside `report` because it is threaded
+   * unchanged through every level of the walk and only `maskValueDeep` reads it. Kept
+   * distinct from `report` for the reason `errorToString` keeps its own two apart: a
+   * render failure reported on the redaction channel arrives with the wrong
+   * `FormatFailureKind` and spends the one redaction report a genuinely broken
+   * `redactFunction` still needs.
+   */
+  reportRender: ReportFormatFailure;
 }
 
 /**
@@ -726,6 +738,9 @@ function redactPathsInner(
           resolveRedaction(key, leaf, isDerived, redactFunction),
         new WeakSet(),
         report,
+        undefined,
+        undefined,
+        state.reportRender,
       );
     } catch (error) {
       // Never fall back to the original: a failed redaction says so instead.
@@ -769,6 +784,9 @@ function redactPathsInner(
           resolveRedaction(key, leaf, isDerived, redactFunction),
         new WeakSet(),
         report,
+        undefined,
+        undefined,
+        state.reportRender,
       );
     } catch (error) {
       report(error, inside);
@@ -1203,6 +1221,7 @@ export function redactMatchedPaths(
   redactFunction: RedactLeafFunction | undefined,
   report: ReportFormatFailure = NOOP_FORMAT_REPORTER,
   aliases?: ForwardingAliases,
+  reportRender: ReportFormatFailure = NOOP_FORMAT_REPORTER,
 ): unknown {
   const state: RedactState = {
     didMaskAnything: false,
@@ -1211,6 +1230,7 @@ export function redactMatchedPaths(
     entriesLeft: MAX_REDACTION_ENTRIES,
     scanLeft: MAX_REDACTION_ENTRIES,
     aliases,
+    reportRender,
   };
 
   const result = redactPathsInner(
