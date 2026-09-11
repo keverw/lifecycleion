@@ -422,8 +422,16 @@ export class FileSink implements LogSink {
       return;
     }
 
+    // The first entry this call discards, kept for the report below. `writeQueue[0]` is
+    // the oldest *surviving* entry - one that is still going to be written - so naming it
+    // told an `onError` handler that a line it will see again was lost, while the entries
+    // that genuinely were lost went unnamed.
+    let firstDropped: LogEntry | undefined;
+
     while (this.writeQueue.length > limit) {
-      this.writeQueue.shift();
+      const dropped = this.writeQueue.shift();
+
+      firstDropped ??= dropped?.entry;
       this.droppedEntries++;
     }
 
@@ -448,7 +456,10 @@ export class FileSink implements LogSink {
         : () => {
             this.onError?.(
               failure,
-              this.writeQueue[0]?.entry ?? ({} as LogEntry),
+              // A dropped entry, never a surviving one: `willRetry` is `false` here, and
+              // a handler that reads that as "this line is gone" and writes it elsewhere
+              // would otherwise duplicate an entry still queued for the file.
+              firstDropped ?? ({} as LogEntry),
               0,
               false,
             );
