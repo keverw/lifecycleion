@@ -214,6 +214,13 @@ export class NamedPipeSink implements LogSink {
    * attempt per {@link REOPEN_COOLDOWN_MS} is enough to recover promptly without that.
    */
   private lastReopenAttempt = 0;
+  /**
+   * A reopen deferred until the cooldown has elapsed, if one is pending.
+   *
+   * One at a time, and `unref`'d, so a sink waiting to recover never holds the process
+   * open and never stacks attempts.
+   */
+  private reopenTimer?: NodeJS.Timeout;
   private _isReconnecting = false;
   private initPromise: Promise<void>;
   private closing = false;
@@ -381,6 +388,11 @@ export class NamedPipeSink implements LogSink {
 
     this.closed = true;
 
+    if (this.reopenTimer !== undefined) {
+      clearTimeout(this.reopenTimer);
+      this.reopenTimer = undefined;
+    }
+
     // An open still waiting for a reader is abandoned rather than waited on: it cannot
     // complete without the reader that never came, and holding it would keep a descriptor
     // and a threadpool slot for the life of the process.
@@ -510,6 +522,14 @@ export class NamedPipeSink implements LogSink {
         // the sink looked ready, had nowhere to write, and silently lost every entry until
         // the application happened to call `reconnect()` itself.
         this.isInitialized = false;
+
+        // And recovery starts here, because this is the first moment it can. A failed
+        // write reports through its callback *before* the stream emits `'error'`, so the
+        // `requeue` that callback performs asks for a reconnection while this sink still
+        // looks connected - and is told there is nothing to do. Without this the requeued
+        // entry sat until some unrelated later write happened along, which in a quiet
+        // process is never.
+        this.ensureConnection();
       });
 
       // Initialized means *open*, not merely constructed. Until this fires there is
@@ -630,6 +650,30 @@ export class NamedPipeSink implements LogSink {
   }
 
   /**
+   * Try again once the cooldown has elapsed.
+   *
+   * A single deferred attempt, not a retry loop: it is scheduled by something that
+   * actually happened - a write that failed, or an entry queued with nowhere to go - and
+   * an attempt that fails does not schedule another on its own. A sink whose pipe is gone
+   * for good therefore costs one attempt per event rather than a timer running forever.
+   */
+  private scheduleReopen(delayMS: number): void {
+    if (this.reopenTimer !== undefined || this.closed || this.closing) {
+      return;
+    }
+
+    const timer = setTimeout(() => {
+      this.reopenTimer = undefined;
+      this.ensureConnection();
+    }, delayMS);
+
+    // So a pending attempt cannot hold the process open.
+    timer.unref?.();
+
+    this.reopenTimer = timer;
+  }
+
+  /**
    * Wait for a freshly created stream to open, fail, or take too long.
    *
    * Resolves rather than rejecting in every case: the caller's contract is a status, and
@@ -693,8 +737,16 @@ export class NamedPipeSink implements LogSink {
     }
 
     const now = Date.now();
+    const sinceLastAttempt = now - this.lastReopenAttempt;
 
-    if (now - this.lastReopenAttempt < REOPEN_COOLDOWN_MS) {
+    if (sinceLastAttempt < REOPEN_COOLDOWN_MS) {
+      // Deferred rather than dropped. The cooldown is there to keep a dead pipe from
+      // becoming a syscall storm, not to make recovery wait for the next log call: an
+      // entry requeued by a failed write would otherwise sit until unrelated traffic
+      // arrived, and a process that has just lost its log pipe may have nothing else to
+      // say.
+      this.scheduleReopen(REOPEN_COOLDOWN_MS - sinceLastAttempt);
+
       return;
     }
 

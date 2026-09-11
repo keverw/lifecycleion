@@ -1129,6 +1129,64 @@ describe('NamedPipeSink', () => {
     }
   }, 15000);
 
+  test('recovers a requeued entry without waiting for later traffic', async () => {
+    // A failed write reports through its callback before the stream emits `'error'`, so
+    // the requeue asks for a reconnection while the sink still looks connected and is told
+    // there is nothing to do. Nothing then started recovery, and the entry sat until some
+    // unrelated later write happened along - which in a quiet process is never.
+    const pipePath = `${tmpDir.path}/self-recovery.pipe`;
+    await createNamedPipe(pipePath);
+
+    const reader = startPipeReader(pipePath);
+    const sink = new NamedPipeSink({ pipePath, onError: () => {} });
+
+    try {
+      expect(await waitForOpenPipe(sink)).toBe(true);
+
+      // The sink's own stream, made to fail the way a real one does: the write callback
+      // first, the `'error'` event behind it.
+      const live = (sink as unknown as { pipeStream: fs.WriteStream })
+        .pipeStream;
+
+      (
+        live as unknown as {
+          write: (
+            chunk: string,
+            callback?: (error?: Error | null) => void,
+          ) => boolean;
+        }
+      ).write = (_chunk, callback) => {
+        callback?.(new Error('EPIPE'));
+        live.emit('error', new Error('EPIPE'));
+
+        return true;
+      };
+
+      sink.write({
+        timestamp: Date.now(),
+        type: 'info',
+        template: 'recovered-on-its-own',
+        message: 'recovered-on-its-own',
+      });
+
+      // The entry is owed, the connection is gone, and nothing else is going to be logged.
+      expect(sink.getHealth().queueSize).toBe(1);
+      expect(sink.getHealth().isInitialized).toBe(false);
+
+      // No further writes and no `reconnect()` call: the sink reopens on the deferred
+      // attempt its own failure scheduled, and flushes what it was holding.
+      expect(await waitForOpenPipe(sink, 5000)).toBe(true);
+
+      await new Promise((resolve) => setTimeout(resolve, 200));
+
+      expect(sink.getHealth().queueSize).toBe(0);
+      expect(reader.data.join('')).toContain('recovered-on-its-own');
+    } finally {
+      await sink.close();
+      reader.stop();
+    }
+  }, 20000);
+
   test('a late error from a replaced stream does not unseat the live one', async () => {
     // A stream ended by `reconnect()` can deliver its error after the replacement has
     // opened, and its handler is a closure over the stream it was attached to. Ungated,
