@@ -1029,21 +1029,44 @@ describe('FileSink - bounded queue', () => {
     await sink.close();
   });
 
-  test('is unbounded when maxQueueSize is not set', async () => {
-    // The default is what this was before the option existed: nothing is dropped.
+  test('caps the queue at 10,000 entries by default', async () => {
+    // Unbounded was the wrong default for a queue that only grows when something is
+    // already wrong, and it was the default on both sinks. They share one policy now.
+    const sink = new FileSink({
+      logDir: tmpDir.path,
+      basename: 'default-cap',
+      onError: () => {
+        // Driven deliberately over the cap; the drop report is expected rather than news.
+      },
+    });
+
+    for (let index = 0; index < 10_050; index++) {
+      sink.write(makeEntry(`entry-${index}`));
+    }
+
+    expect(sink.getHealth().queueSize).toBeLessThanOrEqual(10_000);
+    expect(sink.getHealth().droppedEntries).toBeGreaterThan(0);
+
+    await sink.close();
+  }, 20000);
+
+  test('holds everything when maxQueueSize is -1', async () => {
+    // The pre-default behaviour, now asked for by name, and spelled the same way on both
+    // sinks.
     const sink = new FileSink({
       logDir: tmpDir.path,
       basename: 'unbounded',
+      maxQueueSize: -1,
     });
 
-    for (let index = 0; index < 200; index++) {
+    for (let index = 0; index < 10_050; index++) {
       sink.write(makeEntry(`entry-${index}`));
     }
 
     expect(sink.getHealth().droppedEntries).toBe(0);
 
     await sink.close();
-  });
+  }, 20000);
 
   test('still writes every entry when the queue stays under the cap', async () => {
     // The cap must not cost anything for a sink that is keeping up.

@@ -1190,6 +1190,7 @@ new FileSink({
   maxSizeMB: 10, // Rotate at 10MB (default: 10)
   jsonFormat: true, // Use JSON format (default: false)
   maxRetries: 3, // Retry failed writes (default: 3)
+  maxQueueSize: 10_000, // Entries held while writes fail (default: 10,000; -1 = unlimited)
   closeTimeoutMS: 30000, // Timeout for close() in ms (default: 30000)
   minLevel: LogLevel.INFO, // Minimum log level to write (default: INFO)
   onError: (error, entry, attempt, willRetry) => {
@@ -1326,13 +1327,30 @@ if (result.timedOut) {
 
 Writes logs to a named pipe (FIFO) for log aggregation. Linux/macOS only.
 
+Both queueing sinks — `FileSink` and `NamedPipeSink` — answer a failed write the same way:
+
+- the entry goes back on the queue and is retried up to `maxRetries` (default 3)
+- the queue holds up to `maxQueueSize` entries (default 10,000; pass `-1` to hold
+  everything, which is what both did before the default existed)
+- over the cap, the **oldest** entry is dropped, counted
+  (`FileSink.getHealth().droppedEntries`, `NamedPipeSink.droppedEntryCount`) and the first
+  drop is reported through `onError`
+- a broken stream is reopened automatically on a later write, so neither sink needs an API
+  call to recover
+
+`NamedPipeSink.reconnect()` remains available for reconnecting on demand. Because the sink
+now reopens on its own, a `reconnect()` that races one of those automatic attempts answers
+`already_reconnecting` — the reconnection it would have performed is already under way.
+
 ```typescript
 import { NamedPipeSink, PipeErrorType } from 'lifecycleion/logger';
 
 const pipeSink = new NamedPipeSink({
   pipePath: '/tmp/app_logs',
   jsonFormat: true,
-  closeTimeoutMS: 30000, // Timeout for close() in ms (default: 30000)
+  maxRetries: 3, // Retry failed writes (default: 3)
+  maxQueueSize: 10_000, // Entries held while the pipe is unusable (default: 10,000; -1 = unlimited)
+  closeTimeoutMS: 30000, // Timeout for close() and its final flush (default: 30000)
   onError: (errorType, err, pipePath) => {
     console.error(`Pipe error (${errorType}) for ${pipePath}:`, err.message);
 

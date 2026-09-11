@@ -702,4 +702,151 @@ describe('NamedPipeSink', () => {
     expect(errors).toHaveLength(1);
     expect(errors[0]?.type).toBe(PipeErrorType.WRITE);
   });
+  test('holds entries while the pipe is unusable and flushes them on recovery', async () => {
+    // The failure this sink used to answer by dropping. `FileSink` queues, retries and
+    // reopens; a pipe error cleared the stream, left `isInitialized` set, and every later
+    // entry fell through a silent early return until the application called `reconnect()`
+    // itself - by which time there was nothing left to flush.
+    const pipePath = `${tmpDir.path}/recover.pipe`;
+    await createNamedPipe(pipePath);
+
+    const reader = startPipeReader(pipePath);
+    const sink = new NamedPipeSink({ pipePath });
+
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    const entryFor = (message: string): LogEntry => ({
+      timestamp: Date.now(),
+      type: 'info',
+      template: message,
+      message,
+    });
+
+    // Force the sink into the state a stream failure leaves behind.
+    sink.write(entryFor('before-outage'));
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    (sink as unknown as { pipeStream: undefined }).pipeStream = undefined;
+    (sink as unknown as { isInitialized: boolean }).isInitialized = false;
+
+    sink.write(entryFor('during-outage'));
+
+    // Held, not lost: nothing was written and nothing was counted as dropped.
+    expect(sink.droppedEntryCount).toBe(0);
+
+    // `write` starts an automatic reopen of its own, and a manual `reconnect()` racing it
+    // answers `already_reconnecting` - correctly, since the reopen it would have done is
+    // already happening. Let that settle so this asserts the manual path.
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    const status = await sink.reconnect();
+
+    expect(status.success).toBe(true);
+
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    await sink.close();
+    reader.stop();
+
+    const written = reader.data.join('');
+
+    expect(written).toContain('before-outage');
+    expect(written).toContain('during-outage');
+  }, 15000);
+
+  test('reopens on its own once the cooldown has passed', async () => {
+    // No `reconnect()` call at all: the entry queued during the outage goes out because
+    // `write` asked the sink to reopen, the way `FileSink` recreates its stream on the
+    // next attempt.
+    const pipePath = `${tmpDir.path}/selfheal.pipe`;
+    await createNamedPipe(pipePath);
+
+    const reader = startPipeReader(pipePath);
+    const sink = new NamedPipeSink({ pipePath });
+
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    (sink as unknown as { pipeStream: undefined }).pipeStream = undefined;
+    (sink as unknown as { isInitialized: boolean }).isInitialized = false;
+    // The constructor's own open counts as the last attempt, so clear the cooldown.
+    (sink as unknown as { lastReopenAttempt: number }).lastReopenAttempt = 0;
+
+    sink.write({
+      timestamp: Date.now(),
+      type: 'info',
+      template: 'self-healed',
+      message: 'self-healed',
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    await sink.close();
+    reader.stop();
+
+    expect(reader.data.join('')).toContain('self-healed');
+    expect(sink.droppedEntryCount).toBe(0);
+  }, 15000);
+
+  test('caps the queue at 10,000 entries by default', async () => {
+    // Both sinks default to a cap now. Unbounded is the wrong default for a queue that
+    // only grows when something is already wrong.
+    const pipePath = `${tmpDir.path}/default-cap.pipe`;
+    await createNamedPipe(pipePath);
+
+    const sink = new NamedPipeSink({
+      pipePath,
+      // Driven deliberately over the cap, so the drop report is expected rather than news.
+      onError: () => {},
+      // Nothing is reading this pipe, so the closing flush cannot complete; the sink caps
+      // that wait rather than hanging on it, and this keeps the test brisk.
+      closeTimeoutMS: 200,
+    });
+
+    // Never initialized - nothing is reading and nothing opened it - so every entry queues.
+    (sink as unknown as { isInitialized: boolean }).isInitialized = false;
+
+    for (let i = 0; i < 10_050; i++) {
+      sink.write({
+        timestamp: Date.now(),
+        type: 'info',
+        template: `entry-${String(i)}`,
+        message: `entry-${String(i)}`,
+      });
+    }
+
+    expect(
+      (sink as unknown as { writeQueue: unknown[] }).writeQueue.length,
+    ).toBe(10_000);
+    expect(sink.droppedEntryCount).toBe(50);
+
+    await sink.close();
+  }, 15000);
+
+  test('holds everything when maxQueueSize is -1', async () => {
+    const pipePath = `${tmpDir.path}/unlimited.pipe`;
+    await createNamedPipe(pipePath);
+
+    const sink = new NamedPipeSink({
+      pipePath,
+      maxQueueSize: -1,
+      onError: () => {},
+      closeTimeoutMS: 200,
+    });
+
+    (sink as unknown as { isInitialized: boolean }).isInitialized = false;
+
+    for (let i = 0; i < 10_050; i++) {
+      sink.write({
+        timestamp: Date.now(),
+        type: 'info',
+        template: `entry-${String(i)}`,
+        message: `entry-${String(i)}`,
+      });
+    }
+
+    expect(
+      (sink as unknown as { writeQueue: unknown[] }).writeQueue.length,
+    ).toBe(10_050);
+    expect(sink.droppedEntryCount).toBe(0);
+
+    await sink.close();
+  }, 15000);
 });

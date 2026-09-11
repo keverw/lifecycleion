@@ -2,6 +2,10 @@ import fs, { promises as fsPromises } from 'fs';
 import { describeError, toError } from '../../to-error';
 import { renderOnce, type RenderedLine } from './internal/rendered-line';
 import { reportThroughHandler } from '../../internal/failure-reporter';
+import {
+  resolveMaxQueueSize,
+  resolveMaxRetries,
+} from './internal/queue-policy';
 import type { LogEntry, LogSink } from '../types';
 import { LogLevel, getLogLevel } from '../types';
 
@@ -14,19 +18,22 @@ export interface FileSinkOptions {
   closeTimeoutMS?: number;
   minLevel?: LogLevel;
   /**
-   * Cap on entries waiting to be written. Unbounded by default, which is what this was
-   * before the option existed.
+   * Cap on entries waiting to be written. Defaults to 10,000; pass `-1` to hold
+   * everything, which is what this did before the option had a default.
    *
    * The queue grows whenever writes fail or stall - a full disk, a directory that went
    * away, a slow volume - and every queued entry holds its rendered line *and* the
    * `LogEntry`, whose `params` is the caller's own object by reference. So a sink that
    * cannot write turns a logging loop into unbounded memory growth, on exactly the
-   * unhealthy path where the process can least afford it.
+   * unhealthy path where the process can least afford it. That is why the cap is on by
+   * default rather than waiting to be asked for.
    *
-   * When set, the **oldest** entry is dropped to make room, on the reasoning that during
-   * an outage the newest lines describe what is happening now. Drops are counted in
+   * The **oldest** entry is dropped to make room, on the reasoning that during an outage
+   * the newest lines describe what is happening now. Drops are counted in
    * {@link FileSinkHealth.droppedEntries} and the first one is reported through
    * `onError`, so a silently truncated log is never the only evidence.
+   *
+   * Shared with `NamedPipeSink`, which reads the same option the same way.
    */
   maxQueueSize?: number;
   onError?: (
@@ -118,14 +125,11 @@ export class FileSink implements LogSink {
     this.basename = options.basename;
     this.maxSizeMB = options.maxSizeMB ?? 10;
     this.jsonFormat = options.jsonFormat ?? false;
-    this.maxRetries = options.maxRetries ?? 3;
+    this.maxRetries = resolveMaxRetries(options.maxRetries);
     this.closeTimeoutMS = options.closeTimeoutMS ?? 30000;
     this.minLevel = options.minLevel ?? LogLevel.INFO;
     this.onError = options.onError;
-    this.maxQueueSize =
-      typeof options.maxQueueSize === 'number' && options.maxQueueSize > 0
-        ? Math.floor(options.maxQueueSize)
-        : undefined;
+    this.maxQueueSize = resolveMaxQueueSize(options.maxQueueSize);
 
     // Initialize asynchronously
     this.initPromise = this.initialize();

@@ -5,6 +5,10 @@ import type { LogEntry, LogSink } from '../types';
 import { describeError, toError } from '../../to-error';
 import { renderOnce, type RenderedLine } from './internal/rendered-line';
 import { reportThroughHandler } from '../../internal/failure-reporter';
+import {
+  resolveMaxQueueSize,
+  resolveMaxRetries,
+} from './internal/queue-policy';
 
 /**
  * Types of pipe errors that can occur
@@ -34,18 +38,32 @@ export interface NamedPipeSinkOptions {
   onError?: (errorType: PipeErrorType, error: Error, pipePath: string) => void;
   formatter?: (entry: LogEntry) => string;
   /**
-   * Cap on entries queued while the pipe is unavailable. Unbounded by default, which is
-   * what this was before the option existed.
+   * Cap on entries queued while the pipe is unavailable. Defaults to 10,000; pass `-1` to
+   * hold everything, which is what this did before the option had a default.
    *
    * A named pipe with no reader is the ordinary case for this sink - the reader restarts,
    * or has not started yet - and every line logged in the meantime is held. Without a cap
-   * an outage of any length is unbounded memory growth.
+   * an outage of any length is unbounded memory growth, which is why the cap is on by
+   * default rather than waiting to be asked for.
    *
-   * When set, the **oldest** entry is dropped to make room: during an outage the newest
-   * lines describe what is happening now. The first drop is reported through `onError` as
-   * a `WRITE` failure, so a silently truncated log is never the only evidence.
+   * The **oldest** entry is dropped to make room: during an outage the newest lines
+   * describe what is happening now. Drops are counted in {@link droppedEntryCount} and the
+   * first one is reported through `onError` as a `WRITE` failure, so a silently truncated
+   * log is never the only evidence.
+   *
+   * Shared with `FileSink`, which reads the same option the same way.
    */
   maxQueueSize?: number;
+  /**
+   * Attempts a failed write gets before the entry is given up on. Defaults to 3, matching
+   * `FileSink`; `0` writes once and never retries.
+   *
+   * A pipe write fails for the same reasons a file write does - the far end went away,
+   * the stream was torn down - and the entry is no more lost in one case than the other.
+   * It is re-queued and goes out when the pipe is next usable, rather than being dropped
+   * where it stood.
+   */
+  maxRetries?: number;
 }
 
 export type ReconnectStatus =
@@ -62,7 +80,29 @@ export type ReconnectStatus =
  * queue is stalled. `FileSink` keeps its entry because its public `onError` hands it to the
  * caller; this sink's `onError` takes only the error type and the pipe path.
  */
-type QueuedPipeEntry = RenderedLine;
+interface QueuedPipeEntry extends RenderedLine {
+  /**
+   * Writes already attempted for this line.
+   *
+   * The one thing this sink keeps beyond the rendered line, and it is what makes a failed
+   * write recoverable rather than terminal: the entry goes back on the queue and is tried
+   * again when the pipe is usable, up to `maxRetries`, exactly as `FileSink` has always
+   * done. The `LogEntry` itself is still deliberately not kept - holding it would pin the
+   * caller's whole params graph for as long as the queue is stalled, and this sink's
+   * `onError` takes only the error type and the pipe path.
+   */
+  attempts: number;
+}
+
+/**
+ * How long the sink waits between automatic reopen attempts.
+ *
+ * A reopen is a `stat` plus an `open`, and a dead pipe is exactly when the application is
+ * logging hardest, so one attempt per entry would answer an outage with a syscall storm.
+ * A second is short enough that a reader restarting is picked up promptly and long enough
+ * that a pipe which is never coming back costs nothing to keep asking about.
+ */
+const REOPEN_COOLDOWN_MS = 1000;
 
 /**
  * NamedPipeSink writes logs to a named pipe (FIFO)
@@ -89,8 +129,17 @@ export class NamedPipeSink implements LogSink {
   private writeQueue: QueuedPipeEntry[] = [];
   private isInitialized = false;
   private maxQueueSize?: number;
+  private maxRetries: number;
   private droppedEntries = 0;
   private didReportDrop = false;
+  /**
+   * When the last automatic reopen was attempted.
+   *
+   * A reopen costs a `stat` and an `open`, and an outage is exactly when the log loop is
+   * busiest, so attempting one per entry would turn a dead pipe into a syscall storm. One
+   * attempt per {@link REOPEN_COOLDOWN_MS} is enough to recover promptly without that.
+   */
+  private lastReopenAttempt = 0;
   private _isReconnecting = false;
   private initPromise: Promise<void>;
   private closing = false;
@@ -103,10 +152,8 @@ export class NamedPipeSink implements LogSink {
     this.onError = options.onError;
     this.formatter = options.formatter;
     this.closeTimeoutMS = options.closeTimeoutMS ?? 30000;
-    this.maxQueueSize =
-      typeof options.maxQueueSize === 'number' && options.maxQueueSize > 0
-        ? Math.floor(options.maxQueueSize)
-        : undefined;
+    this.maxQueueSize = resolveMaxQueueSize(options.maxQueueSize);
+    this.maxRetries = resolveMaxRetries(options.maxRetries);
 
     this.initPromise = this.initializePipe();
   }
@@ -116,26 +163,25 @@ export class NamedPipeSink implements LogSink {
       return;
     }
 
-    // Queue entry if not initialized. Rendered now rather than at flush time, so the
-    // line is fixed while `write` still holds the caller's stack.
-    if (!this.isInitialized) {
-      this.writeQueue.push(this.renderEntry(entry));
+    // Queued whenever there is nowhere to put it *yet* - before the first open, and after
+    // a failure took the stream away. Rendered now rather than at flush time, so the line
+    // is fixed while `write` still holds the caller's stack.
+    //
+    // Held rather than dropped, which is the whole of what changed here. A pipe failure
+    // used to end the sink: the stream `'error'` handler cleared `pipeStream` and left
+    // `isInitialized` set, so every later entry fell through a silent early return -
+    // uncounted, unreported, and not recoverable by the `reconnect()` the class documents,
+    // since there was nothing left to flush. `FileSink` answers the identical failure by
+    // queueing, retrying and reopening; there was never a reason for the two to differ.
+    if (!this.isInitialized || !this.pipeStream || this.pipeStream.destroyed) {
+      this.writeQueue.push({ ...this.renderEntry(entry), attempts: 0 });
       this.enforceQueueLimit();
+      this.ensureConnection();
 
       return;
     }
 
-    // Nothing to render for. `writeEntry` drops an entry the pipe cannot take, and the
-    // stream `'error'` handler clears `pipeStream` while leaving `isInitialized` set - so
-    // every write after a pipe failure reaches here. Rendering first would run a
-    // caller-supplied `formatter`, side effects and all, for a line that is then thrown
-    // away, which the direct path did not do before it started rendering eagerly.
-    // `writeEntry` still checks for itself, since the queued path arrives by another route.
-    if (!this.pipeStream || this.pipeStream.destroyed) {
-      return;
-    }
-
-    this.writeEntry(this.renderEntry(entry));
+    this.writeEntry({ ...this.renderEntry(entry), attempts: 0 });
   }
 
   /**
@@ -218,15 +264,49 @@ export class NamedPipeSink implements LogSink {
     this.closed = true;
 
     if (this.pipeStream && !this.pipeStream.destroyed) {
+      const stream = this.pipeStream;
+
       return new Promise<void>((resolve) => {
+        // Bounded by `closeTimeoutMS`, which until now covered only the wait for
+        // *initialization* and not the close itself. `end()` flushes before it calls back,
+        // and a FIFO with no reader cannot flush - so on the sink's most ordinary failure
+        // this callback never fired and `close()` never resolved, hanging whatever was
+        // shutting the process down. The timeout matters more now that the sink reopens on
+        // its own: a stream created during an outage is one `close()` will find here.
+        let isSettled = false;
+
+        const finish = (): void => {
+          if (isSettled) {
+            return;
+          }
+
+          isSettled = true;
+          clearTimeout(timeoutHandle);
+          this.pipeStream = undefined;
+          resolve();
+        };
+
+        const timeoutHandle = setTimeout(() => {
+          // Destroyed rather than left pending, so the descriptor is not held for the life
+          // of the process by a flush that is never going to happen.
+          try {
+            stream.destroy();
+          } catch {
+            // Nothing further to try; the sink is closing either way.
+          }
+
+          finish();
+        }, this.closeTimeoutMS);
+
+        timeoutHandle.unref?.();
+
         try {
-          this.pipeStream?.end(() => {
-            this.pipeStream = undefined;
-            resolve();
+          stream.end(() => {
+            finish();
           });
         } catch (error) {
           this.handleError(PipeErrorType.CLOSE, error);
-          resolve();
+          finish();
         }
       });
     }
@@ -268,6 +348,11 @@ export class NamedPipeSink implements LogSink {
       this.pipeStream.on('error', (err) => {
         this.handleError(PipeErrorType.WRITE, err);
         this.pipeStream = undefined;
+        // Uninitialized as well as streamless, so `write` queues what comes next instead
+        // of discarding it. Leaving this set was what made a single pipe error terminal:
+        // the sink looked ready, had nowhere to write, and silently lost every entry until
+        // the application happened to call `reconnect()` itself.
+        this.isInitialized = false;
       });
 
       this.isInitialized = true;
@@ -300,6 +385,80 @@ export class NamedPipeSink implements LogSink {
   /** Entries discarded because the queue was at `maxQueueSize`. */
   public get droppedEntryCount(): number {
     return this.droppedEntries;
+  }
+
+  /**
+   * Put a failed entry back on the queue, or give up on it.
+   *
+   * The retry half of the policy `FileSink` has always had and this sink had none of: a
+   * write that did not land is not the same as a line the caller did not want. It goes
+   * back on the queue and out when the pipe is next usable, up to `maxRetries`.
+   *
+   * Re-queued at the **back**, which is the same trade `FileSink` makes: it costs
+   * ordering against a failing entry blocking everything behind it, and during an outage
+   * nothing is being written in order anyway.
+   *
+   * An entry that has used up its attempts is counted as a drop rather than vanishing,
+   * so `droppedEntryCount` means "lines this sink did not deliver" whatever the reason.
+   */
+  private requeue(queued: QueuedPipeEntry): void {
+    if (this.closed || this.closing) {
+      return;
+    }
+
+    if (queued.attempts >= this.maxRetries) {
+      this.droppedEntries++;
+
+      return;
+    }
+
+    this.writeQueue.push({ ...queued, attempts: queued.attempts + 1 });
+    this.enforceQueueLimit();
+    this.ensureConnection();
+  }
+
+  /**
+   * Reopen the pipe if it is not usable, at most one attempt at a time.
+   *
+   * `initializePipe` flushes the queue itself once it succeeds, so recovery needs nothing
+   * further from here.
+   *
+   * Two guards, and both are load-bearing. Only one attempt may be in flight, because
+   * opening a FIFO with no reader does not fail - it *blocks* until a reader appears,
+   * holding a libuv threadpool slot (four by default) for as long as it waits, so
+   * concurrent attempts would starve every other file operation in the process. And
+   * attempts are spaced by {@link REOPEN_COOLDOWN_MS}, because this is called from
+   * `write`, which during an outage is called as often as the application logs.
+   */
+  private ensureConnection(): void {
+    if (
+      this.closed ||
+      this.closing ||
+      this.isInitialized ||
+      this._isReconnecting
+    ) {
+      return;
+    }
+
+    const now = Date.now();
+
+    if (now - this.lastReopenAttempt < REOPEN_COOLDOWN_MS) {
+      return;
+    }
+
+    this.lastReopenAttempt = now;
+    this._isReconnecting = true;
+
+    this.initPromise = this.initializePipe().finally(() => {
+      this._isReconnecting = false;
+    });
+
+    // `initializePipe` reports its own failures through `handleError` and never rejects,
+    // but this chain is not awaited by anyone, so a throw from the `finally` above would
+    // be an unhandled rejection raised out of an ordinary `logger.info()`.
+    void this.initPromise.catch(() => {
+      // Nothing left to report with.
+    });
   }
 
   /**
@@ -341,7 +500,7 @@ export class NamedPipeSink implements LogSink {
    * the caller's stack is still held, whether the entry goes out now or waits for the
    * pipe.
    */
-  private renderEntry(entry: LogEntry): QueuedPipeEntry {
+  private renderEntry(entry: LogEntry): RenderedLine {
     return renderOnce(() => this.formatEntry(entry));
   }
 
@@ -354,7 +513,11 @@ export class NamedPipeSink implements LogSink {
     }
 
     if (!this.pipeStream || this.pipeStream.destroyed) {
-      // Silently skip if pipe is not available
+      // Back on the queue rather than skipped. This is reached from `processQueue`, where
+      // the stream can go away between one entry and the next, and an entry dropped here
+      // is one the caller asked to log and will never see.
+      this.requeue(queued);
+
       return;
     }
 
@@ -369,14 +532,21 @@ export class NamedPipeSink implements LogSink {
     try {
       const messageToWrite = queued.formatted ?? '';
 
-      // Write to pipe with backpressure handling
-      if (!this.pipeStream.write(messageToWrite)) {
-        this.pipeStream.once('drain', () => {
-          // Handle backpressure - stream is ready again
-        });
-      }
+      // The return value is deliberately ignored. It says the stream's buffer is over its
+      // high-water mark, which for this sink changes nothing: entries are handed over as
+      // they arrive and Node buffers what the pipe has not taken yet.
+      //
+      // A `once('drain')` listener used to be attached here with an empty body - it
+      // handled nothing, and one was added per backpressured write, so a stalled pipe
+      // reached Node's listener-leak warning within a few thousand entries. Queueing
+      // instead of dropping makes that path far busier, which is what turned a harmless
+      // no-op into a real leak.
+      this.pipeStream.write(messageToWrite);
     } catch (error) {
       this.handleError(PipeErrorType.WRITE, error);
+      // The line never reached the pipe, so it goes back on the queue and out on a later
+      // attempt - the same answer `FileSink` gives a throwing write.
+      this.requeue(queued);
     }
   }
 
