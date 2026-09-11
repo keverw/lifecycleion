@@ -1687,4 +1687,201 @@ describe('NamedPipeSink', () => {
       fs.closeSync(readerFd);
     }
   }, 20000);
+  test('a retry-exhausted drop is not reported as a full queue', async () => {
+    // `droppedEntries` counts two different things - entries evicted by the cap, and
+    // entries whose retries ran out - and `enforceQueueLimit` read the total. So one
+    // retry-exhausted drop made the next `write()` report a `'queue_full'` against a queue
+    // holding a single line, and set the once-only flag, which nothing resets: the real
+    // overflow that came later was then never reported at all.
+    const pipePath = `${tmpDir.path}/false-queue-full.pipe`;
+    await createNamedPipe(pipePath);
+
+    const readerFd = fs.openSync(
+      pipePath,
+      fs.constants.O_RDONLY | fs.constants.O_NONBLOCK,
+    );
+    const failures: SinkFailure[] = [];
+    const sink = new NamedPipeSink({
+      pipePath,
+      maxQueueSize: 5,
+      maxRetries: 0,
+      onError: (failure) => {
+        failures.push(failure);
+      },
+      closeTimeoutMS: 200,
+    });
+
+    try {
+      expect(await waitForOpenPipe(sink)).toBe(true);
+
+      (sink as unknown as { ensureConnection: () => void }).ensureConnection =
+        () => {
+          // Recovery would reopen the pipe and drain the queue; this test is about what
+          // the queue reports while it cannot.
+        };
+
+      const live = (sink as unknown as { pipeStream: fs.WriteStream })
+        .pipeStream;
+
+      // One write that fails on the next tick. With no retries left the entry is given up
+      // on, which counts a drop that the cap had nothing to do with.
+      (
+        live as unknown as {
+          write: (
+            chunk: string,
+            callback?: (error?: Error | null) => void,
+          ) => boolean;
+        }
+      ).write = (_chunk, callback) => {
+        setTimeout(() => {
+          callback?.(new Error('EPIPE'));
+        }, 0);
+
+        return true;
+      };
+
+      sink.write({
+        timestamp: Date.now(),
+        type: 'info',
+        template: 'given-up-on',
+        message: 'given-up-on',
+      });
+
+      await new Promise((resolve) => setTimeout(resolve, 100));
+
+      expect(sink.getHealth().droppedEntries).toBe(1);
+
+      // Nothing to write to, so everything below waits in the managed queue.
+      (sink as unknown as { isInitialized: boolean }).isInitialized = false;
+
+      for (let index = 0; index < 3; index++) {
+        sink.write({
+          timestamp: Date.now(),
+          type: 'info',
+          template: `under-cap-${String(index)}`,
+          message: `under-cap-${String(index)}`,
+        });
+      }
+
+      // Three lines held under a cap of five is not a full queue.
+      expect(sink.getHealth().queueSize).toBe(3);
+      expect(failures.filter((entry) => entry.kind === 'queue_full')).toEqual(
+        [],
+      );
+
+      for (let index = 0; index < 20; index++) {
+        sink.write({
+          timestamp: Date.now(),
+          type: 'info',
+          template: `over-cap-${String(index)}`,
+          message: `over-cap-${String(index)}`,
+        });
+      }
+
+      // Now the cap is evicting, and that is reported - once.
+      const queueFull = failures.filter((entry) => entry.kind === 'queue_full');
+
+      expect(queueFull).toHaveLength(1);
+      expect(queueFull[0]?.disposition).toBe('lost');
+      expect(sink.getHealth().queueSize).toBe(5);
+    } finally {
+      await sink.close();
+      fs.closeSync(readerFd);
+    }
+  }, 15000);
+
+  test('entries still queued when close() gives up are counted and reported', async () => {
+    // A FIFO with no reader is this sink's ordinary failure, and the queue behind it is
+    // exactly what `close()` cannot flush. Those lines were abandoned silently:
+    // `droppedEntries` stayed at 0 and `onError` heard nothing, so a shutdown during an
+    // outage looked identical to one that wrote everything.
+    const pipePath = `${tmpDir.path}/close-abandons.pipe`;
+    await createNamedPipe(pipePath);
+
+    const failures: SinkFailure[] = [];
+    const sink = new NamedPipeSink({
+      pipePath,
+      closeTimeoutMS: 200,
+      onError: (failure) => {
+        failures.push(failure);
+      },
+    });
+
+    // No reader, so the write side never opens and everything below waits in the queue.
+    for (let index = 0; index < 4; index++) {
+      sink.write({
+        timestamp: Date.now(),
+        type: 'info',
+        template: `abandoned-${String(index)}`,
+        message: `abandoned-${String(index)}`,
+      });
+    }
+
+    expect(sink.getHealth().queueSize).toBe(4);
+
+    // `close()` sets `closing` synchronously, so the reader opened here only releases the
+    // `open` blocked in libuv's threadpool - the stream it completes is destroyed unused
+    // rather than draining the queue this test is about. Walking away from that pending
+    // open instead would take one of four threads with it and stall every later test.
+    const closePromise = sink.close();
+    const readerFd = fs.openSync(
+      pipePath,
+      fs.constants.O_RDONLY | fs.constants.O_NONBLOCK,
+    );
+
+    await closePromise;
+    fs.closeSync(readerFd);
+
+    expect(sink.getHealth().queueSize).toBe(0);
+    expect(sink.getHealth().droppedEntries).toBe(4);
+
+    // Once, not once per entry: a shutdown that abandons a full queue would otherwise
+    // fire the callback `maxQueueSize` times on the way out of the process.
+    const closeFailures = failures.filter((entry) => entry.kind === 'close');
+
+    expect(closeFailures).toHaveLength(1);
+    expect(closeFailures[0]?.disposition).toBe('lost');
+    expect(closeFailures[0]?.error.message).toContain('4 entries still queued');
+
+    // `'close'` rather than `'write'`, so a connection being torn down is not also
+    // reported as unhealthy.
+    expect(sink.getHealth().consecutiveFailures).toBe(0);
+  }, 15000);
+
+  test('close() reports nothing when the queue is empty', async () => {
+    const pipePath = `${tmpDir.path}/close-clean.pipe`;
+    await createNamedPipe(pipePath);
+
+    const readerFd = fs.openSync(
+      pipePath,
+      fs.constants.O_RDONLY | fs.constants.O_NONBLOCK,
+    );
+    const failures: SinkFailure[] = [];
+    const sink = new NamedPipeSink({
+      pipePath,
+      closeTimeoutMS: 2000,
+      onError: (failure) => {
+        failures.push(failure);
+      },
+    });
+
+    try {
+      expect(await waitForOpenPipe(sink)).toBe(true);
+
+      sink.write({
+        timestamp: Date.now(),
+        type: 'info',
+        template: 'delivered',
+        message: 'delivered',
+      });
+
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      await sink.close();
+
+      expect(sink.getHealth().droppedEntries).toBe(0);
+      expect(failures.filter((entry) => entry.kind === 'close')).toEqual([]);
+    } finally {
+      fs.closeSync(readerFd);
+    }
+  }, 15000);
 });

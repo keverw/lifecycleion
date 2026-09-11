@@ -100,7 +100,8 @@ export interface NamedPipeSinkHealth {
   /** Entries rendered and waiting for the pipe. */
   queueSize: number;
   /**
-   * Entries this sink did not deliver - evicted at `maxQueueSize`, or out of retries.
+   * Entries this sink did not deliver - evicted at `maxQueueSize`, out of retries, or
+   * still queued when `close()` gave up on them.
    *
    * The same meaning as `FileSinkHealth.droppedEntries`.
    */
@@ -450,6 +451,8 @@ export class NamedPipeSink implements LogSink {
 
     this.closed = true;
 
+    this.abandonQueueOnClose();
+
     if (this.reopenTimer !== undefined) {
       clearTimeout(this.reopenTimer);
       this.reopenTimer = undefined;
@@ -517,6 +520,39 @@ export class NamedPipeSink implements LogSink {
         }
       });
     }
+  }
+
+  /**
+   * Give up on whatever is still queued when the sink closes, and say so.
+   *
+   * A FIFO with no reader is this sink's ordinary failure, and the queue behind it is
+   * exactly what `close()` cannot flush - there is nothing to flush it into. Those lines
+   * went nowhere, so they are counted like any other line this sink did not deliver
+   * rather than vanishing: `droppedEntries` means the same thing here as at the queue cap
+   * and at the end of an entry's retries.
+   *
+   * Reported once, not once per entry, for the reason `enforceQueueLimit` reports once: a
+   * shutdown that abandons a full queue would otherwise fire the callback ten thousand
+   * times, on the way out of the process. `'close'` rather than `'write'`, so it is not
+   * counted against a connection that is being torn down anyway.
+   */
+  private abandonQueueOnClose(): void {
+    const abandoned = this.writeQueue.length;
+
+    if (abandoned === 0) {
+      return;
+    }
+
+    this.writeQueue = [];
+    this.droppedEntries += abandoned;
+
+    this.handleError(
+      'close',
+      new Error(
+        `Closed with ${String(abandoned)} entr${abandoned === 1 ? 'y' : 'ies'} still queued for ${this.pipePath}; they were not written`,
+      ),
+      { disposition: 'lost' },
+    );
   }
 
   /**
@@ -894,12 +930,20 @@ export class NamedPipeSink implements LogSink {
       return;
     }
 
+    let didEvict = false;
+
     while (this.writeQueue.length > limit) {
       this.writeQueue.shift();
       this.droppedEntries++;
+      didEvict = true;
     }
 
-    if (this.droppedEntries === 0 || this.didReportDrop) {
+    // Gated on an eviction this call made, not on the cumulative count.
+    // `droppedEntries` also counts entries given up on by `requeue` after their retries
+    // ran out, and those are not an overflow: reading the counter here reported a
+    // `'queue_full'` the queue never had, and set `didReportDrop`, which nothing resets -
+    // so the real overflow that followed was suppressed.
+    if (!didEvict || this.didReportDrop) {
       return;
     }
 

@@ -1306,10 +1306,16 @@ console.log(health);
 //   isHealthy: true,           // false if any consecutive failures
 //   queueSize: 0,              // Number of pending writes
 //   lastError: undefined,      // Last error that occurred
-//   consecutiveFailures: 0,    // Number of consecutive failures
-//   isInitialized: true        // Whether sink is ready
+//   consecutiveFailures: 0,    // Consecutive failed *writes* since the last success
+//   isInitialized: true,       // Whether sink is ready
+//   droppedEntries: 0          // Lines this sink did not deliver
 // }
 ```
+
+`consecutiveFailures` — and therefore `isHealthy` — counts write failures only, in both
+queueing sinks. A `'format'` failure never reached the destination and says nothing about
+whether the sink can write, so it is reported through `onError` (with `disposition`) and
+recorded in `lastError`, but it does not mark the sink unhealthy.
 
 #### Flush Pending Writes
 
@@ -1347,6 +1353,11 @@ Both queueing sinks — `FileSink` and `NamedPipeSink` — answer a failed write
 - over the cap, the **oldest** entry is dropped, counted
   (both sinks report `getHealth().droppedEntries`) and the first
   drop is reported through `onError`
+- `getHealth().droppedEntries` means "lines this sink did not deliver": evicted at the
+  cap, still queued when `close()` gave up on them, and for `NamedPipeSink` also out of
+  retries (`FileSink` counts those in its own `flush()` result instead). A close that
+  abandons a queue reports it once as a `'close'` failure with `disposition: 'lost'`
+  rather than once per entry
 - a broken stream is reopened automatically on a later write, so neither sink needs an API
   call to recover
 - `minLevel` / `setMinLevel()` / `getMinLevel()` filter by level, defaulting to

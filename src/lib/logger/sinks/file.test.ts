@@ -1210,4 +1210,178 @@ describe('FileSink - bounded queue', () => {
 
     await sink.close();
   });
+
+  test('entries still queued when close() times out are counted and reported', async () => {
+    // `close()` is bounded by `closeTimeoutMS`, and once it gives up nothing will ever
+    // process what is left. Those entries were abandoned silently: `droppedEntries` stayed
+    // where it was and `onError` heard nothing, so a shutdown that lost half the queue
+    // looked identical to one that wrote everything.
+    const failures: SinkFailure[] = [];
+    const sink = new FileSink({
+      logDir: tmpDir.path,
+      basename: 'close-abandons',
+      closeTimeoutMS: 150,
+      onError: (failure) => {
+        failures.push(failure);
+      },
+    });
+
+    await sink.flush();
+
+    // Nothing drains the queue from here, so `close()` waits out its timeout and leaves
+    // these behind - which is what a stalled volume does to it for real.
+    (sink as unknown as { processQueue: () => Promise<void> }).processQueue =
+      () => Promise.resolve();
+
+    for (let index = 0; index < 3; index++) {
+      sink.write(makeEntry(`abandoned-${String(index)}`));
+    }
+
+    expect(sink.getHealth().queueSize).toBe(3);
+
+    await sink.close();
+
+    expect(sink.getHealth().queueSize).toBe(0);
+    expect(sink.getHealth().droppedEntries).toBe(3);
+
+    // Once, not once per entry: a shutdown that abandons a full queue would otherwise
+    // fire the callback `maxQueueSize` times on the way out of the process.
+    const closeFailures = failures.filter((entry) => entry.kind === 'close');
+
+    expect(closeFailures).toHaveLength(1);
+    expect(closeFailures[0]?.disposition).toBe('lost');
+    expect(closeFailures[0]?.error.message).toContain('3 entries still queued');
+    // The oldest abandoned entry, as a sample. Every entry in the queue was lost, so
+    // unlike the cap's report there is no surviving line to confuse this with.
+    expect(closeFailures[0]?.entry?.message).toBe('abandoned-0');
+  });
+
+  test('a drop the cap did not cause is not reported as a full queue', async () => {
+    // `droppedEntries` counts two different things now - entries evicted by the cap, and
+    // entries `close()` gave up on - and `enforceQueueLimit` read the total. A `close()`
+    // that times out with a write still in flight leaves the counter non-zero, and the
+    // failing write behind it re-queues its entry: that call evicts nothing, but reported
+    // a `'queue_full'` against a queue holding one line under a cap of 10,000, and set the
+    // once-only flag, which nothing resets.
+    const failures: SinkFailure[] = [];
+    const sink = new FileSink({
+      logDir: tmpDir.path,
+      basename: 'false-queue-full',
+      maxQueueSize: 5,
+      // Nothing drains the queue below, so `close()` waits this out rather than the
+      // 30-second default.
+      closeTimeoutMS: 100,
+      onError: (failure) => {
+        failures.push(failure);
+      },
+    });
+
+    await sink.flush();
+
+    // Standing in for the close-abandoned drops, which cannot be produced on a sink that
+    // is still open. What matters is only that the counter is non-zero.
+    (sink as unknown as { droppedEntries: number }).droppedEntries = 3;
+
+    // Nothing drains the queue, so these sit under the cap.
+    (sink as unknown as { processQueue: () => Promise<void> }).processQueue =
+      () => Promise.resolve();
+
+    for (let index = 0; index < 4; index++) {
+      sink.write(makeEntry(`under-cap-${String(index)}`));
+    }
+
+    // Four lines under a cap of five is not a full queue.
+    expect(sink.getHealth().queueSize).toBe(4);
+    expect(failures.filter((entry) => entry.kind === 'queue_full')).toEqual([]);
+
+    for (let index = 0; index < 20; index++) {
+      sink.write(makeEntry(`over-cap-${String(index)}`));
+    }
+
+    // Now the cap is evicting, and that is still reported - once.
+    const queueFull = failures.filter((entry) => entry.kind === 'queue_full');
+
+    expect(queueFull).toHaveLength(1);
+    expect(queueFull[0]?.disposition).toBe('lost');
+    expect(sink.getHealth().queueSize).toBe(5);
+
+    await sink.close();
+  });
+
+  test('a clean close reports nothing and drops nothing', async () => {
+    const failures: SinkFailure[] = [];
+    const sink = new FileSink({
+      logDir: tmpDir.path,
+      basename: 'close-clean',
+      onError: (failure) => {
+        failures.push(failure);
+      },
+    });
+
+    sink.write(makeEntry('delivered'));
+
+    await sink.flush();
+    await sink.close();
+
+    expect(sink.getHealth().droppedEntries).toBe(0);
+    expect(failures).toEqual([]);
+  });
+
+  test('a format failure does not count against write health', async () => {
+    // `consecutiveFailures` / `isHealthy` answer "can this sink reach its destination".
+    // A render that threw never touched the file, so counting it reported a sink writing
+    // every other line perfectly as broken - and diverged from `NamedPipeSink`, which has
+    // never counted a `'format'` failure against the pipe.
+    const failures: SinkFailure[] = [];
+    const sink = new FileSink({
+      logDir: tmpDir.path,
+      basename: 'format-health',
+      jsonFormat: true,
+      onError: (failure) => {
+        failures.push(failure);
+      },
+    });
+
+    await sink.flush();
+
+    // A `BigInt` is not serializable, so the render throws and no line can be produced.
+    sink.write({
+      timestamp: Date.now(),
+      type: 'info',
+      serviceName: 'TestService',
+      template: 'unrenderable',
+      message: 'unrenderable',
+      redactedParams: { big: 1n },
+    });
+
+    await sink.flush();
+
+    expect(failures).toHaveLength(1);
+    expect(failures[0]?.kind).toBe('format' satisfies SinkFailureKind);
+    // This sink substitutes no default format, so there is nothing to fall back to.
+    expect(failures[0]?.disposition).toBe('lost');
+
+    const health = sink.getHealth();
+
+    expect(health.consecutiveFailures).toBe(0);
+    expect(health.isHealthy).toBe(true);
+    // Still reported, and still the most recent failure - it did happen.
+    expect(health.lastError?.message).toContain('Failed to format log entry');
+
+    // And the sink keeps writing.
+    sink.write(makeEntry('still-working'));
+
+    await sink.flush();
+    await sink.close();
+
+    const files = await fsPromises.readdir(tmpDir.path);
+    const logFile = files.find((name) => name.startsWith('format-health'));
+
+    const contents = await fsPromises.readFile(
+      `${tmpDir.path}/${logFile ?? ''}`,
+      'utf8',
+    );
+
+    expect(contents).toContain('still-working');
+  });
 });

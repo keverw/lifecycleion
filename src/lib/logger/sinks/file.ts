@@ -62,9 +62,19 @@ export interface FileSinkHealth {
   isHealthy: boolean;
   queueSize: number;
   lastError?: Error;
+  /**
+   * Failed writes since the last successful one.
+   *
+   * Write failures only, as in `NamedPipeSinkHealth.consecutiveFailures`: a `'format'`
+   * failure never reached the file and says nothing about whether this sink can write,
+   * so counting it would report a working sink as broken.
+   */
   consecutiveFailures: number;
   isInitialized: boolean;
-  /** Entries discarded because the queue was at `maxQueueSize`. Always 0 when unset. */
+  /**
+   * Entries this sink did not deliver - evicted at `maxQueueSize`, or still queued when
+   * `close()` gave up on them. Always 0 when neither has happened.
+   */
   droppedEntries: number;
 }
 
@@ -298,6 +308,8 @@ export class FileSink implements LogSink {
 
     this.closed = true;
 
+    this.abandonQueueOnClose();
+
     // Close stream
     if (this.logFileStream) {
       return new Promise<void>((resolve) => {
@@ -311,6 +323,53 @@ export class FileSink implements LogSink {
         });
       });
     }
+  }
+
+  /**
+   * Give up on whatever is still queued when `close()` stops waiting, and say so.
+   *
+   * `close()` is bounded by `closeTimeoutMS`, so a slow or broken destination leaves
+   * entries behind - and once `closed` is set nothing will ever process them. Those
+   * entries went nowhere, which is the same thing that happens at the queue cap, so they
+   * are counted the same way: `droppedEntries` means "lines this sink did not deliver",
+   * whatever the reason. Reported once with `disposition: 'lost'` rather than once per
+   * entry, for the same reason the cap reports once - a shutdown that abandons a full
+   * queue would otherwise fire the callback ten thousand times.
+   */
+  private abandonQueueOnClose(): void {
+    const abandoned = this.writeQueue.length;
+
+    if (abandoned === 0) {
+      return;
+    }
+
+    const firstAbandoned = this.writeQueue[0]?.entry;
+
+    this.writeQueue = [];
+    this.droppedEntries += abandoned;
+
+    const failure = new FileSinkError(
+      `Closed with ${String(abandoned)} entr${abandoned === 1 ? 'y' : 'ies'} still queued (closeTimeoutMS=${String(this.closeTimeoutMS)}); they were not written`,
+    );
+
+    this.lastError = failure;
+
+    reportThroughHandler(
+      this.onError === undefined
+        ? undefined
+        : () =>
+            this.onError?.({
+              kind: 'close',
+              error: failure,
+              target: this.currentLogFile ?? this.logDir,
+              // The oldest abandoned entry, as a sample. Every entry in the queue was
+              // lost, so unlike the cap's report there is no surviving line to confuse
+              // this with.
+              entry: firstAbandoned,
+              disposition: 'lost',
+            }),
+      () => describeError(failure),
+    );
   }
 
   /**
@@ -363,8 +422,22 @@ export class FileSink implements LogSink {
           // and the failure counters, and escaping `processQueue` as an unhandled
           // rejection that left every queued entry behind it stalled.
           const err = toError(error);
+          const kind = this.failureKindFor(err);
+
           this.lastError = err;
-          this.consecutiveFailures++;
+
+          // A render that failed is not a write-health failure, and is not counted as
+          // one. `consecutiveFailures` / `isHealthy` answer "can this sink reach its
+          // destination" - a full disk, a directory that went away - and a `formatter`
+          // or a `JSON.stringify` that threw says nothing about the file. Counting it
+          // reported a sink writing every other line perfectly as broken, and diverged
+          // from `NamedPipeSink`, which has never counted a `'format'` failure against
+          // the pipe. The line itself is still reported, with `disposition: 'lost'`:
+          // this sink substitutes no default format, so there is nothing to fall back
+          // to and the entry does not arrive.
+          if (kind !== 'format') {
+            this.consecutiveFailures++;
+          }
 
           // Determine if we should retry.
           //
@@ -394,7 +467,7 @@ export class FileSink implements LogSink {
                   // console rung instead of becoming an unhandled rejection.
                   () =>
                     this.onError?.({
-                      kind: this.failureKindFor(err),
+                      kind,
                       error: err,
                       target: this.currentLogFile ?? this.logDir,
                       entry: queuedEntry.entry,
@@ -444,15 +517,23 @@ export class FileSink implements LogSink {
     // told an `onError` handler that a line it will see again was lost, while the entries
     // that genuinely were lost went unnamed.
     let firstDropped: LogEntry | undefined;
+    let didEvict = false;
 
     while (this.writeQueue.length > limit) {
       const dropped = this.writeQueue.shift();
 
       firstDropped ??= dropped?.entry;
       this.droppedEntries++;
+      didEvict = true;
     }
 
-    if (this.droppedEntries === 0 || this.didReportDrop) {
+    // Gated on an eviction this call made, not on the cumulative count, for the reason
+    // `NamedPipeSink.enforceQueueLimit` is: `droppedEntries` now also counts entries
+    // `abandonQueueOnClose` gave up on, and those are not an overflow. A `close()` that
+    // times out with a write still in flight left the counter non-zero, and the failing
+    // write behind it re-queued its entry - so a queue holding one line under a cap of
+    // 10,000 reported a `'queue_full'`, and set `didReportDrop`, which nothing resets.
+    if (!didEvict || this.didReportDrop) {
       return;
     }
 
