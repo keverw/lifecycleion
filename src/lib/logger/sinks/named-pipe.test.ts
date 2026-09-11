@@ -2441,6 +2441,71 @@ describe('NamedPipeSink', () => {
     await sink.close();
   }, 15000);
 
+  test('an onError that logs back into the broken sink does not recurse', async () => {
+    // The hostile shape, and a realistic one: a handler whose way of reporting the failure
+    // is to log it - through the very sink that just failed, because that is the logger the
+    // application has.
+    //
+    // What stops it is not the report deduplication but the queue. A sink that cannot write
+    // *queues* the entry and returns; queuing is not a failure, so it reports nothing, so
+    // the log about the failure becomes a queued line rather than a second failure. The
+    // recursion therefore stops at depth one on its own. The deduplication covers a
+    // different axis - it keeps the retry timer from re-entering the handler once a second
+    // for as long as the outage lasts - and both are checked here.
+    const pipePath = `${tmpDir.path}/self-logging.pipe`;
+
+    let calls = 0;
+    let depth = 0;
+    let maxDepth = 0;
+
+    // Declared before the sink so the handler can reach it, and read through the box so
+    // the handler closes over something that is assigned by the time it runs.
+    const self: { sink?: NamedPipeSink } = {};
+
+    const sink = new NamedPipeSink({
+      pipePath,
+      closeTimeoutMS: 500,
+      onError: () => {
+        calls++;
+        depth++;
+        maxDepth = Math.max(maxDepth, depth);
+
+        self.sink?.write({
+          timestamp: Date.now(),
+          type: 'error',
+          template: 'the log sink failed',
+          message: 'the log sink failed',
+        });
+
+        depth--;
+      },
+    });
+
+    self.sink = sink;
+
+    sink.write({
+      timestamp: Date.now(),
+      type: 'info',
+      template: 'first',
+      message: 'first',
+    });
+
+    // Several cooldowns' worth of retries against a path that does not exist.
+    await new Promise((resolve) => setTimeout(resolve, 2500));
+
+    // Never re-entered: the handler's own write reported nothing.
+    expect(maxDepth).toBe(1);
+
+    // And said once, not once per retry.
+    expect(calls).toBe(1);
+
+    // Not vacuous: the handler's write really did happen, and really was queued - the
+    // original line plus the one the handler logged about it.
+    expect(sink.getHealth().queueSize).toBe(2);
+
+    await sink.close();
+  }, 15000);
+
   test('recovers a pipe that only appears later, with no further traffic', async () => {
     // Three ways an open can fail - no reader on the FIFO, the open itself refused, the
     // `stat` finding nothing there - and only the first ever had a timer behind it. The
