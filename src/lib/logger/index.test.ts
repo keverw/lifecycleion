@@ -2278,6 +2278,53 @@ describe('Logger - a redactedKeys list that will not be read twice', () => {
     expect(sink.logs[0]?.redactedKeys).toBeUndefined();
   });
 
+  test('a list holding a non-string never reaches a sink as one', () => {
+    // `snapshotList` reports what the list *holds*, not what its elements are, so the
+    // snapshot was cast straight to `string[]` and stored - putting a number, and the
+    // caller's own object with its traps still attached, exactly where the copy exists to
+    // remove them. A sink then does the ordinary thing with the field it is handed,
+    // `.join(',')` or `.map(k => k.toUpperCase())`, and throws inside `sink.write`: one
+    // bad list became an `onSinkError` for every registered sink on that call.
+    const caller = { a: 1 };
+    const sink = new ArraySink();
+    const logger = new Logger({
+      sinks: [sink],
+      callProcessExit: false,
+      onFormatError: () => {},
+    });
+
+    logger.info('login {{password}}', {
+      params: { password: SECRET },
+      redactedKeys: [123, caller] as unknown as string[],
+    });
+
+    const entry = sink.logs[0];
+
+    // Nothing this field could honestly name: redaction has already failed closed, and
+    // the caller's object must not travel to a sink on it either way.
+    expect(entry?.redactedKeys).toBeUndefined();
+    expect(entry?.message).not.toContain(SECRET);
+    expect(JSON.stringify(entry?.redactedParams)).not.toContain(SECRET);
+  });
+
+  test('a list of strings is still handed to the sink as an inert copy', () => {
+    // The counterpart the check above must not break. The copy is also what keeps the
+    // caller's own array off the entry, so a later mutation of it cannot rewrite what a
+    // sink already recorded.
+    const requested = ['password'];
+    const sink = new ArraySink();
+    const logger = new Logger({ sinks: [sink], callProcessExit: false });
+
+    logger.info('login {{password}}', {
+      params: { password: SECRET },
+      redactedKeys: requested,
+    });
+
+    requested[0] = 'rewritten';
+
+    expect(sink.logs[0]?.redactedKeys).toEqual(['password']);
+  });
+
   test('a list that cannot be read at all reaches onFormatError', () => {
     // The fail-closed guards used to swallow the cause, which broke the promise
     // `onFormatError` keeps on every other surface that redacts - `applyRedaction` for

@@ -891,7 +891,24 @@ export class Logger extends EventEmitter {
 
     if (snapshot !== null) {
       redactedKeys = snapshot as string[];
-      inertKeys = redactedKeys;
+
+      // Strings only, and that is not the same question `snapshotList` answered.
+      // `snapshotList` reports what the list *holds*, not what its elements are, so a
+      // `redactedKeys: [123, { a: 1 }]` was cast straight to `string[]` and stored -
+      // putting a number, and the caller's own object with its traps still attached,
+      // exactly where the copy exists to remove them. A sink then does the ordinary
+      // thing with the field this hands it, `.join(',')` or `.map(k => k.toUpperCase())`,
+      // and throws inside `sink.write`: one bad list becomes an `onSinkError` for every
+      // registered sink on that call.
+      //
+      // A list that is not all strings leaves this `undefined`, which is the same answer
+      // an untrustworthy list already gets: `parseRedactPaths` refuses a non-string entry,
+      // so redaction has already failed closed and said so through `onFormatError`, and
+      // `redactedParams` carries the marker. There is nothing this field could honestly
+      // name.
+      if (redactedKeys.every((key) => typeof key === 'string')) {
+        inertKeys = redactedKeys;
+      }
     }
 
     // The reporter for every fail-closed path below, built on first use so an ordinary

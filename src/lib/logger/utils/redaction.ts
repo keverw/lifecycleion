@@ -332,7 +332,20 @@ export function applyRedaction(
   // Parsed with the shared parser rather than a local `includes('.')` test, so an entry
   // addresses the same thing here as it does in `sensitiveFieldNames` and
   // `stringifyValue`. A list that is present but unusable fails closed.
-  const paths = parseRedactPaths(redactedKeys);
+  //
+  // Handed the snapshot, never `redactedKeys` itself. `parseRedactPaths` snapshots again
+  // internally, and a plain array answers both reads identically - but the caller's own
+  // object need not: a `Proxy` whose `get` trap answers `'password'` the first time and
+  // something harmless afterwards passes `snapshotList` here, skips the "nothing was
+  // asked for" exit above, and then has the *second* read decide the paths. The walk
+  // matches nothing, and the params go back in the clear with no report at all. That is
+  // the whole reason the snapshot exists, and this was the one read that went around it.
+  //
+  // The same goes for every `markAllRedactionFailed` below. Marking cannot leak a value -
+  // it only ever writes the marker, and fails to `{}` if the list refuses - but handing it
+  // the caller's object re-entered their traps a second, third and fourth time during an
+  // already-failing pass, and let a lying list decide which keys the failure names.
+  const paths = parseRedactPaths(entries);
 
   if (paths === null) {
     report(
@@ -340,7 +353,7 @@ export function applyRedaction(
       '<redactedKeys>',
     );
 
-    return markAllRedactionFailed(redactedKeys);
+    return markAllRedactionFailed(entries);
   }
 
   // No copy is made, and none is probed for either.
@@ -418,7 +431,7 @@ export function applyRedaction(
   } catch {
     // `Object.keys` itself refused - a revoked `Proxy`, an `ownKeys` trap that throws -
     // so there is no key to read safely and nothing to mark but the redacted ones.
-    return markAllRedactionFailed(redactedKeys);
+    return markAllRedactionFailed(entries);
   }
 
   // The same normalization, continued down the paths the caller named, so the walk and
@@ -436,7 +449,7 @@ export function applyRedaction(
   const walked = walk(guarded);
 
   if (walked === null) {
-    return markAllRedactionFailed(redactedKeys);
+    return markAllRedactionFailed(entries);
   }
 
   for (const { key, error } of unreadable) {

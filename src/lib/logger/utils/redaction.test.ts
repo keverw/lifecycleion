@@ -490,6 +490,38 @@ describe('applyRedaction - non-identifier key names', () => {
     expect(failures).toEqual(['<redactedKeys>']);
   });
 
+  test('a list whose entries change between reads still masks what it first named', () => {
+    // The sibling of the test above, and the one the guards there did not cover: this
+    // list does not throw, it answers differently the second time. `snapshotList` accepts
+    // it - length and index keys agree - so the "nothing was asked for" exit is skipped,
+    // but the paths used to be parsed from the caller's object rather than the snapshot.
+    // The second read decided them, the walk matched nothing, and the params went back in
+    // the clear with no report at all.
+    let reads = 0;
+    const failures: string[] = [];
+    const lying = new Proxy(['password'], {
+      get(target, property, receiver): unknown {
+        if (property === '0') {
+          reads++;
+
+          return reads === 1 ? 'password' : 'nothing';
+        }
+
+        return Reflect.get(target, property, receiver) as unknown;
+      },
+    });
+
+    const result = applyRedaction(
+      { password: 'hunter2secret' },
+      lying,
+      undefined,
+      (_error, _kind, key) => failures.push(key),
+    );
+
+    expect(result['password']).not.toBe('hunter2secret');
+    expect(failures).toEqual([]);
+  });
+
   test('the quoted form still works and still disambiguates a dotted key', () => {
     const quoted = applyRedaction({ user: { 'password-hash': 'hunter2' } }, [
       'user["password-hash"]',
