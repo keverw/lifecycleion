@@ -5160,8 +5160,14 @@ export class LifecycleManager
     this.logger
       .entity(name)
       .warn(
+        // A placeholder, never the message concatenated in. The component's own text
+        // becomes the *template* otherwise, and the path grammar admits ordinary name
+        // punctuation - `-`, `@`, `$` - so a failure reported as
+        // `Cannot reach {{svc-a}}` parses as a placeholder, resolves to nothing, and is
+        // rendered as the `(null)` fallback. Substituted text is not re-scanned, so the
+        // message survives verbatim here however it is spelled.
         failure
-          ? `Component stopped unexpectedly: ${describeError(failure)}`
+          ? 'Component stopped unexpectedly: {{error.message}}'
           : 'Component stopped unexpectedly',
         { params: { error: failure } },
       );
