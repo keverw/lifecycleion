@@ -227,8 +227,17 @@ export function deserializeError(obj: SerializedError): Error {
   const rawName = source['name'];
   const rawStack = source['stack'];
 
+  // An absent message stays absent. A payload that carries none is the ordinary shape of
+  // a partial IPC message, and `describeValue` turned that into the literal text
+  // `undefined` or `null` - a fabricated message, logged and re-thrown as though the
+  // sender had written it. Only a message that is genuinely *there* but not a string is
+  // described, which is what the defensive read was for.
   const error = new Error(
-    typeof rawMessage === 'string' ? rawMessage : describeValue(rawMessage),
+    typeof rawMessage === 'string'
+      ? rawMessage
+      : rawMessage === undefined || rawMessage === null
+        ? ''
+        : describeValue(rawMessage),
   );
 
   if (typeof rawName === 'string') {
