@@ -2806,14 +2806,6 @@ function getEffectiveRequestHeadersFromError(
 }
 
 /**
- * Read a member from a value supplied by an adapter or runtime.
- *
- * Rejected values may be proxies, abort reasons, or decorated errors, and both a
- * getter and a Proxy trap can throw. An unreadable member is treated as absent so
- * that second error cannot replace the one being normalized.
- */
-
-/**
  * Validate and copy an adapter-provided header record into a plain object.
  *
  * Copying is part of the safety boundary: checking the outer value alone would
