@@ -1996,6 +1996,67 @@ describe('NamedPipeSink', () => {
     }
   }, 15000);
 
+  test('a write that fails after close is reported, once', async () => {
+    // The drain loop pushes the backlog into the stream's buffer and sets `closed` without
+    // awaiting the write callbacks, so a callback that errors afterwards lands in
+    // `requeue` past `abandonQueueOnClose()`. It counted the loss and said nothing - while
+    // the caller had already reported that same entry as `disposition: 'retrying'`, so an
+    // `onError` consumer whose job is to fall back to another destination on `'lost'` was
+    // told the opposite of what happened.
+    const pipePath = `${tmpDir.path}/post-close-loss.pipe`;
+    await createNamedPipe(pipePath);
+
+    const readerFd = fs.openSync(
+      pipePath,
+      fs.constants.O_RDONLY | fs.constants.O_NONBLOCK,
+    );
+    const failures: SinkFailure[] = [];
+    const sink = new NamedPipeSink({
+      pipePath,
+      closeTimeoutMS: 1000,
+      onError: (failure) => {
+        failures.push(failure);
+      },
+    });
+
+    try {
+      expect(await waitForOpenPipe(sink)).toBe(true);
+
+      // Nothing queued, so `abandonQueueOnClose()` reports nothing and every `'close'`
+      // failure below is the one this test is about.
+      await sink.close();
+
+      expect(failures.filter((entry) => entry.kind === 'close')).toHaveLength(
+        0,
+      );
+
+      const internals = sink as unknown as {
+        requeue: (queued: { formatted: string; attempts: number }) => void;
+      };
+
+      for (let index = 0; index < 3; index++) {
+        internals.requeue({
+          formatted: `late-${String(index)}\n`,
+          attempts: 0,
+        });
+      }
+
+      expect(sink.getHealth().droppedEntries).toBe(3);
+
+      // Once, like the cap's report and `abandonQueueOnClose()`'s: a close abandoning a
+      // full stream buffer would otherwise fire the callback for every entry in it.
+      const closeFailures = failures.filter((entry) => entry.kind === 'close');
+
+      expect(closeFailures).toHaveLength(1);
+      expect(closeFailures[0]?.disposition).toBe('lost');
+      expect(closeFailures[0]?.error.message).toContain(
+        'after the sink was closed',
+      );
+    } finally {
+      fs.closeSync(readerFd);
+    }
+  }, 15000);
+
   test('the close drain retries a failed write and reports what it still cannot send', async () => {
     // The other half of the same fix: with retries left the entry goes back on the queue
     // rather than being counted immediately, so `close()`'s drain loop gets to try it

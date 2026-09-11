@@ -263,6 +263,8 @@ export class NamedPipeSink implements LogSink {
   private minLevel: LogLevel;
   private droppedEntries = 0;
   private didReportDrop = false;
+  /** Whether the one post-close loss report has gone out. See {@link requeue}. */
+  private didReportPostCloseLoss = false;
   private lastError?: Error;
   private consecutiveFailures = 0;
   /**
@@ -954,6 +956,27 @@ export class NamedPipeSink implements LogSink {
       // Counted rather than dropped silently, because the entry was already shifted off
       // `writeQueue` and so was not among the ones that call reported.
       this.droppedEntries++;
+
+      // And said out loud, once. The drain loop in `close()` pushes the backlog into the
+      // stream's buffer and sets `closed` without awaiting the write callbacks, so every
+      // callback that errors afterwards lands here - reported by the caller as
+      // `disposition: 'retrying'` while this made it final. An `onError` consumer whose
+      // job is to fall back to another destination on `'lost'` was told the opposite of
+      // what happened, and `abandonQueueOnClose()` had already run against an empty queue,
+      // so nothing else was going to tell it. Once per close, like the cap's report and
+      // that one: a close abandoning a full stream buffer would otherwise fire the
+      // callback for every entry in it.
+      if (!this.didReportPostCloseLoss) {
+        this.didReportPostCloseLoss = true;
+
+        this.handleError(
+          'close',
+          new Error(
+            `Write to ${this.pipePath} failed after the sink was closed; the entry was not written`,
+          ),
+          { disposition: 'lost' },
+        );
+      }
 
       return;
     }

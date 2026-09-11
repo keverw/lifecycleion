@@ -84,7 +84,14 @@ export function isErrorLike(
 }
 
 /**
- * A member as a string, or `undefined` when it is absent or not one.
+ * A member as a string, or `undefined` when it is absent.
+ *
+ * A member that is *present but not a string* is described rather than answered as absent.
+ * `SerializedError` says these three are text, and the value is whatever the caller put
+ * there: `err.message = 42` answered `undefined` here, which the `?? ''` below turned into
+ * an empty message - and the own-property copy loop then skipped `message` because the key
+ * was already on the result, so the `42` reached the peer nowhere at all. Described, it
+ * survives as `'42'`.
  *
  * A read that *threw* is neither: it answers {@link UNSERIALIZABLE_TEXT} and reports. The
  * plain guarded read this replaces answered `undefined`, which the `?? ''` and
@@ -109,7 +116,18 @@ function readText(
     return UNSERIALIZABLE_TEXT;
   }
 
-  return typeof value === 'string' ? value : undefined;
+  if (typeof value === 'string') {
+    return value;
+  }
+
+  // Absent stays absent, and `null` counts as absent: `stack` is optional on
+  // `SerializedError`, and inventing the text `'undefined'` or `'null'` for an error that
+  // carries no stack would be worse than carrying none. `deserializeError` refuses exactly
+  // this on the far side of the wire, so describing them here would put the two ends of
+  // one round trip in disagreement.
+  return value === undefined || value === null
+    ? undefined
+    : describeValue(value);
 }
 
 /**
@@ -244,6 +262,31 @@ function serializeErrorInner(
       for (const key of shape.keys) {
         defineEntry(copy, key, readOwnMember(source, key, path, report));
       }
+    } else if (shape.kind === 'unreadable') {
+      // Nothing could be enumerated, and that has to show. Acted on only for `'object'`,
+      // an unreadable shape - a `Proxy` whose `ownKeys` trap throws - left `copy` empty
+      // and returned `{}`: not a valid `SerializedError`, nothing reported, and a peer
+      // `deserializeError` rebuilding a nameless `Error('')` from it. Every other branch
+      // here reports the read that refused and marks what it could not carry.
+      report(shape.error, path);
+
+      copy.name = 'Error';
+      copy.message = UNSERIALIZABLE_TEXT;
+    } else {
+      // An array carrying `name`/`message`/`stack` is error-shaped by this module's own
+      // test, and `describeContainer` reports it as a length - so the `'object'` branch
+      // above never sees its keys and this returned a bare `{}`.
+      //
+      // The three members by name, exactly as the `isErrorValue` branch reads them, rather
+      // than by enumerating own property names. `isErrorLike` tests with `in`, so they may
+      // be inherited, and an own-only enumeration would miss them and produce a nameless
+      // error anyway; it would also materialize every index of the array, uncharged
+      // against `budget`, which is a synchronous stall inside a function documented never
+      // to throw and always to terminate. The elements are not carried: this is a value
+      // claiming to be an error, and what makes it one is these three.
+      copy.name = readText(source, 'name', path, report) ?? 'Error';
+      copy.message = readText(source, 'message', path, report) ?? '';
+      copy.stack = readText(source, 'stack', path, report);
     }
 
     return deepSerializeRecord(copy, seen, depth, path, report, budget);

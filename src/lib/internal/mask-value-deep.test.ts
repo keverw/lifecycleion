@@ -65,3 +65,51 @@ describe('maskValueDeep budget', () => {
     });
   });
 });
+
+describe('maskValueDeep named array properties', () => {
+  test('carries an array’s named own properties through the mask', () => {
+    // The array branch rebuilds by index, so a named property was dropped from the result
+    // - and a rebuilt array is what the caller receives, so `note` was simply gone from a
+    // payload that redacting one element was meant to leave otherwise intact.
+    const items = ['s1', 's2'] as unknown[] & { note?: string };
+    items.note = 'request-42';
+
+    const masked = maskValueDeep('items', items, maskLeaf) as unknown[] & {
+      note?: string;
+    };
+
+    expect(masked).toHaveLength(2);
+    expect(masked[0]).toBe('**');
+    expect(masked.note).toBe('**********');
+  });
+
+  test('masks a named property that holds a container', () => {
+    const items = ['s1'] as unknown[] & { meta?: unknown };
+    items.meta = { token: 'abcd' };
+
+    const masked = maskValueDeep('items', items, maskLeaf) as unknown[] & {
+      meta?: Record<string, unknown>;
+    };
+
+    expect(masked.meta).toEqual({ token: '****' });
+  });
+
+  test('marks the truncation rather than dropping named keys silently', () => {
+    // Every other stopping point in both walks leaves a marker. A key that was never
+    // enumerated cannot be named, so this one goes in as a trailing element.
+    const items = [] as unknown as unknown[] & Record<string, unknown>;
+
+    for (let index = 0; index < 200_000; index++) {
+      items.push(`element-${index}`);
+    }
+
+    items.note = 'request-42';
+
+    const masked = maskValueDeep('items', items, maskLeaf) as unknown[] &
+      Record<string, unknown>;
+
+    expect(masked.length).toBeLessThan(200_000);
+    expect(masked[masked.length - 1]).toBe(REDACTED_PLACEHOLDER);
+    expect(Object.keys(masked)).not.toContain('note');
+  });
+});

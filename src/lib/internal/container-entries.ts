@@ -88,3 +88,35 @@ export function defineEntry(
     configurable: true,
   });
 }
+/**
+ * The largest value that is an array *index* rather than an ordinary named property.
+ *
+ * An index is a key whose `ToString(ToUint32(key))` is the key itself, which stops one
+ * short of `length`'s own maximum. `"-1"` and `"4294967296"` are therefore named
+ * properties, not indexes - and a `parseInt` round-trip calls both of them indexes, which
+ * is how a first cut of the named-property pass below silently dropped them.
+ */
+const MAX_ARRAY_INDEX = 2 ** 32 - 2;
+
+/** Whether `key` addresses an array slot, as opposed to being a name that merely looks numeric. */
+export function isArrayIndexKey(key: string): boolean {
+  const asNumber = Number(key);
+
+  return (
+    Number.isInteger(asNumber) &&
+    asNumber >= 0 &&
+    asNumber <= MAX_ARRAY_INDEX &&
+    String(asNumber) === key
+  );
+}
+
+/**
+ * An array's own enumerable keys that are *not* indexes.
+ *
+ * `describeContainer` reports an array as a length, which is what both walks iterate - so
+ * a named property on an array is invisible to them while the renderer resolves it with an
+ * ordinary property read. That divergence is the whole reason this exists.
+ */
+export function namedArrayKeys(source: object): string[] {
+  return Object.keys(source).filter((key) => !isArrayIndexKey(key));
+}

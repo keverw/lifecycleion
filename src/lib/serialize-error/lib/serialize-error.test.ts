@@ -479,3 +479,93 @@ describe('serializeError terminates on payloads nothing else bounds', () => {
     });
   });
 });
+
+describe('serializeError on values that are error-shaped without being errors', () => {
+  test('reports and marks a shape that cannot be enumerated', () => {
+    // `describeContainer` answering `'unreadable'` was ignored, so this returned a bare
+    // `{}`: not a valid `SerializedError`, nothing reported, and a peer rebuilding a
+    // nameless `Error('')` from it.
+    const hostile = new Proxy(
+      { name: 'HostileError', message: 'boom', stack: 'stack' },
+      {
+        ownKeys() {
+          throw new Error('ownKeys refused');
+        },
+      },
+    );
+
+    const reported: unknown[] = [];
+    const result = serializeError(hostile, {
+      onFormatError: (failure) => {
+        reported.push(failure);
+      },
+    });
+
+    expect(reported).toHaveLength(1);
+    expect(result.name).toBe('Error');
+    expect(typeof result.message).toBe('string');
+    expect(result.message).not.toBe('');
+  });
+
+  test('keeps the three members of an error-shaped array', () => {
+    // An array is reported by length, so the object branch never saw these keys and the
+    // whole value serialized to `{}`.
+    const arrayLike = ['a'] as unknown[] & Record<string, unknown>;
+    arrayLike.name = 'ArrayError';
+    arrayLike.message = 'from an array';
+    arrayLike.stack = 'stack line';
+
+    const result = serializeError(arrayLike);
+
+    expect(result.name).toBe('ArrayError');
+    expect(result.message).toBe('from an array');
+    expect(result.stack).toBe('stack line');
+  });
+
+  test('does not walk the elements of a huge error-shaped array', () => {
+    const huge = new Array(200_000).fill('x') as unknown[] &
+      Record<string, unknown>;
+    huge.name = 'BigError';
+    huge.message = 'big';
+    huge.stack = 'stack';
+
+    const result = serializeError(huge);
+
+    expect(result.name).toBe('BigError');
+    expect(Object.keys(result).length).toBeLessThan(10);
+  });
+});
+
+describe('serializeError on non-string name/message/stack', () => {
+  test('describes a member that is present but not a string', () => {
+    // `?? ''` turned this into an empty message, and the own-property copy loop then
+    // skipped `message` because the key was already on the result - so the `42` reached
+    // the peer nowhere at all.
+    const error = withExtras(new Error('ignored'));
+    error.message = 42 as unknown as string;
+
+    const result = serializeError(error);
+
+    expect(result.message).toBe('42');
+  });
+
+  test('treats an absent or null member as absent rather than describing it', () => {
+    // `deserializeError` refuses to fabricate `'null'` on the far side of the wire, so
+    // describing it here would put the two ends of one round trip in disagreement.
+    const error = withExtras(new Error('ignored'));
+    error.message = null as unknown as string;
+    error.name = null as unknown as string;
+    error.stack = null as unknown as string;
+
+    const result = serializeError(error);
+
+    expect(result.name).toBe('Error');
+    expect(result.message).toBe('');
+    expect(result.stack).toBeUndefined();
+
+    const rebuilt = deserializeError(result);
+
+    expect(rebuilt.name).toBe('Error');
+    expect(rebuilt.message).toBe('');
+  });
+});

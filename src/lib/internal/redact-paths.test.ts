@@ -297,3 +297,98 @@ describe('redactMatchedPaths - shape of a masked container', () => {
     expect(parseRedactPaths(['password', 'token'])).toHaveLength(2);
   });
 });
+
+describe('the parsed-path index', () => {
+  // Both lookups were a linear scan of the whole list run once per visited node, so a pass
+  // cost `paths x nodes` - bounded on each factor and on neither product. A prefix tree
+  // answers in the length of the path, and has to answer exactly what the scan did.
+
+  test('answers with the first matching entry, in list order', () => {
+    const parsed = paths('a.b', 'a.b', 'a');
+
+    expect(matchRedactPath(parsed, ['a', 'b'])).toBe('a.b');
+    // A bare name is taken literally as well as parsed, so `a.b` also names one top-level
+    // key spelled that way - and it was pushed first.
+    expect(matchRedactPath(parsed, ['a.b'])).toBe('a.b');
+    expect(matchRedactPath(parsed, ['a'])).toBe('a');
+  });
+
+  test('separates an exact match from one that points below', () => {
+    const parsed = paths('user.token');
+
+    expect(matchRedactPath(parsed, ['user'])).toBeUndefined();
+    expect(matchRedactPath(parsed, ['user', 'token'])).toBe('user.token');
+    expect(findPathInto(parsed, ['user'])).toBe('user.token');
+    expect(findPathInto(parsed, ['user', 'token'])).toBeUndefined();
+    expect(findPathInto(parsed, ['other'])).toBeUndefined();
+    // Nothing addresses the root itself.
+    expect(findPathInto(parsed, [])).toBeUndefined();
+  });
+
+  test('handles paths that are prefixes of one another', () => {
+    const parsed = paths('a.b.c', 'a.b');
+
+    expect(matchRedactPath(parsed, ['a', 'b'])).toBe('a.b');
+    expect(matchRedactPath(parsed, ['a', 'b', 'c'])).toBe('a.b.c');
+    expect(findPathInto(parsed, ['a', 'b'])).toBe('a.b.c');
+  });
+
+  test('is not confused by a segment named like a prototype key', () => {
+    const parsed = paths('__proto__.token');
+
+    expect(matchRedactPath(parsed, ['__proto__', 'token'])).toBe(
+      '__proto__.token',
+    );
+    expect(matchRedactPath(parsed, ['toString'])).toBeUndefined();
+    expect(findPathInto(parsed, ['toString'])).toBeUndefined();
+  });
+
+  test('answers a long list without scanning it per node', () => {
+    const entries: string[] = [];
+
+    for (let index = 0; index < 20_000; index++) {
+      entries.push(`k${index}.nested.leaf`);
+    }
+
+    const parsed = parseRedactPaths(entries);
+
+    if (parsed === null) {
+      throw new Error('expected a usable path list');
+    }
+    const started = Date.now();
+
+    for (let index = 0; index < 20_000; index++) {
+      expect(matchRedactPath(parsed, [`k${index}`, 'nested', 'leaf'])).toBe(
+        `k${index}.nested.leaf`,
+      );
+    }
+
+    // The scan this replaces took minutes at this size; the bound is deliberately loose so
+    // it fails only on a return to it.
+    expect(Date.now() - started).toBeLessThan(5_000);
+  });
+});
+
+describe('redactMatchedPaths - the entry budget', () => {
+  test('stops a wide object at the cap rather than rebuilding all of it', () => {
+    // The object branch marked every remaining key and walked the whole list, so the cap
+    // bounded neither the time nor the size of the copy - which is what it is for. The
+    // array branch has always stopped.
+    const wide: Record<string, unknown> = {};
+
+    for (let index = 0; index < 1_200_000; index++) {
+      wide[`k${index}`] = index;
+    }
+
+    const redacted = redactMatchedPaths(
+      { wide },
+      paths('wide.k0'),
+      undefined,
+    ) as { wide: Record<string, unknown> };
+
+    const keys = Object.keys(redacted.wide);
+
+    expect(keys.length).toBeLessThan(1_200_000);
+    expect(redacted.wide[keys[keys.length - 1]]).toBe(REDACTION_FAILED_MARKER);
+  });
+});

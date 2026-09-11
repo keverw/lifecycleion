@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'bun:test';
 
-import { defineEntry, describeContainer } from './container-entries';
+import {
+  defineEntry,
+  describeContainer,
+  isArrayIndexKey,
+  namedArrayKeys,
+} from './container-entries';
 
 describe('describeContainer', () => {
   it('reports an array by length', () => {
@@ -158,5 +163,41 @@ describe('defineEntry', () => {
     defineEntry(target, 'a', 2);
 
     expect(target['a']).toBe(2);
+  });
+});
+
+describe('isArrayIndexKey', () => {
+  it('accepts the keys that address a slot', () => {
+    expect(isArrayIndexKey('0')).toBe(true);
+    expect(isArrayIndexKey('7')).toBe(true);
+    expect(isArrayIndexKey(String(2 ** 32 - 2))).toBe(true);
+  });
+
+  it('refuses the keys that only look numeric', () => {
+    // An index is a key whose `ToString(ToUint32(key))` is the key itself, which stops one
+    // short of `length`'s maximum - so these are named properties, and a `parseInt`
+    // round-trip called all of them indexes.
+    expect(isArrayIndexKey('-1')).toBe(false);
+    expect(isArrayIndexKey(String(2 ** 32 - 1))).toBe(false);
+    expect(isArrayIndexKey('4294967296')).toBe(false);
+    expect(isArrayIndexKey('01')).toBe(false);
+    expect(isArrayIndexKey('1.0')).toBe(false);
+    expect(isArrayIndexKey(' 1')).toBe(false);
+    expect(isArrayIndexKey('')).toBe(false);
+    expect(isArrayIndexKey('note')).toBe(false);
+  });
+});
+
+describe('namedArrayKeys', () => {
+  it('reports the named own keys an index walk cannot see', () => {
+    const items = ['a', 'b'] as unknown[] & Record<string, unknown>;
+    items.note = 'x';
+    items['-1'] = 'y';
+
+    expect(namedArrayKeys(items).sort()).toEqual(['-1', 'note']);
+  });
+
+  it('reports nothing for an ordinary array', () => {
+    expect(namedArrayKeys(['a', 'b'])).toEqual([]);
   });
 });

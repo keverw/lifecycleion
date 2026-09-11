@@ -382,6 +382,151 @@ describe('FileSink', () => {
     // Note: Date.prototype.toISOString will be restored in afterEach
   });
 
+  test('ends the previous stream when the date rolls over', async () => {
+    // The date branch of `rotateIfNeeded` called `setupLogFile()` while the current stream
+    // was still live, and `setupLogFile` overwrites the field with no `end()`: one
+    // `WriteStream` and one descriptor leaked per UTC midnight, and whatever sat in the
+    // orphaned stream's buffer was never flushed - `close()` only ends the stream that is
+    // current by then.
+    const sink = new FileSink({
+      logDir: tmpDir.path,
+      basename: 'rollover-test',
+      maxSizeMB: 1,
+      jsonFormat: false,
+    });
+
+    const firstMock = mock(() => '2023-03-01T12:00:00.000Z');
+    Object.defineProperty(Date.prototype, 'toISOString', {
+      value: function (this: Date) {
+        return firstMock();
+      },
+      writable: true,
+      configurable: true,
+    });
+
+    const entry = (message: string): LogEntry => ({
+      timestamp: Date.now(),
+      type: 'info',
+      serviceName: 'RolloverTest',
+      template: message,
+      message,
+    });
+
+    sink.write(entry('before midnight'));
+    await sink.flush();
+
+    const privateSink = sink as unknown as {
+      logFileStream?: { writableEnded: boolean };
+    };
+    const firstStream = privateSink.logFileStream;
+
+    expect(firstStream).toBeDefined();
+    expect(firstStream?.writableEnded).toBe(false);
+
+    const secondMock = mock(() => '2023-03-02T12:00:00.000Z');
+    Object.defineProperty(Date.prototype, 'toISOString', {
+      value: function (this: Date) {
+        return secondMock();
+      },
+      writable: true,
+      configurable: true,
+    });
+
+    sink.write(entry('after midnight'));
+    await sink.flush();
+
+    // The stream that was replaced was ended, so its buffer reached the file and its
+    // descriptor went back.
+    expect(firstStream?.writableEnded).toBe(true);
+    expect(privateSink.logFileStream).not.toBe(
+      firstStream as unknown as undefined,
+    );
+
+    await sink.close();
+  });
+
+  test('reports itself initialized once a lazy setup succeeds', async () => {
+    // `isInitialized` was set only by `initialize()`, which runs once from the constructor
+    // and swallows what it catches. A sink whose directory was not there yet recovers in
+    // `writeEntry` and writes every line from then on, while `getHealth()` went on
+    // answering `{ isHealthy: false, isInitialized: false }` forever.
+    const blocked = `${tmpDir.path}/not-a-directory`;
+
+    await fsPromises.writeFile(blocked, 'in the way');
+
+    const sink = new FileSink({
+      logDir: `${blocked}/logs`,
+      basename: 'lazy-test',
+      maxSizeMB: 1,
+      jsonFormat: false,
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    expect(sink.getHealth().isInitialized).toBe(false);
+
+    // The obstruction goes away, exactly as a volume that mounts late would.
+    await fsPromises.rm(blocked);
+
+    sink.write({
+      timestamp: Date.now(),
+      type: 'info',
+      serviceName: 'LazyTest',
+      template: 'written after recovery',
+      message: 'written after recovery',
+    });
+
+    await sink.flush();
+
+    const health = sink.getHealth();
+
+    expect(health.isInitialized).toBe(true);
+    expect(health.isHealthy).toBe(true);
+
+    await sink.close();
+  });
+
+  test('flush counts a line lost to exhausted retries as failed', async () => {
+    // `flush()` derived its answer from a counter that only retry exhaustion moved, while
+    // every other loss moved `droppedEntries`. One counter now, so the two cannot disagree
+    // about the same entry.
+    const sink = new FileSink({
+      logDir: tmpDir.path,
+      basename: 'flush-count-test',
+      maxSizeMB: 1,
+      jsonFormat: false,
+      maxRetries: 1,
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    const privateSink = sink as unknown as {
+      destroyStream: () => void;
+      setupLogFile: () => Promise<void>;
+    };
+
+    privateSink.destroyStream();
+    privateSink.setupLogFile = mock(() => {
+      throw new Error('Failed to setup log file');
+    });
+
+    sink.write({
+      timestamp: Date.now(),
+      type: 'info',
+      serviceName: 'FlushCountTest',
+      template: 'never lands',
+      message: 'never lands',
+    });
+
+    const result = await sink.flush();
+
+    expect(result.entriesFailed).toBe(1);
+    expect(result.success).toBe(false);
+    expect(sink.getHealth().droppedEntries).toBe(1);
+
+    await sink.close();
+  });
+
   test('should handle write stream errors and recover', async () => {
     // Create a real sink
     const sink = new FileSink({

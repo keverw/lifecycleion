@@ -1,5 +1,9 @@
 import { getPathParts } from './path-utils';
-import { defineEntry, describeContainer } from './container-entries';
+import {
+  defineEntry,
+  describeContainer,
+  namedArrayKeys,
+} from './container-entries';
 import { isPlainContainer } from './is-plain-container';
 import { maskValueDeep } from './mask-value-deep';
 import { resolveRedaction } from './resolve-redaction';
@@ -61,39 +65,6 @@ function isSeen(
   const origin = aliases?.get(value);
 
   return origin !== undefined && seen.has(origin);
-}
-
-/**
- * The largest value that is an array *index* rather than an ordinary named property.
- *
- * An index is a key whose `ToString(ToUint32(key))` is the key itself, which stops one
- * short of `length`'s own maximum. `"-1"` and `"4294967296"` are therefore named
- * properties, not indexes - and a `parseInt` round-trip calls both of them indexes, which
- * is how a first cut of the named-property pass below silently dropped them.
- */
-const MAX_ARRAY_INDEX = 2 ** 32 - 2;
-
-/** Whether `key` addresses an array slot, as opposed to being a name that merely looks numeric. */
-function isArrayIndexKey(key: string): boolean {
-  const asNumber = Number(key);
-
-  return (
-    Number.isInteger(asNumber) &&
-    asNumber >= 0 &&
-    asNumber <= MAX_ARRAY_INDEX &&
-    String(asNumber) === key
-  );
-}
-
-/**
- * An array's own enumerable keys that are *not* indexes.
- *
- * `describeContainer` reports an array as a length, which is what both walks iterate - so
- * a named property on an array is invisible to them while the renderer resolves it with an
- * ordinary property read. That divergence is the whole reason this exists.
- */
-function namedArrayKeys(source: object): string[] {
-  return Object.keys(source).filter((key) => !isArrayIndexKey(key));
 }
 
 /**
@@ -270,6 +241,89 @@ export function parseRedactPaths(value: unknown): RedactPath[] | null {
   }
 }
 
+/** One node of the prefix tree {@link redactPathIndex} builds. */
+interface RedactPathNode {
+  /** The entry of the first path that ends exactly here, if any. */
+  exact?: string;
+  /** The entry of the first path that continues strictly below here, if any. */
+  below?: string;
+  children: Map<string, RedactPathNode>;
+}
+
+/**
+ * Built once per list, then reused for every node the walk visits.
+ *
+ * Both lookups below used to be a linear scan of the whole list, run once per visited
+ * node, so the cost of a pass was `paths x nodes`. Each factor is capped on its own -
+ * {@link MAX_REDACT_LIST_ENTRIES} and {@link MAX_REDACTION_ENTRIES} - and nothing capped
+ * the product: 5,000 entries over a 6,000-node payload measured 349 ms, and the permitted
+ * maxima extrapolate to roughly twenty minutes synchronously inside `logger.info()`, which
+ * is the exact stall `MAX_REDACTION_ENTRIES` exists to close. A prefix tree answers both
+ * questions in the length of the path being asked about, which is bounded by the payload's
+ * depth rather than by the size of the list.
+ *
+ * Keyed on the array so callers keep handing round a plain `RedactPath[]`. The lists are
+ * built by `parseRedactPaths` and never mutated afterwards; a caller that did mutate one
+ * would be answered from the tree built for it as it was.
+ */
+const redactPathIndexes = new WeakMap<RedactPath[], RedactPathNode>();
+
+function redactPathIndex(paths: RedactPath[]): RedactPathNode {
+  const existing = redactPathIndexes.get(paths);
+
+  if (existing !== undefined) {
+    return existing;
+  }
+
+  const root: RedactPathNode = { children: new Map() };
+
+  // In list order, and never overwriting: both lookups answered with the *first* matching
+  // entry when they were a `find`, and that entry is what a custom `redactFunction` is
+  // handed as the key the caller wrote.
+  for (const candidate of paths) {
+    let node = root;
+
+    for (const part of candidate.parts) {
+      // Recorded on the way down, so every proper prefix of this path learns that
+      // something addresses a location below it.
+      node.below ??= candidate.entry;
+
+      let child = node.children.get(part);
+
+      if (child === undefined) {
+        child = { children: new Map() };
+        node.children.set(part, child);
+      }
+
+      node = child;
+    }
+
+    node.exact ??= candidate.entry;
+  }
+
+  redactPathIndexes.set(paths, root);
+
+  return root;
+}
+
+/** The node `path` names, or `undefined` when no entry runs through it. */
+function findRedactPathNode(
+  paths: RedactPath[],
+  path: string[],
+): RedactPathNode | undefined {
+  let node: RedactPathNode | undefined = redactPathIndex(paths);
+
+  for (const part of path) {
+    node = node.children.get(part);
+
+    if (node === undefined) {
+      return undefined;
+    }
+  }
+
+  return node;
+}
+
 /**
  * The originating entry when `path` matches one of `paths`, else `undefined`.
  *
@@ -280,11 +334,7 @@ export function matchRedactPath(
   paths: RedactPath[],
   path: string[],
 ): string | undefined {
-  return paths.find(
-    (candidate) =>
-      candidate.parts.length === path.length &&
-      candidate.parts.every((part, index) => part === path[index]),
-  )?.entry;
+  return findRedactPathNode(paths, path)?.exact;
 }
 
 /**
@@ -318,7 +368,7 @@ export function findPathInto(
     return undefined;
   }
 
-  return pathPointingBelow(paths, path)?.entry;
+  return pathPointingBelow(paths, path);
 }
 
 /**
@@ -332,20 +382,8 @@ export function findPathInto(
 function pathPointingBelow(
   paths: RedactPath[],
   path: string[],
-): RedactPath | undefined {
-  return paths.find((candidate) => {
-    if (candidate.parts.length <= path.length) {
-      return false;
-    }
-
-    for (const [index, element] of path.entries()) {
-      if (candidate.parts[index] !== element) {
-        return false;
-      }
-    }
-
-    return true;
-  });
+): string | undefined {
+  return findRedactPathNode(paths, path)?.below;
 }
 
 /**
@@ -1034,12 +1072,21 @@ function redactPathsInner(
       // `Object.keys` builds a fresh array, so this branch cannot be lied to about its
       // own length - but the budget is per pass, not per container, and a payload of many
       // small objects spends it exactly as one huge array does.
+      //
+      // Stops on the first key past the budget rather than marking every remaining one,
+      // exactly as the array branch above and both of `maskValueDeep`'s branches do. A
+      // `continue` here still walked the whole key list and still built an entry for each
+      // of them, so on the payload the cap exists for - a container with more keys than
+      // the cap, a `Proxy` whose `ownKeys` reports millions among them - the cap bounded
+      // neither the time nor the size of the copy being rebuilt, which is the entire
+      // point of it. One marker stands for the tail, which is what the rest would have
+      // been.
       if (state.entriesLeft <= 0) {
         state.didFailToRead = true;
         didMask = true;
         defineEntry(copy, key, REDACTION_FAILED_MARKER);
 
-        continue;
+        break;
       }
 
       state.entriesLeft--;

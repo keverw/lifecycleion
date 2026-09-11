@@ -705,7 +705,7 @@ A masking request asks for the library's own masking with different settings:
 interface RedactMaskConfig {
   strategy?: 'string' | 'email' | 'domain'; // default 'string'
   percent?: number; // 0-100 (out-of-range values are clamped), default 90
-  maskChar?: string; // default '*'
+  maskChar?: string; // single character, default '*' (longer is cut to its first character)
   userPercent?: number; // 'email' only, falls back to percent
   domainPercent?: number; // 'email' only, falls back to percent
 }
@@ -1328,7 +1328,8 @@ console.log(result);
 // {
 //   success: true,        // false if any entries failed or timeout
 //   entriesWritten: 42,   // Number of entries successfully written
-//   entriesFailed: 0,     // Number of entries that failed after retries
+//   entriesFailed: 0,     // Entries this sink lost during the flush - retries exhausted,
+//                         // evicted at maxQueueSize, or abandoned by close()
 //   timedOut: false       // true if flush timed out
 // }
 

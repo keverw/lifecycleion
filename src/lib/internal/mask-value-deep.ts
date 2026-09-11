@@ -2,7 +2,11 @@ import {
   REDACTED_PLACEHOLDER,
   REDACTION_FAILED_MARKER,
 } from './default-redact-function';
-import { defineEntry, describeContainer } from './container-entries';
+import {
+  defineEntry,
+  describeContainer,
+  namedArrayKeys,
+} from './container-entries';
 import { isPlainContainer } from './is-plain-container';
 import {
   NOOP_FORMAT_REPORTER,
@@ -136,6 +140,10 @@ export function maskValueDeep(
       const source = value as unknown[];
       const masked: unknown[] = [];
 
+      // Whether the truncation marker below has already gone in, so the named pass does
+      // not add a second one for the same spent budget.
+      let didMarkTruncation = false;
+
       // A counted index loop, not `for...of`: iteration resolves `Symbol.iterator` off
       // the value, which is caller code on a subclass, free to throw or to yield
       // something other than the elements. Same reason `redactPathsInner` counts.
@@ -149,6 +157,7 @@ export function maskValueDeep(
         // have been.
         if (budget.remaining <= 0) {
           masked.push(REDACTED_PLACEHOLDER);
+          didMarkTruncation = true;
 
           break;
         }
@@ -176,6 +185,80 @@ export function maskValueDeep(
         } catch (error) {
           report(error, key);
           masked.push(REDACTION_FAILED_MARKER);
+        }
+      }
+
+      // An array's *named* properties, for the same reason `redactPathsInner` carries
+      // them: `describeContainer` reports an array as a length, so this branch rebuilt it
+      // without them - and a rebuilt array is what the caller receives, so anything not
+      // carried over is simply gone. `const a = ['s1', 's2']; a.note = 'request-42';`
+      // masked the two elements and dropped `note` entirely. The comment below the loop
+      // claimed parity with that walk while this was the one place the two disagreed.
+      //
+      // Behind the budget check and after the index loop, exactly as there: `Object.keys`
+      // materializes every own index key as a string, which on a large array is the stall
+      // the budget exists to bound, and running it once the budget is spent defeats the
+      // cap it sits next to.
+      //
+      // Truncation is marked rather than left silent, which is what every other stopping
+      // point in both walks does. A key that was never enumerated cannot be named, so the
+      // marker goes in as a trailing element - the same one the index loop writes - rather
+      // than under a key this cannot invent. Without it an array whose budget ran out on
+      // its *last element* came back with its named properties simply missing and nothing
+      // anywhere saying so: the index loop exits normally in that case, having written no
+      // marker at all.
+      if (budget.remaining <= 0) {
+        if (!didMarkTruncation) {
+          masked.push(REDACTED_PLACEHOLDER);
+          didMarkTruncation = true;
+        }
+      } else {
+        let namedKeys: string[] = [];
+
+        try {
+          namedKeys = namedArrayKeys(source);
+        } catch (error) {
+          // Reported *and* marked. A failed enumeration is not an array without named
+          // properties, and treating it as one is the difference between "there was
+          // nothing here" and "what was here could not be read".
+          report(error, key);
+          masked.push(REDACTION_FAILED_MARKER);
+        }
+
+        for (const namedKey of namedKeys) {
+          if (budget.remaining <= 0) {
+            if (!didMarkTruncation) {
+              masked.push(REDACTED_PLACEHOLDER);
+              didMarkTruncation = true;
+            }
+
+            break;
+          }
+
+          try {
+            charge(budget, namedKey);
+
+            defineEntry(
+              masked as unknown as Record<string, unknown>,
+              namedKey,
+              maskValueDeep(
+                key,
+                (source as unknown as Record<string, unknown>)[namedKey],
+                mask,
+                seen,
+                report,
+                depth + 1,
+                budget,
+              ),
+            );
+          } catch (error) {
+            report(error, key);
+            defineEntry(
+              masked as unknown as Record<string, unknown>,
+              namedKey,
+              REDACTION_FAILED_MARKER,
+            );
+          }
         }
       }
 

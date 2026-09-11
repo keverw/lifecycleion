@@ -134,7 +134,6 @@ export class FileSink implements LogSink {
   private lastError?: Error;
   private consecutiveFailures = 0;
   private totalEntriesWritten = 0;
-  private totalEntriesFailed = 0;
   private closing = false;
   private closed = false;
   private closeTimeoutMS: number;
@@ -224,7 +223,20 @@ export class FileSink implements LogSink {
     }
 
     const startWritten = this.totalEntriesWritten;
-    const startFailed = this.totalEntriesFailed;
+
+    // `droppedEntries`, which every loss path bumps. A separate counter held only the
+    // writes that exhausted their retries, so a flush that lost lines to a queue overflow
+    // or to a `close()` abandoning its backlog - the conditions `maxQueueSize` exists for -
+    // answered `{ success: true, entriesFailed: 0 }` about them. One counter, so `flush()`
+    // and `getHealth()` cannot disagree about what was lost.
+    //
+    // A delta over the flush window, as `entriesWritten` is, and it means the same thing
+    // as that one: what happened to this sink while the flush was waiting. So an eviction
+    // that happened in an earlier `write()` is not in it - `getHealth().droppedEntries` is
+    // the cumulative figure and the one to poll for that - and a concurrent burst that
+    // overflows the queue during the window is, even though the flush was not waiting on
+    // the entries it evicted.
+    const startFailed = this.droppedEntries;
     const startTime = Date.now();
 
     // Wait for queue to finish processing with timeout
@@ -232,7 +244,7 @@ export class FileSink implements LogSink {
       if (Date.now() - startTime > timeoutMS) {
         // Timeout reached
         const entriesWritten = this.totalEntriesWritten - startWritten;
-        const entriesFailed = this.totalEntriesFailed - startFailed;
+        const entriesFailed = this.droppedEntries - startFailed;
 
         return {
           success: false,
@@ -246,7 +258,7 @@ export class FileSink implements LogSink {
     }
 
     const entriesWritten = this.totalEntriesWritten - startWritten;
-    const entriesFailed = this.totalEntriesFailed - startFailed;
+    const entriesFailed = this.droppedEntries - startFailed;
 
     return {
       success: entriesFailed === 0,
@@ -311,17 +323,34 @@ export class FileSink implements LogSink {
     this.abandonQueueOnClose();
 
     // Close stream
-    if (this.logFileStream) {
-      return new Promise<void>((resolve) => {
-        if (!this.logFileStream) {
-          return resolve();
-        }
+    await this.endStream();
+  }
 
-        this.logFileStream.end(() => {
-          this.logFileStream = undefined;
-          resolve();
-        });
+  /**
+   * End the current stream and wait for it to flush.
+   *
+   * The one place that does this, because every caller has to: `end()` is what flushes
+   * what is buffered, and a stream replaced without it keeps its descriptor and loses its
+   * buffer. `close()` and both rotation paths all reach it through here.
+   */
+  private async endStream(): Promise<void> {
+    const stream = this.logFileStream;
+
+    if (!stream) {
+      return;
+    }
+
+    await new Promise<void>((resolve) => {
+      stream.end(() => {
+        resolve();
       });
+    });
+
+    // Cleared only if it is still the one this ended: a rotation that ran while `end()`
+    // was flushing has already installed its replacement, and clearing unconditionally
+    // would drop a live stream on the floor.
+    if (this.logFileStream === stream) {
+      this.logFileStream = undefined;
     }
   }
 
@@ -487,13 +516,12 @@ export class FileSink implements LogSink {
           } else {
             // Max retries exceeded - entry is lost
             //
-            // Counted as a drop too, matching `NamedPipeSink`. `totalEntriesFailed` is read
-            // only by `flush()`, and `FileSinkHealth` does not expose it, so an entry lost
-            // to an exhausted retry or a failed render reported `disposition: 'lost'` while
-            // `getHealth()` still answered `{ isHealthy: true, droppedEntries: 0 }` - against
-            // that field's own documented meaning, "lines this sink did not deliver". An
-            // operator polling health rather than calling `flush()` could not see the loss.
-            this.totalEntriesFailed++;
+            // Counted as a drop, matching `NamedPipeSink`, and the only counter kept for
+            // it: an entry lost to an exhausted retry or a failed render reported
+            // `disposition: 'lost'` while `getHealth()` still answered
+            // `{ isHealthy: true, droppedEntries: 0 }` - against that field's own
+            // documented meaning, "lines this sink did not deliver". `flush()` reads the
+            // same counter, so the two can no longer disagree about what was lost.
             this.droppedEntries++;
           }
         }
@@ -751,6 +779,14 @@ export class FileSink implements LogSink {
       if (this.currentLogSize >= maxSizeBytes) {
         await this.rotateFile();
       }
+
+      // Marked here rather than only in `initialize()`, which runs once from the
+      // constructor and swallows what it catches. A sink whose directory was not there yet
+      // recovers lazily - `writeEntry` calls this again and writes successfully from then
+      // on - but nothing ever set the flag, so `getHealth()` answered
+      // `{ isHealthy: false, isInitialized: false }` forever while every line was landing
+      // on disk. An operator watching health saw a permanently broken sink that was fine.
+      this.isInitialized = true;
     } catch (error) {
       throw new FileSinkError(
         `Failed to setup log file: ${currentLogFile}`,
@@ -787,7 +823,14 @@ export class FileSink implements LogSink {
 
     // Date changed - setup new file
     if (this.currentLogFile !== expectedFile) {
+      // Ended first, exactly as `rotateFile()` ends it. `setupLogFile()` overwrites
+      // `logFileStream` with no teardown, so the stream this replaces was left open and
+      // unreachable: one `WriteStream` and one file descriptor leaked per UTC midnight for
+      // the life of the process, and whatever sat in its buffer was never flushed - not by
+      // `close()`, which only ends the stream that is current by then.
+      await this.endStream();
       await this.setupLogFile();
+
       return;
     }
 
@@ -810,16 +853,7 @@ export class FileSink implements LogSink {
     const currentDate = new Date().toISOString().slice(0, 10); // YYYY-MM-DD (UTC)
 
     // Close current stream
-    await new Promise<void>((resolve) => {
-      if (!this.logFileStream) {
-        return resolve();
-      }
-
-      this.logFileStream.end(() => {
-        this.logFileStream = undefined;
-        resolve();
-      });
-    });
+    await this.endStream();
 
     // Rename with timestamp
     const timestamp = Math.floor(Date.now() / 1000);

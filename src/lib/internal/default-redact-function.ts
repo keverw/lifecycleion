@@ -47,7 +47,11 @@ export interface RedactMaskConfig {
   strategy?: 'string' | 'email' | 'domain';
   /** 0-100. Defaults to {@link DEFAULT_MASK_PERCENT}. */
   percent?: number;
-  /** Defaults to `'*'`. */
+  /**
+   * A single character, repeated once per masked character. Defaults to `'*'`; a longer
+   * string is cut to its first code point, since its length multiplies everything written
+   * to every sink.
+   */
   maskChar?: string;
   /** `email` only. Falls back to `percent`. */
   userPercent?: number;
@@ -228,6 +232,32 @@ export function matchRedactMaskConfig(value: unknown): RedactMaskConfigMatch {
 }
 
 /**
+ * One mask character, whatever the caller supplied.
+ *
+ * `datamask` emits one `maskChar` per masked character, so the length of this string is a
+ * multiplier on everything written to every sink - the same output amplification the
+ * `percent` ceiling below exists to stop, and the one this was missing: checked only for
+ * being non-empty, a `redactFunction` answering `{ maskChar: 'X'.repeat(100_000) }` over
+ * three 200-character params produced 54 MB per log line. It escapes the render budget
+ * too, which charges the input leaf before `mask` runs and never charges the result, so
+ * `MAX_RENDER_LENGTH` saw six hundred characters of it.
+ *
+ * The first code point rather than the first UTF-16 unit, so an astral mask character
+ * survives whole instead of being cut into a lone surrogate - and taken from a two-unit
+ * slice rather than by spreading the whole string, which would walk the very length this
+ * is here to refuse to carry.
+ */
+function normalizeMaskChar(value: unknown): string {
+  if (typeof value !== 'string' || value.length === 0) {
+    return '*';
+  }
+
+  const codePoint = value.slice(0, 2).codePointAt(0);
+
+  return codePoint === undefined ? '*' : String.fromCodePoint(codePoint);
+}
+
+/**
  * A usable masking percent, or `fallback` when the value does not name one.
  *
  * Clamped at the ceiling as well as the floor. `datamask` masks a *proportion*, emitting
@@ -268,10 +298,7 @@ export function maskWithConfig(
   let masked: string;
 
   try {
-    const maskChar =
-      typeof config.maskChar === 'string' && config.maskChar.length > 0
-        ? config.maskChar
-        : '*';
+    const maskChar = normalizeMaskChar(config.maskChar);
 
     const percent = normalizePercent(config.percent, DEFAULT_MASK_PERCENT);
 
