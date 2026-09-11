@@ -490,7 +490,7 @@ describe('NamedPipeSink', () => {
     await sink.close();
   });
 
-  test('should report isReconnecting status correctly', async () => {
+  test('should report reconnection state through getHealth', async () => {
     const pipePath = `${tmpDir.path}/reconnecting-status.pipe`;
     await createNamedPipe(pipePath);
 
@@ -504,7 +504,7 @@ describe('NamedPipeSink', () => {
     await new Promise((resolve) => setTimeout(resolve, 100));
 
     // Initially not reconnecting
-    expect(sink.isReconnecting).toBe(false);
+    expect(sink.getHealth().isReconnecting).toBe(false);
 
     // Write to ensure it's working
     const entry: LogEntry = {
@@ -519,7 +519,7 @@ describe('NamedPipeSink', () => {
     await new Promise((resolve) => setTimeout(resolve, 100));
 
     // Should still not be reconnecting during normal operation
-    expect(sink.isReconnecting).toBe(false);
+    expect(sink.getHealth().isReconnecting).toBe(false);
 
     reader.stop();
     await sink.close();
@@ -732,7 +732,7 @@ describe('NamedPipeSink', () => {
     sink.write(entryFor('during-outage'));
 
     // Held, not lost: nothing was written and nothing was counted as dropped.
-    expect(sink.droppedEntryCount).toBe(0);
+    expect(sink.getHealth().droppedEntries).toBe(0);
 
     // `write` starts an automatic reopen of its own, and a manual `reconnect()` racing it
     // answers `already_reconnecting` - correctly, since the reopen it would have done is
@@ -782,7 +782,7 @@ describe('NamedPipeSink', () => {
     reader.stop();
 
     expect(reader.data.join('')).toContain('self-healed');
-    expect(sink.droppedEntryCount).toBe(0);
+    expect(sink.getHealth().droppedEntries).toBe(0);
   }, 15000);
 
   test('caps the queue at 10,000 entries by default', async () => {
@@ -800,6 +800,15 @@ describe('NamedPipeSink', () => {
       closeTimeoutMS: 200,
     });
 
+    // Auto-reopen is neutered here deliberately. These two cover queue accounting, and a
+    // reopen against a pipe nobody is reading leaves an `open` pending for as long as the
+    // test process lives - holding a libuv threadpool slot, four of which is every file
+    // operation the suite has. Recovery is covered by its own tests above, with a reader.
+    (sink as unknown as { ensureConnection: () => void }).ensureConnection =
+      () => {
+        // Intentionally empty.
+      };
+
     // Never initialized - nothing is reading and nothing opened it - so every entry queues.
     (sink as unknown as { isInitialized: boolean }).isInitialized = false;
 
@@ -815,7 +824,7 @@ describe('NamedPipeSink', () => {
     expect(
       (sink as unknown as { writeQueue: unknown[] }).writeQueue.length,
     ).toBe(10_000);
-    expect(sink.droppedEntryCount).toBe(50);
+    expect(sink.getHealth().droppedEntries).toBe(50);
 
     await sink.close();
   }, 15000);
@@ -831,6 +840,15 @@ describe('NamedPipeSink', () => {
       closeTimeoutMS: 200,
     });
 
+    // Auto-reopen is neutered here deliberately. These two cover queue accounting, and a
+    // reopen against a pipe nobody is reading leaves an `open` pending for as long as the
+    // test process lives - holding a libuv threadpool slot, four of which is every file
+    // operation the suite has. Recovery is covered by its own tests above, with a reader.
+    (sink as unknown as { ensureConnection: () => void }).ensureConnection =
+      () => {
+        // Intentionally empty.
+      };
+
     (sink as unknown as { isInitialized: boolean }).isInitialized = false;
 
     for (let i = 0; i < 10_050; i++) {
@@ -845,8 +863,93 @@ describe('NamedPipeSink', () => {
     expect(
       (sink as unknown as { writeQueue: unknown[] }).writeQueue.length,
     ).toBe(10_050);
-    expect(sink.droppedEntryCount).toBe(0);
+    expect(sink.getHealth().droppedEntries).toBe(0);
 
     await sink.close();
+  }, 15000);
+  test('reports queue size, drops and failures through getHealth', async () => {
+    // The observability half of the shared policy: both sinks answer a failure the same
+    // way, and both can now say how that is going. This sink used to expose a single
+    // dropped-entry count, so a queue growing behind a pipe nobody was reading was
+    // invisible until entries started falling off the end of it.
+    const pipePath = `${tmpDir.path}/health.pipe`;
+    await createNamedPipe(pipePath);
+
+    const reader = startPipeReader(pipePath);
+    const sink = new NamedPipeSink({ pipePath });
+
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    const healthy = sink.getHealth();
+
+    expect(healthy.isInitialized).toBe(true);
+    expect(healthy.isHealthy).toBe(true);
+    expect(healthy.queueSize).toBe(0);
+    expect(healthy.droppedEntries).toBe(0);
+    expect(healthy.consecutiveFailures).toBe(0);
+    expect(healthy.lastError).toBeUndefined();
+
+    // Force the state a stream failure leaves behind, then queue behind it.
+    (sink as unknown as { pipeStream: undefined }).pipeStream = undefined;
+    (sink as unknown as { isInitialized: boolean }).isInitialized = false;
+
+    for (let index = 0; index < 3; index++) {
+      sink.write({
+        timestamp: Date.now(),
+        type: 'info',
+        template: `queued-${String(index)}`,
+        message: `queued-${String(index)}`,
+      });
+    }
+
+    const stalled = sink.getHealth();
+
+    expect(stalled.queueSize).toBe(3);
+    expect(stalled.isInitialized).toBe(false);
+    expect(stalled.isHealthy).toBe(false);
+    expect(stalled.droppedEntries).toBe(0);
+
+    await sink.close();
+    reader.stop();
+  }, 15000);
+
+  test('counts a format failure without calling the sink unhealthy', async () => {
+    // A `formatter` that throws still produces a line and leaves the pipe untouched, so
+    // it is recorded as the last error but never as a write failure.
+    const pipePath = `${tmpDir.path}/health-format.pipe`;
+    await createNamedPipe(pipePath);
+
+    const reader = startPipeReader(pipePath);
+    const sink = new NamedPipeSink({
+      pipePath,
+      formatter: () => {
+        throw new Error('formatter blew up');
+      },
+      onError: () => {
+        // Expected: the sink reports the failure and writes the default format instead.
+      },
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    sink.write({
+      timestamp: Date.now(),
+      type: 'info',
+      template: 'still-written',
+      message: 'still-written',
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 150));
+
+    const health = sink.getHealth();
+
+    expect(health.lastError?.message).toContain('formatter blew up');
+    expect(health.consecutiveFailures).toBe(0);
+    expect(health.isHealthy).toBe(true);
+
+    await sink.close();
+    reader.stop();
+
+    expect(reader.data.join('')).toContain('still-written');
   }, 15000);
 });

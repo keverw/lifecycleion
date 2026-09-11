@@ -1333,7 +1333,7 @@ Both queueing sinks — `FileSink` and `NamedPipeSink` — answer a failed write
 - the queue holds up to `maxQueueSize` entries (default 10,000; pass `-1` to hold
   everything, which is what both did before the default existed)
 - over the cap, the **oldest** entry is dropped, counted
-  (`FileSink.getHealth().droppedEntries`, `NamedPipeSink.droppedEntryCount`) and the first
+  (both sinks report `getHealth().droppedEntries`) and the first
   drop is reported through `onError`
 - a broken stream is reopened automatically on a later write, so neither sink needs an API
   call to recover
@@ -1424,7 +1424,7 @@ const pipeSink = new NamedPipeSink({
 const status = await pipeSink.reconnect();
 
 // Check if currently reconnecting
-if (pipeSink.isReconnecting) {
+if (pipeSink.getHealth().isReconnecting) {
   console.log('Reconnection in progress...');
 }
 ```

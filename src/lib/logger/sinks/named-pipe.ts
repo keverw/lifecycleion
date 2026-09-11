@@ -47,9 +47,10 @@ export interface NamedPipeSinkOptions {
    * default rather than waiting to be asked for.
    *
    * The **oldest** entry is dropped to make room: during an outage the newest lines
-   * describe what is happening now. Drops are counted in {@link droppedEntryCount} and the
-   * first one is reported through `onError` as a `WRITE` failure, so a silently truncated
-   * log is never the only evidence.
+   * describe what is happening now. Drops are counted in
+   * {@link NamedPipeSinkHealth.droppedEntries} and the first one is reported through
+   * `onError` as a `WRITE` failure, so a silently truncated log is never the only
+   * evidence.
    *
    * Shared with `FileSink`, which reads the same option the same way.
    */
@@ -64,6 +65,41 @@ export interface NamedPipeSinkOptions {
    * where it stood.
    */
   maxRetries?: number;
+}
+
+/**
+ * What a `NamedPipeSink` will tell you about itself.
+ *
+ * The shape `FileSink.getHealth()` returns, plus the one thing only this sink has
+ * (`isReconnecting`). The two sinks now answer a failure the same way, and there was no
+ * reason for only one of them to be able to say how that was going: this sink exposed a
+ * single `droppedEntryCount` getter, so a queue growing behind a pipe nobody was reading
+ * was invisible until entries started falling off the end of it.
+ */
+export interface NamedPipeSinkHealth {
+  /** No failed writes since the last successful one, and the pipe is open. */
+  isHealthy: boolean;
+  /** Entries rendered and waiting for the pipe. */
+  queueSize: number;
+  /**
+   * Entries this sink did not deliver - evicted at `maxQueueSize`, or out of retries.
+   *
+   * The same meaning as `FileSinkHealth.droppedEntries`.
+   */
+  droppedEntries: number;
+  /** Whether the pipe is currently open for writing. */
+  isInitialized: boolean;
+  /** Whether a reconnect - manual or automatic - is in flight. */
+  isReconnecting: boolean;
+  /** The most recent failure of any kind, including a `formatter` that threw. */
+  lastError?: Error;
+  /**
+   * Failed writes since the last successful one.
+   *
+   * Write failures only: a `FORMAT` failure still produced a line and left the pipe
+   * healthy, so counting it would report a sink that is working perfectly as broken.
+   */
+  consecutiveFailures: number;
 }
 
 export type ReconnectStatus =
@@ -132,6 +168,8 @@ export class NamedPipeSink implements LogSink {
   private maxRetries: number;
   private droppedEntries = 0;
   private didReportDrop = false;
+  private lastError?: Error;
+  private consecutiveFailures = 0;
   /**
    * When the last automatic reopen was attempted.
    *
@@ -185,13 +223,33 @@ export class NamedPipeSink implements LogSink {
   }
 
   /**
+   * Current state of the sink, in the shape `FileSink.getHealth()` uses.
+   *
+   * The one place this sink reports on itself. It replaced a `droppedEntryCount` getter
+   * and an `isReconnecting` getter, which between them answered two of the seven
+   * questions worth asking and left a queue growing behind an unusable pipe invisible
+   * until entries began falling off the end of it. One method, the same shape as the
+   * other queueing sink, so a consumer can watch both the same way.
+   *
+   * Cheap enough to poll: every field is already being tracked.
+   */
+  public getHealth(): NamedPipeSinkHealth {
+    return {
+      isHealthy: this.consecutiveFailures === 0 && this.isInitialized,
+      queueSize: this.writeQueue.length,
+      droppedEntries: this.droppedEntries,
+      isInitialized: this.isInitialized,
+      isReconnecting: this._isReconnecting,
+      lastError: this.lastError,
+      consecutiveFailures: this.consecutiveFailures,
+    };
+  }
+
+  /**
    * Attempt to reconnect to the named pipe.
    * Useful when the pipe reader restarts or after a temporary error.
    * Queued writes during the outage will be flushed on successful reconnection.
    */
-  public get isReconnecting(): boolean {
-    return this._isReconnecting;
-  }
 
   public async reconnect(): Promise<ReconnectStatus> {
     // If already reconnecting, just wait for the existing attempt
@@ -382,11 +440,6 @@ export class NamedPipeSink implements LogSink {
     }
   }
 
-  /** Entries discarded because the queue was at `maxQueueSize`. */
-  public get droppedEntryCount(): number {
-    return this.droppedEntries;
-  }
-
   /**
    * Put a failed entry back on the queue, or give up on it.
    *
@@ -399,7 +452,8 @@ export class NamedPipeSink implements LogSink {
    * nothing is being written in order anyway.
    *
    * An entry that has used up its attempts is counted as a drop rather than vanishing,
-   * so `droppedEntryCount` means "lines this sink did not deliver" whatever the reason.
+   * so `getHealth().droppedEntries` means "lines this sink did not deliver" whatever the
+   * reason.
    */
   private requeue(queued: QueuedPipeEntry): void {
     if (this.closed || this.closing) {
@@ -542,6 +596,9 @@ export class NamedPipeSink implements LogSink {
       // instead of dropping makes that path far busier, which is what turned a harmless
       // no-op into a real leak.
       this.pipeStream.write(messageToWrite);
+      // Handed to the stream, which is as far as this sink can see: what the pipe does
+      // with it afterwards arrives as an `'error'` event, not as a return value.
+      this.consecutiveFailures = 0;
     } catch (error) {
       this.handleError(PipeErrorType.WRITE, error);
       // The line never reached the pipe, so it goes back on the queue and out on a later
@@ -610,6 +667,15 @@ export class NamedPipeSink implements LogSink {
     // filesystem callbacks as well as from `catch` blocks, so it is not guaranteed to be
     // an `Error`, and `onError` declares one.
     const failure = toError(error);
+
+    this.lastError = failure;
+
+    // Write failures only. A `FORMAT` failure still wrote a line and left the pipe
+    // untouched, so counting it would report a healthy sink as failing - the same
+    // distinction the error type itself exists to draw.
+    if (errorType === PipeErrorType.WRITE) {
+      this.consecutiveFailures++;
+    }
 
     // The shared rung, so this channel cannot drift from the logger's four. Nothing here
     // may escape: `handleError` runs from a Node stream `'error'` handler, where a throw is
