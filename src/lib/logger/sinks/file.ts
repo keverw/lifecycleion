@@ -20,6 +20,17 @@ export type {
   SinkFailureKind,
 } from './internal/sink-failure';
 
+/**
+ * The shortest flush `close()` will ask for, however little of its budget is left.
+ *
+ * The same floor, and for the same reason, as `NamedPipeSink`'s: the drain loop spends the
+ * close budget before the flush is reached, and a zero-millisecond timer registered in the
+ * same tick as `end()` always wins against a `'finish'` that cannot fire synchronously.
+ * Without it the final flush would not merely be short but impossible. A tenth of a second
+ * is what a close can overshoot by, against a default of thirty.
+ */
+const MIN_CLOSE_FLUSH_MS = 100;
+
 export interface FileSinkOptions {
   logDir: string;
   basename: string;
@@ -388,8 +399,54 @@ export class FileSink implements LogSink {
 
     this.abandonQueueOnClose();
 
-    // Close stream
-    await this.endStream();
+    // Close stream, on what is left of the *whole* close's budget. `endStream()` waits on
+    // `stream.end(cb)`, which flushes before it calls back - so with `logDir` on a hung
+    // network mount, or a path that resolves to a FIFO or device with no reader, that
+    // callback never fired and `await sink.close()` never resolved: a shutdown hang from
+    // the one method that documents a bound. `closeTimeoutMS` covered the init wait and
+    // the drain loop above and stopped short of the flush that follows them.
+    //
+    // Floored, for the reason `NamedPipeSink.close()` floors its own: the drain loop exits
+    // on the same deadline, so a stalled destination arrives here with nothing left, and a
+    // zero-millisecond timer registered in the same tick as `end()` always beats a
+    // `'finish'` that cannot fire synchronously - which would make the final flush
+    // unreachable for a stream that would have flushed at once.
+    const remainingCloseMS = Math.max(
+      MIN_CLOSE_FLUSH_MS,
+      this.closeTimeoutMS - (Date.now() - startTime),
+    );
+
+    const stream = this.logFileStream;
+
+    let flushTimeout: NodeJS.Timeout | undefined;
+
+    try {
+      await Promise.race([
+        this.endStream(),
+        new Promise<void>((resolve) => {
+          flushTimeout = setTimeout(resolve, remainingCloseMS);
+        }),
+      ]);
+    } finally {
+      if (flushTimeout) {
+        clearTimeout(flushTimeout);
+      }
+    }
+
+    // Whatever `end()` did not manage in that window is not going to happen: the descriptor
+    // is released rather than held for the life of the process. Cleared only if it is still
+    // the stream this close found, matching `endStream()`'s own check.
+    if (stream && !stream.destroyed) {
+      try {
+        stream.destroy();
+      } catch {
+        // Best effort; the sink is closed either way.
+      }
+    }
+
+    if (this.logFileStream === stream) {
+      this.logFileStream = undefined;
+    }
   }
 
   /**

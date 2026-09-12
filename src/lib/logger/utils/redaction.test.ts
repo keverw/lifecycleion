@@ -1243,6 +1243,30 @@ describe('applyRedaction - fail closed', () => {
 
     expect(result['password']).toBe(REDACTION_FAILED_MARKER);
   });
+
+  test('reports the bag that could not be enumerated at all', () => {
+    // The one fail-closed branch here that returned without reporting. Every sibling says
+    // why it failed; this one put `***REDACTION FAILED***` in the output and never fired
+    // `onFormatError`, so the operator had nothing anywhere to trace it to.
+    const revocable = Proxy.revocable({ password: 'hunter2' }, {});
+
+    revocable.revoke();
+
+    const failures: { kind: string; key: string }[] = [];
+
+    const result = applyRedaction(
+      revocable.proxy,
+      ['password'],
+      undefined,
+      (_error, kind, key) => {
+        failures.push({ kind, key });
+      },
+    );
+
+    expect(result['password']).toBe(REDACTION_FAILED_MARKER);
+    expect(failures.length).toBeGreaterThan(0);
+    expect(failures[0]?.kind).toBe('redaction');
+  });
 });
 
 describe('applyRedaction - params it was not asked to redact', () => {

@@ -209,6 +209,15 @@ function readOwnSensitivePaths(
  */
 const UNRENDERABLE_KEYS = '<unrenderable: keys>';
 
+/**
+ * A value with nothing to address inside it, so it renders as one row rather than as rows.
+ *
+ * Not a string, because every string this file produces is a value a payload could hold:
+ * the caller renders the original through the ordinary leaf renderer on seeing this, so a
+ * sentinel that could be confused with content would send a payload down the wrong branch.
+ */
+const NOT_ADDRESSABLE = Symbol('error-to-string-not-addressable');
+
 /** A single value refused to be read - a throwing accessor, a revoked `Proxy`. */
 const UNRENDERABLE_VALUE = '<unrenderable: value>';
 
@@ -237,15 +246,16 @@ const UNRENDERABLE_TEXT = '<unrenderable: text>';
  * inherited keys as own ones puts them back where both the walk and the table can see
  * them, which is the whole point of the bag.
  *
- * @returns The bag, or {@link UNRENDERABLE_KEYS} when the value refuses to be enumerated
+ * @returns The bag, {@link UNRENDERABLE_KEYS} when the value refuses to be enumerated
  *   at all, which the caller renders as the marker rather than as an absent
- *   `additionalInfo`.
+ *   `additionalInfo`, or {@link NOT_ADDRESSABLE} when it enumerates to nothing, which the
+ *   caller renders as a single row.
  */
 function asAddressableBag(
   info: object,
   path: string,
   reportRender: ReportFormatFailure,
-): object | string {
+): object | string | typeof NOT_ADDRESSABLE {
   if (isPlainContainer(info)) {
     return info;
   }
@@ -269,6 +279,19 @@ function asAddressableBag(
     reportRender(error, path);
 
     return UNRENDERABLE_KEYS;
+  }
+
+  // Nothing enumerable to forward. A `Map`, a `Set`, a `Date`, an `Error`, a `URL` - every
+  // non-plain container whose contents live behind methods or internal slots - yields no
+  // keys here, so the bag was empty, the row loop below had nothing to write, and the
+  // error rendered as one carrying no `additionalInfo` at all. That is the same silent
+  // collapse the refused-enumeration branch above exists to refuse, and it disagreed with
+  // this file's own rule that a non-object `additionalInfo` renders as a single row: the
+  // identical value one level deeper (`additionalInfo: { inner: map }`) rendered fine.
+  // Answering with the marker string sends it through the single-row exit instead, where
+  // it prints as the leaf it is.
+  if (keys.length === 0) {
+    return NOT_ADDRESSABLE;
   }
 
   const bag: Record<string, unknown> = {};
@@ -765,6 +788,45 @@ function errorToASCIITable(
                 reportRender,
               )
             : additionalInfo;
+
+        // A container with nothing addressable inside it - a `Map`, a `Set`, a `Date`, a
+        // `URL` - renders as the one leaf it is, through the same renderer that already
+        // prints it that way one level deeper. Walking it as a bag produced no rows at
+        // all, so the error came out claiming to carry no `additionalInfo`; nothing is
+        // skipped by not walking it, since a path cannot address a key it does not have.
+        if (bag === NOT_ADDRESSABLE) {
+          table.addRow(
+            'AdditionalInfo',
+            stringifyValue(
+              additionalInfo,
+              joinPath(path, 'additionalInfo'),
+              maxRowLength,
+              seen,
+              depth + 1,
+              budget,
+              redactFunction,
+              report,
+              reportRender,
+            ),
+          );
+
+          addErrorTail(
+            table,
+            err,
+            cause,
+            sensitivePaths,
+            path,
+            maxRowLength,
+            seen,
+            depth,
+            budget,
+            redactFunction,
+            report,
+            reportRender,
+          );
+
+          return table;
+        }
 
         // A bag that could not be enumerated at all carries the marker instead, and falls
         // through to the non-object branch below, which renders it as the `AdditionalInfo`

@@ -549,6 +549,52 @@ function pathPointingBelow(
 }
 
 /**
+ * Whether reading `key` off `value` can answer differently the next time it is read.
+ *
+ * An own enumerable accessor is the one entry this walk cannot hand back by reference. The
+ * walk reads each member exactly once and decides from that read alone, but the value it
+ * returns is read *again* - by the renderer, by a structured sink, by whatever the caller
+ * does with it - and a getter is free to answer differently then. A subtree that matched
+ * nothing on the read the walk saw was passed through untouched, so the second read
+ * rendered whatever the getter chose to give it: measured through the public API, a
+ * `redactedKeys: ['password']` pass masking the root's own `password` and printing
+ * `a.g.up.password` in the clear beside it, because `up` answered `{}` first and the
+ * secret second.
+ *
+ * The answer is to stop passing such a container through, not to read it twice here. A
+ * container holding one of these is rebuilt from the values the walk already read, so what
+ * the caller gets back is the snapshot this pass actually vetted.
+ *
+ * Own accessors only. An inherited one is not something this walk reads or rebuilds, and a
+ * `Proxy` that lies from its `getOwnPropertyDescriptor` trap can defeat this the way it can
+ * defeat every other question asked of it - the leak this closes is the getter, which is
+ * ordinary, not the hostile proxy, which is not.
+ *
+ * An absent descriptor is *not* one of these. An array hole has none - `[1, , 3]`,
+ * `new Array(n)`, anything whose `length` runs past its defined indices - and the index
+ * loop walks it by `length`, so treating "no descriptor" as unstable rebuilt every sparse
+ * array that came through: the hole came back as a dense `undefined`, the caller's own
+ * array stopped being handed back, and one hole anywhere forced a deep rebuild of the
+ * whole payload. A hole answers `undefined` to every read, which is the one thing this
+ * needs to know.
+ *
+ * @returns `true` when the member is an accessor, and when the descriptor cannot be read
+ *          at all - a member this cannot vouch for is treated as one that needs
+ *          snapshotting, which is the conservative direction here.
+ */
+function isUnstableEntry(value: object, key: string): boolean {
+  let descriptor: PropertyDescriptor | undefined;
+
+  try {
+    descriptor = Object.getOwnPropertyDescriptor(value, key);
+  } catch {
+    return true;
+  }
+
+  return descriptor !== undefined && descriptor.get !== undefined;
+}
+
+/**
  * Whether a subtree that no path addresses still has to be walked in full.
  *
  * A container with no candidate beneath it masks nothing, so the walk's whole output for
@@ -654,6 +700,13 @@ function needsFullWalk(
 
       state.scanLeft--;
 
+      // A slot the walk would have to snapshot rather than pass through. Skipping the
+      // subtree hands it back by reference, which is exactly what must not happen to an
+      // accessor - see {@link isUnstableEntry}.
+      if (isUnstableEntry(elements, String(index))) {
+        return true;
+      }
+
       let element: unknown;
 
       try {
@@ -693,6 +746,10 @@ function needsFullWalk(
 
       state.scanLeft--;
 
+      if (isUnstableEntry(value, name)) {
+        return true;
+      }
+
       let named: unknown;
 
       try {
@@ -715,6 +772,10 @@ function needsFullWalk(
     }
 
     state.scanLeft--;
+
+    if (isUnstableEntry(value, key)) {
+      return true;
+    }
 
     let entry: unknown;
 
@@ -794,9 +855,19 @@ interface RedactState {
    * the leak the failure marker exists to prevent.
    */
   didFailToRead: boolean;
+
   /**
-   * Nodes already walked, inside a region no path can reach, that came back
-   * {@link UNCHANGED}.
+   * Whether any container was rebuilt only to snapshot an unstable entry.
+   *
+   * Kept beside {@link RedactState.didMaskAnything} because it answers the same question
+   * for the shortcut at the end of `redactMatchedPaths`: a pass that masked nothing hands
+   * the caller their own value back, and that would undo every snapshot taken along the
+   * way - handing back the very container whose getter is free to answer differently on
+   * the read that reaches the output. See {@link isUnstableEntry}.
+   */
+  didSnapshotUnstable: boolean;
+  /**
+   * What nodes already walked inside a region no path can reach came back as.
    *
    * `seen` is released as the walk leaves a node, deliberately, so a value referenced
    * twice side by side is walked both times rather than the second being called a cycle.
@@ -812,14 +883,35 @@ interface RedactState {
    *   answers a question about the node *at a path*. Where an ancestor's scan already
    *   established that no path points below it, nothing at or beneath it can match, so
    *   the path stops mattering and the node alone determines the answer.
-   * - **Only {@link UNCHANGED}.** A cycle yields the failure marker, and whether a
-   *   back-edge closes depends on the route, not on the node - so a marker must never be
-   *   replayed onto a route where the same node is not in a cycle. `UNCHANGED` cannot be
-   *   wrong in that direction: it is returned only when nothing beneath produced a marker
-   *   on this route, and a node whose subtree reaches back into itself produces one on
-   *   every route that walks it, this one included.
+   * - **Only a result that is not route-dependent.** A cycle yields the failure marker,
+   *   and whether a back-edge closes depends on the route, not on the node - so a marker
+   *   must never be replayed onto a route where the same node is not in a cycle. The same
+   *   goes for the depth cap and for the entry budget, which stop at whatever the walk
+   *   order reached first. {@link RedactState.routeDependentResults} is what counts those,
+   *   and a subtree that produced one is not recorded.
+   *
+   * Both {@link UNCHANGED} and a rebuilt copy are recorded. The copy matters as much as
+   * the sentinel now that an unstable entry forces a snapshot: a shared subtree holding a
+   * single getter answers with a copy rather than `UNCHANGED`, so recording only the
+   * sentinel put the exponential walk straight back - 2^n rebuilds of the same node, which
+   * is what this memo exists to stop. Replaying one copy across every reference also keeps
+   * the sharing the input had, rather than turning one object into n identical ones.
    */
-  noMatchUnchanged: WeakSet<object>;
+  skippedRegionResults: WeakMap<object, unknown>;
+  /**
+   * How many results this pass has produced that depend on the *route* to a node rather
+   * than on the node.
+   *
+   * The memo above replays a result onto every reference that reaches a node, so a result
+   * that would have been different by another route must never go into it. Three produce
+   * one: a cycle, which closes on some routes and not others; the depth cap, which is
+   * reached at different points depending on how far down the route already is; and the
+   * entry budget, which is spent in walk order and so stops at whichever reference got
+   * there first. Counted rather than flagged, because what matters is whether one landed
+   * *inside the subtree just walked* - which is a comparison of this number before and
+   * after, and not a property of the pass as a whole.
+   */
+  routeDependentResults: number;
   /**
    * Entries left to visit in this pass. See {@link MAX_REDACTION_ENTRIES}.
    *
@@ -1022,15 +1114,29 @@ function redactPathsInner(
   // it stopped. Not reported either: a cap is not a failure, and the one redaction report a
   // broken `redactFunction` needs should not be spent on it.
   if (path.length >= MAX_RENDER_DEPTH) {
+    // Where the cap lands is a property of the route, not of the node. See
+    // {@link RedactState.routeDependentResults}.
+    state.routeDependentResults++;
+
     return TRUNCATED;
   }
 
-  // Already walked, under an ancestor that established nothing here can match, and found
-  // to change nothing. See `RedactState.noMatchUnchanged` for why the node alone is
-  // enough to key that on here and nowhere else.
-  if (shouldSkipCandidateScan && state.noMatchUnchanged.has(value)) {
-    return UNCHANGED;
+  // Already walked, under an ancestor that established nothing here can match. See
+  // `RedactState.skippedRegionResults` for why the node alone is enough to key the answer
+  // on here and nowhere else. `undefined` is never a recorded result - the walk answers
+  // with `UNCHANGED` or with a container - so it is free to mean "not recorded".
+  if (shouldSkipCandidateScan) {
+    const recorded = state.skippedRegionResults.get(value);
+
+    if (recorded !== undefined) {
+      return recorded;
+    }
   }
+
+  // Where the counter stood before this node was walked, so what the walk comes back with
+  // can be told apart from what the route to it produced. See
+  // {@link RedactState.routeDependentResults}.
+  const routeDependentBefore = state.routeDependentResults;
 
   // Nothing below can match, so the walk's answer for this whole subtree is the subtree
   // itself - reached, without this, by rebuilding all of it and discarding the rebuild.
@@ -1070,6 +1176,10 @@ function redactPathsInner(
     if (!shouldSkipScanBelow) {
       state.didFailToRead = true;
     }
+
+    // Whether this node closes a cycle is a property of the route to it, so nothing on the
+    // way back up may be memoized. See {@link RedactState.routeDependentResults}.
+    state.routeDependentResults++;
 
     return REDACTION_FAILED_MARKER;
   }
@@ -1135,6 +1245,7 @@ function redactPathsInner(
         // branch above. See {@link MAX_REDACTION_ENTRIES}.
         if (state.entriesLeft <= 0) {
           state.didFailToRead = true;
+          state.routeDependentResults++;
           didMask = true;
           copy.push(REDACTION_FAILED_MARKER);
 
@@ -1146,7 +1257,16 @@ function redactPathsInner(
         // An array slot, so a `*` in the list expands onto it. Built once and reused for
         // both the reports and the recursion below, which is what the index and the
         // failure paths each need.
-        const elementPath = [...path, indexStep(String(index))];
+        const indexKey = String(index);
+        const elementPath = [...path, indexStep(indexKey)];
+
+        // Rebuilt rather than passed through, so what leaves this walk is the value it
+        // read. See {@link isUnstableEntry}: the copy below already holds that value, so
+        // marking the container is the whole of the fix.
+        if (isUnstableEntry(source, indexKey)) {
+          didMask = true;
+          state.didSnapshotUnstable = true;
+        }
 
         let result: unknown;
 
@@ -1241,12 +1361,22 @@ function redactPathsInner(
         // in this walk that failed open. Setting it again where a marker was written costs
         // nothing, since it is already true there.
         state.didFailToRead = true;
+        state.routeDependentResults++;
         didMask = true;
       }
 
       for (const namedKey of namedKeys) {
+        // Stopped on the first key past the budget, exactly as the object branch below
+        // stops and for the reason its comment gives: a `continue` still walked the whole
+        // key list and still built an entry for each of them, so the cap bounded neither
+        // the time nor the size of the copy being rebuilt. An array with `length === 0`
+        // sails past the `entriesLeft > 0` gate above - the index loop consumed nothing -
+        // and then rebuilt every named key it had: 1.2 million of them against a cap of
+        // one million, 624 ms synchronously inside the redaction pass. One marker stands
+        // for the tail, which is what the rest would have been.
         if (state.entriesLeft <= 0) {
           state.didFailToRead = true;
+          state.routeDependentResults++;
           didMask = true;
           defineEntry(
             copy as unknown as Record<string, unknown>,
@@ -1254,7 +1384,7 @@ function redactPathsInner(
             REDACTION_FAILED_MARKER,
           );
 
-          continue;
+          break;
         }
 
         state.entriesLeft--;
@@ -1263,6 +1393,12 @@ function redactPathsInner(
         // because `isArrayIndexKey` says it is not a slot - so a `*` in the list does not
         // expand onto it, and reaches it only as the key literally spelled `*`.
         const namedPath = [...path, literalStep(namedKey)];
+
+        // Snapshotted rather than passed through, exactly as an element is above.
+        if (isUnstableEntry(source, namedKey)) {
+          didMask = true;
+          state.didSnapshotUnstable = true;
+        }
 
         let namedResult: unknown;
         let namedValue: unknown;
@@ -1311,10 +1447,24 @@ function redactPathsInner(
       }
 
       if (didMask) {
+        recordSkippedRegionResult(
+          value,
+          shouldSkipCandidateScan,
+          state,
+          copy,
+          routeDependentBefore,
+        );
+
         return copy;
       }
 
-      recordUnchanged(value, shouldSkipCandidateScan, state);
+      recordSkippedRegionResult(
+        value,
+        shouldSkipCandidateScan,
+        state,
+        UNCHANGED,
+        routeDependentBefore,
+      );
 
       return UNCHANGED;
     }
@@ -1341,6 +1491,7 @@ function redactPathsInner(
       // been.
       if (state.entriesLeft <= 0) {
         state.didFailToRead = true;
+        state.routeDependentResults++;
         didMask = true;
         defineEntry(copy, key, REDACTION_FAILED_MARKER);
 
@@ -1353,6 +1504,14 @@ function redactPathsInner(
       // as the key literally spelled `*` - including on an object whose keys read as
       // numbers, which is not an array and which a wildcard therefore does not address.
       const entryPath = [...path, literalStep(key)];
+
+      // Snapshotted rather than passed through, exactly as an array's element is. This is
+      // the branch the leak was measured on: an object whose `up` getter answered `{}` to
+      // the walk and a bag holding `password` to the renderer.
+      if (isUnstableEntry(value, key)) {
+        didMask = true;
+        state.didSnapshotUnstable = true;
+      }
 
       let result: unknown;
       let entryValue: unknown;
@@ -1413,10 +1572,24 @@ function redactPathsInner(
     // renderer prints, so a path naming one it does not have reaches nothing - exactly as
     // a typo does, and masking over that would blank a payload for a misspelling.
     if (didMask) {
+      recordSkippedRegionResult(
+        value,
+        shouldSkipCandidateScan,
+        state,
+        copy,
+        routeDependentBefore,
+      );
+
       return copy;
     }
 
-    recordUnchanged(value, shouldSkipCandidateScan, state);
+    recordSkippedRegionResult(
+      value,
+      shouldSkipCandidateScan,
+      state,
+      UNCHANGED,
+      routeDependentBefore,
+    );
 
     return UNCHANGED;
   } finally {
@@ -1429,24 +1602,36 @@ function redactPathsInner(
 }
 
 /**
- * Note that `value` walked to {@link UNCHANGED}, when that answer can be reused.
+ * Note what `value` walked to, when that answer can be reused for every other reference
+ * that reaches it.
  *
- * Only inside a region an ancestor's scan already cleared, and only for `UNCHANGED`; see
- * `RedactState.noMatchUnchanged` for why both conditions are what make the memo sound.
+ * Only inside a region an ancestor's scan already cleared, and only for an answer that
+ * does not depend on the route taken to get here; see `RedactState.skippedRegionResults`
+ * for why both conditions are what make the memo sound.
+ *
+ * @param routeDependentBefore `RedactState.routeDependentResults` as it stood when the
+ *        walk of this node began. Unchanged means nothing under it hit a cycle, the depth
+ *        cap, or the entry budget, so what it came back with is a property of the node.
  */
-function recordUnchanged(
+function recordSkippedRegionResult(
   value: object,
   isInSkippedRegion: boolean,
   state: RedactState,
+  result: unknown,
+  routeDependentBefore: number,
 ): void {
   if (!isInSkippedRegion) {
     return;
   }
 
+  if (state.routeDependentResults !== routeDependentBefore) {
+    return;
+  }
+
   try {
-    state.noMatchUnchanged.add(value);
+    state.skippedRegionResults.set(value, result);
   } catch {
-    // Not a usable `WeakSet` key, so this node is simply walked again if it recurs.
+    // Not a usable `WeakMap` key, so this node is simply walked again if it recurs.
   }
 }
 
@@ -1471,7 +1656,9 @@ export function redactMatchedPaths(
   const state: RedactState = {
     didMaskAnything: false,
     didFailToRead: false,
-    noMatchUnchanged: new WeakSet(),
+    didSnapshotUnstable: false,
+    skippedRegionResults: new WeakMap(),
+    routeDependentResults: 0,
     entriesLeft: MAX_REDACTION_ENTRIES,
     scanLeft: MAX_REDACTION_ENTRIES,
     aliases,
@@ -1505,5 +1692,9 @@ export function redactMatchedPaths(
     return value;
   }
 
-  return state.didMaskAnything || state.didFailToRead ? result : value;
+  return state.didMaskAnything ||
+    state.didFailToRead ||
+    state.didSnapshotUnstable
+    ? result
+    : value;
 }

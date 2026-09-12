@@ -717,9 +717,16 @@ export function applyRedaction(
 
   try {
     guarded = normalizeParamsBag(params, unreadable, aliases);
-  } catch {
+  } catch (error) {
     // `Object.keys` itself refused - a revoked `Proxy`, an `ownKeys` trap that throws -
     // so there is no key to read safely and nothing to mark but the redacted ones.
+    //
+    // Said, not only marked. Every sibling branch here reports its cause, and this was the
+    // one that failed closed in silence: the operator saw `***REDACTION FAILED***` in the
+    // output, `onFormatError` never fired, and there was nothing anywhere to trace it to -
+    // which is the silence the reporter exists to end.
+    report(error, '<params>');
+
     return markAllRedactionFailed(entries);
   }
 

@@ -410,6 +410,21 @@ export class NodeAdapter implements HTTPAdapter {
         | undefined;
       let isStreamFactoryPending = false;
 
+      /**
+       * Whether the server has already answered.
+       *
+       * A body write that fails after this is not the failure worth reporting. A server is
+       * free to send a complete early response - a 413 or a 401 with `Connection: close` -
+       * while the body is still uploading, and tearing that socket down is how it says so.
+       * The writers then reject (the chunk truly was not accepted), and the `catch`
+       * handlers below used to answer that with `req.destroy()` and a synthetic
+       * `status: 0, isTransportError: true`, racing the real response to `resolve`: the
+       * caller got a fabricated transport error instead of the server's actual status,
+       * and the destroy tore down the connection the response was still arriving on.
+       * With a response in hand the response path is the one that gets to answer.
+       */
+      let didReceiveResponse = false;
+
       // Deduplication guard — Node's upload path can reach 100% from multiple
       // sources (final drain callback and the upload-complete signal). Once
       // 100% is reported any further calls are dropped.
@@ -434,6 +449,8 @@ export class NodeAdapter implements HTTPAdapter {
       // cannot make it async directly. We use a void IIFE that routes any
       // unhandled rejections back to the outer promise's reject.
       const req = httpModule.request(options, (res) => {
+        didReceiveResponse = true;
+
         void (async () => {
           const status = res.statusCode ?? 0;
           const headers = normalizeResponseHeaders(res.headers);
@@ -906,6 +923,13 @@ export class NodeAdapter implements HTTPAdapter {
             req.end();
           })
           .catch((error: unknown) => {
+            // See `didReceiveResponse`: the server has already answered, so the
+            // write failing is how that answer arrived, not a transport failure
+            // to report over it. The response path resolves with the real status.
+            if (didReceiveResponse) {
+              return;
+            }
+
             req.destroy();
             resolveAdapterResponse(
               resolve,
@@ -942,6 +966,13 @@ export class NodeAdapter implements HTTPAdapter {
             req.end();
           })
           .catch((error: unknown) => {
+            // See `didReceiveResponse`: the server has already answered, so the
+            // write failing is how that answer arrived, not a transport failure
+            // to report over it. The response path resolves with the real status.
+            if (didReceiveResponse) {
+              return;
+            }
+
             req.destroy();
             resolveAdapterResponse(
               resolve,

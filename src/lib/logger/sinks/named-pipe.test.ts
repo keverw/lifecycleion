@@ -548,6 +548,101 @@ describe('NamedPipeSink', () => {
     await sink.close();
   });
 
+  test('reports an unsupported platform once rather than once per attempt', async () => {
+    // Every other open failure goes through `reportOpenFailure`, which says a thing once
+    // per outage. This one called `handleError` directly and marked nothing, so each
+    // `write()` re-entered `openPipe` once `REOPEN_COOLDOWN_MS` had elapsed and a process
+    // logging once a second called `onError` once a second, forever - on the one failure
+    // that is certain never to clear.
+    const pipePath = `${tmpDir.path}/unsupported-platform.pipe`;
+    await createNamedPipe(pipePath);
+
+    const platformSpy = spyOn(os, 'platform').mockReturnValue('win32');
+
+    const failures: SinkFailure[] = [];
+
+    try {
+      const sink = new NamedPipeSink({
+        pipePath,
+        jsonFormat: false,
+        onError: (failure) => {
+          failures.push(failure);
+        },
+      });
+
+      const privateSink = sink as unknown as { openPipe: () => Promise<void> };
+
+      for (let attempt = 0; attempt < 5; attempt++) {
+        await privateSink.openPipe();
+      }
+
+      await sink.close();
+    } finally {
+      platformSpy.mockRestore();
+    }
+
+    const platformFailures = failures.filter(
+      (failure) => failure.kind === 'unsupported_platform',
+    );
+
+    expect(platformFailures).toHaveLength(1);
+  });
+
+  test('reconnect() waits for an open already in flight rather than racing it', async () => {
+    // `reconnect()` guarded on `closed`, `closing` and `_isReconnecting`, none of which the
+    // constructor's `initializePipe()` sets - only `isOpening` does. A `reconnect()` issued
+    // while the constructor's open was still pending therefore ran a second `openPipe`
+    // against the same FIFO: two probes, two `createWriteStream` opens, one `pendingStream`
+    // assignment silently orphaned, and `MAX_ABANDONED_OPENS` reached twice as fast.
+    const pipePath = `${tmpDir.path}/reconnect-races-open.pipe`;
+    await createNamedPipe(pipePath);
+
+    let concurrentOpens = 0;
+    let maxConcurrentOpens = 0;
+    let releaseOpen: () => void = () => undefined;
+
+    const openGate = new Promise<void>((resolve) => {
+      releaseOpen = resolve;
+    });
+
+    const prototype = NamedPipeSink.prototype as unknown as Record<
+      string,
+      unknown
+    >;
+    const realOpenPipe = prototype.openPipe;
+
+    prototype.openPipe = async function stalledOpenPipe(): Promise<void> {
+      concurrentOpens++;
+      maxConcurrentOpens = Math.max(maxConcurrentOpens, concurrentOpens);
+
+      try {
+        await openGate;
+      } finally {
+        concurrentOpens--;
+      }
+    };
+
+    try {
+      const sink = new NamedPipeSink({ pipePath, jsonFormat: false });
+
+      // Issued while the constructor's open is still parked on the gate, which is the
+      // window the guard covers.
+      const reconnecting = sink.reconnect();
+
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      releaseOpen();
+
+      await reconnecting;
+
+      expect(maxConcurrentOpens).toBe(1);
+
+      await sink.close();
+    } finally {
+      prototype.openPipe = realOpenPipe;
+    }
+  });
+
   test('should handle concurrent reconnect attempts', async () => {
     const pipePath = `${tmpDir.path}/already-reconnecting.pipe`;
     await createNamedPipe(pipePath);

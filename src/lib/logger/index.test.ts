@@ -1656,6 +1656,33 @@ describe('Logger', () => {
       expect(closeLogger.isReportErrorListenerRegistered()).toBe(false);
     });
 
+    test('keeps the registration when a live unregister could not take it off', async () => {
+      // Clearing the state unconditionally was right only on the `close()` path, where the
+      // listener is inert because `_closed` is set first. On a live logger it left the
+      // closure attached and still cancelling events while
+      // `isReportErrorListenerRegistered()` answered `false`, so the next `register` put a
+      // *second* one on and every reported error was logged twice.
+      const liveLogger = new Logger({ sinks: [], callProcessExit: false });
+
+      liveLogger.registerReportErrorListener();
+
+      const original = globalThis.removeEventListener;
+
+      globalThis.removeEventListener = () => {
+        throw new Error('removeEventListener gone');
+      };
+
+      try {
+        liveLogger.unregisterReportErrorListener();
+      } finally {
+        globalThis.removeEventListener = original;
+      }
+
+      expect(liveLogger.isReportErrorListenerRegistered()).toBe(true);
+
+      await liveLogger.close();
+    });
+
     test('should emit close event', async () => {
       const events: any[] = [];
 

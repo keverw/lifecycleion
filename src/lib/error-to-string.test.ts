@@ -1858,4 +1858,38 @@ describe('errorToString - bounds that hold at the entry point', () => {
       expect(rendered).toContain('boom');
     }
   });
+  it('renders a container with no addressable keys as one row', () => {
+    // `asAddressableBag` forwards `for...in` keys, and a `Map`, a `Set`, a `Date` or a
+    // `URL` has none - so the bag came out empty, the row loop wrote nothing, and the
+    // error rendered as one carrying no `additionalInfo` at all. The identical value one
+    // level deeper always rendered.
+    for (const info of [new Map([['a', 1]]), new Set([1]), new Date(0)]) {
+      const error = new Error('boom') as Error & { additionalInfo?: unknown };
+
+      error.additionalInfo = info;
+
+      const rendered = errorToString(error);
+
+      expect(rendered).toContain('AdditionalInfo');
+      expect(rendered).not.toBe('<error could not be rendered>');
+    }
+  });
+
+  it('renders a wide grapheme that overhangs its column instead of throwing', () => {
+    // `splitWord` splits by grapheme, so a column too narrow for a two-column character
+    // emits a chunk wider than the column and the padding count goes negative.
+    // `' '.repeat(-1)` threw a `RangeError` that the backstop turned into
+    // `<error could not be rendered>`, losing message, name and stack - for an error whose
+    // only crime was holding one CJK character deep in its `cause` chain.
+    let error: Error = new Error('\u4e16');
+
+    for (let level = 0; level < 18; level++) {
+      error = new Error(`level${String(level)}`, { cause: error });
+    }
+
+    const rendered = errorToString(error);
+
+    expect(rendered).not.toBe('<error could not be rendered>');
+    expect(rendered).toContain('level17');
+  });
 });

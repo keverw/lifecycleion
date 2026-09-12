@@ -1356,6 +1356,47 @@ describe('FileSink - bounded queue', () => {
     await sink.close();
   });
 
+  test('close() stays bounded when the final flush never completes', async () => {
+    // `closeTimeoutMS` bounded the init wait and the drain loop and then stopped: the
+    // closing `await this.endStream()` waited on `stream.end(cb)` with no deadline at all.
+    // `end()` flushes before it calls back, so with `logDir` on a hung mount - or a path
+    // that resolves to a FIFO with no reader - that callback never fired and
+    // `await sink.close()` never resolved, hanging whatever was shutting the process down.
+    const sink = new FileSink({
+      logDir: tmpDir.path,
+      basename: 'close-flush-hangs',
+      closeTimeoutMS: 150,
+    });
+
+    await sink.flush();
+
+    let wasDestroyed = false;
+
+    // Accepts the write and then never finishes flushing it, which is what a stalled
+    // destination does to `end()`.
+    const stalled = {
+      destroyed: false,
+      end: () => undefined,
+      destroy: () => {
+        wasDestroyed = true;
+      },
+      write: () => true,
+      on: () => undefined,
+      once: () => undefined,
+    };
+
+    (sink as unknown as { logFileStream: unknown }).logFileStream = stalled;
+
+    const startedAt = Date.now();
+
+    await sink.close();
+
+    expect(Date.now() - startedAt).toBeLessThan(5000);
+
+    // The descriptor is released rather than held for the life of the process.
+    expect(wasDestroyed).toBe(true);
+  });
+
   test('entries still queued when close() times out are counted and reported', async () => {
     // `close()` is bounded by `closeTimeoutMS`, and once it gives up nothing will ever
     // process what is left. Those entries were abandoned silently: `droppedEntries` stayed

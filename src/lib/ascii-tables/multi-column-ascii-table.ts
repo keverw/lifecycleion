@@ -1,4 +1,5 @@
 import { ASCIITableUtils } from './ascii-table-utils';
+import { padRight } from '../padding-utils';
 import stringWidth from 'string-width';
 
 interface MultiColumnASCIITableOptions {
@@ -161,7 +162,11 @@ export class MultiColumnASCIITable {
       const rowLine = wrappedCells.map((cell, index) => {
         const cellLines = cell.split('\n');
         const cellLine = cellLines[i] || '';
-        const padding = ' '.repeat(columnWidths[index] - stringWidth(cellLine));
+        // Clamped, for the reason `KeyValueASCIITable`'s padding is: a wrapped chunk can
+        // overhang a column narrower than one of its graphemes, and `repeat(-1)` throws
+        // out of a renderer whose caller turns any throw into `<error could not be
+        // rendered>`.
+        const padding = padRight('', columnWidths[index] - stringWidth(cellLine));
 
         return ' ' + cellLine + padding + ' ';
       });

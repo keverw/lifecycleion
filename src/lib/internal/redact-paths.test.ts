@@ -887,3 +887,89 @@ describe('redactMatchedPaths - the masking budget', () => {
     }
   });
 });
+describe('redactMatchedPaths - an entry that answers twice', () => {
+  test('does not hand back a subtree whose getter can answer differently', () => {
+    // The leak, reproduced through the public API: the walk read `up` once, saw `{}`,
+    // concluded nothing below matched, and handed the subtree back *by reference* - so the
+    // renderer read `up` again and printed what the getter chose to give it the second
+    // time. Masking the root's own `password` in the same pass made no difference; the
+    // untouched branch rode through beside it in the clear.
+    let reads = 0;
+    const secret = { password: SECRET };
+    const unstable = {
+      get up(): unknown {
+        reads++;
+
+        return reads > 1 ? secret : {};
+      },
+    };
+
+    const redacted = redactMatchedPaths(
+      { password: SECRET, a: { g: unstable } },
+      paths('password', '**.password'),
+      undefined,
+    ) as { a: { g: { up: { password?: string } } } };
+
+    // The snapshot the walk vetted, not whatever a later read produces.
+    expect(redacted.a.g.up.password).toBeUndefined();
+    expect(JSON.stringify(redacted)).not.toContain(SECRET);
+
+    // Read once, by the walk. Nothing downstream re-enters the getter.
+    expect(reads).toBe(1);
+  });
+
+  test('snapshots an unstable element of an array too', () => {
+    let reads = 0;
+    const holder: unknown[] = [];
+
+    Object.defineProperty(holder, '0', {
+      enumerable: true,
+      configurable: true,
+      get: () => {
+        reads++;
+
+        return reads > 1 ? { password: SECRET } : {};
+      },
+    });
+
+    const redacted = redactMatchedPaths(
+      { items: holder },
+      paths('**.password'),
+      undefined,
+    );
+
+    expect(JSON.stringify(redacted)).not.toContain(SECRET);
+    expect(reads).toBe(1);
+  });
+
+  test('does not mistake an array hole for an accessor', () => {
+    // A hole has no descriptor, and the index loop walks an array by `length`, so reading
+    // "no descriptor" as "unstable" rebuilt every sparse array that came through: the hole
+    // came back as a dense `undefined`, the caller's own array stopped being handed back,
+    // and one hole anywhere forced a deep rebuild of the whole payload. A hole answers
+    // `undefined` to every read, which is all this has to know.
+    // Built rather than spelled as `[1, , 3]`, which the linter refuses: same array, one
+    // hole at index 1.
+    const items = [1];
+
+    items.length = 3;
+    items[2] = 3;
+
+    const payload = { items, other: 'x' };
+
+    expect(redactMatchedPaths(payload, paths('password'), undefined)).toBe(
+      payload,
+    );
+  });
+
+  test('still hands an untouched plain payload back by reference', () => {
+    // The pass-through is the point of the walk: a payload a list matches none of is the
+    // caller's own value, not a copy of it. Only a container holding an accessor is
+    // rebuilt.
+    const payload = { a: { b: 1 }, c: [1, 2, 3] };
+
+    expect(redactMatchedPaths(payload, paths('**.password'), undefined)).toBe(
+      payload,
+    );
+  });
+});

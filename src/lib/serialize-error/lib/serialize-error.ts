@@ -241,10 +241,34 @@ function serializeErrorInner(
     }
 
     for (const key of keys) {
-      if (!(key in result)) {
-        // Read through the guard: a custom property is as free to throw as `message` is.
-        result[key] = readOwnMember(error, key, path, report);
+      // `hasOwnProperty`, not `in`, which is the check the error-like branch below already
+      // makes correctly. `in` walks `Object.prototype`, so an error carrying an own
+      // property named `toString`, `valueOf`, `constructor` or `hasOwnProperty` answered
+      // "already have that" about a key `result` had never been given, and the property
+      // was dropped with no marker and no report - at a boundary whose whole purpose is
+      // to carry an error across a process intact.
+      if (Object.prototype.hasOwnProperty.call(result, key)) {
+        continue;
       }
+
+      // Stopped rather than spun through, exactly as the bounded walks below stop. This
+      // enumeration is the error's own, and it is as attacker-shaped as any other bag:
+      // an error whose `cause` carries three hundred thousand own keys copied every one
+      // of them and then serialized every one of them, synchronously, on the failure path
+      // {@link MAX_SERIALIZED_NODES} exists to bound. `name`, `message` and `stack` are
+      // already in `result` by construction and so are never what this stops before.
+      if (budget.remaining <= 0) {
+        defineEntry(result, key, TRUNCATED);
+
+        break;
+      }
+
+      budget.remaining--;
+
+      // Read through the guard: a custom property is as free to throw as `message` is.
+      // Defined rather than assigned, now that `__proto__` reaches here: `in` used to
+      // answer true for it, so a plain assignment would reparent the object being built.
+      defineEntry(result, key, readOwnMember(error, key, path, report));
     }
 
     return deepSerializeRecord(result, seen, depth, path, report, budget);

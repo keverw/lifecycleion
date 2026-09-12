@@ -1864,6 +1864,35 @@ describe('a shared subtree costs one walk, not one per route', () => {
     expect(redacted['password']).not.toBe(SECRET);
   });
 
+  test('a shared subtree holding a getter is snapshotted once, not per route', () => {
+    // A getter stops the subtree being handed back by reference - it has to, or the second
+    // read leaks (see the accessor tests below) - and that made every node on the way up
+    // rebuild. Rebuilt per *route*, 30 levels of sharing is 2^30 copies and never
+    // finishes; the memo records the copy as well as the untouched answer, so it is one
+    // copy per node and the sharing survives into the output.
+    const leaf = {
+      get counted(): string {
+        return 'x';
+      },
+    };
+
+    let node: unknown = leaf;
+
+    for (let index = 0; index < 30; index++) {
+      node = { l: node, r: node };
+    }
+
+    const start = performance.now();
+
+    const redacted = redactValue(
+      { data: node, password: SECRET },
+      { redactedKeys: ['password'] },
+    ) as { data: { l: unknown; r: unknown } };
+
+    expect(performance.now() - start).toBeLessThan(2000);
+    expect(redacted.data.l).toBe(redacted.data.r);
+  });
+
   test('the scan reads each node once, however many references reach it', () => {
     let reads = 0;
     const leaf = {

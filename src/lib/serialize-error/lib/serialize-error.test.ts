@@ -613,4 +613,45 @@ describe('error-shaped objects with inherited members', () => {
     expect(serialized.message).toBe('own');
     expect(serialized.name).toBe('Inherited');
   });
+
+  test('keeps an own property whose name is on Object.prototype', () => {
+    // `!(key in result)` walked the prototype chain, so an own `toString`, `valueOf` or
+    // `constructor` answered "already present" about a key the result had never been
+    // given, and was dropped with no marker and no report.
+    const shadowingKeys = ['toString', 'valueOf', 'constructor'];
+    const error = new Error('boom');
+
+    for (const key of shadowingKeys) {
+      (error as unknown as Record<string, unknown>)[key] = `own-${key}`;
+    }
+
+    const serialized = serializeError(error) as unknown as Record<
+      string,
+      unknown
+    >;
+
+    for (const key of shadowingKeys) {
+      expect(serialized[key]).toBe(`own-${key}`);
+    }
+  });
+
+  test('bounds an error carrying more own keys than the node budget', () => {
+    // The error's own enumeration was uncharged, so `MAX_SERIALIZED_NODES` bounded every
+    // walk but the one that reaches every error: a `cause` holding three hundred thousand
+    // keys copied and serialized all of them, synchronously, at an IPC boundary.
+    const cause = new Error('cause');
+    const bag = cause as unknown as Record<string, unknown>;
+
+    for (let index = 0; index < 200_000; index++) {
+      bag[`k${String(index)}`] = index;
+    }
+
+    const serialized = serializeError(
+      new Error('boom', { cause }),
+    ) as unknown as { cause: Record<string, unknown> };
+
+    expect(Object.keys(serialized.cause).length).toBeLessThan(200_000);
+    expect(serialized.cause.name).toBe('Error');
+    expect(serialized.cause.message).toBe('cause');
+  });
 });

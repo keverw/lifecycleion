@@ -260,9 +260,18 @@ export class KeyValueASCIITable {
           const keyLine = keyLines[i] || '';
           const valueLine = valueLines[i] || '';
 
-          const keyPadding = ' '.repeat(columnWidths[0] - stringWidth(keyLine));
+          // `padRight`, not `' '.repeat()`, because the count can go negative: a line
+          // wider than its own column is not impossible here. `splitWord` splits by
+          // grapheme, so a column one cell wide cannot hold a two-column grapheme - a CJK
+          // character or an emoji - at all, and the chunk it emits overhangs by one.
+          // `repeat(-1)` throws a `RangeError`, which `errorToString`'s backstop turns
+          // into `<error could not be rendered>`: message, name and stack all thrown away
+          // because one value held a wide character. `padEnd` clamps instead, so the row
+          // is one cell wide of its border rather than absent.
+          const keyPadding = padRight('', columnWidths[0] - stringWidth(keyLine));
 
-          const valuePadding = ' '.repeat(
+          const valuePadding = padRight(
+            '',
             columnWidths[1] - stringWidth(valueLine),
           );
 

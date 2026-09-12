@@ -689,10 +689,21 @@ export class Logger extends EventEmitter {
       // The global was usable when the listener went on and is not now. Rethrowing buys
       // nothing and costs a great deal: this runs from `close()` *before* the sinks are
       // closed, so a throw here left every file and pipe sink holding its handle for the
-      // life of the process. A listener that cannot be taken off is already inert, since
-      // `close()` sets `_closed` first and the listener returns early on it, and the
-      // state below is cleared either way. Guarded here rather than at `close()` so all
-      // of the other callers are covered by the same fix.
+      // life of the process. Guarded here rather than at `close()` so all of the other
+      // callers are covered by the same fix.
+      //
+      // The state is kept rather than cleared, and only on a *live* logger. A listener
+      // that could not be taken off is still attached: after `close()` that is harmless,
+      // since `_closed` is set first and the listener returns early on it, so the state is
+      // cleared below exactly as before - but a direct `unregisterReportErrorListener()`
+      // on a live logger left the closure attached and still logging and cancelling
+      // events while `isReportErrorListenerRegistered()` answered `false`, so the next
+      // `register...()` attached a *second* one and every reported error was logged twice.
+      // Keeping the registration is the honest answer to a removal that did not happen,
+      // and it is what stops the duplicate.
+      if (!this._closed) {
+        return 'success';
+      }
     }
 
     this._reportErrorListener = null;

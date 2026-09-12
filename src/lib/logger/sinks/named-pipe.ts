@@ -597,9 +597,32 @@ export class NamedPipeSink implements LogSink {
     this._isReconnecting = true;
 
     try {
-      // Close existing stream if any
+      // An open already in flight has to finish before this one starts. `_isReconnecting`
+      // is not the flag that covers it: the constructor's `initializePipe()` sets only
+      // `isOpening`, so a `reconnect()` issued while the constructor's open was still
+      // pending - an app that constructs the sink and reconnects on a "reader is ready"
+      // signal - ran a second `openPipe` concurrently against the same FIFO: two probes,
+      // two `createWriteStream` opens, one `pendingStream` assignment silently orphaned,
+      // and `MAX_ABANDONED_OPENS` reached twice as fast. `_isReconnecting` is already set
+      // above, so nothing new starts while this waits.
+      if (this.isOpening) {
+        await this.initPromise;
+
+        // `close()` can have run while that open was awaited, and it takes the same view
+        // the guard above does: a closed sink is not one to reopen.
+        if (this.closed || this.closing) {
+          return { success: false, reason: 'closed' };
+        }
+      }
+
+      // Close existing stream if any, bounded. `end()` alone is what `close()` stopped
+      // doing: it flushes before calling back, and a FIFO whose reader is attached but not
+      // consuming - the exact state that prompts a manual `reconnect()` - never flushes,
+      // so `'finish'` never fires, and with the reference dropped here the descriptor and
+      // everything buffered behind it were pinned for the life of the process, once per
+      // call. Flushed if it can be, destroyed if it cannot.
       if (this.pipeStream && !this.pipeStream.destroyed) {
-        this.pipeStream.end();
+        this.abandonStream(this.pipeStream);
         this.pipeStream = undefined;
       }
 
@@ -854,6 +877,46 @@ export class NamedPipeSink implements LogSink {
    * `await`, so setting it here closes the window for every caller at once - including the
    * constructor's, where there is no `await` in front of it to hide behind.
    */
+  /**
+   * Let go of a stream this sink will not write to again, without leaking its descriptor.
+   *
+   * `end()` first, so anything still buffered reaches a reader that is consuming, then
+   * `destroy()` on a timer for the one that is not - `end()`'s callback cannot fire on a
+   * FIFO that cannot flush, and the caller has already stopped waiting for it. The timer
+   * is unreferenced: this must not be a reason the process stays alive.
+   */
+  private abandonStream(stream: fs.WriteStream): void {
+    let isSettled = false;
+
+    const destroy = (): void => {
+      if (isSettled) {
+        return;
+      }
+
+      isSettled = true;
+
+      try {
+        stream.destroy();
+      } catch {
+        // Nothing further to try; the sink has already let go of this stream.
+      }
+    };
+
+    const timer = setTimeout(destroy, MIN_CLOSE_FLUSH_MS);
+
+    timer.unref?.();
+
+    try {
+      stream.end(() => {
+        clearTimeout(timer);
+        destroy();
+      });
+    } catch {
+      clearTimeout(timer);
+      destroy();
+    }
+  }
+
   private async initializePipe(): Promise<void> {
     this.isOpening = true;
 
@@ -868,11 +931,16 @@ export class NamedPipeSink implements LogSink {
     // Check platform support
     const platform = os.platform();
     if (platform !== 'linux' && platform !== 'darwin') {
-      this.handleError(
+      // Through the dedup every other open failure goes through. Called directly, this one
+      // bypassed it and nothing marked the sink unusable, so each `write()` re-entered
+      // `openPipe` once `REOPEN_COOLDOWN_MS` had elapsed and a process logging once a
+      // second called the caller's `onError` once a second, forever - the flood
+      // {@link reportedOpenFailures} exists to prevent, on the one failure that is
+      // certain never to clear: the platform is what it is for the life of the process.
+      this.reportOpenFailure(
         'unsupported_platform',
-        new Error(
-          `Named pipes are only supported on Linux and macOS, current platform: ${platform}`,
-        ),
+        `Named pipes are only supported on Linux and macOS, current platform: ${platform}`,
+        undefined,
       );
 
       return;
