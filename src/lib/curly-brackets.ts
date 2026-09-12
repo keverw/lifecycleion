@@ -1,4 +1,5 @@
 import { getPathParts } from './internal/path-utils';
+import { chargeText, createRenderBudget } from './internal/render-budget';
 import { stringifyValue } from './stringify-value';
 import {
   createFormatReporter,
@@ -95,6 +96,14 @@ CurlyBrackets.compileTemplate = function (
     // template is reused across calls, and a budget shared between them would report the
     // first render's failure and stay silent for every render after it.
     const report = createFormatReporter('render', options?.onFormatError);
+
+    // One allowance for the whole template, not one per placeholder. Each `stringifyValue`
+    // opens a budget of its own, so every individual render looked in bounds while a
+    // template with N placeholders emitted up to N megabytes - the same "the cap depends on
+    // where the value sits" hole the leaf caps closed one level down. Per render of the
+    // compiled template rather than per compile, matching `report`: a compiled template is
+    // reused, and a budget shared across calls would spend itself on the first one.
+    const budget = createRenderBudget();
 
     // Forwarded into the shared reporter rather than handed over directly, and rooted at
     // the placeholder rather than at the anonymous `<value>` a bare render reports.
@@ -199,7 +208,14 @@ CurlyBrackets.compileTemplate = function (
       }
 
       try {
-        return stringifyValue(replacement, renderOptionsFor(p1.trim()));
+        // Charged, and cut at whatever is left: the leaf caps inside bound one placeholder,
+        // and this bounds their sum. A placeholder that runs out is emitted with the same
+        // `[max length exceeded]` marker the renderers use, so a template that stopped
+        // early never reads as one that rendered everything.
+        return chargeText(
+          budget,
+          stringifyValue(replacement, renderOptionsFor(p1.trim())),
+        );
       } catch (error) {
         // `String()` invokes `toString`/`Symbol.toPrimitive`, both ordinary properties.
         // Dead in practice - `stringifyValue` has its own top-level guard that reports and

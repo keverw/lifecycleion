@@ -569,8 +569,17 @@ export function stringifyTemplateValue(
     // this can no longer produce `[object Object]`. The rule cannot see that, and only
     // started asking once the `undefined` check above narrowed `unknown` to a type that
     // admits an object.
-    // eslint-disable-next-line @typescript-eslint/no-base-to-string
-    return String(value);
+    //
+    // Capped for the same reason the root string above is: a `toString` of a caller's own
+    // is as free to return ten megabytes as a string param is to hold them, and nested,
+    // the same instance goes through `quoteWithinBudget` and is cut. Uncapped here, the
+    // bound depended only on whether the value happened to sit inside a container -
+    // `{{body}}` with a bare instance wrote the lot to every sink, `{ wrapper: body }`
+    // wrote a megabyte.
+    return capToMaxRenderLength(
+      // eslint-disable-next-line @typescript-eslint/no-base-to-string
+      String(value),
+    );
   } catch (error) {
     report(error, joinTemplatePath(path));
 

@@ -415,3 +415,38 @@ describe('CurlyBrackets.escape', () => {
     });
   });
 });
+
+describe('CurlyBrackets - one budget across the whole template', () => {
+  test('bounds the total output rather than each placeholder on its own', () => {
+    // Every placeholder opened a render budget of its own, so a template with four of them
+    // could emit four megabytes while each individual render looked perfectly in bounds.
+    const big = 'x'.repeat(900_000);
+
+    const rendered = CurlyBrackets('{{a}}{{b}}{{c}}{{d}}', {
+      a: big,
+      b: big,
+      c: big,
+      d: big,
+    });
+
+    expect(rendered).toContain('[max length exceeded]');
+    expect(rendered.length).toBeLessThan(2_000_000);
+  });
+
+  test('spends nothing extra on an ordinary template', () => {
+    // The cap is invisible to every render that is not running away.
+    expect(CurlyBrackets('{{a}}-{{b}}', { a: 'one', b: 'two' })).toBe(
+      'one-two',
+    );
+  });
+
+  test('gives each render of a compiled template its own allowance', () => {
+    // Per render, not per compile: a compiled template is reused, and a budget shared
+    // across calls would spend itself on the first one and truncate every call after it.
+    const compiled = CurlyBrackets.compileTemplate('{{a}}');
+    const big = 'x'.repeat(900_000);
+
+    expect(compiled({ a: big }).length).toBe(900_000);
+    expect(compiled({ a: big }).length).toBe(900_000);
+  });
+});

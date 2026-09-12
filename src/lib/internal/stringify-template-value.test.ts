@@ -159,6 +159,27 @@ describe('stringifyTemplateValue - values that resist rendering', () => {
     );
   });
 
+  test('caps a bare value whose own toString is enormous', () => {
+    // Bounded wherever it sits. Nested, this instance goes through `quoteWithinBudget` and
+    // is cut; bare, it returned `String(value)` whole, so the cap depended only on whether
+    // the value happened to have a container around it.
+    class Huge {
+      public toString(): string {
+        return 'x'.repeat(10_000_000);
+      }
+    }
+
+    const bare = stringifyTemplateValue(new Huge());
+
+    expect(bare).toContain('[max length exceeded]');
+    expect(bare.length).toBeLessThan(2_000_000);
+
+    const nested = stringifyTemplateValue({ v: new Huge() });
+
+    expect(nested).toContain('[max length exceeded]');
+    expect(nested.length).toBeLessThan(2_000_000);
+  });
+
   test('renders a bigint as text rather than throwing on it', () => {
     // `JSON.stringify` throws on a bigint anywhere inside a value, which used to collapse
     // the entire render to `[object]`.
