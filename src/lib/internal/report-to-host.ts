@@ -6,6 +6,83 @@ import {
 import { reportToConsole } from './report-to-console';
 
 /**
+ * Reporting state shared by every bundled copy of Lifecycleion in this realm.
+ *
+ * A module-local guard only protects one copy. Code splitting, plugins, or dependency
+ * duplication can load several copies that all register listeners on the same global
+ * `error` channel, so they must also agree when that channel is already being dispatched.
+ */
+interface HostReportSharedState {
+  dispatchDepth: number;
+}
+
+const HOST_REPORT_STATE_KEY = Symbol.for('lifecycleion.reportToHost.v1');
+const localHostReportState: HostReportSharedState = { dispatchDepth: 0 };
+
+/** Get the cross-bundle state, falling back locally when the global is hostile/frozen. */
+function getHostReportState(): HostReportSharedState {
+  try {
+    const globalObject = globalThis as Record<symbol, unknown>;
+    const existing = globalObject[HOST_REPORT_STATE_KEY];
+
+    if (typeof existing === 'object' && existing !== null) {
+      const dispatchDepth = (existing as Partial<HostReportSharedState>)
+        .dispatchDepth;
+
+      if (
+        typeof dispatchDepth === 'number' &&
+        Number.isSafeInteger(dispatchDepth) &&
+        dispatchDepth >= 0
+      ) {
+        return existing as HostReportSharedState;
+      }
+    }
+
+    const state: HostReportSharedState = { dispatchDepth: 0 };
+    globalObject[HOST_REPORT_STATE_KEY] = state;
+
+    return state;
+  } catch {
+    return localHostReportState;
+  }
+}
+
+/**
+ * Enter the global reporting channel. A missing lease means another report owns it.
+ * Every operation is guarded because this is itself part of the last-resort error path.
+ */
+function acquireHostReportLease(): HostReportSharedState | undefined {
+  const state = getHostReportState();
+
+  try {
+    if (state.dispatchDepth > 0) {
+      return undefined;
+    }
+
+    state.dispatchDepth++;
+    return state;
+  } catch {
+    // A hostile value stored under our symbol can still change behaviour after the
+    // guarded read in getHostReportState. Retain protection within this module.
+    if (localHostReportState.dispatchDepth > 0) {
+      return undefined;
+    }
+
+    localHostReportState.dispatchDepth++;
+    return localHostReportState;
+  }
+}
+
+/** Release a lease without allowing a hostile shared object to raise another failure. */
+function releaseHostReportLease(state: HostReportSharedState): void {
+  try {
+    state.dispatchDepth = Math.max(0, state.dispatchDepth - 1);
+  } catch {
+    // There is no safer state to mutate. A hostile global must not escape this path.
+  }
+}
+
+/**
  * The standard global `'error'` reporting channel, and the rungs beneath it.
  *
  * Extracted so two callers can share one implementation without importing each other.
@@ -141,45 +218,59 @@ export function reportToHost(
   error: Error,
   renderForConsole?: () => string,
 ): void {
-  // Also installed at module load, above. Repeating it here costs a few typeof checks on
-  // an error path and makes reporting independent of whether a bundler kept that
-  // top-level call, so a failure can never be swallowed for a packaging reason.
-  installGlobalEventTarget();
+  const lease = acquireHostReportLease();
 
-  const outcome = dispatchErrorEvent(error);
-
-  if (outcome === 'handled') {
+  if (!lease) {
+    // A listener or one of its sinks failed while handling an earlier report. Sending
+    // this nested failure through the same listeners would re-enter every bundled logger
+    // and grow combinatorially. The emergency console rung is guarded and terminates the
+    // cycle while the original report continues to every listener.
+    reportToConsole(renderedReport(error, renderForConsole));
     return;
   }
 
-  if (outcome === 'unavailable') {
-    const reportError = readGlobal('reportError');
+  try {
+    // Repeating installation here costs a few typeof checks on an error path and makes
+    // reporting independent of whether a bundler retained any eager setup.
+    installGlobalEventTarget();
 
-    if (isFunction(reportError)) {
-      try {
-        (reportError as (this: unknown, error: unknown) => void).call(
-          globalThis,
-          // Rendered, like the console rung below it, and for the same reason: this rung
-          // is only reached when dispatch is unavailable, so there is no listener to hand
-          // the structured failure to - only a host that will print it. Handing over the
-          // wrapper would hand over its `cause`, and a runtime's error inspection prints
-          // an error's own properties, so an `additionalInfo` this library exists to mask
-          // would reach stderr in the clear.
-          renderedReport(error, renderForConsole),
-        );
+    const outcome = dispatchErrorEvent(error);
 
-        return;
-      } catch {
-        // Fall through to the console: a reporting function that throws has not
-        // reported anything.
+    if (outcome === 'handled') {
+      return;
+    }
+
+    if (outcome === 'unavailable') {
+      const reportError = readGlobal('reportError');
+
+      if (isFunction(reportError)) {
+        try {
+          (reportError as (this: unknown, error: unknown) => void).call(
+            globalThis,
+            // Rendered, like the console rung below it, and for the same reason: this rung
+            // is only reached when dispatch is unavailable, so there is no listener to hand
+            // the structured failure to - only a host that will print it. Handing over the
+            // wrapper would hand over its `cause`, and a runtime's error inspection prints
+            // an error's own properties, so an `additionalInfo` this library exists to mask
+            // would reach stderr in the clear.
+            renderedReport(error, renderForConsole),
+          );
+
+          return;
+        } catch {
+          // Fall through to the console: a reporting function that throws has not
+          // reported anything.
+        }
       }
     }
-  }
 
-  // The last reporting rung, by design, and guarded by `reportToConsole`: neither
-  // `safeHandleCallback` nor `safeHandleCallbackAndWait` may throw from this path.
-  // `renderedReport` guards its own rendering and falls back to the error itself.
-  reportToConsole(renderedReport(error, renderForConsole));
+    // The last reporting rung, by design, and guarded by `reportToConsole`: neither
+    // `safeHandleCallback` nor `safeHandleCallbackAndWait` may throw from this path.
+    // `renderedReport` guards its own rendering and falls back to the error itself.
+    reportToConsole(renderedReport(error, renderForConsole));
+  } finally {
+    releaseHostReportLease(lease);
+  }
 }
 
 /**

@@ -1458,6 +1458,75 @@ describe('Logger', () => {
       expect(String(consoled[0])).toContain('inner boom');
     });
 
+    test('re-entrancy guard is shared when multiple loggers trigger render failures', () => {
+      const hostileValue = (): Record<string, unknown> => {
+        const value: Record<string, unknown> = {};
+
+        Object.defineProperty(value, 'token', {
+          get() {
+            throw new Error('accessor refused');
+          },
+          enumerable: true,
+        });
+
+        return value;
+      };
+      const capturedSinks = [new ArraySink(), new ArraySink()];
+      const listeners = capturedSinks.map((capturedSink) => {
+        const listener = new Logger({
+          sinks: [
+            {
+              write: (entry): void => {
+                capturedSink.write(entry);
+                stringifyValue({ user: hostileValue() });
+              },
+            },
+          ],
+          callProcessExit: false,
+        });
+
+        listener.registerReportErrorListener();
+        return listener;
+      });
+
+      const consoled: unknown[] = [];
+      const originalConsoleError = console.error;
+      console.error = (...args: unknown[]): void => {
+        consoled.push(args[0]);
+      };
+
+      try {
+        for (const message of ['outer boom one', 'outer boom two']) {
+          safeHandleCallback('outerCallback', () => {
+            throw new Error(message);
+          });
+        }
+      } finally {
+        console.error = originalConsoleError;
+
+        for (const listener of listeners) {
+          listener.unregisterReportErrorListener();
+        }
+      }
+
+      // Both top-level reports reach both listeners exactly once. Without a shared
+      // cross-logger guard, each sink's nested report re-enters the other logger too.
+      for (const capturedSink of capturedSinks) {
+        expect(capturedSink.logs.map((entry) => entry.message)).toEqual([
+          expect.stringContaining('outer boom one'),
+          expect.stringContaining('outer boom two'),
+        ]);
+      }
+
+      // Each listener's standalone render raises one nested report per top-level report.
+      // They terminate at the console, and the second top-level report proves the lease
+      // was released.
+      expect(consoled).toHaveLength(4);
+      expect(consoled.every((entry) => String(entry).includes('Render failed'))).toBe(
+        true,
+      );
+    });
+
     test('should register reportError listener', () => {
       const result = logger.registerReportErrorListener();
 
