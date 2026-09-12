@@ -589,6 +589,10 @@ Detach signal handlers and stop listening for process signals and keyboard event
 - Pauses stdin
 - Calling multiple times is safe (idempotent)
 
+If restoring terminal mode fails, `detach()` still returns normally and reports the
+failure on the global `'error'` channel. The shared state remains marked so a future
+manager attachment can adopt ownership and retry restoration when it detaches.
+
 ### Trigger Methods
 
 All trigger methods share the same behavior pattern and are useful for programmatic triggering or testing.

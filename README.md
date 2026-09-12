@@ -89,7 +89,7 @@ class MyComponent extends BaseComponent {
 }
 
 const manager = new LifecycleManager({ logger });
-manager.registerComponent(new MyComponent());
+await manager.registerComponent(new MyComponent());
 
 const startup = await manager.startAllComponents();
 

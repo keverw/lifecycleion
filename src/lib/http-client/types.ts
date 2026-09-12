@@ -210,13 +210,14 @@ export interface AdapterResponse {
  * callback given to `write`/`end` or as an `'error'` event - which is what a Node stream
  * does. The event often arrives after the request has already settled and its own
  * listeners are gone, so the adapter keeps a listener attached across that gap to stop it
- * becoming an uncaught exception. No deadline is imposed on when it arrives: a real
- * `fs.WriteStream` closes its file descriptor asynchronously before emitting, and a
- * deadline short enough to be useful was short enough to expire first.
+ * becoming an uncaught exception. The listener is released when the error or `'close'`
+ * arrives, after roughly one second with neither, or after roughly five seconds total.
+ * A later request can install a fresh listener; see the HTTP client documentation for
+ * the exact lifetime rules.
  *
  * **Emit `'close'` when finished.** That is how the adapter learns nothing further is
  * coming and releases the listener. An implementation that emits neither an `'error'` nor
- * a `'close'` keeps one listener on its own sink.
+ * a `'close'` keeps the listener only until the bounded timers above expire.
  */
 export interface WritableLike {
   write(chunk: Uint8Array | string, cb?: (err?: Error | null) => void): boolean;

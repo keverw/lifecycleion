@@ -931,7 +931,8 @@ console.log(logger.getSinks().length); // 0
 - `removeSink()` does NOT close the sink - you are responsible for closing it if needed
 - `logger.close()` closes all sinks AND removes them from the logger
 - After `logger.close()`, the logger is marked as closed and will not accept new log messages
-- You can still add new sinks after `logger.close()` if needed for a fresh start
+- Adding a sink after `logger.close()` does not reopen the logger; create a new `Logger`
+  instance for a fresh start
 
 ### Service Loggers
 
@@ -1274,7 +1275,8 @@ console.log(debugSink.getMinLevel()); // LogLevel.WARN
 #### File Naming
 
 - Current: `app-2024-01-15.log`
-- Rotated: `app-2024-01-15-1705334400.log`
+- Rotated: `app-2024-01-15-1705334400123.log`, then
+  `app-2024-01-15-1705334400123-1.log` if that millisecond already exists
 
 #### Features
 
