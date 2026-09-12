@@ -394,6 +394,9 @@ export class NamedPipeSink implements LogSink {
    * open and never stacks attempts.
    */
   private reopenTimer?: NodeJS.Timeout;
+
+  /** When {@link reopenTimer} is due, so a sooner request can displace a later one. */
+  private reopenAtMS?: number;
   private _isReconnecting = false;
   /**
    * Whether an open is in flight, from the moment one is asked for.
@@ -756,6 +759,7 @@ export class NamedPipeSink implements LogSink {
     if (this.reopenTimer !== undefined) {
       clearTimeout(this.reopenTimer);
       this.reopenTimer = undefined;
+      this.reopenAtMS = undefined;
     }
 
     // An open still waiting for a reader is abandoned rather than waited on: it cannot
@@ -1416,6 +1420,15 @@ export class NamedPipeSink implements LogSink {
     try {
       this.drainQueue();
     } finally {
+      // A drained queue closes the reported episode. `didReportDrop` gates the report so
+      // an overflowing queue does not fire a callback per dropped line, but nothing else
+      // cleared it: a sink that overflowed during one brief outage, recovered, and
+      // overflowed again hours later stayed silent the second time. Reset only on an
+      // empty queue, so a pass that stopped short of draining does not re-arm the flood.
+      if (this.writeQueue.length === 0) {
+        this.didReportDrop = false;
+      }
+
       this.isProcessing = false;
     }
   }
@@ -1610,12 +1623,33 @@ export class NamedPipeSink implements LogSink {
    * from its own handler, once, for the thing that actually happened.
    */
   private scheduleReopen(delayMS: number): void {
-    if (this.reopenTimer !== undefined || this.closed || this.closing) {
+    if (this.closed || this.closing) {
       return;
     }
 
+    // One timer, but the *soonest* one. Held blindly, a long deferral swallowed every
+    // short one behind it: the `OPEN_WAIT_MS` exit arms `STALE_OPEN_MS + REOPEN_COOLDOWN_MS`
+    // on an open still in flight, and when that open then failed, both the cooldown re-arm
+    // and its backstop were discarded - so a pipe whose reader was already back waited out
+    // the stale-open window instead of the cooldown this file documents. A later, longer
+    // request never displaces a sooner one.
+    if (this.reopenTimer !== undefined) {
+      if (
+        this.reopenAtMS !== undefined &&
+        Date.now() + delayMS >= this.reopenAtMS
+      ) {
+        return;
+      }
+
+      clearTimeout(this.reopenTimer);
+      this.reopenTimer = undefined;
+    }
+
+    this.reopenAtMS = Date.now() + delayMS;
+
     const timer = setTimeout(() => {
       this.reopenTimer = undefined;
+      this.reopenAtMS = undefined;
       this.ensureConnection();
     }, delayMS);
 
@@ -1827,8 +1861,8 @@ export class NamedPipeSink implements LogSink {
     // Gated on an eviction this call made, not on the cumulative count.
     // `droppedEntries` also counts entries given up on by `requeue` after their retries
     // ran out, and those are not an overflow: reading the counter here reported a
-    // `'queue_full'` the queue never had, and set `didReportDrop`, which nothing resets -
-    // so the real overflow that followed was suppressed.
+    // `'queue_full'` the queue never had, and set `didReportDrop` - so the real overflow
+    // that followed was suppressed until the queue next drained.
     if (!didEvict || this.didReportDrop) {
       return;
     }

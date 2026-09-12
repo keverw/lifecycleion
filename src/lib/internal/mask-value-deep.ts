@@ -127,7 +127,21 @@ export function maskValueDeep(
 
     charge(budget, text);
 
-    return mask(key, text, isDerived);
+    const masked = mask(key, text, isDerived);
+
+    // Charged for what masking *added*, not just for what it was handed. `charge` above
+    // bills the input leaf, and a replacement is capped one at a time by
+    // `capToMaxRenderLength` - so nothing anywhere billed the aggregate: 200 named leaves
+    // each answered a `MAX_RENDER_LENGTH` replacement produced 200 times the pass's whole
+    // allowance, in the structured `redactedParams` a sink is handed. Only the excess is
+    // billed, so ordinary masking - which returns roughly what it was given - costs the
+    // budget exactly what it did before, and a sibling after an inflating replacement
+    // degrades the way every other over-budget value does.
+    if (typeof masked === 'string' && masked.length > text.length) {
+      chargeUnits(budget, masked.length - text.length);
+    }
+
+    return masked;
   }
 
   // Past either limit nothing of the original survives, which is the safe direction here

@@ -751,8 +751,15 @@ export class NodeAdapter implements HTTPAdapter {
         openBodyOutcome();
       }
 
+      // Tears the request down whatever state it is in. A cancel has to reach the socket
+      // even once the body is fully written: `req.end()` runs synchronously in this
+      // executor for every bodiless request, so a `writableEnded` guard here would make
+      // `AbortController.abort()` and every timeout a no-op on the transport - the promise
+      // rejecting while the response kept streaming into `chunks[]` and the connection
+      // stayed open. Only `destroyed` is worth skipping, and the `catch` covers a socket
+      // that is already gone answering `ERR_SOCKET_CLOSED`.
       const destroyRequestQuietly = (): void => {
-        if (req.writableEnded || req.destroyed) {
+        if (req.destroyed) {
           return;
         }
 
@@ -761,6 +768,18 @@ export class NodeAdapter implements HTTPAdapter {
         } catch {
           // Already torn down, which is the state this was trying to reach.
         }
+      };
+
+      // The narrower sibling, for the paths whose business is an *unfinished* request -
+      // one whose body writer died before `req.end()`. A request that ended has nothing
+      // left to clean up there, and destroying it could cut short a response still
+      // arriving on the same socket, which is the whole reason those paths wait.
+      const destroyUnfinishedRequestQuietly = (): void => {
+        if (req.writableEnded) {
+          return;
+        }
+
+        destroyRequestQuietly();
       };
 
       /**
@@ -818,7 +837,7 @@ export class NodeAdapter implements HTTPAdapter {
 
         // Only once the response is fully in. See `didResponseClose`.
         if (didResponseClose) {
-          destroyRequestQuietly();
+          destroyUnfinishedRequestQuietly();
 
           return;
         }
@@ -842,7 +861,7 @@ export class NodeAdapter implements HTTPAdapter {
               return;
             }
 
-            destroyRequestQuietly();
+            destroyUnfinishedRequestQuietly();
           }, UPLOAD_STALL_GRACE_MS);
 
           // Never a reason for the process to stay up, exactly as the stall watchdog's
@@ -851,7 +870,7 @@ export class NodeAdapter implements HTTPAdapter {
         } catch {
           // No way to schedule it, so the request is torn down now rather than left to
           // hang. A response mid-flight is the lesser loss of the two.
-          destroyRequestQuietly();
+          destroyUnfinishedRequestQuietly();
         }
       };
 
@@ -909,7 +928,7 @@ export class NodeAdapter implements HTTPAdapter {
             return;
           }
 
-          req.destroy();
+          destroyRequestQuietly();
         });
 
         void (async () => {
@@ -1237,7 +1256,15 @@ export class NodeAdapter implements HTTPAdapter {
             return;
           }
 
-          reportWriteErrorAfterResponse(error);
+          // Only a request that *has* a body can have a body write to report. Without
+          // this, an ordinary interrupted download - a bodiless GET whose connection
+          // resets mid-response, already answered correctly by the `res` handlers with
+          // the real status and `isStreamError` - was also rendered onto the global
+          // `'error'` channel and armed a grace deadline for a writer that never existed.
+          // `upload.outcome` is opened for every bodied request and only those.
+          if (upload.outcome) {
+            reportWriteErrorAfterResponse(error);
+          }
 
           return;
         }

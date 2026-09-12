@@ -1202,7 +1202,17 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
 
       // reportResult is how the operation communicates outcome of this attempt.
       // Route the value to `data` for success/skip, or `error` for error/fatal.
+      // What the operation last handed `reportResult`, so the `catch` below can tell the
+      // ordinary `catch (e) { reportResult('error', e); throw e; }` shape - which is a
+      // rethrow of an outcome already recorded, not a second one - from a genuine throw
+      // after a settled attempt.
+      let didReport = false;
+      let reportedValue: unknown;
+
       const reportResult: ReportResult = (status, value) => {
+        didReport = true;
+        reportedValue = value;
+
         if (status === 'success' || status === 'skip') {
           this.handleReportResult(context, status, {
             data: value as T,
@@ -1224,6 +1234,18 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
           await result;
         }
       } catch (error) {
+        // A rethrow of what was already reported is not a second outcome, and reporting it
+        // as one dispatched a synthetic global `'error'` `ErrorEvent` per attempt - falling
+        // through to a full rendered error table on the console with nothing listening, and
+        // to `window.onerror` and any error monitoring behind it in a browser - for the
+        // most ordinary shape an operation can have:
+        // `catch (e) { reportResult('error', e); throw e; }`. That is precisely the harm
+        // the aborted case above is excluded for. A throw carrying anything else still
+        // reports, which is the failure that would otherwise disappear.
+        if (didReport && context.handled && error === reportedValue) {
+          return;
+        }
+
         // Treat thrown errors as retryable errors by default.
         this.handleReportResult(
           context,

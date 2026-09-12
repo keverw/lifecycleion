@@ -80,8 +80,10 @@ export function resolveMaxQueueSize(requested?: number): number | undefined {
 /**
  * How many attempts a failed write gets, never fewer than the one it already had.
  *
- * A negative or absurd value resolves to none rather than being honoured literally: the
- * entry is still written once, it simply is not retried.
+ * A negative or zero value resolves to none rather than being honoured literally: the
+ * entry is still written once, it simply is not retried. A value that names no usable
+ * count at all - `NaN`, `Infinity`, a non-number - takes {@link DEFAULT_MAX_RETRIES}
+ * instead, since it says nothing about what the caller wanted.
  */
 export function resolveMaxRetries(requested?: number): number {
   if (typeof requested !== 'number' || Number.isNaN(requested)) {
@@ -92,6 +94,11 @@ export function resolveMaxRetries(requested?: number): number {
     return 0;
   }
 
+  // `Infinity` names no usable count and lands on the default, deliberately unlike its
+  // spelling in `resolveMaxQueueSize`: an unlimited *cap* is a coherent request, while an
+  // unlimited retry count is a write that can never be given up on - a failing sink
+  // holding the same entry at the front of its queue forever. It is treated as the
+  // unusable request it is, not as "always".
   return Number.isFinite(requested)
     ? Math.floor(requested)
     : DEFAULT_MAX_RETRIES;

@@ -1587,26 +1587,38 @@ function redactPathsInner(
     const copy: Record<string, unknown> = {};
     let didMask = false;
 
-    for (const key of shape.keys) {
-      // `Object.keys` builds a fresh array, so this branch cannot be lied to about its
-      // own length - but the budget is per pass, not per container, and a payload of many
-      // small objects spends it exactly as one huge array does.
-      //
-      // Stops on the first key past the budget rather than marking every remaining one,
-      // exactly as the array branch above and both of `maskValueDeep`'s branches do. A
-      // `continue` here still walked the whole key list and still built an entry for each
-      // of them, so on the payload the cap exists for - a container with more keys than
-      // the cap, a `Proxy` whose `ownKeys` reports millions among them - the cap bounded
-      // neither the time nor the size of the copy being rebuilt, which is the entire
-      // point of it. One marker stands for the tail, which is what the rest would have
-      // been.
-      if (state.entriesLeft <= 0) {
-        state.didFailToRead = true;
-        state.routeDependentResults++;
-        didMask = true;
-        defineEntry(copy, key, REDACTION_FAILED_MARKER);
+    // The keys a path actually names at this position, read off the index nodes already
+    // resolved rather than by asking per key. Small and author-controlled - a handful of
+    // entries from `redactedKeys`, never a function of the payload.
+    const namedKeys = new Set<string>();
 
-        break;
+    for (const node of nodes) {
+      for (const childKey of node.children.keys()) {
+        namedKeys.add(childKey);
+      }
+    }
+
+    // What each key walked to, so the budget can be spent in one order while the copy is
+    // still built in the container's own.
+    const results = new Map<string, unknown>();
+
+    /**
+     * Walk one entry into {@link results}. Answers `false` once the pass's entry budget
+     * is gone, which is the caller's signal to stop.
+     *
+     * `Object.keys` builds a fresh array, so this branch cannot be lied to about its own
+     * length - but the budget is per pass, not per container, and a payload of many small
+     * objects spends it exactly as one huge array does. Stopping on the first key past the
+     * budget rather than marking every remaining one matches the array branch above and
+     * both of `maskValueDeep`'s branches: a `continue` still walked the whole key list and
+     * still built an entry for each of them, so on the payload the cap exists for - a
+     * container with more keys than the cap, a `Proxy` whose `ownKeys` reports millions
+     * among them - the cap bounded neither the time nor the size of the copy being rebuilt,
+     * which is the entire point of it. One marker stands for the tail.
+     */
+    const walkEntry = (key: string): boolean => {
+      if (state.entriesLeft <= 0) {
+        return false;
       }
 
       state.entriesLeft--;
@@ -1636,9 +1648,9 @@ function redactPathsInner(
         report(error, pathText(entryPath));
         state.didFailToRead = true;
         didMask = true;
-        defineEntry(copy, key, REDACTION_FAILED_MARKER);
+        results.set(key, REDACTION_FAILED_MARKER);
 
-        continue;
+        return true;
       }
 
       // Guarded per entry, exactly as the array branch above and the renderer both are.
@@ -1664,10 +1676,71 @@ function redactPathsInner(
         didMask = true;
       }
 
-      // Defined rather than assigned: a plain assignment to `__proto__` is a no-op for a
-      // string and reparents the object for an object, so a payload carrying that key
-      // would silently lose the entry or change the shape of the result.
-      defineEntry(copy, key, result === UNCHANGED ? entryValue : result);
+      results.set(key, result === UNCHANGED ? entryValue : result);
+
+      return true;
+    };
+
+    // The keys a path names, before any of the others.
+    //
+    // The budget is per pass, so whichever entries are walked first are the ones that get
+    // it - and `Object.keys` order is the payload's, not this list's. A subtree nothing
+    // points into can be enormous and still has to be walked in full whenever the
+    // candidate scan cannot clear it, so on `{ b: <a million keys>, s: 'topsecret' }` with
+    // `['s']` the whole allowance went to `b`, and `s` - the one key the caller actually
+    // named - came back as the failure marker. Reversing the order on the *same* payload
+    // masked it correctly, which is a redaction that depended on key order. The named keys
+    // are few and the caller's own, so spending the budget on them first bounds nothing
+    // that was not already bounded.
+    for (const key of shape.keys) {
+      if (!namedKeys.has(key)) {
+        continue;
+      }
+
+      if (!walkEntry(key)) {
+        break;
+      }
+    }
+
+    // Then everything else, in the container's own order.
+    for (const key of shape.keys) {
+      if (results.has(key)) {
+        continue;
+      }
+
+      if (!walkEntry(key)) {
+        break;
+      }
+    }
+
+    // Built in `Object.keys` order whatever order the two passes above ran in, so the
+    // rebuilt copy enumerates exactly as the original did.
+    //
+    // One marker for the tail, at the first position the budget did not reach - the same
+    // shape the array branch and both of `maskValueDeep`'s branches produce. Entries
+    // already walked still go in behind it: they are the ones a path named, and dropping
+    // them to keep the marker at the end would lose the mask this pass exists for.
+    let didMarkTail = false;
+
+    for (const key of shape.keys) {
+      if (results.has(key)) {
+        // Defined rather than assigned: a plain assignment to `__proto__` is a no-op for a
+        // string and reparents the object for an object, so a payload carrying that key
+        // would silently lose the entry or change the shape of the result.
+        defineEntry(copy, key, results.get(key));
+
+        continue;
+      }
+
+      if (didMarkTail) {
+        continue;
+      }
+
+      didMarkTail = true;
+      state.didFailToRead = true;
+      state.routeDependentResults++;
+      didMask = true;
+      defineEntry(copy, key, REDACTION_FAILED_MARKER);
     }
 
     // Only a container something was actually masked inside is rebuilt. Anything else is
@@ -1750,6 +1823,14 @@ function recordWalkResult(
  * The input is never mutated. Copies are built only along the branches that lead to a
  * mask; every other part of the value is passed through by reference, so a payload that
  * names one key does not have the rest of itself rewritten.
+ *
+ * With one exception, and it is the cap rather than the rule: past
+ * {@link MAX_REDACTION_ENTRIES} the walk can no longer tell whether a subtree it has not
+ * finished holds something named, so it stops and stands a {@link REDACTION_FAILED_MARKER}
+ * in for the rest. A container reached in that state comes back as a truncated rebuild
+ * even though nothing in it matched. Fails closed by design - handing the tail back by
+ * reference would be returning entries the walk never looked at - and the keys a path
+ * actually names are walked first, so it is the unnamed bulk that degrades.
  */
 export function redactMatchedPaths(
   value: unknown,

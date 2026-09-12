@@ -12,6 +12,7 @@ import {
   capKey,
   capToMaxRenderLength,
   charge,
+  chargeText,
   chargeUnits,
   createRenderBudget,
   MAX_RENDER_DEPTH,
@@ -487,12 +488,30 @@ export function stringifyTemplateValue(
   value: unknown,
   path: string = '',
   report: ReportFormatFailure = NOOP_FORMAT_REPORTER,
+  budget?: RenderBudget,
 ): string {
+  /**
+   * Every leaf this function emits, held to one allowance.
+   *
+   * Cut to the same allowance a string one level down gets - see `capToMaxRenderLength`:
+   * these were the variable-length leaves no budget touched, so whether one was bounded
+   * depended only on whether anything was wrapped around it. Against the caller's budget
+   * when one is supplied, so a render that shares an allowance with its siblings cannot
+   * open a fresh `MAX_RENDER_LENGTH` of its own.
+   *
+   * Applied at *every* exit, not only the two obvious ones: `[Function: name]` and
+   * `[ClassName]` read a `name` that is an ordinary, caller-controlled property and as
+   * free to hold two megabytes as a string param is. Nested, `renderNested` puts both
+   * through `quoteWithinBudget`; left uncharged here, the bound depended once again on
+   * whether the value happened to sit inside a container.
+   */
+  const emit = (text: string): string =>
+    budget === undefined
+      ? capToMaxRenderLength(text)
+      : chargeText(budget, text);
+
   if (typeof value === 'string') {
-    // Cut to the same allowance a string one level down gets. See
-    // `capToMaxRenderLength`: this was the one variable-length leaf no budget touched, so
-    // whether a string was bounded depended only on whether anything was wrapped around it.
-    return capToMaxRenderLength(value);
+    return emit(value);
   }
 
   // `undefined` has no JSON form, so it is named the way everything else without one is -
@@ -507,7 +526,7 @@ export function stringifyTemplateValue(
   // sees it, so a custom function is handed `[undefined]` here too rather than a second
   // spelling of the same value.
   if (value === undefined) {
-    return '[undefined]';
+    return emit('[undefined]');
   }
 
   // A plain object or array is its contents, so render them rather than `[object Object]`
@@ -524,7 +543,7 @@ export function stringifyTemplateValue(
         joinTemplatePath(path),
         seen,
         0,
-        createRenderBudget(),
+        budget ?? createRenderBudget(),
         report,
       );
     } catch (error) {
@@ -533,7 +552,7 @@ export function stringifyTemplateValue(
       // Nothing below is expected to throw: every read it makes is guarded, and the
       // depth cap stops recursion before it can exhaust the stack. Kept as a backstop
       // regardless, because nothing here may escape a log call.
-      return Array.isArray(value) ? '[array]' : '[object]';
+      return emit(Array.isArray(value) ? '[array]' : '[object]');
     }
   }
 
@@ -542,7 +561,7 @@ export function stringifyTemplateValue(
   const date = renderDate(value);
 
   if (date !== null) {
-    return date;
+    return emit(date);
   }
 
   if (value !== null && typeof value === 'object') {
@@ -553,14 +572,16 @@ export function stringifyTemplateValue(
     if (!hasOwnStringForm(value)) {
       // A class instance with no `toString` of its own. Name it rather than dumping its
       // fields, which is neither what the caller asked for nor safe to assume is printable.
-      return describeByConstructor(value, (error) => {
-        report(error, joinTemplatePath(path));
-      });
+      return emit(
+        describeByConstructor(value, (error) => {
+          report(error, joinTemplatePath(path));
+        }),
+      );
     }
   }
 
   if (typeof value === 'function') {
-    return describeFunction(value);
+    return emit(describeFunction(value));
   }
 
   try {
@@ -576,13 +597,11 @@ export function stringifyTemplateValue(
     // bound depended only on whether the value happened to sit inside a container -
     // `{{body}}` with a bare instance wrote the lot to every sink, `{ wrapper: body }`
     // wrote a megabyte.
-    return capToMaxRenderLength(
-      // eslint-disable-next-line @typescript-eslint/no-base-to-string
-      String(value),
-    );
+    // eslint-disable-next-line @typescript-eslint/no-base-to-string
+    return emit(String(value));
   } catch (error) {
     report(error, joinTemplatePath(path));
 
-    return UNRENDERABLE_TEXT;
+    return emit(UNRENDERABLE_TEXT);
   }
 }

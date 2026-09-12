@@ -489,6 +489,12 @@ export class FileSink implements LogSink {
             resolve,
             Math.max(MIN_CLOSE_FLUSH_MS, timeoutMS),
           );
+
+          // Never a reason to hold the process up, as every timer in `NamedPipeSink` is
+          // not. This is armed on ordinary size- and date-triggered rotations too, not
+          // only on `close()`, so on a stalled mount a rotation would otherwise keep the
+          // event loop alive for the whole `closeTimeoutMS` and block exit.
+          flushTimeout.unref?.();
         }),
       ]);
     } finally {
@@ -806,6 +812,15 @@ export class FileSink implements LogSink {
         }
       }
     } finally {
+      // A drained queue closes the reported episode. `didReportDrop` gates the report so
+      // an overflowing queue does not fire a callback per dropped line, but nothing else
+      // cleared it: a sink that overflowed during one brief outage, recovered, and
+      // overflowed again hours later stayed silent the second time. Reset only on an
+      // empty queue, so a pass that stopped short of draining does not re-arm the flood.
+      if (this.writeQueue.length === 0) {
+        this.didReportDrop = false;
+      }
+
       this.isProcessing = false;
     }
   }
@@ -847,7 +862,8 @@ export class FileSink implements LogSink {
     // `abandonQueueOnClose` gave up on, and those are not an overflow. A `close()` that
     // times out with a write still in flight left the counter non-zero, and the failing
     // write behind it re-queued its entry - so a queue holding one line under a cap of
-    // 10,000 reported a `'queue_full'`, and set `didReportDrop`, which nothing resets.
+    // 10,000 reported a `'queue_full'`, and set `didReportDrop`, which suppresses every
+    // report until the queue next drains.
     if (!didEvict || this.didReportDrop) {
       return;
     }
@@ -1321,6 +1337,18 @@ export class FileSink implements LogSink {
     // anywhere saying so. Milliseconds make the ordinary collision impossible and the
     // counter settles the rest, since rotations are serialized on this sink.
     const rotatedFile = await this.reserveRotatedFileName(currentDate);
+
+    // Asked again, for the failure the check at the top cannot cover on its own. Both
+    // awaits above are long: `endStreamWithin` waits out `closeTimeoutMS` on a stalled
+    // mount, and `reserveRotatedFileName` probes the disk. A `close()` racing this one
+    // resumes in that window, times out, and reports the sink shut down - and this then
+    // renamed the live log to an archive that `setupLogFile` would never replace, because
+    // it early-returns on a closed sink. Re-checking after the awaits is the same pattern
+    // `writeEntry` follows for the same reason; the stream is already ended here, so
+    // standing down leaves nothing half-done.
+    if (this.closing || this.closed) {
+      return;
+    }
 
     try {
       await fsPromises.rename(this.currentLogFile, rotatedFile);

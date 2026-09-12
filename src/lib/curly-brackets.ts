@@ -1,10 +1,6 @@
 import { getPathParts } from './internal/path-utils';
-import {
-  TRUNCATED_LENGTH,
-  chargeText,
-  createRenderBudget,
-} from './internal/render-budget';
-import { stringifyValue } from './stringify-value';
+import { TRUNCATED_LENGTH, createRenderBudget } from './internal/render-budget';
+import { stringifyTemplateValue } from './internal/stringify-template-value';
 import {
   createFormatReporter,
   type FormatErrorHandler,
@@ -101,27 +97,33 @@ CurlyBrackets.compileTemplate = function (
     // first render's failure and stay silent for every render after it.
     const report = createFormatReporter('render', options?.onFormatError);
 
-    // One allowance for the whole template, not one per placeholder. Each `stringifyValue`
-    // opens a budget of its own, so every individual render looked in bounds while a
-    // template with N placeholders emitted up to N megabytes - the same "the cap depends on
-    // where the value sits" hole the leaf caps closed one level down. Per render of the
-    // compiled template rather than per compile, matching `report`: a compiled template is
-    // reused, and a budget shared across calls would spend itself on the first one.
+    // One allowance for the whole template, not one per placeholder. A render left to
+    // open a budget of its own puts every individual placeholder in bounds while a
+    // template with N of them emits up to N megabytes - the same "the cap depends on
+    // where the value sits" hole the leaf caps closed one level down. Handed down into
+    // each render below rather than applied to what comes back, so a value larger than
+    // what is left is never materialized in the first place.
+    //
+    // Per render of the compiled template rather than per compile, matching `report`: a
+    // compiled template is reused, and a budget shared across calls would spend itself on
+    // the first one.
     const budget = createRenderBudget();
 
     // Forwarded into the shared reporter rather than handed over directly, and rooted at
     // the placeholder rather than at the anonymous `<value>` a bare render reports.
     //
-    // Two things this buys. `stringifyValue` builds a reporter of its own per call, so
-    // handing the caller's handler straight down would give every placeholder its own
-    // once-per-call budget - one report per broken placeholder, which is the flood the
-    // bound exists to prevent; routing them through `report` keeps it at one per render of
-    // the template. And a template has many placeholders, so `<value>.token` names the
-    // failure without naming which `{{...}}` produced it, which is most of what the caller
-    // needs to act.
-    // One reporter per kind, built on first use. `report` above is the `'render'` one;
-    // a nested `stringifyValue` can also raise `'redaction'`, and the two must not share a
-    // budget - a redaction failure and a render failure in the same template are two
+    // Two things this buys. Each placeholder wraps the handler in a once-per-call reporter
+    // of its own, so handing the caller's handler straight down would give every
+    // placeholder its own report budget - one report per broken placeholder, which is the
+    // flood the bound exists to prevent; routing them through the shared per-kind reporters
+    // below keeps it at one per render of the template. And a template has many
+    // placeholders, so `<value>.token` names the failure without naming which `{{...}}`
+    // produced it, which is most of what the caller needs to act.
+    //
+    // One reporter per kind, built on first use. `report` above is the `'render'` one, and
+    // the render walk raises nothing else from here - this list passes no `redactedKeys`,
+    // so no redaction runs. Kept keyed by kind regardless: two kinds must never share a
+    // budget, since a redaction failure and a render failure in the same template are two
     // different things and collapsing them would hide one.
     const byKind = new Map<FormatFailureKind, ReportFormatFailure>([
       ['render', report],
@@ -212,37 +214,52 @@ CurlyBrackets.compileTemplate = function (
       }
 
       // Checked, not only charged - the same guard the sibling walks keep, and for the
-      // same reason. `chargeText` bounds what is *emitted* and does nothing about what is
-      // *produced*: `stringifyValue` is evaluated as its argument, so every placeholder
-      // after the budget ran out still rendered its value in full - each opening a fresh
-      // `MAX_RENDER_LENGTH` of its own - only for the result to be cut to the marker and
-      // thrown away. One 60,000-key param behind 500 placeholders spent 1.9 seconds
-      // synchronously inside `logger.info()` rendering 500 megabyte-scale strings nobody
-      // would ever see. The marker is emitted uncharged, since the budget it would be
-      // billed against is already gone and a template's placeholder count is the author's,
-      // not the payload's.
+      // same reason. Charging the result bounds what is *emitted* and does nothing about
+      // what is *produced*: every placeholder after the budget ran out still rendered its
+      // value in full, only for the result to be cut to the marker and thrown away. One
+      // 60,000-key param behind 500 placeholders spent 1.9 seconds synchronously inside
+      // `logger.info()` rendering 500 megabyte-scale strings nobody would ever see. The
+      // marker is emitted uncharged, since the budget it would be billed against is
+      // already gone and a template's placeholder count is the author's, not the
+      // payload's.
       if (budget.remaining <= 0) {
         return TRUNCATED_LENGTH;
       }
 
+      const name = p1.trim();
+
+      // The pass's own budget, handed *down* rather than applied to what comes back.
+      // Charging the result still let the one placeholder that straddles the boundary
+      // open a fresh `MAX_RENDER_LENGTH` inside `stringifyValue` and materialize a
+      // megabyte-scale string before it was cut - the check above only stops the
+      // placeholders *after* the one that exhausts the budget. Threaded in, the render
+      // itself truncates at whatever is left, so a template's total cost is one
+      // allowance rather than one per straddle.
+      //
+      // Called at the internal seam rather than through `stringifyValue`, which takes no
+      // budget: with no `redactedKeys` - which this never passes - that function is
+      // exactly the reporter, the guard, and the call below.
+      const placeholderReport = createFormatReporter(
+        'render',
+        renderOptionsFor(name).onFormatError,
+      );
+
       try {
-        // Charged, and cut at whatever is left: the leaf caps inside bound one placeholder,
-        // and this bounds their sum. A placeholder that runs out is emitted with the same
-        // `[max length exceeded]` marker the renderers use, so a template that stopped
-        // early never reads as one that rendered everything.
-        return chargeText(
+        return stringifyTemplateValue(
+          replacement,
+          '',
+          placeholderReport,
           budget,
-          stringifyValue(replacement, renderOptionsFor(p1.trim())),
         );
       } catch (error) {
-        // `String()` invokes `toString`/`Symbol.toPrimitive`, both ordinary properties.
-        // Dead in practice - `stringifyValue` has its own top-level guard that reports and
-        // returns `[unrenderable]` rather than throwing - but `report` is in scope, and a
-        // backstop that renders the fallback without saying why is the same silence this
-        // whole channel exists to end.
-        report(error, p1.trim());
+        // A `RangeError` from a payload nested past the stack, which is the one failure
+        // the walk's own per-read guards cannot absorb. Reported and answered with the
+        // same marker `stringifyValue`'s top-level guard used to produce here, rather
+        // than with the fallback - a value that exists but would not render is not an
+        // absent one.
+        placeholderReport(error, '<value>');
 
-        return fallback;
+        return '[unrenderable]';
       }
     });
   };

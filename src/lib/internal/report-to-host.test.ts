@@ -2,7 +2,9 @@ import { expect, test } from 'bun:test';
 import type * as ReportToHostModule from './report-to-host';
 
 /** Import separately evaluated copies, as code splitting or dependency duplication can. */
-function importReportToHostCopy(name: string): Promise<typeof ReportToHostModule> {
+function importReportToHostCopy(
+  name: string,
+): Promise<typeof ReportToHostModule> {
   return import(`./report-to-host.ts?test-copy=${name}`) as Promise<
     typeof ReportToHostModule
   >;
@@ -165,9 +167,7 @@ test('a shared object that refuses to release its lease is replaced, not abandon
     // The object that could not be released is gone, replaced by a fresh one - which is
     // what lets the *other* copies recover too, since they re-read the global every time.
     expect(
-      (globalThis as unknown as Record<symbol, unknown>)[
-        HOST_REPORT_STATE_KEY
-      ],
+      (globalThis as unknown as Record<symbol, unknown>)[HOST_REPORT_STATE_KEY],
     ).not.toBe(hostile);
 
     copy.reportToHost(new Error('second report'));
