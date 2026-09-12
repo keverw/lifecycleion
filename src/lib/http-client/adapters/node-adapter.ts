@@ -953,7 +953,13 @@ export class NodeAdapter implements HTTPAdapter {
               failStreamSetupOnSocketError = (error: Error): void => {
                 failStreamSetupOnSocketError = undefined;
                 streamAbort.abort();
-                req.destroy();
+                // Guarded, because this one runs from inside `req.on('error', ...)`.
+                // Every other destroy on this path is in the request's own promise chain,
+                // where a throw is rejected into it; a throw out of an event handler is the
+                // uncaught exception the rest of this file's absorbers exist to prevent -
+                // and a socket already gone can answer `ERR_SOCKET_CLOSED` from `destroy()`
+                // on some runtimes, which is precisely the state this is reached in.
+                destroyRequestQuietly();
                 settleResponse({
                   status,
                   headers,
