@@ -16,6 +16,7 @@ import {
   chargeUnits,
   createRenderBudget,
   MAX_RENDER_DEPTH,
+  noteTruncation,
   MAX_RENDER_LENGTH,
   TRUNCATED,
   TRUNCATED_LENGTH,
@@ -133,8 +134,15 @@ function quoteWithinBudget(budget: RenderBudget, text: string): string {
     return charge(budget, full);
   }
 
-  const encoded = quoteWithinLimit(text, Math.max(0, budget.remaining));
+  const { encoded, kept } = quoteWithinLimit(
+    text,
+    Math.max(0, budget.remaining),
+  );
 
+  // A nested leaf cut here is a cut like any other: without this, a template whose
+  // oversized value sat one level down - `{{o}}` holding `{ k: <2 MB> }` - was shortened
+  // and told its caller nothing, while the same string at the top reported.
+  noteTruncation(budget, text.length - kept);
   chargeUnits(budget, encoded.length);
 
   return encoded;
@@ -153,7 +161,7 @@ function quoteKeyWithinCap(key: string): string {
     return quoted;
   }
 
-  return quoteWithinLimit(key, MAX_RENDER_LENGTH);
+  return quoteWithinLimit(key, MAX_RENDER_LENGTH).encoded;
 }
 
 /**
@@ -168,7 +176,10 @@ function quoteKeyWithinCap(key: string): string {
  * re-encodings rather than a binary search. The marker always survives - a limit with
  * nothing left still says it ran out rather than emitting an empty string.
  */
-function quoteWithinLimit(text: string, limit: number): string {
+function quoteWithinLimit(
+  text: string,
+  limit: number,
+): { encoded: string; kept: number } {
   let keep = Math.min(text.length, limit);
   let encoded = quote(`${text.slice(0, keep)}${TRUNCATED_LENGTH}`);
 
@@ -186,7 +197,7 @@ function quoteWithinLimit(text: string, limit: number): string {
     encoded = quote(`${text.slice(0, keep)}${TRUNCATED_LENGTH}`);
   }
 
-  return encoded;
+  return { encoded, kept: keep };
 }
 
 /**
@@ -266,6 +277,7 @@ function renderNested(
     // render is the walk as much as the string, and a container entered past the budget
     // would serialize its whole subtree before anyone looked at the total.
     if (budget.remaining <= 0) {
+      noteTruncation(budget);
       return charge(budget, quote(TRUNCATED_LENGTH));
     }
 
@@ -338,6 +350,7 @@ function renderContainer(
       // Stops the loop rather than only the element: the elements still to come would
       // each be walked in full before adding to a total already past the cap.
       if (budget.remaining <= 0) {
+        noteTruncation(budget);
         parts.push(charge(budget, quote(TRUNCATED_LENGTH)));
 
         break;
@@ -414,6 +427,7 @@ function renderContainer(
     // branch above has no such problem, since a bare element is legal there. Naming the
     // key also says *where* the render stopped rather than only that it did.
     if (budget.remaining <= 0) {
+      noteTruncation(budget);
       parts.push(`${renderedKey}${charge(budget, quote(TRUNCATED_LENGTH))}`);
 
       break;

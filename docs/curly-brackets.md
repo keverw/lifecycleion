@@ -11,6 +11,7 @@
   - [Escaping Brackets](#escaping-brackets)
   - [Compiling Templates](#compiling-templates)
   - [Telling an Unreadable Placeholder from an Absent One](#telling-an-unreadable-placeholder-from-an-absent-one)
+  - [Bounding How Much a Template Renders](#bounding-how-much-a-template-renders)
   - [Escaping Utility](#escaping-utility)
 - [Credits / Inspiration](#credits--inspiration)
 
@@ -23,6 +24,9 @@
 - **Nested Path Support**: Resolve nested object properties with paths like `{{user.name}}`, array indexes like `{{users[0].name}}`, and quoted bracket keys like `{{user["display-name"]}}`.
 - **Escaped Brackets**: Safely include literal `{{` and `}}` in your templates without them being replaced, by escaping them with a backslash (`\`).
 - **Efficient Template Reuse**: With `compileTemplate`, compile your template once and reuse it with different sets of data, improving performance for repeated template processing.
+- **Bounded Output**: One render allowance shared across a template's placeholders, so a
+  repeated placeholder cannot multiply one payload into many times the output. Configurable
+  with `maxRenderLength`, and observable with `onTruncate`.
 - **TypeScript Support**: Fully supports TypeScript for type-safe templating.
 
 ## Usage
@@ -158,6 +162,62 @@ the value it was hiding, and the rendered string is going wherever you send it.
 
 `compileTemplate` takes the same options as its third argument, and each render of a
 compiled template gets its own budget.
+
+### Bounding How Much a Template Renders
+
+Every render has one allowance shared by all of its placeholders, defaulting to 1,000,000
+characters. The bound is per render and shared rather than per placeholder, because the
+same value substituted many times is many times the output for one payload:
+
+```typescript
+// Six placeholders, one 2 MB value: ~1 MB out, not 12 MB.
+CurlyBrackets('{{body}}'.repeat(6), { body });
+```
+
+That matters most when the _template_ is user input, as it is for anything rendering a
+message someone else wrote - then the repeat count is theirs to choose too.
+
+Only the values substituted in are charged. The literal text between placeholders is
+passed through untouched and costs nothing, and neither does the fallback, so the cap
+governs interpolation rather than the length of the template itself. A plain string costs
+exactly its own length; a container costs its rendered form, so it also pays for its
+braces, quotes, commas and key names.
+
+Raise it, or turn it off, when you are rendering something other than a log line:
+
+```typescript
+CurlyBrackets(template, locals, undefined, { maxRenderLength: 20_000_000 });
+CurlyBrackets(template, locals, undefined, { maxRenderLength: Infinity });
+```
+
+`Infinity` is the only way to render without a bound. Anything else unusable - a negative,
+zero, `NaN`, a non-number - takes the default rather than being honoured, because this is
+the bound that makes a hostile template safe to render and a typo in a config must not be
+what switches it off.
+
+Truncation is a degradation rather than a failure: the output carries a
+`[max length exceeded]` marker and `onFormatError` does **not** fire, since that channel
+means something _refused_ to render. For a log line the marker is enough. For a template
+rendering something a person will read, it is not - the output is quietly shortened and
+ships that way - so ask for `onTruncate`:
+
+```typescript
+CurlyBrackets(template, locals, undefined, {
+  onTruncate: ({ placeholder, dropped }) => {
+    // placeholder: 'body'; dropped: characters cut, or undefined when the budget was
+    // already spent before this placeholder was reached, so its value was never rendered
+    // and never measured.
+  },
+});
+```
+
+It fires at most once per render, not once per placeholder: a template past its budget
+truncates everything after the first cut, and the first is the informative one. Scanning
+the output for the marker is not a substitute - a payload can legitimately contain those
+words, and it does not say which placeholder was cut.
+
+The `Logger` pins its own allowance at the default, so raising `maxRenderLength` for your
+own templates never changes how much a log line hands to each sink.
 
 ### Escaping Utility
 

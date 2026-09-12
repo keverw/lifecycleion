@@ -482,3 +482,116 @@ describe('CurlyBrackets - one budget across the whole template', () => {
     expect(rendered.length).toBeLessThan(1_100_000);
   });
 });
+
+describe('maxRenderLength and onTruncate', () => {
+  const body = 'x'.repeat(2_000_000);
+
+  it('caps the whole render, not each placeholder', () => {
+    // The shape the bound exists for: one payload substituted six times is six times the
+    // output, and where the template is user input the repeat count is theirs too.
+    const rendered = CurlyBrackets('{{body}}'.repeat(6), { body });
+
+    expect(rendered.length).toBeLessThan(1_100_000);
+  });
+
+  it('tells the caller what was cut', () => {
+    const cuts: { placeholder: string; dropped: number | undefined }[] = [];
+
+    CurlyBrackets('{{ body }}', { body }, undefined, {
+      onTruncate: (info) => cuts.push(info),
+    });
+
+    expect(cuts).toEqual([{ placeholder: 'body', dropped: 1_000_000 }]);
+  });
+
+  it('reports a cut made inside a container, not only a bare string', () => {
+    // The counter lives on the budget rather than being measured off the result, so a
+    // nested leaf cut by `quoteWithinBudget` is seen exactly as a top-level string is.
+    const cuts: { placeholder: string; dropped: number | undefined }[] = [];
+
+    CurlyBrackets('{{o}}', { o: { k: body } }, undefined, {
+      onTruncate: (info) => cuts.push(info),
+    });
+
+    expect(cuts).toHaveLength(1);
+    expect(cuts[0]?.placeholder).toBe('o');
+    expect(cuts[0]?.dropped).toBeGreaterThan(0);
+  });
+
+  it('reports a placeholder the budget never reached with no count', () => {
+    // `dropped` is honest rather than zero: the guard exists so the value is never
+    // rendered, so nothing ever measured it.
+    const cuts: { placeholder: string; dropped: number | undefined }[] = [];
+
+    CurlyBrackets('{{a}}{{b}}', { a: body, b: body }, undefined, {
+      maxRenderLength: 100,
+      onTruncate: (info) => cuts.push(info),
+    });
+
+    // Once per render, not once per placeholder - and the first is the informative one.
+    expect(cuts).toHaveLength(1);
+    expect(cuts[0]?.placeholder).toBe('a');
+  });
+
+  it('does not fire when nothing was cut', () => {
+    const cuts: unknown[] = [];
+
+    const rendered = CurlyBrackets('hi {{name}}', { name: 'bob' }, undefined, {
+      onTruncate: (info) => cuts.push(info),
+    });
+
+    expect(rendered).toBe('hi bob');
+    expect(cuts).toHaveLength(0);
+  });
+
+  it('honours a raised limit and Infinity', () => {
+    expect(
+      CurlyBrackets('{{body}}'.repeat(6), { body }, undefined, {
+        maxRenderLength: 20_000_000,
+      }).length,
+    ).toBe(12_000_000);
+
+    expect(
+      CurlyBrackets('{{body}}'.repeat(6), { body }, undefined, {
+        maxRenderLength: Number.POSITIVE_INFINITY,
+      }).length,
+    ).toBe(12_000_000);
+  });
+
+  it('falls back to the default for any unusable limit', () => {
+    // Fails closed, unlike `resolveMaxQueueSize`'s reading of the same shapes: this is the
+    // bound that makes a hostile template safe to render, so a typo in a config must not
+    // be what switches it off.
+    for (const bad of [-1, 0, Number.NaN, '5000', undefined]) {
+      const rendered = CurlyBrackets('{{body}}', { body }, undefined, {
+        maxRenderLength: bad as number | undefined,
+      });
+
+      expect(rendered.length).toBeLessThan(1_100_000);
+      expect(rendered).toContain('[max length exceeded]');
+    }
+  });
+
+  it('survives a handler that throws', () => {
+    // A notification about a degradation, not a step in producing the output.
+    const rendered = CurlyBrackets('{{body}}', { body }, undefined, {
+      onTruncate: () => {
+        throw new Error('boom');
+      },
+    });
+
+    expect(rendered.length).toBeLessThan(1_100_000);
+  });
+
+  it('does not route truncation through onFormatError', () => {
+    // Truncation is an ordinary degradation; `onFormatError` means something refused to
+    // render, and spending its one report here would hide a real failure.
+    const failures: unknown[] = [];
+
+    CurlyBrackets('{{body}}', { body }, undefined, {
+      onFormatError: (error) => failures.push(error),
+    });
+
+    expect(failures).toHaveLength(0);
+  });
+});

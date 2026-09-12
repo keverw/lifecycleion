@@ -6,6 +6,7 @@ import {
   isGlobalEventTargetAvailable,
 } from '../global-event-target';
 import { CurlyBrackets } from '../curly-brackets';
+import { MAX_RENDER_LENGTH } from '../internal/render-budget';
 import { isNumber } from '../is-number';
 import { isPromise } from '../is-promise';
 import { describeError, isErrorValue, toError } from '../to-error';
@@ -1106,6 +1107,16 @@ export class Logger extends EventEmitter {
     const message = messageParams
       ? CurlyBrackets(template, messageParams, undefined, {
           onFormatError: this.formatErrorHandler(),
+          // Pinned rather than inherited. `maxRenderLength` exists for callers rendering
+          // templates for something other than a log line - an email body, a document -
+          // who may raise it or turn it off for their own payloads. A log line is the
+          // other case entirely: this bounds what every sink is handed per line, so it
+          // must not move because the template default did.
+          //
+          // No truncation handler: the `[max length exceeded]` marker lands in the
+          // message a reader already sees, and a callback per truncated line is the flood
+          // every other bound in this file exists to avoid.
+          maxRenderLength: MAX_RENDER_LENGTH,
         })
       : template;
 

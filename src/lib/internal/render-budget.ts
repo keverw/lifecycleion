@@ -116,11 +116,45 @@ export function capToMaxRenderLength(text: string): string {
 /** Remaining output allowance for one render, shared by every level of it. */
 export interface RenderBudget {
   remaining: number;
+  /**
+   * How many times this render has cut something short.
+   *
+   * Counted rather than reported from here: truncation is an ordinary degradation and
+   * this module has no channel to report on, but a caller that renders a template for
+   * something other than a log line - an email body, a rendered document - needs to know
+   * its output was shortened, and scanning the result for {@link TRUNCATED_LENGTH} cannot
+   * tell a cut apart from a payload that happens to contain those words. Reading this
+   * before and after a render answers it exactly, wherever in the walk the cut happened.
+   *
+   * The count, not the characters, is what makes the answer complete: a container that
+   * gives up on its remaining entries drops a tail it never rendered and therefore never
+   * measured, so {@link droppedChars} cannot see it and a caller reading only that would
+   * be told a truncated render was intact.
+   */
+  truncations: number;
+  /**
+   * Characters this render is *known* to have cut.
+   *
+   * A lower bound rather than a total, and deliberately so: only a cut that had the text
+   * in hand can measure it. A dropped tail - the elements or entries past a spent budget,
+   * or a placeholder the budget never reached - was never rendered, so nothing about its
+   * size was ever established. Pair it with {@link truncations}, which counts those too.
+   */
+  droppedChars: number;
 }
 
-/** A fresh allowance for one top-level render. */
-export function createRenderBudget(): RenderBudget {
-  return { remaining: MAX_RENDER_LENGTH };
+/**
+ * A fresh allowance for one top-level render.
+ *
+ * @param limit Characters this render may emit. `Infinity` is unlimited - `chargeText`
+ *        then never cuts and the `remaining <= 0` guards never trip - which is how a
+ *        caller that is not writing to a log opts out without every leaf falling back to
+ *        its own separate {@link MAX_RENDER_LENGTH} cap.
+ */
+export function createRenderBudget(
+  limit: number = MAX_RENDER_LENGTH,
+): RenderBudget {
+  return { remaining: limit, truncations: 0, droppedChars: 0 };
 }
 
 /**
@@ -154,6 +188,24 @@ export function charge(budget: RenderBudget, text: string): string {
  */
 export function chargeUnits(budget: RenderBudget, amount: number): void {
   budget.remaining -= amount;
+}
+
+/**
+ * Record that this render cut something short.
+ *
+ * @param droppedChars Characters dropped, when the cut had them in hand to count. Omitted
+ *        by a caller giving up on a tail it never rendered - the count still rises, which
+ *        is what keeps "was anything cut" answerable when "how much" is not.
+ */
+export function noteTruncation(
+  budget: RenderBudget,
+  droppedChars?: number,
+): void {
+  budget.truncations++;
+
+  if (droppedChars !== undefined && droppedChars > 0) {
+    budget.droppedChars += droppedChars;
+  }
 }
 
 /**
@@ -191,6 +243,9 @@ export function chargeText(budget: RenderBudget, text: string): string {
   // would emit the wrong part of the value rather than none of it.
   const kept = text.slice(0, Math.max(0, budget.remaining));
   const emitted = `${kept}${TRUNCATED_LENGTH}`;
+
+  // What this cut, before the charge below moves `remaining`.
+  noteTruncation(budget, text.length - kept.length);
 
   chargeUnits(budget, emitted.length);
 
