@@ -19,7 +19,7 @@ A lightweight, type-safe event emitter implementation that works in both browser
   - [`listenerCount(event: string): number`](#listenercountevent-string-number)
   - [`clear(event?: string): void`](#clearevent-string-void)
 - [Error Handling](#error-handling)
-  - [Overriding where handler failures go](#overriding-where-handler-failures-go)
+  - [Overriding Where Handler Failures Go](#overriding-where-handler-failures-go)
 - [Memory Management](#memory-management)
 
 <!-- tocstop -->
@@ -171,7 +171,7 @@ emitter.on('test', async () => {
 
 The error messages include the event name and detailed error information, making debugging easier.
 
-### Overriding where handler failures go
+### Overriding Where Handler Failures Go
 
 The global `'error'` channel is not always the right destination. An emitter whose own
 events are logged can feed its handler failures straight back into itself: a failing

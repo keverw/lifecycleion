@@ -11,7 +11,7 @@ with.
   - [toError](#toerror)
   - [describeError](#describeerror)
   - [isErrorValue](#iserrorvalue)
-  - [Which one do I want?](#which-one-do-i-want)
+  - [Which One Do I Want?](#which-one-do-i-want)
 
 <!-- tocstop -->
 
@@ -31,8 +31,8 @@ its own, and on a reporting path that one escapes into the caller that was only 
 report a failure.
 
 `toError(value)` returns `value` unchanged when it already is an `Error`. Otherwise it
-returns a new `Error` describing the value, with the original kept on `cause` — the
-description is lossy, and for a value whose `toString` threw it carries nothing at all.
+returns a new `Error` describing the value, with the original kept on `cause`. The
+description is lossy, and for a value whose `toString` threw, it carries nothing at all.
 
 ```typescript
 const original = new Error('boom');
@@ -58,9 +58,9 @@ event-handler failures. Exported so callers can reproduce that same normalizatio
 `describeError(value)` returns a single-line description of any thrown or rejected value,
 and **never throws**.
 
-`toError` guarantees an `Error` _object_, not a readable one. It returns an `Error`
-instance unchanged — deliberately, so the original identity, `stack`, and `cause` survive
-for a caller that needs them — and `message` is an ordinary property that a subclass or a
+`toError` guarantees an `Error` _object_, not a readable one. It deliberately returns an
+`Error` instance unchanged, so the original identity, `stack`, and `cause` survive for a
+caller that needs them. The `message` is an ordinary property that a subclass or a
 `Proxy` can turn into an accessor that throws. So `toError(value).message` is still an
 unguarded read:
 
@@ -77,7 +77,7 @@ toError(hostile).message; // throws 'boom'
 describeError(hostile); // '<error message could not be read>'
 ```
 
-`describeError` is the pairing for the common case — normalize, then read, both guarded:
+`describeError` is the pairing for the common case. It normalizes and then reads, with both steps guarded:
 
 ```typescript
 describeError(new Error('boom')); // 'boom'
@@ -90,8 +90,8 @@ describeError(null); // 'Non-error value thrown: null'
 `isErrorValue(value)` answers whether a value is an error, and is the test `toError` itself
 uses to decide whether to return a value unchanged or wrap it.
 
-Reach for it when you need the _question_ answered rather than an `Error` in hand — a
-branch that passes a genuine error through and wraps everything else, for example.
+Reach for it when you need the _question_ answered rather than an `Error` in hand, for
+example, in a branch that passes a genuine error through and wraps everything else.
 
 **It recognizes errors built in another realm.** `instanceof` compares against _this_
 realm's `Error.prototype`, so an error thrown out of a `vm` context, an iframe, or a jsdom
@@ -108,24 +108,24 @@ isErrorValue(foreign); // true
 ```
 
 **It never throws.** `instanceof` walks a prototype chain, which a revoked `Proxy` refuses,
-so the check is guarded — you can call it on a reporting path without a `try` of your own.
+so the check is guarded. You can call it on a reporting path without a `try` of your own.
 
 A hostile object can claim the brand with `Symbol.toStringTag` and will be reported as an
 error. That is the same bargain `instanceof` already offers, since a `Proxy` can forge a
 prototype chain, and it costs nothing: read anything off the result with `describeError` or
 [`errorToString`](./error-to-string.md), both of which guard every read.
 
-### Which one do I want?
+### Which One Do I Want?
 
 | You need                                                         | Use                                     |
 | ---------------------------------------------------------------- | --------------------------------------- |
 | Text for a `console.error`, a template literal, or a log line    | `describeError`                         |
-| The `Error` object itself — to rethrow, or to pass to a callback | `toError`                               |
+| The `Error` object itself, to rethrow or pass to a callback      | `toError`                               |
 | The full multi-line render, with `name`, `code`, and `stack`     | [`errorToString`](./error-to-string.md) |
 | To know whether a value _is_ an error, without coercing it       | `isErrorValue`                          |
 
-All four are safe to call on a reporting path; none of them throws.
+All four are safe to call on a reporting path. None of them throws.
 
 This matters most inside a callback the library hands a failure to and then asks not to
-throw — `logger`'s `onSinkError` and `onEventHandlerError`, for instance. Reach for
+throw, such as `logger`'s `onSinkError` and `onEventHandlerError`. Reach for
 `describeError` there rather than reading `.message` yourself.

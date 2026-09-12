@@ -9,8 +9,8 @@ Format any error (or unknown thrown value) into a readable ASCII table string, s
   - [errorToString](#errortostring)
 - [Recognized Fields](#recognized-fields)
 - [Additional Info & Sensitive Fields](#additional-info--sensitive-fields)
-  - [Choosing how values are masked](#choosing-how-values-are-masked)
-- [Never throws](#never-throws)
+  - [Choosing How Values Are Masked](#choosing-how-values-are-masked)
+- [Never Throws](#never-throws)
 - [Notes](#notes)
 
 <!-- tocstop -->
@@ -125,7 +125,7 @@ console.log(errorToString(err));
 // AdditionalInfo.user  → alice
 ```
 
-`sensitiveFieldNames` uses the **same path syntax as the logger's [`redactedKeys`](./logger.md#redaction-of-sensitive-data)**, so one mental model covers both. That extends to what a path _means_: it names a **location, not a value**, so one object sitting at two places in `additionalInfo` is masked only where it was named and is printed in full at the other. See [A Path Names a Location, Not a Value](./logger.md#a-path-names-a-location-not-a-value). A bare name addresses a top-level key of `additionalInfo`; reaching a nested value takes a path, and array indexes and quoted bracket keys work the same way:
+`sensitiveFieldNames` uses the **same path syntax as the logger's [`redactedKeys`](./logger.md#redaction-of-sensitive-data)**, so one mental model covers both. That extends to what a path _means_: it names a **location, not a value**, so one object sitting at two places in `additionalInfo` is masked only where it was named and is printed in full at the other. See [A Path Names a Location, Not a Value](./logger.md#a-path-names-a-location-not-a-value). A bare name addresses a top-level key of `additionalInfo`. Reaching a nested value takes a path, and array indexes and quoted bracket keys work the same way:
 
 ```typescript
 const err = new Error('auth failed');
@@ -159,11 +159,11 @@ Entries the grammar rejects mask **nothing at all**, silently. That covers a tra
 
 A dotted or bracketed entry is treated as ambiguous and both readings are covered, the same way the logger's `redactedKeys` does: `'user.password'` masks the nested `additionalInfo.user.password` _and_ a literal key spelled `'user.password'`, when either exists.
 
-#### Choosing how values are masked
+#### Choosing How Values Are Masked
 
 Masked values use the same default the logger applies, so a value renders identically whether it went through a log line or a rendered error. That default masks 90% of strings that are at least 8 characters long, so a little survives at each end and the same secret can be correlated across log lines without being readable. Short strings and values rendered from other types are replaced outright, as described below.
 
-The `redactFunction` here honours the same return contract as the logger's - a string is used literally, `null` defers to the default, a number sets the percent, and an object is always a masking request, never a replacement value. A plain object whose own keys are all masking settings (`strategy`, one of `'string' | 'email' | 'domain'`, plus `percent`, `maskChar`, `userPercent`, `domainPercent`) is masked with those; any other object - `{}`, an unrecognized key, a mixture, an array, a class instance - falls back to the default masking, landing exactly where `null` does, the treatment of non-string values included. The value reaching your function is always a `string`, already rendered. See [the logger docs](./logger.md#controlling-how-a-value-is-masked) for the full table.
+The `redactFunction` here honours the same return contract as the logger's - a string is used literally, `null` defers to the default, a number sets the percent, and an object is always a masking request, never a replacement value. A plain object whose own keys are all masking settings (`strategy`, one of `'string' | 'email' | 'domain'`, plus `percent`, `maskChar`, `userPercent`, `domainPercent`) is masked with those. Any other object - `{}`, an unrecognized key, a mixture, an array, a class instance - falls back to the default masking, landing exactly where `null` does, the treatment of non-string values included. The value reaching your function is always a `string`, already rendered. See [the logger docs](./logger.md#controlling-how-a-value-is-masked) for the full table.
 
 ```typescript
 // apiKey: 'sk_live_51H8x9QcAbCdEf'
@@ -195,16 +195,16 @@ To render a literal null, return the string `'null'`. Returning **nothing** defe
 
 The function is handed the key exactly as you wrote it in `sensitiveFieldNames` (`user.password`, not the leaf `password`) and the value already stringified, which is what the logger passes for the same field - so the same function genuinely serves both, and a mutating function cannot reach into your error object.
 
-Pass `onFormatError` to find out why a value failed to redact - it receives the error, `kind: 'redaction'`, and the `sensitiveFieldNames` entry it happened on. The same callback also reports rendering failures under `kind: 'render'`; both come from the same walk over the same value and address it the same way, which is why they are one callback with a discriminator rather than two. It fires at most once per kind per call, and with no handler reports on the standard global `'error'` channel so a `logger.registerReportErrorListener()` records it, falling back to `console.error` when nothing claims it. The same option is on the logger and on `stringifyValue`.
+Pass `onFormatError` to find out why a value failed to redact - it receives the error, `kind: 'redaction'`, and the `sensitiveFieldNames` entry it happened on. The same callback also reports rendering failures under `kind: 'render'`. Both come from the same walk over the same value and address it the same way, which is why they are one callback with a discriminator rather than two. It fires at most once per kind per call, and with no handler reports on the standard global `'error'` channel so a `logger.registerReportErrorListener()` records it, falling back to `console.error` when nothing claims it. The same option is on the logger and on `stringifyValue`.
 
 If the `redactFunction` throws, or reading the value throws, the result is `***REDACTION FAILED***` - never the original value. That is the same marker the logger uses for the same condition, and it is deliberately distinct from a successful mask so a broken `redactFunction` cannot hide behind output that looks fine.
 
 Masking **fails closed** when the _list itself_ is unusable. A comma-joined string, a `Set`, a non-string entry, or an accessor that throws all mean the caller asked for masking and this cannot tell what for, so `additionalInfo` is dropped wholesale and replaced with `*** (sensitiveFieldNames unreadable)` rather than rendered in the clear. This does **not** extend to an individual entry: one that does not parse, or that parses but matches nothing, simply masks nothing and leaves the other entries working, exactly as an unmatched `redactedKeys` entry redacts nothing in the logger.
 
-## Never throws
+## Never Throws
 
-`errorToString` runs on reporting paths — [safe-handle-callback](./safe-handle-callback.md)
-calls it to render whatever a callback threw — where raising a second failure on top of the
+`errorToString` runs on reporting paths. [safe-handle-callback](./safe-handle-callback.md)
+calls it to render whatever a callback threw, where raising a second failure on top of the
 first is the worst possible outcome. It is written so it cannot:
 
 - Every property read off the value is guarded. `message`, `stack`, `code` and the rest are
@@ -218,9 +218,9 @@ first is the worst possible outcome. It is written so it cannot:
 
   | Marker                  | Meaning                                                                                                                                                                             |
   | ----------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-  | `<unrenderable: keys>`  | The container would not be enumerated — a revoked `Proxy`, a throwing `ownKeys` trap.                                                                                               |
-  | `<unrenderable: value>` | One value would not be read — a throwing accessor, a revoked `Proxy`.                                                                                                               |
-  | `<unrenderable: text>`  | The value was read but could not be turned into text — `String()` invokes `toString`/`Symbol.toPrimitive`, and `JSON.stringify` throws on a cyclic object and on a nested `BigInt`. |
+  | `<unrenderable: keys>`  | The container would not be enumerated because of a revoked `Proxy` or a throwing `ownKeys` trap.                                                                                               |
+  | `<unrenderable: value>` | One value would not be read because of a throwing accessor or a revoked `Proxy`.                                                                                                               |
+  | `<unrenderable: text>`  | The value was read but could not be turned into text. `String()` invokes `toString`/`Symbol.toPrimitive`, and `JSON.stringify` throws on a cyclic object and on a nested `BigInt`. |
 
   **The cause is deliberately not in the marker.** The thrown value is yours: a getter is
   free to throw `new Error('cannot read ' + this.password)`, and a marker carrying that
@@ -249,10 +249,10 @@ first is the worst possible outcome. It is written so it cannot:
 
 - The recursive walk of `additionalInfo` tracks the objects on the current path and cuts a
   cycle with `<circular>` rather than exhausting the stack. Only a genuine cycle - an
-  object contained within itself - is cut; an object merely referenced twice side by side
+  object contained within itself - is cut. An object merely referenced twice side by side
   renders in full both times.
 - The walk is bounded in both directions, sharing its limits with the logger's template
-  rendering. Past 100 levels it stops and marks the spot with `[max depth exceeded]`; past
+  rendering. Past 100 levels it stops and marks the spot with `[max depth exceeded]`. Past
   roughly a megabyte of output it stops and marks it with `[max length exceeded]`. Both
   matter because the cycle check above deliberately lets an object referenced twice render
   twice, so a payload that reuses one subtree doubles in size per level without ever being

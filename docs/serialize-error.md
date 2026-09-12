@@ -8,7 +8,7 @@ Useful for IPC, internal RPCs, and storing errors in a database (e.g. logging fa
 
 - [Usage](#usage)
 - [What It Captures](#what-it-captures)
-- [When a value cannot be serialized](#when-a-value-cannot-be-serialized)
+- [When a Value Cannot Be Serialized](#when-a-value-cannot-be-serialized)
 - [API](#api)
   - [isErrorLike](#iserrorlike)
 - [RESTful API Error Guidelines](#restful-api-error-guidelines)
@@ -41,7 +41,7 @@ throw restored;
 - All own properties from Error subclasses (`errCode`, `statusCode`, whatever)
 - Nested errors are recursively serialized
 
-## When a value cannot be serialized
+## When a Value Cannot Be Serialized
 
 Serializing degrades rather than failing. A value that refuses to be read becomes
 `<unserializable: keys>`, `<unserializable: value>` or `<unserializable: text>` - naming

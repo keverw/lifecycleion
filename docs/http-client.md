@@ -285,11 +285,11 @@ interface HTTPResponse<T = unknown> {
 
 #### Uploads That Outlive the Response
 
-Most REST APIs read and process the whole upload before they answer, so by the time you have a response the body is long gone out. If that is your situation, ignore `requestBodySettled`: it is there on any request that had a body, and on that shape it has nothing to tell you — it resolves with `undefined`. It exists for the uncommon shapes where the answer can arrive first: early-ack, unbuffered, and duplex endpoints, and `NodeAdapter` only.
+Most REST APIs read and process the whole upload before they answer, so by the time you have a response the body is long gone out. If that is your situation, ignore `requestBodySettled`: it is there on any request that had a body, and on that shape it has nothing to tell you. It resolves with `undefined`. It exists for the uncommon shapes where the answer can arrive first: early-ack, unbuffered, and duplex endpoints, and `NodeAdapter` only.
 
-With request buffering disabled — nginx `proxy_request_buffering off`, or any endpoint that acks a streaming upload as soon as it has what it needs — the answer arrives while the upload is still going. The response is real and is delivered immediately, and what happens to the rest of the body afterwards used to be invisible: it can fail on its own (a `File` that yields fewer bytes than its `Blob.size` puts a body on the wire short of its `Content-Length`), or be cut short by the adapter's stall watchdog seconds after you already read a clean `2xx`.
+With request buffering disabled, as with nginx `proxy_request_buffering off` or any endpoint that acks a streaming upload as soon as it has what it needs, the answer arrives while the upload is still going. The response is real and is delivered immediately, and what happens to the rest of the body afterwards used to be invisible: it can fail on its own (a `File` that yields fewer bytes than its `Blob.size` puts a body on the wire short of its `Content-Length`), or be cut short by the adapter's stall watchdog seconds after you already read a clean `2xx`.
 
-`requestBodySettled` is that outcome. It is present whenever this request had a body writer — every bodied request, not only the ones whose writer was still running when the response resolved, so presence is not the test for "the upload outlived the answer" — it resolves with the failure or with `undefined`, and it never rejects:
+`requestBodySettled` is that outcome. It is present whenever this request had a body writer, meaning every bodied request, not only the ones whose writer was still running when the response resolved. Presence is not the test for "the upload outlived the answer." It resolves with the failure or with `undefined`, and it never rejects:
 
 ```ts
 const response = await client.post('/upload').body(form).send();
@@ -305,7 +305,7 @@ if (response.status === 200) {
 
 It rides on every response to a bodied request, not only the successful ones: a failed response stream (`isStreamError`), a connection reset before any headers, a TLS failure. Those are the shapes where the writer is most likely to have been mid-flight, so `undefined` there means the body went out, never "no one was looking".
 
-It is advisory and changes nothing the client decides — `status`, `isFailed`, `isNetworkError`, and retries are all untouched. That is deliberate: carried on the response as a transport failure instead, a `413` that answered and stopped reading would reach you as a network error with the server's own explanation dropped. Every such failure is also reported on the global `'error'` channel, whether or not anyone awaits this. `NodeAdapter` is the only adapter that reports it today.
+It is advisory and changes nothing the client decides. `status`, `isFailed`, `isNetworkError`, and retries are all untouched. That is deliberate: carried on the response as a transport failure instead, a `413` that answered and stopped reading would reach you as a network error with the server's own explanation dropped. Every such failure is also reported on the global `'error'` channel, whether or not anyone awaits this. `NodeAdapter` is the only adapter that reports it today.
 
 ### Content-Type Detection and Body Parsing
 
@@ -1306,9 +1306,9 @@ const response = await client.get('/large-file.bin', {
 });
 ```
 
-#### Writing your own `WritableLike`
+#### Writing Your Own `WritableLike`
 
-A Node stream — `fs.createWriteStream()`, a socket, a `zlib` transform — satisfies
+A Node stream, such as `fs.createWriteStream()`, a socket, or a `zlib` transform, satisfies
 `WritableLike` as it is, and everything below is already true of it. The rest of this
 section only matters if you hand-roll the sink.
 
@@ -1317,17 +1317,17 @@ Two expectations the adapter relies on:
 - **Define `off` or `removeListener`.** Both are optional on the type so an existing
   object still compiles, but the adapter attaches listeners for the life of a request and
   takes them off again afterwards. With neither method it cannot, so rather than attach
-  listeners it could never remove, it keeps the ones it has — and a sink reused across
-  many requests accumulates them until Node warns about a leak. Either name works; a Node
+  listeners it could never remove, it keeps the ones it has. A sink reused across
+  many requests accumulates them until Node warns about a leak. Either name works. A Node
   stream has both.
 - **Report a failed write.** Either call the callback passed to `write` / `end` with the
-  error, or emit `'error'` — which is what a Node stream does. A write that fails destroys
+  error, or emit `'error'`, which is what a Node stream does. A write that fails destroys
   the stream and its `'error'` often arrives after the request has already settled, so the
   adapter keeps an `'error'` listener on your sink across that gap to stop the event from
   becoming an uncaught exception. The wait is bounded but not brief: a real
   `fs.WriteStream` closes its file descriptor asynchronously before it emits, so the error
-  lands a poll phase later, and a removal counted in turns of the loop expired first —
-  which turned the very error the listener existed to absorb into an uncaught exception.
+  lands a poll phase later, and a removal counted in turns of the loop expired first.
+  This turned the very error the listener existed to absorb into an uncaught exception.
   See [How long that listener stays](#how-long-that-listener-stays).
 - **Emit `'close'` when you are finished.** That is how the adapter learns nothing further
   is coming and takes the listener off at once, instead of waiting out the timers below.
@@ -1335,18 +1335,18 @@ Two expectations the adapter relies on:
   with there, and the adapter reads it as a second signal when `end`'s callback reports
   success on a stream that was destroyed underneath it. It is optional, and a sink without
   it loses nothing as long as it honours the point above. The read is guarded, so an
-  `errored` accessor that throws costs that one signal rather than the request — it happens
+  `errored` accessor that throws costs that one signal rather than the request. It happens
   inside `end`'s callback, a tick after the call, where an escaping throw would be an
   uncaught exception rather than a failed download. That is not a general licence to throw:
   a sink whose `on` or `destroy` throws still fails the request.
 
-##### How long that listener stays
+##### How Long That Listener Stays
 
 Worth knowing, because the writable is yours and the adapter is holding a listener on it.
 
 Nothing can promise "no more errors, ever." The operating system does not offer that
 guarantee and a writable is free to emit an hour from now, so the adapter does not wait for
-an answer it cannot get — **it waits for a bounded time and then lets go.**
+an answer it cannot get. **It waits for a bounded time and then lets go.**
 
 One `'error'` listener is shared per writable rather than per request, so ten concurrent
 downloads into one sink attach one listener between them, not ten. It comes off at the
@@ -1356,23 +1356,23 @@ first of these:
 | ---------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | The `'error'` arrives              | Absorbed, and reported through the host error reporter unless the request already handed it to you as `errorCause`. Released one turn later, so a sibling request's late error is still covered                                         |
 | `'close'`                          | The stream has finished tearing down and nothing further is coming, so it is released immediately                                                                                                                                       |
-| ~1 second with neither             | The per-request window. Every request that settles while the listener is already attached restarts it, so each gets a window of its own rather than the remainder of the first one's — clamped by whatever is left of the ceiling below |
+| ~1 second with neither             | The per-request window. Every request that settles while the listener is already attached restarts it, so each gets a window of its own rather than the remainder of the first one's, clamped by whatever is left of the ceiling below |
 | ~5 seconds since it first attached | The absolute ceiling on one listener, which no amount of restarting extends                                                                                                                                                             |
 
 That last row is the one to hold on to: **the absorber does not live forever, and it is not
 per process.** Without the ceiling, a caller streaming continuously into `process.stdout` or
-a pooled sink — exactly the writables that never error and never close — would push the
+a pooled sink, exactly the kind of writable that never errors and never closes, would push the
 window out on every settle and keep the _first_ request's closure pinned to that stream for
 the life of the process.
 
 When the ceiling is reached the listener detaches, and the next request to settle on that
 writable attaches a fresh one with a fresh ceiling. Continuous traffic therefore does keep a
-listener on the sink continuously; what it cannot do is keep any one request's scope alive
+listener on the sink continuously. What it cannot do is keep any one request's scope alive
 behind it.
 
 The practical consequence for a sink you wrote: an error emitted more than a few seconds
 after the last request touching it settled is yours to handle. On a Node stream with no
-`'error'` listener of your own, that is an uncaught exception — the ordinary contract for a
+`'error'` listener of your own, that is an uncaught exception under the ordinary contract for a
 stream you own, and the reason the two points above ask for an `'error'` or a `'close'`
 rather than silence.
 
@@ -1390,10 +1390,10 @@ For deciding whether a request may be resent, a stream error groups with a **rea
 
 | Outcome                                       | Did the server receive it?     | Safe to replay a non-idempotent write? |
 | --------------------------------------------- | ------------------------------ | -------------------------------------- |
-| Transport failure with `wasDefinitelyNotSent` | No — no connection was made    | Yes — nothing could have been applied  |
-| Transport failure, delivery not proven        | Unknown                        | No — it may have arrived               |
-| `isStreamError`, real status                  | Yes, and it may have committed | No — the outcome is unknown            |
-| `5xx` with an intact body                     | Yes, and it may have committed | No — the outcome is unknown            |
+| Transport failure with `wasDefinitelyNotSent` | No, no connection was made     | Yes, nothing could have been applied   |
+| Transport failure, delivery not proven        | Unknown                        | No, it may have arrived                |
+| `isStreamError`, real status                  | Yes, and it may have committed | No, the outcome is unknown             |
+| `5xx` with an intact body                     | Yes, and it may have committed | No, the outcome is unknown             |
 
 A transport failure is not by itself a licence to replay. `status: 0` means no usable response came back, which is not the same as the request never arriving. A connection dropped after the request was written looks identical from here. Only an adapter that can name the cause (a refused connection, a name that did not resolve) can turn that into proof.
 
@@ -1409,8 +1409,8 @@ Two things deliberately do **not** set the flag. A caller's own `AbortSignal` fi
 
 | Adapter        | `isStreamError` | Notes                                                                                                                                               |
 | -------------- | --------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `NodeAdapter`  | Full            | Streamed and buffered bodies; distinguishes `stream_write_error` from `stream_response_error`                                                       |
-| `FetchAdapter` | Buffered bodies | Server runtimes and browsers alike; always reports `stream_response_error` — `fetch` buffers the body, so there is no per-chunk delivery to inspect |
+| `NodeAdapter`  | Full            | Streamed and buffered bodies, distinguishing `stream_write_error` from `stream_response_error`                                                       |
+| `FetchAdapter` | Buffered bodies | Server runtimes and browsers alike. Always reports `stream_response_error` because `fetch` buffers the body, so there is no per-chunk delivery to inspect |
 | `MockAdapter`  | Simulated       | Opt in per response with `streamError: true`, or name the code explicitly                                                                           |
 | `XHRAdapter`   | Not reported    | `XMLHttpRequest` discards the status on a network error, leaving nothing to qualify                                                                 |
 
@@ -1477,7 +1477,7 @@ Since the client treats anything other than `false` as retryable, an unset value
 
 | Value                   | Meaning                                                                   |
 | ----------------------- | ------------------------------------------------------------------------- |
-| `adapter_veto`          | The adapter reported `isRetryable: false` — no attempt can succeed        |
+| `adapter_veto`          | The adapter reported `isRetryable: false`, so no attempt can succeed      |
 | `stream_error`          | The body failed after headers arrived, so the server received the request |
 | `non_idempotent_method` | A `POST` or `PATCH` with no proof of non-delivery                         |
 

@@ -85,9 +85,9 @@ redactValue({ user: { password: 'hunter2secret' } }, options);
 stringifyValue(redactValue(value, options)) === stringifyValue(value, options);
 ```
 
-The value passed in is never modified. Copies are built only along the branches that lead to a mask, so anything not named comes back as the value that went in — a `Date` is still that `Date`, an `Error` still carries its `message` and `stack`. A container that _was_ masked inside is rebuilt as a plain object, since the original must not be mutated and a class instance cannot be reconstructed from outside. A failure yields the redaction marker rather than the original value.
+The value passed in is never modified. Copies are built only along the branches that lead to a mask, so anything not named comes back as the value that went in. A `Date` is still that `Date`, and an `Error` still carries its `message` and `stack`. A container that _was_ masked inside is rebuilt as a plain object, since the original must not be mutated and a class instance cannot be reconstructed from outside. A failure yields the redaction marker rather than the original value.
 
-## How values render
+## How Values Render
 
 | Value                               | Result                   |
 | ----------------------------------- | ------------------------ |
@@ -101,7 +101,7 @@ The value passed in is never modified. Copies are built only along the branches 
 | `class FooBar {}` instance          | `[FooBar]`               |
 | an instance defining `toString`     | whatever it returns      |
 
-A plain object or array renders as JSON, so its contents are readable and an array cannot be confused with one element containing a comma. A value **renders the same way wherever it appears** - alone, or nested any number of levels down. Only plain objects and arrays are walked; everything else is a single leaf rendered by its own string form:
+A plain object or array renders as JSON, so its contents are readable and an array cannot be confused with one element containing a comma. A value **renders the same way wherever it appears** - alone, or nested any number of levels down. Only plain objects and arrays are walked. Everything else is a single leaf rendered by its own string form:
 
 | value               | renders as                                                                      |
 | ------------------- | ------------------------------------------------------------------------------- |
@@ -129,7 +129,7 @@ Two limits bound a render that would otherwise run away, and both leave a marker
 
 The length limit is what bounds breadth, which depth cannot. Rendering _is_ recursive over shared references - an object reached by two paths is rendered at both, deliberately, since it is not a cycle - so a graph reusing one child under two keys doubles per level. Twenty-two levels of `{ l: child, r: child }` is only 45 objects and would render to 96 MB without a cap. Both limits are far outside ordinary use: 1 MB is around 8,500 typical records or 12,000 config entries in a single line, and reaching either usually means more was passed to a log call than was meant. The length limit is approximate rather than exact - it is checked before descending into a container, so the last one entered can overshoot, by under 10% on flat data and around 30% on deeply nested data.
 
-## Redacting while rendering
+## Redacting While Rendering
 
 Pass `redactedKeys` to mask parts of the value before it is rendered. Paths use the same syntax as the logger's [`redactedKeys`](./logger.md#redaction-of-sensitive-data), rooted at `value`:
 
@@ -143,7 +143,7 @@ stringifyValue(
 // '{"user":{"password":"h***********t"}}'
 ```
 
-A bare name addresses a top-level key; `user.password` and `items[0].token` address one location; `items[*].token` and `items.*.token` address every element of an array. Naming a plain object or array masks each value inside it and keeps the shape. See [Wildcards Over Arrays](./logger.md#wildcards-over-arrays) for what a wildcard does and does not expand over.
+A bare name addresses a top-level key. `user.password` and `items[0].token` address one location, while `items[*].token` and `items.*.token` address every element of an array. Naming a plain object or array masks each value inside it and keeps the shape. See [Wildcards Over Arrays](./logger.md#wildcards-over-arrays) for what a wildcard does and does not expand over.
 
 A path names a **location, not a value**, so one object reachable by two paths is masked only where it was named: `redactValue({ a, b: { ref: a } }, { redactedKeys: ['a.secret'] })` masks `a.secret` and hands `b.ref.secret` back as it came in. Name both to mask both. See [A Path Names a Location, Not a Value](./logger.md#a-path-names-a-location-not-a-value) for why, which covers this surface too.
 
@@ -160,13 +160,13 @@ redactValue({ err: new Error('boom') }, { redactedKeys: ['err.message'] });
 
 This is what keeps the guarantee that **redacted output differs from unredacted output only where a value was masked**. Descending into such a value instead would rebuild it as a plain object, and the renderer would then print its fields rather than its string form - so redacting one field would expose every other field beside it, which is the opposite of what was asked for.
 
-A `toJSON` method is **not** called. `JSON.stringify` honours it; this does not. It was honoured for a plain object and ignored for a class instance, which is an arbitrary split, and it is caller code on the logging path - free to throw, to be slow, or to return something different each call. Everything is walked by this library instead, so what prints is what the value actually holds, and an object with a `toJSON` redacts like any other. To keep a field out of a log line, name it in `redactedKeys`.
+A `toJSON` method is **not** called. `JSON.stringify` honours it, but this does not. It was honoured for a plain object and ignored for a class instance, which is an arbitrary split, and it is caller code on the logging path - free to throw, to be slow, or to return something different each call. Everything is walked by this library instead, so what prints is what the value actually holds, and an object with a `toJSON` redacts like any other. To keep a field out of a log line, name it in `redactedKeys`.
 
 Masking a value the renderer prints whole replaces it with a **string** - nothing is rebuilt for it. That is what keeps the shape stable: `"[Map]"` before, `"***REDACTED***"` after. Only plain objects and arrays are ever rebuilt, because they are the only things either walk enters.
 
 Two cases fail closed and so do change a value nobody named, both marked rather than silently altered: a container whose keys cannot be read, and a container that holds itself once a mask has landed elsewhere in the payload. Redaction can copy around neither, and handing back the original would risk returning it unmasked. A cycle in a payload where nothing matched at all is left exactly as it came in.
 
-### What masking reaches
+### What Masking Reaches
 
 Masking covers exactly what rendering prints: **own enumerable string-keyed properties** of plain objects and arrays. Anything `Object.entries` does not see - a non-enumerable property, a symbol key, one carried on a prototype, one a `Proxy` hides from its `ownKeys` trap - is neither masked nor printed:
 
@@ -185,7 +185,7 @@ Nothing reaches a log line, because the renderer cannot see it either. But it me
 - The same rendering backs template interpolation in [curly-brackets](./curly-brackets.md) and the logger's message text, so a value reads the same everywhere.
 - `redactValue`, `stringifyValue` and the logger's `redactedKeys` share one implementation, so a `redactFunction` behaves identically in all three.
 - Redaction fails closed. A `redactFunction` that throws, or a value that cannot be read, yields `***REDACTION FAILED***` rather than the original.
-- Pass `onFormatError` to learn _why_ a value failed. The markers say only that something did; this callback is handed the error, which stage threw, and the structural path it happened on - `password`, `<value>.user.token`.
+- Pass `onFormatError` to learn _why_ a value failed. The markers say only that something did. This callback is handed the error, which stage threw, and the structural path it happened on - `password`, `<value>.user.token`.
   - `kind: 'redaction'` means your `redactFunction` threw, or a value could not be read to mask it.
   - `kind: 'render'` means a value refused to be read or turned into text. Either call can raise it: `redactValue` hands back structure, but masking a leaf renders it first, so a `toString` that throws under a masked key reports here too. Render subjects are rooted at `<value>` in both, so the same leaf is named the same way whichever half reports it. It fires only when a read actually threw, never for the ordinary degradations.
   - Both come from the same walk over the same value and address it the same way, which is why they are one callback with a discriminator rather than two. Each kind carries its own once-per-call budget, so a value that fails both ways is reported both ways.

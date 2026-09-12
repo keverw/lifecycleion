@@ -10,7 +10,7 @@
   - [Using a Fallback](#using-a-fallback)
   - [Escaping Brackets](#escaping-brackets)
   - [Compiling Templates](#compiling-templates)
-  - [Telling an unreadable placeholder from an absent one](#telling-an-unreadable-placeholder-from-an-absent-one)
+  - [Telling an Unreadable Placeholder from an Absent One](#telling-an-unreadable-placeholder-from-an-absent-one)
   - [Escaping Utility](#escaping-utility)
 - [Credits / Inspiration](#credits--inspiration)
 
@@ -134,7 +134,7 @@ console.log(template({ name: 'Alice' })); // Outputs: "Hello, Alice!"
 console.log(template({})); // Outputs: "Hello, (???)!"
 ```
 
-### Telling an unreadable placeholder from an absent one
+### Telling an Unreadable Placeholder from an Absent One
 
 Both render the fallback. `{{user.token}}` on an object whose `token` accessor throws
 produces exactly what a typo produces, and until `onFormatError` existed the two were

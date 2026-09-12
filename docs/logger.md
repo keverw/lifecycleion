@@ -21,11 +21,11 @@ A modern, flexible logging library with sink-based architecture, template string
     - [A Path Names a Location, Not a Value](#a-path-names-a-location-not-a-value)
     - [Path Grammar](#path-grammar)
     - [Custom Redaction Function](#custom-redaction-function)
-    - [Redaction fails closed](#redaction-fails-closed)
-    - [Finding out _why_ redaction failed](#finding-out-_why_-redaction-failed)
-  - [When a value cannot be rendered](#when-a-value-cannot-be-rendered)
-    - [Controlling how a value is masked](#controlling-how-a-value-is-masked)
-    - [What the default reveals](#what-the-default-reveals)
+    - [Redaction Fails Closed](#redaction-fails-closed)
+    - [Finding Out _Why_ Redaction Failed](#finding-out-_why_-redaction-failed)
+  - [When a Value Cannot Be Rendered](#when-a-value-cannot-be-rendered)
+    - [Controlling How a Value Is Masked](#controlling-how-a-value-is-masked)
+    - [What the Default Reveals](#what-the-default-reveals)
   - [Tags for Categorization and Filtering](#tags-for-categorization-and-filtering)
     - [Use Cases](#use-cases)
     - [Notes](#notes)
@@ -62,13 +62,13 @@ A modern, flexible logging library with sink-based architecture, template string
   - [Options for Log Methods](#options-for-log-methods)
   - [Logger Configuration](#logger-configuration)
     - [Sink Error Handling](#sink-error-handling)
-      - [Where errors go when the logger cannot log them](#where-errors-go-when-the-logger-cannot-log-them)
+      - [Where Errors Go When the Logger Cannot Log Them](#where-errors-go-when-the-logger-cannot-log-them)
     - [Exit Behavior](#exit-behavior)
 - [Capturing Reported Errors](#capturing-reported-errors)
 - [Where Failures Go](#where-failures-go)
-  - [Why the fall-back is the console](#why-the-fall-back-is-the-console)
-  - [Never seeing a console line](#never-seeing-a-console-line)
-  - [Standalone renderers are different](#standalone-renderers-are-different)
+  - [Why the Fall-Back Is the Console](#why-the-fall-back-is-the-console)
+  - [Never Seeing a Console Line](#never-seeing-a-console-line)
+  - [Standalone Renderers Are Different](#standalone-renderers-are-different)
 - [EventEmitter Integration](#eventemitter-integration)
   - [Exit Event Phases](#exit-event-phases)
 - [Custom Sinks](#custom-sinks)
@@ -466,7 +466,7 @@ logger.info('User login attempt', {
 });
 ```
 
-**Note:** Dot notation, array indexes, quoted bracket keys like `users[0]["password-hash"]`, and the array wildcard `users[*].password` are all supported. Quoting is only required for a key that contains `.`, `[` or `]`; `users[0].password-hash` resolves the same as `users[0]["password-hash"]`.
+**Note:** Dot notation, array indexes, quoted bracket keys like `users[0]["password-hash"]`, and the array wildcard `users[*].password` are all supported. Quoting is only required for a key that contains `.`, `[` or `]`. The path `users[0].password-hash` resolves the same as `users[0]["password-hash"]`.
 
 A bare name therefore addresses a top-level key only: `redactedKeys: ['password']` masks `params.password` and leaves `params.user.password` rendered. Name the path to reach it.
 
@@ -493,7 +493,7 @@ It stands in for an array **index**, and only for one. That has two consequences
 
 `*`, `[*]` and the quoted `["*"]` are all the same segment, so quoting is **not** an escape hatch: `items["*"]` expands over every element when `items` is an array, exactly as `items[*]` does.
 
-That is the grammar's existing rule rather than a wildcard exception. Quoting disambiguates a key that contains a delimiter; it never changes what a segment means. The same is already true of numbers - `users[0]`, `users["0"]`, `users['0']` and `users.0` are one entry, and that one entry addresses both an array's slot `0` and a plain object's key `"0"`, because the parser does not distinguish an index from a name and the container decides. The consequence for wildcards is simply that there is no spelling which addresses only a named property called `*` on an array.
+That is the grammar's existing rule rather than a wildcard exception. Quoting disambiguates a key that contains a delimiter, but it never changes what a segment means. The same is already true of numbers. The paths `users[0]`, `users["0"]`, `users['0']` and `users.0` are one entry, and that one entry addresses both an array's slot `0` and a plain object's key `"0"`, because the parser does not distinguish an index from a name and the container decides. The consequence for wildcards is simply that there is no spelling which addresses only a named property called `*` on an array.
 
 Concrete paths are unchanged: `users[0].password` still masks that one element, and where both a concrete entry and a wildcard match the same location, the concrete one is the key handed to a [`redactFunction`](#custom-redaction-function).
 
@@ -518,7 +518,7 @@ logger.info('sync', {
 
 Both entries are the same object, so the second one is the first one unmasked. Name every path you want masked - here, `['account.apiKey', 'snapshot.account.apiKey']`.
 
-Where that shows up depends on the surface. The rendered log message is unaffected unless it interpolates the second path, but a structured sink walks the whole of `redactedParams` and reaches it; `redactValue` hands the alias back as it came in; and `errorToString` prints it, since it renders every entry of `additionalInfo` into the table.
+Where that shows up depends on the surface. The rendered log message is unaffected unless it interpolates the second path, but a structured sink walks the whole of `redactedParams` and reaches it. The `redactValue` function hands the alias back as it came in, and `errorToString` prints it, since it renders every entry of `additionalInfo` into the table.
 
 This falls out of what a path means and is not an oversight to work around. Masking by value instead would mean that naming one key silently rewrote a value somewhere else in the payload that you never mentioned, which is the opposite of the guarantee that redacted output differs from unredacted output only where a value was masked. It also cannot be done reliably in one pass, since whether the alias is masked would depend on which of the two paths the walk happened to reach first.
 
@@ -530,7 +530,7 @@ An unquoted path segment is a run of name characters - letters, digits, combinin
 
 This is the redaction grammar. A `{{placeholder}}` in a message template uses the same syntax minus the wildcard, since a placeholder renders one value and there is nothing for `{{users[*].name}}` to print - it is left in the message verbatim, as any unparseable placeholder is.
 
-[`errorToString`](./error-to-string.md#additional-info--sensitive-fields) uses this same syntax for the `sensitiveFieldNames` list it reads off an error, so one mental model covers both. The two agree on bare names, dotted paths, array indexes, and quoted bracket keys; they differ only in what happens when the list itself is unusable, where `errorToString` drops `additionalInfo` wholesale.
+[`errorToString`](./error-to-string.md#additional-info--sensitive-fields) uses this same syntax for the `sensitiveFieldNames` list it reads off an error, so one mental model covers both. The two agree on bare names, dotted paths, array indexes, and quoted bracket keys. They differ only in what happens when the list itself is unusable, where `errorToString` drops `additionalInfo` wholesale.
 
 #### Custom Redaction Function
 
@@ -567,7 +567,7 @@ To render a literal null, return the string `'null'`. Returning **nothing** defe
 
 The same function and the same deferral rule work with [`errorToString`](./error-to-string.md#choosing-how-values-are-masked), which shares this default and passes the same key and stringified value.
 
-#### Redaction fails closed
+#### Redaction Fails Closed
 
 Your `redactFunction` is your code, and the values it is handed are your callers' - either
 can fail. Redaction runs inside `handleLog`, which must not throw out of a `logger.info()`,
@@ -587,10 +587,10 @@ Four failure modes, all fail closed:
 
 | What failed                                                                         | Result                                                                                                          |
 | ----------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
-| Your `redactFunction` throws for a key                                              | That key becomes the marker; every other param redacts normally                                                 |
+| Your `redactFunction` throws for a key                                              | That key becomes the marker, while every other param redacts normally                                           |
 | A value cannot be stringified (a `toString` that throws)                            | Same - that key becomes the marker                                                                              |
-| A param cannot be read (a getter that throws)                                       | That key becomes the marker where it sits; every other param, the redacted one included, redacts normally       |
-| The `params` object cannot be read at all (a revoked `Proxy`, a throwing `ownKeys`) | **Only** the redacted keys are returned, each set to the marker; other params are dropped from `redactedParams` |
+| A param cannot be read (a getter that throws)                                       | That key becomes the marker where it sits, while every other param, including the redacted one, redacts normally |
+| The `params` object cannot be read at all (a revoked `Proxy`, a throwing `ownKeys`) | **Only** the redacted keys are returned, each set to the marker. Other params are dropped from `redactedParams` |
 
 The marker is deliberately distinct from an ordinary `***` mask. An operator seeing `***`
 concludes redaction worked, so a broken `redactFunction` would otherwise hide itself behind
@@ -600,11 +600,11 @@ Note that a cyclic `params` object is **not** a failure - it is walked and redac
 normally.
 
 `entry.params` is unaffected by any of this and still carries the raw values, exactly as it
-does on the success path; only `entry.redactedParams` and the rendered `message` are
+does on the success path. Only `entry.redactedParams` and the rendered `message` are
 substituted. A sink that wants to detect the condition should compare against the exported
 constant rather than hard-coding the literal.
 
-#### Finding out _why_ redaction failed
+#### Finding Out _Why_ Redaction Failed
 
 The marker says that redaction failed, never why - the thrown error was discarded. Pass
 `onFormatError` to get the cause:
@@ -623,12 +623,12 @@ const logger = new Logger({
 
 `kind` is `'redaction'` here and `'render'` when a value refused to be read - see below.
 
-### When a value cannot be rendered
+### When a Value Cannot Be Rendered
 
 Rendering degrades rather than failing: a param that refuses to be read becomes a marker
 (`[unrenderable]`, `<unrenderable: value>`) and the line still goes out, so one bad param
 never costs you the log entry. That is the right trade, and it used to be completely
-silent — a `{{user.token}}` that rendered `(null)` because its accessor threw looked
+silent. A `{{user.token}}` that rendered `(null)` because its accessor threw looked
 exactly like a typo.
 
 `onFormatError` is where the cause goes:
@@ -644,10 +644,10 @@ const logger = new Logger({
 ```
 
 Both stages report through the one callback because both come from the same walk over the
-same value and address it with the same structural path; `kind` is the only thing that ever
+same value and address it with the same structural path. The `kind` is the only thing that ever
 differed between them.
 
-It fires at most once per kind per operation, and only when a read actually threw — never for the
+It fires at most once per kind per operation, and only when a read actually threw, never for the
 ordinary degradations like `[circular]` or `[max depth exceeded]`, which never reach a
 reporter at all.
 
@@ -656,8 +656,8 @@ is deliberate rather than lazy: everything they render runs inside a log call, s
 anywhere a logger might hear it would be logged, and logging renders. The console is the
 only rung that cannot re-enter what is already running.
 
-A **standalone** call — `stringifyValue()` or `errorToString()` invoked directly by you,
-with nothing logging — has no such risk, so with no handler it reports on the standard
+A **standalone** call to `stringifyValue()` or `errorToString()`, invoked directly by you
+with nothing logging, has no such risk, so with no handler it reports on the standard
 global `'error'` channel instead and a `registerReportErrorListener()` records it like any
 other reported failure.
 
@@ -667,12 +667,12 @@ other reported failure.
 > sink again, and it cycles.
 
 **The cause never reaches the log line.** It comes from your own getter or `toString`,
-which were handed the value and are free to put it in the message; a cause written into
+which were handed the value and are free to put it in the message. A cause written into
 the output would travel to every sink past `redactedKeys`. The marker is
 library-authored text, the cause goes to one handler that asked for it. `path` is always
 structural and never a value.
 
-`errorObject()` formats twice — the error, then the params — so it can report twice per
+`errorObject()` formats twice, first the error and then the params, so it can report twice per
 kind, for genuinely different failures. Each kind carries its own budget: a value that
 fails to redact and a value that fails to render are different failures, and collapsing
 them would hide one.
@@ -692,10 +692,10 @@ Two things about it are deliberate:
   set one, a console-writing one if you did not - and `onSinkError` and
   `onEventHandlerError` are console-only for exactly the same reason. A _standalone_
   `stringifyValue()` or `errorToString()`, with nothing logging, has no such risk and does
-  use that channel; see the note above.
+  use that channel. See the note above.
 - **It fires at most once per redaction pass.** A failure is raised per leaf, so a redactor
   that throws unconditionally would otherwise report once for every value inside a named
-  container. The first failure names the cause; the markers left in the output show the
+  container. The first failure names the cause. The markers left in the output show the
   full extent. A pass, not a log call: `errorObject()` redacts twice - once rendering the
   error, once over the params - so it can report twice, for two different failures.
 
@@ -711,7 +711,7 @@ Don't log from inside it, for the reason above. The same option is available on
 
 The guarantee is about redaction _failing_: a key that this attempts to redact never keeps its original value. It is not a guarantee that every sensitive value is found. A `redactedKeys` entry that does not resolve to anything in `params` redacts nothing and is skipped, exactly as it always was, so a typo such as `'password.'` silently protects nothing. A dotted entry is treated as ambiguous and both readings are covered: `'user.password'` redacts the nested `params.user.password` _and_ a literal key spelled `'user.password'`, when either exists.
 
-#### Controlling how a value is masked
+#### Controlling How a Value Is Masked
 
 Your function is handed the key and the value **already stringified** - it is always a
 `string`, whatever the original was - and a string is the ordinary thing to hand back. The
@@ -768,7 +768,7 @@ an error:
 The second row covers `{}`, `{ note: 'withheld' }`, a mixed `{ percent: 10, note: 'x' }`,
 an array, and a class instance. All of them land exactly where `null` does - masked as
 though no `redactFunction` had been given at all. `{}` because every field is optional, so
-a config you assemble conditionally can legitimately come out empty; the rest because
+a config you assemble conditionally can legitimately come out empty. The rest fall back because
 honouring the half of an object we recognize is a guess, and the guess is what leaked
 before: an unrecognized shape read as a config discarded the caller's value and emitted a
 proportional mask of the _original_ in its place.
@@ -793,11 +793,11 @@ redactFunction: (key): RedactFunctionResult =>
 This is why the runtime falls back to the default rather than honouring the half it
 recognizes: a green build is not evidence your config parsed.
 
-The `redactedKeys` list decides _what_ is redacted; this decides _how_, and only for the keys you single out.
+The `redactedKeys` list decides _what_ is redacted. This decides _how_, and only for the keys you single out.
 
 Masking never returns the original. A request that would hide nothing - a percent of `0`, a value too short to mask proportionally, an address `email` cannot parse - falls through to `***REDACTED***` instead.
 
-#### What the default reveals
+#### What the Default Reveals
 
 The default masks 90% of strings that are at least 8 characters long, so a little survives at each end and the same secret can be correlated across log lines without being readable. A shorter string is replaced with `***REDACTED***` outright, since a proportional mask of something that short hides almost nothing.
 
@@ -931,7 +931,7 @@ console.log(logger.getSinks().length); // 0
 - `removeSink()` does NOT close the sink - you are responsible for closing it if needed
 - `logger.close()` closes all sinks AND removes them from the logger
 - After `logger.close()`, the logger is marked as closed and will not accept new log messages
-- Adding a sink after `logger.close()` does not reopen the logger; create a new `Logger`
+- Adding a sink after `logger.close()` does not reopen the logger. Create a new `Logger`
   instance for a fresh start
 
 ### Service Loggers
@@ -1348,7 +1348,7 @@ console.log(health);
 // }
 ```
 
-`consecutiveFailures` — and therefore `isHealthy` — counts write failures only, in both
+`consecutiveFailures`, and therefore `isHealthy`, counts write failures only in both
 queueing sinks. A `'format'` failure never reached the destination and says nothing about
 whether the sink can write, so it is reported through `onError` (with `disposition`) and
 recorded in `lastError`, but it does not mark the sink unhealthy.
@@ -1382,10 +1382,10 @@ if (result.timedOut) {
 
 Writes logs to a named pipe (FIFO) for log aggregation. Linux/macOS only.
 
-Both queueing sinks — `FileSink` and `NamedPipeSink` — answer a failed write the same way:
+Both queueing sinks, `FileSink` and `NamedPipeSink`, answer a failed write the same way:
 
 - the entry goes back on the queue and is retried up to `maxRetries` (default 3)
-- the queue holds up to `maxQueueSize` entries (default 10,000; pass `-1` to hold
+- the queue holds up to `maxQueueSize` entries (default 10,000). Pass `-1` to hold
   everything, which is what both did before the default existed)
 - over the cap, the **oldest** entry is dropped, counted
   (both sinks report `getHealth().droppedEntries`) and the first
@@ -1399,7 +1399,7 @@ Both queueing sinks — `FileSink` and `NamedPipeSink` — answer a failed write
 - a broken stream is reopened automatically on a later write, so neither sink needs an API
   call to recover
 - `minLevel` / `setMinLevel()` / `getMinLevel()` filter by level, defaulting to
-  `LogLevel.INFO` as `ConsoleSink` does; a `raw` entry is always written
+  `LogLevel.INFO` as `ConsoleSink` does. A `raw` entry is always written
 - entries stay in the sink's own queue until the destination is genuinely writable, so the
   cap and `getHealth().queueSize` mean what they say
 
@@ -1410,13 +1410,13 @@ A `reconnect()` with nothing reading the pipe therefore reports failure rather t
 success, and it reports it immediately: the sink asks whether a reader is there with a
 non-blocking open before it performs the real one, and gets `ENXIO` straight back when
 there is none. That is also what keeps a reader-less FIFO from parking a file-I/O thread
-and holding the whole process open — a blocking open of a pipe nobody is reading never
+and holding the whole process open. A blocking open of a pipe nobody is reading never
 returns and cannot be cancelled. The sink keeps asking on an `unref`'d one-second timer, so
 it opens and flushes the queue on its own if a reader turns up later.
 
 `NamedPipeSink.reconnect()` remains available for reconnecting on demand. Because the sink
 now reopens on its own, a `reconnect()` that races one of those automatic attempts answers
-`already_reconnecting` — the reconnection it would have performed is already under way.
+`already_reconnecting`, meaning the reconnection it would have performed is already under way.
 
 ```typescript
 import { NamedPipeSink, LogLevel } from 'lifecycleion/logger';
@@ -1677,9 +1677,9 @@ const logger = new Logger({
 });
 ```
 
-##### Where errors go when the logger cannot log them
+##### Where Errors Go When the Logger Cannot Log Them
 
-Some failures cannot be written to the sinks, because the sinks are either the thing that failed or the thing that would fail again. Those go to a callback you provide, and to `console.error` when you provide none — never back into the logger:
+Some failures cannot be written to the sinks because the sinks are either the thing that failed or the thing that would fail again. Those go to a callback you provide, or to `console.error` when you provide none. They never go back into the logger:
 
 | Failure                                                                                         | Goes to                                                              |
 | ----------------------------------------------------------------------------------------------- | -------------------------------------------------------------------- |
@@ -1692,7 +1692,7 @@ Some failures cannot be written to the sinks, because the sinks are either the t
 | Your `onFormatError` itself throws                                                              | `console.error`                                                      |
 | A new error is reported while `registerReportErrorListener()` is still logging the previous one | `console.error`                                                      |
 
-The third and fifth rows are the ones that would otherwise loop. Logging emits a `'logger'` event, so reporting that handler's failure through the logger would emit again; and logging renders a message, which redacts, so reporting a redaction failure through the logger would redact again and throw again. Neither loop is a stack overflow that a re-entrancy guard could catch - each pass is a fresh turn - which is why both get a callback that cannot re-enter the logger. It gets its own callback rather than `onSinkError` because no sink was involved, and there would be nothing honest to pass as that callback's `sink` argument:
+The third and fifth rows are the ones that would otherwise loop. Logging emits a `'logger'` event, so reporting that handler's failure through the logger would emit again. Logging also renders a message, which redacts, so reporting a redaction failure through the logger would redact again and throw again. Neither loop is a stack overflow that a re-entrancy guard could catch - each pass is a fresh turn - which is why both get a callback that cannot re-enter the logger. It gets its own callback rather than `onSinkError` because no sink was involved, and there would be nothing honest to pass as that callback's `sink` argument:
 
 ```typescript
 const logger = new Logger({
@@ -1705,9 +1705,9 @@ const logger = new Logger({
 });
 ```
 
-Everything else — errors reported by other Lifecycleion modules, and by your own code using [the reporting pattern](./safe-handle-callback.md#the-reporting-pattern) — reaches your sinks normally through `registerReportErrorListener()`.
+Everything else, including errors reported by other Lifecycleion modules and by your own code using [the reporting pattern](./safe-handle-callback.md#the-reporting-pattern), reaches your sinks normally through `registerReportErrorListener()`.
 
-> Do not call this logger's own log methods from inside `onSinkError`, `onEventHandlerError`, or `onFormatError`. If the sink is what failed, logging from the handler asks the same sink to write again; logging from `onEventHandlerError` re-emits the very event whose handler just failed; and logging from `onFormatError` runs the same redaction or rendering that just threw.
+> Do not call this logger's own log methods from inside `onSinkError`, `onEventHandlerError`, or `onFormatError`. If the sink is what failed, logging from the handler asks the same sink to write again. Logging from `onEventHandlerError` re-emits the very event whose handler just failed. Logging from `onFormatError` runs the same redaction or rendering that just threw.
 
 > **Do not read `.message` directly inside these callbacks.** Both are handed a real `Error`, but the value a sink or handler threw is not yours, and `message` is an ordinary property that a subclass or a `Proxy` can turn into an accessor that throws. Reading it raises a second failure from inside the callback that was handling the first.
 
@@ -1768,7 +1768,7 @@ This is useful for:
 
 ## Capturing Reported Errors
 
-Lifecycleion catches errors thrown by callbacks you hand it — event handlers, `onChange`, lifecycle hooks — so one bad callback cannot break an operation. Those errors are reported on the standard global `'error'` event channel rather than rethrown, which means that without a listener they are only written to the console.
+Lifecycleion catches errors thrown by callbacks you hand it, including event handlers, `onChange`, and lifecycle hooks, so one bad callback cannot break an operation. Those errors are reported on the standard global `'error'` event channel rather than rethrown, which means that without a listener they are only written to the console.
 
 `registerReportErrorListener()` attaches that listener and routes what it hears into this logger's sinks:
 
@@ -1792,9 +1792,9 @@ logger.registerReportErrorListener('Uncaught exception', {
 });
 ```
 
-**Scope:** this listens on the platform `'error'` channel, so in a browser it also receives genuine uncaught script errors — not just Lifecycleion's own callback reports. Those can arrive with no `error` object; the event's `message` is logged instead. With the default `preventDefault: true`, the console line for that traffic is suppressed as well.
+**Scope:** this listens on the platform `'error'` channel, so in a browser it also receives genuine uncaught script errors, not just Lifecycleion's own callback reports. Those can arrive with no `error` object. The event's `message` is logged instead. With the default `preventDefault: true`, the console line for that traffic is suppressed as well.
 
-Resource-load failures (a broken `<img>` or `<script>` tag) are **not** included by default. Those `error` events fire on the element and do not bubble, so a global listener registered without capture never sees them — they behave exactly as they would with no logger involved: the element's own handlers run and the browser reports the failed request in the console.
+Resource-load failures (a broken `<img>` or `<script>` tag) are **not** included by default. Those `error` events fire on the element and do not bubble, so a global listener registered without capture never sees them. They behave exactly as they would with no logger involved: the element's own handlers run and the browser reports the failed request in the console.
 
 Set `captureResourceErrors: true` to take them as well:
 
@@ -1804,11 +1804,11 @@ logger.registerReportErrorListener('Uncaught exception', {
 });
 ```
 
-The listener then registers with capture, so it sees element `error` events on the way down. A resource failure is a plain `Event` with no `error` and usually no `message`, so it is described from the failing element instead — `Failed to load IMG: /logo.png` — and tagged `'resource'`.
+The listener then registers with capture, so it sees element `error` events on the way down. A resource failure is a plain `Event` with no `error` and usually no `message`, so it is described from the failing element instead, for example, `Failed to load IMG: /logo.png`, and tagged `'resource'`.
 
-Capture is a wide net: a listener registered this way sees **every** `error` event dispatched anywhere in the document, not just failed loads. Classification is therefore deliberately narrow, and an event is only treated as a resource failure when it is **trusted** (dispatched by the browser itself, never by application code), is a plain `Event` (not an `ErrorEvent` or a `CustomEvent`), and has a target element naming a resource in `src`, `href`, `currentSrc`, or `data` (the last for `<object>`, which names its resource nowhere else). Anything else is left alone — a component that dispatches its own `error` event and branches on the result keeps its answer, rather than finding the event cancelled by a logger. Because `dispatchEvent()` always produces an untrusted event, a wrapper element re-announcing a failure with `this.dispatchEvent(new Event('error'))` stays the application's own signal.
+Capture is a wide net: a listener registered this way sees **every** `error` event dispatched anywhere in the document, not just failed loads. Classification is therefore deliberately narrow, and an event is only treated as a resource failure when it is **trusted** (dispatched by the browser itself, never by application code), is a plain `Event` (not an `ErrorEvent` or a `CustomEvent`), and has a target element naming a resource in `src`, `href`, `currentSrc`, or `data` (the last for `<object>`, which names its resource nowhere else). Anything else is left alone. A component that dispatches its own `error` event and branches on the result keeps its answer, rather than finding the event cancelled by a logger. Because `dispatchEvent()` always produces an untrusted event, a wrapper element re-announcing a failure with `this.dispatchEvent(new Event('error'))` stays the application's own signal.
 
-Expect volume: every broken asset becomes a log entry, and on a page with flaky third-party resources that adds up. **Filter them in your sinks** — the tag is there so a custom sink can route them somewhere quieter or drop them entirely:
+Expect volume: every broken asset becomes a log entry, and on a page with flaky third-party resources that adds up. **Filter them in your sinks**. The tag is there so a custom sink can route them somewhere quieter or drop them entirely:
 
 ```typescript
 class AppSink implements LogSink {
@@ -1824,13 +1824,13 @@ class AppSink implements LogSink {
 
 Lifecycleion's own reports and uncaught script errors are untagged, so filtering on `'resource'` never drops them. On Node and Bun this option does nothing: there is no document, so nothing dispatches element events there.
 
-**Shadow DOM is not covered.** A resource `error` event is dispatched with `composed: false`, so its propagation path stops at the shadow boundary and never reaches `globalThis` — capture does not help, because the global object is not on the path at all. Failed loads inside a shadow root are therefore invisible to this option, and to any other global listener. Nothing can widen the path from outside; seeing them means a listener inside that shadow root, which a closed root does not allow at all.
+**Shadow DOM is not covered.** A resource `error` event is dispatched with `composed: false`, so its propagation path stops at the shadow boundary and never reaches `globalThis`. Capture does not help because the global object is not on the path at all. Failed loads inside a shadow root are therefore invisible to this option and to any other global listener. Nothing can widen the path from outside. Seeing them means a listener inside that shadow root, which a closed root does not allow at all.
 
-This does not affect an ordinary React, Vue, Angular, or Svelte application: those render into the light DOM, where every failed load is on the normal path. It applies only where a shadow root is genuinely in play — third-party web components, or mounting your own app into one — and then only to resources inside that root. The rest of the page still reports normally.
+This does not affect an ordinary React, Vue, Angular, or Svelte application: those render into the light DOM, where every failed load is on the normal path. It applies only where a shadow root is genuinely in play, such as with third-party web components or when mounting your own app into one, and then only to resources inside that root. The rest of the page still reports normally.
 
-**Closing:** `close()` unregisters the listener. A closed logger's log methods are no-ops, so a listener left registered would claim reports it cannot record — and, cancelling them by default, stop them reaching the console either. A logger cannot be reopened, so registering after `close()` returns `'closed'` and attaches nothing rather than leaving an inert listener on `globalThis`.
+**Closing:** `close()` unregisters the listener. A closed logger's log methods are no-ops, so a listener left registered would claim reports it cannot record and, by cancelling them, stop them from reaching the console either. A logger cannot be reopened, so registering after `close()` returns `'closed'` and attaches nothing rather than leaving an inert listener on `globalThis`.
 
-**Feedback loops:** logging emits a `'logger'` event, and a failing event handler is normally reported on this same channel — so a `'logger'` handler that fails would feed itself, forever. `Logger` therefore reports failures of its own `'logger'` handlers to the `onEventHandlerError` option — or to `console.error` when there is none — rather than to the `'error'` channel. Handlers on other Lifecycleion emitters are unaffected and still reach your sinks. As a backstop, the listener also ignores any report that arrives while it is still logging the previous one — a sink that dispatches an error of its own mid-write, say — so that error goes to the console instead of back through the sinks.
+**Feedback loops:** logging emits a `'logger'` event, and a failing event handler is normally reported on this same channel, so a `'logger'` handler that fails would feed itself forever. `Logger` therefore reports failures of its own `'logger'` handlers to the `onEventHandlerError` option, or to `console.error` when there is none, rather than to the `'error'` channel. Handlers on other Lifecycleion emitters are unaffected and still reach your sinks. As a backstop, the listener also ignores any report that arrives while it is still logging the previous one, such as a sink that dispatches an error of its own mid-write, so that error goes to the console instead of back through the sinks.
 
 Teardown and inspection:
 
@@ -1840,7 +1840,7 @@ logger.isReportErrorListenerRegistered(); // boolean
 logger.isReportErrorAvailable(); // boolean — are the global event primitives present?
 ```
 
-`'not_available'` from `registerReportErrorListener` means the global object exposes neither native nor polyfilled event methods. From `unregisterReportErrorListener` it means the removal itself was refused - the methods are there, but `removeEventListener` threw - so **the listener is still attached and still receiving**, and the registration is deliberately kept so that a later `register` does not add a second one. `isReportErrorListenerRegistered()` agrees with it and still answers `true`. See [global-event-target](./global-event-target.md); on Node.js, Lifecycleion installs them for you.
+`'not_available'` from `registerReportErrorListener` means the global object exposes neither native nor polyfilled event methods. From `unregisterReportErrorListener` it means the removal itself was refused - the methods are there, but `removeEventListener` threw - so **the listener is still attached and still receiving**, and the registration is deliberately kept so that a later `register` does not add a second one. `isReportErrorListenerRegistered()` agrees with it and still answers `true`. See [global-event-target](./global-event-target.md). On Node.js, Lifecycleion installs them for you.
 
 ## Where Failures Go
 
@@ -1862,18 +1862,18 @@ same value and address it with the same structural path.
 
 `FileSink` and `NamedPipeSink` have their own `onError` with the same three rungs, and
 `ArraySink` has `onFormatError` (which also reports a throwing `transformer`, under
-`kind: 'transform'`); `ConsoleSink` has none, since it does not queue or
+`kind: 'transform'`), while `ConsoleSink` has none, since it does not queue or
 transform anything. See [Built-In Sinks](#built-in-sinks).
 
-### Why the fall-back is the console
+### Why the Fall-Back Is the Console
 
 Because it is the only rung that cannot re-enter what just failed. Everything the logger
 renders, redacts and writes happens _inside_ a log call, so reporting a failure anywhere a
-logger might hear it would be logged — and logging renders, redacts and writes to sinks,
+logger might hear it would be logged, and logging renders, redacts and writes to sinks,
 which is what failed a moment ago. Each pass is a fresh turn, so no re-entrancy guard
 closes that loop.
 
-### Never seeing a console line
+### Never Seeing a Console Line
 
 Set all three. Once every channel has a handler, the library's console rung is unreachable
 from the logger:
@@ -1898,16 +1898,16 @@ Two caveats worth knowing:
 
 - **A handler that throws still reaches the console**, reporting both the original failure
   and your handler's own throw. That is deliberate: a handler that just failed is not a
-  reason to reach for a louder channel, and both facts matter — one says the channel you
+  reason to reach for a louder channel, and both facts matter. One says the channel you
   chose is broken, the other is what you needed to know.
-- **`ConsoleSink` is unaffected.** It writes to the console because that is its job; these
+- **`ConsoleSink` is unaffected.** It writes to the console because that is its job. These
   callbacks are about failures, not output.
 
-### Standalone renderers are different
+### Standalone Renderers Are Different
 
 `stringifyValue()`, `errorToString()`, `serializeError()` and `CurlyBrackets()` can be
 called with no logger involved at all. With no handler, those report on the standard global `'error'` channel
-instead — so `registerReportErrorListener()` picks them up and logs them properly — falling
+instead, so `registerReportErrorListener()` picks them up and logs them properly, falling
 back to the console only when nothing claims the event. There is no loop to worry about
 when nothing is logging.
 
@@ -2034,22 +2034,22 @@ interface LogEntry {
 
 If you configure `redactedKeys`, the `message` field is rendered from the redacted values. This means templated sensitive fields such as `{{password}}` are masked in the message as well as in `redactedParams`. Without `redactedKeys`, the message is rendered from the original `params`.
 
-**`entry.params` is never redacted.** Every entry carries both views: `params` is handed to sinks exactly as the caller passed it, secrets and all, so a sink that genuinely needs the real values - an in-process metric, a local debugger - can have them. Redaction masks `redactedParams` and the `message`, not `params`.
+**`entry.params` is never redacted.** Every entry carries both views. The `params` value is handed to sinks exactly as the caller passed it, secrets and all, so a sink that genuinely needs the real values, such as an in-process metric or a local debugger, can have them. Redaction masks `redactedParams` and the `message`, not `params`.
 
-That makes it the one field a sink must be deliberate about. **A sink that writes anywhere the values could outlive the process - a file, a socket, a pipe, a third-party service - should not read `params` directly:**
+That makes it the one field a sink must be deliberate about. **A sink that writes anywhere the values could outlive the process, such as a file, a socket, a pipe, or a third-party service, should not read `params` directly:**
 
 ```ts
 const safe = entry.redactedParams ?? entry.params;
 ```
 
-`redactedParams` is `undefined` when no `redactedKeys` were configured, which is why the fallback is needed; when redaction _was_ configured, this always prefers the masked view. Reaching for `entry.params` on its own is how a redacted log line still ends up shipping the secret.
+`redactedParams` is `undefined` when no `redactedKeys` were configured, which is why the fallback is needed. When redaction _was_ configured, this always prefers the masked view. Reaching for `entry.params` on its own is how a redacted log line still ends up shipping the secret.
 
-`redactedParams` differs from `params` only where a value was masked. Everything else is the value the caller passed, by reference - a `Date` is still that `Date`, an `Error` still carries its `message` and `stack` - so a structured sink can read it without losing fidelity to redaction.
+`redactedParams` differs from `params` only where a value was masked. Everything else is the value the caller passed by reference. A `Date` is still that `Date`, and an `Error` still carries its `message` and `stack`, so a structured sink can read it without losing fidelity to redaction.
 
-**That reference sharing is literal, and it is not a copy or a snapshot.** The bag itself is always a fresh object - that is what keeps what a sink can read equal to what redaction walked - but copies below it are built only along the branches that lead to a mask, so every value the walk did not touch is the caller's own. Two rules follow for a sink or an `arrayLogTransformer`:
+**That reference sharing is literal, and it is not a copy or a snapshot.** The bag itself is always a fresh object, which keeps what a sink can read equal to what redaction walked. However, copies below it are built only along the branches that lead to a mask, so every value the walk did not touch is the caller's own. Two rules follow for a sink or an `arrayLogTransformer`:
 
-- **Do not write into `redactedParams`.** Adding or replacing a top-level field is safe, since that bag belongs to the entry, but normalizing a value _in place_ writes into the caller's own object. Build your own instead - `{ ...entry.redactedParams }` for a shallow change, a deep copy for anything below the top level.
-- **Read it before you `await`.** An unmasked subtree reflects whatever the caller's object holds at the moment you read it, not at the moment the entry was created, and reusing one params object across log calls is ordinary. Serialize synchronously, or take your own copy first. `FileSink` and `NamedPipeSink` both do the former: they render the line in `write()` and queue the string, not the entry.
+- **Do not write into `redactedParams`.** Adding or replacing a top-level field is safe, since that bag belongs to the entry, but normalizing a value _in place_ writes into the caller's own object. Build your own instead, using `{ ...entry.redactedParams }` for a shallow change or a deep copy for anything below the top level.
+- **Read it before you `await`.** An unmasked subtree reflects whatever the caller's object holds at the moment you read it, not at the moment the entry was created, and reusing one params object across log calls is ordinary. Serialize synchronously, or take your own copy first. `FileSink` and `NamedPipeSink` both do the former. They render the line in `write()` and queue the string, not the entry.
 
 The masked values themselves are fresh strings and are affected by neither.
 
