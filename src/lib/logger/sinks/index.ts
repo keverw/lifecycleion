@@ -18,5 +18,6 @@ export {
 export type {
   SinkErrorHandler,
   SinkFailure,
+  SinkFailureDisposition,
   SinkFailureKind,
 } from './internal/sink-failure';

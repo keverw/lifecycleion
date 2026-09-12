@@ -41,9 +41,11 @@ export interface StringifyValueOptions {
    * `[unrenderable]` marker leaves a diagnosis and not only a marker.
    *
    * `kind` says which stage threw: `'redaction'` for a broken `redactFunction`,
-   * `'render'` for a value that refused to be read or stringified. Only
-   * {@link stringifyValue} can raise `'render'`; {@link redactValue} hands back structure
-   * and never renders.
+   * `'render'` for a value that refused to be read or stringified. Both calls can raise
+   * either: {@link redactValue} hands back structure, but masking a leaf renders it first,
+   * so a `toString` that throws under a masked key is a `'render'` failure there too.
+   * Render subjects are rooted at `<value>` in both, so the same leaf is named the same way
+   * whichever half reports it.
    *
    * The cause is deliberately absent from the markers: it comes from your own getter,
    * `toString` or `redactFunction` and may carry the value it was hiding, so writing it
@@ -95,6 +97,55 @@ export interface StringifyValueOptions {
 export function redactValue(
   value: unknown,
   options?: StringifyValueOptions,
+): unknown {
+  return redactValueWith(value, options, null);
+}
+
+/** Names the root of a value that has no key of its own, as the render walk spells it. */
+const ANONYMOUS_ROOT = '<value>';
+
+/** Whether a report's subject is one of the bracketed names for a whole input. */
+function isBracketedSubject(path: string): boolean {
+  return path.startsWith('<') && path.endsWith('>');
+}
+
+/**
+ * Spell a redaction walk's render failure the way the render walk spells the same leaf.
+ *
+ * The two walks name the same position differently: `stringifyTemplateValue` roots a path
+ * at {@link ANONYMOUS_ROOT} and the redaction walk hands back the caller's own entry,
+ * bare. Only the rooted form can be re-rooted, so an unrooted one reached `curlyBrackets`'
+ * `rootPathAt` unchanged and told a template author `a` where every other render failure
+ * in the same call said `user.a`.
+ */
+function rootedRenderReport(report: ReportFormatFailure): ReportFormatFailure {
+  return (error: unknown, path: string): void => {
+    if (path.length === 0) {
+      report(error, ANONYMOUS_ROOT);
+
+      return;
+    }
+
+    report(
+      error,
+      isBracketedSubject(path) ? path : `${ANONYMOUS_ROOT}.${path}`,
+    );
+  };
+}
+
+/**
+ * {@link redactValue}, with the `'render'` channel supplied from outside.
+ *
+ * `stringifyValue` renders what this returns, so the two halves of one call are one
+ * operation and must share one render budget: building a reporter at each end gave the
+ * call two, and `stringifyValue({ a: hostileA, b: hostileB }, { redactedKeys: ['a'] })`
+ * therefore fired `onFormatError('render')` twice against a contract that promises at
+ * most once per kind per call.
+ */
+function redactValueWith(
+  value: unknown,
+  options: StringifyValueOptions | undefined,
+  renderReport: ReportFormatFailure | null,
 ): unknown {
   // Declared out here so the `catch` can reach it, as `applyRedaction` does: a failure
   // that escapes the guarded region below must still leave a diagnosis and not only the
@@ -152,10 +203,15 @@ export function redactValue(
       options?.redactFunction,
       report,
       undefined,
-      // Its own `'render'` reporter: a leaf that refuses to render while being masked is a
-      // render failure, and reporting it through `report` would label it `'redaction'` and
-      // spend the single redaction report a broken `redactFunction` still needs.
-      createFormatReporter('render', options?.onFormatError),
+      // A `'render'` reporter, never `report`: a leaf that refuses to render while being
+      // masked is a render failure, and reporting it through `report` would label it
+      // `'redaction'` and spend the single redaction report a broken `redactFunction`
+      // still needs. The caller's own when there is one - `stringifyValue` renders what
+      // this returns, so both halves share one budget - and one of this call's own
+      // otherwise.
+      rootedRenderReport(
+        renderReport ?? createFormatReporter('render', options?.onFormatError),
+      ),
     );
   } catch (error) {
     // Reported when there is a reporter to report with. Nothing above is expected to
@@ -216,7 +272,11 @@ export function stringifyValue(
   const report = createFormatReporter('render', options?.onFormatError);
 
   try {
-    return stringifyTemplateValue(redactValue(value, options), '', report);
+    return stringifyTemplateValue(
+      redactValueWith(value, options, report),
+      '',
+      report,
+    );
   } catch (error) {
     // Nothing below is expected to throw - the walk guards every read it owns - but a
     // `RangeError` from a payload nested past the stack lands here, and returning the

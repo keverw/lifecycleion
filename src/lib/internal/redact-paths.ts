@@ -15,6 +15,13 @@ import {
   NOOP_FORMAT_REPORTER,
   type ReportFormatFailure,
 } from './format-reporter';
+import {
+  createRenderBudget,
+  MAX_RENDER_DEPTH,
+  type RenderBudget,
+  TRUNCATED,
+  TRUNCATED_LENGTH,
+} from './render-budget';
 
 /** Decides the replacement for a redacted value. */
 export type RedactLeafFunction = RedactValueFunction;
@@ -370,9 +377,32 @@ export function indexStep(index: string): RedactPathStep {
   return { key: index, isArrayIndex: true };
 }
 
-/** The path as the failure reports spell it. */
+/**
+ * Longest subject one failure report may carry.
+ *
+ * The steps of a path are caller data - an object parsed from JSON carries whatever keys
+ * arrived - and joining them unbounded made the one text this module emits the one it did
+ * not cap: a payload nested thousands deep produced a single 40 KB `root.n.n.n....`
+ * subject on the error path, where every other string here goes through `capKey` or
+ * `chargeText`. Far longer than any path worth naming, and long enough that an ordinary
+ * one is never touched.
+ */
+const MAX_PATH_TEXT_LENGTH = 1_000;
+
+/**
+ * The path as the failure reports spell it.
+ *
+ * Cut to {@link MAX_PATH_TEXT_LENGTH}, keeping the *front*: a report is read from the root
+ * down, so the leading steps are the ones that locate it.
+ */
 function pathText(path: readonly RedactPathStep[]): string {
-  return path.map((step) => step.key).join('.');
+  const text = path.map((step) => step.key).join('.');
+
+  if (text.length <= MAX_PATH_TEXT_LENGTH) {
+    return text;
+  }
+
+  return `${text.slice(0, MAX_PATH_TEXT_LENGTH)}${TRUNCATED_LENGTH}`;
 }
 
 /**
@@ -571,9 +601,19 @@ function needsFullWalk(
   seen: WeakSet<object>,
   visited: Set<object>,
   state: RedactState,
+  depth = 0,
 ): boolean {
   if (!isPlainContainer(value)) {
     return false;
+  }
+
+  // Bounded like every other walk over caller data, rather than relying on the `catch` in
+  // {@link mustWalkInFull} to absorb a `RangeError` - which made the answer depend on how
+  // much stack was left rather than on the payload, so one value cleared the scan at 5,000
+  // deep and failed it at 20,000. "Walk it properly" is the conservative answer here and
+  // the same one the overflow produced, now reached without running the stack out.
+  if (depth >= MAX_RENDER_DEPTH) {
+    return true;
   }
 
   if (isSeen(value, seen, state.aliases)) {
@@ -622,7 +662,7 @@ function needsFullWalk(
         return true;
       }
 
-      if (needsFullWalk(element, seen, visited, state)) {
+      if (needsFullWalk(element, seen, visited, state, depth + 1)) {
         return true;
       }
     }
@@ -661,7 +701,7 @@ function needsFullWalk(
         return true;
       }
 
-      if (needsFullWalk(named, seen, visited, state)) {
+      if (needsFullWalk(named, seen, visited, state, depth + 1)) {
         return true;
       }
     }
@@ -684,7 +724,7 @@ function needsFullWalk(
       return true;
     }
 
-    if (needsFullWalk(entry, seen, visited, state)) {
+    if (needsFullWalk(entry, seen, visited, state, depth + 1)) {
       return true;
     }
   }
@@ -697,12 +737,13 @@ function mustWalkInFull(
   value: unknown,
   seen: WeakSet<object>,
   state: RedactState,
+  depth = 0,
 ): boolean {
   try {
     // A fresh set per scan, not one shared across the walk: `seen` differs between
     // scans, so a node that answered `false` under one ancestor chain is not answering
     // the same question under another.
-    return needsFullWalk(value, seen, new Set(), state);
+    return needsFullWalk(value, seen, new Set(), state, depth);
   } catch {
     // A `RangeError` from a payload nested past the stack, and nothing else: every read
     // the scan makes is already guarded.
@@ -824,6 +865,23 @@ interface RedactState {
    * `redactFunction` still needs.
    */
   reportRender: ReportFormatFailure;
+  /**
+   * The allowance every mask in this pass spends from, shared by all of them.
+   *
+   * One budget per *pass*, not one per matched container, for the reason `entriesLeft` is
+   * per pass: `maskValueDeep` charges its own walk, but called with a fresh budget at
+   * every match it was charging a counter nobody else could see, so the cap bounded one
+   * mask and nothing about their sum. `entriesLeft` did not close that either - it is
+   * decremented once per matched *container*, before the mask descends - so forty keys
+   * each holding a 400,000-element array, all forty named in `redactedKeys`, masked
+   * 16,000,000 entries in 4.3 seconds synchronously inside `logger.info()`, sixteen times
+   * the nominal per-pass cap.
+   *
+   * Past it a mask yields `REDACTED_PLACEHOLDER` rather than the original, which is the
+   * same direction `maskValueDeep` already takes at its own limits: a pass that runs out
+   * over-masks, and never under-masks.
+   */
+  maskBudget: RenderBudget;
 }
 
 /**
@@ -871,7 +929,8 @@ function redactPathsInner(
         new WeakSet(),
         report,
         undefined,
-        undefined,
+        // The pass's own budget, not a fresh one. See {@link RedactState.maskBudget}.
+        state.maskBudget,
         state.reportRender,
       );
     } catch (error) {
@@ -926,7 +985,8 @@ function redactPathsInner(
         new WeakSet(),
         report,
         undefined,
-        undefined,
+        // The pass's own budget, not a fresh one. See {@link RedactState.maskBudget}.
+        state.maskBudget,
         state.reportRender,
       );
     } catch (error) {
@@ -934,6 +994,35 @@ function redactPathsInner(
 
       return REDACTION_FAILED_MARKER;
     }
+  }
+
+  // Bounded like the renderers and like `maskValueDeep`, rather than recursing until the
+  // stack runs out and letting a per-entry `catch` absorb the `RangeError`. Absorbing it
+  // "worked" - the marker landed and the pass finished - but it made the output a property
+  // of how much stack was left rather than of the payload: the same 20,000-deep value
+  // passed through untouched when redaction was called directly and collapsed to a marker
+  // one frame deeper in, and it charged the caller a redaction-failure report for a payload
+  // nothing was wrong with.
+  //
+  // {@link TRUNCATED}, and deliberately not {@link REDACTION_FAILED_MARKER}: nothing failed
+  // here, and the marker reads to an operator as a redaction outage. This is the same word
+  // the renderers write where they stop, so a payload deep enough to reach the cap renders
+  // as it did before redaction had a cap at all.
+  //
+  // What the cap must not do is hand the tail back *by reference*: a back-edge parked below
+  // this point still refers to an ancestor that may be rebuilt around a mask, which is the
+  // leak `mustWalkInFull` exists to catch and which nothing below the cap has checked. A
+  // replacement string is not a reference, so that hazard is closed either way.
+  //
+  // `didFailToRead` is left alone for the same reason the marker is: it forces
+  // `redactMatchedPaths` to return the rebuilt copy, so a list matching nothing would stop
+  // handing the caller their own value back - which is the one thing redaction promises
+  // about a payload it was not asked to touch. With the flag clear, a pass that masked
+  // nothing returns the original and a pass that masked something carries this word where
+  // it stopped. Not reported either: a cap is not a failure, and the one redaction report a
+  // broken `redactFunction` needs should not be spent on it.
+  if (path.length >= MAX_RENDER_DEPTH) {
+    return TRUNCATED;
   }
 
   // Already walked, under an ancestor that established nothing here can match, and found
@@ -954,7 +1043,7 @@ function redactPathsInner(
     !shouldSkipCandidateScan &&
     pathPointingBelow(paths, path) === undefined
   ) {
-    if (!mustWalkInFull(value, seen, state)) {
+    if (!mustWalkInFull(value, seen, state, path.length)) {
       return UNCHANGED;
     }
 
@@ -1387,6 +1476,7 @@ export function redactMatchedPaths(
     scanLeft: MAX_REDACTION_ENTRIES,
     aliases,
     reportRender,
+    maskBudget: createRenderBudget(),
   };
 
   const result = redactPathsInner(

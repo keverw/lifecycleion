@@ -50,8 +50,10 @@ export function reportCallbackError(
     // Renders `report`, not `error`. `errorToString` emits rows only for an object, so a
     // non-object throw - `throw 'boom'`, `throw 42`, a rejected promise carrying a string -
     // rendered as a three-line empty table with the thrown value nowhere in it. The
-    // wrapper is always an `Error`, and `errorToString` renders its `cause`, so the value
-    // comes back on the `Cause` row whatever it is.
+    // wrapper is always an `Error`, and `errorToString` renders its `cause`, so `'boom'`
+    // and `42` come back on the `Cause` row. The two exceptions are `throw null` and
+    // `throw undefined`: `addErrorTail` emits the row only for a `cause` that is neither,
+    // so those render as the wrapper alone - the message still names the callback.
     () =>
       `Error in a callback ${callbackName}: ${DOUBLE_EOL}${errorToString(report)}`,
   );

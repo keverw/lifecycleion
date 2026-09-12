@@ -2065,6 +2065,35 @@ describe('a shared subtree costs one walk, not one per route', () => {
       ]);
     });
 
+    test('fires once per kind for the whole call, and roots both walks the same way', () => {
+      // `stringifyValue` renders what `redactValue` returns, so the two halves are one
+      // operation - but each built its own `'render'` reporter, so the call had two
+      // once-per-kind budgets and a value that refused to render in both halves reported
+      // twice against a contract that promises once. The paths disagreed too: the redaction
+      // walk handed back the caller's own entry, bare, while the render walk rooted its
+      // path at `<value>` - and only the rooted form is one `curlyBrackets` can re-root, so
+      // a template author was told `a` where the same failure elsewhere said `user.a`.
+      const seen: [string, string][] = [];
+      // Not a plain object: a plain one is walked, and its `toString` is just a member.
+      // A class instance is a leaf, which is what a render can trip over.
+      const unrenderable = (): unknown =>
+        new (class Hostile {
+          public toString(): string {
+            throw new Error('toString refused');
+          }
+        })();
+
+      stringifyValue(
+        { a: unrenderable(), b: unrenderable() },
+        {
+          redactedKeys: ['a'],
+          onFormatError: (_error, kind, path) => seen.push([kind, path]),
+        },
+      );
+
+      expect(seen).toEqual([['render', '<value>.a']]);
+    });
+
     test('should fall back to the console without a handler, and never throw', () => {
       // Handler, then console, then nothing - the same three rungs `onFormatError`,
       // `onSinkError` and `onEventHandlerError` all use. The rung itself is

@@ -347,6 +347,30 @@ describe('LifecycleManager - hostile thrown values', () => {
     );
   });
 
+  test('an unreadable error thrown while registering settles as a rejected result', async () => {
+    // The registration `catch` read `err.message` unguarded. `toError` returns a
+    // brand-claiming value unchanged, so a `message` accessor that throws reached it and
+    // `registerComponent`/`insertComponentAt` *rejected* - out of the one `catch` whose job
+    // is to answer with a rejected result instead of throwing.
+    const lifecycle = new LifecycleManager({ logger });
+
+    class DependenciesThrowUnreadable extends BaseComponent {
+      public getDependencies(): string[] {
+        throw unreadableError();
+      }
+      public start(): void {}
+      public stop(): void {}
+    }
+
+    const result = await lifecycle.registerComponent(
+      new DependenciesThrowUnreadable(logger, { name: 'unreadable-deps' }),
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.code).toBe('unknown_error');
+    expect(result.reason).toBe('<error message could not be read>');
+  });
+
   test('an unreadable error thrown from onShutdownForce() still marks the component stalled', async () => {
     // The force `catch` compared `err.message` against the timeout text before anything
     // else, so an accessor that throws there skipped the whole stall path: the component

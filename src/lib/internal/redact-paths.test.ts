@@ -9,6 +9,7 @@ import {
   redactMatchedPaths,
 } from './redact-paths';
 import { REDACTION_FAILED_MARKER } from './default-redact-function';
+import { TRUNCATED } from './render-budget';
 
 // This module had no direct tests: it was covered only through `stringify-value` and the
 // logger's `applyRedaction`, both of which exercise it with well-behaved payloads. What
@@ -731,5 +732,158 @@ describe('redactMatchedPaths - the entry budget', () => {
 
     expect(keys.length).toBeLessThan(1_200_000);
     expect(redacted.wide[keys[keys.length - 1]]).toBe(REDACTION_FAILED_MARKER);
+  });
+});
+
+describe('redactMatchedPaths - the depth cap', () => {
+  test('stops at the depth cap instead of running the stack out', () => {
+    // The walk and its candidate scan both recursed without a bound and relied on a
+    // per-entry `catch` to absorb the `RangeError`. That made the output a property of how
+    // much stack was left rather than of the payload: the same value passed through
+    // untouched at 5,000 deep and collapsed to a marker at 20,000, and the overflow was
+    // charged to the caller as a redaction failure for a payload nothing was wrong with.
+    const makeChain = (levels: number): Record<string, unknown> => {
+      const root: Record<string, unknown> = {};
+      let node = root;
+
+      for (let level = 0; level < levels; level++) {
+        const next: Record<string, unknown> = {};
+
+        node.n = next;
+        node = next;
+      }
+
+      node.leaf = 'innocent';
+
+      return root;
+    };
+
+    const failures: string[] = [];
+    const report = (_error: unknown, path: string): void => {
+      failures.push(path);
+    };
+
+    // A real mask at the root, so the copy the cap writes into is actually built: with
+    // nothing masked anywhere the pass hands the caller's own value back, which the
+    // pass-through test below is about.
+    const deep = redactMatchedPaths(
+      { password: 'hunter2secret', root: makeChain(20_000) },
+      paths('password'),
+      undefined,
+      report,
+    ) as { root: Record<string, unknown> };
+
+    // Cut at a fixed depth, with the marker where it stopped - and not reported, because a
+    // cap is not a failure to read and must not spend the one redaction report a broken
+    // `redactFunction` needs.
+    expect(failures).toEqual([]);
+
+    let node: unknown = deep.root;
+    let depth = 0;
+
+    while (
+      typeof node === 'object' &&
+      node !== null &&
+      'n' in (node as Record<string, unknown>)
+    ) {
+      node = (node as Record<string, unknown>).n;
+      depth++;
+    }
+
+    // The word the renderers write where *they* stop, not the redaction marker: nothing
+    // failed, and a marker here reads to an operator as a redaction outage.
+    expect(node).toBe(TRUNCATED);
+    expect(depth).toBeLessThan(200);
+
+    // Deterministic: the same shape answers the same way whatever stack is left above it.
+    const nested = ((): unknown => {
+      const run = (left: number): unknown =>
+        left === 0
+          ? redactMatchedPaths(
+              { password: 'hunter2secret', root: makeChain(20_000) },
+              paths('password'),
+              undefined,
+            )
+          : run(left - 1);
+
+      return run(400);
+    })() as { root: Record<string, unknown> };
+
+    let other: unknown = nested.root;
+    let otherDepth = 0;
+
+    while (
+      typeof other === 'object' &&
+      other !== null &&
+      'n' in (other as Record<string, unknown>)
+    ) {
+      other = (other as Record<string, unknown>).n;
+      otherDepth++;
+    }
+
+    expect(otherDepth).toBe(depth);
+    expect(other).toBe(TRUNCATED);
+  });
+
+  test('hands a payload back by reference whether or not it reached the cap', () => {
+    // The cap must not cost a pass that masked nothing its pass-through: redaction
+    // promises that anything it was not asked to touch comes back as it went in, and
+    // marking the cap as a failed read made a 20,000-deep payload with no match come back
+    // as a rebuilt 100-deep copy.
+    const shallow = { a: { b: { c: { d: 'innocent' } } } };
+
+    expect(redactMatchedPaths(shallow, paths('password'), undefined)).toBe(
+      shallow,
+    );
+
+    const deep: Record<string, unknown> = {};
+    let node = deep;
+
+    for (let level = 0; level < 20_000; level++) {
+      const next: Record<string, unknown> = {};
+
+      node.n = next;
+      node = next;
+    }
+
+    expect(redactMatchedPaths(deep, paths('password'), undefined)).toBe(deep);
+  });
+});
+
+describe('redactMatchedPaths - the masking budget', () => {
+  test('bounds masking across the whole pass, not per matched container', () => {
+    // `maskValueDeep` was called with a fresh budget at every match, so the cap bounded one
+    // mask and nothing about their sum - and `entriesLeft` does not close it either, since
+    // it is charged once per matched *container*, before the mask descends. Forty keys each
+    // holding a 400,000-element array masked 16,000,000 entries in 4.3 seconds inside one
+    // `logger.info()`.
+    const payload: Record<string, unknown> = {};
+    const keys: string[] = [];
+
+    for (let index = 0; index < 40; index++) {
+      const key = `k${index}`;
+
+      keys.push(key);
+      payload[key] = Array.from({ length: 400_000 }, () => 'x');
+    }
+
+    const started = Date.now();
+    const redacted = redactMatchedPaths(
+      payload,
+      paths(...keys),
+      undefined,
+    ) as Record<string, unknown>;
+    const elapsedMS = Date.now() - started;
+
+    // Past the pass's allowance a mask yields the placeholder rather than the original, so
+    // the later keys over-mask - which is the safe direction - and the pass stays bounded.
+    const masked = keys.filter((key) => Array.isArray(redacted[key])).length;
+
+    expect(masked).toBeLessThan(40);
+    expect(elapsedMS).toBeLessThan(4_000);
+
+    for (const key of keys) {
+      expect(redacted[key]).not.toBe(payload[key]);
+    }
   });
 });

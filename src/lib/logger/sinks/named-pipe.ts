@@ -487,9 +487,28 @@ export class NamedPipeSink implements LogSink {
       return;
     }
 
+    // Rendered now rather than at flush time, so the line is fixed while `write` still
+    // holds the caller's stack.
+    const rendered: QueuedPipeEntry = {
+      ...this.renderEntry(entry),
+      attempts: 0,
+    };
+
+    // Handed straight to `writeEntry`, which reports it, rather than queued. A render is
+    // attempted exactly once on purpose, so waiting for a pipe cannot make this line
+    // appear - and queueing it meant an unrenderable entry logged during an outage was
+    // reported only if the pipe came back: with the reader still gone it sat in the queue
+    // until `requeue` gave up on it and counted it in `droppedEntries` with no `onError`
+    // call, or until `close()` called it a `'close'` failure. Either way the caller lost
+    // the `'format'` diagnosis their own formatter had earned.
+    if (rendered.formatError !== undefined) {
+      this.writeEntry(rendered);
+
+      return;
+    }
+
     // Queued whenever there is nowhere to put it *yet* - before the first open, and after
-    // a failure took the stream away. Rendered now rather than at flush time, so the line
-    // is fixed while `write` still holds the caller's stack.
+    // a failure took the stream away.
     //
     // Held rather than dropped, which is the whole of what changed here. A pipe failure
     // used to end the sink: the stream `'error'` handler cleared `pipeStream` and left
@@ -505,14 +524,14 @@ export class NamedPipeSink implements LogSink {
       // here instead, where `maxQueueSize` applies and `getHealth()` can see it.
       this.isAwaitingDrain
     ) {
-      this.writeQueue.push({ ...this.renderEntry(entry), attempts: 0 });
+      this.writeQueue.push(rendered);
       this.enforceQueueLimit();
       this.ensureConnection();
 
       return;
     }
 
-    this.writeEntry({ ...this.renderEntry(entry), attempts: 0 });
+    this.writeEntry(rendered);
   }
 
   /**
@@ -1696,15 +1715,13 @@ export class NamedPipeSink implements LogSink {
       return;
     }
 
-    if (!this.pipeStream || this.pipeStream.destroyed) {
-      // Back on the queue rather than skipped. This is reached from `processQueue`, where
-      // the stream can go away between one entry and the next, and an entry dropped here
-      // is one the caller asked to log and will never see.
-      this.requeue(queued);
-
-      return;
-    }
-
+    // Before the stream check, not after it, because this entry has no line to write and
+    // the pipe's state cannot change that. Checked second, an unrenderable entry logged
+    // during an outage was requeued instead of reported, and once its retries ran out
+    // `requeue` dropped it on `droppedEntries` with no `onError` call at all - a silent
+    // loss for the one failure this sink promises is never retried and always reported as
+    // `'format'`/`'lost'`.
+    //
     // Reported where the render used to happen, so a failure surfaces exactly as it did
     // before - but from the single attempt made in `write`, never from a second one.
     if (queued.formatError !== undefined) {
@@ -1722,6 +1739,15 @@ export class NamedPipeSink implements LogSink {
         // No line was produced, and rendering is never repeated, so this one is gone.
         disposition: 'lost',
       });
+
+      return;
+    }
+
+    if (!this.pipeStream || this.pipeStream.destroyed) {
+      // Back on the queue rather than skipped. This is reached from `processQueue`, where
+      // the stream can go away between one entry and the next, and an entry dropped here
+      // is one the caller asked to log and will never see.
+      this.requeue(queued);
 
       return;
     }

@@ -1523,6 +1523,50 @@ describe('NamedPipeSink', () => {
     }
   }, 15000);
 
+  test('a line that could not be rendered is reported even with no reader attached', async () => {
+    // The render failure used to be checked *after* the stream check, so an unrenderable
+    // entry logged while the pipe had no reader was requeued instead of reported - and
+    // once its retries ran out `requeue` dropped it on `droppedEntries` with no `onError`
+    // call at all. A caller whose formatter throws during an outage got a silent loss for
+    // the one failure this sink documents as never retried and always reported.
+    const pipePath = `${tmpDir.path}/format-lost-no-reader.pipe`;
+    await createNamedPipe(pipePath);
+
+    const failures: SinkFailure[] = [];
+    // No reader, so the open never completes and there is no stream to write to.
+    const sink = new NamedPipeSink({
+      pipePath,
+      jsonFormat: true,
+      onError: (failure) => {
+        failures.push(failure);
+      },
+    });
+
+    try {
+      sink.write({
+        timestamp: Date.now(),
+        type: 'info',
+        template: 'unrenderable',
+        message: 'unrenderable',
+        // `JSON.stringify` refuses a `BigInt`, so the default format throws too and there
+        // is no fallback left to produce a line.
+        redactedParams: { size: BigInt(1) },
+      });
+
+      await new Promise((resolve) => setTimeout(resolve, 150));
+
+      const lostFormats = failures.filter(
+        (entry) => entry.kind === 'format' && entry.disposition === 'lost',
+      );
+
+      expect(lostFormats).toHaveLength(1);
+      expect(sink.getHealth().droppedEntries).toBe(1);
+      expect(sink.getHealth().queueSize).toBe(0);
+    } finally {
+      await sink.close();
+    }
+  }, 15000);
+
   test('a closed sink does not report itself healthy, and refuses to reconnect', async () => {
     // `isHealthy` is `consecutiveFailures === 0 && isInitialized`, and `close()` left
     // `isInitialized` set - so a sink with no stream, discarding everything written to it,

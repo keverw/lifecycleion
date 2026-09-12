@@ -1716,6 +1716,56 @@ describe('errorToString - bounds that hold at the entry point', () => {
     expect(atFourHundred.length).toBeLessThan(atEighty.length * 3);
   });
 
+  it('charges both lines a table row emits, not one', () => {
+    // `KeyValueASCIITable` writes a content line *and* a `+---+` rule per row, each padded
+    // out to the full table width, so billing a row one width under-counted every render by
+    // half: 400,000 one-character `additionalInfo` values rendered 1,883,654 characters at
+    // width 80 and 2,090,208 at width 10,000, against a documented one-megabyte cap a
+    // caller may be sizing a buffer on.
+    const info: Record<string, string> = {};
+
+    for (let index = 0; index < 400_000; index++) {
+      info[`k${index}`] = 'x';
+    }
+
+    const error = new Error('rows') as Error & { additionalInfo: unknown };
+
+    error.additionalInfo = info;
+
+    // A leaf is emitted whole, so a modest overshoot of the megabyte is expected - this
+    // renders 1,090,108 - and twice it is not.
+    for (const width of [80, 10_000]) {
+      expect(errorToString(error, width).length).toBeLessThan(1_200_000);
+    }
+
+    // A stack is written on its own row, one padded line per line of it, so a stack of many
+    // short lines was charged for its characters and emitted as full-width rows:
+    // `'a\n'.repeat(400_000)` rendered 32,400,890 characters.
+    const manyLines = new Error('lines');
+
+    manyLines.stack = 'a\n'.repeat(400_000);
+
+    for (const width of [80, 10_000]) {
+      expect(errorToString(manyLines, width).length).toBeLessThan(1_200_000);
+    }
+
+    // An ordinary error is nowhere near any of this and must come back whole.
+    const ordinary = errorToString(new Error('ordinary'));
+
+    expect(ordinary).toContain('ordinary');
+    expect(ordinary).not.toContain('[max length exceeded]');
+
+    // A deep cause chain pays the same framing once per enclosing level, and plateaued at
+    // 2,741,124 characters for the same reason.
+    let chained: unknown = new Error('deep');
+
+    for (let level = 0; level < 60; level++) {
+      chained = new Error(`lvl${String(level)}`, { cause: chained });
+    }
+
+    expect(errorToString(chained).length).toBeLessThan(1_200_000);
+  });
+
   it('renders at a row length below the table minimum', () => {
     // `maxRowLength` is a public parameter, and the table constructor throws below its
     // minimum width - a throw the top-level backstop turned into

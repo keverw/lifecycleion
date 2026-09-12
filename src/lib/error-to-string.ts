@@ -664,7 +664,7 @@ function errorToASCIITable(
         // The row's framing, exactly as the `additionalInfo` and nested walks charge it:
         // every row is padded out to the table width and re-indented once per enclosing
         // level, and none of that is any string this walk produces.
-        chargeUnits(budget, Math.max(MIN_ROW_COST, maxRowLength) * (depth + 1));
+        chargeUnits(budget, rowFrameCost(maxRowLength, depth));
 
         table.addRow(
           label,
@@ -886,10 +886,7 @@ function errorToASCIITable(
           // bounded when the cap went in; keys were the leaf nobody cut.
           const renderedKey = charge(budget, capKey(key));
 
-          chargeUnits(
-            budget,
-            Math.max(MIN_ROW_COST, maxRowLength) * (depth + 1),
-          );
+          chargeUnits(budget, rowFrameCost(maxRowLength, depth));
 
           // `readMemberOrThrew`, not `readMember`. The plain helper answers `undefined`
           // for a read that refused, and `undefined` renders as the literal word - so an
@@ -1031,14 +1028,23 @@ function addErrorTail(
     reportRender(stack.error, joinPath(path, 'stack'));
     table.addValueOnSeparateRow('Stack', UNRENDERABLE_VALUE);
   } else if (stack) {
-    chargeUnits(budget, Math.max(MIN_ROW_COST, maxRowLength) * (depth + 1));
+    chargeUnits(budget, rowFrameCost(maxRowLength, depth));
+
+    const stackText = safeStringify(
+      stack,
+      joinPath(path, 'stack'),
+      reportRender,
+    );
 
     table.addValueOnSeparateRow(
       'Stack',
       chargeNestedText(
         budget,
-        safeStringify(stack, joinPath(path, 'stack'), reportRender),
-        rowTextLevels(maxRowLength, depth),
+        stackText,
+        // `ownRowTextLevels`, not `rowTextLevels`: a stack is written on its own row, one
+        // padded line per line of it, and a stack of many short lines was charged for its
+        // characters and emitted as full-width rows.
+        ownRowTextLevels(stackText, maxRowLength, depth),
       ),
     );
   }
@@ -1053,6 +1059,30 @@ function addErrorTail(
  * the only ones the cap exists for - were the ones it stopped bounding.
  */
 const MIN_ROW_COST = 8;
+
+/**
+ * How many rendered lines one row of a key-value table actually costs.
+ *
+ * `KeyValueASCIITable` emits a content line *and* a `+---+` rule per row, each padded out
+ * to the full table width, so billing a row one width under-counted the render by half:
+ * 400,000 one-character `additionalInfo` values rendered 1.88 MB against the 1 MB cap.
+ *
+ * This is the *framing* of one row, which is constant. A row whose value is written on its
+ * own lines pays per line of that value too, and {@link ownRowTextLevels} is where that is
+ * charged.
+ */
+const LINES_PER_ROW = 2;
+
+/**
+ * What one row's framing costs the budget, excluding its text.
+ *
+ * Every row is padded out to the table width, emitted over {@link LINES_PER_ROW} lines,
+ * and re-indented once per enclosing level - and none of that is any string the walks
+ * produce, so nothing else charges it.
+ */
+function rowFrameCost(maxRowLength: number, depth: number): number {
+  return Math.max(MIN_ROW_COST, maxRowLength) * (depth + 1) * LINES_PER_ROW;
+}
 
 /**
  * What one character of a row's text actually costs the whole render.
@@ -1072,6 +1102,51 @@ function rowTextLevels(maxRowLength: number, depth: number): number {
 
 /** Borders, padding and the key column's separator around one wrapped line of text. */
 const ROW_FRAME_WIDTH = 6;
+
+/**
+ * How many lines `text` is written over before any wrapping.
+ *
+ * Counted rather than split: the value is caller data - a `stack` is as long as the engine
+ * made it - and `split('\n')` on it allocates an array of every line to learn one number.
+ */
+function countLines(text: string): number {
+  let lines = 1;
+  let index = text.indexOf('\n');
+
+  while (index !== -1) {
+    lines++;
+    index = text.indexOf('\n', index + 1);
+  }
+
+  return lines;
+}
+
+/**
+ * {@link rowTextLevels} for a value written on its own row, which pays per *line*.
+ *
+ * An own row - the `Stack` row, and the nested tables - is emitted line by line, and
+ * `KeyValueASCIITable` pads every one of those lines out to the full table width. For a
+ * value whose lines are long, wrapping dominates and {@link rowTextLevels} already charges
+ * it; for a value with many *short* lines nothing did, and a stack is precisely that shape:
+ * `'a\n'.repeat(400_000)` rendered 32,400,890 characters against the one-megabyte cap,
+ * because 400,000 one-character lines were billed as 800,000 characters and emitted as
+ * 400,000 padded rows of eighty.
+ *
+ * So a character costs the wrapping it provokes *plus* its share of the padding every line
+ * it ends carries. Measured on the text as handed over: a cut made against this factor
+ * keeps a prefix, whose line count is never higher, so the estimate can only overshoot -
+ * the safe direction for a cap.
+ */
+function ownRowTextLevels(
+  text: string,
+  maxRowLength: number,
+  depth: number,
+): number {
+  const width = Math.max(MIN_ROW_COST, maxRowLength);
+  const perLinePadding = (width * countLines(text)) / Math.max(1, text.length);
+
+  return rowTextLevels(maxRowLength, depth) + (depth + 1) * perLinePadding;
+}
 
 function stringifyValue(
   value: unknown,
@@ -1439,7 +1514,7 @@ function stringifyValueInner(
         // the cap unenforced against a payload whose *keys* are large.
         const renderedKey = charge(budget, capKey(key));
 
-        chargeUnits(budget, Math.max(MIN_ROW_COST, maxRowLength) * (depth + 1));
+        chargeUnits(budget, rowFrameCost(maxRowLength, depth));
 
         let val: unknown;
 

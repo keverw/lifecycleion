@@ -768,7 +768,11 @@ export class LifecycleManager
       return {
         success: false,
         startupOrder: [],
-        reason: err.message,
+        // `describeError`, not `err.message`: `toError` returns a brand-claiming value
+        // unchanged, so `message` can be an accessor that throws - and this `catch` is
+        // the whole reason `getStartupOrder` does not throw, so a throw here would defeat
+        // it. Same guard as the `component_startup_failed` path below.
+        reason: describeError(err),
         code,
         error: err,
       };
@@ -1052,7 +1056,11 @@ export class LifecycleManager
           startedComponents: [],
           failedOptionalComponents: [],
           skippedDueToDependency: [],
-          reason: err.message,
+          // `describeError`, not `err.message`, for the reason `getStartupOrder` uses it:
+          // a brand-claiming throw can make `message` an accessor that throws, and this
+          // `try` has only a `finally` above it, so that would reject `startAllComponents`
+          // instead of returning a failed `StartupResult`.
+          reason: describeError(err),
           code,
           error: err,
           durationMS: Date.now() - startTime,
@@ -3110,7 +3118,11 @@ export class LifecycleManager
       this.lifecycleEvents.componentRegistrationRejected({
         name: componentName,
         reason: code,
-        message: err.message,
+        // Guarded like every other failure-path read of a normalized throw: a
+        // brand-claiming value reaches `.message` unchanged, and a throw here would
+        // reject `registerComponent`/`insertComponentAt` rather than answering with the
+        // rejected result below.
+        message: describeError(err),
         registrationIndexBefore,
         registrationIndexAfter: registrationIndexBefore,
         startupOrder: [],
@@ -3130,7 +3142,7 @@ export class LifecycleManager
         success: false,
         registered: false,
         componentName,
-        reason: err.message,
+        reason: describeError(err),
         code,
         error: err,
         registrationIndexBefore,
