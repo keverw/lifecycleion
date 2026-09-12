@@ -57,6 +57,16 @@ const UNSERIALIZABLE_KEYS = '<unserializable: keys>';
 /** A single value refused to be read - a throwing accessor, a revoked `Proxy`. */
 const UNSERIALIZABLE_VALUE = '<unserializable: value>';
 
+/**
+ * Stands in for a function, which JSON has no form for at all.
+ *
+ * `JSON.stringify` drops the key outright, so the receiver could not tell an absent
+ * property from one holding a function - and an own `toJSON` is worse than dropped, since
+ * `JSON.stringify` *calls* it and a hostile one threw from inside the caller's own
+ * `stringify`, downstream of everything this module guards.
+ */
+const UNSERIALIZABLE_FUNCTION = '<function>';
+
 /** A value was readable but could not be turned into text. */
 const UNSERIALIZABLE_TEXT = '<unserializable: text>';
 
@@ -474,6 +484,54 @@ function deepSerializeRecord(
   return result;
 }
 
+/**
+ * Coerce a leaf `JSON.stringify` cannot carry, or hand it back untouched.
+ *
+ * This module's whole promise is a payload that survives `JSON.stringify`, and three
+ * primitives broke it - one loudly, two quietly:
+ *
+ * - **A `BigInt` throws.** `JSON.stringify({ n: 1n })` raises a `TypeError`, so an error
+ *   carrying one - an id, a byte count, a database key - took down the `stringify` at the
+ *   IPC boundary this exists to cross, while already reporting a failure.
+ * - **A function or a symbol value is dropped**, key and all, with nothing to say it was
+ *   there. A function leaf is worse than absent: `JSON.stringify` *invokes* an own
+ *   `toJSON`, so an object carrying a hostile one - copied verbatim, method and all -
+ *   threw from inside the caller's `stringify` rather than from anything this module runs.
+ *
+ * Rendered as text in all three cases. The markers follow *this module's* vocabulary -
+ * angle brackets, like the `<unserializable: …>` the docs already teach - rather than
+ * `errorToString`'s `[Function]`, and the difference is the audience: that output is read
+ * by a human, and this payload is parsed by a receiver who has no way to ask what a value
+ * means. `<function>` reads as the library talking; `[Function]` reads as something a
+ * caller might have stored. Neither is proof - a caller whose property really holds the
+ * text `<function>` is indistinguishable, exactly as it already is for
+ * `<unserializable: value>` - but one is recognizable and the other is a guess.
+ *
+ * A `bigint` is the exception, and gets its digits rather than a marker: they are the
+ * *value*, and a receiver can parse them back. Its type is what does not survive - a
+ * `bigint` and a string of the same digits arrive identical - which is the same trade
+ * `stringifyTemplateValue` makes for the same leaf.
+ *
+ * `NaN` and the infinities are deliberately left alone: `JSON.stringify` writes `null` for
+ * them rather than throwing, which is the conventional stand-in and costs nothing here.
+ * `undefined` is left alone too - `JSON.stringify` drops the key, and an absent field is
+ * how this module already represents an absent `message`.
+ */
+function coerceUnJSONableLeaf(value: unknown): unknown {
+  switch (typeof value) {
+    case 'bigint':
+      return String(value);
+    case 'function':
+      return UNSERIALIZABLE_FUNCTION;
+    case 'symbol':
+      // `Symbol(description)`, wrapped so it reads as a marker: bare, it is exactly what
+      // `String(symbol)` gives, which is indistinguishable from a caller's own text.
+      return `<symbol: ${describeValue(value)}>`;
+    default:
+      return value;
+  }
+}
+
 function deepSerialize(
   value: unknown,
   seen: WeakSet<object>,
@@ -483,7 +541,7 @@ function deepSerialize(
   budget: NodeBudget,
 ): unknown {
   if (value === null || typeof value !== 'object') {
-    return value;
+    return coerceUnJSONableLeaf(value);
   }
 
   // Past the cap nothing further is walked. Without it a payload nested deeper than the

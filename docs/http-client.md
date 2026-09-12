@@ -305,6 +305,10 @@ if (response.status === 200) {
 
 It rides on every response to a bodied request, not only the successful ones: a failed response stream (`isStreamError`), a connection reset before any headers, a TLS failure. Those are the shapes where the writer is most likely to have been mid-flight, so `undefined` there means the body went out, never "no one was looking".
 
+That includes the responses the client builds itself, with no adapter response behind them at all - a cancel, a per-attempt timeout, an adapter that threw, and the terminal redirect outcomes (`redirect_disabled`, a redirect loop, a redirect interceptor that threw). The adapter carries the promise on the error it throws and the client reads it off there, which is what makes `undefined` safe to read as "the body went out" everywhere: while the field was absent on those paths, `await response.requestBodySettled` answered `undefined` for an upload that had been torn down mid-flight - the documented success value, on the one path where you would most likely think to ask.
+
+The promise exists from the moment the request has a body, not from the first byte written, so an abort that lands before the writer starts is reported the same way rather than falling back to `undefined`. Absence is left to mean one thing: no adapter reported an upload outcome for this request - it had no body, it was never dispatched (cancelled or refused by an interceptor before it reached an adapter), or the adapter does not report this at all, which today is every adapter but `NodeAdapter`.
+
 It is advisory and changes nothing the client decides. `status`, `isFailed`, `isNetworkError`, and retries are all untouched. That is deliberate: carried on the response as a transport failure instead, a `413` that answered and stopped reading would reach you as a network error with the server's own explanation dropped. Every such failure is also reported on the global `'error'` channel, whether or not anyone awaits this. `NodeAdapter` is the only adapter that reports it today.
 
 ### Content-Type Detection and Body Parsing

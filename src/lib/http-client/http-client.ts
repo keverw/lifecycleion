@@ -30,6 +30,7 @@ import {
   DEFAULT_REQUEST_ATTEMPT_HEADER,
   DEFAULT_USER_AGENT,
   NON_RETRYABLE_HTTP_CLIENT_CALLBACK_ERROR_FLAG,
+  REQUEST_BODY_SETTLED_KEY,
   RESPONSE_STREAM_ABORT_FLAG,
   STREAM_FACTORY_CANCEL_KEY,
   STREAM_FACTORY_ERROR_FLAG,
@@ -85,6 +86,7 @@ import type { CookieJar } from './cookie-jar';
 // rejection values on `cause`."
 import { isErrorValue, toError as normalizeError } from '../to-error';
 import { readUnknownMember as readObjectMember } from '../internal/read-member';
+import { isPromise } from '../is-promise';
 
 type RemoveFn = () => void;
 
@@ -716,6 +718,21 @@ export class BaseHTTPClient {
           });
 
           const { adapterResponse, wasCancelled, wasTimeout } = attemptResult;
+
+          /**
+           * This attempt's upload outcome, wherever it ended up.
+           *
+           * Two sources because there are two shapes: an attempt that *threw* carries it
+           * on the result, and one that resolved carries it on the adapter response. The
+           * terminal redirect branches below build their `HTTPResponse` with
+           * `adapterResponse: null` - a redirect the caller disabled, a loop, an
+           * interceptor that threw, a cancel between hops - so they cannot read the
+           * response's own field and dropped it. An early `3xx` mid-upload is exactly the
+           * shape where it is not empty.
+           */
+          const uploadOutcome =
+            attemptResult.requestBodySettled ??
+            adapterResponse?.requestBodySettled;
           lastAttemptNumber = attemptResult.attemptCount;
           isRetriesExhausted = attemptResult.isRetriesExhausted;
           completedAttemptCount = attemptResult.attemptCount;
@@ -751,6 +768,9 @@ export class BaseHTTPClient {
                 detectedRedirectURL: adapterResponse.detectedRedirectURL,
                 headers: {},
                 body: null,
+                // Carried onto the rebuilt response: the real one is discarded here, and
+                // with it the upload outcome the adapter had already attached.
+                ...(uploadOutcome ? { requestBodySettled: uploadOutcome } : {}),
               },
               requestID,
               // Provably false: a cancel settles with no adapter response, and
@@ -798,6 +818,7 @@ export class BaseHTTPClient {
                 initialURL: finalRequest.requestURL,
                 requestURL: attemptResult.sentRequest.requestURL,
                 redirectHistory,
+                ...(uploadOutcome ? { requestBodySettled: uploadOutcome } : {}),
               });
               errorCode = 'redirect_loop';
               break;
@@ -940,6 +961,7 @@ export class BaseHTTPClient {
                 requestURL: failedRedirectRequest.requestURL,
                 redirectHistory: nextRedirectHistory,
                 isNetworkErrorOverride: false,
+                ...(uploadOutcome ? { requestBodySettled: uploadOutcome } : {}),
               });
 
               errorCode = 'interceptor_error';
@@ -968,6 +990,9 @@ export class BaseHTTPClient {
                 initialURL: finalRequest.requestURL,
                 requestURL: cancelledRequestURL,
                 redirectHistory: [...redirectHistory, cancelledRequestURL],
+                ...(attemptResult.requestBodySettled
+                  ? { requestBodySettled: attemptResult.requestBodySettled }
+                  : {}),
               });
 
               break;
@@ -1012,6 +1037,11 @@ export class BaseHTTPClient {
             initialURL: finalRequest.requestURL,
             requestURL: attemptResult.sentRequest.requestURL,
             redirectHistory,
+            // From the attempt result when it threw - the shape that leaves
+            // `adapterResponse` null - and otherwise straight off the response,
+            // which the branches above reach with `adapterResponse: null` and so
+            // cannot read for themselves.
+            ...(uploadOutcome ? { requestBodySettled: uploadOutcome } : {}),
             ...(attemptResult.errorCode === 'interceptor_error' ||
             attemptResult.errorCode === 'stream_setup_error' ||
             attemptResult.errorCode === 'redirect_disabled'
@@ -1237,6 +1267,12 @@ export class BaseHTTPClient {
     errorCode?: HTTPClientError['code'];
     adapterCause?: Error;
     cancelReason?: string;
+    /**
+     * The request body's outcome for an attempt that *threw*, where there is no
+     * adapter response to carry it. Read off the tagged error; absent when the
+     * request had no body writer at all. See {@link REQUEST_BODY_SETTLED_KEY}.
+     */
+    requestBodySettled?: Promise<Error | undefined>;
   }> {
     const {
       request: baseRequest,
@@ -1714,6 +1750,17 @@ export class BaseHTTPClient {
         };
       } catch (error) {
         clearTimeout(timeoutID);
+        /**
+         * The upload's own outcome, carried on the throw.
+         *
+         * `requestBodySettled` rides on the response object on every path the adapter
+         * resolves. A throw has no response object, so the adapter tags the error
+         * instead and every failure result below carries it through - a cancel, a
+         * timeout and a transport failure are exactly when a caller asks whether its
+         * body made it, and an absent field answers `undefined`, which is what a
+         * *completed* upload resolves with.
+         */
+        const uploadOutcome = getRequestBodySettled(error);
 
         // Before any classification: if the adapter attached the response it had
         // already received, the Set-Cookie on those headers belongs in the jar.
@@ -1747,6 +1794,7 @@ export class BaseHTTPClient {
 
           return {
             adapterResponse: null,
+            ...(uploadOutcome ? { requestBodySettled: uploadOutcome } : {}),
             sentRequest,
             attemptCount: attemptNumber,
             wasCancelled: true,
@@ -1818,6 +1866,7 @@ export class BaseHTTPClient {
             const signalReason = getSignalCancelReason(cancelSignal);
             return {
               adapterResponse: null,
+              ...(uploadOutcome ? { requestBodySettled: uploadOutcome } : {}),
               sentRequest: sentRequestForObservedAdapterError(
                 sentRequest,
                 error,
@@ -1850,6 +1899,7 @@ export class BaseHTTPClient {
 
             return {
               adapterResponse: {
+                ...(uploadOutcome ? { requestBodySettled: uploadOutcome } : {}),
                 status: abortedResponse.status,
                 ...redirectFieldsFor(
                   abortedResponse.status,
@@ -1896,6 +1946,7 @@ export class BaseHTTPClient {
 
           return {
             adapterResponse: {
+              ...(uploadOutcome ? { requestBodySettled: uploadOutcome } : {}),
               status: fallbackStatus,
               ...redirectFieldsFor(fallbackStatus, fallbackHeaders),
               headers: fallbackHeaders,
@@ -1933,6 +1984,7 @@ export class BaseHTTPClient {
             const signalReason = getSignalCancelReason(cancelSignal);
             return {
               adapterResponse: null,
+              ...(uploadOutcome ? { requestBodySettled: uploadOutcome } : {}),
               sentRequest,
               attemptCount: attemptNumber,
               wasCancelled: true,
@@ -1973,6 +2025,7 @@ export class BaseHTTPClient {
 
               return {
                 adapterResponse: null,
+                ...(uploadOutcome ? { requestBodySettled: uploadOutcome } : {}),
                 sentRequest,
                 attemptCount: attemptNumber,
                 wasCancelled: true,
@@ -2003,6 +2056,7 @@ export class BaseHTTPClient {
 
           return {
             adapterResponse: null,
+            ...(uploadOutcome ? { requestBodySettled: uploadOutcome } : {}),
             sentRequest: sentRequestForNonRetryableAdapterCallbackError(
               sentRequest,
               error,
@@ -2057,6 +2111,7 @@ export class BaseHTTPClient {
               requestURL: sentRequest.requestURL,
               redirectHistory,
               isNetworkErrorOverride: false,
+              ...(uploadOutcome ? { requestBodySettled: uploadOutcome } : {}),
             });
 
             const retryError = this._makeError(
@@ -2083,6 +2138,7 @@ export class BaseHTTPClient {
               const signalReason = getSignalCancelReason(cancelSignal);
               return {
                 adapterResponse: null,
+                ...(uploadOutcome ? { requestBodySettled: uploadOutcome } : {}),
                 sentRequest,
                 attemptCount: attemptNumber,
                 wasCancelled: true,
@@ -2120,6 +2176,7 @@ export class BaseHTTPClient {
 
         return {
           adapterResponse: null,
+          ...(uploadOutcome ? { requestBodySettled: uploadOutcome } : {}),
           sentRequest,
           attemptCount: attemptNumber,
           wasCancelled: false,
@@ -2168,6 +2225,12 @@ export class BaseHTTPClient {
     requestURL: string;
     redirectHistory: string[];
     isNetworkErrorOverride?: boolean;
+    /**
+     * The upload's outcome when there is no `adapterResponse` to carry it - a
+     * cancel, a timeout, or any other attempt that threw. Read off the tagged
+     * error by the attempt runner; see {@link REQUEST_BODY_SETTLED_KEY}.
+     */
+    requestBodySettled?: Promise<Error | undefined>;
   }): HTTPResponse<T> {
     const {
       adapterResponse,
@@ -2179,6 +2242,7 @@ export class BaseHTTPClient {
       requestURL,
       redirectHistory,
       isNetworkErrorOverride,
+      requestBodySettled,
     } = params;
 
     const wasRedirectFollowed = redirectHistory.length > 0;
@@ -2210,6 +2274,12 @@ export class BaseHTTPClient {
         redirectHistory,
         requestID,
         adapterType,
+        // No adapter response means the attempt threw, so the promise arrives
+        // separately rather than on a response object. Omitting it here reported
+        // the documented *success* value - `await undefined` is `undefined` - for
+        // a cancelled or timed-out upload, which is the one case where a caller
+        // most needs the real answer. Absent only when there was no body writer.
+        ...(requestBodySettled ? { requestBodySettled } : {}),
       };
     }
 
@@ -2903,6 +2973,40 @@ function getResponseStreamAbortInfo(
     status,
     headers,
   };
+}
+
+/**
+ * The request body's settlement promise off an error an adapter threw.
+ *
+ * The mirror of `AdapterResponse.requestBodySettled` for the failure paths: the promise
+ * lives in the adapter's closure, and a throw has no response object to hang it on, so it
+ * arrives tagged on the error instead.
+ *
+ * Validated as a thenable rather than trusted. The tag is an ordinary property on an
+ * object this client did not create - a caller's own `Error` subclass, or a rejection
+ * value from a third-party adapter - and handing a non-promise to `await` downstream
+ * resolves it to itself, which would report the tag's own value as the upload's outcome.
+ */
+function getRequestBodySettled(
+  err: unknown,
+): Promise<Error | undefined> | undefined {
+  const settled = readObjectMember(err, REQUEST_BODY_SETTLED_KEY);
+
+  if (!isPromise(settled)) {
+    return undefined;
+  }
+
+  // Adopted rather than handed over as it arrived. `isPromise` accepts any object with a
+  // callable `then`, and `HTTPAdapter` is a public extension point: a custom adapter that
+  // tags `Promise.reject(...)` would otherwise put a rejecting promise on
+  // `HTTPResponse.requestBodySettled`, which is documented never to reject - so a caller
+  // following the docs and awaiting it without a `try` would throw, and one that ignores
+  // the field would get an unhandled rejection against the response object. A rejection
+  // becomes the failure it is; `Promise.resolve` also flattens a foreign thenable.
+  return Promise.resolve(settled).then(
+    (value) => (value === undefined ? undefined : normalizeError(value)),
+    (error: unknown) => normalizeError(error),
+  );
 }
 
 /**

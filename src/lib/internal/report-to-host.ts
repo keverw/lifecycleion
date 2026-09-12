@@ -19,7 +19,46 @@ interface HostReportSharedState {
 const HOST_REPORT_STATE_KEY = Symbol.for('lifecycleion.reportToHost.v1');
 const localHostReportState: HostReportSharedState = { dispatchDepth: 0 };
 
-/** Get the cross-bundle state, falling back locally when the global is hostile/frozen. */
+/**
+ * Install a fresh shared state, replacing whatever is there.
+ *
+ * The repair path for every way the shared object can prove unusable: a squatter under our
+ * symbol whose `dispatchDepth` throws, one that silently drops the write, one that refused
+ * to release a lease. Replacing it also repairs the *other* copies, which re-read the
+ * global on every report - an object stuck at a nonzero depth would otherwise send every
+ * later report in every copy to the emergency console rung for the life of the process.
+ *
+ * @returns The installed state, or `undefined` when the global itself refuses it - a frozen
+ *          `globalThis`, a non-writable property - which is the only case with no repair.
+ */
+function installFreshHostReportState(): HostReportSharedState | undefined {
+  try {
+    const globalObject = globalThis as Record<symbol, unknown>;
+    const state: HostReportSharedState = { dispatchDepth: 0 };
+
+    globalObject[HOST_REPORT_STATE_KEY] = state;
+
+    // Read back rather than trusted. A write that is *refused* throws under the module's
+    // own strict mode and is caught below; one that is *ignored* - a non-writable
+    // property, a setter that drops the value - returns normally and left this reporting
+    // with a state nobody would ever see, so every copy believed it held the only lease.
+    return globalObject[HOST_REPORT_STATE_KEY] === state ? state : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Get the cross-bundle state, falling back to this copy's own when the global refuses it.
+ *
+ * Nothing is latched. An earlier version remembered that the shared state was unusable and
+ * never looked again, which is wrong in the one direction that matters: the conditions are
+ * another package's doing, not the environment's, and `installFreshHostReportState` - run
+ * here or by a *different* copy releasing a stuck lease - repairs them. A copy that had
+ * latched would have stayed blind to the healthy object its neighbour installed, for the
+ * life of the process. The cost of asking every time is a few property reads on a path
+ * that is already reporting a failure.
+ */
 function getHostReportState(): HostReportSharedState {
   try {
     const globalObject = globalThis as Record<symbol, unknown>;
@@ -37,14 +76,12 @@ function getHostReportState(): HostReportSharedState {
         return existing as HostReportSharedState;
       }
     }
-
-    const state: HostReportSharedState = { dispatchDepth: 0 };
-    globalObject[HOST_REPORT_STATE_KEY] = state;
-
-    return state;
   } catch {
-    return localHostReportState;
+    // A throwing accessor under our symbol: the read itself is somebody else's code. Not
+    // a reason to give up on sharing - the repair below replaces exactly that object.
   }
+
+  return installFreshHostReportState() ?? localHostReportState;
 }
 
 /**
@@ -60,16 +97,45 @@ function acquireHostReportLease(): HostReportSharedState | undefined {
     }
 
     state.dispatchDepth++;
-    return state;
+
+    if (state.dispatchDepth > 0) {
+      return state;
+    }
+
+    // The increment was ignored rather than refused, so this object cannot hold a lease at
+    // all - and unlike a refusal it says so silently, leaving every copy to believe it owns
+    // a channel none of them is guarding.
   } catch {
     // A hostile value stored under our symbol can still change behaviour after the
-    // guarded read in getHostReportState. Retain protection within this module.
-    if (localHostReportState.dispatchDepth > 0) {
+    // guarded read in getHostReportState.
+  }
+
+  return acquireRepairedLease();
+}
+
+/**
+ * Acquire from a replacement shared object, or from this copy's own guard.
+ *
+ * Reached when the object `getHostReportState` handed back cannot hold a lease. Replacing
+ * it keeps cross-copy protection for every report after this one; `localHostReportState`
+ * is the fallback for a global that will not take a replacement, and it can neither refuse
+ * nor ignore the write because it is this copy's own object.
+ */
+function acquireRepairedLease(): HostReportSharedState | undefined {
+  const state = installFreshHostReportState() ?? localHostReportState;
+
+  try {
+    if (state.dispatchDepth > 0) {
       return undefined;
     }
 
-    localHostReportState.dispatchDepth++;
-    return localHostReportState;
+    state.dispatchDepth++;
+
+    return state;
+  } catch {
+    // Only reachable for a replacement that went hostile between two statements. One
+    // report on the console rung is the cost; the next one gets a fresh object.
+    return undefined;
   }
 }
 
@@ -77,9 +143,31 @@ function acquireHostReportLease(): HostReportSharedState | undefined {
 function releaseHostReportLease(state: HostReportSharedState): void {
   try {
     state.dispatchDepth = Math.max(0, state.dispatchDepth - 1);
+
+    // A lease is only granted at depth `0`, so anything but `0` here means the write did
+    // not take. Left alone, the lease is never released and every later report - in this
+    // copy and in every other one reading the same object - takes the emergency console
+    // rung and never reaches an `'error'` listener again.
+    if (state.dispatchDepth === 0) {
+      return;
+    }
   } catch {
-    // There is no safer state to mutate. A hostile global must not escape this path.
+    // The shared object refused the write. Same outcome as an ignored one: a lease that
+    // can never be put down.
   }
+
+  if (state === localHostReportState) {
+    // Ours, and it just refused a write, which should not be reachable. Reset outright
+    // rather than leaving this copy unable to report for the life of the process.
+    localHostReportState.dispatchDepth = 0;
+
+    return;
+  }
+
+  // Replace the object instead of abandoning it, so the copies still reading it recover
+  // too. Nothing to do when the global will not take a replacement: the next report reads
+  // the stuck object, finds a lease it cannot take, and goes through the same repair.
+  installFreshHostReportState();
 }
 
 /**

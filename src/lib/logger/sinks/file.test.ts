@@ -1988,6 +1988,110 @@ describe('FileSink - entries written during close', () => {
     );
   });
 
+  test('close() reports the write it gave up on, and does not call it a clean shutdown', async () => {
+    // The other half of the same timeout. The entry that was mid-`stream.write` when the
+    // drain's deadline passed is in no queue and no counter - `abandonQueueOnClose()` only
+    // sees what is still queued - so `await close()` resolved and `getHealth()` answered
+    // exactly as it does for a shutdown that wrote everything. Worse when the callback
+    // *succeeds* late: it credits `totalEntriesWritten` and adds its length to a file
+    // nothing is writing to any more, after the close said it was done.
+    const failures: SinkFailure[] = [];
+    const sink = new FileSink({
+      logDir: tmpDir.path,
+      basename: 'inflight-report',
+      closeTimeoutMS: 150,
+      onError: (failure) => {
+        failures.push(failure);
+      },
+    });
+
+    await sink.flush();
+
+    let settleWrite: ((error?: Error) => void) | undefined;
+
+    const stalled = {
+      destroyed: false,
+      end: (callback?: () => void) => callback?.(),
+      destroy: () => undefined,
+      write: (_chunk: string, callback: (error?: Error) => void) => {
+        settleWrite = callback;
+
+        return true;
+      },
+      on: () => undefined,
+      once: () => undefined,
+    };
+
+    (sink as unknown as { logFileStream: unknown }).logFileStream = stalled;
+
+    sink.write({
+      timestamp: Date.now(),
+      type: 'info',
+      serviceName: 'TestService',
+      template: 'held',
+      message: 'held',
+    });
+
+    // Long enough for the entry to be handed to the stream and park there.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    expect(settleWrite).toBeDefined();
+
+    await sink.close();
+
+    const closeFailures = failures.filter(
+      (failure) => failure.kind === 'close',
+    );
+
+    // Said, rather than left to be inferred from a counter that never moved.
+    expect(closeFailures).toHaveLength(1);
+    expect(closeFailures[0]?.error.message).toMatch(
+      /write still in flight.*unknown/i,
+    );
+
+    // `'no_entry'`, not `'lost'`: whether those bytes reached the file is genuinely
+    // unknown from here, and `droppedEntries` means "lines this sink did not deliver" -
+    // this one may well have been delivered a moment later.
+    expect(closeFailures[0]?.disposition).toBe('no_entry');
+    expect(closeFailures[0]?.entry).toBeUndefined();
+    expect(sink.getHealth().droppedEntries).toBe(0);
+
+    // Distinct from the refusal `write()` reports after `close()` began, and from the
+    // abandoned-queue report: neither fires here, so this line is the only way a caller
+    // learns the close did not finish what it started.
+    expect(closeFailures[0]?.error.message).not.toMatch(/still queued/i);
+
+    // The late success the report exists to explain: it lands after `close()` resolved.
+    settleWrite?.();
+
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  });
+
+  test('close() reports nothing extra when the drain finishes in time', async () => {
+    const failures: SinkFailure[] = [];
+    const sink = new FileSink({
+      logDir: tmpDir.path,
+      basename: 'inflight-clean',
+      closeTimeoutMS: 2000,
+      onError: (failure) => {
+        failures.push(failure);
+      },
+    });
+
+    sink.write({
+      timestamp: Date.now(),
+      type: 'info',
+      serviceName: 'TestService',
+      template: 'ordinary',
+      message: 'ordinary',
+    });
+
+    await sink.close();
+
+    expect(failures).toEqual([]);
+    expect(sink.getHealth().droppedEntries).toBe(0);
+  });
+
   test('a UTC date change during close() does not rotate behind the shutdown', async () => {
     // The date branch of `rotateIfNeeded` was the one rotation with no close guard, and it
     // awaits `endStreamWithin(closeTimeoutMS)` - a fresh full-length wait begun inside a

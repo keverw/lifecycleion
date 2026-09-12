@@ -10,6 +10,7 @@ import { HTTPClient } from '../http-client';
 import { CookieJar } from '../cookie-jar';
 import {
   NON_RETRYABLE_HTTP_CLIENT_CALLBACK_ERROR_FLAG,
+  REQUEST_BODY_SETTLED_KEY,
   RESPONSE_STREAM_ABORT_FLAG,
   STREAM_FACTORY_ERROR_FLAG,
 } from '../consts';
@@ -4530,6 +4531,136 @@ describe('NodeAdapter via HTTPClient', () => {
       server.close();
     }
   }, 20000);
+
+  test('a cancel mid-upload carries the upload outcome on the throw', async () => {
+    const net = await import('node:net');
+
+    // The other half of the same contract. Every path that *resolves* carries
+    // `requestBodySettled` on the response; a path that *throws* has no response to carry
+    // it, and the promise lives in this adapter's closure - so it is tagged onto the error
+    // instead. Without it `HTTPClient` built its cancelled response without the field, and
+    // `await undefined` reported a clean upload for a body torn down mid-flight.
+    const server = net.createServer((socket) => {
+      socket.on('error', () => {
+        // The teardown reaches this side as a reset; nothing here asserts on it.
+      });
+
+      // Never read: the upload parks with the request still open.
+      socket.pause();
+    });
+
+    await new Promise<void>((done) => {
+      server.listen(0, '127.0.0.1', done);
+    });
+
+    const { port } = server.address() as { port: number };
+    const controller = new AbortController();
+
+    try {
+      const pending = new NodeAdapter().send({
+        requestURL: `http://127.0.0.1:${port}/upload`,
+        method: 'POST',
+        headers: {},
+        // Past what the socket buffers absorb, so the write is genuinely still running.
+        body: 'x'.repeat(8 * 1024 * 1024),
+        signal: controller.signal,
+      });
+
+      // Long enough for the writer to start and park.
+      await new Promise((done) => setTimeout(done, 50));
+      controller.abort();
+
+      const thrown: unknown = await pending.then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+
+      expect(thrown).toBeInstanceOf(Error);
+      expect((thrown as Error).name).toBe('AbortError');
+
+      const settled = (thrown as Record<PropertyKey, unknown>)[
+        REQUEST_BODY_SETTLED_KEY
+      ];
+
+      expect(settled).toBeInstanceOf(Promise);
+
+      // Resolves rather than rejecting, exactly as it does on the paths that resolve, so
+      // an error nobody inspects cannot become an unhandled rejection.
+      const failure = await (settled as Promise<Error | undefined>);
+
+      expect(failure).toBeInstanceOf(Error);
+    } finally {
+      server.close();
+    }
+  }, 20000);
+
+  test('a bodied request aborted before any write still carries the upload outcome', async () => {
+    // The window the mid-upload fix left open. The outcome promise used to be created by
+    // the first write, and the write branches are the last thing the adapter does - so a
+    // signal that was already aborted threw from above them with nothing to tag, the field
+    // was omitted, and `await` answered `undefined`: the documented value for a body that
+    // went out in full, for one that never started. Opened with the request instead.
+    const controller = new AbortController();
+
+    controller.abort();
+
+    // Never connected to: the abort is answered before the socket matters.
+    const pending = new NodeAdapter().send({
+      requestURL: 'http://127.0.0.1:1/upload',
+      method: 'POST',
+      headers: {},
+      body: 'hello',
+      signal: controller.signal,
+    });
+
+    const thrown: unknown = await pending.then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+
+    expect((thrown as Error).name).toBe('AbortError');
+
+    const settled = (thrown as Record<PropertyKey, unknown>)[
+      REQUEST_BODY_SETTLED_KEY
+    ];
+
+    expect(settled).toBeInstanceOf(Promise);
+
+    // The throw itself, not `undefined`. Nothing went out, and the promise settles rather
+    // than hanging on a writer that is never going to run.
+    expect(await (settled as Promise<Error | undefined>)).toBeInstanceOf(Error);
+
+    // Not enumerable: a runtime printing this error prints its own enumerable properties,
+    // and so do `describeError` and `serializeError`.
+    expect(Object.keys(thrown as object)).not.toContain(
+      REQUEST_BODY_SETTLED_KEY,
+    );
+  });
+
+  test('a bodiless request aborted before any write carries no upload outcome', async () => {
+    // Absence still means something: there is no upload to report on, so nothing is
+    // claimed either way.
+    const controller = new AbortController();
+
+    controller.abort();
+
+    const thrown: unknown = await new NodeAdapter()
+      .send({
+        requestURL: 'http://127.0.0.1:1/nothing',
+        method: 'GET',
+        headers: {},
+        signal: controller.signal,
+      })
+      .then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+
+    expect((thrown as Error).name).toBe('AbortError');
+    expect(
+      (thrown as Record<PropertyKey, unknown>)[REQUEST_BODY_SETTLED_KEY],
+    ).toBeUndefined();
+  });
 
   test('a body that goes out in full settles `requestBodySettled` with no error', async () => {
     const net = await import('node:net');

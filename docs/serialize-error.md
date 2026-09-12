@@ -9,6 +9,8 @@ Useful for IPC, internal RPCs, and storing errors in a database (e.g. logging fa
 - [Usage](#usage)
 - [What It Captures](#what-it-captures)
 - [When a Value Cannot Be Serialized](#when-a-value-cannot-be-serialized)
+- [Values JSON Cannot Carry](#values-json-cannot-carry)
+- [Bounds on the Walk](#bounds-on-the-walk)
 - [API](#api)
   - [isErrorLike](#iserrorlike)
 - [RESTful API Error Guidelines](#restful-api-error-guidelines)
@@ -66,6 +68,40 @@ It fires at most once per call. With no handler it reports on the standard globa
 **The cause never enters the payload.** It comes from the caller's own getter and may
 carry the value it was hiding, and this object is about to cross a wire - so the marker
 goes in the payload and the cause goes to one handler that asked for it.
+
+## Values JSON Cannot Carry
+
+The output is JSON-serializable, which takes more than avoiding cycles - three leaf types would otherwise break `JSON.stringify` on the payload itself:
+
+| Leaf on the error | In the payload          | Left alone, `JSON.stringify` would                                                                        |
+| ----------------- | ----------------------- | --------------------------------------------------------------------------------------------------------- |
+| `bigint`          | its decimal digits      | throw a `TypeError`                                                                                       |
+| `function`        | `<function>`            | drop the key silently - and **call** an own `toJSON`, so a hostile one threw from inside your `stringify` |
+| `symbol`          | `<symbol: Symbol(...)>` | drop the key silently                                                                                     |
+
+The two markers use the same angle brackets as `<unserializable: value>` on purpose: this payload is parsed by a receiver who cannot ask what a value means, so a marker has to read as the library talking rather than as something a caller might have stored. It is recognizable, not provable - a property whose real value is the text `<function>` is indistinguishable, exactly as it already is for the `<unserializable: …>` markers.
+
+A `bigint` gets its digits rather than a marker, because the digits are the _value_ and the receiver can parse them back. What does not survive is its type: a `bigint` and a string of the same digits arrive identical.
+
+`NaN` and the infinities are deliberately untouched: `JSON.stringify` writes `null` for them rather than throwing, which is the conventional stand-in, and a marker would only disagree with what the receiving side ends up reading. `undefined` is likewise left as-is, and `JSON.stringify` drops the key - the same way an absent `message` is represented.
+
+## Bounds on the Walk
+
+`serializeError` never throws and always terminates, which is what lets it run at a boundary where a second failure would replace the one being reported. `JSON.stringify` makes the opposite trade - it raises a `TypeError` on a cycle - so the walk here is bounded instead, and a payload that reaches a bound is cut rather than refused.
+
+Three things stop the walk, all marked `[max depth exceeded]` in the payload:
+
+| Bound          | Limit      | Reached by                                                           |
+| -------------- | ---------- | -------------------------------------------------------------------- |
+| Nesting depth  | 100 levels | a payload nested past the cap, with or without a cycle               |
+| A cycle        | -          | `error.self = error`, or a request object pointing back at its error |
+| Values visited | 100,000    | a shared subtree reached once per reference, or an error bag of keys |
+
+The last one is the least obvious: a value referenced twice side by side is serialized in full both times, so an object graph that is neither deep nor circular can still be large. The node count is the only bound that catches that.
+
+Both the depth and cycle bounds mark where they stopped rather than dropping the entry, so a receiving side always sees _that_ something was cut and where. The marker text is shared with the other renderers in this library and reads `[max depth exceeded]` for all three causes, so it names the most common one and not necessarily the one that fired.
+
+**String values are passed through unchanged.** There is no length cap on `message`, `stack`, or any own property - a bound there would silently hand the receiver a wrong message rather than a truncated render, and it is the receiver, not the marker, that parses this payload. A transport with a frame limit should enforce its own, where it can fail loudly.
 
 ## API
 

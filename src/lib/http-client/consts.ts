@@ -82,6 +82,38 @@ export const STREAM_FACTORY_CANCEL_KEY =
 export const RESPONSE_STREAM_ABORT_FLAG = '_lifecycleion_response_stream_abort';
 
 /**
+ * Attached to an error an adapter *throws* to carry the request body's own
+ * settlement promise, the mirror of `AdapterResponse.requestBodySettled` on the
+ * paths that resolve.
+ *
+ * `requestBodySettled` is documented as present on every bodied request, and an
+ * adapter that throws - a cancel, a timeout, a transport failure - had nowhere to
+ * put it: the promise lives in the adapter's closure and the response object it
+ * would have ridden on is never built. `HTTPClient` then omitted the field, and
+ * `await undefined` is `undefined`, which is the documented value for *an upload
+ * that went out in full*. A cancelled bodied `POST` reported a clean upload.
+ *
+ * The value is the promise itself, never an error. `NodeAdapter`'s own promise
+ * resolves with the upload's failure or with `undefined` and never rejects, so an
+ * error carrying it can be discarded by a caller that does not care without
+ * raising an unhandled rejection - but `HTTPAdapter` is a public extension point,
+ * so `HTTPClient` normalizes whatever it finds here rather than trusting that of a
+ * tag it did not write.
+ *
+ * A symbol rather than a string, unlike the boolean markers above it. This value
+ * rides on an error that may be serialized at an IPC boundary, and `serializeError`
+ * walks `getOwnPropertyNames` deliberately - so a string key put an internal
+ * `Promise` into the payload as an empty object, and spent a node of that walk's
+ * budget on it, enumerable or not. Symbol keys are skipped by both that walk and
+ * `JSON.stringify`. `Symbol.for`, not `Symbol`, for the reason `reportToHost` uses
+ * the global registry: the adapter and the client are separate entry points, so a
+ * consumer importing both has two copies of this module and they must agree.
+ */
+export const REQUEST_BODY_SETTLED_KEY = Symbol.for(
+  'lifecycleion.requestBodySettled.v1',
+);
+
+/**
  * Set on the AbortError thrown by XHRAdapter's defensive `timeout` event
  * listener. Lets HTTPClient classify the error as a timeout (retryable) rather
  * than an unexpected abort (non-retryable cancel).

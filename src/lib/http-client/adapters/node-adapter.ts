@@ -14,6 +14,7 @@ import type {
 import {
   NON_RETRYABLE_HTTP_CLIENT_CALLBACK_ERROR_FLAG,
   REDIRECT_STATUS_CODES,
+  REQUEST_BODY_SETTLED_KEY,
   RESPONSE_STREAM_ABORT_FLAG,
   STREAM_FACTORY_CANCEL_KEY,
   STREAM_FACTORY_ERROR_FLAG,
@@ -394,6 +395,59 @@ export class NodeAdapter implements HTTPAdapter {
       }
     }
 
+    /**
+     * The request body's outcome, held out here rather than inside the executor.
+     *
+     * Out here because a `Promise` executor rejects on a *synchronous* throw as well as
+     * through `reject`, and that path touches none of the executor's own handlers:
+     * `httpModule.request` validates headers and the path synchronously
+     * (`ERR_INVALID_HTTP_TOKEN`, `ERR_UNESCAPED_CHARACTERS`), `Buffer.from` can raise a
+     * `RangeError` on a huge body, and `req.setHeader` can throw - all after the outcome
+     * promise has been opened. Reached from here, `settleRequestBodyForThrow` below is the
+     * one choke point every rejection passes through, whatever raised it.
+     */
+    const upload: {
+      outcome: Promise<Error | undefined> | null;
+      settle: ((failure: Error | undefined) => void) | null;
+    } = { outcome: null, settle: null };
+
+    /**
+     * Settle the upload and tag the error with it, for a request that is rejecting.
+     *
+     * The request is being torn down, so this body is not going out - whether a writer was
+     * mid-flight, or had not started at all. Settling with the throw itself is both the
+     * honest answer and what keeps the promise from hanging: opened with the request and
+     * never ended, `await response.requestBodySettled` would wait for a writer that is
+     * never going to run. Idempotent, so a real write failure already recorded by
+     * `endBodyWrite` wins over this.
+     */
+    const settleRequestBodyForThrow = (error: Error): Error => {
+      const settle = upload.settle;
+
+      upload.settle = null;
+      settle?.(error);
+
+      if (upload.outcome) {
+        try {
+          // A symbol key, so this never reaches the wire: `serializeError` walks
+          // `getOwnPropertyNames` on purpose - non-enumerability would not have kept an
+          // internal `Promise` out of an IPC payload - and `JSON.stringify` ignores symbol
+          // keys outright. `Symbol.for`, not `Symbol`, so an adapter copy and a client copy
+          // from different bundle chunks agree on it.
+          Object.defineProperty(error, REQUEST_BODY_SETTLED_KEY, {
+            value: upload.outcome,
+            enumerable: false,
+            configurable: true,
+            writable: true,
+          });
+        } catch {
+          // Frozen, sealed, or an exotic host object. The throw is what matters.
+        }
+      }
+
+      return error;
+    };
+
     return new Promise<AdapterResponse>((resolve, reject) => {
       let activeResponseStream:
         | {
@@ -531,15 +585,59 @@ export class NodeAdapter implements HTTPAdapter {
        * Resolves, never rejects: a caller that ignores it must not be handed an unhandled
        * rejection for an upload it never asked about.
        */
-      let bodyWriteOutcome: Promise<Error | undefined> | null = null;
 
-      let settleBodyWrite: ((failure: Error | undefined) => void) | null = null;
+      /**
+       * Open the outcome promise, so it exists from the moment the request has a body.
+       *
+       * Opened here rather than at the first write, which is where it used to be created:
+       * the write branches are the last thing in this executor, so everything that can
+       * throw before them - a signal that was already aborted, a `streamResponse` factory
+       * that refused - threw with no promise to tag, `HTTPClient` omitted the field, and
+       * `await` answered `undefined`, the documented value for a body that went out in
+       * full. Nothing had gone out at all.
+       *
+       * Idempotent: the two write branches still announce themselves through
+       * {@link beginBodyWrite}, and the promise they find is the one already handed to
+       * whatever has since been resolved or thrown.
+       */
+      const openBodyOutcome = (): void => {
+        if (upload.outcome) {
+          return;
+        }
 
+        upload.outcome = new Promise<Error | undefined>((settle) => {
+          upload.settle = settle;
+        });
+      };
+
+      /**
+       * A writer is running. Distinct from having a body: `isWritingBody` is what tells
+       * the response-close handler to leave an upload alone rather than destroying it
+       * mid-write, and that is only true once a writer actually exists.
+       */
       const beginBodyWrite = (): void => {
         isWritingBody = true;
-        bodyWriteOutcome = new Promise<Error | undefined>((settle) => {
-          settleBodyWrite = settle;
-        });
+        openBodyOutcome();
+      };
+
+      /**
+       * Answer `requestBodySettled` and nothing else.
+       *
+       * Split from {@link endBodyWrite} because one caller must settle the promise
+       * *without* declaring the writer finished: a write error that lands after the
+       * response has arrived is reported and left to the grace deadline, and
+       * `isWritingBody` still gates the response-close handler's choice between the
+       * stall watchdog and an immediate `destroy`. Flipping it there would have changed
+       * that teardown as a side effect of answering the caller.
+       *
+       * Idempotent through `settleBodyWrite`, which is cleared on the first call: a
+       * promise resolves once, and the second settle would be silently dropped anyway.
+       */
+      const settleBodyOutcome = (failure?: unknown): void => {
+        const settle = upload.settle;
+
+        upload.settle = null;
+        settle?.(failure === undefined ? undefined : normalizeError(failure));
       };
 
       /**
@@ -550,11 +648,7 @@ export class NodeAdapter implements HTTPAdapter {
        */
       const endBodyWrite = (failure?: unknown): void => {
         isWritingBody = false;
-
-        const settle = settleBodyWrite;
-
-        settleBodyWrite = null;
-        settle?.(failure === undefined ? undefined : normalizeError(failure));
+        settleBodyOutcome(failure);
       };
 
       /**
@@ -579,13 +673,61 @@ export class NodeAdapter implements HTTPAdapter {
           request.requestURL,
           request.headers,
           {
-            ...(bodyWriteOutcome
-              ? { requestBodySettled: bodyWriteOutcome }
+            ...(upload.outcome
+              ? { requestBodySettled: upload.outcome }
               : {}),
             ...response,
           },
         );
       };
+
+      /**
+       * Reject with the upload outcome attached, the mirror of {@link settleResponse}.
+       *
+       * Every throw out of this adapter goes through here for the same reason every
+       * resolve goes through `settleResponse`: `requestBodySettled` is documented as
+       * present on every bodied request, and the paths that throw are the ones where it
+       * carries the most - a cancel or a timeout tears the request down mid-upload, and
+       * the writer's failure is then the only record that the body never went out. With
+       * the promise stranded in this closure, `HTTPClient` built its response without the
+       * field, and `await undefined` reported a clean upload for a body that was cut off.
+       *
+       * The error is passed through unchanged, tag or no tag, so a frozen or exotic error
+       * still rejects with exactly what the caller threw. Attaching is best-effort: it is
+       * strictly additive to the failure being reported, and losing the tag must never
+       * replace that failure with a `TypeError` raised on the way to reporting it.
+       */
+      /**
+       * Reject with the upload outcome attached, the mirror of {@link settleResponse}.
+       *
+       * Every throw raised by this adapter's own handlers goes through here for the same
+       * reason every resolve goes through `settleResponse`: `requestBodySettled` is
+       * documented as present on every bodied request, and the paths that throw are the
+       * ones where it carries the most - a cancel or a timeout tears the request down
+       * mid-upload, and the writer's failure is then the only record that the body never
+       * went out. With the promise stranded in this closure, `HTTPClient` built its
+       * response without the field, and `await undefined` reported a clean upload for a
+       * body that was cut off.
+       *
+       * A synchronous throw out of this executor cannot reach here - it never runs another
+       * handler - so the work itself lives in `settleRequestBodyForThrow`, which the
+       * enclosing `catch` shares.
+       */
+      const failRequest = (error: Error): void => {
+        reject(settleRequestBodyForThrow(error));
+      };
+
+      // Every bodied request has its outcome from here on, whichever branch below writes
+      // it and whatever throws before they run. The condition mirrors the write branches
+      // at the end of this executor; the `else` there is the genuinely bodiless request,
+      // which has no upload to report and correctly carries no field.
+      if (
+        request.body instanceof FormData ||
+        typeof request.body === 'string' ||
+        request.body instanceof Uint8Array
+      ) {
+        openBodyOutcome();
+      }
 
       const destroyRequestQuietly = (): void => {
         if (req.writableEnded || req.destroyed) {
@@ -618,6 +760,14 @@ export class NodeAdapter implements HTTPAdapter {
        */
       const reportWriteErrorAfterResponse = (error: unknown): void => {
         const failure = normalizeError(error);
+
+        // This body is over, so answer `requestBodySettled` now rather than leaving it to
+        // the writer. Nothing below settles it: the request is reported and then handed to
+        // the grace deadline, and a writer blocked in `Blob.stream()`'s `read()` never
+        // returns to notice - `await response.requestBodySettled` then hung for the whole
+        // grace window on an upload that was already dead. Settled before the report, so a
+        // failure in reporting cannot leave the caller waiting.
+        settleBodyOutcome(failure);
 
         try {
           // Rendered for the console rung, the convention every other `reportToHost` caller
@@ -782,7 +932,7 @@ export class NodeAdapter implements HTTPAdapter {
               // listeners run, destroy the request, and propagate as a setup failure.
               streamAbort.abort();
               req.destroy();
-              reject(markStreamFactoryError(error, req, request.headers));
+              failRequest(markStreamFactoryError(error, req, request.headers));
               return;
             }
             isStreamFactoryPending = false;
@@ -821,7 +971,7 @@ export class NodeAdapter implements HTTPAdapter {
               Object.assign(abortErr, {
                 [STREAM_FACTORY_CANCEL_KEY]: cancelReason ?? true,
               });
-              reject(abortErr);
+              failRequest(abortErr);
               return;
             }
 
@@ -993,7 +1143,7 @@ export class NodeAdapter implements HTTPAdapter {
             });
           });
         })().catch((error: unknown) => {
-          reject(normalizeError(error));
+          failRequest(normalizeError(error));
         });
       });
 
@@ -1003,7 +1153,7 @@ export class NodeAdapter implements HTTPAdapter {
         if (request.signal?.aborted) {
           const abortErr = new Error('Request aborted');
           abortErr.name = 'AbortError';
-          reject(abortErr);
+          failRequest(abortErr);
           return;
         }
 
@@ -1084,7 +1234,7 @@ export class NodeAdapter implements HTTPAdapter {
           req.destroy();
           const abortErr = new Error('Request aborted');
           abortErr.name = 'AbortError';
-          reject(abortErr);
+          failRequest(abortErr);
           return;
         }
 
@@ -1101,7 +1251,7 @@ export class NodeAdapter implements HTTPAdapter {
                 'Request aborted during response streaming',
               );
               error.name = 'AbortError';
-              reject(
+              failRequest(
                 markResponseStreamAbortError(
                   error,
                   req,
@@ -1122,7 +1272,7 @@ export class NodeAdapter implements HTTPAdapter {
                 'Request aborted during response streaming',
               );
               error.name = 'AbortError';
-              reject(
+              failRequest(
                 markResponseStreamAbortError(
                   error,
                   req,
@@ -1140,14 +1290,14 @@ export class NodeAdapter implements HTTPAdapter {
                 'Request aborted during streamResponse setup',
               );
               abortErr.name = 'AbortError';
-              reject(markStreamFactoryError(abortErr, req, request.headers));
+              failRequest(markStreamFactoryError(abortErr, req, request.headers));
               return;
             }
 
             req.destroy();
             const abortErr = new Error('Request aborted');
             abortErr.name = 'AbortError';
-            reject(abortErr);
+            failRequest(abortErr);
           },
           { once: true },
         );
@@ -1248,6 +1398,13 @@ export class NodeAdapter implements HTTPAdapter {
         reportUploadProgress({ loaded: 0, total: 0, progress: 1 });
         req.end();
       }
+    }).catch((error: unknown) => {
+      // The one rejection path the executor's own handlers cannot see: a `Promise`
+      // executor rejects on a synchronous throw too, and `httpModule.request`,
+      // `Buffer.from` and `req.setHeader` can all raise one after the outcome promise has
+      // been opened. Re-thrown unchanged apart from the tag, so classification upstream is
+      // untouched.
+      throw settleRequestBodyForThrow(normalizeError(error));
     });
   }
 }

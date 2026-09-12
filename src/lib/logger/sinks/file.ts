@@ -390,9 +390,17 @@ export class FileSink implements LogSink {
       }
     }
 
+    // Whether the drain gave up with a write still in flight, rather than with only a
+    // backlog left. `abandonQueueOnClose()` reports the backlog; the entry already shifted
+    // out of the queue and handed to `stream.write` belongs to neither counter, so a close
+    // that timed out mid-write answered exactly like a clean one.
+    let didAbandonInFlightWrite = false;
+
     // Wait for queue to finish processing with timeout
     while (this.writeQueue.length > 0 || this.isProcessing) {
       if (Date.now() - startTime > this.closeTimeoutMS) {
+        didAbandonInFlightWrite = this.isProcessing;
+
         break;
       }
       await new Promise((resolve) => setTimeout(resolve, 10));
@@ -408,6 +416,7 @@ export class FileSink implements LogSink {
     this.isInitialized = false;
 
     this.abandonQueueOnClose();
+    this.reportInFlightWriteOnClose(didAbandonInFlightWrite);
 
     // Close stream, on what is left of the *whole* close's budget. `endStream()` waits on
     // `stream.end(cb)`, which flushes before it calls back - so with `logDir` on a hung
@@ -505,6 +514,47 @@ export class FileSink implements LogSink {
     if (this.logFileStream === stream) {
       this.logFileStream = undefined;
     }
+  }
+
+  /**
+   * Say so when the close gave up with a write still in flight.
+   *
+   * `close()` documents a bound, so a slow or hung destination is answered by giving up
+   * rather than by hanging - but the entry that was mid-`stream.write` when the deadline
+   * passed is in no queue and no counter, so `await close()` resolved and `getHealth()`
+   * reported a clean shutdown with a write still outstanding. Whether its bytes landed is
+   * genuinely unknown from here: the callback may fire after this resolves, credit the
+   * entry to `totalEntriesWritten`, and add its length to a file nothing is writing to any
+   * more. Unknown is the honest answer, and saying it is what "closed means done" needs
+   * in the one case where it is not quite true.
+   *
+   * Not counted in `droppedEntries`, which means "lines this sink did not deliver" - this
+   * line may well have been delivered. `'no_entry'` for the same reason: the failure is
+   * about the close, and the entry itself is neither lost nor retrying.
+   */
+  private reportInFlightWriteOnClose(didAbandon: boolean): void {
+    if (!didAbandon) {
+      return;
+    }
+
+    const failure = new FileSinkError(
+      `Closed with a write still in flight (closeTimeoutMS=${String(this.closeTimeoutMS)}); whether it reached the file is unknown`,
+    );
+
+    this.lastError = failure;
+
+    reportThroughHandler(
+      this.onError === undefined
+        ? undefined
+        : () =>
+            this.onError?.({
+              kind: 'close',
+              error: failure,
+              target: this.currentLogFile ?? this.logDir,
+              disposition: 'no_entry',
+            }),
+      () => describeError(failure),
+    );
   }
 
   /**

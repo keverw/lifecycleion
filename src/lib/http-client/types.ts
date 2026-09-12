@@ -182,9 +182,12 @@ export interface AdapterResponse {
    * server's explanation dropped, and let an abort during the wait discard a
    * response that had already arrived in full.
    *
-   * Present whenever this request had a body writer, which is every bodied
-   * request - not only the ones whose writer was still running when the response
-   * resolved, so presence does not mean the upload outlived the answer. On the
+   * Present on every bodied request, from the moment the request has a body
+   * rather than from the first byte written - so an abort before the writer
+   * starts is reported here too, instead of leaving the field absent and
+   * `await` answering `undefined`. Not only the requests whose writer was still
+   * running when the response resolved, so presence does not mean the upload
+   * outlived the answer. On the
    * ordinary shape, where the body went out long before the response came back,
    * it resolves with `undefined`. A writer that failed just before the response
    * arrived is still reported through it, which is why it is not gated on the

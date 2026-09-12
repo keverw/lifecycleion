@@ -655,6 +655,101 @@ describe('error-shaped objects with inherited members', () => {
     expect(serialized.cause.message).toBe('cause');
   });
 
+  test('keeps the payload JSON-serializable for leaves JSON cannot carry', () => {
+    // The promise this module makes is a payload that survives `JSON.stringify`, and three
+    // leaves broke it. A `BigInt` threw outright - at the IPC boundary, while already
+    // reporting a failure - and a function or symbol value was dropped, key and all, with
+    // nothing to say it had been there.
+    const error = new Error('leaves');
+
+    Object.assign(withExtras(error), {
+      big: 9_007_199_254_740_993n,
+      fn: function named() {
+        return 1;
+      },
+      sym: Symbol('marker'),
+      nested: { big: 1n },
+    });
+
+    const serialized = serializeError(error);
+
+    expect(serialized.big).toBe('9007199254740993');
+    // This module's own marker vocabulary - the angle brackets of
+    // `<unserializable: value>` - not `errorToString`'s human-facing `[Function]`: this
+    // payload is parsed by a receiver with no way to ask what a value means.
+    expect(serialized.fn).toBe('<function>');
+    expect(serialized.sym).toBe('<symbol: Symbol(marker)>');
+    expect((serialized.nested as { big: unknown }).big).toBe('1');
+
+    // The point of all four: this no longer throws.
+    expect(() => JSON.stringify(serialized)).not.toThrow();
+    expect(JSON.parse(JSON.stringify(serialized))).toMatchObject({
+      message: 'leaves',
+      big: '9007199254740993',
+      fn: '<function>',
+      sym: '<symbol: Symbol(marker)>',
+    });
+  });
+
+  test('a hostile own `toJSON` cannot throw from inside the caller stringify', () => {
+    // The worst of the dropped leaves. `JSON.stringify` *invokes* an own `toJSON`, so a
+    // nested object carrying one was copied verbatim - method and all - and threw from the
+    // caller's own `stringify`, downstream of everything this module guards.
+    const error = new Error('hostile toJSON');
+
+    withExtras(error).payload = {
+      toJSON() {
+        throw new Error('toJSON blew up');
+      },
+    };
+
+    const serialized = serializeError(error);
+
+    expect(() => JSON.stringify(serialized)).not.toThrow();
+    expect((serialized.payload as { toJSON: unknown }).toJSON).toBe(
+      '<function>',
+    );
+  });
+
+  test('leaves `NaN` and the infinities to JSON own null convention', () => {
+    // Deliberately untouched: `JSON.stringify` writes `null` for these rather than
+    // throwing, so there is nothing to rescue and a marker would only disagree with what
+    // the receiver gets.
+    const error = new Error('numbers');
+
+    Object.assign(withExtras(error), { nan: NaN, inf: Infinity });
+
+    const serialized = serializeError(error);
+
+    expect(serialized.nan).toBeNaN();
+    expect(JSON.parse(JSON.stringify(serialized))).toMatchObject({
+      nan: null,
+      inf: null,
+    });
+  });
+
+  test('passes a long string field through instead of capping it', () => {
+    // Deliberate, and the one bound this function does *not* take from the renderers. The
+    // node and depth caps are what make "never throws, always terminates" true - without
+    // them a cycle or a deep graph raised a `RangeError` out of the function whose whole
+    // job is describing a failure. A length cap buys none of that: it only shortens the
+    // output, and the thing it would shorten is a `message` the receiving side *parses*.
+    // `errorToString` renders for a human, so a marker in place of the tail costs nothing
+    // there; here it would hand an IPC consumer a wrong message with no way to tell, and
+    // the payload carries no channel to say it was cut. A transport with a frame limit
+    // enforces its own, where it can fail loudly.
+    const long = 'x'.repeat(2_000_000);
+    const error = new Error(long);
+
+    withExtras(error).detail = long;
+
+    const serialized = serializeError(error);
+
+    expect(serialized.message).toBe(long);
+    expect(serialized.detail).toBe(long);
+    expect(serialized.message).not.toContain('max length exceeded');
+  });
+
   test('bounds an error-*like* bag carrying more own keys than the node budget', () => {
     // The same cap from the other side. `isErrorLike` accepts a plain object with `name`,
     // `message` and `stack` - which is what an error arriving over IPC looks like - and

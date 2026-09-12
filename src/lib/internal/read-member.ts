@@ -19,9 +19,9 @@
  *          is therefore indistinguishable from an absent one; where that distinction
  *          matters, ask a function that keeps it.
  */
-export function readMember(source: object, key: string): unknown {
+export function readMember(source: object, key: PropertyKey): unknown {
   try {
-    return (source as Record<string, unknown>)[key];
+    return (source as Record<PropertyKey, unknown>)[key];
   } catch {
     return undefined;
   }
@@ -40,10 +40,15 @@ export function readMember(source: object, key: string): unknown {
  * shapes between `http-client`, three adapters and `tls-error-utils`, on a rule against
  * importing across module boundaries that the same files now break for `toError`.
  *
+ * The key is a `PropertyKey` rather than a `string` because one marker is deliberately
+ * symbol-keyed: `REQUEST_BODY_SETTLED_KEY` carries a `Promise` on a thrown error, and a
+ * string key would ride into an IPC payload through `serializeError`'s
+ * `getOwnPropertyNames` walk.
+ *
  * @returns The member's value, or `undefined` when the source cannot hold one or reading
  *          it threw.
  */
-export function readUnknownMember(source: unknown, key: string): unknown {
+export function readUnknownMember(source: unknown, key: PropertyKey): unknown {
   if (
     source === null ||
     (typeof source !== 'object' && typeof source !== 'function')

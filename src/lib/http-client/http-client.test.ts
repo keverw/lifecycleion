@@ -15,6 +15,7 @@ import {
   DEFAULT_REQUEST_ID_HEADER,
   DEFAULT_USER_AGENT,
   NON_RETRYABLE_HTTP_CLIENT_CALLBACK_ERROR_FLAG,
+  REQUEST_BODY_SETTLED_KEY,
   RESPONSE_STREAM_ABORT_FLAG,
   STREAM_FACTORY_CANCEL_KEY,
   STREAM_FACTORY_ERROR_FLAG,
@@ -518,6 +519,121 @@ describe('HTTPClient — basic HTTP methods', () => {
     expect(response.isNetworkError).toBe(false);
     expect(response.body).toEqual({ ok: true });
     expect(await response.requestBodySettled).toBeInstanceOf(Error);
+  });
+
+  test('a cancelled bodied request carries the upload outcome, not a silent success', async () => {
+    // The hole this closes: a cancel settles with no adapter response, so the field was
+    // omitted - and `await undefined` is `undefined`, which is the documented value for an
+    // upload that went out *in full*. A caller following the docs concluded its upload
+    // completed for a body that was cut off mid-flight, on the one path where it would
+    // think to ask. The adapter tags the throw instead; the client reads it off there.
+    const uploadFailure = new Error('upload cut short');
+    const controller = new AbortController();
+
+    const adapter: HTTPAdapter = {
+      getType: () => 'node',
+      send: (_request: AdapterRequest): Promise<AdapterResponse> => {
+        // Aborted from inside the adapter: aborting first returns before `send` is ever
+        // called, which is not the shape this is about.
+        controller.abort();
+
+        const abortErr = new Error('Request aborted');
+
+        abortErr.name = 'AbortError';
+        Object.assign(abortErr, {
+          [REQUEST_BODY_SETTLED_KEY]: Promise.resolve(uploadFailure),
+        });
+
+        return Promise.reject(abortErr);
+      },
+    };
+
+    const response = await new HTTPClient({
+      adapter,
+      baseURL: 'http://example.test',
+    })
+      .post('/upload')
+      .json({ a: 1 })
+      .signal(controller.signal)
+      .send();
+
+    expect(response.isCancelled).toBe(true);
+    expect(response.status).toBe(0);
+
+    // Presence first: the documented contract is that a bodied request has the field, and
+    // an absent one answers `undefined` through `await` without ever being missing.
+    expect(response.requestBodySettled).toBeDefined();
+    expect(await response.requestBodySettled).toBe(uploadFailure);
+  });
+
+  test('a timed-out bodied request carries the upload outcome', async () => {
+    const uploadFailure = new Error('upload never finished');
+
+    const adapter: HTTPAdapter = {
+      getType: () => 'node',
+      send: (request: AdapterRequest): Promise<AdapterResponse> =>
+        new Promise((_resolve, reject) => {
+          request.signal?.addEventListener('abort', () => {
+            const abortErr = new Error('Request aborted');
+
+            abortErr.name = 'AbortError';
+            Object.assign(abortErr, {
+              [REQUEST_BODY_SETTLED_KEY]: Promise.resolve(uploadFailure),
+            });
+
+            reject(abortErr);
+          });
+        }),
+    };
+
+    const response = await new HTTPClient({
+      adapter,
+      baseURL: 'http://example.test',
+      timeout: 20,
+    })
+      .post('/upload')
+      .json({ a: 1 })
+      .send();
+
+    expect(response.isTimeout).toBe(true);
+    expect(response.requestBodySettled).toBeDefined();
+    expect(await response.requestBodySettled).toBe(uploadFailure);
+  });
+
+  test('a tagged value that is not a promise is ignored rather than awaited', async () => {
+    // The tag is an ordinary property on an object this client did not create. `await` on
+    // a non-thenable resolves to the value itself, so trusting it would report the tag as
+    // the upload's own outcome - a string, or anything else a caller's `Error` subclass
+    // happens to carry under that name.
+    const controller = new AbortController();
+
+    const adapter: HTTPAdapter = {
+      getType: () => 'node',
+      send: (_request: AdapterRequest): Promise<AdapterResponse> => {
+        controller.abort();
+
+        const abortErr = new Error('Request aborted');
+
+        abortErr.name = 'AbortError';
+        Object.assign(abortErr, {
+          [REQUEST_BODY_SETTLED_KEY]: 'not a promise',
+        });
+
+        return Promise.reject(abortErr);
+      },
+    };
+
+    const response = await new HTTPClient({
+      adapter,
+      baseURL: 'http://example.test',
+    })
+      .post('/upload')
+      .json({ a: 1 })
+      .signal(controller.signal)
+      .send();
+
+    expect(response.isCancelled).toBe(true);
+    expect(response.requestBodySettled).toBeUndefined();
   });
 
   test('rejects browser XHR redirect handling when explicitly enabled', () => {
