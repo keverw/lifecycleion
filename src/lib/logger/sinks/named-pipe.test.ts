@@ -1812,6 +1812,64 @@ describe('NamedPipeSink', () => {
       reader.stop();
     }
   }, 15000);
+  test('reports the entry it drops when the stream went away and the retries ran out', async () => {
+    // The window `drainQueue` cannot close: it checks the stream, shifts an entry, and the
+    // stream can be gone by the time `writeEntry` looks again. That path requeues with no
+    // report of its own, so at the retry cap `requeue` counted a `droppedEntries` and said
+    // nothing - a silent loss for an `onError` consumer whose job is to write a fallback
+    // copy on `disposition: 'lost'`, since only `getHealth()` ever moved.
+    const pipePath = `${tmpDir.path}/dropped-no-stream.pipe`;
+    await createNamedPipe(pipePath);
+
+    const reader = startPipeReader(pipePath);
+    const failures: SinkFailure[] = [];
+    const sink = new NamedPipeSink({
+      pipePath,
+      // No retries, so the first failed attempt is also the last one.
+      maxRetries: 0,
+      onError: (failure) => {
+        failures.push(failure);
+      },
+    });
+
+    try {
+      expect(await waitForOpenPipe(sink)).toBe(true);
+
+      (sink as unknown as { ensureConnection: () => void }).ensureConnection =
+        () => {
+          // Recovery is not what this test is about; the entry has already run out of
+          // attempts by the time this would be reached.
+        };
+
+      const live = (sink as unknown as { pipeStream: fs.WriteStream })
+        .pipeStream;
+
+      live.destroy();
+
+      // Driven straight at `writeEntry`, because that is the whole race: `drainQueue`
+      // would refuse to shift while the stream is destroyed, and the entry only reaches
+      // this branch when the stream dies *after* that check.
+      (
+        sink as unknown as {
+          writeEntry: (queued: { formatted: string; attempts: number }) => void;
+        }
+      ).writeEntry({ formatted: 'orphan\n', attempts: 0 });
+
+      expect(sink.getHealth().droppedEntries).toBe(1);
+      expect(failures).toHaveLength(1);
+      expect(failures[0]?.kind).toBe('write');
+      // `'lost'`, which is the one disposition that means write this line somewhere else.
+      expect(failures[0]?.disposition).toBe('lost');
+      expect(failures[0]?.attempt).toBe(1);
+      // The stream this could not be written to is already gone, so it says nothing about
+      // the health of whatever replaces it.
+      expect(sink.getHealth().consecutiveFailures).toBe(0);
+    } finally {
+      await sink.close();
+      reader.stop();
+    }
+  }, 15000);
+
   test('an unrelated stream error does not unsuppress a pending report', async () => {
     // The suppression used to be one slot holding the last error, cleared by whatever
     // error arrived next. A stale stream emitting between a write callback and its own

@@ -1477,9 +1477,14 @@ export class NamedPipeSink implements LogSink {
    *
    * An entry that has used up its attempts is counted as a drop rather than vanishing,
    * so `getHealth().droppedEntries` means "lines this sink did not deliver" whatever the
-   * reason.
+   * reason - and said out loud, which is what `wasReported` is for. A caller that has
+   * already reported this attempt as `'lost'` passes `true`; the one that has not - the
+   * `writeEntry` path where the stream went away between the `processQueue` check and the
+   * write, so there was no failure to report - passes nothing, and the cap reports for it.
+   * Counted but unreported, that path was a silent loss for a fallback `onError` consumer
+   * that only writes on `disposition: 'lost'`: `droppedEntries` moved and nothing else did.
    */
-  private requeue(queued: QueuedPipeEntry): void {
+  private requeue(queued: QueuedPipeEntry, wasReported = false): void {
     if (this.closed) {
       // Past `abandonQueueOnClose()`, so nothing is going to carry this one any further.
       // Counted rather than dropped silently, because the entry was already shifted off
@@ -1512,6 +1517,26 @@ export class NamedPipeSink implements LogSink {
 
     if (queued.attempts >= this.maxRetries) {
       this.droppedEntries++;
+
+      if (!wasReported) {
+        // Synthesized rather than re-reporting `lastError`, which may be an unrelated
+        // earlier failure - a format error from another line among them - and would name
+        // the wrong cause for this one. What is known here is exactly what this says.
+        this.handleError(
+          'write',
+          new Error(
+            `Write to ${this.pipePath} failed after ${String(queued.attempts + 1)} attempts; the pipe was unavailable and the entry was not written`,
+          ),
+          {
+            attempt: queued.attempts + 1,
+            disposition: 'lost',
+            // The stream this entry could not be written to is already gone - that is why
+            // it is here - so this says nothing about whatever replaced it. Same question
+            // the write callback asks before counting a failure against health.
+            countsAgainstHealth: false,
+          },
+        );
+      }
 
       return;
     }
@@ -1928,7 +1953,8 @@ export class NamedPipeSink implements LogSink {
             countsAgainstHealth: this.pipeStream === stream,
           });
 
-          this.requeue(queued);
+          // Already reported just above, cap or no cap.
+          this.requeue(queued, true);
 
           return;
         }
@@ -1949,8 +1975,9 @@ export class NamedPipeSink implements LogSink {
         disposition: queued.attempts < this.maxRetries ? 'retrying' : 'lost',
       });
       // The line never reached the pipe, so it goes back on the queue and out on a later
-      // attempt - the same answer `FileSink` gives a throwing write.
-      this.requeue(queued);
+      // attempt - the same answer `FileSink` gives a throwing write. Reported just above,
+      // so the cap inside does not report it a second time.
+      this.requeue(queued, true);
     }
   }
 

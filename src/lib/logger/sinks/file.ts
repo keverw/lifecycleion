@@ -72,8 +72,9 @@ export interface FileSinkOptions {
    *
    * One object rather than four positional arguments, and the same one `NamedPipeSink`
    * hands back: `kind` says what failed, `target` which file it was writing to at the
-   * time, `entry` / `attempt` which line and try, and `willRetry` whether the line is
-   * coming back. See {@link SinkFailure}.
+   * time, `entry` / `attempt` which line and try, and `disposition` what became of the
+   * line - `'lost'` is the one that means write it somewhere else, and the `willRetry`
+   * boolean it replaced could not say that. See {@link SinkFailure}.
    */
   onError?: SinkErrorHandler;
 }
@@ -574,8 +575,41 @@ export class FileSink implements LogSink {
 
       // Process any queued writes
       await this.processQueue();
-    } catch {
-      // Silently fail - entries will be queued until next initialization attempt
+    } catch (error) {
+      // Said, not swallowed. Entries do stay queued and `writeEntry` retries `setupLogFile`
+      // later, so nothing is lost here - but a constructor-time `EACCES` or `EISDIR` left
+      // no trace at all until some later write happened to hit the missing stream, and a
+      // sink that can never open its file looked identical to one that simply had nothing
+      // to write yet. `NamedPipeSink` reports its setup failures up front; this now does
+      // too.
+      // `setupLogFile` already raises a `FileSinkError` that names the file, so wrapping
+      // one produced `Failed to setup log file: Failed to setup log file: ...`. Only what
+      // arrives as something else - `mkdir`'s raw `ENOTDIR`, `EACCES` - is given the
+      // sentence `failureKindFor` recognizes.
+      const failure =
+        error instanceof FileSinkError
+          ? error
+          : new FileSinkError(
+              `Failed to setup log file: ${describeError(error)}`,
+              toError(error),
+            );
+
+      this.lastError = failure;
+
+      reportThroughHandler(
+        this.onError === undefined
+          ? undefined
+          : () =>
+              this.onError?.({
+                kind: 'setup',
+                error: failure,
+                target: this.currentLogFile ?? this.logDir,
+                // Setup belongs to no particular line, and the queue still holds every
+                // entry: a later write retries this, so nothing here is lost.
+                disposition: 'retrying',
+              }),
+        () => describeError(failure),
+      );
     }
   }
 

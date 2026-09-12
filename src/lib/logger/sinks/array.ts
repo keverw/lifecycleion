@@ -4,6 +4,7 @@ import {
   namedArrayKeys,
 } from '../../internal/container-entries';
 import { isPlainContainer } from '../../internal/is-plain-container';
+import { MAX_REDACTION_ENTRIES } from '../../internal/redact-paths';
 import { MAX_RENDER_DEPTH, TRUNCATED } from '../../internal/render-budget';
 import {
   consoleFormatHandler,
@@ -22,6 +23,20 @@ import type { ArrayLogTransformer, LogEntry, LogSink } from '../types';
  * would claim a masking happened here.
  */
 const UNCOPYABLE_MARKER = '<value could not be copied>';
+
+/**
+ * Stands where the snapshot stopped because it had copied all it is allowed to.
+ *
+ * Distinct from {@link TRUNCATED}, which says the walk hit the depth cap, and from
+ * {@link UNCOPYABLE_MARKER}, which says a read threw: this one says the payload was
+ * simply bigger than one entry may keep, and everything after it is missing.
+ */
+const TRUNCATED_ENTRIES = '[max entries exceeded]';
+
+/** Entries left to copy in one snapshot, shared by every level of it. */
+interface SnapshotBudget {
+  entriesLeft: number;
+}
 
 /**
  * Copy the structure of `redactedParams` so what is stored stops tracking the caller.
@@ -50,7 +65,17 @@ function snapshotParams(
   params: Record<string, unknown>,
   report: ReportFormatFailure,
 ): Record<string, unknown> {
-  const snapshot = snapshotValue(params, new WeakMap(), 0, '<params>', report);
+  const snapshot = snapshotValue(
+    params,
+    new WeakMap(),
+    0,
+    '<params>',
+    report,
+    // One allowance for the whole snapshot rather than a per-container cap: a payload
+    // splits the same total cost across any shape it likes, and a bound that reset at
+    // each level would be no bound at all.
+    { entriesLeft: MAX_REDACTION_ENTRIES },
+  );
 
   // The top level is a bag this sink owns, so a marker there would replace the whole
   // thing. Unreadable keys leave an empty bag instead - it carries no caller values.
@@ -65,6 +90,7 @@ function snapshotValue(
   depth: number,
   path: string,
   report: ReportFormatFailure,
+  budget: SnapshotBudget,
 ): unknown {
   if (!isPlainContainer(value)) {
     return value;
@@ -107,11 +133,33 @@ function snapshotValue(
     // A counted index loop rather than `for...of`, matching the redaction walk: iteration
     // resolves `Symbol.iterator` off the value, which on a subclass is caller code.
     for (let index = 0; index < shape.length; index++) {
+      // Billed per element, before the element is read. `shape.length` is not a fact -
+      // `Array.isArray` is true for a `Proxy` whose `length` trap may answer any number,
+      // and a real `new Array(20_000_000)` costs the same - so a claim of billions had
+      // this loop allocating a slot per claimed element synchronously inside `write()`,
+      // which runs inside the caller's `logger.info()`. An unchanged large subtree
+      // reaches this snapshot by reference whenever something *else* in the params was
+      // redacted, so the claim does not even have to be on the redacted branch.
+      if (budget.entriesLeft <= 0) {
+        copy.push(TRUNCATED_ENTRIES);
+
+        return copy;
+      }
+
+      budget.entriesLeft--;
+
       const elementPath = `${path}[${String(index)}]`;
 
       try {
         copy.push(
-          snapshotValue(source[index], seen, depth + 1, elementPath, report),
+          snapshotValue(
+            source[index],
+            seen,
+            depth + 1,
+            elementPath,
+            report,
+            budget,
+          ),
         );
       } catch (error) {
         report(error, elementPath);
@@ -138,6 +186,14 @@ function snapshotValue(
     }
 
     for (const namedKey of namedKeys) {
+      if (budget.entriesLeft <= 0) {
+        copy.push(TRUNCATED_ENTRIES);
+
+        return copy;
+      }
+
+      budget.entriesLeft--;
+
       const namedPath = `${path}.${namedKey}`;
 
       try {
@@ -150,6 +206,7 @@ function snapshotValue(
             depth + 1,
             namedPath,
             report,
+            budget,
           ),
         );
       } catch (error) {
@@ -170,6 +227,18 @@ function snapshotValue(
   seen.set(value, copy);
 
   for (const key of shape.keys) {
+    // Counted against the same allowance as the array branch: an `ownKeys` trap is as
+    // free to invent a million keys as a `length` trap is to invent a million elements.
+    // The marker goes in under a key of its own, so a reader sees the copy stopped
+    // rather than reading a bag that looks complete.
+    if (budget.entriesLeft <= 0) {
+      defineEntry(copy, TRUNCATED_ENTRIES, TRUNCATED_ENTRIES);
+
+      return copy;
+    }
+
+    budget.entriesLeft--;
+
     let entry: unknown;
 
     try {
@@ -179,6 +248,7 @@ function snapshotValue(
         depth + 1,
         `${path}.${key}`,
         report,
+        budget,
       );
     } catch (error) {
       report(error, `${path}.${key}`);

@@ -453,6 +453,40 @@ describe('FileSink', () => {
     await sink.close();
   });
 
+  test('reports a setup that failed at construction rather than waiting for a write', async () => {
+    // `initialize()` caught and said nothing. Entries do stay queued and `writeEntry`
+    // retries `setupLogFile` later, so nothing is lost - but a sink that can never open its
+    // file looked exactly like one that simply had nothing to write yet, until some later
+    // write happened to hit the missing stream. `NamedPipeSink` reports its setup failures
+    // up front, and this is the same promise.
+    const blocked = `${tmpDir.path}/blocked-setup`;
+
+    await fsPromises.writeFile(blocked, 'in the way');
+
+    const failures: SinkFailure[] = [];
+    const sink = new FileSink({
+      logDir: `${blocked}/logs`,
+      basename: 'setup-report',
+      maxSizeMB: 1,
+      jsonFormat: false,
+      onError: (failure) => {
+        failures.push(failure);
+      },
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    expect(failures.length).toBeGreaterThanOrEqual(1);
+    expect(failures[0]?.kind).toBe('setup');
+    // Nothing is lost here: the queue still holds every entry and a later write tries the
+    // setup again, so a fallback consumer must not write a duplicate copy.
+    expect(failures[0]?.disposition).toBe('retrying');
+    expect(sink.getHealth().lastError).toBeDefined();
+
+    await sink.close();
+    await fsPromises.rm(blocked, { force: true });
+  });
+
   test('reports itself initialized once a lazy setup succeeds', async () => {
     // `isInitialized` was set only by `initialize()`, which runs once from the constructor
     // and swallows what it catches. A sink whose directory was not there yet recovers in

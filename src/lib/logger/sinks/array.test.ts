@@ -603,3 +603,79 @@ test("an array's named properties survive the snapshot", () => {
   items.cursor = 'mutated';
   expect(stored.cursor).toBe('abc');
 });
+
+test('bounds the snapshot rather than trusting an array that lies about its length', () => {
+  // `Array.isArray` is true for a `Proxy` over an array, and `length` is whatever the trap
+  // answers. Unbounded, `write()` allocated a slot per claimed element synchronously inside
+  // the caller's log call - a two-million claim took roughly half a second, and `2 ** 32 - 1`
+  // is minutes of it. The elements themselves are never read here, so the claim alone is the
+  // whole cost.
+  const liar = new Proxy([1, 2, 3], {
+    get(target, key, receiver) {
+      if (key === 'length') {
+        return 3_000_000_000;
+      }
+
+      return Reflect.get(target, key, receiver) as unknown;
+    },
+  });
+
+  const sink = new ArraySink();
+  const startedAt = Date.now();
+
+  sink.write({
+    timestamp: Date.now(),
+    type: 'info',
+    template: 't',
+    message: 'm',
+    redactedParams: { items: liar },
+  });
+
+  const stored = sink.logs[0]?.redactedParams?.['items'] as unknown[];
+
+  expect(Array.isArray(stored)).toBe(true);
+  // Bounded, and self-describing: the copy says where it stopped rather than looking like
+  // an array that was genuinely that long.
+  expect(stored.length).toBeLessThanOrEqual(1_000_001);
+  expect(stored[stored.length - 1]).toBe('[max entries exceeded]');
+  expect(Date.now() - startedAt).toBeLessThan(10_000);
+});
+
+test('spends one allowance across the whole snapshot rather than one per container', () => {
+  // A per-container cap is no cap at all: the same total cost splits across any shape the
+  // payload likes. Two arrays each claiming the full bound must together cost one bound.
+  const claim = (): unknown[] =>
+    new Proxy([1], {
+      get(target, key, receiver) {
+        if (key === 'length') {
+          return 2_000_000;
+        }
+
+        return Reflect.get(target, key, receiver) as unknown;
+      },
+    });
+
+  const sink = new ArraySink();
+
+  sink.write({
+    timestamp: Date.now(),
+    type: 'info',
+    template: 't',
+    message: 'm',
+    redactedParams: { a: claim(), b: claim() },
+  });
+
+  const stored = sink.logs[0]?.redactedParams as Record<string, unknown>;
+  const first = stored['a'] as unknown[];
+  const second = stored['b'] as unknown[] | undefined;
+  const total = (first.length ?? 0) + (second?.length ?? 0);
+
+  // The two together, markers included, stay inside the one allowance.
+  expect(total).toBeLessThanOrEqual(1_000_003);
+  expect(first[first.length - 1]).toBe('[max entries exceeded]');
+
+  // `a` spent the allowance, so `b` never starts: the bag says so under a marker key of
+  // its own rather than looking like a params object that only ever had one entry.
+  expect(second).toBeUndefined();
+  expect(stored['[max entries exceeded]']).toBe('[max entries exceeded]');
+});
