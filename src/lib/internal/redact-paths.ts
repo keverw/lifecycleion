@@ -1839,6 +1839,7 @@ export function redactMatchedPaths(
   report: ReportFormatFailure = NOOP_FORMAT_REPORTER,
   aliases?: ForwardingAliases,
   reportRender: ReportFormatFailure = NOOP_FORMAT_REPORTER,
+  maskBudget: RenderBudget = createRenderBudget(),
 ): unknown {
   const state: RedactState = {
     didMaskAnything: false,
@@ -1851,7 +1852,7 @@ export function redactMatchedPaths(
     scanLeft: MAX_REDACTION_ENTRIES,
     aliases,
     reportRender,
-    maskBudget: createRenderBudget(),
+    maskBudget,
   };
 
   const result = redactPathsInner(

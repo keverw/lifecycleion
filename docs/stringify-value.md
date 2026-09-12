@@ -8,6 +8,7 @@ Render any value as a display string, or return it with parts redacted. The rend
 - [API](#api)
   - [stringifyValue](#stringifyvalue)
   - [Options](#options)
+    - [Bounding and Observing the Render](#bounding-and-observing-the-render)
   - [redactValue](#redactvalue)
 - [How values render](#how-values-render)
 - [Redacting while rendering](#redacting-while-rendering)
@@ -51,6 +52,19 @@ interface StringifyValueOptions {
     kind: 'redaction' | 'render',
     path: string,
   ) => void;
+  /** Characters this call may emit. Defaults to 1,000,000; `Infinity` for no bound. */
+  maxRenderLength?: number;
+  /** Notified when the output was cut short. */
+  onTruncate?: (info: TruncationInfo) => void;
+}
+
+interface TruncationInfo {
+  /** Which bound stopped the render. */
+  reason: 'length' | 'depth' | 'circular';
+  /** What was being rendered when it stopped - `<value>` for a bare render. */
+  subject: string;
+  /** Characters known to be dropped, or `undefined` when nothing measured them. */
+  dropped: number | undefined;
 }
 
 /**
@@ -66,6 +80,41 @@ type RedactFunctionResult =
 The value reaching your `redactFunction` is **always a `string`** - the leaf is rendered
 before the function is called, whatever it started as. That is also what stops a mutating
 function reaching into the value you passed in.
+
+#### Bounding and Observing the Render
+
+One allowance covers the whole call, shared by every level of the value - and shared by
+both halves of it, so masking a value and rendering the result spend one budget between
+them rather than a megabyte each:
+
+```typescript
+stringifyValue(value, { maxRenderLength: 20_000_000 });
+stringifyValue(value, { maxRenderLength: Infinity }); // no bound
+```
+
+`Infinity` is the only way to render unbounded. Anything else unusable - a negative, zero,
+`NaN`, a non-number - takes the default rather than being honoured, because this is the
+bound that makes an untrusted payload safe to render and a typo must not be what switches
+it off.
+
+Truncation is a degradation rather than a failure, so it does **not** reach
+`onFormatError` - that channel means something _refused_ to render and hands you an error.
+There is no error here; the walk succeeded and could not represent everything. Ask for
+`onTruncate` instead:
+
+```typescript
+stringifyValue(value, {
+  onTruncate: ({ reason, subject, dropped }) => {
+    // reason 'length' | 'depth' | 'circular'
+  },
+});
+```
+
+It fires at most once per call, carrying the first cut - the one that explains the rest.
+`dropped` is only ever present for `'length'`: a cycle and a depth cap drop a subtree that
+was never rendered, so its size was never established.
+
+`curlyBrackets` and `errorToString` take the same two options and report the same shape.
 
 ### redactValue
 

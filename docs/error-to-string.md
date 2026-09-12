@@ -43,8 +43,30 @@ interface ErrorToStringOptions {
     kind: 'redaction' | 'render',
     path: string,
   ) => void;
+  /** Characters this call may emit. Defaults to 1,000,000; `Infinity` for no bound. */
+  maxRenderLength?: number;
+  /** Notified when the output was cut short. */
+  onTruncate?: (info: TruncationInfo) => void;
+}
+
+interface TruncationInfo {
+  /** Which bound stopped the render. */
+  reason: 'length' | 'depth' | 'circular';
+  /** What was being rendered when it stopped - `<error>` here. */
+  subject: string;
+  /** Characters known to be dropped, or `undefined` when nothing measured them. */
+  dropped: number | undefined;
 }
 ```
+
+`maxRenderLength` is one allowance for the whole table, shared by every row and by the
+masking that runs before them, so an error with a long `cause` chain costs one cap rather
+than one per link. It is separate from `maxRowLength`, which sets the table's _width_;
+this sets how much may be emitted in total.
+
+Truncation does not reach `onFormatError` - that channel means a value _refused_ to render
+and hands you an error, and there is none here. `onTruncate` fires at most once per call
+with the first cut, and takes the same shape `curlyBrackets` and `stringifyValue` use.
 
 | Parameter      | Type                   | Default | Description                                                              |
 | -------------- | ---------------------- | ------- | ------------------------------------------------------------------------ |
@@ -216,10 +238,10 @@ first is the worst possible outcome. It is written so it cannot:
 - Values that resist rendering are marked rather than propagating, and the marker names
   which half refused:
 
-  | Marker                  | Meaning                                                                                                                                                                             |
-  | ----------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-  | `<unrenderable: keys>`  | The container would not be enumerated because of a revoked `Proxy` or a throwing `ownKeys` trap.                                                                                               |
-  | `<unrenderable: value>` | One value would not be read because of a throwing accessor or a revoked `Proxy`.                                                                                                               |
+  | Marker                  | Meaning                                                                                                                                                                            |
+  | ----------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+  | `<unrenderable: keys>`  | The container would not be enumerated because of a revoked `Proxy` or a throwing `ownKeys` trap.                                                                                   |
+  | `<unrenderable: value>` | One value would not be read because of a throwing accessor or a revoked `Proxy`.                                                                                                   |
   | `<unrenderable: text>`  | The value was read but could not be turned into text. `String()` invokes `toString`/`Symbol.toPrimitive`, and `JSON.stringify` throws on a cyclic object and on a nested `BigInt`. |
 
   **The cause is deliberately not in the marker.** The thrown value is yours: a getter is

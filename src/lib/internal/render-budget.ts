@@ -38,6 +38,32 @@ export const TRUNCATED = '[max depth exceeded]';
  */
 export const MAX_RENDER_LENGTH = 1_000_000;
 
+/**
+ * How much one render may emit, from what the caller asked for.
+ *
+ * Fails *closed* on anything unusable, which is the opposite of `resolveMaxQueueSize`'s
+ * reading of the same shapes and deliberately so: an unlimited queue is a coherent request
+ * and costs the caller memory they asked to spend, while an unlimited render is the bound
+ * that makes an untrusted payload safe to render at all. A negative, a zero, a `NaN` out
+ * of `Number(process.env.X)` - none of those say "no limit", and treating them that way
+ * would turn a typo into the thing that disabled it. Only `Infinity`, which says it
+ * exactly, does.
+ */
+export function resolveMaxRenderLength(requested: number | undefined): number {
+  if (typeof requested !== 'number' || Number.isNaN(requested)) {
+    return MAX_RENDER_LENGTH;
+  }
+
+  if (requested === Number.POSITIVE_INFINITY) {
+    return requested;
+  }
+
+  // Floored to at least one: a fraction in `(0, 1)` would otherwise round to a budget of
+  // zero, which is not "a very small allowance" but the spent state every guard reads as
+  // "emit the marker and render nothing".
+  return requested > 0 ? Math.max(1, Math.floor(requested)) : MAX_RENDER_LENGTH;
+}
+
 /** Emitted where the budget ran out, so a truncated render never looks complete. */
 export const TRUNCATED_LENGTH = '[max length exceeded]';
 
@@ -141,6 +167,14 @@ export interface RenderBudget {
    * size was ever established. Pair it with {@link truncations}, which counts those too.
    */
   droppedChars: number;
+  /**
+   * Which bound stopped this render first, or `undefined` if none did.
+   *
+   * The first rather than the last: once a budget is spent everything after it degrades
+   * too, so the last says only that the render kept going. The first is the one that
+   * explains the output.
+   */
+  firstReason?: TruncationReason;
 }
 
 /**
@@ -191,17 +225,72 @@ export function chargeUnits(budget: RenderBudget, amount: number): void {
 }
 
 /**
+ * Why a render emitted a marker instead of the content it stood for.
+ *
+ * The three ways a walk stops early, and they are one family rather than three: each
+ * succeeded at rendering and simply could not represent everything, which is what
+ * separates all of them from a value that *refused* to render and reports an error. A
+ * caller asking "is my output complete" is asking one question, so it gets one channel
+ * and this says which bound answered.
+ */
+export type TruncationReason =
+  /** {@link MAX_RENDER_LENGTH}, or whatever the caller set in its place. */
+  | 'length'
+  /** {@link MAX_RENDER_DEPTH}. */
+  | 'depth'
+  /** A reference back into something already being rendered. */
+  | 'circular';
+
+/**
+ * What a truncation handler is told.
+ *
+ * One shape across every entry point that renders - `curlyBrackets`, `stringifyValue`,
+ * `errorToString` - because a caller asking "is my output complete" is asking the same
+ * question of all of them, and three near-identical shapes would only make the answer
+ * look like three different questions.
+ */
+export interface TruncationInfo {
+  /** Which bound stopped the render. */
+  reason: TruncationReason;
+  /**
+   * What was being rendered when it stopped.
+   *
+   * The placeholder as written for a template - `user.body` for `{{ user.body }}` - and
+   * the rendered value's own root otherwise.
+   */
+  subject: string;
+  /**
+   * Characters known to have been dropped, or `undefined` when nothing measured them.
+   *
+   * A lower bound rather than a total, and only ever present for a `'length'` cut: a
+   * cycle, a depth cap, and a value the budget was already spent before reaching all drop
+   * something that was never rendered, so its size was never established. `undefined` is
+   * the honest answer there rather than a zero that reads as "nothing was lost".
+   */
+  dropped: number | undefined;
+}
+
+/** Notified when a render was cut short. See {@link TruncationInfo}. */
+export type TruncationHandler = (info: TruncationInfo) => void;
+
+/**
  * Record that this render cut something short.
  *
+ * @param reason Which bound stopped it. Only the first is kept: a render past its budget
+ *        degrades continuously, and the first is the one that explains the rest.
  * @param droppedChars Characters dropped, when the cut had them in hand to count. Omitted
  *        by a caller giving up on a tail it never rendered - the count still rises, which
- *        is what keeps "was anything cut" answerable when "how much" is not.
+ *        is what keeps "was anything cut" answerable when "how much" is not. Only a
+ *        `'length'` cut ever has one: a cycle and a depth cap drop a subtree that was
+ *        never rendered and so was never measured.
  */
 export function noteTruncation(
   budget: RenderBudget,
+  reason: TruncationReason,
   droppedChars?: number,
 ): void {
   budget.truncations++;
+  budget.firstReason ??= reason;
 
   if (droppedChars !== undefined && droppedChars > 0) {
     budget.droppedChars += droppedChars;
@@ -245,7 +334,7 @@ export function chargeText(budget: RenderBudget, text: string): string {
   const emitted = `${kept}${TRUNCATED_LENGTH}`;
 
   // What this cut, before the charge below moves `remaining`.
-  noteTruncation(budget, text.length - kept.length);
+  noteTruncation(budget, 'length', text.length - kept.length);
 
   chargeUnits(budget, emitted.length);
 
@@ -292,6 +381,11 @@ export function chargeNestedText(
   );
   const emitted = `${kept}${TRUNCATED_LENGTH}`;
 
+  // Counted like every other cut. Missed here, a rendered error - whose nested rows are
+  // the *only* thing that reaches this function - reported an intact render while its
+  // `AdditionalInfo` had been shortened, which is precisely the surface a caller sets a
+  // handler to watch.
+  noteTruncation(budget, 'length', text.length - kept.length);
   chargeUnits(budget, emitted.length * factor);
 
   return emitted;

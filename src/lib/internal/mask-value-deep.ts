@@ -16,6 +16,7 @@ import { stringifyTemplateValue } from './stringify-template-value';
 import {
   charge,
   chargeUnits,
+  noteTruncation,
   createRenderBudget,
   MAX_RENDER_DEPTH,
   type RenderBudget,
@@ -109,6 +110,8 @@ export function maskValueDeep(
     // above it has already paid for and can still mask, and nothing is unbounded about
     // rendering it.
     if (budget.remaining <= 0) {
+      noteTruncation(budget, 'length');
+
       return REDACTED_PLACEHOLDER;
     }
 
@@ -148,12 +151,16 @@ export function maskValueDeep(
   // and the same answer the cycle below gives. A truncation marker would read as masked
   // content rather than as the absence of it.
   if (depth >= MAX_RENDER_DEPTH || budget.remaining <= 0) {
+    noteTruncation(budget, depth >= MAX_RENDER_DEPTH ? 'depth' : 'length');
+
     return REDACTED_PLACEHOLDER;
   }
 
   if (seen.has(value)) {
     // A cycle cannot be rebuilt, and must not be walked forever. Nothing of the original
     // survives here, which is the safe direction.
+    noteTruncation(budget, 'circular');
+
     return REDACTED_PLACEHOLDER;
   }
 
@@ -201,6 +208,7 @@ export function maskValueDeep(
         // the stall. One placeholder stands for the tail, which is what the rest would
         // have been.
         if (budget.remaining <= 0) {
+          noteTruncation(budget, 'length');
           masked.push(REDACTED_PLACEHOLDER);
           didMarkTruncation = true;
 
@@ -255,6 +263,7 @@ export function maskValueDeep(
       // marker at all.
       if (budget.remaining <= 0) {
         if (!didMarkTruncation) {
+          noteTruncation(budget, 'length');
           masked.push(REDACTED_PLACEHOLDER);
           didMarkTruncation = true;
         }
@@ -274,6 +283,7 @@ export function maskValueDeep(
         for (const namedKey of namedKeys) {
           if (budget.remaining <= 0) {
             if (!didMarkTruncation) {
+              noteTruncation(budget, 'length');
               masked.push(REDACTED_PLACEHOLDER);
               didMarkTruncation = true;
             }

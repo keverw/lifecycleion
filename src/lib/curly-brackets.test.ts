@@ -1,5 +1,5 @@
 import { describe, expect, it, test } from 'bun:test';
-import { CurlyBrackets } from './curly-brackets';
+import { CurlyBrackets, type TruncationInfo } from './curly-brackets';
 
 const html = `
 <html>
@@ -495,33 +495,35 @@ describe('maxRenderLength and onTruncate', () => {
   });
 
   it('tells the caller what was cut', () => {
-    const cuts: { placeholder: string; dropped: number | undefined }[] = [];
+    const cuts: TruncationInfo[] = [];
 
     CurlyBrackets('{{ body }}', { body }, undefined, {
       onTruncate: (info) => cuts.push(info),
     });
 
-    expect(cuts).toEqual([{ placeholder: 'body', dropped: 1_000_000 }]);
+    expect(cuts).toEqual([
+      { reason: 'length', subject: 'body', dropped: 1_000_000 },
+    ]);
   });
 
   it('reports a cut made inside a container, not only a bare string', () => {
     // The counter lives on the budget rather than being measured off the result, so a
     // nested leaf cut by `quoteWithinBudget` is seen exactly as a top-level string is.
-    const cuts: { placeholder: string; dropped: number | undefined }[] = [];
+    const cuts: TruncationInfo[] = [];
 
     CurlyBrackets('{{o}}', { o: { k: body } }, undefined, {
       onTruncate: (info) => cuts.push(info),
     });
 
     expect(cuts).toHaveLength(1);
-    expect(cuts[0]?.placeholder).toBe('o');
+    expect(cuts[0]?.subject).toBe('o');
     expect(cuts[0]?.dropped).toBeGreaterThan(0);
   });
 
   it('reports a placeholder the budget never reached with no count', () => {
     // `dropped` is honest rather than zero: the guard exists so the value is never
     // rendered, so nothing ever measured it.
-    const cuts: { placeholder: string; dropped: number | undefined }[] = [];
+    const cuts: TruncationInfo[] = [];
 
     CurlyBrackets('{{a}}{{b}}', { a: body, b: body }, undefined, {
       maxRenderLength: 100,
@@ -530,7 +532,7 @@ describe('maxRenderLength and onTruncate', () => {
 
     // Once per render, not once per placeholder - and the first is the informative one.
     expect(cuts).toHaveLength(1);
-    expect(cuts[0]?.placeholder).toBe('a');
+    expect(cuts[0]?.subject).toBe('a');
   });
 
   it('does not fire when nothing was cut', () => {

@@ -3,7 +3,11 @@ import {
   muteConsoleError,
   restoreConsoleError,
 } from './internal/console-test-utils';
-import { errorToString, type RedactFieldFunction } from './error-to-string';
+import {
+  errorToString,
+  type RedactFieldFunction,
+  type TruncationInfo,
+} from './error-to-string';
 import {
   applyRedaction,
   REDACTION_FAILED_MARKER,
@@ -1964,5 +1968,75 @@ describe('errorToString - bounds that hold at the entry point', () => {
 
     expect(rendered).not.toBe('<error could not be rendered>');
     expect(rendered).toContain('level17');
+  });
+});
+
+describe('maxRenderLength and onTruncate', () => {
+  function errorWith(info: unknown): Error {
+    const error = new Error('x') as Error & { additionalInfo?: unknown };
+
+    error.additionalInfo = info;
+
+    return error;
+  }
+
+  it('reports each reason through the one channel', () => {
+    const cyclic: Record<string, unknown> = { a: 1 };
+
+    cyclic.self = cyclic;
+
+    let deep: Record<string, unknown> = {};
+
+    const deepRoot = deep;
+
+    for (let level = 0; level < 200; level++) {
+      deep = deep.n = {};
+    }
+
+    const reasons = [{ big: 'z'.repeat(2_000_000) }, deepRoot, cyclic].map(
+      (info) => {
+        const cuts: TruncationInfo[] = [];
+
+        errorToString(errorWith(info), undefined, {
+          onTruncate: (cut) => cuts.push(cut),
+        });
+
+        return cuts[0]?.reason;
+      },
+    );
+
+    expect(reasons).toEqual(['length', 'depth', 'circular']);
+  });
+
+  it('does not fire for an error that rendered in full', () => {
+    const cuts: TruncationInfo[] = [];
+
+    errorToString(new Error('small'), undefined, {
+      onTruncate: (cut) => cuts.push(cut),
+    });
+
+    expect(cuts).toHaveLength(0);
+  });
+
+  it('honours a raised limit, separately from maxRowLength', () => {
+    const error = errorWith({ big: 'z'.repeat(2_000_000) });
+
+    const bounded = errorToString(error, undefined, {});
+    const unbounded = errorToString(error, undefined, {
+      maxRenderLength: Number.POSITIVE_INFINITY,
+    });
+
+    expect(bounded.length).toBeLessThan(1_100_000);
+    expect(unbounded.length).toBeGreaterThan(bounded.length);
+  });
+
+  it('does not route truncation through onFormatError', () => {
+    const failures: unknown[] = [];
+
+    errorToString(errorWith({ big: 'z'.repeat(2_000_000) }), undefined, {
+      onFormatError: (error) => failures.push(error),
+    });
+
+    expect(failures).toHaveLength(0);
   });
 });

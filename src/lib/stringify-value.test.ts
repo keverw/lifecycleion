@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, it, test } from 'bun:test';
 import {
   muteConsoleError,
   restoreConsoleError,
@@ -7,6 +7,7 @@ import {
   redactValue,
   stringifyValue,
   type StringifyValueOptions,
+  type TruncationInfo,
 } from './stringify-value';
 import { applyRedaction } from './logger/utils/redaction';
 import type { RedactFunction } from './logger/types';
@@ -2205,5 +2206,111 @@ describe('a key is a variable-length leaf too', () => {
     const rendered = stringifyValue({ a: huge, b: huge, c: 'tail' });
 
     expect(rendered).toContain('"c":"[max length exceeded]"');
+  });
+});
+
+describe('maxRenderLength and onTruncate', () => {
+  const big = 'x'.repeat(2_000_000);
+
+  it('reports each reason through the one channel', () => {
+    const cyclic: Record<string, unknown> = { a: 1 };
+
+    cyclic.self = cyclic;
+
+    let deep: Record<string, unknown> = {};
+
+    const deepRoot = deep;
+
+    for (let level = 0; level < 200; level++) {
+      deep = deep.n = {};
+    }
+
+    const reasons = [big, deepRoot, cyclic].map((value) => {
+      const cuts: TruncationInfo[] = [];
+
+      stringifyValue(value, { onTruncate: (info) => cuts.push(info) });
+
+      return cuts[0]?.reason;
+    });
+
+    expect(reasons).toEqual(['length', 'depth', 'circular']);
+  });
+
+  it('only counts characters for a length cut', () => {
+    // A cycle and a depth cap drop a subtree that was never rendered, so nothing measured
+    // it - `undefined` rather than a zero that reads as "nothing was lost".
+    const cyclic: Record<string, unknown> = {};
+
+    cyclic.self = cyclic;
+
+    const lengthCuts: TruncationInfo[] = [];
+    const cycleCuts: TruncationInfo[] = [];
+
+    stringifyValue(big, { onTruncate: (info) => lengthCuts.push(info) });
+    stringifyValue(cyclic, { onTruncate: (info) => cycleCuts.push(info) });
+
+    expect(lengthCuts[0]?.dropped).toBe(1_000_000);
+    expect(cycleCuts[0]?.dropped).toBeUndefined();
+  });
+
+  it('shares one allowance between masking and the render', () => {
+    // Without the shared budget a `redactFunction` answering oversized replacements got a
+    // fresh cap of its own, so `maxRenderLength` bounded only half the operation.
+    const params: Record<string, string> = {};
+
+    for (let index = 0; index < 20; index++) {
+      params[`k${String(index)}`] = 'secret';
+    }
+
+    const cuts: TruncationInfo[] = [];
+
+    stringifyValue(params, {
+      redactedKeys: Object.keys(params),
+      redactFunction: () => 'R'.repeat(500_000),
+      onTruncate: (info) => cuts.push(info),
+    });
+
+    expect(cuts).toHaveLength(1);
+    expect(cuts[0]?.reason).toBe('length');
+  });
+
+  it('bounds redactValue too, which renders every leaf it masks', () => {
+    const params: Record<string, string> = {};
+
+    for (let index = 0; index < 20; index++) {
+      params[`k${String(index)}`] = 'secret';
+    }
+
+    const cuts: TruncationInfo[] = [];
+
+    redactValue(params, {
+      redactedKeys: Object.keys(params),
+      redactFunction: () => 'R'.repeat(500_000),
+      maxRenderLength: 100_000,
+      onTruncate: (info) => cuts.push(info),
+    });
+
+    expect(cuts).toHaveLength(1);
+  });
+
+  it('honours Infinity and falls back on anything else unusable', () => {
+    expect(
+      stringifyValue(big, { maxRenderLength: Number.POSITIVE_INFINITY }).length,
+    ).toBe(2_000_000);
+
+    for (const bad of [-1, 0, Number.NaN, '5000', undefined]) {
+      expect(
+        stringifyValue(big, { maxRenderLength: bad as number | undefined })
+          .length,
+      ).toBeLessThan(1_100_000);
+    }
+  });
+
+  it('does not route truncation through onFormatError', () => {
+    const failures: unknown[] = [];
+
+    stringifyValue(big, { onFormatError: (error) => failures.push(error) });
+
+    expect(failures).toHaveLength(0);
   });
 });

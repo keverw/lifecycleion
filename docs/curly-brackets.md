@@ -203,21 +203,37 @@ ships that way - so ask for `onTruncate`:
 
 ```typescript
 CurlyBrackets(template, locals, undefined, {
-  onTruncate: ({ placeholder, dropped }) => {
-    // placeholder: 'body'; dropped: characters cut, or undefined when the budget was
-    // already spent before this placeholder was reached, so its value was never rendered
-    // and never measured.
+  onTruncate: ({ reason, subject, dropped }) => {
+    // reason:  'length' | 'depth' | 'circular'
+    // subject: the placeholder, e.g. 'user.body'
+    // dropped: characters cut, or undefined when nothing measured them
   },
 });
 ```
 
-It fires at most once per render, not once per placeholder: a template past its budget
-truncates everything after the first cut, and the first is the informative one. Scanning
-the output for the marker is not a substitute - a payload can legitimately contain those
-words, and it does not say which placeholder was cut.
+`reason` says which bound stopped it, because all three are the same kind of event: the
+render succeeded and simply could not represent everything. `'length'` is this budget,
+`'depth'` is the nesting cap, and `'circular'` is a reference back into something already
+being rendered - each emits its own marker where it stopped.
 
-The `Logger` pins its own allowance at the default, so raising `maxRenderLength` for your
-own templates never changes how much a log line hands to each sink.
+`dropped` is a lower bound, and only ever present for `'length'`. A cycle, a depth cap, and
+a placeholder the budget was already spent before reaching all drop something that was
+never rendered, so its size was never established - `undefined` is the honest answer there
+rather than a zero that reads as "nothing was lost".
+
+It fires at most once per render, not once per cut: a template past its budget degrades
+continuously, and the first cut is the one that explains the rest. Scanning the output for
+the marker is not a substitute - a payload can legitimately contain those words, and it
+does not say which placeholder was cut or why.
+
+`stringifyValue`, `redactValue` and `errorToString` take the same two options and report
+through the same `TruncationInfo`, so "is my output complete" is one question with one
+answer wherever you ask it. Within a single call the allowance is shared end to end -
+masking a value and rendering the result spend one budget between them, not one each.
+
+The `Logger` pins its own allowance at the default on both the message and the error paths,
+so raising `maxRenderLength` for your own templates never changes how much a log line hands
+to each sink.
 
 ### Escaping Utility
 

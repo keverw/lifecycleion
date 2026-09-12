@@ -1253,6 +1253,11 @@ export class Logger extends EventEmitter {
       redactFunction: this.redactFunction,
       // Never left to the default: see `formatErrorHandler`.
       onFormatError: this.formatErrorHandler(),
+      // Pinned, exactly as the message render is: `maxRenderLength` exists for callers
+      // rendering for something other than a log line, and this bounds what every sink is
+      // handed per line. No truncation handler, for the reason the message render sets
+      // none - the marker lands in the output a reader already sees.
+      maxRenderLength: MAX_RENDER_LENGTH,
     });
   }
 

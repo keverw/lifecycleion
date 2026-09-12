@@ -26,15 +26,25 @@ import {
   createRenderBudget,
   MAX_RENDER_DEPTH,
   MAX_RENDER_LENGTH,
+  noteTruncation,
+  resolveMaxRenderLength,
   TRUNCATED,
   TRUNCATED_LENGTH,
   type RenderBudget,
+  type TruncationHandler,
 } from './internal/render-budget';
+import { createTruncationReporter } from './internal/truncation-reporter';
 import {
   createFormatReporter,
   type FormatErrorHandler,
   type ReportFormatFailure,
 } from './internal/format-reporter';
+
+export type {
+  TruncationHandler,
+  TruncationInfo,
+  TruncationReason,
+} from './internal/render-budget';
 
 /**
  * Produces the replacement shown for a value named by `sensitiveFieldNames`.
@@ -89,6 +99,31 @@ export interface ErrorToStringOptions {
    * Fires at most once per kind per call. Do not redact, render or log from inside it.
    */
   onFormatError?: FormatErrorHandler;
+  /**
+   * Characters this render may emit, defaulting to {@link MAX_RENDER_LENGTH}.
+   *
+   * One allowance for the whole table, shared by every row and every level below them, so
+   * an error carrying a large `cause` chain costs one cap rather than one per link.
+   * `Infinity` renders without a bound; anything else unusable takes the default rather
+   * than being honoured, since this is the bound that makes an error built from untrusted
+   * data safe to render.
+   *
+   * @see onTruncate, which is how a caller learns it was reached.
+   */
+  maxRenderLength?: number;
+  /**
+   * Notified when the render was cut short - by {@link maxRenderLength}, the depth cap, or
+   * a cycle.
+   *
+   * Deliberately not {@link onFormatError}: these are degradations rather than failures.
+   * The walk succeeded and simply could not represent everything, so there is no error to
+   * hand over, and the marker in the output says where it stopped. That is enough for a
+   * human reading a stack trace and not enough for a program consuming the string, which
+   * is what this is for.
+   *
+   * Fires at most once per call. Do not render, redact or log from inside it.
+   */
+  onTruncate?: TruncationHandler;
 }
 
 /**
@@ -375,6 +410,7 @@ function redactAddressedValue(
   redactFunction: RedactFieldFunction | undefined,
   report: ReportFormatFailure,
   reportRender: ReportFormatFailure,
+  budget: RenderBudget,
 ): unknown {
   if (paths.length === 0) {
     return value;
@@ -392,6 +428,9 @@ function redactAddressedValue(
       report,
       undefined,
       reportRender,
+      // This render's own allowance, so masking and the table that follows spend one
+      // budget between them. See `StringifyValueOptions.maxRenderLength`.
+      budget,
     );
   } catch (error) {
     report(error, '<sensitiveFieldNames>');
@@ -595,6 +634,17 @@ export function errorToString(
     seen.add(error);
   }
 
+  // One allowance for this call. Held here rather than built inline so the truncation
+  // reporter below can watch the same counters the walk moves.
+  const budget = createRenderBudget(
+    resolveMaxRenderLength(options?.maxRenderLength),
+  );
+
+  const reportTruncation = createTruncationReporter(
+    budget,
+    options?.onTruncate,
+  );
+
   try {
     const table = errorToASCIITable(
       error,
@@ -602,7 +652,7 @@ export function errorToString(
       maxRowLength,
       seen,
       0,
-      createRenderBudget(),
+      budget,
       options?.redactFunction,
       report,
       reportRender,
@@ -629,6 +679,12 @@ export function errorToString(
     }
 
     return '<error could not be rendered>';
+  } finally {
+    // After the render whatever it did, the `catch` included: a cut made before a later
+    // failure is still a cut. The reporter reads the budget's own counters rather than the
+    // rendered string, so it sees one made anywhere in the walk - a row, a nested entry, a
+    // cycle, or the depth cap.
+    reportTruncation('<error>');
   }
 }
 
@@ -902,6 +958,7 @@ function errorToASCIITable(
                 redactFunction,
                 report,
                 reportRender,
+                budget,
               );
 
         // The walk can fail the whole value closed, and what it hands back then is the
@@ -984,6 +1041,7 @@ function errorToASCIITable(
           // of fifty megabyte-long values billed the budget deeply negative and rendered
           // every one of them anyway.
           if (budget.remaining <= 0) {
+            noteTruncation(budget, 'length');
             table.addRow('AdditionalInfo', TRUNCATED_LENGTH);
 
             break;
@@ -1114,6 +1172,7 @@ function addErrorTail(
         redactFunction,
         report,
         reportRender,
+        budget,
       );
 
       // The same guard the `additionalInfo` branch carries. A walk that fails the whole
@@ -1368,6 +1427,8 @@ function stringifyValue(
 
   if (isTracked) {
     if (seen.has(value)) {
+      noteTruncation(budget, 'circular');
+
       return '<circular>';
     }
 
@@ -1380,10 +1441,14 @@ function stringifyValue(
     // renderer already carries, since the two walk the same caller payloads and a cap
     // that held in only one of them would just be reached through the other entry point.
     if (depth >= MAX_RENDER_DEPTH) {
+      noteTruncation(budget, 'depth');
+
       return charge(budget, TRUNCATED);
     }
 
     if (budget.remaining <= 0) {
+      noteTruncation(budget, 'length');
+
       return charge(budget, TRUNCATED_LENGTH);
     }
 
@@ -1474,6 +1539,7 @@ function stringifyValueInner(
       }
 
       if (budget.remaining <= 0) {
+        noteTruncation(budget, 'length');
         parts.push(TRUNCATED_LENGTH);
 
         break;
@@ -1681,6 +1747,7 @@ function stringifyValueInner(
 
       for (const key of keys) {
         if (budget.remaining <= 0) {
+          noteTruncation(budget, 'length');
           entries.push({ key: TRUNCATED_LENGTH, value: '' });
 
           break;

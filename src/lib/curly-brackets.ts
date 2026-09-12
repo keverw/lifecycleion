@@ -1,10 +1,12 @@
 import { getPathParts } from './internal/path-utils';
 import {
-  MAX_RENDER_LENGTH,
   TRUNCATED_LENGTH,
   createRenderBudget,
   noteTruncation,
+  resolveMaxRenderLength,
+  type TruncationHandler,
 } from './internal/render-budget';
+import { createTruncationReporter } from './internal/truncation-reporter';
 import { stringifyTemplateValue } from './internal/stringify-template-value';
 import {
   createFormatReporter,
@@ -12,6 +14,12 @@ import {
   type FormatFailureKind,
   type ReportFormatFailure,
 } from './internal/format-reporter';
+
+export type {
+  TruncationHandler,
+  TruncationInfo,
+  TruncationReason,
+} from './internal/render-budget';
 
 export type {
   FormatErrorHandler,
@@ -77,26 +85,7 @@ export interface CurlyBracketsOptions {
    *
    * Do not render, redact or log from inside it.
    */
-  onTruncate?: (info: TruncationInfo) => void;
-}
-
-/** What {@link CurlyBracketsOptions.onTruncate} is told. */
-export interface TruncationInfo {
-  /**
-   * The placeholder whose value was cut, as written between the braces and trimmed -
-   * `user.body` for `{{ user.body }}`.
-   */
-  placeholder: string;
-  /**
-   * Characters dropped from that placeholder's value.
-   *
-   * `undefined` when the budget was already spent before this placeholder was reached, so
-   * its value was never rendered and its length was never measured. That is a real state
-   * and not a missing number: the render refuses to stringify a value it has no room for,
-   * which is the whole reason a template with many oversized placeholders costs one
-   * allowance rather than one per placeholder.
-   */
-  dropped: number | undefined;
+  onTruncate?: TruncationHandler;
 }
 
 interface CurlyBracketsFunction {
@@ -115,32 +104,6 @@ interface CurlyBracketsFunction {
 }
 
 const PLACEHOLDER_PATTERN = /(?:\\)?{{(\s*[^{}]+?\s*)(?:\\)?\s*}}/g;
-
-/**
- * How much this render may emit. See {@link CurlyBracketsOptions.maxRenderLength}.
- *
- * Fails *closed* on anything unusable, which is the opposite of `resolveMaxQueueSize`'s
- * reading of the same shapes and deliberately so: an unlimited queue is a coherent request
- * and costs the caller memory they asked to spend, while an unlimited render is the bound
- * that makes a template someone else wrote safe to render at all. A negative, a zero, a
- * `NaN` out of `Number(process.env.X)` - none of those say "no limit", and treating them
- * that way would turn a typo into the thing that disabled it. Only `Infinity`, which says
- * it exactly, does.
- */
-function resolveMaxRenderLength(requested: number | undefined): number {
-  if (typeof requested !== 'number' || Number.isNaN(requested)) {
-    return MAX_RENDER_LENGTH;
-  }
-
-  if (requested === Number.POSITIVE_INFINITY) {
-    return requested;
-  }
-
-  // Floored to at least one: a fraction in `(0, 1)` would otherwise round to a budget of
-  // zero, which is not "a very small allowance" but the spent state every placeholder's
-  // guard reads as "emit the marker and render nothing".
-  return requested > 0 ? Math.max(1, Math.floor(requested)) : MAX_RENDER_LENGTH;
-}
 
 /**
  * Processes a template string, replacing placeholders with corresponding values from a provided object.
@@ -204,30 +167,10 @@ CurlyBrackets.compileTemplate = function (
 
     // One notification per render, matching `report`. See
     // `CurlyBracketsOptions.onTruncate`.
-    let didReportTruncation = false;
-
-    const reportTruncation = (
-      placeholder: string,
-      dropped: number | undefined,
-    ): void => {
-      const handler = options?.onTruncate;
-
-      if (handler === undefined || didReportTruncation) {
-        return;
-      }
-
-      didReportTruncation = true;
-
-      try {
-        handler({ placeholder, dropped });
-      } catch {
-        // A handler that throws must not take the render down with it - this is a
-        // notification about a degradation, not a step in producing the output. It is
-        // also not reported onward: `onFormatError` is for a value that refused to
-        // render, and routing a broken callback there would spend the one report a
-        // genuinely unrenderable payload still needs.
-      }
-    };
+    const reportTruncation = createTruncationReporter(
+      budget,
+      options?.onTruncate,
+    );
 
     // Forwarded into the shared reporter rather than handed over directly, and rooted at
     // the placeholder rather than at the anonymous `<value>` a bare render reports.
@@ -352,8 +295,8 @@ CurlyBrackets.compileTemplate = function (
       // missing one: the guard exists precisely so the value is never rendered here, so
       // nothing ever measured it.
       if (budget.remaining <= 0) {
-        noteTruncation(budget);
-        reportTruncation(name, undefined);
+        noteTruncation(budget, 'length');
+        reportTruncation(name);
 
         return TRUNCATED_LENGTH;
       }
@@ -374,12 +317,6 @@ CurlyBrackets.compileTemplate = function (
         renderOptionsFor(name).onFormatError,
       );
 
-      // Read across the render rather than measured off the result, so a cut made deep
-      // inside a container - a key, a nested leaf - is seen exactly as a cut to a
-      // top-level string is. See `RenderBudget.droppedChars`.
-      const truncationsBefore = budget.truncations;
-      const droppedBefore = budget.droppedChars;
-
       try {
         return stringifyTemplateValue(
           replacement,
@@ -397,13 +334,10 @@ CurlyBrackets.compileTemplate = function (
 
         return '[unrenderable]';
       } finally {
-        if (budget.truncations > truncationsBefore) {
-          // `undefined` when the cut was a tail nothing measured - see
-          // `RenderBudget.droppedChars`, which only a cut holding the text can raise.
-          const dropped = budget.droppedChars - droppedBefore;
-
-          reportTruncation(name, dropped > 0 ? dropped : undefined);
-        }
+        // Asked after every placeholder, including the ones that threw: the reporter reads
+        // the budget's own counters, so a cut made deep inside a container - a key, a
+        // nested leaf, a cycle - is seen exactly as a cut to a top-level string is.
+        reportTruncation(name);
       }
     });
   };

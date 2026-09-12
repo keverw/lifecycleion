@@ -142,7 +142,7 @@ function quoteWithinBudget(budget: RenderBudget, text: string): string {
   // A nested leaf cut here is a cut like any other: without this, a template whose
   // oversized value sat one level down - `{{o}}` holding `{ k: <2 MB> }` - was shortened
   // and told its caller nothing, while the same string at the top reported.
-  noteTruncation(budget, text.length - kept);
+  noteTruncation(budget, 'length', text.length - kept);
   chargeUnits(budget, encoded.length);
 
   return encoded;
@@ -266,10 +266,14 @@ function renderNested(
   if (isPlainContainer(value)) {
     if (seen.has(value)) {
       // A cycle is cut where it closes, rather than collapsing everything above it.
+      noteTruncation(budget, 'circular');
+
       return charge(budget, quote('[circular]'));
     }
 
     if (depth >= MAX_RENDER_DEPTH) {
+      noteTruncation(budget, 'depth');
+
       return charge(budget, quote(TRUNCATED));
     }
 
@@ -277,7 +281,8 @@ function renderNested(
     // render is the walk as much as the string, and a container entered past the budget
     // would serialize its whole subtree before anyone looked at the total.
     if (budget.remaining <= 0) {
-      noteTruncation(budget);
+      noteTruncation(budget, 'length');
+
       return charge(budget, quote(TRUNCATED_LENGTH));
     }
 
@@ -350,7 +355,7 @@ function renderContainer(
       // Stops the loop rather than only the element: the elements still to come would
       // each be walked in full before adding to a total already past the cap.
       if (budget.remaining <= 0) {
-        noteTruncation(budget);
+        noteTruncation(budget, 'length');
         parts.push(charge(budget, quote(TRUNCATED_LENGTH)));
 
         break;
@@ -427,7 +432,7 @@ function renderContainer(
     // branch above has no such problem, since a bare element is legal there. Naming the
     // key also says *where* the render stopped rather than only that it did.
     if (budget.remaining <= 0) {
-      noteTruncation(budget);
+      noteTruncation(budget, 'length');
       parts.push(`${renderedKey}${charge(budget, quote(TRUNCATED_LENGTH))}`);
 
       break;

@@ -1,6 +1,13 @@
 import { parseRedactPaths, redactMatchedPaths } from './internal/redact-paths';
 import { stringifyTemplateValue } from './internal/stringify-template-value';
 import {
+  createRenderBudget,
+  resolveMaxRenderLength,
+  type RenderBudget,
+  type TruncationHandler,
+} from './internal/render-budget';
+import { createTruncationReporter } from './internal/truncation-reporter';
+import {
   createFormatReporter,
   type FormatErrorHandler,
   type ReportFormatFailure,
@@ -9,6 +16,12 @@ import {
   REDACTION_FAILED_MARKER,
   type RedactValueFunction,
 } from './internal/default-redact-function';
+
+export type {
+  TruncationHandler,
+  TruncationInfo,
+  TruncationReason,
+} from './internal/render-budget';
 
 export type {
   FormatErrorHandler,
@@ -62,6 +75,31 @@ export interface StringifyValueOptions {
    * function. Do not redact, render or log from inside it.
    */
   onFormatError?: FormatErrorHandler;
+  /**
+   * Characters this render may emit, defaulting to {@link MAX_RENDER_LENGTH}.
+   *
+   * One allowance for the whole value, shared by every level of it - a container is not
+   * given a fresh one per entry, which is what keeps a deep payload from costing a cap per
+   * level. `Infinity` renders without a bound; anything else unusable takes the default
+   * rather than being honoured, since this is the bound that makes an untrusted payload
+   * safe to render and a typo in a config must not be what switches it off.
+   *
+   * @see onTruncate, which is how a caller learns it was reached.
+   */
+  maxRenderLength?: number;
+  /**
+   * Notified when the render was cut short - by {@link maxRenderLength}, the depth cap, or
+   * a cycle.
+   *
+   * Deliberately not {@link onFormatError}: these are degradations rather than failures.
+   * The walk succeeded and simply could not represent everything, so there is no error to
+   * hand over, and the marker in the output says where it stopped. That is enough when a
+   * person reads the output and not enough when a program consumes it, which is what this
+   * is for.
+   *
+   * Fires at most once per call. Do not render, redact or log from inside it.
+   */
+  onTruncate?: TruncationHandler;
 }
 
 /**
@@ -98,7 +136,23 @@ export function redactValue(
   value: unknown,
   options?: StringifyValueOptions,
 ): unknown {
-  return redactValueWith(value, options, null);
+  const budget = createRenderBudget(
+    resolveMaxRenderLength(options?.maxRenderLength),
+  );
+
+  const reportTruncation = createTruncationReporter(
+    budget,
+    options?.onTruncate,
+  );
+
+  try {
+    return redactValueWith(value, options, null, budget);
+  } finally {
+    // Masking renders every leaf it replaces, so this walk can be cut short exactly as a
+    // render can - and a caller holding structure rather than a string has even less way
+    // to notice than one who could scan for the marker.
+    reportTruncation(ANONYMOUS_ROOT);
+  }
 }
 
 /** Names the root of a value that has no key of its own, as the render walk spells it. */
@@ -146,6 +200,7 @@ function redactValueWith(
   value: unknown,
   options: StringifyValueOptions | undefined,
   renderReport: ReportFormatFailure | null,
+  budget: RenderBudget,
 ): unknown {
   // Declared out here so the `catch` can reach it, as `applyRedaction` does: a failure
   // that escapes the guarded region below must still leave a diagnosis and not only the
@@ -212,6 +267,12 @@ function redactValueWith(
       rootedRenderReport(
         renderReport ?? createFormatReporter('render', options?.onFormatError),
       ),
+      // The caller's allowance, so masking and the render that follows spend one budget
+      // between them rather than a megabyte each. Without it `maxRenderLength` bounded
+      // only half the operation: a `redactFunction` answering oversized replacements got
+      // a fresh cap of its own whatever the caller had asked for, and the truncation it
+      // caused was invisible to `onTruncate`.
+      budget,
     );
   } catch (error) {
     // Reported when there is a reporter to report with. Nothing above is expected to
@@ -271,11 +332,24 @@ export function stringifyValue(
   // allocate for their own reporters.
   const report = createFormatReporter('render', options?.onFormatError);
 
+  // One allowance for this call, created here rather than inside the walk so the same
+  // budget covers the redaction pass's own masking and the render that follows it - two
+  // halves of one operation, as `redactValueWith` already documents for the reporter.
+  const budget = createRenderBudget(
+    resolveMaxRenderLength(options?.maxRenderLength),
+  );
+
+  const reportTruncation = createTruncationReporter(
+    budget,
+    options?.onTruncate,
+  );
+
   try {
     return stringifyTemplateValue(
-      redactValueWith(value, options, report),
+      redactValueWith(value, options, report, budget),
       '',
       report,
+      budget,
     );
   } catch (error) {
     // Nothing below is expected to throw - the walk guards every read it owns - but a
@@ -284,5 +358,10 @@ export function stringifyValue(
     report(error, '<value>');
 
     return '[unrenderable]';
+  } finally {
+    // After the render whatever it did, including throwing: a cut that happened before a
+    // later failure is still a cut, and the reporter reads the budget's counters rather
+    // than the string, so it sees one made anywhere in the walk.
+    reportTruncation(ANONYMOUS_ROOT);
   }
 }
