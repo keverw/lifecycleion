@@ -182,10 +182,17 @@ export interface AdapterResponse {
    * server's explanation dropped, and let an abort during the wait discard a
    * response that had already arrived in full.
    *
-   * Present only when a body writer was running for this request. Nothing here
-   * affects `isFailed`, `isNetworkError`, retries, or the status, and every such
-   * failure is still reported on the global `'error'` channel whether or not
-   * anyone awaits this.
+   * Present whenever this request had a body writer, which is every bodied
+   * request - not only the ones whose writer was still running when the response
+   * resolved, so presence does not mean the upload outlived the answer. On the
+   * ordinary shape, where the body went out long before the response came back,
+   * it resolves with `undefined`. A writer that failed just before the response
+   * arrived is still reported through it, which is why it is not gated on the
+   * writer still being live.
+   *
+   * Nothing here affects `isFailed`, `isNetworkError`, retries, or the status,
+   * and every such failure is still reported on the global `'error'` channel
+   * whether or not anyone awaits this.
    */
   requestBodySettled?: Promise<Error | undefined>;
 }
@@ -536,8 +543,10 @@ export interface HTTPResponse<T = unknown> {
    */
   isStreamError: boolean;
   /**
-   * Settles when the request body finishes going out, for a response that arrived
-   * while the upload was still running. See
+   * Settles when the request body finishes going out. Present on every bodied
+   * request, not only the ones whose upload was still running when the response
+   * arrived - so presence says nothing about which of the two came first, and on
+   * the ordinary shape it resolves with `undefined`. See
    * {@link AdapterResponse.requestBodySettled}.
    *
    * Advisory only, and it never rejects: this response succeeded as far as the

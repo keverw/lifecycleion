@@ -41,7 +41,7 @@ import { resolveDetectedRedirectURL } from '../utils';
 // prefix on `message` and the original value on `cause`, where before it carried only the
 // coerced text. See the 1.0.0 changelog entry: "HTTP adapters preserve non-`Error`
 // rejection values on `cause`."
-import { toError as normalizeError } from '../../to-error';
+import { toError as normalizeError, describeError } from '../../to-error';
 import { reportToHost } from '../../internal/report-to-host';
 import { readUnknownMember as readObjectMember } from '../../internal/read-member';
 
@@ -590,7 +590,13 @@ export class NodeAdapter implements HTTPAdapter {
         const failure = normalizeError(error);
 
         try {
-          reportToHost(failure);
+          // Rendered for the console rung, the convention every other `reportToHost` caller
+          // follows. Without it that rung is handed the raw `Error`, and a process with no
+          // `'error'` listener printed `stack`, `cause` and whatever they carry - a request
+          // URL and its query string among them - in the clear, which is the one thing the
+          // rendered line exists to avoid. The listener still gets the `Error` itself, so a
+          // consumer's own redaction settings are unaffected.
+          reportToHost(failure, () => describeError(failure));
         } catch {
           // Nothing left to report with; the response still carries the real status.
         }
@@ -1009,6 +1015,27 @@ export class NodeAdapter implements HTTPAdapter {
           const abortErr = new Error('Request aborted');
           abortErr.name = 'AbortError';
           reject(abortErr);
+          return;
+        }
+
+        // The server has already answered, so the response path is the one that gets to
+        // answer - the same rule the write-path `catch` handlers follow, reached from the
+        // other entry point. An upload-side `EPIPE` / `ECONNRESET` fires *both*: those
+        // handlers stood down on `didReceiveResponse` while this one went on resolving a
+        // fabricated `{ status: 0, isTransportError: true }`, and `resolve` is
+        // first-call-wins - so whenever that error landed before the response body was
+        // fully in, a real `413` with a truncated body was replaced by a transport error,
+        // its status and the server's explanation thrown away. Measured against a server
+        // that answers `413` and then resets mid-upload: `status: 0`, `read ECONNRESET`.
+        //
+        // The response side always settles on its own - `'end'`, or the `'error'`,
+        // `'aborted'` and `'close'` handlers that answer with the real status and
+        // `isStreamError` - so standing down here cannot leave the promise hanging.
+        // Reported rather than dropped, and the request torn down once the response has
+        // been consumed: see `reportWriteErrorAfterResponse`.
+        if (didReceiveResponse) {
+          reportWriteErrorAfterResponse(error);
+
           return;
         }
 
@@ -1498,14 +1525,15 @@ async function streamResponseBody(
           }
 
           try {
-            reportToHost(
-              normalizeError(
-                error ??
-                  new Error(
-                    'A writable passed to streamResponse emitted an error after the request settled',
-                  ),
-              ),
+            const failure = normalizeError(
+              error ??
+                new Error(
+                  'A writable passed to streamResponse emitted an error after the request settled',
+                ),
             );
+
+            // Rendered for the console rung; see the other `reportToHost` call above.
+            reportToHost(failure, () => describeError(failure));
           } catch {
             // Nothing left to report with; the event is still absorbed either way.
           }

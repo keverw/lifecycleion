@@ -4361,19 +4361,23 @@ describe('NodeAdapter via HTTPClient', () => {
     const net = await import('node:net');
 
     // The server answers and then stops reading, so the write parks under backpressure
-    // that will never drain. Nothing fails, so no `catch` runs; without the stall
-    // watchdog the request sits unfinished on a keep-alive socket until the server times
-    // it out. See `UPLOAD_STALL_GRACE_MS`.
-    let didCloseSocket = false;
-
+    // that will never drain. Nothing fails, so no `catch` runs; without the stall watchdog
+    // the request sits unfinished on a keep-alive socket until the server times it out.
+    // See `UPLOAD_STALL_GRACE_MS`.
+    //
+    // Observed through `requestBodySettled` rather than through the server's own `'close'`,
+    // and with a reader that never resumes. Watching the server side needed the socket
+    // reading again to see the client's reset, and resuming it to look put the upload back
+    // in motion: the watchdog re-arms for as long as progress is being made, so a resume
+    // inside any of its windows let the 8 MB finish, left nothing to tear down, and failed
+    // an assertion about a teardown that correctly never happened. Measured: the upload
+    // parks at ~1.7 MB, dribbles a few KB as the kernel probes the closed window, and the
+    // first window that sees none of it destroys the request - here at ~15 s, which is why
+    // the timeout below is generous. The writer's own outcome says the same thing the
+    // socket close did, from the side that is not racing.
     const server = net.createServer((socket) => {
       socket.on('error', () => {
-        // The client's teardown reaches this side as a reset; the assertion below is on
-        // the close that follows it.
-      });
-
-      socket.on('close', () => {
-        didCloseSocket = true;
+        // The client's teardown reaches this side as a reset.
       });
 
       socket.once('data', () => {
@@ -4381,15 +4385,9 @@ describe('NodeAdapter via HTTPClient', () => {
           'HTTP/1.1 413 Payload Too Large\r\nConnection: keep-alive\r\nContent-Length: 3\r\n\r\nno!',
         );
 
-        // Read nothing more. The buffers fill and the client's writes stop being
+        // Read nothing more, ever. The buffers fill and the client's writes stop being
         // accepted, which is the shape a proxy that has given up presents.
         socket.pause();
-
-        // Resumed past the grace so this side can observe what the client did: a paused
-        // socket reports neither the peer's close nor its reset until it is reading again.
-        setTimeout(() => {
-          socket.resume();
-        }, 6_500);
       });
     });
 
@@ -4410,13 +4408,15 @@ describe('NodeAdapter via HTTPClient', () => {
 
       expect(res.status).toBe(413);
 
-      await new Promise((resolve) => setTimeout(resolve, 7_500));
+      // The upload outlived the answer, so the writer's outcome is the teardown's receipt:
+      // an upload left alone would resolve `undefined` once it finished.
+      const uploadOutcome = await res.requestBodySettled;
 
-      expect(didCloseSocket).toBe(true);
+      expect(uploadOutcome).toBeInstanceOf(Error);
     } finally {
       server.close();
     }
-  }, 20000);
+  }, 40000);
 
   test('an early response does not truncate an upload the server is still reading', async () => {
     const net = await import('node:net');
@@ -4612,6 +4612,58 @@ describe('NodeAdapter via HTTPClient', () => {
       expect(new TextDecoder().decode(res.body ?? new Uint8Array())).toBe(
         '{"error":"big"}',
       );
+    } finally {
+      server.close();
+    }
+  }, 20000);
+
+  test('an upload reset before the response body is in keeps the real status', async () => {
+    const net = await import('node:net');
+
+    // The write-path `catch` handlers stand down on `didReceiveResponse` and leave the real
+    // status to the response path; `req.on('error')` did not, and an upload-side
+    // `ECONNRESET` fires both. `resolve` is first-call-wins, so whenever that error landed
+    // before the response body was fully in, the server's answer was replaced by a
+    // fabricated `{ status: 0, isTransportError: true }` - the same overlay the
+    // early-response handling exists to prevent, reached from the other entry point. The
+    // response here is deliberately left short of its `Content-Length` so the reset wins
+    // the race every run.
+    const server = net.createServer((socket) => {
+      socket.on('error', () => {
+        // The reset below reaches this side too.
+      });
+
+      socket.once('data', () => {
+        socket.write(
+          'HTTP/1.1 413 Payload Too Large\r\nConnection: keep-alive\r\nContent-Length: 15\r\n\r\n{"err',
+        );
+
+        setTimeout(() => {
+          socket.destroy();
+        }, 50);
+      });
+    });
+
+    await new Promise<void>((done) => {
+      server.listen(0, '127.0.0.1', done);
+    });
+
+    const { port } = server.address() as { port: number };
+
+    try {
+      const res = await new NodeAdapter().send({
+        requestURL: `http://127.0.0.1:${port}/upload`,
+        method: 'POST',
+        headers: {},
+        // Large enough that the upload is still running when the reset arrives.
+        body: 'x'.repeat(32 * 1024 * 1024),
+      });
+
+      // The server's answer, and a truncated response reported as exactly that - not as a
+      // connection that never produced one.
+      expect(res.status).toBe(413);
+      expect(res.isTransportError).toBeUndefined();
+      expect(res.isStreamError).toBe(true);
     } finally {
       server.close();
     }
