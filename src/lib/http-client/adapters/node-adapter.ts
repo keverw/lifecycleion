@@ -1295,7 +1295,7 @@ export class NodeAdapter implements HTTPAdapter {
       if (request.signal) {
         if (request.signal.aborted) {
           // Signal already aborted before we even started (e.g., pre-cancelled builder)
-          req.destroy();
+          destroyRequestQuietly();
           const abortErr = new Error('Request aborted');
           abortErr.name = 'AbortError';
           failRequest(abortErr);
@@ -1309,7 +1309,12 @@ export class NodeAdapter implements HTTPAdapter {
               const { status, headers, writable } = activeResponseStream;
               activeResponseStream = undefined;
               destroyWritableQuietly(writable);
-              req.destroy();
+              // Guarded, as its writable sibling one line up already is, and for the
+              // reason the stall watchdog's destroy is: this whole listener runs from an
+              // `AbortSignal` event, where a throw is an uncaught exception rather than a
+              // rejection into this request's promise - and a socket torn down by the same
+              // abort can answer `ERR_SOCKET_CLOSED` from `destroy()` on some runtimes.
+              destroyRequestQuietly();
 
               const error = new Error(
                 'Request aborted during response streaming',
@@ -1330,7 +1335,7 @@ export class NodeAdapter implements HTTPAdapter {
             if (activeBufferedResponse) {
               const { status, headers } = activeBufferedResponse;
               activeBufferedResponse = undefined;
-              req.destroy();
+              destroyRequestQuietly();
 
               const error = new Error(
                 'Request aborted during response streaming',
@@ -1349,7 +1354,7 @@ export class NodeAdapter implements HTTPAdapter {
             }
 
             if (isStreamFactoryPending) {
-              req.destroy();
+              destroyRequestQuietly();
               const abortErr = new Error(
                 'Request aborted during streamResponse setup',
               );
@@ -1360,7 +1365,7 @@ export class NodeAdapter implements HTTPAdapter {
               return;
             }
 
-            req.destroy();
+            destroyRequestQuietly();
             const abortErr = new Error('Request aborted');
             abortErr.name = 'AbortError';
             failRequest(abortErr);
