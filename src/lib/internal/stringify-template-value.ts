@@ -21,6 +21,7 @@ import {
   TRUNCATED,
   TRUNCATED_LENGTH,
   type RenderBudget,
+  type TruncationReason,
 } from './render-budget';
 
 /**
@@ -301,7 +302,102 @@ function renderNested(
   // `toString` - a `URL`, a `Map`, a class instance - and a `toString` has no length limit:
   // one returning ten megabytes was emitted whole, since this path only ever charged for
   // what it had already produced.
-  return quoteWithinBudget(budget, stringifyTemplateValue(value, path, report));
+  //
+  // Rendered against *this* render's allowance rather than bare: called with no budget,
+  // `stringifyTemplateValue` falls back to `capToMaxRenderLength`, which cuts at the fixed
+  // `MAX_RENDER_LENGTH` and notes nothing - so a caller who raised `maxRenderLength` had a
+  // nested leaf silently cut at one megabyte while the same value at the root rendered in
+  // full, and `onTruncate` never fired for it.
+  const leaf = renderLeafWithinBudget(budget, value, path, report);
+  const truncationsBeforeCharge = budget.truncations;
+  const quoted = quoteWithinBudget(budget, leaf.text);
+
+  noteLeafCut(budget, leaf, truncationsBeforeCharge);
+
+  return quoted;
+}
+
+/** A leaf rendered against a budget, and whatever rendering it had to cut. */
+export interface RenderedLeaf {
+  text: string;
+  /** The cut the render made, or `undefined` when the leaf fitted. */
+  cut?: { reason: TruncationReason; dropped: number };
+}
+
+/**
+ * Render one non-container leaf against a budget, without spending it.
+ *
+ * {@link stringifyTemplateValue} handed a budget charges what it emits, which is wrong for
+ * a caller that has its own charge to make - a quoted leaf, or a row whose every character
+ * costs more than one. Handed *no* budget it falls back to {@link capToMaxRenderLength},
+ * whose cut is the fixed {@link MAX_RENDER_LENGTH} however much the caller allowed, and
+ * which records nothing: a render with a raised `maxRenderLength` was shortened at a bound
+ * it had replaced and reported as intact.
+ *
+ * So the render runs against a copy of the allowance and the caller bills the result. The
+ * copy's cut is handed back rather than recorded here: the caller's own charge may cut the
+ * same leaf a second time - quoting escapes it, a row re-indents it - and one leaf cut once
+ * is one truncation however many passes shortened it. See {@link noteLeafCut}, which is how
+ * a caller records it.
+ *
+ * `levels` is how many characters of output one character of the leaf costs - see
+ * {@link chargeNestedText} - so the cut is made against the allowance that will actually
+ * hold it.
+ */
+export function renderLeafWithinBudget(
+  budget: RenderBudget,
+  value: unknown,
+  path: string,
+  report: ReportFormatFailure,
+  levels: number = 1,
+): RenderedLeaf {
+  const factor = Math.max(1, levels);
+  const shadow: RenderBudget = {
+    remaining:
+      budget.remaining === Number.POSITIVE_INFINITY
+        ? budget.remaining
+        : Math.floor(budget.remaining / factor),
+    truncations: 0,
+    droppedChars: 0,
+  };
+
+  const text = stringifyTemplateValue(value, path, report, shadow);
+
+  return {
+    text,
+    cut:
+      shadow.truncations > 0
+        ? {
+            reason: shadow.firstReason ?? 'length',
+            dropped: shadow.droppedChars,
+          }
+        : undefined,
+  };
+}
+
+/**
+ * Fold a leaf's own cut into the caller's budget, unless the caller already cut it again.
+ *
+ * The two cuts are one truncation: a leaf shortened to the allowance and then shortened
+ * again by the charge that quotes or re-indents it was cut once, in the reader's terms.
+ * Counted twice, `truncations` and `droppedChars` both over-report - and `droppedChars` is
+ * documented as a lower bound on what was actually lost, not on what the render measured
+ * twice. Compared against the count taken before the charge, so only a cut the caller did
+ * not already record is added.
+ */
+export function noteLeafCut(
+  budget: RenderBudget,
+  leaf: RenderedLeaf,
+  truncationsBeforeCharge: number,
+): void {
+  if (
+    leaf.cut === undefined ||
+    budget.truncations !== truncationsBeforeCharge
+  ) {
+    return;
+  }
+
+  noteTruncation(budget, leaf.cut.reason, leaf.cut.dropped);
 }
 
 /** Render a plain object or array as JSON, its leaves rendered by the shared rules. */

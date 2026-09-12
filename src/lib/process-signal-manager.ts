@@ -864,13 +864,6 @@ export class ProcessSignalManager {
         shared.rawModeOwner = null;
         shared.rawModeEnabledByManager = false;
       } catch (error) {
-        // Reported for the reason `restoreStdin`'s twin is: a terminal left in raw mode is
-        // the user's shell broken, and this said nothing about it.
-        reportCallbackError(
-          'ProcessSignalManager stdin raw mode restore',
-          error,
-        );
-
         // Ensure there's a non-null owner so future detaches can retry.
         // This matters in the edge case where setRawMode(true) threw after enabling raw mode:
         // rawModeOwner would still be null, and without setting it here we'd never retry disabling.
@@ -879,6 +872,19 @@ export class ProcessSignalManager {
         }
         // rawModeEnabledByManager stays true so future instances can adopt and retry.
         // Terminal will be restored on process exit anyway.
+
+        // Reported for the reason `restoreStdin`'s twin is: a terminal left in raw mode is
+        // the user's shell broken, and this said nothing about it.
+        //
+        // Reported *after* the ownership repair above, not before it. The report runs a
+        // global `'error'` listener synchronously, and a listener that calls `attach()`
+        // from there observed the shared state half-repaired - no attached instances,
+        // `rawModeEnabledByManager` still true, and no owner to adopt. The twin at
+        // `restoreStdin` has nothing after its report, so it needs no such ordering.
+        reportCallbackError(
+          'ProcessSignalManager stdin raw mode restore',
+          error,
+        );
       }
     }
   }

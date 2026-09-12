@@ -323,12 +323,10 @@ export class FileSink implements LogSink {
    * @param timeoutMS Maximum time to wait in milliseconds (default: 30000ms / 30s)
    */
   public async flush(timeoutMS: number = 30000): Promise<FlushResult> {
-    // Wait for initialization
-    if (this.initPromise) {
-      await this.initPromise;
-    }
-
-    const startWritten = this.totalEntriesWritten;
+    // The clock starts here, before the wait below rather than after it: `timeoutMS` is
+    // documented as the maximum time this call takes, and an init that never settles is
+    // exactly the case a caller sets one for.
+    const startTime = Date.now();
 
     // `droppedEntries`, which every loss path bumps. A separate counter held only the
     // writes that exhausted their retries, so a flush that lost lines to a queue overflow
@@ -342,8 +340,58 @@ export class FileSink implements LogSink {
     // the cumulative figure and the one to poll for that - and a concurrent burst that
     // overflows the queue during the window is, even though the flush was not waiting on
     // the entries it evicted.
+    //
+    // Both baselines are read before the wait below rather than after it, so the window
+    // they measure is the whole call. Read after, a loss that landed while the init was
+    // still settling fell outside the delta and a flush that lost a line answered
+    // `{ entriesFailed: 0, success: true }` about it.
+    const startWritten = this.totalEntriesWritten;
     const startFailed = this.droppedEntries;
-    const startTime = Date.now();
+
+    // Wait for initialization, bounded by the caller's own budget. `close()` has always
+    // raced this wait against its timeout; `flush()` awaited it outright, so a `mkdir` or
+    // `stat` hung on an unresponsive mount made `flush(1000)` never return at all - the
+    // shape a timeout exists to rule out.
+    if (this.initPromise) {
+      const initPromise = this.initPromise;
+      let timeoutHandle: NodeJS.Timeout | undefined;
+      const timeoutSentinel = { timedOut: true } as const;
+
+      try {
+        const timeoutPromise = new Promise<typeof timeoutSentinel>(
+          (resolve) => {
+            timeoutHandle = setTimeout(
+              () => resolve(timeoutSentinel),
+              timeoutMS,
+            );
+          },
+        );
+
+        const result = await Promise.race([
+          initPromise.then(() => undefined),
+          timeoutPromise,
+        ]);
+
+        if (result === timeoutSentinel) {
+          // Prevent an unhandled rejection if the init fails after this returns, exactly
+          // as `close()` does on the same race.
+          Promise.resolve(initPromise).catch(() => {
+            // Intentionally ignored after the timeout.
+          });
+
+          return {
+            success: false,
+            entriesWritten: this.totalEntriesWritten - startWritten,
+            entriesFailed: this.droppedEntries - startFailed,
+            timedOut: true,
+          };
+        }
+      } finally {
+        if (timeoutHandle) {
+          clearTimeout(timeoutHandle);
+        }
+      }
+    }
 
     // Wait for queue to finish processing with timeout
     while (this.writeQueue.length > 0 || this.isProcessing) {
@@ -961,8 +1009,21 @@ export class FileSink implements LogSink {
     const messageBytes = Buffer.byteLength(messageToWrite, 'utf8');
 
     // Check if writing would exceed limit
+    //
+    // Only for a file that has something in it. An entry larger than `maxSizeMB` on its own
+    // can never fit, so on an empty file this check fired for every such line and rotated a
+    // file holding nothing: `rotateIfNeeded` above had already rotated the full one, and
+    // this rotated its empty replacement straight back out. With `reserveRotatedFileName`
+    // handing out unique names, those no longer collide, so each oversized entry left a
+    // zero-byte archive behind - five 4 KB lines against a 1 KB limit produced ten files,
+    // five of them empty. Written to the current file instead, overshooting the limit by
+    // the one line that cannot be split, which is what an unsplittable entry costs either
+    // way.
     const maxSizeBytes = this.maxSizeMB * 1024 * 1024;
-    if (this.currentLogSize + messageBytes > maxSizeBytes) {
+    if (
+      this.currentLogSize > 0 &&
+      this.currentLogSize + messageBytes > maxSizeBytes
+    ) {
       await this.rotateFile();
     }
 

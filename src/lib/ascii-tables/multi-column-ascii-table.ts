@@ -154,9 +154,13 @@ export class MultiColumnASCIITable {
     const wrappedCells = row.map((value, index) => {
       const wrappedLines = ASCIITableUtils.wrapText(value, columnWidths[index]);
 
-      return wrappedLines
-        .map((line) => line.padEnd(columnWidths[index]))
-        .join('\n');
+      // Joined as wrapped, not padded here. `padEnd` counts UTF-16 code units while the
+      // column width - and the padding below - is measured in display columns, so a cell
+      // holding wide characters was padded past its own width by the difference and the
+      // clamped pad below could not take it back: the row rendered wider than its column
+      // and the `|` borders stopped lining up. One notion of width, the same one
+      // `KeyValueASCIITable` uses.
+      return wrappedLines.join('\n');
     });
 
     const maxLines = Math.max(

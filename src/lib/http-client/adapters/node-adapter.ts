@@ -1215,13 +1215,21 @@ export class NodeAdapter implements HTTPAdapter {
             return;
           }
 
-          // Only a request that *has* a body can have a body write to report. Without
-          // this, an ordinary interrupted download - a bodiless GET whose connection
-          // resets mid-response, already answered correctly by the `res` handlers with
-          // the real status and `isStreamError` - was also rendered onto the global
-          // `'error'` channel and armed a grace deadline for a writer that never existed.
-          // `upload.outcome` is opened for every bodied request and only those.
-          if (upload.outcome) {
+          // Only a request whose body writer is still unfinished can have a body write to
+          // report. Without this, an ordinary interrupted download - a bodiless GET whose
+          // connection resets mid-response, already answered correctly by the `res`
+          // handlers with the real status and `isStreamError` - was also rendered onto the
+          // global `'error'` channel and armed a grace deadline for a writer that never
+          // existed.
+          //
+          // `upload.settle`, not `upload.outcome`: the outcome promise is opened for every
+          // bodied request and stays set for the life of it, so a POST whose body went out
+          // in full and was `end()`-ed, then cut short by a reset while the response was
+          // still arriving, hit the same false positive this guard exists to prevent - and
+          // burned the one-shot `didReportWriteErrorAfterResponse` on a writer that had
+          // already finished. `settle` is cleared the moment the writer settles, so it
+          // reads as exactly "a body write is still outstanding".
+          if (upload.settle !== null) {
             reportWriteErrorAfterResponse(error);
           }
 

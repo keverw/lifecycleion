@@ -990,9 +990,7 @@ export class BaseHTTPClient {
                 initialURL: finalRequest.requestURL,
                 requestURL: cancelledRequestURL,
                 redirectHistory: [...redirectHistory, cancelledRequestURL],
-                ...(attemptResult.requestBodySettled
-                  ? { requestBodySettled: attemptResult.requestBodySettled }
-                  : {}),
+                ...(uploadOutcome ? { requestBodySettled: uploadOutcome } : {}),
               });
 
               break;

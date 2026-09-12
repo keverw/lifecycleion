@@ -730,14 +730,21 @@ export class NamedPipeSink implements LogSink {
     // have written every one of them. A graceful shutdown losing the tail of the log it is
     // shutting down is the one moment those lines matter most.
     //
-    // Conditioned on the stream, which is what makes this different from `FileSink`'s
-    // wait. A FIFO with no reader cannot flush, and there is no progress to wait for: with
-    // the stream gone or destroyed the queue is abandoned immediately, exactly as before,
-    // rather than holding a shutdown for `closeTimeoutMS` to achieve nothing.
+    // An open still in flight counts as a stream to wait for, exactly as an open one does.
+    // `waitForOpen` answers at `OPEN_WAIT_MS` whether or not the FIFO's write side has
+    // opened, so a reader that attaches after those two seconds - and well inside a
+    // thirty-second `closeTimeoutMS` - arrived to find `pipeStream` still undefined, the
+    // loop skipped, and the backlog abandoned with the whole budget unspent. `FileSink`
+    // waits on its queue with no stream condition at all; this is the same wait, held to
+    // the same deadline.
+    //
+    // Bounded by `closeTimeoutMS` either way, which is what makes waiting on a pending open
+    // safe: a reader that never comes costs the close its budget and no more, and the
+    // pending open is destroyed below exactly as before.
     while (
       (this.writeQueue.length > 0 || this.isProcessing) &&
-      this.pipeStream !== undefined &&
-      !this.pipeStream.destroyed &&
+      (this.pendingStream !== undefined ||
+        (this.pipeStream !== undefined && !this.pipeStream.destroyed)) &&
       Date.now() - startTime <= this.closeTimeoutMS
     ) {
       // Asked for explicitly: nothing else drives a pass while this loop is awaiting, and

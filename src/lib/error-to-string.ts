@@ -15,7 +15,10 @@ import {
 import { describeContainer } from './internal/container-entries';
 import { isPlainContainer } from './internal/is-plain-container';
 import { readMember } from './internal/read-member';
-import { stringifyTemplateValue } from './internal/stringify-template-value';
+import {
+  noteLeafCut,
+  renderLeafWithinBudget,
+} from './internal/stringify-template-value';
 import { isErrorValue } from './to-error';
 import {
   capNestedKey,
@@ -291,6 +294,7 @@ function asAddressableBag(
   info: object,
   path: string,
   reportRender: ReportFormatFailure,
+  budget: RenderBudget,
 ): object | string | typeof NOT_ADDRESSABLE {
   if (isPlainContainer(info)) {
     return info;
@@ -328,10 +332,11 @@ function asAddressableBag(
 
   const keys: string[] = [];
 
+  /** Whether the key cap below stopped the collection short of the value's own keys. */
+  let didCapKeys = false;
+
   try {
     for (const key in source) {
-      keys.push(key);
-
       // Bounded like every other walk in this file. The rows this bag becomes are bounded
       // - the loop that writes them stops the moment the budget runs out - but *building*
       // it was not, and a bag is a forwarding accessor defined per key: `additionalInfo`
@@ -342,9 +347,18 @@ function asAddressableBag(
       //
       // See {@link MAX_ADDRESSABLE_BAG_KEYS} for why cutting here cannot cut a row the
       // render would otherwise have emitted.
+      // Tested before the key is collected, not after: asked afterwards, the check fired
+      // on the iteration that took the *last* key a value happened to have, so an object
+      // holding exactly `MAX_ADDRESSABLE_BAG_KEYS` of them was reported truncated and given
+      // a marker row with nothing missing from it. Reaching this with the bag already full
+      // means there was one more key to take, which is the only shape that is a cut.
       if (keys.length >= MAX_ADDRESSABLE_BAG_KEYS) {
+        didCapKeys = true;
+
         break;
       }
+
+      keys.push(key);
     }
   } catch (error) {
     // A `Proxy` can throw from its `ownKeys` trap. Said, not swallowed: an empty bag here
@@ -386,6 +400,31 @@ function asAddressableBag(
       // a key `for...in` already yielded) but a dropped key is a missing row, and a
       // missing row is exactly what the markers here exist to make impossible.
       reportRender(error, joinPath(path, key));
+    }
+  }
+
+  // Said, when the cap above cut the collection. {@link MAX_ADDRESSABLE_BAG_KEYS} is sized
+  // so the budget's own marker row lands first - but only for a budget of at most
+  // {@link MAX_RENDER_LENGTH}, and `maxRenderLength` is the caller's to raise. Above it the
+  // rows the cap dropped were the render's only loss, and it had no marker and no
+  // `onTruncate`: 100,000 keys rendered exactly 62,500 rows and reported an intact render.
+  // Counted and named here instead, so a cut is a cut whatever the allowance is.
+  //
+  // Defined after the forwarded keys rather than before them, so the marker renders as the
+  // last row: written first it read as the row where the render stopped, with 62,500 rows
+  // still to come after it. Every other truncation marker in this file lands last too.
+  if (didCapKeys) {
+    noteTruncation(budget, 'length');
+
+    try {
+      Object.defineProperty(bag, TRUNCATED_LENGTH, {
+        value: '',
+        enumerable: true,
+        configurable: true,
+        writable: true,
+      });
+    } catch {
+      // The count above is what makes the cut answerable; the marker row is the nicety.
     }
   }
 
@@ -901,6 +940,7 @@ function errorToASCIITable(
                 additionalInfo,
                 joinPath(path, 'additionalInfo'),
                 reportRender,
+                budget,
               )
             : additionalInfo;
 
@@ -1257,6 +1297,16 @@ const MIN_ROW_COST = 8;
 const LINES_PER_ROW = 2;
 
 /**
+ * What a container's own delimiters cost, before the row amplification is applied.
+ *
+ * The two characters an empty container still renders as. Charged because a container
+ * whose contents cost the budget nothing has to cost it something, or a payload built from
+ * empty containers never reaches the cap at all - the same reason `renderContainer`
+ * charges its brackets.
+ */
+const CONTAINER_FRAME_COST = 2;
+
+/**
  * How many keys one bag forwards before it stops collecting them.
  *
  * Not a second cap on the output: a row costs the budget at least
@@ -1530,6 +1580,20 @@ function stringifyValueInner(
       return UNRENDERABLE_KEYS;
     }
 
+    // This container's own framing, charged as `renderContainer` charges its brackets and
+    // for the same reason: a container whose contents cost nothing cost nothing at all, so
+    // a payload built from empty containers ran past the cap without ever reaching it -
+    // `additionalInfo: { a: Array(600_000).fill({}) }` rendered 2,892,509 characters
+    // against the one-megabyte cap.
+    //
+    // Billed at what a character of a row costs, like every other text this walk charges:
+    // the framing is emitted into a row that is wrapped, padded and re-indented once per
+    // enclosing level.
+    chargeUnits(
+      budget,
+      CONTAINER_FRAME_COST * rowTextLevels(maxRowLength, depth),
+    );
+
     for (let index = 0; index < shape.length; index++) {
       // The separator is charged, not the parts: a part was charged by the call that
       // produced it, and charging it again here would bill a leaf once per level above
@@ -1631,10 +1695,32 @@ function stringifyValueInner(
       // value to that renderer, so every marker *inside* the result is already spelled its
       // way, and respelling only the outermost one would make a single rendered value
       // disagree with itself.
-      return chargeText(
+      //
+      // Charged at what a character of a row costs, like the string leaf above and unlike
+      // the flat `chargeText` this used to make: this value is written into a row that is
+      // wrapped, padded and re-indented once per enclosing level, none of which a flat
+      // character count sees.
+      //
+      // Rendered through `renderLeafWithinBudget` rather than bare, so the cut is made
+      // against *this* render's allowance instead of the fixed `MAX_RENDER_LENGTH` the
+      // budget-less call falls back to - which shortened a nested leaf at one megabyte
+      // however high `maxRenderLength` was set, and told `onTruncate` nothing.
+      const levels = rowTextLevels(maxRowLength, depth);
+      const leaf = renderLeafWithinBudget(
         budget,
-        stringifyTemplateValue(value, path, reportRender),
+        value,
+        path,
+        reportRender,
+        levels,
       );
+      const truncationsBeforeCharge = budget.truncations;
+      const charged = chargeNestedText(budget, leaf.text, levels);
+
+      // Counted here only if the charge above did not cut the same leaf again. See
+      // `noteLeafCut`.
+      noteLeafCut(budget, leaf, truncationsBeforeCharge);
+
+      return charged;
     } else {
       // An error-shaped plain object renders as an error, under its own
       // `sensitiveFieldNames`.
@@ -1744,6 +1830,13 @@ function stringifyValueInner(
       );
 
       const entries: NestedKeyValueEntry[] = [];
+
+      // The container's own framing, for the reason the array branch above charges its
+      // brackets: an object with no keys charged nothing, so a payload of them was free.
+      chargeUnits(
+        budget,
+        CONTAINER_FRAME_COST * rowTextLevels(maxRowLength, depth),
+      );
 
       for (const key of keys) {
         if (budget.remaining <= 0) {
