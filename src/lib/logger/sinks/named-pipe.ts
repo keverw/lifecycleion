@@ -1095,6 +1095,19 @@ export class NamedPipeSink implements LogSink {
       // and `cat < pipe`, like every other reader that treats end of input as end of job,
       // exits in that gap. Measured: the reader hung up before the first line was written.
       // Holding both descriptors until this one is open means there is no gap to see.
+      // Asked again, because both answers above came from an await. `close()` bounds its
+      // own drain and cleanup, so an open that started before it can resume after it has
+      // finished - and `reconnect()` got exactly this guard while this path did not. The
+      // open that follows is the one that cannot be taken back: if the reader hung up in
+      // the probe-to-open window it blocks in the runtime's file-I/O thread pool, nothing
+      // is left to fire `'open'` and destroy it, and `ensureConnection` returns early on
+      // `closed` so `releaseStalePendingOpen` never runs either - a descriptor and a
+      // threadpool slot held for the life of the process, behind a `close()` that already
+      // resolved.
+      if (this.closed || this.closing) {
+        return;
+      }
+
       const stream = fs.createWriteStream(this.pipePath, {
         flags: 'a', // Append mode
       });
@@ -1127,9 +1140,26 @@ export class NamedPipeSink implements LogSink {
         }
 
         if (!wasReported) {
-          this.handleError('write', err, {
-            countsAgainstHealth: isCurrent,
-          });
+          if (isCurrent && stream.pending) {
+            // An open that failed, not a write: `createWriteStream` does not throw for
+            // `EACCES`, `EISDIR` or `EMFILE`, it emits here, and this sink's own probe
+            // reports the same failures as `'setup'`. Two things went wrong arriving as
+            // `'write'`. The kind is documented as the one that means an entry is at risk,
+            // and no entry is at risk from a stream that never had a descriptor; and the
+            // report bypassed `reportOpenFailure`, so a persistent post-probe failure - the
+            // `O_NONBLOCK` probe succeeding and the stream open then failing `EMFILE` under
+            // descriptor pressure - called `onError` once per retry, forever, which is the
+            // flood the dedupe and the cap exist to stop.
+            this.reportOpenFailure(
+              'setup',
+              `Could not open named pipe at ${this.pipePath}: ${describeError(err)}`,
+              err,
+            );
+          } else {
+            this.handleError('write', err, {
+              countsAgainstHealth: isCurrent,
+            });
+          }
         }
         // When it was reported, nothing further is recorded here: the write callback's
         // own `handleError` already set `lastError` and counted the failure. Counting it

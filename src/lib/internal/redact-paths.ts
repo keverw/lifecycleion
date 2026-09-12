@@ -469,6 +469,75 @@ function findRedactPathNodes(
   return nodes;
 }
 
+/** The first entry `pick` answers with, over a set of nodes the walk is standing on. */
+function firstEntryOver(
+  nodes: readonly RedactPathNode[],
+  pick: (node: RedactPathNode) => string | undefined,
+): string | undefined {
+  for (const node of nodes) {
+    const entry = pick(node);
+
+    if (entry !== undefined) {
+      return entry;
+    }
+  }
+
+  return undefined;
+}
+
+/**
+ * A stable name for the position `nodes` describes, for {@link RedactState.walkResults}.
+ *
+ * The nodes come out of {@link findRedactPathNodes} in the order the route reached them,
+ * which two routes onto the same set need not agree on, so the ids are sorted: the memo
+ * keys a *set*, and two spellings of one set that did not compare equal would each walk
+ * the subtree again.
+ *
+ * `shouldSkipCandidateScan` is part of the position because it is part of the question -
+ * it decides whether the node is scanned or walked in full, and the two can answer
+ * differently for a container holding an unstable entry.
+ *
+ * So is the depth, and only because of the cap: how far a subtree gets to be walked before
+ * {@link MAX_RENDER_DEPTH} cuts it is the one thing about the route that changes the answer
+ * without changing the node set. Carrying it here is what lets a capped result be memoized
+ * at all - counting the cap as route-dependent instead left every payload deeper than the
+ * cap walking route by route, which is the blowup this memo exists to stop, arriving one
+ * level lower down.
+ */
+function walkPositionKey(
+  nodes: readonly RedactPathNode[],
+  shouldSkipCandidateScan: boolean,
+  depth: number,
+): string {
+  const ids: number[] = [];
+
+  for (const node of nodes) {
+    let id = redactPathNodeIDs.get(node);
+
+    if (id === undefined) {
+      id = nextRedactPathNodeID++;
+      redactPathNodeIDs.set(node, id);
+    }
+
+    ids.push(id);
+  }
+
+  ids.sort((left, right) => left - right);
+
+  return `${shouldSkipCandidateScan ? 's' : 'w'}:${depth}:${ids.join(',')}`;
+}
+
+/**
+ * An id per index node, assigned on first use. See {@link walkPositionKey}.
+ *
+ * Weak, and never on the node itself: the index is cached on the caller's `paths` array
+ * for as long as that array lives, and a number written onto its nodes would outlive the
+ * pass that needed it.
+ */
+const redactPathNodeIDs = new WeakMap<RedactPathNode, number>();
+
+let nextRedactPathNodeID = 0;
+
 /** The first entry `pick` answers with, over the nodes `path` can be standing on. */
 function firstEntryAt(
   paths: RedactPath[],
@@ -867,7 +936,24 @@ interface RedactState {
    */
   didSnapshotUnstable: boolean;
   /**
-   * What nodes already walked inside a region no path can reach came back as.
+   * Whether the depth cap cut the walk short of something a path pointed at.
+   *
+   * Beside {@link RedactState.didSnapshotUnstable} and for the same reason: the copy the
+   * walk built is the only value that carries what the cap did. The cap replaces the tail
+   * it refused to walk with {@link TRUNCATED}, and a pass that masked nothing elsewhere
+   * used to hand the caller their own value back instead - which is the *untruncated*
+   * payload, with every key the walk never reached still on it. A list naming one key past
+   * the cap therefore masked it at the last level before the cut and printed it in the
+   * clear at the first level after, with nothing reported.
+   *
+   * So a cut a path pointed past is a change like any other: it forces the rebuilt copy
+   * out, and what the caller gets is the value the walk actually vetted. A cut with no path
+   * below it is not set here, so a payload deeper than the cap that the list matches none
+   * of is still handed back by reference, untouched.
+   */
+  didTruncate: boolean;
+  /**
+   * What nodes this pass has already walked came back as, per walk position.
    *
    * `seen` is released as the walk leaves a node, deliberately, so a value referenced
    * twice side by side is walked both times rather than the second being called a cycle.
@@ -875,19 +961,26 @@ interface RedactState {
    * payload, and a subtree reachable by two references is therefore walked twice, its own
    * shared children four times, and so on: an object graph of 53 objects nested 26 deep,
    * with each level holding the same child under two keys, took 2.7 seconds, and 61
-   * objects took roughly 44. This is what bounds that to one walk per node.
+   * objects took roughly 44. This is what bounds that to one walk per node per position.
    *
    * Two conditions make the memo sound, and both are load-bearing:
    *
-   * - **Only inside a skipped region.** A result is keyed on the node alone, but the walk
-   *   answers a question about the node *at a path*. Where an ancestor's scan already
-   *   established that no path points below it, nothing at or beneath it can match, so
-   *   the path stops mattering and the node alone determines the answer.
+   * - **Keyed on the walk position, not only on the node.** The walk answers a question
+   *   about a node *at a path*, and what the path contributes is exactly the set of index
+   *   nodes the route is standing on - `matched`, `below` and everything the walk can
+   *   still reach are read off that set and off nothing else about the route. So two
+   *   routes standing on the same index nodes ask the same question, and one answer
+   *   serves both. Keyed on the node alone this held only inside a region an ancestor's
+   *   scan had already cleared, which left every payload a path *does* point into walking
+   *   route by route: 20 shared objects under `order.items[*]...card` spent 2.5 seconds
+   *   inside one `logger.info()` and then blanked an unrelated sibling with
+   *   {@link REDACTION_FAILED_MARKER}, having exhausted the entry budget on rewalks.
    * - **Only a result that is not route-dependent.** A cycle yields the failure marker,
    *   and whether a back-edge closes depends on the route, not on the node - so a marker
    *   must never be replayed onto a route where the same node is not in a cycle. The same
-   *   goes for the depth cap and for the entry budget, which stop at whatever the walk
-   *   order reached first. {@link RedactState.routeDependentResults} is what counts those,
+   *   goes for the entry budget, which stops at whatever the walk order reached first.
+   *   The depth cap is handled by the key rather than by this guard; see
+   *   {@link walkPositionKey}. {@link RedactState.routeDependentResults} is what counts those,
    *   and a subtree that produced one is not recorded.
    *
    * Both {@link UNCHANGED} and a rebuilt copy are recorded. The copy matters as much as
@@ -896,18 +989,23 @@ interface RedactState {
    * sentinel put the exponential walk straight back - 2^n rebuilds of the same node, which
    * is what this memo exists to stop. Replaying one copy across every reference also keeps
    * the sharing the input had, rather than turning one object into n identical ones.
+   *
+   * The pass-level flags are not replayed with it, and do not need to be: every one of
+   * them is monotonic and was set by the walk being replayed.
    */
-  skippedRegionResults: WeakMap<object, unknown>;
+  walkResults: WeakMap<object, Map<string, unknown>>;
   /**
    * How many results this pass has produced that depend on the *route* to a node rather
    * than on the node.
    *
    * The memo above replays a result onto every reference that reaches a node, so a result
    * that would have been different by another route must never go into it. Three produce
-   * one: a cycle, which closes on some routes and not others; the depth cap, which is
-   * reached at different points depending on how far down the route already is; and the
-   * entry budget, which is spent in walk order and so stops at whichever reference got
-   * there first. Counted rather than flagged, because what matters is whether one landed
+   * one: a cycle, which closes on some routes and not others, and the entry budget, which
+   * is spent in walk order and so stops at whichever reference got there first. The depth
+   * cap is the third such result and is *not* counted here - it is keyed instead, by the
+   * depth {@link walkPositionKey} carries, so a capped subtree is replayed only onto a
+   * route standing exactly as far down. Counted rather than flagged, because what matters
+   * is whether one landed
    * *inside the subtree just walked* - which is a comparison of this number before and
    * after, and not a property of the pass as a whole.
    */
@@ -1005,7 +1103,14 @@ function redactPathsInner(
   report: ReportFormatFailure,
   shouldSkipCandidateScan = false,
 ): unknown {
-  const matched = matchRedactPath(paths, path);
+  // The index nodes this route is standing on, resolved once. Every question the walk asks
+  // of the path list - does this node match, does anything point below it, and which
+  // position the memo keys on - is answered off this set and off nothing else about the
+  // route, which is what lets {@link RedactState.walkResults} key on it. Resolving it once
+  // also stops each level re-descending the index from the root, which was `O(depth)` per
+  // node walked.
+  const nodes = findRedactPathNodes(paths, path);
+  const matched = firstEntryOver(nodes, (node) => node.exact);
 
   if (matched !== undefined) {
     // Marked before the attempt, not after: a mask that throws still yields the failure
@@ -1060,7 +1165,12 @@ function redactPathsInner(
   // So a path pointing inside one masks the whole value. That is the only masking whose
   // result still prints the way the original did: one string in place of another.
   if (!isPlainContainer(value)) {
-    const inside = findPathInto(paths, path);
+    // {@link findPathInto} over the node set already resolved, root rule and all: nothing
+    // addresses the root itself.
+    const inside =
+      path.length === 0
+        ? undefined
+        : firstEntryOver(nodes, (node) => node.below);
 
     if (inside === undefined) {
       return UNCHANGED;
@@ -1106,31 +1216,35 @@ function redactPathsInner(
   // leak `mustWalkInFull` exists to catch and which nothing below the cap has checked. A
   // replacement string is not a reference, so that hazard is closed either way.
   //
-  // `didFailToRead` is left alone for the same reason the marker is: it forces
-  // `redactMatchedPaths` to return the rebuilt copy, so a list matching nothing would stop
-  // handing the caller their own value back - which is the one thing redaction promises
-  // about a payload it was not asked to touch. With the flag clear, a pass that masked
-  // nothing returns the original and a pass that masked something carries this word where
-  // it stopped. Not reported either: a cap is not a failure, and the one redaction report a
-  // broken `redactFunction` needs should not be spent on it.
+  // `didFailToRead` is left alone - nothing failed to read here - and the pass-through is
+  // left alone with it wherever the list was not pointing past the cut: a 20,000-deep
+  // payload that a `redactedKeys` list matches none of still comes back by reference,
+  // which is what redaction promises about a payload it was not asked to touch.
+  //
+  // A cut with a path pointing below it is the other case, and there the cap has to force
+  // the rebuilt copy out - {@link RedactState.didTruncate} is what does that. Without it a
+  // pass that masked nothing else handed the caller their own value back, tail and all, so
+  // the key the list named went to every sink in the clear at one level past the cap while
+  // masking correctly one level before it, with nothing reported. Over-masking is the only
+  // direction a cap may fail in. Still not reported: a cap is not a failure, and the one
+  // redaction report a broken `redactFunction` needs should not be spent on it.
   if (path.length >= MAX_RENDER_DEPTH) {
-    // Where the cap lands is a property of the route, not of the node. See
-    // {@link RedactState.routeDependentResults}.
-    state.routeDependentResults++;
+    if (firstEntryOver(nodes, (node) => node.below) !== undefined) {
+      state.didTruncate = true;
+    }
 
     return TRUNCATED;
   }
 
-  // Already walked, under an ancestor that established nothing here can match. See
-  // `RedactState.skippedRegionResults` for why the node alone is enough to key the answer
-  // on here and nowhere else. `undefined` is never a recorded result - the walk answers
-  // with `UNCHANGED` or with a container - so it is free to mean "not recorded".
-  if (shouldSkipCandidateScan) {
-    const recorded = state.skippedRegionResults.get(value);
+  // Already walked from this same position. See `RedactState.walkResults` for what makes
+  // the position enough to key the answer on. `undefined` is never a recorded result - the
+  // walk answers with `UNCHANGED` or with a container - so it is free to mean "not
+  // recorded".
+  const memoKey = walkPositionKey(nodes, shouldSkipCandidateScan, path.length);
+  const recorded = state.walkResults.get(value)?.get(memoKey);
 
-    if (recorded !== undefined) {
-      return recorded;
-    }
+  if (recorded !== undefined) {
+    return recorded;
   }
 
   // Where the counter stood before this node was walked, so what the walk comes back with
@@ -1147,7 +1261,7 @@ function redactPathsInner(
 
   if (
     !shouldSkipCandidateScan &&
-    pathPointingBelow(paths, path) === undefined
+    firstEntryOver(nodes, (node) => node.below) === undefined
   ) {
     if (!mustWalkInFull(value, seen, state, path.length)) {
       return UNCHANGED;
@@ -1447,24 +1561,12 @@ function redactPathsInner(
       }
 
       if (didMask) {
-        recordSkippedRegionResult(
-          value,
-          shouldSkipCandidateScan,
-          state,
-          copy,
-          routeDependentBefore,
-        );
+        recordWalkResult(value, memoKey, state, copy, routeDependentBefore);
 
         return copy;
       }
 
-      recordSkippedRegionResult(
-        value,
-        shouldSkipCandidateScan,
-        state,
-        UNCHANGED,
-        routeDependentBefore,
-      );
+      recordWalkResult(value, memoKey, state, UNCHANGED, routeDependentBefore);
 
       return UNCHANGED;
     }
@@ -1572,24 +1674,12 @@ function redactPathsInner(
     // renderer prints, so a path naming one it does not have reaches nothing - exactly as
     // a typo does, and masking over that would blank a payload for a misspelling.
     if (didMask) {
-      recordSkippedRegionResult(
-        value,
-        shouldSkipCandidateScan,
-        state,
-        copy,
-        routeDependentBefore,
-      );
+      recordWalkResult(value, memoKey, state, copy, routeDependentBefore);
 
       return copy;
     }
 
-    recordSkippedRegionResult(
-      value,
-      shouldSkipCandidateScan,
-      state,
-      UNCHANGED,
-      routeDependentBefore,
-    );
+    recordWalkResult(value, memoKey, state, UNCHANGED, routeDependentBefore);
 
     return UNCHANGED;
   } finally {
@@ -1602,37 +1692,44 @@ function redactPathsInner(
 }
 
 /**
- * Note what `value` walked to, when that answer can be reused for every other reference
- * that reaches it.
+ * Note what `value` walked to, when that answer can be reused by every other route that
+ * reaches it from the same position.
  *
- * Only inside a region an ancestor's scan already cleared, and only for an answer that
- * does not depend on the route taken to get here; see `RedactState.skippedRegionResults`
- * for why both conditions are what make the memo sound.
+ * Only for an answer that does not depend on the route taken to get here; see
+ * `RedactState.walkResults` for why that is what makes the memo sound.
  *
  * @param routeDependentBefore `RedactState.routeDependentResults` as it stood when the
- *        walk of this node began. Unchanged means nothing under it hit a cycle, the depth
- *        cap, or the entry budget, so what it came back with is a property of the node.
+ *        walk of this node began. Unchanged means nothing under it hit a cycle or the
+ *        entry budget, so what it came back with is a property of the position.
  */
-function recordSkippedRegionResult(
+function recordWalkResult(
   value: object,
-  isInSkippedRegion: boolean,
+  memoKey: string,
   state: RedactState,
   result: unknown,
   routeDependentBefore: number,
 ): void {
-  if (!isInSkippedRegion) {
-    return;
-  }
-
   if (state.routeDependentResults !== routeDependentBefore) {
     return;
   }
 
+  let byPosition: Map<string, unknown>;
+
   try {
-    state.skippedRegionResults.set(value, result);
+    const existing = state.walkResults.get(value);
+
+    if (existing === undefined) {
+      byPosition = new Map();
+      state.walkResults.set(value, byPosition);
+    } else {
+      byPosition = existing;
+    }
   } catch {
     // Not a usable `WeakMap` key, so this node is simply walked again if it recurs.
+    return;
   }
+
+  byPosition.set(memoKey, result);
 }
 
 /**
@@ -1657,7 +1754,8 @@ export function redactMatchedPaths(
     didMaskAnything: false,
     didFailToRead: false,
     didSnapshotUnstable: false,
-    skippedRegionResults: new WeakMap(),
+    didTruncate: false,
+    walkResults: new WeakMap(),
     routeDependentResults: 0,
     entriesLeft: MAX_REDACTION_ENTRIES,
     scanLeft: MAX_REDACTION_ENTRIES,
@@ -1688,13 +1786,17 @@ export function redactMatchedPaths(
   // A failed *read* is excluded from that shortcut. It is not evidence of absence: the
   // walk never saw what was behind it, so "nothing matched" says nothing about whether a
   // redacted key sits there, and handing back the original would return it in the clear.
+  // The depth cap is excluded for exactly that reason - it is the walk declining to look -
+  // and a snapshot is excluded because handing the original back undoes it. See
+  // {@link RedactState.didTruncate}.
   if (result === UNCHANGED) {
     return value;
   }
 
   return state.didMaskAnything ||
     state.didFailToRead ||
-    state.didSnapshotUnstable
+    state.didSnapshotUnstable ||
+    state.didTruncate
     ? result
     : value;
 }

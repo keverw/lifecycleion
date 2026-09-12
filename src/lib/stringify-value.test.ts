@@ -2178,6 +2178,19 @@ describe('a key is a variable-length leaf too', () => {
     expect(() => JSON.parse(rendered) as unknown).not.toThrow();
   });
 
+  test('escaping cannot expand a cut key past the budget', () => {
+    // The same bug the value side was fixed for, on the key side: `capKey` cuts the raw
+    // key and the quoting happens after, so a million NUL characters - six characters each
+    // once quoted - were cut to the cap and emitted at six times it. The identical string
+    // as a value had been charged what it emits since `quoteWithinBudget` went in.
+    const nul = String.fromCharCode(0).repeat(1_000_000);
+
+    const rendered = stringifyValue({ [nul]: 1 });
+
+    expect(rendered.length).toBeLessThan(1_100_000);
+    expect(() => JSON.parse(rendered) as unknown).not.toThrow();
+  });
+
   test('the output does not scale with how large the key was', () => {
     const small = stringifyValue({ ['k'.repeat(5_000_000)]: 1 }).length;
     const large = stringifyValue({ ['k'.repeat(20_000_000)]: 1 }).length;

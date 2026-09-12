@@ -825,6 +825,83 @@ describe('redactMatchedPaths - the depth cap', () => {
     expect(other).toBe(TRUNCATED);
   });
 
+  test('does not hand back the original when the cap cut short of a named key', () => {
+    // The cap replaces the tail it refused to walk, but a pass that masked nothing else
+    // then took the pass-through shortcut and returned the caller's own value - the
+    // *untruncated* one, with the named key still on it. The same list masked correctly one
+    // level above the cap and printed in the clear one level below it, with nothing
+    // reported.
+    const build = (levels: number): { value: object; entry: string } => {
+      let node: Record<string, unknown> = { password: SECRET };
+      const parts = ['password'];
+
+      for (let level = 0; level < levels; level++) {
+        node = { n: node };
+        parts.unshift('n');
+      }
+
+      return { value: node, entry: parts.join('.') };
+    };
+
+    const deep = build(400);
+    const result = redactMatchedPaths(
+      deep.value,
+      paths(deep.entry),
+      undefined,
+    ) as Record<string, unknown>;
+
+    expect(result).not.toBe(deep.value);
+
+    let node: unknown = result;
+
+    while (
+      typeof node === 'object' &&
+      node !== null &&
+      'n' in (node as Record<string, unknown>)
+    ) {
+      node = (node as Record<string, unknown>).n;
+    }
+
+    // The word the renderers write where they stop, and nowhere the secret itself.
+    expect(node).toBe(TRUNCATED);
+    expect(JSON.stringify(result)).not.toContain(SECRET);
+  });
+
+  test('walks a shared subtree once per position rather than once per route', () => {
+    // `seen` is released as the walk leaves a node, so a subtree reachable by two
+    // references was walked twice, its shared children four times, and so on. The memo
+    // covered only regions no path could reach, which is every payload except the ones a
+    // list actually addresses: 20 shared objects under a wildcard path spent seconds
+    // inside one pass and then exhausted the entry budget, blanking an unrelated sibling
+    // with the failure marker.
+    const leaf: Record<string, unknown> = { card: '4111', note: 'keep-me' };
+    let node: Record<string, unknown> = leaf;
+    const parts = ['order'];
+
+    for (let level = 0; level < 20; level++) {
+      const child = node;
+
+      node = { items: [child, child] };
+      parts.push('items', '*');
+    }
+
+    parts.push('card');
+
+    const started = Date.now();
+    const result = redactMatchedPaths(
+      { order: node, note: 'sibling' },
+      paths(parts.join('.')),
+      undefined,
+    ) as Record<string, unknown>;
+
+    // Route by route this is 2^20 walks. The bound being tested is the shape of the work,
+    // so the assertion is generous rather than a benchmark.
+    expect(Date.now() - started).toBeLessThan(2_000);
+
+    // And the sibling the exhausted budget used to blank.
+    expect(result.note).toBe('sibling');
+  });
+
   test('hands a payload back by reference whether or not it reached the cap', () => {
     // The cap must not cost a pass that masked nothing its pass-through: redaction
     // promises that anything it was not asked to touch comes back as it went in, and

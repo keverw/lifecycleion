@@ -4301,14 +4301,20 @@ describe('NodeAdapter via HTTPClient', () => {
 
     // A complete answer mid-upload, with the connection kept alive: a proxy replying
     // `413` before the body is finished is the ordinary shape of this. The write then
-    // fails, and the response path deliberately answers over it - but `req.end()` only
-    // ever runs on the write path's success, so nothing finished the request and the
-    // socket was held, unfinished and unusable, until the server's own timeout.
+    // fails or parks, and the response path deliberately answers over it - but
+    // `req.end()` only ever runs on the write path's success, so nothing finished the
+    // request and the socket was held, unfinished and unusable, until the server's own
+    // timeout.
     let didCloseSocket = false;
+    let receivedBytes = 0;
 
     const server = net.createServer((socket) => {
       socket.on('close', () => {
         didCloseSocket = true;
+      });
+
+      socket.on('data', (chunk: Buffer) => {
+        receivedBytes += chunk.length;
       });
 
       socket.once('data', () => {
@@ -4323,6 +4329,7 @@ describe('NodeAdapter via HTTPClient', () => {
     });
 
     const { port } = server.address() as { port: number };
+    const bodySize = 8 * 1024 * 1024;
 
     try {
       const res = await new NodeAdapter().send({
@@ -4330,19 +4337,146 @@ describe('NodeAdapter via HTTPClient', () => {
         method: 'POST',
         headers: {},
         // Large enough that the upload is still running when the answer lands.
-        body: 'x'.repeat(8 * 1024 * 1024),
+        body: 'x'.repeat(bodySize),
       });
 
       // The server's real answer, not a fabricated transport error over it.
       expect(res.status).toBe(413);
 
-      await new Promise((resolve) => setTimeout(resolve, 200));
+      // Past the stall grace, so an upload that parked has been torn down by now. See
+      // `UPLOAD_STALL_GRACE_MS`.
+      await new Promise((resolve) => setTimeout(resolve, 6_000));
+
+      // Either exit leaves the socket usable: the upload finished and the request was
+      // ended, or it made no further progress and was destroyed. What the request must
+      // never be is left open with a body it is no longer writing - which is what a
+      // server still reading here would see as neither.
+      expect(didCloseSocket || receivedBytes >= bodySize).toBe(true);
+    } finally {
+      server.close();
+    }
+  }, 20000);
+
+  test('an early response with a stalled upload tears the request down', async () => {
+    const net = await import('node:net');
+
+    // The server answers and then stops reading, so the write parks under backpressure
+    // that will never drain. Nothing fails, so no `catch` runs; without the stall
+    // watchdog the request sits unfinished on a keep-alive socket until the server times
+    // it out. See `UPLOAD_STALL_GRACE_MS`.
+    let didCloseSocket = false;
+
+    const server = net.createServer((socket) => {
+      socket.on('error', () => {
+        // The client's teardown reaches this side as a reset; the assertion below is on
+        // the close that follows it.
+      });
+
+      socket.on('close', () => {
+        didCloseSocket = true;
+      });
+
+      socket.once('data', () => {
+        socket.write(
+          'HTTP/1.1 413 Payload Too Large\r\nConnection: keep-alive\r\nContent-Length: 3\r\n\r\nno!',
+        );
+
+        // Read nothing more. The buffers fill and the client's writes stop being
+        // accepted, which is the shape a proxy that has given up presents.
+        socket.pause();
+
+        // Resumed past the grace so this side can observe what the client did: a paused
+        // socket reports neither the peer's close nor its reset until it is reading again.
+        setTimeout(() => {
+          socket.resume();
+        }, 6_500);
+      });
+    });
+
+    await new Promise<void>((done) => {
+      server.listen(0, '127.0.0.1', done);
+    });
+
+    const { port } = server.address() as { port: number };
+
+    try {
+      const res = await new NodeAdapter().send({
+        requestURL: `http://127.0.0.1:${port}/upload`,
+        method: 'POST',
+        headers: {},
+        // Past what the socket buffers absorb, so the write genuinely parks.
+        body: 'x'.repeat(8 * 1024 * 1024),
+      });
+
+      expect(res.status).toBe(413);
+
+      await new Promise((resolve) => setTimeout(resolve, 7_500));
 
       expect(didCloseSocket).toBe(true);
     } finally {
       server.close();
     }
-  });
+  }, 20000);
+
+  test('an early response does not truncate an upload the server is still reading', async () => {
+    const net = await import('node:net');
+
+    // The other half of the early-response case, and the one the stall watchdog must not
+    // break: with request buffering disabled the answer can arrive while the upload is
+    // still going and the server goes on consuming it. Progress is reported only once per
+    // accepted chunk, so a receiver that is merely busy for a moment reports nothing at
+    // all - and a watchdog impatient with that cuts a body short of the `Content-Length`
+    // already on the wire while handing the caller the early status as a clean success.
+    let receivedBytes = 0;
+
+    const server = net.createServer((socket) => {
+      socket.on('error', () => {
+        // Only the assertion below decides the outcome.
+      });
+
+      socket.on('data', (chunk: Buffer) => {
+        receivedBytes += chunk.length;
+      });
+
+      socket.once('data', () => {
+        socket.write(
+          'HTTP/1.1 200 OK\r\nConnection: keep-alive\r\nContent-Length: 2\r\n\r\nok',
+        );
+
+        // Busy for a while, then back to reading - a pause, not a hang up.
+        socket.pause();
+
+        setTimeout(() => {
+          socket.resume();
+        }, 2_000);
+      });
+    });
+
+    await new Promise<void>((done) => {
+      server.listen(0, '127.0.0.1', done);
+    });
+
+    const { port } = server.address() as { port: number };
+    const bodySize = 8 * 1024 * 1024;
+
+    try {
+      const res = await new NodeAdapter().send({
+        requestURL: `http://127.0.0.1:${port}/upload`,
+        method: 'POST',
+        headers: {},
+        body: 'x'.repeat(bodySize),
+      });
+
+      expect(res.status).toBe(200);
+
+      await new Promise((resolve) => setTimeout(resolve, 4_000));
+
+      // Every byte the caller handed over, not the prefix that fitted before the pause.
+      expect(receivedBytes).toBeGreaterThanOrEqual(bodySize);
+    } finally {
+      server.close();
+    }
+  }, 20000);
 
   test('an empty-body POST whose headers reached the server is not replayable', async () => {
     const net = await import('node:net');

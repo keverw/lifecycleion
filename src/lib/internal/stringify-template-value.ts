@@ -14,6 +14,7 @@ import {
   chargeUnits,
   createRenderBudget,
   MAX_RENDER_DEPTH,
+  MAX_RENDER_LENGTH,
   TRUNCATED,
   TRUNCATED_LENGTH,
   type RenderBudget,
@@ -116,9 +117,43 @@ function quoteWithinBudget(budget: RenderBudget, text: string): string {
     return charge(budget, full);
   }
 
-  const allowance = Math.max(0, budget.remaining);
+  const encoded = quoteWithinLimit(text, Math.max(0, budget.remaining));
 
-  let keep = Math.min(text.length, allowance);
+  chargeUnits(budget, encoded.length);
+
+  return encoded;
+}
+
+/**
+ * `key`, quoted, cut so the quoted form fits {@link MAX_RENDER_LENGTH}.
+ *
+ * The cheap test first: a key that cannot expand past the cap even if every character
+ * escapes is the ordinary case, and it pays one length comparison.
+ */
+function quoteKeyWithinCap(key: string): string {
+  const quoted = quote(capKey(key));
+
+  if (quoted.length <= MAX_RENDER_LENGTH) {
+    return quoted;
+  }
+
+  return quoteWithinLimit(key, MAX_RENDER_LENGTH);
+}
+
+/**
+ * `text`, quoted, cut so the *quoted* form fits `limit`.
+ *
+ * The cut and the encoding in one place, because doing them in the other order is the bug
+ * both callers had: cutting the raw text and quoting afterwards emits whatever the escaping
+ * expanded it to, which for a run of NUL characters is six times the cut.
+ *
+ * Cut by ratio rather than by search: one pass usually lands it, since the expansion is
+ * uniform enough, and the loop is bounded so a pathological mixture costs a few
+ * re-encodings rather than a binary search. The marker always survives - a limit with
+ * nothing left still says it ran out rather than emitting an empty string.
+ */
+function quoteWithinLimit(text: string, limit: number): string {
+  let keep = Math.min(text.length, limit);
   let encoded = quote(`${text.slice(0, keep)}${TRUNCATED_LENGTH}`);
 
   // The marker itself, quoted, is the floor: below that there is nothing to say.
@@ -126,16 +161,14 @@ function quoteWithinBudget(budget: RenderBudget, text: string): string {
 
   for (
     let attempt = 0;
-    attempt < 4 && keep > 0 && encoded.length > Math.max(allowance, floor);
+    attempt < 4 && keep > 0 && encoded.length > Math.max(limit, floor);
     attempt++
   ) {
-    const ratio = Math.max(allowance, floor) / encoded.length;
+    const ratio = Math.max(limit, floor) / encoded.length;
 
     keep = Math.floor(keep * ratio);
     encoded = quote(`${text.slice(0, keep)}${TRUNCATED_LENGTH}`);
   }
-
-  chargeUnits(budget, encoded.length);
 
   return encoded;
 }
@@ -341,7 +374,18 @@ function renderContainer(
     // parsed from JSON carries whatever names arrived, and
     // `stringifyValue({ ['k'.repeat(5_000_000)]: 1 })` returned 5,000,028 characters
     // against a 1,000,000 cap. Cut inside the quotes, so the result is still JSON.
-    const renderedKey = charge(budget, `${quote(capKey(key))}:`);
+    //
+    // Cut against the cap and not against what is *left* of the budget, which is what
+    // separates this from the value side: a key names where the render stopped, so an
+    // ordinary key still goes out whole once the budget is spent - and it is billed whole,
+    // exactly as `charge` bills every other string it hands back.
+    //
+    // The quoting is part of the cut for the reason it is on the value side too: `capKey`
+    // cuts the raw key and the escaping happens after, so a key of a million NUL characters
+    // - six characters each once quoted - was cut to the cap and then emitted at six times
+    // it. The identical string as a value had been charged what it emits since
+    // `quoteWithinBudget` went in.
+    const renderedKey = charge(budget, `${quoteKeyWithinCap(key)}:`);
 
     // Stops the loop rather than only this entry, for the reason the array branch does:
     // the entries still to come would each be walked in full to no purpose.

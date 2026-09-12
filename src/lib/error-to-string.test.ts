@@ -1875,6 +1875,44 @@ describe('errorToString - bounds that hold at the entry point', () => {
     }
   });
 
+  it('renders an error additionalInfo as its own table, own keys or not', () => {
+    // The bag was built from whatever own enumerable keys the error happened to carry, and
+    // those keys became the whole of the rendering: a syscall error - `code`, `errno`,
+    // `syscall`, `path`, all own and enumerable - came out as flat `AdditionalInfo.<key>`
+    // rows with no message, no name and no stack, while the same error with no own key
+    // rendered the full nested table. The most common error in the wild was the one whose
+    // diagnosis was dropped.
+    const inner = new Error('inner failure') as Error & { code?: string };
+
+    inner.code = 'ENOENT';
+
+    const error = new Error('outer') as Error & { additionalInfo?: unknown };
+
+    error.additionalInfo = inner;
+
+    const rendered = errorToString(error);
+
+    expect(rendered).toContain('inner failure');
+    expect(rendered).toContain('ENOENT');
+    expect(rendered).toContain('Stack');
+  });
+
+  it('renders a binary view as one value rather than a row per byte', () => {
+    // A `Buffer` on an error is ordinary, and its keys are its bytes: forwarding them
+    // spent the whole render budget on `AdditionalInfo.<n>` rows saying nothing, after
+    // materializing every index the enumeration touched - seconds of synchronous work on
+    // the failure-reporting path.
+    const error = new Error('boom') as Error & { additionalInfo?: unknown };
+
+    error.additionalInfo = new Uint8Array(2_000_000);
+
+    const started = Date.now();
+    const rendered = errorToString(error);
+
+    expect(Date.now() - started).toBeLessThan(3_000);
+    expect(rendered).not.toContain('AdditionalInfo.1000');
+  });
+
   it('renders a wide grapheme that overhangs its column instead of throwing', () => {
     // `splitWord` splits by grapheme, so a column too narrow for a two-column character
     // emits a chunk wider than the column and the padding count goes negative.

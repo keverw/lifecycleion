@@ -425,12 +425,137 @@ export class NodeAdapter implements HTTPAdapter {
        */
       let didReceiveResponse = false;
 
+      /**
+       * Whether the response has finished arriving.
+       *
+       * Distinct from {@link didReceiveResponse}, which says only that the headers came
+       * back. Tearing the request down while the body is still coming in is what the
+       * early-response handling exists to prevent, so the one place that may destroy an
+       * unfinished request is a write failure *after* this - by which point the response
+       * has been read and the socket has nothing left to deliver.
+       */
+      let didResponseClose = false;
+
+      /**
+       * Whether a body writer is still running.
+       *
+       * An early response does not mean the server stopped reading: with request buffering
+       * disabled - nginx `proxy_request_buffering off`, or an endpoint that acks a
+       * streaming upload as soon as it has what it needs - the answer arrives while the
+       * upload is still going and the server goes on consuming it. Destroying the request
+       * there truncates a body the client was still writing, against a `Content-Length`
+       * already on the wire, and the caller is handed the early status as a clean success.
+       *
+       * So a writer that is still going is left to finish: it ends the request itself on
+       * success, and on failure the `catch` below destroys what is left. Nothing is leaked
+       * either way, which is what the destroy was added for.
+       */
+      let isWritingBody = false;
+
+      /** The most recent `loaded` any upload-progress report carried. */
+      let uploadedBytesSeen = 0;
+
+      /**
+       * Destroy an upload the server has stopped reading, once the response is in.
+       *
+       * The two cases an early response splits into look identical from here for the first
+       * instant. A proxy that answers `413` and stops reading leaves the write parked under
+       * backpressure that will never drain, and `req.end()` only ever runs on the write
+       * path's success - so without this the socket is held, unfinished and unusable, until
+       * the server's own timeout. An endpoint that acks a streaming upload early and *goes
+       * on consuming it* looks the same at the moment the answer lands, and destroying it
+       * there truncates a body against a `Content-Length` already on the wire.
+       *
+       * Progress is what tells them apart: the first makes none, the second keeps making it.
+       * So the upload is given {@link UPLOAD_STALL_GRACE_MS} to move, re-armed for as long
+       * as it does, and destroyed the first time it does not. That grace is what decides
+       * how slow a receiver may be before it is mistaken for one that has stopped; see the
+       * constant.
+       */
+      const watchForStalledUpload = (): void => {
+        let bytesAtLastTick = uploadedBytesSeen;
+
+        /**
+         * Guarded, because this one runs from a timer.
+         *
+         * Every other `req.destroy()` here is inside the request's own promise chain, where
+         * a throw is rejected into it. This one has no such home: a socket already gone can
+         * answer `ERR_SOCKET_CLOSED` from `destroy()` on some runtimes, and a throw out of a
+         * timer callback is the uncaught exception the rest of this file's absorbers exist
+         * to prevent - taking the process down over a teardown that had already happened.
+         */
+        const destroyQuietly = (): void => {
+          try {
+            req.destroy();
+          } catch {
+            // Already torn down, which is the state this was trying to reach.
+          }
+        };
+
+        const tick = (): void => {
+          if (!isWritingBody || req.writableEnded || req.destroyed) {
+            return;
+          }
+
+          if (uploadedBytesSeen === bytesAtLastTick) {
+            destroyQuietly();
+
+            return;
+          }
+
+          bytesAtLastTick = uploadedBytesSeen;
+          arm();
+        };
+
+        const arm = (): void => {
+          const timer = setTimeout(tick, UPLOAD_STALL_GRACE_MS);
+
+          // Never a reason for the process to stay up: the response has already been
+          // delivered by the time this is armed.
+          timer.unref?.();
+        };
+
+        arm();
+      };
+
+      /**
+       * A body write that failed after the server had already answered.
+       *
+       * Not fabricated into a transport error - the response path answers with the real
+       * status, which is the whole point of {@link didReceiveResponse} - but not dropped
+       * either. The writers raise more than socket teardown: `serializeMultipartFormData`
+       * throws when a `File` yields fewer bytes than its `Blob.size`, which is a body that
+       * went out short of its `Content-Length` with no transport failure anywhere, and
+       * returning here left that on nothing - not the response, not `errorCause`, not the
+       * global channel - while the caller read the status as a clean success.
+       */
+      const reportWriteErrorAfterResponse = (error: unknown): void => {
+        try {
+          reportToHost(normalizeError(error));
+        } catch {
+          // Nothing left to report with; the response still carries the real status.
+        }
+
+        // Only once the response is fully in. See `didResponseClose`.
+        if (didResponseClose && !req.writableEnded && !req.destroyed) {
+          try {
+            req.destroy();
+          } catch {
+            // Already torn down, which is the state this was trying to reach.
+          }
+        }
+      };
+
       // Deduplication guard — Node's upload path can reach 100% from multiple
       // sources (final drain callback and the upload-complete signal). Once
       // 100% is reported any further calls are dropped.
       let didFireUpload100 = false;
 
       const reportUploadProgress = (event: AdapterProgressEvent): void => {
+        // Tracked before the dedupe gate, so the stall watchdog sees every report the
+        // writers make rather than only the ones the caller is told about.
+        uploadedBytesSeen = event.loaded;
+
         if (didFireUpload100) {
           return;
         }
@@ -460,9 +585,22 @@ export class NodeAdapter implements HTTPAdapter {
         // Once the response has been consumed the request has no further use, so an
         // unfinished one is destroyed here, where it can no longer cut a response short.
         res.on('close', () => {
-          if (!req.writableEnded) {
-            req.destroy();
+          didResponseClose = true;
+
+          if (req.writableEnded) {
+            return;
           }
+
+          // A writer still running is left alone while it is getting anywhere; see
+          // `watchForStalledUpload`. It ends the request when it finishes, and
+          // `reportWriteErrorAfterResponse` destroys it if it fails.
+          if (isWritingBody) {
+            watchForStalledUpload();
+
+            return;
+          }
+
+          req.destroy();
         });
 
         void (async () => {
@@ -927,6 +1065,8 @@ export class NodeAdapter implements HTTPAdapter {
         // progress is length-computable (not chunked-transfer guesswork).
         const boundary = generateMultipartBoundary();
 
+        isWritingBody = true;
+
         serializeMultipartFormData(
           request.body,
           req,
@@ -934,13 +1074,20 @@ export class NodeAdapter implements HTTPAdapter {
           reportUploadProgress,
         )
           .then(() => {
+            isWritingBody = false;
             req.end();
           })
           .catch((error: unknown) => {
+            isWritingBody = false;
+
             // See `didReceiveResponse`: the server has already answered, so the
             // write failing is how that answer arrived, not a transport failure
             // to report over it. The response path resolves with the real status.
+            // Said rather than dropped, and the leftovers cleaned up: see
+            // `reportWriteErrorAfterResponse`.
             if (didReceiveResponse) {
+              reportWriteErrorAfterResponse(error);
+
               return;
             }
 
@@ -975,15 +1122,24 @@ export class NodeAdapter implements HTTPAdapter {
 
         req.setHeader('Content-Length', bytes.length.toString());
 
+        isWritingBody = true;
+
         writeRequestBodyChunked(bytes, req, reportUploadProgress)
           .then(() => {
+            isWritingBody = false;
             req.end();
           })
           .catch((error: unknown) => {
+            isWritingBody = false;
+
             // See `didReceiveResponse`: the server has already answered, so the
             // write failing is how that answer arrived, not a transport failure
             // to report over it. The response path resolves with the real status.
+            // Said rather than dropped, and the leftovers cleaned up: see
+            // `reportWriteErrorAfterResponse`.
             if (didReceiveResponse) {
+              reportWriteErrorAfterResponse(error);
+
               return;
             }
 
@@ -1013,6 +1169,28 @@ export class NodeAdapter implements HTTPAdapter {
     });
   }
 }
+
+/**
+ * How long an upload may make no progress after the response arrived before it is torn
+ * down. See `watchForStalledUpload`.
+ *
+ * Progress here is coarse: `writeRequestBodyChunked` reports once per accepted
+ * {@link REQUEST_BODY_CHUNK_SIZE} chunk, after both the write callback and any `'drain'`,
+ * so a receiver that has answered and then goes quiet for a moment - busy with what it
+ * already has, or a TCP window that closed while it works - reports nothing for the whole
+ * pause. Anything shorter than a pause like that cuts a body the server was still reading,
+ * which is the failure this watchdog exists to avoid, not to cause; at one second a
+ * two-second pause truncated an 8 MiB upload at 6.8 MiB and handed the caller the early
+ * status as a clean success.
+ *
+ * Five seconds is past any such pause on a connection that is still alive, and it is what
+ * the pending-writable absorber in this file already waits before deciding nobody claimed
+ * an error. What is left is a bound rather than a promise: a receiver that stops reading
+ * for longer than this while still intending to read gets a truncated body, and the far
+ * more common shape - a proxy that has answered and will never read again - costs one idle
+ * socket for five seconds instead of one held to that server's timeout.
+ */
+const UPLOAD_STALL_GRACE_MS = 5_000;
 
 // ---------------------------------------------------------------------------
 // Streaming pipe helper

@@ -425,6 +425,22 @@ export class FileSink implements LogSink {
       this.closeTimeoutMS - (Date.now() - startTime),
     );
 
+    await this.endStreamWithin(remainingCloseMS);
+  }
+
+  /**
+   * End the current stream and wait for it to flush, giving up after `timeoutMS`.
+   *
+   * The bound is the whole point, and it is needed wherever the sink waits on a flush -
+   * not only at `close()`. `end(cb)` flushes before it calls back, so on a hung network
+   * mount or a path that resolves to a FIFO with no reader that callback never fires: the
+   * first size-triggered rotation then suspended `writeEntry` forever with `isProcessing`
+   * still set, so the queue never drained again, later lines were evicted at
+   * `maxQueueSize`, and `flush()` and `close()` could only time out. A rotation that gives
+   * up on the flush loses what was buffered in that one stream; a rotation that never
+   * returns loses the sink.
+   */
+  private async endStreamWithin(timeoutMS: number): Promise<void> {
     const stream = this.logFileStream;
 
     let flushTimeout: NodeJS.Timeout | undefined;
@@ -433,7 +449,10 @@ export class FileSink implements LogSink {
       await Promise.race([
         this.endStream(),
         new Promise<void>((resolve) => {
-          flushTimeout = setTimeout(resolve, remainingCloseMS);
+          flushTimeout = setTimeout(
+            resolve,
+            Math.max(MIN_CLOSE_FLUSH_MS, timeoutMS),
+          );
         }),
       ]);
     } finally {
@@ -444,12 +463,12 @@ export class FileSink implements LogSink {
 
     // Whatever `end()` did not manage in that window is not going to happen: the descriptor
     // is released rather than held for the life of the process. Cleared only if it is still
-    // the stream this close found, matching `endStream()`'s own check.
+    // the stream this found, matching `endStream()`'s own check.
     if (stream && !stream.destroyed) {
       try {
         stream.destroy();
       } catch {
-        // Best effort; the sink is closed either way.
+        // Best effort; the stream is going away either way.
       }
     }
 
@@ -463,7 +482,8 @@ export class FileSink implements LogSink {
    *
    * The one place that does this, because every caller has to: `end()` is what flushes
    * what is buffered, and a stream replaced without it keeps its descriptor and loses its
-   * buffer. `close()` and both rotation paths all reach it through here.
+   * buffer. `close()` and both rotation paths reach it through `endStreamWithin`, which is
+   * what puts a bound on the wait.
    */
   private async endStream(): Promise<void> {
     const stream = this.logFileStream;
@@ -881,6 +901,17 @@ export class FileSink implements LogSink {
    * Setup the log file
    */
   private async setupLogFile(): Promise<void> {
+    // Nothing to open for a sink that is going away. `close()` bounds its drain loop, so a
+    // `writeEntry` suspended in here - a slow `mkdir` on a network mount is enough - resumed
+    // *after* that loop gave up, after the stream `close()` found had been destroyed and
+    // after `close()` itself resolved. It then opened a fresh descriptor nothing would ever
+    // close and set `isInitialized` back to `true`, so `getHealth()` reported a closed sink
+    // as initialized - the state `close()` clears the flag to prevent. Checked again below
+    // for the same reason: every await here is a place `close()` can run.
+    if (this.closing || this.closed) {
+      return;
+    }
+
     const currentDate = new Date().toISOString().slice(0, 10); // YYYY-MM-DD (UTC)
     const currentLogFile = `${this.logDir}/${this.basename}-${currentDate}.log`;
 
@@ -894,6 +925,10 @@ export class FileSink implements LogSink {
       } catch {
         // File doesn't exist, create it
         await fsPromises.writeFile(currentLogFile, '', { flag: 'a' });
+      }
+
+      if (this.closing || this.closed) {
+        return;
       }
 
       const stream = fs.createWriteStream(currentLogFile, { flags: 'a' });
@@ -1002,6 +1037,16 @@ export class FileSink implements LogSink {
         await this.rotateFile();
       }
 
+      // Closed while the size was being read, so this stream has already outlived the
+      // teardown that would have ended it. Torn down here rather than left for nobody: the
+      // descriptor is the leak, and `isInitialized` must not go back up behind a `close()`
+      // that cleared it.
+      if (this.closing || this.closed) {
+        this.destroyStream();
+
+        return;
+      }
+
       // Marked here rather than only in `initialize()`, which runs once from the
       // constructor and swallows what it catches. A sink whose directory was not there yet
       // recovers lazily - `writeEntry` calls this again and writes successfully from then
@@ -1050,7 +1095,9 @@ export class FileSink implements LogSink {
       // unreachable: one `WriteStream` and one file descriptor leaked per UTC midnight for
       // the life of the process, and whatever sat in its buffer was never flushed - not by
       // `close()`, which only ends the stream that is current by then.
-      await this.endStream();
+      //
+      // Bounded, like every other flush this sink waits on: see `endStreamWithin`.
+      await this.endStreamWithin(this.closeTimeoutMS);
       await this.setupLogFile();
 
       return;
@@ -1074,8 +1121,8 @@ export class FileSink implements LogSink {
 
     const currentDate = new Date().toISOString().slice(0, 10); // YYYY-MM-DD (UTC)
 
-    // Close current stream
-    await this.endStream();
+    // Close current stream, bounded: see `endStreamWithin`.
+    await this.endStreamWithin(this.closeTimeoutMS);
 
     // Rename with timestamp, disambiguated when one second holds more than one rotation.
     //

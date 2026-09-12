@@ -25,6 +25,7 @@ import {
   chargeUnits,
   createRenderBudget,
   MAX_RENDER_DEPTH,
+  MAX_RENDER_LENGTH,
   TRUNCATED,
   TRUNCATED_LENGTH,
   type RenderBudget,
@@ -248,8 +249,8 @@ const UNRENDERABLE_TEXT = '<unrenderable: text>';
  *
  * @returns The bag, {@link UNRENDERABLE_KEYS} when the value refuses to be enumerated
  *   at all, which the caller renders as the marker rather than as an absent
- *   `additionalInfo`, or {@link NOT_ADDRESSABLE} when it enumerates to nothing, which the
- *   caller renders as a single row.
+ *   `additionalInfo`, or {@link NOT_ADDRESSABLE} when it enumerates to nothing or is an
+ *   error, which the caller renders as a single row.
  */
 function asAddressableBag(
   info: object,
@@ -258,6 +259,32 @@ function asAddressableBag(
 ): object | string | typeof NOT_ADDRESSABLE {
   if (isPlainContainer(info)) {
     return info;
+  }
+
+  // An error is a leaf here whatever it carries, and goes through the single-row exit,
+  // where `stringifyValue` renders it as its own nested table under its own
+  // `sensitiveFieldNames` - the rule this file states for an error nested one level
+  // deeper, applied to one sitting directly in `additionalInfo`.
+  //
+  // Without this the bag was built from whatever own enumerable keys the error happened to
+  // have, and those keys became the whole of the rendering: a `Error('connect ECONNREFUSED')`
+  // carrying `code`, `errno`, `syscall` and `path` - the shape every Node syscall error has -
+  // rendered as four flat `AdditionalInfo.<key>` rows with no `message`, no `name` and no
+  // `stack`, while the same error with no own key rendered the full table. The most common
+  // error in the wild was the one whose diagnosis was dropped.
+  if (isErrorValue(info)) {
+    return NOT_ADDRESSABLE;
+  }
+
+  // So is a view over binary data, and for the plainer reason that its keys are its bytes.
+  // A `Buffer` attached to an error is ordinary, and forwarding it key by key rendered
+  // tens of thousands of `AdditionalInfo.<n> | 0` rows - the budget's whole allowance spent
+  // saying nothing - after materializing every index the enumeration touched, which is
+  // seconds of synchronous work at a few megabytes. `sensitiveFieldNames` was never going
+  // to name a byte offset either. Rendered as the one value it is, like every other
+  // non-plain container whose contents are not addressable structure.
+  if (ArrayBuffer.isView(info)) {
+    return NOT_ADDRESSABLE;
   }
 
   // Through a `Record` view: `isPlainContainer` is a `value is object` guard, so the early
@@ -269,6 +296,20 @@ function asAddressableBag(
   try {
     for (const key in source) {
       keys.push(key);
+
+      // Bounded like every other walk in this file. The rows this bag becomes are bounded
+      // - the loop that writes them stops the moment the budget runs out - but *building*
+      // it was not, and a bag is a forwarding accessor defined per key: `additionalInfo`
+      // holding a `Uint8Array` (a `Buffer` on an error is ordinary) spent 1.5 seconds at a
+      // million elements and 9.9 at five million, all to produce the same one megabyte of
+      // output the cap allows. Synchronous, on the failure-reporting path, whose whole
+      // contract is that it terminates.
+      //
+      // See {@link MAX_ADDRESSABLE_BAG_KEYS} for why cutting here cannot cut a row the
+      // render would otherwise have emitted.
+      if (keys.length >= MAX_ADDRESSABLE_BAG_KEYS) {
+        break;
+      }
     }
   } catch (error) {
     // A `Proxy` can throw from its `ownKeys` trap. Said, not swallowed: an empty bag here
@@ -1134,6 +1175,19 @@ const MIN_ROW_COST = 8;
  * charged.
  */
 const LINES_PER_ROW = 2;
+
+/**
+ * How many keys one bag forwards before it stops collecting them.
+ *
+ * Not a second cap on the output: a row costs the budget at least
+ * `MIN_ROW_COST * LINES_PER_ROW`, so {@link MAX_RENDER_LENGTH} pays for this many rows and
+ * no more, and the render stops at the budget - with its own marker row - at or before the
+ * key this stops at. What it bounds is the *collection*, which is work the budget never
+ * saw and which scales with the value rather than with the output.
+ */
+const MAX_ADDRESSABLE_BAG_KEYS = Math.ceil(
+  MAX_RENDER_LENGTH / (MIN_ROW_COST * LINES_PER_ROW),
+);
 
 /**
  * What one row's framing costs the budget, excluding its text.

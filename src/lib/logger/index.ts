@@ -665,14 +665,18 @@ export class Logger extends EventEmitter {
   /**
    * Unregister the global `'error'` event listener.
    *
-   * If the listener is not registered, it returns 'not_registered'.
-   * Otherwise, it unregister the listener and returns 'success'.
+   * If the listener is not registered, it returns 'not_registered'. If the global refused
+   * the removal on a live logger, the listener is still attached and it returns
+   * 'not_available', matching what `registerReportErrorListener` answers when the global
+   * refuses the add.
    *
    * @returns 'success' if the listener is unregistered successfully,
-   *          'not_registered' if the listener is not registered.
+   *          'not_registered' if the listener is not registered,
+   *          'not_available' if the global refused to remove it.
    */
 
-  public unregisterReportErrorListener(): 'success' | 'not_registered' {
+  public unregisterReportErrorListener():
+    'success' | 'not_registered' | 'not_available' {
     if (!this._reportErrorListenerRegistered || !this._reportErrorListener) {
       return 'not_registered';
     }
@@ -700,9 +704,14 @@ export class Logger extends EventEmitter {
       // events while `isReportErrorListenerRegistered()` answered `false`, so the next
       // `register...()` attached a *second* one and every reported error was logged twice.
       // Keeping the registration is the honest answer to a removal that did not happen,
-      // and it is what stops the duplicate.
+      // and it is what stops the duplicate. So is the return code: `'success'` here said
+      // the listener was off while the closure went on receiving every global `'error'`
+      // and, by default, cancelling it - and it contradicted
+      // `isReportErrorListenerRegistered()`, which still answered `true`, so a caller had
+      // no way to tell the two apart. `'not_available'` is what the matching `add` answers
+      // for the same refusal.
       if (!this._closed) {
-        return 'success';
+        return 'not_available';
       }
     }
 

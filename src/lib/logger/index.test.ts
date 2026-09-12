@@ -1672,12 +1672,20 @@ describe('Logger', () => {
         throw new Error('removeEventListener gone');
       };
 
+      let result: string;
+
       try {
-        liveLogger.unregisterReportErrorListener();
+        result = liveLogger.unregisterReportErrorListener();
       } finally {
         globalThis.removeEventListener = original;
       }
 
+      // And said so. `'success'` claimed the listener was off while the closure went on
+      // receiving every global `'error'` and cancelling it, and it contradicted
+      // `isReportErrorListenerRegistered()` below - so a caller had no way to tell a
+      // removal that happened from one that did not. `'not_available'` is what the
+      // matching `register` answers for the same refusal.
+      expect(result).toBe('not_available');
       expect(liveLogger.isReportErrorListenerRegistered()).toBe(true);
 
       await liveLogger.close();

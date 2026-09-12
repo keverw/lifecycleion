@@ -1833,12 +1833,12 @@ This does not affect an ordinary React, Vue, Angular, or Svelte application: tho
 Teardown and inspection:
 
 ```typescript
-logger.unregisterReportErrorListener(); // 'success' | 'not_registered'
+logger.unregisterReportErrorListener(); // 'success' | 'not_registered' | 'not_available'
 logger.isReportErrorListenerRegistered(); // boolean
 logger.isReportErrorAvailable(); // boolean — are the global event primitives present?
 ```
 
-`'not_available'` means the global object exposes neither native nor polyfilled event methods. See [global-event-target](./global-event-target.md); on Node.js, Lifecycleion installs them for you.
+`'not_available'` from `registerReportErrorListener` means the global object exposes neither native nor polyfilled event methods. From `unregisterReportErrorListener` it means the removal itself was refused - the methods are there, but `removeEventListener` threw - so **the listener is still attached and still receiving**, and the registration is deliberately kept so that a later `register` does not add a second one. `isReportErrorListenerRegistered()` agrees with it and still answers `true`. See [global-event-target](./global-event-target.md); on Node.js, Lifecycleion installs them for you.
 
 ## Where Failures Go
 
