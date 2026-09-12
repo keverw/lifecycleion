@@ -20,6 +20,7 @@ import { isErrorValue } from './to-error';
 import {
   capKey,
   charge,
+  chargeNestedText,
   chargeText,
   chargeUnits,
   createRenderBudget,
@@ -519,12 +520,23 @@ export function errorToString(
   // exists to end as the behaviour almost everyone gets.
   const reportRender = createFormatReporter('render', options?.onFormatError);
 
+  // The root goes in `seen` before the walk, the same way `serializeError` registers
+  // it. Without that, `err.cause = err` was not a cycle until the *second* time round:
+  // the error rendered in full, then again as its own cause, and only the third visit was
+  // caught - so a self-referential error printed its message four times, while the sibling
+  // renderer printed it once.
+  const seen = new WeakSet<object>();
+
+  if (error !== null && typeof error === 'object') {
+    seen.add(error);
+  }
+
   try {
     const table = errorToASCIITable(
       error,
       '',
       maxRowLength,
-      new WeakSet(),
+      seen,
       0,
       createRenderBudget(),
       options?.redactFunction,
@@ -649,11 +661,20 @@ function errorToASCIITable(
       // went the same way. A read that threw has already been marked above, so the only
       // thing this drops is a member that is genuinely absent.
       if (value !== undefined && value !== null) {
+        // The row's framing, exactly as the `additionalInfo` and nested walks charge it:
+        // every row is padded out to the table width and re-indented once per enclosing
+        // level, and none of that is any string this walk produces.
+        chargeUnits(budget, Math.max(MIN_ROW_COST, maxRowLength) * (depth + 1));
+
         table.addRow(
           label,
-          chargeText(
+          // `chargeNestedText`, because a cause's table is re-emitted by every ancestor:
+          // billed once, a 200 KB `message` twenty-five causes deep rendered 26 MB against
+          // the 1 MB cap.
+          chargeNestedText(
             budget,
             safeStringify(value, joinPath(path, key), reportRender),
+            rowTextLevels(maxRowLength, depth),
           ),
         );
       }
@@ -769,13 +790,14 @@ function errorToASCIITable(
         if (masked === null || typeof masked !== 'object') {
           table.addRow(
             'AdditionalInfo',
-            chargeText(
+            chargeNestedText(
               budget,
               safeStringify(
                 masked,
                 joinPath(path, 'additionalInfo'),
                 reportRender,
               ),
+              rowTextLevels(maxRowLength, depth),
             ),
           );
 
@@ -1009,11 +1031,14 @@ function addErrorTail(
     reportRender(stack.error, joinPath(path, 'stack'));
     table.addValueOnSeparateRow('Stack', UNRENDERABLE_VALUE);
   } else if (stack) {
+    chargeUnits(budget, Math.max(MIN_ROW_COST, maxRowLength) * (depth + 1));
+
     table.addValueOnSeparateRow(
       'Stack',
-      chargeText(
+      chargeNestedText(
         budget,
         safeStringify(stack, joinPath(path, 'stack'), reportRender),
+        rowTextLevels(maxRowLength, depth),
       ),
     );
   }
@@ -1028,6 +1053,25 @@ function addErrorTail(
  * the only ones the cap exists for - were the ones it stopped bounding.
  */
 const MIN_ROW_COST = 8;
+
+/**
+ * What one character of a row's text actually costs the whole render.
+ *
+ * Two multipliers, both of which the flat per-row charge misses. A cause's table is
+ * re-wrapped and re-indented by every level above it, so a character is emitted once per
+ * enclosing level; and each *wrapped line* carries borders and padding, which at the
+ * narrow widths deep nesting reaches - the width drops by four per level and floors at
+ * {@link KEY_VALUE_TABLE_MIN_WIDTH} - costs more than the content it frames. Charging the
+ * text flat, a 200 KB message twenty-five causes deep rendered 26 MB against the 1 MB cap.
+ */
+function rowTextLevels(maxRowLength: number, depth: number): number {
+  const content = Math.max(1, maxRowLength - ROW_FRAME_WIDTH);
+
+  return ((depth + 1) * maxRowLength) / content;
+}
+
+/** Borders, padding and the key column's separator around one wrapped line of text. */
+const ROW_FRAME_WIDTH = 6;
 
 function stringifyValue(
   value: unknown,

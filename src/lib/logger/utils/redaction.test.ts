@@ -1571,6 +1571,34 @@ describe('the redaction walk is bounded by entries, not by a reported length', (
     expect(redacted.password).not.toBe(SECRET);
   });
 
+  test('a path into a function masks the function whole', () => {
+    // A function is not a plain container, so a path pointing inside one masks the value
+    // the way it does for a class instance. It used to exit at the `typeof !== 'object'`
+    // guard above that branch, handing every sink the function with its secret still on it.
+    const callback = Object.assign(function handler(): void {}, {
+      password: SECRET,
+    });
+
+    const redacted = applyRedaction({ callback }, ['callback.password']);
+
+    expect(redacted.callback).not.toBe(callback);
+    expect(typeof redacted.callback).toBe('string');
+    expect(JSON.stringify(redacted)).not.toContain(SECRET);
+  });
+
+  test('a `__proto__` segment does not fabricate a key on the bag', () => {
+    // `container['__proto__']` resolves through a non-enumerable accessor on
+    // `Object.prototype`, which the walk never reaches - so widening for it added a
+    // `__proto__` key that every sink then serialized into the log line.
+    const redacted = applyRedaction({ x: 1 }, ['__proto__.polluted']);
+
+    expect(Object.prototype.hasOwnProperty.call(redacted, '__proto__')).toBe(
+      false,
+    );
+    expect(JSON.stringify(redacted)).toBe('{"x":1}');
+    expect(({} as Record<string, unknown>).polluted).toBeUndefined();
+  });
+
   test('an ordinary payload is nowhere near the entry cap', () => {
     const items = Array.from({ length: 1_000 }, (_, index) => ({
       index,

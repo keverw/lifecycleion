@@ -1748,6 +1748,54 @@ describe('errorToString - bounds that hold at the entry point', () => {
     expect(enormous).toContain('boom');
   });
 
+  it('bounds a deep cause chain carrying a large message', () => {
+    // Every level re-wraps, re-pads and re-indents the level below it, so one character of
+    // the innermost message is emitted once per enclosing level. Charged flat, a 200 KB
+    // message twenty-five causes deep rendered 26 MB against the one-megabyte cap.
+    let error: unknown = new Error('x'.repeat(200_000));
+
+    for (let level = 0; level < 25; level++) {
+      error = new Error(`lvl${String(level)}`, { cause: error });
+    }
+
+    const rendered = errorToString(error);
+
+    expect(rendered).not.toBe('<error could not be rendered>');
+    expect(rendered).toContain('lvl24');
+    expect(rendered.length).toBeLessThan(1_000_000);
+  });
+
+  it('renders a long word at a column narrow enough to split it per character', () => {
+    // The table narrows by four per cause level and floors at nine, where wrapping splits
+    // a word into one entry per grapheme. Spread into `push`, that was one argument per
+    // entry and a `RangeError` from the engine's argument limit - which the backstop
+    // turned into `<error could not be rendered>`, losing the error entirely.
+    let error: unknown = new Error(`m${'y'.repeat(400_000)}`);
+
+    for (let level = 0; level < 20; level++) {
+      error = new Error(`lvl${String(level)}`, { cause: error });
+    }
+
+    const rendered = errorToString(error);
+
+    expect(rendered).not.toBe('<error could not be rendered>');
+    expect(rendered).toContain('lvl19');
+  });
+
+  it('treats the root as seen, so a self-referential cause renders once', () => {
+    // `serializeError` registers the root before the walk; this did not, so the error
+    // rendered in full, then again as its own cause, and only the third visit was caught.
+    const error = new Error('selfcause') as Error & { cause?: unknown };
+
+    error.cause = error;
+    error.stack = 'stack-without-the-message';
+
+    const rendered = errorToString(error);
+    const occurrences = rendered.split('selfcause').length - 1;
+
+    expect(occurrences).toBe(1);
+  });
+
   it('falls back to the default width for a width that names nothing', () => {
     // `0` and `NaN` already landed on the default: both are falsy, so the constructor's
     // `tableWidth && tableWidth < 9` guard never reached its throw and `|| 80` applied.

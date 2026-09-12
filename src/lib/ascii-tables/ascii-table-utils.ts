@@ -34,7 +34,20 @@ export class ASCIITableUtils {
           currentLine = word;
         } else {
           const subWords = ASCIITableUtils.splitWord(word, maxLength);
-          lines.push(...subWords.slice(0, -1));
+
+          // A loop, not `push(...subWords.slice(0, -1))`: `splitWord` returns one entry
+          // per `maxLength` graphemes, and `maxLength` bottoms out at 1 at
+          // `KEY_VALUE_TABLE_MIN_WIDTH` - which a cause chain reaches, since each level
+          // narrows the table by four. Spreading passes one argument per entry, so a long
+          // word in a narrow column raised `Maximum call stack size exceeded` from inside
+          // the renderer, and `errorToString`'s backstop turned that into
+          // `<error could not be rendered>` - the error's message, name and stack thrown
+          // away because its column was narrow. Same reasoning as
+          // `KeyValueASCIITable`'s nested-value loop.
+          for (const subWord of subWords.slice(0, -1)) {
+            lines.push(subWord);
+          }
+
           currentLine = subWords[subWords.length - 1];
         }
       }

@@ -134,6 +134,29 @@ export class FileSink implements LogSink {
   private lastError?: Error;
   private consecutiveFailures = 0;
   private totalEntriesWritten = 0;
+  /**
+   * Whether the first entry refused because the sink is closing has been reported.
+   *
+   * See {@link write}. Every such entry is counted; only the first is reported.
+   */
+  private reportedCloseRefusal = false;
+
+  /**
+   * Errors a write callback has already reported, so the stream's `'error'` event does not
+   * report them again.
+   *
+   * The same pairing `NamedPipeSink` keeps, and for the same reason: a stream delivers one
+   * failed write through both channels, and they know different halves of it. The callback
+   * knows which line it was and whether it is coming back; the event knows only that the
+   * stream is gone. Reported by both, a consumer got two entries for one failure, the
+   * second contradicting the first about the line's fate.
+   *
+   * Keyed on the error itself rather than a single slot, so an unrelated failure arriving
+   * in between cannot consume the entry that was waiting for its own event. Weak, so
+   * remembering one cannot keep it alive.
+   */
+  private readonly suppressedWriteErrors = new WeakSet<object>();
+
   private closing = false;
   private closed = false;
   private closeTimeoutMS: number;
@@ -154,16 +177,52 @@ export class FileSink implements LogSink {
   }
 
   public write(entry: LogEntry): void {
-    if (this.closing || this.closed) {
-      return;
-    }
-
     // Check if log level is below minimum threshold (skip for raw logs)
     if (entry.type !== 'raw') {
       const logLevel = getLogLevel(entry.type);
       if (logLevel > this.minLevel) {
         return;
       }
+    }
+
+    if (this.closing || this.closed) {
+      // After the level filter, never before it: an entry below `minLevel` was never
+      // going to be written, so it is not a line this sink failed to deliver and must not
+      // land in `droppedEntries` - or fire a `'close'` report for a `debug` line.
+      // Counted and said, not discarded quietly - the same answer `NamedPipeSink` gives.
+      // `close()` waits up to `closeTimeoutMS`, and every line logged in that window left
+      // through this early return with `droppedEntries` unmoved, `onError` silent and
+      // `getHealth()` reporting a clean shutdown. `abandonQueueOnClose` counts what was
+      // already queued; these are the ones refused at the door.
+      this.droppedEntries++;
+
+      // Once, for the reason the abandoned queue reports once: an application still
+      // logging through a thirty-second close would otherwise get a callback per line.
+      if (!this.reportedCloseRefusal) {
+        this.reportedCloseRefusal = true;
+
+        const failure = new FileSinkError(
+          `Entry logged after close() began; it was not written, and further ones are counted in droppedEntries without being reported`,
+        );
+
+        this.lastError = failure;
+
+        reportThroughHandler(
+          this.onError === undefined
+            ? undefined
+            : () =>
+                this.onError?.({
+                  kind: 'close',
+                  error: failure,
+                  target: this.currentLogFile ?? this.logDir,
+                  entry,
+                  disposition: 'lost',
+                }),
+          () => describeError(failure),
+        );
+      }
+
+      return;
     }
 
     // Rendered here rather than on the write path, which runs after `setupLogFile` and
@@ -682,10 +741,32 @@ export class FileSink implements LogSink {
         return reject(new FileSinkError('No log file stream available'));
       }
 
-      this.logFileStream.write(messageToWrite, (err) => {
+      const writingTo = this.logFileStream;
+
+      writingTo.write(messageToWrite, (err) => {
         if (err) {
-          // Stream is broken - destroy it so it can be recreated
-          this.destroyStream();
+          // The event is told to keep quiet about this particular error; it still tears
+          // the stream down, which is the half it does know about. A non-object is not
+          // trackable and is simply not suppressed: the event then reports it, which is
+          // noisier than ideal but never silent.
+          if (typeof err === 'object') {
+            this.suppressedWriteErrors.add(err);
+          }
+
+          // The stream that failed, not whatever is current - the identity guard the
+          // `'error'` handler carries, for the same hazard. A callback belonging to a
+          // stream a rotation has since replaced tore down the healthy replacement and
+          // lost its buffer.
+          if (this.logFileStream === writingTo) {
+            this.destroyStream();
+          } else {
+            try {
+              writingTo.destroy();
+            } catch {
+              // Nothing further to try for a stream nothing is using.
+            }
+          }
+
           reject(new FileSinkError('Error writing to log file', err));
         } else {
           this.currentLogSize += messageBytes;
@@ -754,7 +835,7 @@ export class FileSink implements LogSink {
       this.logFileStream = stream;
       this.currentLogFile = currentLogFile;
 
-      stream.on('error', () => {
+      stream.on('error', (streamError: unknown) => {
         // The stream that failed, not whatever is current. A rotation replaces this
         // stream, and the one it replaced can still deliver its error afterwards -
         // ungated, that late error destroyed the *live* stream, failing whatever write
@@ -771,6 +852,74 @@ export class FileSink implements LogSink {
         }
 
         this.destroyStream();
+
+        // Already said, by the write callback that knew which line it was and whether it
+        // was coming back. Consumed only when it matches, so an unrelated error cannot
+        // unsuppress the report still waiting for its own event.
+        if (
+          typeof streamError === 'object' &&
+          streamError !== null &&
+          this.suppressedWriteErrors.has(streamError)
+        ) {
+          this.suppressedWriteErrors.delete(streamError);
+
+          return;
+        }
+
+        // Reported, not only torn down. This handler recorded nothing at all, so an async
+        // failure with no write in flight to pair it with - the disk filling, the file
+        // removed underneath the descriptor, an open that failed - left `getHealth()`
+        // answering `isHealthy: true` with a stale `lastError` and `onError` never fired,
+        // where `NamedPipeSink` reports every such failure. A write that was in flight
+        // still reports through its own rejection, which is the report suppressed above;
+        // this covers the failure that has no line to attach to.
+        //
+        // `'setup'` while the stream is still opening, `'write'` once it has a descriptor -
+        // the classification `NamedPipeSink` settled on. `createWriteStream` does not throw
+        // for `EACCES`, `EISDIR` or `EMFILE`, it emits, and `'write'` is documented as the
+        // one kind that means an entry is at risk: a destination that could never be opened
+        // is about no entry at all.
+        const kind: SinkFailureKind = stream.pending ? 'setup' : 'write';
+
+        const failure = new FileSinkError(
+          stream.pending
+            ? `Failed to setup log file: ${currentLogFile}`
+            : 'Log file stream failed',
+          toError(streamError),
+        );
+
+        this.lastError = failure;
+
+        // Only a failure of a stream that had a descriptor says anything about this
+        // sink's ability to write; an open that never completed is `isInitialized`'s
+        // business, exactly as `NamedPipeSink` treats it.
+        if (kind === 'write') {
+          this.consecutiveFailures++;
+        } else {
+          // An open that never completed leaves the sink uninitialized, whatever
+          // `setupLogFile` marked on its way out: `createWriteStream` returns a stream for
+          // a path it cannot open and fails afterwards, so the flag was set and
+          // `getHealth()` answered `isHealthy: true` for a sink with no descriptor at all.
+          // The next `writeEntry` calls `setupLogFile` again and sets it back when the
+          // open really does succeed.
+          this.isInitialized = false;
+        }
+
+        reportThroughHandler(
+          this.onError === undefined
+            ? undefined
+            : () =>
+                this.onError?.({
+                  kind,
+                  error: failure,
+                  target: this.currentLogFile ?? this.logDir,
+                  // No `entry`: the stream failed on its own, not while carrying a line
+                  // this sink can name. Anything queued is retried on the reopened stream
+                  // and reported on its own terms if that fails.
+                  disposition: 'no_entry',
+                }),
+          () => describeError(failure),
+        );
       });
 
       // Get current file size

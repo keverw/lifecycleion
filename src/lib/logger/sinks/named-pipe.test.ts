@@ -2506,6 +2506,94 @@ describe('NamedPipeSink', () => {
     await sink.close();
   }, 15000);
 
+  test('a self-logging onError cannot recurse through a throwing formatter', async () => {
+    // The other half of the invariant above. The queue short-circuit that stops the
+    // no-pipe path does not apply here: the render happens in `write()`, before anything
+    // is queued, so a `formatter` that throws reported, re-entered `write()` from the
+    // handler, threw again, and reported again - without bound.
+    const pipePath = `${tmpDir.path}/self-logging-format.pipe`;
+
+    let calls = 0;
+    let depth = 0;
+    let maxDepth = 0;
+
+    const self: { sink?: NamedPipeSink } = {};
+
+    const sink = new NamedPipeSink({
+      pipePath,
+      closeTimeoutMS: 500,
+      formatter: () => {
+        throw new Error('Formatter error');
+      },
+      onError: () => {
+        calls++;
+        depth++;
+        maxDepth = Math.max(maxDepth, depth);
+
+        self.sink?.write({
+          timestamp: Date.now(),
+          type: 'error',
+          template: 'the log sink failed',
+          message: 'the log sink failed',
+        });
+
+        depth--;
+      },
+    });
+
+    self.sink = sink;
+
+    sink.write({
+      timestamp: Date.now(),
+      type: 'info',
+      template: 'first',
+      message: 'first',
+    });
+
+    expect(maxDepth).toBe(1);
+    expect(calls).toBe(1);
+
+    // Not vacuous: the handler's own line still rendered through the default format and
+    // still reached the queue, alongside the one that started this.
+    expect(sink.getHealth().queueSize).toBe(2);
+
+    await sink.close();
+  }, 15000);
+
+  test('an entry written during close() is counted and reported once', async () => {
+    // `close()` waits up to `closeTimeoutMS`, and everything logged in that window left
+    // through `write()`'s early return with nothing to show for it: `droppedEntries`
+    // unmoved, `onError` silent, `getHealth()` claiming a clean shutdown.
+    const pipePath = `${tmpDir.path}/write-during-close.pipe`;
+    const dispositions: (string | undefined)[] = [];
+
+    const sink = new NamedPipeSink({
+      pipePath,
+      closeTimeoutMS: 200,
+      onError: (failure: SinkFailure) => {
+        if (failure.kind === 'close') {
+          dispositions.push(failure.disposition);
+        }
+      },
+    });
+
+    await sink.close();
+
+    for (let index = 0; index < 3; index++) {
+      sink.write({
+        timestamp: Date.now(),
+        type: 'info',
+        template: 'late',
+        message: 'late',
+      });
+    }
+
+    expect(sink.getHealth().droppedEntries).toBe(3);
+
+    // Once, not once per line.
+    expect(dispositions).toEqual(['lost']);
+  }, 15000);
+
   test('a path that flaps reports each distinct state once, not once per change', async () => {
     // The reason the sink remembers every failure of an outage rather than just the last
     // one. Remembering only the previous failure reports on every *change*, so a path

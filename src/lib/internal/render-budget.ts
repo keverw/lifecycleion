@@ -153,3 +153,48 @@ export function chargeText(budget: RenderBudget, text: string): string {
 
   return emitted;
 }
+
+/**
+ * Charge a variable-length leaf that every level above it will re-emit.
+ *
+ * {@link chargeText} bills a leaf once, which is right for a renderer whose output is the
+ * concatenation of its leaves. A table nested inside a table is not that: every line of a
+ * cause's table is re-wrapped, padded to the width and indented again by each ancestor, so
+ * one character of the innermost message costs one character per enclosing level. Billed
+ * once, a 200 KB message twenty-five causes deep charged 200 KB and rendered 26 MB against
+ * a 1 MB cap - the cap holding only for the shallow payloads it was never needed for.
+ *
+ * `levels` is how many times the text will be emitted: 1 at the top level, where this is
+ * exactly {@link chargeText}. The cut is made against the per-level allowance, so what is
+ * kept still fits once multiplied.
+ */
+export function chargeNestedText(
+  budget: RenderBudget,
+  text: string,
+  levels: number,
+): string {
+  const factor = Math.max(1, levels);
+
+  if (factor === 1) {
+    return chargeText(budget, text);
+  }
+
+  if (text.length * factor <= budget.remaining) {
+    chargeUnits(budget, text.length * factor);
+
+    return text;
+  }
+
+  // `Math.max`, for the same reason `chargeText` needs it: the budget can already be
+  // negative when a leaf arrives, and a negative end reads as counting back from the end
+  // of the string.
+  const kept = text.slice(
+    0,
+    Math.max(0, Math.floor(budget.remaining / factor)),
+  );
+  const emitted = `${kept}${TRUNCATED_LENGTH}`;
+
+  chargeUnits(budget, emitted.length * factor);
+
+  return emitted;
+}

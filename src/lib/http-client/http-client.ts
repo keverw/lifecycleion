@@ -1296,7 +1296,14 @@ export class BaseHTTPClient {
         // failure - correctly, for a caller who meant to pass one - but an absent optional
         // hook is not a mistake, and reporting it would put two spurious lines on the
         // global channel for every request anyone ever makes.
-        if (options.onAttemptEnd === undefined) {
+        // `== null`, so an explicit `null` is treated as "none supplied" exactly as
+        // `guardProgressCallback` treats it. A caller passing `onAttemptStart: null`
+        // otherwise got a "is not a function" report on the global channel for every
+        // attempt of every request.
+        if (
+          options.onAttemptEnd === undefined ||
+          options.onAttemptEnd === null
+        ) {
           return;
         }
 
@@ -1330,7 +1337,10 @@ export class BaseHTTPClient {
       callbacks.setNextRetryAt(null);
       // Observational only; see `onAttemptEnd` above for why it is guarded, and why an
       // absent hook is skipped rather than handed over.
-      if (options.onAttemptStart !== undefined) {
+      if (
+        options.onAttemptStart !== undefined &&
+        options.onAttemptStart !== null
+      ) {
         safeHandleCallback('onAttemptStart', options.onAttemptStart, {
           attemptNumber,
           isRetry,

@@ -1530,3 +1530,196 @@ describe('FileSink - bounded queue', () => {
     expect(contents).toContain('still-working');
   });
 });
+
+describe('FileSink - entries refused at the door', () => {
+  let tmpDir: TmpDir;
+
+  beforeEach(async () => {
+    tmpDir = new TmpDir({
+      unsafeCleanup: true,
+      prefix: 'file-sink-refused-test',
+    });
+    await tmpDir.initialize();
+  });
+
+  afterEach(async () => {
+    await tmpDir.cleanup();
+  });
+
+  test('an async stream failure is reported, not only torn down', async () => {
+    // `NamedPipeSink` reports every error its stream delivers; this handler recorded
+    // nothing, so a failure with no write in flight to pair it with left `getHealth()`
+    // answering `isHealthy: true` with a stale `lastError` and `onError` never fired.
+    const failures: SinkFailure[] = [];
+    const sink = new FileSink({
+      logDir: tmpDir.path,
+      basename: 'stream-error',
+      onError: (failure) => {
+        failures.push(failure);
+      },
+    });
+
+    await sink.flush();
+
+    const stream = (
+      sink as unknown as {
+        logFileStream?: {
+          pending: boolean;
+          emit: (event: string, error: Error) => void;
+          once: (event: string, listener: () => void) => void;
+        };
+      }
+    ).logFileStream;
+
+    expect(stream).toBeDefined();
+
+    // Waited for, because the classification turns on it: a stream still opening reports
+    // `'setup'` - the destination could not be opened - and only one that has a descriptor
+    // reports `'write'`, the kind that means an entry is at risk.
+    if (stream?.pending === true) {
+      await new Promise<void>((resolve) => {
+        stream.once('open', resolve);
+      });
+    }
+
+    stream?.emit('error', new Error('ENOSPC: no space left on device'));
+
+    expect(failures).toHaveLength(1);
+    expect(failures[0]?.kind).toBe('write');
+    expect(failures[0]?.disposition).toBe('no_entry');
+    expect(sink.getHealth().isHealthy).toBe(false);
+    expect(sink.getHealth().lastError?.message).toContain(
+      'Log file stream failed',
+    );
+
+    await sink.close();
+  });
+
+  test('one failed write is reported once, not by both channels', async () => {
+    // A stream delivers a failed write through the callback *and* the `'error'` event. The
+    // callback knows which line it was and whether it is coming back; the event knows only
+    // that the stream is gone. The same identity pairing `NamedPipeSink` keeps.
+    const failures: SinkFailure[] = [];
+    const sink = new FileSink({
+      logDir: tmpDir.path,
+      basename: 'paired',
+      maxRetries: 0,
+      onError: (failure) => {
+        failures.push(failure);
+      },
+    });
+
+    await sink.flush();
+
+    const stream = (
+      sink as unknown as {
+        logFileStream?: {
+          write: (chunk: string, cb: (err?: Error) => void) => boolean;
+          emit: (event: string, error: Error) => void;
+        };
+      }
+    ).logFileStream;
+
+    expect(stream).toBeDefined();
+
+    if (stream) {
+      stream.write = (_chunk, cb) => {
+        const err = new Error('EIO: simulated');
+
+        queueMicrotask(() => {
+          cb(err);
+          stream.emit('error', err);
+        });
+
+        return true;
+      };
+    }
+
+    sink.write({
+      timestamp: Date.now(),
+      type: 'info',
+      template: 'paired',
+      message: 'paired',
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 200));
+
+    const writeFailures = failures.filter((entry) => entry.kind === 'write');
+
+    expect(writeFailures).toHaveLength(1);
+    // The half that knows the line, not the one that knows only the connection.
+    expect(writeFailures[0]?.disposition).toBe('lost');
+    expect(sink.getHealth().droppedEntries).toBe(1);
+
+    await sink.close();
+  });
+
+  test('an open that never completes is reported as setup, not write', async () => {
+    // `createWriteStream` returns a stream for a path it cannot open and fails afterwards,
+    // so this arrives as an event rather than a throw. `NamedPipeSink` settled the
+    // classification: `'write'` is the one kind that means an entry is at risk, and a
+    // destination that could never be opened is about no entry at all.
+    const failures: SinkFailure[] = [];
+    const logPath = `${tmpDir.path}/blocked-${new Date().toISOString().slice(0, 10)}.log`;
+
+    // A directory where the log file goes: `access` succeeds, the open fails with EISDIR.
+    await fsPromises.mkdir(logPath, { recursive: true });
+
+    const sink = new FileSink({
+      logDir: tmpDir.path,
+      basename: 'blocked',
+      onError: (failure) => {
+        failures.push(failure);
+      },
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 300));
+
+    expect(failures).toHaveLength(1);
+    expect(failures[0]?.kind).toBe('setup');
+    expect(failures[0]?.disposition).toBe('no_entry');
+
+    // A sink with no descriptor is not healthy, whatever `setupLogFile` marked on its way
+    // out.
+    expect(sink.getHealth().isHealthy).toBe(false);
+    expect(sink.getHealth().isInitialized).toBe(false);
+
+    await sink.close();
+  });
+
+  test('an entry written after close() is counted and reported once', async () => {
+    // The other half of `abandonQueueOnClose`. That counts what was already queued; these
+    // are the lines refused at the door during and after a close, which used to leave
+    // through `write()`'s early return with `droppedEntries` unmoved and `onError` silent.
+    const failures: SinkFailure[] = [];
+    const sink = new FileSink({
+      logDir: tmpDir.path,
+      basename: 'refused',
+      closeTimeoutMS: 150,
+      onError: (failure) => {
+        failures.push(failure);
+      },
+    });
+
+    await sink.flush();
+    await sink.close();
+
+    for (let index = 0; index < 3; index++) {
+      sink.write({
+        timestamp: Date.now(),
+        type: 'info',
+        template: `late-${String(index)}`,
+        message: `late-${String(index)}`,
+      });
+    }
+
+    expect(sink.getHealth().droppedEntries).toBe(3);
+
+    const closeFailures = failures.filter((entry) => entry.kind === 'close');
+
+    // Once, not once per line: an application still logging through a thirty-second close
+    // would otherwise get a callback per entry.
+    expect(closeFailures).toHaveLength(1);
+    expect(closeFailures[0]?.disposition).toBe('lost');
+  });
+});

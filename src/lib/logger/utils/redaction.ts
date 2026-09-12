@@ -357,6 +357,17 @@ function normalizeAlongRedactPaths(
           return;
         }
 
+        // Addressable, not merely readable. `container['__proto__']` resolves through the
+        // accessor on `Object.prototype`, whose value `isPlainContainer` accepts by way of
+        // its null-prototype branch - so a path spelled `__proto__.x` widened the bag with
+        // a fabricated `__proto__` key that every sink then serialized into the log line.
+        // Nothing was polluted, since every write here goes through `defineProperty`, but
+        // the bag grew a key the caller never had. The walk sees own keys and inherited
+        // *enumerable* ones; this has to see exactly the same set.
+        if (!isAddressableKey(container, key)) {
+          continue;
+        }
+
         let value: unknown;
 
         try {
@@ -407,6 +418,41 @@ function normalizeAlongRedactPaths(
       }
     }
   }
+}
+
+/**
+ * Whether `key` names something the walk can address on `container`.
+ *
+ * Own properties, and inherited ones only where they are enumerable - which is the set
+ * `normalizeParamsBag` flattens and therefore the set the walk resolves. A non-enumerable
+ * inherited accessor, `__proto__` being the one that matters, names nothing the walk will
+ * ever reach.
+ */
+function isAddressableKey(container: object, key: string): boolean {
+  try {
+    if (Object.prototype.hasOwnProperty.call(container, key)) {
+      return true;
+    }
+
+    for (
+      let proto: object | null = Object.getPrototypeOf(container) as
+        object | null;
+      proto !== null;
+      proto = Object.getPrototypeOf(proto) as object | null
+    ) {
+      const descriptor = Object.getOwnPropertyDescriptor(proto, key);
+
+      if (descriptor !== undefined) {
+        return descriptor.enumerable === true;
+      }
+    }
+  } catch {
+    // A `Proxy` that refuses to answer. Nothing addressable can be established, and the
+    // walk's own guards fail the container closed when it reaches it.
+    return false;
+  }
+
+  return false;
 }
 
 /**

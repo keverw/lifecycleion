@@ -569,3 +569,48 @@ describe('serializeError on non-string name/message/stack', () => {
     expect(rebuilt.message).toBe('');
   });
 });
+
+describe('error-shaped objects with inherited members', () => {
+  test('carries name, message and stack read off the prototype', () => {
+    // `isErrorLike` tests with `in`, so what makes the value error-shaped can live on its
+    // prototype. An own-key copy carried none of it: the result was `{ field: 'email' }` -
+    // not a valid `SerializedError` - and `deserializeError` rebuilt a nameless `Error('')`.
+    const proto = {
+      name: 'ValidationError',
+      message: 'bad input',
+      stack: 'at validate',
+    };
+
+    const value = Object.create(proto) as Record<string, unknown>;
+
+    value.field = 'email';
+
+    const serialized = serializeError(value);
+
+    expect(serialized.name).toBe('ValidationError');
+    expect(serialized.message).toBe('bad input');
+    expect(serialized.stack).toBe('at validate');
+    expect((serialized as Record<string, unknown>).field).toBe('email');
+
+    const rebuilt = deserializeError(serialized);
+
+    expect(rebuilt.message).toBe('bad input');
+    expect(rebuilt.name).toBe('ValidationError');
+  });
+
+  test('an own member still wins over the inherited one', () => {
+    const proto = {
+      name: 'Inherited',
+      message: 'inherited',
+      stack: 'at proto',
+    };
+    const value = Object.create(proto) as Record<string, unknown>;
+
+    value.message = 'own';
+
+    const serialized = serializeError(value);
+
+    expect(serialized.message).toBe('own');
+    expect(serialized.name).toBe('Inherited');
+  });
+});

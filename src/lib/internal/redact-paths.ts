@@ -882,7 +882,16 @@ function redactPathsInner(
     }
   }
 
-  if (value === null || typeof value !== 'object') {
+  // A function counts as a value here, not as "nothing to do". It is not a plain
+  // container, so the mask-whole branch below is the one that applies to it - and reaching
+  // that branch is the whole point: a path naming something *inside* a function exited
+  // here untouched, so `applyRedaction({ cb }, ['cb.password'])` handed every sink the
+  // function with its `password` property still on it, while the identical shape as a
+  // class instance masked correctly.
+  if (
+    value === null ||
+    (typeof value !== 'object' && typeof value !== 'function')
+  ) {
     return UNCHANGED;
   }
 

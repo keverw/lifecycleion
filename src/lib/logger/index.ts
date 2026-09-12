@@ -605,6 +605,18 @@ export class Logger extends EventEmitter {
       } finally {
         // Cleared in `finally` so a sink or handler that throws its way out cannot leave
         // the listener permanently deaf.
+        //
+        // Cleared *here*, synchronously, and not in a microtask. Deferring it bounds one
+        // more case - `runCallbackSafely` reports a rejected async handler through
+        // `result.catch(...)`, which lands after this body and so escapes the guard - but
+        // it also holds the guard for the remainder of the current task, and every
+        // *unrelated* report raised in that same task is then neither logged nor
+        // cancelled. `for (const failure of failures) reportError(failure)` loses all but
+        // the first, which is a far more ordinary shape than the loop it would close.
+        //
+        // So the bound this gives is synchronous re-entry only: a sink that reports on
+        // this channel from inside its own `write()`. A reporter that answers in a later
+        // microtask or turn is outside it.
         this._isHandlingReportedError = false;
       }
 

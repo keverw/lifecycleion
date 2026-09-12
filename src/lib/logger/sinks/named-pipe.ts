@@ -413,6 +413,22 @@ export class NamedPipeSink implements LogSink {
    * starvation the guards' own documentation says they prevent.
    */
   private isOpening = false;
+
+  /**
+   * Set while a `formatter` failure is being reported, so that report cannot re-enter it.
+   *
+   * See the guard in {@link formatEntry}. A nested format failure is not lost output: the
+   * line still renders through the default format and still goes out.
+   */
+  private isReportingFormatFailure = false;
+
+  /**
+   * Whether the first entry refused because the sink is closing has been reported.
+   *
+   * See {@link write}. Every such entry is counted; only the first is reported.
+   */
+  private reportedCloseRefusal = false;
+
   private initPromise: Promise<void>;
   private closing = false;
   private closed = false;
@@ -432,10 +448,6 @@ export class NamedPipeSink implements LogSink {
   }
 
   public write(entry: LogEntry): void {
-    if (this.closing || this.closed) {
-      return;
-    }
-
     // Before the render, so a filtered entry never runs a caller's `formatter`. Checked
     // the way the other sinks check it, `raw` included.
     if (entry.type !== 'raw') {
@@ -444,6 +456,35 @@ export class NamedPipeSink implements LogSink {
       if (logLevel > this.minLevel) {
         return;
       }
+    }
+
+    if (this.closing || this.closed) {
+      // After the level filter, never before it: an entry below `minLevel` was never
+      // going to be written, so it is not a line this sink failed to deliver and must not
+      // land in `droppedEntries` - or fire a `'close'` report for a `debug` line.
+      // Counted and said, not discarded quietly. `close()` waits up to `closeTimeoutMS`
+      // for the queue to drain, and everything logged in that window used to leave through
+      // this early return with nothing to show for it: `droppedEntries` unmoved, `onError`
+      // silent, `getHealth()` claiming a clean shutdown. `abandonQueueOnClose` counts the
+      // lines that were already queued; these are the ones refused at the door, and they
+      // went nowhere just the same.
+      this.droppedEntries++;
+
+      // Once, for the reason the abandoned queue reports once: an application still
+      // logging through a thirty-second close would otherwise get a callback per line.
+      if (!this.reportedCloseRefusal) {
+        this.reportedCloseRefusal = true;
+
+        this.handleError(
+          'close',
+          new Error(
+            `Entry logged after close() began for ${this.pipePath}; it was not written, and further ones are counted in droppedEntries without being reported`,
+          ),
+          { disposition: 'lost' },
+        );
+      }
+
+      return;
     }
 
     // Queued whenever there is nowhere to put it *yet* - before the first open, and after
@@ -1084,6 +1125,23 @@ export class NamedPipeSink implements LogSink {
       // caller asked a question that has to be answered. The open is left in flight either
       // way - see `pendingStream`.
       await this.waitForOpen(stream);
+
+      // The one exit that armed nothing. `waitForOpen` answers at `OPEN_WAIT_MS` whether
+      // or not the open has settled, and an open still in flight leaves `pendingStream`
+      // set - which `ensureConnection` reads as "an attempt is already running" and
+      // refuses every later one until `releaseStalePendingOpen` clears it. That only runs
+      // from `ensureConnection`, so a process that stopped logging never got there: the
+      // sink sat `isInitialized: false` with no timer behind it, contradicting
+      // `scheduleReopen`'s claim that recovery does not wait on traffic. Armed past
+      // `STALE_OPEN_MS`, so the timer finds the open old enough to abandon.
+      if (
+        !this.isInitialized &&
+        !this.closed &&
+        !this.closing &&
+        this.pendingStream === stream
+      ) {
+        this.scheduleReopen(STALE_OPEN_MS + REOPEN_COOLDOWN_MS);
+      }
     } catch (error) {
       this.reportOpenFailure(
         'not_found',
@@ -1766,7 +1824,21 @@ export class NamedPipeSink implements LogSink {
         // reaches the pipe. What is true at this moment is only that the sink substituted
         // its own format; the line then takes the ordinary path, and if it is queued,
         // evicted, or fails to write, that is reported on its own terms.
-        this.handleError('format', error, { disposition: 'fallback' });
+        // Guarded against the report re-entering the throw that produced it. An `onError`
+        // that logs through this same logger is the shape `close()`'s abandoned-queue
+        // report is documented safe for, and it reaches `write()` again - which renders
+        // again, runs the same throwing `formatter` again, and reports again, without
+        // bound. The queue short-circuit that stops the no-pipe path does not help here:
+        // the render happens before anything is queued.
+        if (!this.isReportingFormatFailure) {
+          this.isReportingFormatFailure = true;
+
+          try {
+            this.handleError('format', error, { disposition: 'fallback' });
+          } finally {
+            this.isReportingFormatFailure = false;
+          }
+        }
       }
     }
 

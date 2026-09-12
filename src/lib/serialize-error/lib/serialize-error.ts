@@ -262,6 +262,28 @@ function serializeErrorInner(
       for (const key of shape.keys) {
         defineEntry(copy, key, readOwnMember(source, key, path, report));
       }
+
+      // The three members by name, for the same reason the array branch below reads them
+      // that way: `isErrorLike` tests with `in`, so what makes this value error-shaped can
+      // live on its prototype, and an own-key copy carries none of it. An object created
+      // from an error-shaped prototype therefore serialized to its own keys alone -
+      // `{ field: 'email' }`, no `name`, no `message` - which is not a valid
+      // `SerializedError`, and `deserializeError` rebuilt a nameless `Error('')` from it.
+      if (!Object.prototype.hasOwnProperty.call(copy, 'name')) {
+        copy.name = readText(source, 'name', path, report) ?? 'Error';
+      }
+
+      if (!Object.prototype.hasOwnProperty.call(copy, 'message')) {
+        copy.message = readText(source, 'message', path, report) ?? '';
+      }
+
+      if (!Object.prototype.hasOwnProperty.call(copy, 'stack')) {
+        const inheritedStack = readText(source, 'stack', path, report);
+
+        if (inheritedStack !== undefined) {
+          copy.stack = inheritedStack;
+        }
+      }
     } else if (shape.kind === 'unreadable') {
       // Nothing could be enumerated, and that has to show. Acted on only for `'object'`,
       // an unreadable shape - a `Proxy` whose `ownKeys` trap throws - left `copy` empty
