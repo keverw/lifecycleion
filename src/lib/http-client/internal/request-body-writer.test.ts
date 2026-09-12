@@ -294,6 +294,49 @@ describe('writeRequestBodyChunked', () => {
     );
   });
 
+  test('rejects when the socket dies under a write that was never backpressured', async () => {
+    // The hang this used to be. `'close'` and `'error'` were armed only when `write()`
+    // asked for a drain, so a chunk the buffer took outright - callback pending, no
+    // backpressure - had nothing listening when the socket died. Nothing rejected and
+    // nothing resolved: the promise stayed pending for good, and it is the same promise
+    // `node-adapter` hands the caller as `requestBodySettled`, so `await` on it never
+    // returned. Measured against a real server that answers early and then resets: the
+    // response arrived in 112 ms and the upload outcome never came at all.
+    const data = Buffer.alloc(REQUEST_BODY_CHUNK_SIZE * 2, 0xaa);
+    const req = new EventEmitter() as EventEmitter &
+      RequestBodyWritable & { destroyed: boolean };
+    req.destroyed = false;
+    req.setHeader = () => {};
+
+    // Accepted without backpressure, and the callback never comes - which is exactly what
+    // a `ClientRequest` does with a chunk still in its buffer when the connection drops.
+    req.write = () => true;
+
+    const writePromise = writeRequestBodyChunked(data, req);
+    await Promise.resolve();
+
+    req.destroyed = true;
+    req.emit('close');
+
+    let caught: Error | undefined;
+
+    try {
+      await writePromise;
+    } catch (error) {
+      caught = error as Error;
+    }
+
+    expect(caught?.message).toBe(
+      'Request stream closed before the body was fully written',
+    );
+
+    // And nothing left on the request: the listeners come off on the way out, whether or
+    // not the write that armed them was backpressured.
+    expect(req.listenerCount('close')).toBe(0);
+    expect(req.listenerCount('error')).toBe(0);
+    expect(req.listenerCount('drain')).toBe(0);
+  });
+
   test('rejects if req emits error while waiting for drain', async () => {
     const data = Buffer.alloc(REQUEST_BODY_CHUNK_SIZE * 2, 0xaa);
     const req = new EventEmitter() as EventEmitter &

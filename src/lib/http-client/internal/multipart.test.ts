@@ -799,6 +799,49 @@ describe('serializeMultipartFormData', () => {
     );
   });
 
+  test('rejects when the socket dies under a write that was never backpressured', async () => {
+    // The same hang `writeRequestBodyChunked` had: `'close'` and `'error'` were armed only
+    // when `write()` asked for a drain, so a part the buffer took outright - callback
+    // pending, no backpressure - had nothing listening when the connection dropped. The
+    // upload promise never settled, and `node-adapter` hands that promise to the caller as
+    // `requestBodySettled`.
+    const fd = new FormData();
+    fd.append('field', 'value');
+
+    const req = new EventEmitter() as EventEmitter &
+      RequestBodyWritable & { destroyed: boolean };
+    req.destroyed = false;
+    req.setHeader = () => {};
+
+    // Accepted without backpressure, callback never called: what a `ClientRequest` does
+    // with a part still in its buffer when the socket goes.
+    req.write = () => true;
+
+    const boundary = generateMultipartBoundary();
+    const writePromise = serializeMultipartFormData(fd, req, boundary);
+
+    await Promise.resolve();
+
+    req.destroyed = true;
+    req.emit('close');
+
+    let caught: Error | undefined;
+
+    try {
+      await writePromise;
+    } catch (error) {
+      caught = error as Error;
+    }
+
+    expect(caught?.message).toBe(
+      'Request stream closed before the body was fully written',
+    );
+
+    expect(req.listenerCount('close')).toBe(0);
+    expect(req.listenerCount('error')).toBe(0);
+    expect(req.listenerCount('drain')).toBe(0);
+  });
+
   test('no upload progress is reported after the write has already rejected', async () => {
     // `maybeResolve` does more than resolve: it advances `uploadedBytes` and fires
     // `onProgress`. Its sibling in `request-body-writer` keeps an `isSettled` guard and

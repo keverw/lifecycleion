@@ -171,17 +171,29 @@ function writeChunkWithBackpressure(
     );
     hasWriteReturned = true;
 
-    // `!isSettled` as well as `!canContinue`, the same guard `serializeMultipartFormData`
-    // keeps. The callback above can run synchronously with an error - a `ClientRequest`
-    // already destroyed answers that way - and it settles the write before any listener
-    // exists. Attaching three afterwards armed nothing that could take them off again: the
-    // `req.destroyed` guard calls `onClose`, which returns on `isSettled`, so `onDrain`,
-    // `onClose` and `onError` stayed on `req` for the life of the request - once per failing
-    // chunk, which is the `MaxListenersExceededWarning` path. There is nothing to wait for
-    // once the write has already been rejected.
-    if (!canContinue && !isSettled) {
-      isDrainDone = false;
-      req.once('drain', onDrain);
+    // Armed whether or not the write was backpressured. A chunk the buffer took without
+    // asking for a drain still has a callback that only Node will call, and a socket that dies
+    // while it sits there never calls it: with the listeners attached only under backpressure,
+    // nothing rejected and nothing resolved, so the writer's promise stayed pending for good.
+    // That is the promise `requestBodySettled` hands the caller - an early-ack `200` whose
+    // connection then dropped left an `await` on it hanging forever - and the adapter's own
+    // upload-stall watchdog could not help: it destroys the request, which is precisely the
+    // event nothing was listening for.
+    //
+    // `'drain'` stays conditional: only a backpressured write has one coming.
+    //
+    // `!isSettled` throughout. The write callback can run synchronously with an error - a
+    // `ClientRequest` already destroyed answers that way - settling the write and running
+    // `cleanup()` before any listener exists. Attaching listeners afterwards armed nothing that
+    // could take them off again: the `req.destroyed` guard calls `onClose`, which returns on
+    // `isSettled`, so they stayed on `req` for the life of the request - once per chunk, which
+    // is the `MaxListenersExceededWarning` path.
+    if (!isSettled) {
+      if (!canContinue) {
+        isDrainDone = false;
+        req.once('drain', onDrain);
+      }
+
       req.once('close', onClose);
       req.once('error', onError);
 

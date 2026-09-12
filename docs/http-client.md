@@ -303,6 +303,8 @@ if (response.status === 200) {
 }
 ```
 
+It rides on every response to a bodied request, not only the successful ones: a failed response stream (`isStreamError`), a connection reset before any headers, a TLS failure. Those are the shapes where the writer is most likely to have been mid-flight, so `undefined` there means the body went out, never "no one was looking".
+
 It is advisory and changes nothing the client decides — `status`, `isFailed`, `isNetworkError`, and retries are all untouched. That is deliberate: carried on the response as a transport failure instead, a `413` that answered and stopped reading would reach you as a network error with the server's own explanation dropped. Every such failure is also reported on the global `'error'` channel, whether or not anyone awaits this. `NodeAdapter` is the only adapter that reports it today.
 
 ### Content-Type Detection and Body Parsing

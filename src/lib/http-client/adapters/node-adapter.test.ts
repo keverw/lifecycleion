@@ -4569,6 +4569,102 @@ describe('NodeAdapter via HTTPClient', () => {
     }
   }, 20000);
 
+  test('a response that fails mid-stream still carries `requestBodySettled`', async () => {
+    const net = await import('node:net');
+
+    // The shape the field exists for, and the one it was missing from: an early-ack `200`
+    // whose *response* body then fails while the upload is still parked behind it. The
+    // response resolves through `isStreamError`, and attaching the promise only to the two
+    // success paths meant `await response.requestBodySettled` gave `undefined` here - which
+    // is exactly what a clean upload looks like, for a body that never went out.
+    const server = net.createServer((socket) => {
+      socket.on('error', () => {
+        // The teardown below reaches this side as a reset; nothing here asserts on it.
+      });
+
+      socket.once('data', () => {
+        // A length the body never reaches, so cutting the connection is a premature close
+        // rather than a complete response.
+        socket.write(
+          'HTTP/1.1 200 OK\r\nConnection: keep-alive\r\nContent-Length: 1000\r\n\r\nok',
+        );
+
+        // Read nothing further: the upload parks behind the answer.
+        socket.pause();
+
+        setTimeout(() => {
+          socket.destroy();
+        }, 100);
+      });
+    });
+
+    await new Promise<void>((done) => {
+      server.listen(0, '127.0.0.1', done);
+    });
+
+    const { port } = server.address() as { port: number };
+
+    try {
+      const res = await new NodeAdapter().send({
+        requestURL: `http://127.0.0.1:${port}/upload`,
+        method: 'POST',
+        headers: {},
+        // Past what the socket buffers absorb, so the write genuinely parks.
+        body: 'x'.repeat(8 * 1024 * 1024),
+      });
+
+      // The server's real status survives the stream failure, as it always has.
+      expect(res.status).toBe(200);
+      expect(res.isStreamError).toBe(true);
+
+      // And the upload outcome travels with it.
+      expect(res.requestBodySettled).toBeDefined();
+      expect(await res.requestBodySettled).toBeInstanceOf(Error);
+    } finally {
+      server.close();
+    }
+  }, 20000);
+
+  test('a transport failure before any headers still carries `requestBodySettled`', async () => {
+    const net = await import('node:net');
+
+    // The other half of the same gap: no response at all, the connection reset under an
+    // upload that was still running. The adapter answers `{ status: 0, isTransportError }`,
+    // and that response is bodied too - so it says what became of the body rather than
+    // leaving the caller to read `undefined` as success.
+    const server = net.createServer((socket) => {
+      socket.on('error', () => {
+        // A reset on this side is the point of the test.
+      });
+
+      socket.once('data', () => {
+        socket.destroy();
+      });
+    });
+
+    await new Promise<void>((done) => {
+      server.listen(0, '127.0.0.1', done);
+    });
+
+    const { port } = server.address() as { port: number };
+
+    try {
+      const res = await new NodeAdapter().send({
+        requestURL: `http://127.0.0.1:${port}/upload`,
+        method: 'POST',
+        headers: {},
+        body: 'x'.repeat(8 * 1024 * 1024),
+      });
+
+      expect(res.status).toBe(0);
+      expect(res.isTransportError).toBe(true);
+      expect(res.requestBodySettled).toBeDefined();
+      expect(await res.requestBodySettled).toBeInstanceOf(Error);
+    } finally {
+      server.close();
+    }
+  }, 20000);
+
   test('a 413 that stops reading keeps its status and its body', async () => {
     const net = await import('node:net');
 

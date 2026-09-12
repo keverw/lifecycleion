@@ -557,6 +557,36 @@ export class NodeAdapter implements HTTPAdapter {
         settle?.(failure === undefined ? undefined : normalizeError(failure));
       };
 
+      /**
+       * Resolve with an adapter response, carrying the upload outcome on every one.
+       *
+       * {@link AdapterResponse.requestBodySettled} is documented as present on every
+       * bodied request, and attaching it at the individual `resolve` sites only put it
+       * on the two that succeeded. The responses that most need it are the other ones:
+       * an early-ack `200` whose *response* body then fails resolves through
+       * `isStreamError`, and that is exactly the shape where the writer was still
+       * running and its failure is the only record of a body that never went out.
+       * `await undefined` is `undefined`, so omitting it there reported a clean upload.
+       *
+       * Spread first so a caller that passes its own value still wins.
+       */
+      const settleResponse = (
+        response: Omit<AdapterResponse, 'effectiveRequestHeaders'>,
+      ): void => {
+        resolveAdapterResponse(
+          resolve,
+          req,
+          request.requestURL,
+          request.headers,
+          {
+            ...(bodyWriteOutcome
+              ? { requestBodySettled: bodyWriteOutcome }
+              : {}),
+            ...response,
+          },
+        );
+      };
+
       const destroyRequestQuietly = (): void => {
         if (req.writableEnded || req.destroyed) {
           return;
@@ -817,19 +847,12 @@ export class NodeAdapter implements HTTPAdapter {
 
             if (streamResult === true) {
               activeResponseStream = undefined;
-              resolveAdapterResponse(
-                resolve,
-                req,
-                request.requestURL,
-                request.headers,
-                {
-                  status,
-                  headers,
-                  body: null,
-                  isStreamed: true,
-                  requestBodySettled: bodyWriteOutcome ?? undefined,
-                },
-              );
+              settleResponse({
+                status,
+                headers,
+                body: null,
+                isStreamed: true,
+              });
             } else {
               activeResponseStream = undefined;
               // Body streaming failure after headers (disk full, writable
@@ -844,20 +867,14 @@ export class NodeAdapter implements HTTPAdapter {
               streamAbort.abort();
               destroyWritableQuietly(writable);
               req.destroy();
-              resolveAdapterResponse(
-                resolve,
-                req,
-                request.requestURL,
-                request.headers,
-                {
-                  status,
-                  headers,
-                  body: null,
-                  isStreamError: true,
-                  streamErrorCode: streamResult.code,
-                  errorCause: streamResult.cause,
-                },
-              );
+              settleResponse({
+                status,
+                headers,
+                body: null,
+                isStreamError: true,
+                streamErrorCode: streamResult.code,
+                errorCause: streamResult.cause,
+              });
             }
 
             return;
@@ -919,18 +936,11 @@ export class NodeAdapter implements HTTPAdapter {
             const body =
               chunks.length > 0 ? new Uint8Array(Buffer.concat(chunks)) : null;
 
-            resolveAdapterResponse(
-              resolve,
-              req,
-              request.requestURL,
-              request.headers,
-              {
-                status,
-                headers,
-                body,
-                requestBodySettled: bodyWriteOutcome ?? undefined,
-              },
-            );
+            settleResponse({
+              status,
+              headers,
+              body,
+            });
           });
 
           res.on('error', (err: Error) => {
@@ -939,23 +949,14 @@ export class NodeAdapter implements HTTPAdapter {
             }
 
             activeBufferedResponse = undefined;
-            resolveAdapterResponse(
-              resolve,
-              req,
-              request.requestURL,
-              request.headers,
-              {
-                status,
-                headers,
-                body: null,
-                isStreamError: true,
-                streamErrorCode: 'stream_response_error',
-                errorCause: makeResponseStreamError(
-                  'Response stream error',
-                  err,
-                ),
-              },
-            );
+            settleResponse({
+              status,
+              headers,
+              body: null,
+              isStreamError: true,
+              streamErrorCode: 'stream_response_error',
+              errorCause: makeResponseStreamError('Response stream error', err),
+            });
           });
 
           res.on('aborted', () => {
@@ -964,20 +965,14 @@ export class NodeAdapter implements HTTPAdapter {
             }
 
             activeBufferedResponse = undefined;
-            resolveAdapterResponse(
-              resolve,
-              req,
-              request.requestURL,
-              request.headers,
-              {
-                status,
-                headers,
-                body: null,
-                isStreamError: true,
-                streamErrorCode: 'stream_response_error',
-                errorCause: makeResponseStreamError('Response stream aborted'),
-              },
-            );
+            settleResponse({
+              status,
+              headers,
+              body: null,
+              isStreamError: true,
+              streamErrorCode: 'stream_response_error',
+              errorCause: makeResponseStreamError('Response stream aborted'),
+            });
           });
 
           res.on('close', () => {
@@ -986,22 +981,16 @@ export class NodeAdapter implements HTTPAdapter {
             }
 
             activeBufferedResponse = undefined;
-            resolveAdapterResponse(
-              resolve,
-              req,
-              request.requestURL,
-              request.headers,
-              {
-                status,
-                headers,
-                body: null,
-                isStreamError: true,
-                streamErrorCode: 'stream_response_error',
-                errorCause: makeResponseStreamError(
-                  'Response stream closed before completion',
-                ),
-              },
-            );
+            settleResponse({
+              status,
+              headers,
+              body: null,
+              isStreamError: true,
+              streamErrorCode: 'stream_response_error',
+              errorCause: makeResponseStreamError(
+                'Response stream closed before completion',
+              ),
+            });
           });
         })().catch((error: unknown) => {
           reject(normalizeError(error));
@@ -1045,20 +1034,14 @@ export class NodeAdapter implements HTTPAdapter {
         // failure so the client routes it through the failed/error path and
         // never retries it.
         if (isTLSCertificateError(error)) {
-          resolveAdapterResponse(
-            resolve,
-            req,
-            request.requestURL,
-            request.headers,
-            {
-              status: 495,
-              isTransportError: true,
-              isRetryable: false,
-              headers: {},
-              body: null,
-              errorCause: error,
-            },
-          );
+          settleResponse({
+            status: 495,
+            isTransportError: true,
+            isRetryable: false,
+            headers: {},
+            body: null,
+            errorCause: error,
+          });
           return;
         }
 
@@ -1080,20 +1063,14 @@ export class NodeAdapter implements HTTPAdapter {
         const wasDefinitelyNotSent = isPreConnectionError(error);
 
         // All other transport errors (ECONNREFUSED, ENOTFOUND, etc.) → status 0
-        resolveAdapterResponse(
-          resolve,
-          req,
-          request.requestURL,
-          request.headers,
-          {
-            status: 0,
-            isTransportError: true,
-            ...(wasDefinitelyNotSent ? { wasDefinitelyNotSent: true } : {}),
-            headers: {},
-            body: null,
-            errorCause: error,
-          },
-        );
+        settleResponse({
+          status: 0,
+          isTransportError: true,
+          ...(wasDefinitelyNotSent ? { wasDefinitelyNotSent: true } : {}),
+          headers: {},
+          body: null,
+          errorCause: error,
+        });
       });
 
       // Wire abort signal — destroy the underlying socket when fired.
@@ -1209,22 +1186,16 @@ export class NodeAdapter implements HTTPAdapter {
             }
 
             req.destroy();
-            resolveAdapterResponse(
-              resolve,
-              req,
-              request.requestURL,
-              request.headers,
-              {
-                // No isRetryable veto: that would stop retrying an idempotent
-                // PUT or DELETE. Delivery is unproven rather than disproven, so
-                // nothing is claimed and the client's method rule decides.
-                status: 0,
-                isTransportError: true,
-                headers: {},
-                body: null,
-                errorCause: normalizeError(error),
-              },
-            );
+            settleResponse({
+              // No isRetryable veto: that would stop retrying an idempotent
+              // PUT or DELETE. Delivery is unproven rather than disproven, so
+              // nothing is claimed and the client's method rule decides.
+              status: 0,
+              isTransportError: true,
+              headers: {},
+              body: null,
+              errorCause: normalizeError(error),
+            });
           });
       } else if (
         typeof request.body === 'string' ||
@@ -1261,22 +1232,16 @@ export class NodeAdapter implements HTTPAdapter {
             }
 
             req.destroy();
-            resolveAdapterResponse(
-              resolve,
-              req,
-              request.requestURL,
-              request.headers,
-              {
-                // No isRetryable veto: that would stop retrying an idempotent
-                // PUT or DELETE. Delivery is unproven rather than disproven, so
-                // nothing is claimed and the client's method rule decides.
-                status: 0,
-                isTransportError: true,
-                headers: {},
-                body: null,
-                errorCause: normalizeError(error),
-              },
-            );
+            settleResponse({
+              // No isRetryable veto: that would stop retrying an idempotent
+              // PUT or DELETE. Delivery is unproven rather than disproven, so
+              // nothing is claimed and the client's method rule decides.
+              status: 0,
+              isTransportError: true,
+              headers: {},
+              body: null,
+              errorCause: normalizeError(error),
+            });
           });
       } else {
         // No body — fire 100% upload immediately and end the request
