@@ -96,6 +96,22 @@ export function maskValueDeep(
   // a `Date` too. Guarded because reading the prototype of a revoked `Proxy` throws.
   //
   if (!isPlainContainer(value)) {
+    // Spent budgets are answered before anything is rendered, the same answer the guard
+    // below gives a container and the array loop gives its tail. Only the container
+    // branches consulted the budget, so a leaf reached with nothing left still ran its own
+    // `toString` and charged a budget already negative: `stringifyTemplateValue` caps one
+    // value at `MAX_RENDER_LENGTH`, so a hostile `toString` on a named, fully-masked leaf
+    // bought a megabyte of work and output past the bound every other surface honours -
+    // the same escape `normalizeMaskChar` closed for `maskChar`, where the mask's output
+    // also outran the budget that charged its input.
+    //
+    // The depth limit stays where it is: a leaf *at* `MAX_RENDER_DEPTH` is one the walk
+    // above it has already paid for and can still mask, and nothing is unbounded about
+    // rendering it.
+    if (budget.remaining <= 0) {
+      return REDACTED_PLACEHOLDER;
+    }
+
     // Partial masking is only ever right for a value that was genuinely a string.
     // Everything else - a number, an object, a function, a symbol - reaches the mask as
     // a *produced* string, and proportional masking keeps its ends: a card number kept

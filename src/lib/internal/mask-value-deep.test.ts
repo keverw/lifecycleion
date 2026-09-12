@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 
 import { REDACTED_PLACEHOLDER } from './default-redact-function';
 import { maskValueDeep } from './mask-value-deep';
+import { createRenderBudget, type RenderBudget } from './render-budget';
 
 // The budget is what keeps a mask from costing more than the render it stands in for, and
 // it was enforced on one of the two container branches. What follows covers the stop
@@ -11,6 +12,46 @@ const maskLeaf = (_key: string, text: string): string =>
   '*'.repeat(text.length);
 
 describe('maskValueDeep budget', () => {
+  test('a leaf reached with the budget spent is not rendered at all', () => {
+    // The non-container path returns *above* the guard at the top of the walk, so a leaf
+    // whose budget was already gone still ran its own `toString` and charged a budget
+    // already negative. `stringifyTemplateValue` caps one value at `MAX_RENDER_LENGTH`, so
+    // a hostile `toString` on a named, fully-masked leaf bought a megabyte of work and
+    // output past the bound every other surface honours - the same escape
+    // `normalizeMaskChar` closed for a long `maskChar`.
+    let didRender = false;
+
+    // A class instance, not a plain object: only a non-container reaches the leaf path this
+    // is about, and `{ toString }` would be walked as structure instead.
+    class Hostile {
+      public toString(): string {
+        didRender = true;
+
+        return 'x'.repeat(1_000_000);
+      }
+    }
+
+    const hostile = new Hostile();
+
+    const spent: RenderBudget = createRenderBudget();
+
+    spent.remaining = 0;
+
+    const masked = maskValueDeep(
+      'secret',
+      hostile,
+      maskLeaf,
+      undefined,
+      undefined,
+      undefined,
+      spent,
+    );
+
+    // The answer the container branch and the array tail already give for a spent budget.
+    expect(masked).toBe(REDACTED_PLACEHOLDER);
+    expect(didRender).toBe(false);
+  });
+
   test('stops a named container at the budget, as it stops an array', () => {
     // The array branch broke on an exhausted budget and the object branch did not, and a
     // *leaf* does not reach the guard at the top of the walk at all - the non-container

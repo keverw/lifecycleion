@@ -1,4 +1,5 @@
 import type { RedactValueFunction } from './default-redact-function';
+import { capToMaxRenderLength } from './render-budget';
 import {
   defaultRedactValue,
   matchRedactMaskConfig,
@@ -47,7 +48,14 @@ export function resolveRedaction(
     requested = redactFunction(key, value);
 
     if (typeof requested === 'string') {
-      return requested;
+      // Cut to the same allowance every rendered leaf gets. A replacement escapes the
+      // render budget exactly as a long `maskChar` did - the budget charges the *input*
+      // leaf before `mask` runs and never charges what comes back - so a `redactFunction`
+      // answering a ten-megabyte string for a two-hundred-character param wrote all ten to
+      // every sink, per param, per line, while `MAX_RENDER_LENGTH` saw two hundred
+      // characters of it. Capped rather than refused: a replacement is what the caller
+      // asked to appear, and a marker on the end says where it stopped.
+      return capToMaxRenderLength(requested);
     }
 
     if (typeof requested === 'number') {

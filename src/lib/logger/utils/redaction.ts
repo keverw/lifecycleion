@@ -498,6 +498,14 @@ function* stepKeys(container: object, part: string): Generator<string> {
 
   yield part;
 
+  // No cap of its own, and none needed: `length` here is the length of a *copy*. Every
+  // array this is called with came back from `forwardingContainerCopy`, which refuses one
+  // longer than `MAX_REDACTION_ENTRIES` outright, and the bag it starts from is a record.
+  // So the fan-out is already bounded by that cap one level up - measured at
+  // `new Array(20_000_000)` under `items[*].x`, which is refused at the copy and never
+  // reaches here - and a second cap would only disagree with the first. A `Proxy` cannot
+  // widen it either: the copy is a plain array whose own indexes were defined under that
+  // same bound, so no `length` trap is consulted here.
   if (!Number.isSafeInteger(length) || length <= 0) {
     return;
   }
