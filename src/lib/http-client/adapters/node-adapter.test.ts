@@ -4296,6 +4296,54 @@ describe('NodeAdapter via HTTPClient', () => {
     }
   });
 
+  test('an early response with the body still uploading does not strand the socket', async () => {
+    const net = await import('node:net');
+
+    // A complete answer mid-upload, with the connection kept alive: a proxy replying
+    // `413` before the body is finished is the ordinary shape of this. The write then
+    // fails, and the response path deliberately answers over it - but `req.end()` only
+    // ever runs on the write path's success, so nothing finished the request and the
+    // socket was held, unfinished and unusable, until the server's own timeout.
+    let didCloseSocket = false;
+
+    const server = net.createServer((socket) => {
+      socket.on('close', () => {
+        didCloseSocket = true;
+      });
+
+      socket.once('data', () => {
+        socket.write(
+          'HTTP/1.1 413 Payload Too Large\r\nConnection: keep-alive\r\nContent-Length: 3\r\n\r\nno!',
+        );
+      });
+    });
+
+    await new Promise<void>((done) => {
+      server.listen(0, '127.0.0.1', done);
+    });
+
+    const { port } = server.address() as { port: number };
+
+    try {
+      const res = await new NodeAdapter().send({
+        requestURL: `http://127.0.0.1:${port}/upload`,
+        method: 'POST',
+        headers: {},
+        // Large enough that the upload is still running when the answer lands.
+        body: 'x'.repeat(8 * 1024 * 1024),
+      });
+
+      // The server's real answer, not a fabricated transport error over it.
+      expect(res.status).toBe(413);
+
+      await new Promise((resolve) => setTimeout(resolve, 200));
+
+      expect(didCloseSocket).toBe(true);
+    } finally {
+      server.close();
+    }
+  });
+
   test('an empty-body POST whose headers reached the server is not replayable', async () => {
     const net = await import('node:net');
 

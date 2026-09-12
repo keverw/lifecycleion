@@ -673,6 +673,59 @@ describe('NamedPipeSink', () => {
     await sink.close();
   });
 
+  test('a successful reconnect() clears the failures it replaced', async () => {
+    // `consecutiveFailures` was cleared only by a successful *write*, so a `reconnect()`
+    // that opened a fresh pipe over an already-drained queue returned `{ success: true }`
+    // while `getHealth()` went on answering `isHealthy: false` - until traffic happened to
+    // arrive, which in a quiet process is never. A supervisor polling health answers that
+    // by restarting a sink that is working.
+    const pipePath = `${tmpDir.path}/reconnect-health.pipe`;
+    await createNamedPipe(pipePath);
+
+    let reader = startPipeReader(pipePath);
+
+    const sink = new NamedPipeSink({
+      pipePath,
+      jsonFormat: false,
+      onError: () => {
+        // The failure under test is recorded directly; nothing here needs to act on it.
+      },
+    });
+
+    expect(await waitForOpenPipe(sink)).toBe(true);
+
+    // The state an `EPIPE` leaves behind: failures counted against a stream that is gone.
+    const privateSink = sink as unknown as {
+      consecutiveFailures: number;
+      pipeStream?: { destroy: () => void };
+      isInitialized: boolean;
+    };
+
+    privateSink.consecutiveFailures = 2;
+    privateSink.pipeStream?.destroy();
+    privateSink.pipeStream = undefined;
+    privateSink.isInitialized = false;
+
+    expect(sink.getHealth().isHealthy).toBe(false);
+
+    // A FIFO reader sees end of input when the writer goes, so the reader is restarted
+    // around the reconnect exactly as the reconnection tests above do.
+    reader.stop();
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    reader = startPipeReader(pipePath);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    const status = await sink.reconnect();
+
+    expect(status.success).toBe(true);
+    expect(sink.getHealth().consecutiveFailures).toBe(0);
+    expect(sink.getHealth().isHealthy).toBe(true);
+
+    reader.stop();
+    await sink.close();
+  });
+
   test('should handle custom formatter errors gracefully', async () => {
     const pipePath = `${tmpDir.path}/formatter-error.pipe`;
     await createNamedPipe(pipePath);

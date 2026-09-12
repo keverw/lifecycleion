@@ -1763,4 +1763,48 @@ describe('FileSink - entries refused at the door', () => {
     expect(closeFailures).toHaveLength(1);
     expect(closeFailures[0]?.disposition).toBe('lost');
   });
+
+  test('two rotations in one second keep both archives', async () => {
+    // The rotated name used a *second*-resolution suffix, and `rename` overwrites without
+    // a word: any burst that filled `maxSizeMB` twice inside one second destroyed the
+    // first archive while `flush()` reported `entriesFailed: 0`, `droppedEntries: 0` and
+    // `onError` never fired. Lines this sink had already called written, gone silently -
+    // the one outcome the whole failure contract exists to prevent.
+    const sink = new FileSink({
+      logDir: tmpDir.path,
+      basename: 'collision-test',
+      maxSizeMB: 0.0002, // 200 bytes - a few lines per file
+      jsonFormat: false,
+    });
+
+    const line = 'Y'.repeat(120);
+
+    for (let index = 0; index < 30; index++) {
+      sink.write({
+        timestamp: Date.now(),
+        type: 'info',
+        serviceName: 'CollisionTest',
+        template: `${String(index)}: ${line}`,
+        message: `${String(index)}: ${line}`,
+      });
+    }
+
+    await sink.flush();
+    await sink.close();
+
+    const files = await fsPromises.readdir(tmpDir.path);
+
+    let written = 0;
+
+    for (const file of files) {
+      const content = await fsPromises.readFile(
+        `${tmpDir.path}/${file}`,
+        'utf8',
+      );
+
+      written += content.split('\n').filter((entry) => entry !== '').length;
+    }
+
+    expect(written).toBe(30);
+  });
 });

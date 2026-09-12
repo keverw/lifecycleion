@@ -52,18 +52,25 @@ export class MultiColumnASCIITable {
     if (this.rows.length === 0) {
       const emptyTableWidth = Math.min(tableWidth, 40);
 
-      const separator = '+' + '-'.repeat(emptyTableWidth - 2) + '+';
+      // `padEnd`, not `repeat`, for the reason the row padding below uses it: these counts
+      // are derived from a caller-supplied `tableWidth` and the width of a caller-supplied
+      // message, and a negative one throws a `RangeError` out of a renderer whose caller
+      // turns any throw into `<error could not be rendered>`. A narrow table or one wide
+      // grapheme - `emptyMessage: '漢字'` at `tableWidth: 5` - reaches it.
+      const separator = '+' + padRight('', emptyTableWidth - 2, '-') + '+';
       const emptyMessageLines = ASCIITableUtils.wrapText(
         emptyMessage,
         emptyTableWidth - 4,
       );
 
       const emptyRows = emptyMessageLines.map((line) => {
-        const paddingLeft = ' '.repeat(
+        const paddingLeft = padRight(
+          '',
           Math.floor((emptyTableWidth - stringWidth(line) - 4) / 2),
         );
 
-        const paddingRight = ' '.repeat(
+        const paddingRight = padRight(
+          '',
           Math.ceil((emptyTableWidth - stringWidth(line) - 4) / 2),
         );
 
@@ -71,7 +78,7 @@ export class MultiColumnASCIITable {
       });
 
       if (emptyRows.length === 0) {
-        emptyRows.push(`| ${' '.repeat(emptyTableWidth - 4)} |`);
+        emptyRows.push(`| ${padRight('', emptyTableWidth - 4)} |`);
       }
 
       return [separator, ...emptyRows, separator].join('\n');
@@ -166,7 +173,10 @@ export class MultiColumnASCIITable {
         // overhang a column narrower than one of its graphemes, and `repeat(-1)` throws
         // out of a renderer whose caller turns any throw into `<error could not be
         // rendered>`.
-        const padding = padRight('', columnWidths[index] - stringWidth(cellLine));
+        const padding = padRight(
+          '',
+          columnWidths[index] - stringWidth(cellLine),
+        );
 
         return ' ' + cellLine + padding + ' ';
       });

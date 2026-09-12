@@ -31,6 +31,15 @@ export type {
  */
 const MIN_CLOSE_FLUSH_MS = 100;
 
+/**
+ * How many names one rotation will try before it accepts a collision.
+ *
+ * Only reached when two rotations share a millisecond, so a handful is already generous;
+ * the bound is here because the queue is parked for the whole of a rotation and an
+ * unbounded search for a free name would park it on a directory this cannot control.
+ */
+const MAX_ROTATION_NAME_ATTEMPTS = 100;
+
 export interface FileSinkOptions {
   logDir: string;
   basename: string;
@@ -1068,9 +1077,15 @@ export class FileSink implements LogSink {
     // Close current stream
     await this.endStream();
 
-    // Rename with timestamp
-    const timestamp = Math.floor(Date.now() / 1000);
-    const rotatedFile = `${this.logDir}/${this.basename}-${currentDate}-${timestamp}.log`;
+    // Rename with timestamp, disambiguated when one second holds more than one rotation.
+    //
+    // A second-resolution suffix alone named the same archive twice under any burst that
+    // filled `maxSizeMB` twice inside one second, and `rename` overwrites silently: the
+    // earlier archive was gone, with `entriesFailed: 0`, `droppedEntries: 0` and `onError`
+    // never firing - lines that this sink had reported as written, lost with nothing
+    // anywhere saying so. Milliseconds make the ordinary collision impossible and the
+    // counter settles the rest, since rotations are serialized on this sink.
+    const rotatedFile = await this.reserveRotatedFileName(currentDate);
 
     try {
       await fsPromises.rename(this.currentLogFile, rotatedFile);
@@ -1083,5 +1098,33 @@ export class FileSink implements LogSink {
 
     // Setup new file (queue processing will resume after this)
     await this.setupLogFile();
+  }
+
+  /**
+   * A rotated-file path that names nothing already on disk.
+   *
+   * The counter is only reached when two rotations land in the same millisecond, and it is
+   * bounded: after {@link MAX_ROTATION_NAME_ATTEMPTS} the caller gets the last candidate
+   * anyway rather than this looping while the queue is parked. A `rename` onto an existing
+   * archive is still better than a rotation that never finishes.
+   */
+  private async reserveRotatedFileName(currentDate: string): Promise<string> {
+    const timestamp = Date.now();
+    const base = `${this.logDir}/${this.basename}-${currentDate}-${String(timestamp)}`;
+
+    let candidate = `${base}.log`;
+
+    for (let attempt = 1; attempt <= MAX_ROTATION_NAME_ATTEMPTS; attempt++) {
+      try {
+        await fsPromises.access(candidate);
+      } catch {
+        // Nothing there to overwrite, which is the whole question being asked.
+        return candidate;
+      }
+
+      candidate = `${base}-${String(attempt)}.log`;
+    }
+
+    return candidate;
   }
 }

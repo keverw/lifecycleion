@@ -661,6 +661,16 @@ export class NamedPipeSink implements LogSink {
 
       // Check if initialization actually succeeded
       if (this.isInitialized) {
+        // The failures counted were about the stream this call just replaced, and nothing
+        // else clears them: only a successful *write* did, so a `reconnect()` that opened a
+        // fresh pipe over an empty queue returned `{ success: true }` while `getHealth()`
+        // went on reporting `isHealthy: false` - until traffic happened to arrive, which in
+        // a quiet process is never. A supervisor polling health answers that by restarting
+        // a sink that is working. Deliberately not done on the automatic reopen path: there
+        // the queue still holds the lines that failed, and their next attempt is the honest
+        // answer to whether the connection works.
+        this.consecutiveFailures = 0;
+
         return { success: true };
       } else {
         return {

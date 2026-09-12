@@ -568,3 +568,38 @@ test('should report a transformer that throws rather than silently ignoring it',
   expect(sink.logs.length).toBe(1);
   expect(sink.logs[0]?.message).toBe('m');
 });
+
+test("an array's named properties survive the snapshot", () => {
+  // The snapshot copied indexes only, so a redaction marker sitting on an array's *named*
+  // property - which `maskValueDeep` and `redactPathsInner` both carry, and which the
+  // other sinks print - simply vanished on the way into this one. `ArraySink` then held
+  // less of the entry than every sink rendering from the same one.
+  const sink = new ArraySink();
+
+  const items = Object.assign([1, 2], {
+    cursor: 'abc',
+    token: '***REDACTED***',
+  });
+
+  sink.write({
+    timestamp: Date.now(),
+    type: 'info',
+    template: 't',
+    message: 'm',
+    redactedParams: { items },
+  });
+
+  const stored = sink.logs[0]?.redactedParams?.['items'] as unknown[] & {
+    cursor?: string;
+    token?: string;
+  };
+
+  expect(Array.isArray(stored)).toBe(true);
+  expect([...stored]).toEqual([1, 2]);
+  expect(stored.cursor).toBe('abc');
+  expect(stored.token).toBe('***REDACTED***');
+
+  // Still a copy: the point of the snapshot is that later mutation cannot reach it.
+  items.cursor = 'mutated';
+  expect(stored.cursor).toBe('abc');
+});

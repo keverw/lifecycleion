@@ -284,6 +284,31 @@ function serializeErrorInner(
 
     if (shape.kind === 'object') {
       for (const key of shape.keys) {
+        // Charged and stopped, exactly as the `isErrorValue` branch above charges its own
+        // enumeration. This one was free: an error-*like* bag - a plain object carrying
+        // `name`, `message` and `stack`, which is what arrives over IPC - copied every one
+        // of its keys uncharged and then handed them all to `deepSerializeRecord`, so the
+        // cap that bounds the identical shape without those three members bounded nothing
+        // here. Measured at 500,003 keys emitted against a budget of 100,000.
+        //
+        // The three members are never what this stops before: they are skipped here and
+        // read by name below, exactly as the `isErrorValue` branch skips the keys it has
+        // already placed. Charged like any other key, the budget could run out *on* `name`
+        // or `message` - which then held the truncation marker, or were dropped outright -
+        // and a `SerializedError` without them is one `deserializeError` rebuilds as a
+        // nameless `Error('')`.
+        if (key === 'name' || key === 'message' || key === 'stack') {
+          continue;
+        }
+
+        if (budget.remaining <= 0) {
+          defineEntry(copy, key, TRUNCATED);
+
+          break;
+        }
+
+        budget.remaining--;
+
         defineEntry(copy, key, readOwnMember(source, key, path, report));
       }
 
@@ -380,7 +405,10 @@ export function deserializeError(obj: SerializedError): Error {
     error.name = rawName;
   }
 
-  if (typeof rawStack === 'string') {
+  // Empty is absent, as it is for `message` above: a payload carrying `stack: ''` is a
+  // sender that had none, and assigning it overwrote the real stack this `new Error` was
+  // just constructed with - leaving a re-thrown error with no trace at either end.
+  if (typeof rawStack === 'string' && rawStack !== '') {
     error.stack = rawStack;
   }
 

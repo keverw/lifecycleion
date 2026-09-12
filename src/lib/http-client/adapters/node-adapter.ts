@@ -451,6 +451,20 @@ export class NodeAdapter implements HTTPAdapter {
       const req = httpModule.request(options, (res) => {
         didReceiveResponse = true;
 
+        // A body write that fails after the response arrived is answered by the response
+        // path (see `didReceiveResponse`), which deliberately does not tear the request
+        // down - the response may still be streaming in on that socket. But `req.end()`
+        // only ever runs on the write path's success, so nothing else finishes this
+        // request either: with keep-alive the socket is held, unfinished and unusable,
+        // until the server's own timeout - one leaked descriptor per early response.
+        // Once the response has been consumed the request has no further use, so an
+        // unfinished one is destroyed here, where it can no longer cut a response short.
+        res.on('close', () => {
+          if (!req.writableEnded) {
+            req.destroy();
+          }
+        });
+
         void (async () => {
           const status = res.statusCode ?? 0;
           const headers = normalizeResponseHeaders(res.headers);

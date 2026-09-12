@@ -654,4 +654,70 @@ describe('error-shaped objects with inherited members', () => {
     expect(serialized.cause.name).toBe('Error');
     expect(serialized.cause.message).toBe('cause');
   });
+
+  test('bounds an error-*like* bag carrying more own keys than the node budget', () => {
+    // The same cap from the other side. `isErrorLike` accepts a plain object with `name`,
+    // `message` and `stack` - which is what an error arriving over IPC looks like - and
+    // that branch copied every own key uncharged, so adding those three members to a huge
+    // bag bought its way past the cap the identical bag without them is bounded by.
+    const bag: Record<string, unknown> = {
+      name: 'Error',
+      message: 'like',
+      stack: 'stack',
+    };
+
+    for (let index = 0; index < 200_000; index++) {
+      bag[`k${String(index)}`] = index;
+    }
+
+    const serialized = serializeError(
+      new Error('boom', { cause: bag }),
+    ) as unknown as { cause: Record<string, unknown> };
+
+    expect(Object.keys(serialized.cause).length).toBeLessThan(200_000);
+    // What makes it error-shaped survives the cut: those three are read by name.
+    expect(serialized.cause.name).toBe('Error');
+    expect(serialized.cause.message).toBe('like');
+  });
+
+  test('an error-like bag keeps its name and message when they come last', () => {
+    // The budget can run out *on* `name` or `message` when the filler keys are enumerated
+    // first, which charging them left it free to do: the marker landed on `name`, or both
+    // were dropped, and `deserializeError` rebuilds a nameless `Error('')` from that.
+    // Swept across the boundary rather than aimed at it: which key the budget lands on
+    // depends on what the walk spent getting here, and every one of these positions used
+    // to produce either the marker or nothing at all.
+    for (const filler of [99_990, 99_992, 99_993, 99_994, 100_010]) {
+      const bag: Record<string, unknown> = {};
+
+      for (let index = 0; index < filler; index++) {
+        bag[`k${String(index)}`] = index;
+      }
+
+      bag.name = 'TypeError';
+      bag.message = 'last of all';
+      bag.stack = 'stack';
+
+      const serialized = serializeError(
+        new Error('boom', { cause: bag }),
+      ) as unknown as { cause: Record<string, unknown> };
+
+      expect(serialized.cause.name).toBe('TypeError');
+      expect(serialized.cause.message).toBe('last of all');
+    }
+  });
+
+  test('a payload carrying an empty stack keeps the reconstructed one', () => {
+    // Empty is absent, as it already is for `message`. Assigning it overwrote the stack
+    // `new Error` had just constructed, so an error re-thrown on the receiving end of an
+    // IPC boundary had no trace at either end of it.
+    const rebuilt = deserializeError({
+      name: 'Error',
+      message: 'no stack on the wire',
+      stack: '',
+    });
+
+    expect(rebuilt.stack).toBeTruthy();
+    expect(rebuilt.message).toBe('no stack on the wire');
+  });
 });

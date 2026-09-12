@@ -441,6 +441,44 @@ describe('serializeMultipartFormData', () => {
     );
   });
 
+  test('rejects, and says so accurately, when a blob yields more than its size', async () => {
+    // The mirror of the shortfall above, and not the same failure: the body overran a
+    // `Content-Length` already on the wire, so the server reads the tail as the start of
+    // another message. It was reported as "closed before the body was fully written",
+    // which points at exactly the wrong end of the payload.
+    const longFile = {
+      name: 'long.bin',
+      type: 'application/octet-stream',
+      // Claims two bytes; its stream yields six.
+      size: 2,
+      stream: () =>
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(new Uint8Array([1, 2, 3, 4, 5, 6]));
+            controller.close();
+          },
+        }),
+    };
+
+    const fd = {
+      entries: () => [['file', longFile]][Symbol.iterator](),
+    } as unknown as FormData;
+
+    const { req } = makeCapture();
+    const boundary = generateMultipartBoundary();
+
+    let caught: Error | undefined;
+
+    try {
+      await serializeMultipartFormData(fd, req, boundary);
+    } catch (error) {
+      caught = error as Error;
+    }
+
+    expect(caught?.message).toContain('Content-Length');
+    expect(caught?.message).not.toContain('closed before');
+  });
+
   test('stops writing if req.destroyed is true mid-loop', async () => {
     const fd = new FormData();
     fd.append('a', '1');

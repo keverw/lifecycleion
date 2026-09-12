@@ -302,6 +302,15 @@ export function maskWithConfig(
 
     const percent = normalizePercent(config.percent, DEFAULT_MASK_PERCENT);
 
+    // Above the strategy branches, not inside the string one. Every strategy here masks a
+    // *proportion*, so the rule this constant exists for holds for all three - and sat in
+    // the `else` it exempted exactly the requests a caller spells out: a four-digit PIN
+    // under `strategy: 'domain'` came back `***4` and a two-character value under
+    // `strategy: 'email'` came back `*b`, where the default path replaces both outright.
+    if (value.length < MINIMUM_PARTIAL_MASK_LENGTH) {
+      return REDACTED_PLACEHOLDER;
+    }
+
     if (config.strategy === 'email') {
       // The per-part percents go through the same normalization rather than being handed
       // over as given: they are the same caller-supplied number by another name, and
@@ -316,10 +325,6 @@ export function maskWithConfig(
     } else if (config.strategy === 'domain') {
       masked = datamask.domain(value, maskChar, percent);
     } else {
-      if (value.length < MINIMUM_PARTIAL_MASK_LENGTH) {
-        return REDACTED_PLACEHOLDER;
-      }
-
       masked = datamask.string(value, maskChar, percent);
     }
   } catch {

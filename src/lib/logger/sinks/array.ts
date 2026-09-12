@@ -1,6 +1,7 @@
 import {
   defineEntry,
   describeContainer,
+  namedArrayKeys,
 } from '../../internal/container-entries';
 import { isPlainContainer } from '../../internal/is-plain-container';
 import { MAX_RENDER_DEPTH, TRUNCATED } from '../../internal/render-budget';
@@ -115,6 +116,49 @@ function snapshotValue(
       } catch (error) {
         report(error, elementPath);
         copy.push(UNCOPYABLE_MARKER);
+      }
+    }
+
+    // An array's *named* properties, which the redaction walks carry and the renderers
+    // print - `maskValueDeep` and `redactPathsInner` both call `namedArrayKeys` precisely
+    // because they exist. Copied by index alone, a bag whose `items` is
+    // `Object.assign([1, 2], { cursor: 'abc' })` reached this sink as `[1, 2]`, so
+    // `ArraySink` held less than every other sink rendered from the same entry - including
+    // a redaction marker sitting on one of those keys, which simply vanished.
+    let namedKeys: string[] = [];
+
+    try {
+      namedKeys = namedArrayKeys(source);
+    } catch (error) {
+      // Reported and marked: an enumeration that refused is not an array without named
+      // properties. The marker goes in as a trailing element, since a key that was never
+      // enumerated cannot be named - the same answer `maskValueDeep` gives.
+      report(error, path);
+      copy.push(UNCOPYABLE_MARKER);
+    }
+
+    for (const namedKey of namedKeys) {
+      const namedPath = `${path}.${namedKey}`;
+
+      try {
+        defineEntry(
+          copy as unknown as Record<string, unknown>,
+          namedKey,
+          snapshotValue(
+            (source as unknown as Record<string, unknown>)[namedKey],
+            seen,
+            depth + 1,
+            namedPath,
+            report,
+          ),
+        );
+      } catch (error) {
+        report(error, namedPath);
+        defineEntry(
+          copy as unknown as Record<string, unknown>,
+          namedKey,
+          UNCOPYABLE_MARKER,
+        );
       }
     }
 

@@ -148,7 +148,11 @@ export class KeyValueASCIITable {
     if (this.rows.length === 0) {
       const emptyTableWidth = Math.min(tableWidth, 40);
 
-      const separator = '+' + '-'.repeat(emptyTableWidth - 2) + '+';
+      // `padEnd` rather than `repeat`, as the message padding below already does: both
+      // counts come from a caller-supplied `tableWidth`, and a negative one throws a
+      // `RangeError` out of a renderer that is only ever reached to describe something
+      // else.
+      const separator = '+' + padRight('', emptyTableWidth - 2, '-') + '+';
       const emptyMessageLines = ASCIITableUtils.wrapText(
         emptyMessage,
         emptyTableWidth - 4,
@@ -171,7 +175,7 @@ export class KeyValueASCIITable {
       });
 
       if (emptyRows.length === 0) {
-        emptyRows.push(`| ${' '.repeat(emptyTableWidth - 4)} |`);
+        emptyRows.push(`| ${padRight('', emptyTableWidth - 4)} |`);
       }
 
       return [separator, ...emptyRows, separator].join('\n');
@@ -268,7 +272,10 @@ export class KeyValueASCIITable {
           // into `<error could not be rendered>`: message, name and stack all thrown away
           // because one value held a wide character. `padEnd` clamps instead, so the row
           // is one cell wide of its border rather than absent.
-          const keyPadding = padRight('', columnWidths[0] - stringWidth(keyLine));
+          const keyPadding = padRight(
+            '',
+            columnWidths[0] - stringWidth(keyLine),
+          );
 
           const valuePadding = padRight(
             '',

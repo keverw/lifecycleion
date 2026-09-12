@@ -473,8 +473,18 @@ export async function serializeMultipartFormData(
   // Content-Length shortfall, so the server simply waits for bytes that never arrive and
   // the caller hangs until its own timeout rather than seeing the transport error it
   // should have.
-  if (uploadedBytes !== totalSize) {
+  if (uploadedBytes < totalSize) {
     throw new Error('Request stream closed before the body was fully written');
+  }
+
+  // The same mismatch from the other side, and it is not the same failure: a `Blob` that
+  // yields *more* than its `.size` overran a `Content-Length` already on the wire, so the
+  // server reads the tail as the start of another message. Worth its own text - the one
+  // above says the body stopped short, which points at exactly the wrong end of it.
+  if (uploadedBytes > totalSize) {
+    throw new Error(
+      `Request body wrote ${String(uploadedBytes)} bytes against a Content-Length of ${String(totalSize)}`,
+    );
   }
 }
 

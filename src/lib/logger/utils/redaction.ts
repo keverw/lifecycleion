@@ -524,8 +524,15 @@ export function markAllRedactionFailed(
   redactedKeys: unknown,
 ): Record<string, unknown> {
   try {
+    // Strings only. The list is untrusted by construction - this runs *because* it could
+    // not be used - and `Object.fromEntries` stringifies whatever it is handed, so a hole
+    // in a sparse array or a non-string entry invented a key: `new Array(2)` with one
+    // entry marked produced `{"undefined": "***REDACTION FAILED***"}`, a key name the
+    // caller never had, reaching every structured sink as though it were one of theirs.
     return Object.fromEntries(
-      (redactedKeys as string[]).map((key) => [key, REDACTION_FAILED_MARKER]),
+      (redactedKeys as unknown[])
+        .filter((key): key is string => typeof key === 'string')
+        .map((key) => [key, REDACTION_FAILED_MARKER]),
     );
   } catch {
     return {};

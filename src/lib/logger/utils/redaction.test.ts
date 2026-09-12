@@ -6,6 +6,7 @@ import {
 import {
   applyRedaction,
   defaultRedactFunction,
+  markAllRedactionFailed,
   REDACTION_FAILED_MARKER,
 } from './redaction';
 import type { RedactFunction } from '../types';
@@ -935,6 +936,19 @@ describe('applyRedaction - redactFunction return shapes', () => {
     );
   });
 
+  test('a short value is replaced outright whatever strategy asked for it', () => {
+    // The minimum-length rule sat inside the string branch, so naming a strategy skipped
+    // it: a four-digit PIN under `'domain'` came back `***4` and a two-character value
+    // under `'email'` came back `*b`, where the default path replaces both. Every strategy
+    // here masks a proportion, so the rule holds for all of them.
+    expect(
+      applyRedaction({ p: '1234' }, ['p'], () => ({ strategy: 'domain' }))['p'],
+    ).toBe('***REDACTED***');
+    expect(
+      applyRedaction({ p: 'ab' }, ['p'], () => ({ strategy: 'email' }))['p'],
+    ).toBe('***REDACTED***');
+  });
+
   test('a masking that hides nothing falls through to the placeholder', () => {
     // Percent 0 would hand back the original, which is the one unacceptable answer.
     expect(applyRedaction({ p: TOKEN }, ['p'], () => 0)['p']).toBe(
@@ -1633,5 +1647,28 @@ describe('the redaction walk is bounded by entries, not by a reported length', (
 
     expect(redacted.password).not.toBe(SECRET);
     expect(redacted.items).toEqual(items);
+  });
+});
+
+describe('markAllRedactionFailed', () => {
+  test('marks only keys that are actually named', () => {
+    // The list is untrusted by construction - this runs precisely because it could not be
+    // used - and `Object.fromEntries` stringifies whatever it is handed, so a hole in a
+    // sparse array or a non-string entry invented a key the caller never had and sent it
+    // to every structured sink as though it were one of theirs.
+    const sparse = new Array<string>(2);
+
+    sparse[0] = 'password';
+
+    expect(markAllRedactionFailed(sparse)).toEqual({
+      password: REDACTION_FAILED_MARKER,
+    });
+
+    expect(markAllRedactionFailed([1, {}, 'token'])).toEqual({
+      token: REDACTION_FAILED_MARKER,
+    });
+
+    // Unusable input still fails closed rather than throwing.
+    expect(markAllRedactionFailed(undefined)).toEqual({});
   });
 });
