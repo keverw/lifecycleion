@@ -488,6 +488,38 @@ describe('HTTPClient — basic HTTP methods', () => {
     );
   });
 
+  test('carries `requestBodySettled` through without failing the response', async () => {
+    // The upload outcome is advisory: it reaches the caller on an otherwise ordinary
+    // success, and touches nothing the client decides. Carried on the response as a
+    // transport failure instead, a `413` that stopped reading mid-upload would have
+    // arrived as a network error with the server's own explanation dropped.
+    const settled = Promise.resolve(new Error('upload cut short'));
+
+    const adapter: HTTPAdapter = {
+      getType: () => 'node',
+      send: (_request: AdapterRequest): Promise<AdapterResponse> =>
+        Promise.resolve({
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+          body: new TextEncoder().encode('{"ok":true}'),
+          requestBodySettled: settled,
+        }),
+    };
+
+    const response = await new HTTPClient({
+      adapter,
+      baseURL: 'http://example.test',
+    })
+      .post('/upload')
+      .send<{ ok: boolean }>();
+
+    expect(response.status).toBe(200);
+    expect(response.isFailed).toBe(false);
+    expect(response.isNetworkError).toBe(false);
+    expect(response.body).toEqual({ ok: true });
+    expect(await response.requestBodySettled).toBeInstanceOf(Error);
+  });
+
   test('rejects browser XHR redirect handling when explicitly enabled', () => {
     (globalThis as Record<string, unknown>).window = {};
     (globalThis as Record<string, unknown>).document = {};

@@ -156,6 +156,33 @@ export interface AdapterResponse {
    * failures carried via `isStreamError`.
    */
   errorCause?: Error;
+  /**
+   * Settles when the request **body** finishes going out, for a response that
+   * arrived while it was still being written. Advisory: it never makes a response
+   * a failure, and it never rejects.
+   *
+   * An endpoint with request buffering disabled answers while the upload is still
+   * going, and what happens to the body afterwards was invisible to the caller.
+   * It can fail - `serializeMultipartFormData` rejects when a `File` yields fewer
+   * bytes than its `Blob.size`, putting a body on the wire short of its own
+   * `Content-Length` with no transport failure anywhere - or be cut short by the
+   * adapter's own stall watchdog, seconds after the caller already read a clean
+   * `2xx`. Resolves with that failure, or with `undefined` when the body went out
+   * in full.
+   *
+   * A promise rather than a plain error field because the answer usually does not
+   * exist yet: the response is complete and is delivered immediately, and the
+   * upload settles later. Waiting for it before resolving is what this must not
+   * do - it turned a `413` that stopped reading into a network error with the
+   * server's explanation dropped, and let an abort during the wait discard a
+   * response that had already arrived in full.
+   *
+   * Present only when a body writer was running for this request. Nothing here
+   * affects `isFailed`, `isNetworkError`, retries, or the status, and every such
+   * failure is still reported on the global `'error'` channel whether or not
+   * anyone awaits this.
+   */
+  requestBodySettled?: Promise<Error | undefined>;
 }
 
 // --- Response streaming ---
@@ -503,6 +530,18 @@ export interface HTTPResponse<T = unknown> {
    * `isStreamError`.
    */
   isStreamError: boolean;
+  /**
+   * Settles when the request body finishes going out, for a response that arrived
+   * while the upload was still running. See
+   * {@link AdapterResponse.requestBodySettled}.
+   *
+   * Advisory only, and it never rejects: this response succeeded as far as the
+   * client is concerned - `isFailed`, `isNetworkError` and the status are
+   * untouched - and a caller that ignores it sees exactly what it saw before. A
+   * caller that needs to know its upload actually arrived awaits this and checks
+   * for an `Error`. Only `NodeAdapter` reports it today.
+   */
+  requestBodySettled?: Promise<Error | undefined>;
 }
 
 // --- Error ---

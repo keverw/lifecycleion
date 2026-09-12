@@ -4478,6 +4478,192 @@ describe('NodeAdapter via HTTPClient', () => {
     }
   }, 20000);
 
+  test('an upload cut short after the response settles `requestBodySettled`', async () => {
+    const net = await import('node:net');
+
+    // The failure this field exists for. The server answers in full and stops reading, so
+    // the response is complete - and delivered - while the upload is still parked behind
+    // it; the stall watchdog then tears that upload down seconds later. Nothing about the
+    // response can change by then, so the outcome of the body is carried as a promise the
+    // caller may await rather than as a field that would always be empty.
+    const server = net.createServer((socket) => {
+      socket.on('error', () => {
+        // The client's teardown reaches this side as a reset; nothing here asserts on it.
+      });
+
+      socket.once('data', () => {
+        socket.write(
+          'HTTP/1.1 200 OK\r\nConnection: keep-alive\r\nContent-Length: 2\r\n\r\nok',
+        );
+
+        // Read nothing further, ever: the upload parks and never moves again.
+        socket.pause();
+      });
+    });
+
+    await new Promise<void>((done) => {
+      server.listen(0, '127.0.0.1', done);
+    });
+
+    const { port } = server.address() as { port: number };
+
+    try {
+      const res = await new NodeAdapter().send({
+        requestURL: `http://127.0.0.1:${port}/upload`,
+        method: 'POST',
+        headers: {},
+        // Past what the socket buffers absorb, so the write genuinely parks.
+        body: 'x'.repeat(8 * 1024 * 1024),
+      });
+
+      // The server's real answer, delivered without waiting for the upload.
+      expect(res.status).toBe(200);
+      expect(res.isTransportError).toBeUndefined();
+      expect(res.requestBodySettled).toBeDefined();
+
+      // Resolves rather than rejecting, so a caller that ignores it is never handed an
+      // unhandled rejection.
+      const failure = await res.requestBodySettled;
+
+      expect(failure).toBeInstanceOf(Error);
+    } finally {
+      server.close();
+    }
+  }, 20000);
+
+  test('a body that goes out in full settles `requestBodySettled` with no error', async () => {
+    const net = await import('node:net');
+
+    const server = net.createServer((socket) => {
+      socket.on('error', () => {
+        // Only the assertions below decide the outcome.
+      });
+
+      socket.resume();
+
+      socket.once('data', () => {
+        socket.write(
+          'HTTP/1.1 200 OK\r\nConnection: keep-alive\r\nContent-Length: 2\r\n\r\nok',
+        );
+      });
+    });
+
+    await new Promise<void>((done) => {
+      server.listen(0, '127.0.0.1', done);
+    });
+
+    const { port } = server.address() as { port: number };
+
+    try {
+      const res = await new NodeAdapter().send({
+        requestURL: `http://127.0.0.1:${port}/upload`,
+        method: 'POST',
+        headers: {},
+        body: 'x'.repeat(64 * 1024),
+      });
+
+      expect(res.status).toBe(200);
+      expect(await res.requestBodySettled).toBeUndefined();
+    } finally {
+      server.close();
+    }
+  }, 20000);
+
+  test('a 413 that stops reading keeps its status and its body', async () => {
+    const net = await import('node:net');
+
+    // What carrying the body failure on the response itself would have broken: the client
+    // reads any `isTransportError` as a network failure and drops the body with it, so the
+    // server's own explanation of the `413` would never reach the caller. The upload here
+    // is torn down by the stall watchdog exactly as above; none of that may touch this
+    // response.
+    const server = net.createServer((socket) => {
+      socket.on('error', () => {
+        // The client's teardown reaches this side as a reset.
+      });
+
+      socket.once('data', () => {
+        socket.write(
+          'HTTP/1.1 413 Payload Too Large\r\nConnection: keep-alive\r\nContent-Length: 15\r\n\r\n{"error":"big"}',
+        );
+
+        socket.pause();
+      });
+    });
+
+    await new Promise<void>((done) => {
+      server.listen(0, '127.0.0.1', done);
+    });
+
+    const { port } = server.address() as { port: number };
+
+    try {
+      const res = await new NodeAdapter().send({
+        requestURL: `http://127.0.0.1:${port}/upload`,
+        method: 'POST',
+        headers: {},
+        body: 'x'.repeat(8 * 1024 * 1024),
+      });
+
+      expect(res.status).toBe(413);
+      expect(res.isTransportError).toBeUndefined();
+      expect(res.isStreamError).toBeUndefined();
+      expect(res.errorCause).toBeUndefined();
+      expect(new TextDecoder().decode(res.body ?? new Uint8Array())).toBe(
+        '{"error":"big"}',
+      );
+    } finally {
+      server.close();
+    }
+  }, 20000);
+
+  test('an abort while the upload is still running keeps a response already received', async () => {
+    const net = await import('node:net');
+
+    // The other thing waiting for the writer broke. The answer is complete at once and the
+    // upload runs on behind it, so a signal that fires in that window must not turn a
+    // response the caller already has into an `AbortError`.
+    const server = net.createServer((socket) => {
+      socket.on('error', () => {
+        // Only the assertions below decide the outcome.
+      });
+
+      socket.once('data', () => {
+        socket.write(
+          'HTTP/1.1 200 OK\r\nConnection: keep-alive\r\nContent-Length: 2\r\n\r\nok',
+        );
+
+        socket.pause();
+      });
+    });
+
+    await new Promise<void>((done) => {
+      server.listen(0, '127.0.0.1', done);
+    });
+
+    const { port } = server.address() as { port: number };
+    const controller = new AbortController();
+
+    setTimeout(() => {
+      controller.abort();
+    }, 200);
+
+    try {
+      const res = await new NodeAdapter().send({
+        requestURL: `http://127.0.0.1:${port}/upload`,
+        method: 'POST',
+        headers: {},
+        body: 'x'.repeat(8 * 1024 * 1024),
+        signal: controller.signal,
+      });
+
+      expect(res.status).toBe(200);
+      expect(new TextDecoder().decode(res.body ?? new Uint8Array())).toBe('ok');
+    } finally {
+      server.close();
+    }
+  }, 20000);
+
   test('an empty-body POST whose headers reached the server is not replayable', async () => {
     const net = await import('node:net');
 

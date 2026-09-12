@@ -2239,6 +2239,7 @@ export class BaseHTTPClient {
         redirectHistory,
         requestID,
         adapterType,
+        requestBodySettled: adapterResponse?.requestBodySettled,
       };
     }
 
@@ -2271,6 +2272,7 @@ export class BaseHTTPClient {
         redirectHistory,
         requestID,
         adapterType,
+        requestBodySettled: adapterResponse?.requestBodySettled,
       };
     }
 
@@ -2302,6 +2304,7 @@ export class BaseHTTPClient {
         redirectHistory,
         requestID,
         adapterType,
+        requestBodySettled: adapterResponse?.requestBodySettled,
       };
     }
 
@@ -2359,6 +2362,7 @@ export class BaseHTTPClient {
       redirectHistory,
       requestID,
       adapterType,
+      requestBodySettled: adapterResponse.requestBodySettled,
     };
   }
 

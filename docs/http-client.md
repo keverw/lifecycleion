@@ -277,10 +277,31 @@ interface HTTPResponse<T = unknown> {
   adapterType: AdapterType;
   isStreamed: boolean; // Body was piped to a StreamResponseFactory; body is null
   isStreamError: boolean; // Body delivery failed after headers arrived; see Stream Errors and Replay
+  requestBodySettled?: Promise<Error | undefined>; // How the *request* body ended, when the answer arrived before it did; see Uploads That Outlive the Response
 }
 ```
 
 `isFailed` is `true` only for client-level transport failures. A 404 or 500 HTTP response has `isFailed: false` (the server responded and returned a status code).
+
+#### Uploads That Outlive the Response
+
+With request buffering disabled — nginx `proxy_request_buffering off`, or any endpoint that acks a streaming upload as soon as it has what it needs — the answer arrives while the upload is still going. The response is real and is delivered immediately, and what happens to the rest of the body afterwards used to be invisible: it can fail on its own (a `File` that yields fewer bytes than its `Blob.size` puts a body on the wire short of its `Content-Length`), or be cut short by the adapter's stall watchdog seconds after you already read a clean `2xx`.
+
+`requestBodySettled` is that outcome. It is present only when a body writer was still running when the response resolved, it resolves with the failure or with `undefined`, and it never rejects:
+
+```ts
+const response = await client.post('/upload').body(form).send();
+
+if (response.status === 200) {
+  const uploadFailure = await response.requestBodySettled;
+
+  if (uploadFailure) {
+    // The server answered 200, but the body behind it never went out in full.
+  }
+}
+```
+
+It is advisory and changes nothing the client decides — `status`, `isFailed`, `isNetworkError`, and retries are all untouched. That is deliberate: carried on the response as a transport failure instead, a `413` that answered and stopped reading would reach you as a network error with the server's own explanation dropped. Every such failure is also reported on the global `'error'` channel, whether or not anyone awaits this. `NodeAdapter` is the only adapter that reports it today.
 
 ### Content-Type Detection and Body Parsing
 

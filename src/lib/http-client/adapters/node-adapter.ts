@@ -518,6 +518,45 @@ export class NodeAdapter implements HTTPAdapter {
         arm();
       };
 
+      /**
+       * How the request body ended, for a response that is resolved before it does.
+       *
+       * Carried on the response as {@link AdapterResponse.requestBodySettled} and never
+       * waited for: the response is the server's real answer and is delivered as soon as
+       * it is complete, which is usually before the upload it answered over has finished.
+       * Waiting for the writer instead is what this must not do - it turned a `413` that
+       * stopped reading into a network error with the server's explanation dropped, and
+       * let an abort during the wait discard a response that had already arrived in full.
+       *
+       * Resolves, never rejects: a caller that ignores it must not be handed an unhandled
+       * rejection for an upload it never asked about.
+       */
+      let bodyWriteOutcome: Promise<Error | undefined> | null = null;
+
+      let settleBodyWrite: ((failure: Error | undefined) => void) | null = null;
+
+      const beginBodyWrite = (): void => {
+        isWritingBody = true;
+        bodyWriteOutcome = new Promise<Error | undefined>((settle) => {
+          settleBodyWrite = settle;
+        });
+      };
+
+      /**
+       * The writer is done, one way or the other.
+       *
+       * Idempotent through `settleBodyWrite`, which is cleared on the first call: a
+       * promise resolves once, and the second settle would be silently dropped anyway.
+       */
+      const endBodyWrite = (failure?: unknown): void => {
+        isWritingBody = false;
+
+        const settle = settleBodyWrite;
+
+        settleBodyWrite = null;
+        settle?.(failure === undefined ? undefined : normalizeError(failure));
+      };
+
       const destroyRequestQuietly = (): void => {
         if (req.writableEnded || req.destroyed) {
           return;
@@ -548,8 +587,10 @@ export class NodeAdapter implements HTTPAdapter {
        * That is the outcome `didReceiveResponse` exists to prevent.
        */
       const reportWriteErrorAfterResponse = (error: unknown): void => {
+        const failure = normalizeError(error);
+
         try {
-          reportToHost(normalizeError(error));
+          reportToHost(failure);
         } catch {
           // Nothing left to report with; the response still carries the real status.
         }
@@ -780,6 +821,7 @@ export class NodeAdapter implements HTTPAdapter {
                   headers,
                   body: null,
                   isStreamed: true,
+                  requestBodySettled: bodyWriteOutcome ?? undefined,
                 },
               );
             } else {
@@ -880,6 +922,7 @@ export class NodeAdapter implements HTTPAdapter {
                 status,
                 headers,
                 body,
+                requestBodySettled: bodyWriteOutcome ?? undefined,
               },
             );
           });
@@ -1112,7 +1155,7 @@ export class NodeAdapter implements HTTPAdapter {
         // progress is length-computable (not chunked-transfer guesswork).
         const boundary = generateMultipartBoundary();
 
-        isWritingBody = true;
+        beginBodyWrite();
 
         serializeMultipartFormData(
           request.body,
@@ -1121,11 +1164,11 @@ export class NodeAdapter implements HTTPAdapter {
           reportUploadProgress,
         )
           .then(() => {
-            isWritingBody = false;
+            endBodyWrite();
             req.end();
           })
           .catch((error: unknown) => {
-            isWritingBody = false;
+            endBodyWrite(error);
 
             // See `didReceiveResponse`: the server has already answered, so the
             // write failing is how that answer arrived, not a transport failure
@@ -1169,15 +1212,15 @@ export class NodeAdapter implements HTTPAdapter {
 
         req.setHeader('Content-Length', bytes.length.toString());
 
-        isWritingBody = true;
+        beginBodyWrite();
 
         writeRequestBodyChunked(bytes, req, reportUploadProgress)
           .then(() => {
-            isWritingBody = false;
+            endBodyWrite();
             req.end();
           })
           .catch((error: unknown) => {
-            isWritingBody = false;
+            endBodyWrite(error);
 
             // See `didReceiveResponse`: the server has already answered, so the
             // write failing is how that answer arrived, not a transport failure
