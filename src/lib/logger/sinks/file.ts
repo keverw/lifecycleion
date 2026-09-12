@@ -561,9 +561,16 @@ export class FileSink implements LogSink {
       // Create log directory if it doesn't exist
       await fsPromises.mkdir(this.logDir, { recursive: true });
 
-      // Initialize log file
+      // Initialize log file. `setupLogFile` owns `isInitialized`, and setting it again here
+      // undid the one thing that flag's identity check exists to protect: `createWriteStream`
+      // reports a path it cannot open - `EISDIR`, `EACCES`, `EMFILE` - as an event, typically
+      // while `setupLogFile` is suspended in `stat`, so the `'error'` handler destroyed the
+      // stream and cleared the flag and this line then put it straight back. `getHealth()`
+      // answered `{ isInitialized: true, isHealthy: true }` for a sink holding no descriptor
+      // at all, which is the state the handler had just finished reporting. A setup that
+      // returns without marking the flag - a `close()` that landed mid-open, or a stream a
+      // rotation has since replaced - means exactly that, and is left alone.
       await this.setupLogFile();
-      this.isInitialized = true;
 
       // Process any queued writes
       await this.processQueue();
@@ -625,8 +632,18 @@ export class FileSink implements LogSink {
           // A render that failed is never retried: the line is not re-rendered by design
           // (see `QueuedEntry.formatError`), so every attempt would raise the same
           // failure and call `onError` again for one entry that can never be written.
+          //
+          // And never once the sink is closed. `close()` gives up on its drain at
+          // `closeTimeoutMS` with a pass possibly still in flight, and re-queueing from
+          // there put the entry back in a queue `abandonQueueOnClose()` had already emptied
+          // and nothing would ever drain: `getHealth().queueSize` stayed above zero after
+          // `await close()` resolved, and the line was reported `'retrying'` - `maxRetries`
+          // times, against a sink that could only answer `Cannot write to closed sink` -
+          // before finally being counted. `NamedPipeSink.requeue` takes the same view: past
+          // the close, the honest answer is that the entry is lost.
           const willRetry =
             queuedEntry.formatError === undefined &&
+            !this.closed &&
             queuedEntry.attempts < this.maxRetries;
 
           // The shared rung, which also closes a gap this had and `NamedPipeSink` did
@@ -801,6 +818,17 @@ export class FileSink implements LogSink {
     // Check rotation before writing (handles date change and size limit)
     await this.rotateIfNeeded();
 
+    // Asked again, after `setupLogFile` and `rotateIfNeeded`. `close()` bounds its drain
+    // loop and returns while a pass that started before the deadline is still suspended in
+    // one of those, so the check at the top of this method is not the last word: that pass
+    // resumed and wrote a line to disk *after* `await close()` had already resolved and
+    // reported the sink shut down. Raised as an ordinary write failure so the entry is
+    // counted and reported like any other line this sink did not deliver, rather than
+    // landing in a file nobody is expecting to grow any more.
+    if (this.closed) {
+      throw new FileSinkError('Cannot write to closed sink');
+    }
+
     // Always the line rendered in `write`. A render that threw has already been raised
     // above, so this is never a second attempt at one.
     const messageToWrite = queued.formatted ?? '';
@@ -901,14 +929,24 @@ export class FileSink implements LogSink {
    * Setup the log file
    */
   private async setupLogFile(): Promise<void> {
-    // Nothing to open for a sink that is going away. `close()` bounds its drain loop, so a
-    // `writeEntry` suspended in here - a slow `mkdir` on a network mount is enough - resumed
-    // *after* that loop gave up, after the stream `close()` found had been destroyed and
-    // after `close()` itself resolved. It then opened a fresh descriptor nothing would ever
-    // close and set `isInitialized` back to `true`, so `getHealth()` reported a closed sink
-    // as initialized - the state `close()` clears the flag to prevent. Checked again below
-    // for the same reason: every await here is a place `close()` can run.
-    if (this.closing || this.closed) {
+    // Nothing to open for a sink that is already closed. `close()` bounds its drain loop,
+    // so a `writeEntry` suspended in here - a slow `mkdir` on a network mount is enough -
+    // resumed *after* that loop gave up, after the stream `close()` found had been
+    // destroyed and after `close()` itself resolved. It then opened a fresh descriptor
+    // nothing would ever close and set `isInitialized` back to `true`, so `getHealth()`
+    // reported a closed sink as initialized - the state `close()` clears the flag to
+    // prevent. Checked again below for the same reason: every await here is a place
+    // `close()` can run.
+    //
+    // `closed` only, not `closing`. `close()` raises `closing` *before* the drain loop that
+    // is the whole point of waiting, and that loop's writes come through here whenever the
+    // first entry arrives before the constructor's `initialize()` has opened anything -
+    // `new FileSink(...)`, one `write()`, `await close()`. Refusing during the drain phase
+    // meant that sink created no file at all and reported the entry lost after exhausting
+    // its retries, where the same sequence wrote it before. The descriptor a drain-phase
+    // open creates is still the one `close()` ends afterwards, since `endStreamWithin`
+    // reads whatever stream is current when it runs.
+    if (this.closed) {
       return;
     }
 
@@ -927,7 +965,7 @@ export class FileSink implements LogSink {
         await fsPromises.writeFile(currentLogFile, '', { flag: 'a' });
       }
 
-      if (this.closing || this.closed) {
+      if (this.closed) {
         return;
       }
 
@@ -1041,7 +1079,11 @@ export class FileSink implements LogSink {
       // teardown that would have ended it. Torn down here rather than left for nobody: the
       // descriptor is the leak, and `isInitialized` must not go back up behind a `close()`
       // that cleared it.
-      if (this.closing || this.closed) {
+      //
+      // `closed` only, for the reason the guards at the top of this method are: a stream
+      // opened while `close()` is still draining is the stream those queued entries are
+      // written through, and destroying it here left them with nowhere to go.
+      if (this.closed) {
         this.destroyStream();
 
         return;
@@ -1102,6 +1144,19 @@ export class FileSink implements LogSink {
 
     // Date changed - setup new file
     if (this.currentLogFile !== expectedFile) {
+      // Guarded exactly as `rotateFile()` is, and for both of its reasons. This branch
+      // awaits `endStreamWithin(this.closeTimeoutMS)` - a *fresh* full-length wait, begun
+      // from inside a close that is already keeping its own budget, so a UTC midnight
+      // crossed during a shutdown on a stalled mount made a documented thirty-second bound
+      // a sixty-second one. And it ends the stream `close()` is draining through to open the
+      // next day's file, which past `closed` is a descriptor nothing will ever close. The
+      // entry in hand goes to the day the sink was already writing, which is the right
+      // trade at shutdown: a log line in the previous day's file, rather than a close that
+      // overshoots its bound or a stream that outlives it.
+      if (this.closing || this.closed) {
+        return;
+      }
+
       // Ended first, exactly as `rotateFile()` ends it. `setupLogFile()` overwrites
       // `logFileStream` with no teardown, so the stream this replaces was left open and
       // unreachable: one `WriteStream` and one file descriptor leaked per UTC midnight for

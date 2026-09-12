@@ -2095,17 +2095,21 @@ describe('NamedPipeSink', () => {
 
     expect(sink.getHealth().queueSize).toBe(4);
 
-    // `close()` sets `closing` synchronously, so the reader opened here only releases the
-    // `open` blocked in libuv's threadpool - the stream it completes is destroyed unused
-    // rather than draining the queue this test is about. Walking away from that pending
-    // open instead would take one of four threads with it and stall every later test.
-    const closePromise = sink.close();
+    // No reader for the whole close either, so it gives up on `closeTimeoutMS` with nothing
+    // to flush into - which is the shutdown this test is about. A reader attached *during*
+    // the close would not reproduce it: the write side then opens while `closing` is set,
+    // the drain loop promotes it and writes all four, which is the behaviour
+    // `'writes an entry queued before the pipe finishes opening'` covers.
+    await sink.close();
+
+    // Opened only now, to release the `open` still blocked in libuv's threadpool: walking
+    // away from it would take one of four threads with it and stall every later test. With
+    // `closed` set, the stream it completes is destroyed unused.
     const readerFd = fs.openSync(
       pipePath,
       fs.constants.O_RDONLY | fs.constants.O_NONBLOCK,
     );
 
-    await closePromise;
     fs.closeSync(readerFd);
 
     expect(sink.getHealth().queueSize).toBe(0);
@@ -2956,5 +2960,47 @@ describe('NamedPipeSink', () => {
         reader.kill('SIGKILL');
       }
     }
+  }, 15000);
+
+  test('writes an entry queued before the pipe finishes opening', async () => {
+    // A FIFO's write side does not open until a reader arrives, so on this sequence the
+    // `'open'` event lands while `close()` is still awaiting `initPromise` - during
+    // `closing`. Refusing to promote the stream there left `pipeStream` undefined, which is
+    // the one condition the drain loop will not wait on, so the backlog was abandoned with
+    // a reader attached and consuming.
+    const pipePath = `${tmpDir.path}/close-drain.pipe`;
+    await createNamedPipe(pipePath);
+
+    const reader = startPipeReader(pipePath);
+
+    const failures: SinkFailure[] = [];
+    const sink = new NamedPipeSink({
+      pipePath,
+      jsonFormat: false,
+      onError: (failure) => {
+        failures.push(failure);
+      },
+    });
+
+    const testMessage = 'logged before the pipe opened';
+
+    sink.write({
+      timestamp: Date.now(),
+      type: 'info',
+      serviceName: 'TestService',
+      template: testMessage,
+      message: testMessage,
+    });
+
+    await sink.close();
+
+    // The reader's own delivery is asynchronous even once the write has flushed.
+    await new Promise((resolve) => setTimeout(resolve, 200));
+
+    expect(reader.data.join('')).toContain(testMessage);
+    expect(sink.getHealth().droppedEntries).toBe(0);
+    expect(failures).toEqual([]);
+
+    reader.stop();
   }, 15000);
 });

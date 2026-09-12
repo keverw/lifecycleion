@@ -1,4 +1,12 @@
-import { describe, test, expect, mock, beforeEach, afterEach } from 'bun:test';
+import {
+  describe,
+  test,
+  expect,
+  mock,
+  beforeEach,
+  afterEach,
+  spyOn,
+} from 'bun:test';
 import { promises as fsPromises } from 'fs';
 import { FileSink } from './file';
 import type { SinkFailure, SinkFailureKind } from './internal/sink-failure';
@@ -1806,5 +1814,245 @@ describe('FileSink - entries refused at the door', () => {
     }
 
     expect(written).toBe(30);
+  });
+});
+
+describe('FileSink - entries written during close', () => {
+  let tmpDir: TmpDir;
+
+  beforeEach(async () => {
+    tmpDir = new TmpDir({
+      unsafeCleanup: true,
+      prefix: 'file-sink-close-drain-test',
+    });
+    await tmpDir.initialize();
+  });
+
+  afterEach(async () => {
+    // Restored first, exactly as the first suite restores it: the rollover test below moves
+    // `toISOString` a day forward, and without this every later caller in this isolate -
+    // the cleanup on the next line included - reads tomorrow's date. A test that mutates a
+    // global and leaves it that way passes by agreeing with itself.
+    (Date.prototype as unknown as { toISOString: () => string }).toISOString =
+      originalToISOString;
+
+    await tmpDir.cleanup();
+  });
+
+  test('an open that fails while `stat` is awaited stays uninitialized', async () => {
+    // `createWriteStream` reports a path it cannot open as an event, and the window it
+    // arrives in is the `stat` that follows: the `'error'` handler destroys the stream and
+    // clears `isInitialized`, and `initialize()` used to set the flag again the moment
+    // `setupLogFile` returned. `getHealth()` then answered `{ isInitialized: true,
+    // isHealthy: true }` for a sink holding no descriptor - the opposite of what the
+    // handler had just reported. `stat` is slowed here so the error lands inside that
+    // window every run rather than on the scheduler's whim.
+    const currentDate = new Date().toISOString().slice(0, 10);
+    const logPath = `${tmpDir.path}/eisdir-${currentDate}.log`;
+
+    // A directory where the log file goes: `access` succeeds, the open fails with EISDIR.
+    await fsPromises.mkdir(logPath, { recursive: true });
+
+    const statSpy = spyOn(fsPromises, 'stat').mockImplementation(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 150));
+
+      throw new Error('stat held open long enough for the open to fail');
+    });
+
+    try {
+      const failures: SinkFailure[] = [];
+      const sink = new FileSink({
+        logDir: tmpDir.path,
+        basename: 'eisdir',
+        onError: (failure) => {
+          failures.push(failure);
+        },
+      });
+
+      await new Promise((resolve) => setTimeout(resolve, 500));
+
+      expect(failures.map((failure) => failure.kind)).toEqual(['setup']);
+      expect(sink.getHealth().isInitialized).toBe(false);
+      expect(sink.getHealth().isHealthy).toBe(false);
+
+      await sink.close();
+    } finally {
+      statSpy.mockRestore();
+    }
+  });
+
+  test('a write still in flight when close() gives up is lost, not re-queued', async () => {
+    // `close()` gives up on its drain at `closeTimeoutMS` and returns with the pass it was
+    // waiting on still suspended in a write callback. That pass then failed and re-queued
+    // the entry - into a queue `abandonQueueOnClose()` had already emptied and nothing was
+    // ever going to drain again: `getHealth().queueSize` sat above zero after `await
+    // close()` resolved, the line was reported `'retrying'` for `maxRetries` rounds against
+    // a sink that could only answer `Cannot write to closed sink`, and only then counted.
+    // `NamedPipeSink.requeue` takes the same view this now does: past the close, the entry
+    // is lost.
+    const failures: SinkFailure[] = [];
+    const sink = new FileSink({
+      logDir: tmpDir.path,
+      basename: 'inflight',
+      closeTimeoutMS: 150,
+      onError: (failure) => {
+        failures.push(failure);
+      },
+    });
+
+    await sink.flush();
+
+    let settleWrite: ((error?: Error) => void) | undefined;
+
+    // Takes the line and then holds its callback, which is what a stalled destination does
+    // to a write already handed to the stream.
+    const stalled = {
+      destroyed: false,
+      end: (callback?: () => void) => callback?.(),
+      destroy: () => undefined,
+      write: (_chunk: string, callback: (error?: Error) => void) => {
+        settleWrite = callback;
+
+        return true;
+      },
+      on: () => undefined,
+      once: () => undefined,
+    };
+
+    (sink as unknown as { logFileStream: unknown }).logFileStream = stalled;
+
+    for (let index = 0; index < 2; index++) {
+      sink.write({
+        timestamp: Date.now(),
+        type: 'info',
+        serviceName: 'TestService',
+        template: `stalled-${String(index)}`,
+        message: `stalled-${String(index)}`,
+      });
+    }
+
+    // Long enough for the first entry to be handed to the stream and park there.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    expect(settleWrite).toBeDefined();
+
+    await sink.close();
+
+    const droppedAtClose = sink.getHealth().droppedEntries;
+
+    // The destination answers after the close has already resolved.
+    settleWrite?.(new Error('stalled write failed after the close'));
+
+    await new Promise((resolve) => setTimeout(resolve, 200));
+
+    // Nothing waiting on a sink nothing will drain, and the line counted rather than
+    // retried into a queue that no longer exists.
+    expect(sink.getHealth().queueSize).toBe(0);
+    expect(sink.getHealth().droppedEntries).toBe(droppedAtClose + 1);
+    expect(failures.some((failure) => failure.disposition === 'retrying')).toBe(
+      false,
+    );
+  });
+
+  test('a UTC date change during close() does not rotate behind the shutdown', async () => {
+    // The date branch of `rotateIfNeeded` was the one rotation with no close guard, and it
+    // awaits `endStreamWithin(closeTimeoutMS)` - a fresh full-length wait begun inside a
+    // close already keeping its own budget - before opening the next day's file through
+    // `setupLogFile`. Crossing UTC midnight during a shutdown therefore doubled the
+    // documented bound and left the close draining through a stream it had just replaced,
+    // or past `closed`, holding a descriptor nothing would ever close.
+    const logDir = `${tmpDir.path}/rollover`;
+    const sink = new FileSink({
+      logDir,
+      basename: 'rollover',
+      closeTimeoutMS: 300,
+    });
+
+    // Open on the real date first, so the rotation has a date to rotate away from.
+    await new Promise((resolve) => setTimeout(resolve, 200));
+
+    const firstDay = await fsPromises.readdir(logDir);
+
+    expect(firstDay).toHaveLength(1);
+
+    // Tomorrow, for every caller from here on: the next `rotateIfNeeded` sees a date change.
+    (Date.prototype as unknown as { toISOString: () => string }).toISOString =
+      function toISOString(this: Date): string {
+        return originalToISOString.call(
+          new Date(this.getTime() + 24 * 60 * 60 * 1000),
+        );
+      };
+
+    const internals = sink as unknown as {
+      closing: boolean;
+      rotateIfNeeded: () => Promise<void>;
+      logFileStream: unknown;
+    };
+
+    // The state a drain-phase write runs in: `close()` raises `closing` before the loop
+    // whose writes reach `rotateIfNeeded`. Driven directly because the window is otherwise
+    // a race - an ordinary `write()` is processed before the close begins, and one logged
+    // after it is refused at the door.
+    const streamBeforeClose = internals.logFileStream;
+
+    internals.closing = true;
+
+    await internals.rotateIfNeeded();
+
+    expect(await fsPromises.readdir(logDir)).toEqual(firstDay);
+
+    // Still draining through the stream it started with, not through a replacement.
+    expect(internals.logFileStream).toBe(streamBeforeClose);
+
+    // And the guard is the only thing holding it back: the same call outside a close does
+    // rotate, so this test cannot pass by the date change going unnoticed.
+    internals.closing = false;
+
+    await internals.rotateIfNeeded();
+
+    expect(await fsPromises.readdir(logDir)).toHaveLength(2);
+
+    await sink.close();
+  });
+
+  test('writes an entry queued before the first open completes', async () => {
+    // `close()` raises `closing` before the drain loop it exists to run, and that loop's
+    // writes reach `setupLogFile` whenever the first entry arrives before the constructor's
+    // `initialize()` has opened anything. A guard that refused during `closing` as well as
+    // `closed` made this sequence create no log file at all and report the entry lost.
+    const logDir = `${tmpDir.path}/close-drain`;
+    const failures: SinkFailure[] = [];
+
+    const sink = new FileSink({
+      logDir,
+      basename: 'drain',
+      maxSizeMB: 1,
+      jsonFormat: false,
+      onError: (failure) => {
+        failures.push(failure);
+      },
+    });
+
+    const testMessage = 'logged before the first open';
+
+    sink.write({
+      timestamp: Date.now(),
+      type: 'info',
+      serviceName: 'TestService',
+      template: testMessage,
+      message: testMessage,
+    });
+
+    await sink.close();
+
+    const currentDate = new Date().toISOString().slice(0, 10);
+    const content = await fsPromises.readFile(
+      `${logDir}/drain-${currentDate}.log`,
+      'utf8',
+    );
+
+    expect(content).toContain(testMessage);
+    expect(sink.getHealth().droppedEntries).toBe(0);
+    expect(failures).toEqual([]);
   });
 });

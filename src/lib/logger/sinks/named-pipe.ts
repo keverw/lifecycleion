@@ -1104,7 +1104,17 @@ export class NamedPipeSink implements LogSink {
       // `closed` so `releaseStalePendingOpen` never runs either - a descriptor and a
       // threadpool slot held for the life of the process, behind a `close()` that already
       // resolved.
-      if (this.closed || this.closing) {
+      //
+      // `closed`, not `closing`: "behind a `close()` that already resolved" is what the
+      // hazard is about, and `closed` is the flag that says so. While a close is merely
+      // *draining* it is parked on `await this.initPromise`, which is this open - so
+      // refusing here guaranteed the one thing that drain loop will not proceed without, a
+      // `pipeStream`, could never appear, and the ordinary construct-write-close sequence
+      // reported its backlog lost with a reader attached and consuming. A stream opened from
+      // here during the drain is either promoted by the `'open'` handler below and ended by
+      // `close()`, or still pending and destroyed by `close()`'s own `pendingStream`
+      // cleanup; neither outlives the close.
+      if (this.closed) {
         return;
       }
 
@@ -1215,7 +1225,16 @@ export class NamedPipeSink implements LogSink {
         // Only the stream this sink is still waiting on may be promoted. An open that
         // completes after `reconnect()` abandoned it belongs to nothing, and installing it
         // would replace a live connection with one nobody is holding.
-        if (this.closed || this.closing || this.pendingStream !== stream) {
+        //
+        // `closed`, not `closing`. A FIFO's write side does not open until a reader arrives,
+        // so on the ordinary `new NamedPipeSink(...)`, one `write()`, `await close()`
+        // sequence this `'open'` fires while `close()` is still awaiting `initPromise` -
+        // during `closing`, by construction. Turning the stream away there left
+        // `pipeStream` undefined, which is exactly the condition the drain loop below
+        // refuses to wait on, so `close()` went straight to `abandonQueueOnClose()` and
+        // reported every queued line lost with a reader attached and consuming. Promoted
+        // instead, so the drain loop has the stream it needs; `close()` ends it afterwards.
+        if (this.closed || this.pendingStream !== stream) {
           // Cleared when it is this sink's own pending stream being turned away, not only
           // when it belongs to nobody. Left set, it named a stream that had just been
           // destroyed, so `ensureConnection` went on seeing an open in flight and refused
