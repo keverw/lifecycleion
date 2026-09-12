@@ -228,6 +228,20 @@ export class TmpDir {
 
         this.wasCleanedUp = true;
       } catch (error) {
+        // Gone already is the state this was asked to reach, so it counts as done rather
+        // than as a failure: an OS tmp reaper, a parent removed with `unsafeCleanup`, or a
+        // second `cleanup()` after a first threw all leave nothing to remove. Reported as
+        // `ErrTmpDirCleanupUnexpectedError`, it also never set `wasCleanedUp`, so every
+        // later `cleanup()` threw again and the object could not reach a terminal state.
+        if (
+          error instanceof Error &&
+          (error as NodeJS.ErrnoException).code === 'ENOENT'
+        ) {
+          this.wasCleanedUp = true;
+
+          return;
+        }
+
         // Different runtimes report a non-empty directory differently:
         // - ENOTEMPTY: the standard code, from `rmdir` on Node and Bun
         // - EEXIST: some platforms use this for the same condition

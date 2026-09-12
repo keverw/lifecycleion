@@ -1053,7 +1053,19 @@ export class FileSink implements LogSink {
       // on - but nothing ever set the flag, so `getHealth()` answered
       // `{ isHealthy: false, isInitialized: false }` forever while every line was landing
       // on disk. An operator watching health saw a permanently broken sink that was fine.
-      this.isInitialized = true;
+      //
+      // Only for the stream this call opened, the identity check `NamedPipeSink` makes for
+      // the same reason. `createWriteStream` returns a stream for a path it cannot open and
+      // reports afterwards, typically while this is suspended in `stat` or `rotateFile`, and
+      // the `'error'` handler above clears the flag for exactly that case - setting it
+      // unconditionally here put it straight back, so `getHealth()` answered
+      // `{ isInitialized: true, isHealthy: true }` for a sink holding no descriptor at all.
+      // A rotation replaces the stream and its own `setupLogFile` has already marked the
+      // one that succeeded, so there is nothing for this to say about a stream it no longer
+      // holds either.
+      if (this.logFileStream === stream) {
+        this.isInitialized = true;
+      }
     } catch (error) {
       throw new FileSinkError(
         `Failed to setup log file: ${currentLogFile}`,
@@ -1116,6 +1128,17 @@ export class FileSink implements LogSink {
    */
   private async rotateFile(): Promise<void> {
     if (!this.logFileStream || !this.currentLogFile) {
+      return;
+    }
+
+    // Guarded like `setupLogFile`, and for the failure that has no other guard. A rotation
+    // that starts as `close()` runs calls `endStreamWithin(this.closeTimeoutMS)` of its
+    // own, which begins a fresh full-length wait *outside* the budget the close is keeping:
+    // on a stalled mount the close times out and reports the sink shut down, and this then
+    // resumes and renames the live log to an archive while the `setupLogFile` that would
+    // reopen it early-returns because the sink is closed. Whatever was tailing the current
+    // day's file watched it disappear after shutdown had already completed.
+    if (this.closing || this.closed) {
       return;
     }
 

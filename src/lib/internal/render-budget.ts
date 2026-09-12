@@ -63,6 +63,21 @@ export const TRUNCATED_LENGTH = '[max length exceeded]';
  * or row framing around it.
  */
 export function capKey(text: string): string {
+  return capToMaxRenderLength(text);
+}
+
+/**
+ * Cut `text` to the whole render's allowance, for a leaf that has no budget to charge.
+ *
+ * The one such leaf is a string handed to `stringifyTemplateValue` as the *root* value:
+ * there is no container around it, so nothing had opened a budget yet, and it was returned
+ * whole. The same string one level down is cut to {@link MAX_RENDER_LENGTH} with a marker,
+ * which made the cap depend on where a value happened to sit -
+ * `logger.info('{{body}}', { params: { body: tenMegabyteString } })` wrote all ten
+ * megabytes to every sink, while `{ wrapper: { body } }` wrote one. Same rule at every
+ * level now.
+ */
+export function capToMaxRenderLength(text: string): string {
   if (text.length <= MAX_RENDER_LENGTH) {
     return text;
   }

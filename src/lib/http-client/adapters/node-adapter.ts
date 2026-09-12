@@ -518,6 +518,18 @@ export class NodeAdapter implements HTTPAdapter {
         arm();
       };
 
+      const destroyRequestQuietly = (): void => {
+        if (req.writableEnded || req.destroyed) {
+          return;
+        }
+
+        try {
+          req.destroy();
+        } catch {
+          // Already torn down, which is the state this was trying to reach.
+        }
+      };
+
       /**
        * A body write that failed after the server had already answered.
        *
@@ -528,6 +540,12 @@ export class NodeAdapter implements HTTPAdapter {
        * went out short of its `Content-Length` with no transport failure anywhere, and
        * returning here left that on nothing - not the response, not `errorCause`, not the
        * global channel - while the caller read the status as a clean success.
+       *
+       * Reported here rather than carried on the response: the response is the server's
+       * real answer, and the client treats any `isTransportError` as a network failure -
+       * body dropped, `isNetworkError` set - so a `413` that stopped reading mid-upload
+       * would reach the caller as a connection error with its explanation thrown away.
+       * That is the outcome `didReceiveResponse` exists to prevent.
        */
       const reportWriteErrorAfterResponse = (error: unknown): void => {
         try {
@@ -537,12 +555,41 @@ export class NodeAdapter implements HTTPAdapter {
         }
 
         // Only once the response is fully in. See `didResponseClose`.
-        if (didResponseClose && !req.writableEnded && !req.destroyed) {
-          try {
-            req.destroy();
-          } catch {
-            // Already torn down, which is the state this was trying to reach.
-          }
+        if (didResponseClose) {
+          destroyRequestQuietly();
+
+          return;
+        }
+
+        // The response has *not* closed, and now nothing will finish this request: the
+        // writer is gone, so `req.end()` will never run, and a failure that did not also
+        // kill the socket - a `Blob` that yields fewer bytes than its `size`, which
+        // destroys nothing - leaves the request neither ended nor destroyed. Against an
+        // endpoint that answers while it is still reading, the server waits for the rest of
+        // a `Content-Length` that will never arrive, `res` never closes, and nothing settles
+        // this promise at all: the caller hangs until its own signal fires, and the adapter
+        // imposes no timeout of its own by design.
+        //
+        // Given the same grace the stall watchdog gives an upload, and for the same reason:
+        // a response still streaming in on that socket is worth waiting for, and one that
+        // has not finished by then is waiting on a body that is never coming. Tearing it
+        // down settles the promise through the response path's own error handling.
+        try {
+          const deadline = setTimeout(() => {
+            if (didResponseClose) {
+              return;
+            }
+
+            destroyRequestQuietly();
+          }, UPLOAD_STALL_GRACE_MS);
+
+          // Never a reason for the process to stay up, exactly as the stall watchdog's
+          // timer is not.
+          deadline.unref?.();
+        } catch {
+          // No way to schedule it, so the request is torn down now rather than left to
+          // hang. A response mid-flight is the lesser loss of the two.
+          destroyRequestQuietly();
         }
       };
 

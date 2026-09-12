@@ -64,6 +64,30 @@ function isElementTarget(event: Event): boolean {
 }
 
 /**
+ * Whether this `'error'` event is a `CustomEvent` somebody else dispatched.
+ *
+ * A genuine report reaching this listener is an `ErrorEvent` - what a browser dispatches
+ * for an uncaught error, and what `safe-handle-callback` and the polyfill dispatch on the
+ * global - or the bare `Event` a resource failure fires. A `CustomEvent` named `'error'`
+ * is the page's own: `window.dispatchEvent(new CustomEvent('error', { cancelable: true }))`
+ * whose result the dispatcher is about to branch on.
+ *
+ * {@link describeResourceTarget} already refuses one, but only on the element path, so a
+ * `CustomEvent` aimed at `window` or `document` fell through to being logged as "Unknown
+ * error reported by an error event" *and* cancelled, flipping the `dispatchEvent()` answer
+ * its dispatcher reads.
+ */
+function isForeignCustomEvent(event: Event): boolean {
+  try {
+    return typeof CustomEvent === 'function' && event instanceof CustomEvent;
+  } catch {
+    // A hostile or exotic global: not classifiable, and guessing wrong here only ever
+    // suppresses a genuine report, so this answers no and lets the checks below decide.
+    return false;
+  }
+}
+
+/**
  * Describe an `'error'` event target when it is a failed page resource.
  *
  * A resource failure (a broken `<img>`, `<script>`, `<link>`, media element) fires an
@@ -509,7 +533,10 @@ export class Logger extends EventEmitter {
       // Keyed on the target being an element rather than on it not being `globalThis`,
       // because on Node the reports meant for this listener arrive through the polyfill's
       // backing `EventTarget` and so do not target the global object either.
-      if (resource === undefined && isElementTarget(event)) {
+      if (
+        resource === undefined &&
+        (isElementTarget(event) || isForeignCustomEvent(event))
+      ) {
         return;
       }
 

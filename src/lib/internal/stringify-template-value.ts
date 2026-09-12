@@ -10,6 +10,7 @@ import {
 } from './format-reporter';
 import {
   capKey,
+  capToMaxRenderLength,
   charge,
   chargeUnits,
   createRenderBudget,
@@ -61,12 +62,21 @@ export function hasOwnStringForm(value: object): boolean {
     // value that is perfectly describable, suppressing the report for whatever failed next.
     return typeof own === 'function' && own !== Object.prototype.toString;
   } catch {
+    // Not reported here, only fallen back from. A `toString` whose *read* throws says
+    // nothing about whether the value can be described: `describeByConstructor` names it
+    // `[Foo]` a moment later and the render is perfectly good, so reporting at this point
+    // spent the once-per-operation budget on a value that did not fail - suppressing the
+    // report the next genuine failure needed. The value that refuses every read reaches
+    // the generic fallback below, which is where it is reported.
     return false;
   }
 }
 
 /** A name for a value whose own string form says nothing, such as `[FooBar]`. */
-function describeByConstructor(value: object): string {
+function describeByConstructor(
+  value: object,
+  onRefused: (error: unknown) => void = () => undefined,
+): string {
   try {
     const name: unknown = (value as { constructor?: { name?: unknown } })
       .constructor?.name;
@@ -74,8 +84,13 @@ function describeByConstructor(value: object): string {
     if (typeof name === 'string' && name.length > 0) {
       return `[${name}]`;
     }
-  } catch {
-    // Fall through to the generic form.
+  } catch (error) {
+    // Reported on the way to the generic form, which is `[object Object]` - the silent
+    // collapse this whole function exists to avoid, and indistinguishable from a genuine
+    // empty object. A revoked `Proxy` refuses this read and the `toString` read above, so
+    // it used to render that marker with nothing said anywhere, while `errorToString`
+    // reported the very same value. This is the one place both refusals end up.
+    onRefused(error);
   }
 
   return '[object Object]';
@@ -474,7 +489,10 @@ export function stringifyTemplateValue(
   report: ReportFormatFailure = NOOP_FORMAT_REPORTER,
 ): string {
   if (typeof value === 'string') {
-    return value;
+    // Cut to the same allowance a string one level down gets. See
+    // `capToMaxRenderLength`: this was the one variable-length leaf no budget touched, so
+    // whether a string was bounded depended only on whether anything was wrapped around it.
+    return capToMaxRenderLength(value);
   }
 
   // `undefined` has no JSON form, so it is named the way everything else without one is -
@@ -527,10 +545,18 @@ export function stringifyTemplateValue(
     return date;
   }
 
-  if (value !== null && typeof value === 'object' && !hasOwnStringForm(value)) {
-    // A class instance with no `toString` of its own. Name it rather than dumping its
-    // fields, which is neither what the caller asked for nor safe to assume is printable.
-    return describeByConstructor(value);
+  if (value !== null && typeof value === 'object') {
+    // Reported once, whichever of the two reads refused: both run caller code, and a value
+    // that refuses both - a revoked `Proxy` - otherwise rendered `[object Object]` in
+    // silence. `report` is itself once-per-operation, so the second call is a no-op rather
+    // than a second entry.
+    if (!hasOwnStringForm(value)) {
+      // A class instance with no `toString` of its own. Name it rather than dumping its
+      // fields, which is neither what the caller asked for nor safe to assume is printable.
+      return describeByConstructor(value, (error) => {
+        report(error, joinTemplatePath(path));
+      });
+    }
   }
 
   if (typeof value === 'function') {

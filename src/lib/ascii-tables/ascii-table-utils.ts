@@ -69,7 +69,16 @@ export class ASCIITableUtils {
       if (stringWidth(currentSubWord + grapheme) <= maxLength) {
         currentSubWord += grapheme;
       } else {
-        subWords.push(currentSubWord);
+        // Only what has actually accumulated. A grapheme wider than the column - any
+        // full-width character at `KEY_VALUE_TABLE_MIN_WIDTH`, where `maxLength` bottoms
+        // out at 1 - fails the test on the *first* pass, with nothing collected yet:
+        // `splitWord('漢字', 1)` returned `['', '漢', '字']`, and `wrapText` emitted that
+        // leading empty chunk as a blank line above the value. The grapheme still overflows
+        // the column, which nothing can help, but it no longer costs a row as well.
+        if (currentSubWord) {
+          subWords.push(currentSubWord);
+        }
+
         currentSubWord = grapheme;
       }
     }

@@ -738,7 +738,7 @@ function errorToASCIITable(
           chargeNestedText(
             budget,
             safeStringify(value, joinPath(path, key), reportRender),
-            rowTextLevels(maxRowLength, depth),
+            rowTextLevels(maxRowLength, depth, label.length),
           ),
         );
       }
@@ -900,7 +900,7 @@ function errorToASCIITable(
                 joinPath(path, 'additionalInfo'),
                 reportRender,
               ),
-              rowTextLevels(maxRowLength, depth),
+              rowTextLevels(maxRowLength, depth, 'AdditionalInfo'.length),
             ),
           );
 
@@ -1210,8 +1210,26 @@ function rowFrameCost(maxRowLength: number, depth: number): number {
  * {@link KEY_VALUE_TABLE_MIN_WIDTH} - costs more than the content it frames. Charging the
  * text flat, a 200 KB message twenty-five causes deep rendered 26 MB against the 1 MB cap.
  */
-function rowTextLevels(maxRowLength: number, depth: number): number {
-  const content = Math.max(1, maxRowLength - ROW_FRAME_WIDTH);
+function rowTextLevels(
+  maxRowLength: number,
+  depth: number,
+  keyWidth = 0,
+): number {
+  // Clamped the way `KeyValueASCIITable.calculateColumnWidths` clamps the key column
+  // itself: a key longer than that is wrapped rather than given the width it asked for, so
+  // billing the raw length would over-charge - by up to ~37x at width 80 - and truncate a
+  // render that fits.
+  // The key column is not available to the value, so a row's text wraps inside what is
+  // left of the width - and charging as though the whole table were content under-bills
+  // by exactly that ratio. A forty-character key under an eighty-column table rendered
+  // 2,189,105 characters against the one-megabyte cap. `keyWidth` defaults to zero for a
+  // value written on its own row, which really does get the full width.
+  const keyColumn = Math.min(
+    keyWidth,
+    Math.max(0, Math.floor((maxRowLength - 7) / 2)),
+  );
+
+  const content = Math.max(1, maxRowLength - ROW_FRAME_WIDTH - keyColumn);
 
   return ((depth + 1) * maxRowLength) / content;
 }
@@ -1283,7 +1301,17 @@ function stringifyValue(
     // on the entry *after* it. `chargeText` handles the exhausted-budget case this used to
     // check for separately - with nothing left it keeps none of the value and emits the
     // marker alone.
-    return chargeText(budget, value);
+    //
+    // Charged at what a character of a row actually costs, the way the conventional-member
+    // rows above already charge theirs. Billed flat, this leaf paid for the text once and
+    // not for the wrapping and re-indenting that emits it: a single five-megabyte
+    // `additionalInfo` value rendered 1,421,387 characters against the one-megabyte cap.
+    //
+    // Without a `keyWidth`, unlike those rows: this leaf is reached through the walk and
+    // does not know the row it will sit in, so it is billed as though the whole width were
+    // available to it. That under-bills a long key - which leaves less of the row for the
+    // value and so wraps it harder - and the cap holds approximately rather than exactly.
+    return chargeNestedText(budget, value, rowTextLevels(maxRowLength, depth));
   }
 
   // A payload that points back at itself would otherwise recurse until the stack runs
