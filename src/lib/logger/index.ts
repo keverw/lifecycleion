@@ -15,6 +15,7 @@ import { reportThroughHandler } from '../internal/failure-reporter';
 import {
   consoleFormatHandler,
   createFormatReporter,
+  type FormatFailureKind,
   type FormatErrorHandler,
   type ReportFormatFailure,
 } from '../internal/format-reporter';
@@ -989,19 +990,40 @@ export class Logger extends EventEmitter {
     // for the input nothing below them could read, dropped the cause on the floor and
     // left an operator with `(null)` or a marker and nothing to trace it with.
     //
-    // One reporter shared across all of them, so the several guards a single unreadable
-    // list trips report once rather than once each - the same once-per-pass bound
-    // `createFormatReporter` gives every other caller. It is handed to `applyRedaction`
-    // as well, so that function's own reporter nests inside this one instead of carrying a
-    // second budget: the params are one pass, and one pass reports once.
-    let backstopReporter: ReportFormatFailure | null = null;
+    // One reporter per kind shared across all of them, so the several guards a single
+    // unreadable list trips report once rather than once each - the same bound
+    // `createFormatReporter` gives every other caller, which is once per *kind* per
+    // operation and not once in total. These are handed to `applyRedaction` as well, so
+    // that function's own two reporters nest inside these instead of carrying budgets of
+    // their own: the params are one pass, and one pass reports once per kind.
+    //
+    // Per kind, because collapsing them loses a failure. `applyRedaction` raises both -
+    // a `redactFunction` that throws is `'redaction'`, a leaf whose `toString` throws on
+    // the way to the mask is `'render'` - and it splits its reporters for exactly that
+    // reason. Funnelled into a single `'redaction'` reporter here, a params bag that
+    // failed both ways called `onFormatError` once, with the kind of whichever failed
+    // first written over it, and the other failure was never mentioned to anyone.
+    const backstopReporters = new Map<FormatFailureKind, ReportFormatFailure>();
 
+    const reportBackstopOfKind = (
+      kind: FormatFailureKind,
+      error: unknown,
+      key: string,
+    ): void => {
+      let reporter = backstopReporters.get(kind);
+
+      if (reporter === undefined) {
+        reporter = createFormatReporter(kind, this.formatErrorHandler());
+        backstopReporters.set(kind, reporter);
+      }
+
+      reporter(error, key);
+    };
+
+    // Everything this method fails closed on is a redaction failure: the list itself
+    // could not be read, or could not be trusted.
     const reportBackstop = (error: unknown, key: string): void => {
-      backstopReporter ??= createFormatReporter(
-        'redaction',
-        this.formatErrorHandler(),
-      );
-      backstopReporter(error, key);
+      reportBackstopOfKind('redaction', error, key);
     };
 
     // Decided from the snapshot, never from a second read of the caller's own object.
@@ -1042,17 +1064,18 @@ export class Logger extends EventEmitter {
           params,
           redactedKeys,
           this.redactFunction,
-          // One reporter for the whole params pass, rather than one here and another
-          // inside `applyRedaction`. Both are once-per-pass, so nesting them keeps that
-          // bound: the several guards a single unreadable list trips report once between
-          // them, which is what `createFormatReporter` promises and what two
-          // independent budgets quietly broke.
-          // Adapted, not handed over: `reportBackstop` is a reporter bound to
-          // `'redaction'` already, and this slot takes a handler. Dropping the `kind` is
-          // correct rather than lossy - every failure `applyRedaction` raises is a
-          // redaction failure, which is the kind the backstop reports under.
-          (error, _kind, key) => {
-            reportBackstop(error, key);
+          // One budget per kind for the whole params pass, rather than one set here and
+          // another inside `applyRedaction`. Both are once-per-kind-per-pass, so nesting
+          // them keeps that bound: the several guards a single unreadable list trips
+          // report once between them, which is what `createFormatReporter` promises and
+          // what two independent budgets quietly broke.
+          //
+          // The `kind` is carried through rather than dropped. `applyRedaction` raises
+          // `'render'` as well as `'redaction'` - a leaf whose `toString` throws on its
+          // way to the mask is a render failure - and it keeps the two on separate
+          // reporters precisely so one cannot consume the other's report.
+          (error, kind, key) => {
+            reportBackstopOfKind(kind, error, key);
           },
         );
       } catch (error) {

@@ -1050,3 +1050,42 @@ describe('redactMatchedPaths - an entry that answers twice', () => {
     );
   });
 });
+
+describe('snapshotList self-contradiction check', () => {
+  // A named property that merely looks numeric is not an index, and the list snapshot has
+  // to agree with `isArrayIndexKey` about that. A local `/^\d+$/` called `'007'` an index,
+  // read it as an index past the end of a one-element list, and refused the whole list -
+  // and a refused list is fail-closed all the way up: every param is replaced with the
+  // marker.
+  test('accepts a redaction list carrying a numeric-looking named property', () => {
+    const list = ['password'];
+
+    (list as unknown as Record<string, unknown>)['007'] = 'a note';
+
+    expect(parseRedactPaths(list)).toEqual(paths('password'));
+  });
+
+  test('accepts a named property past the array index range', () => {
+    const list = ['password'];
+
+    (list as unknown as Record<string, unknown>)['4294967296'] = 'a note';
+
+    expect(parseRedactPaths(list)).toEqual(paths('password'));
+  });
+
+  // The check the predicate swap must not weaken: a genuine index past `length` still
+  // means the list is lying about its own size, and is still refused.
+  test('still refuses a list whose index keys run past its length', () => {
+    const lying = new Proxy(['password', 'token'], {
+      get(target, property, receiver) {
+        if (property === 'length') {
+          return 1;
+        }
+
+        return Reflect.get(target, property, receiver);
+      },
+    });
+
+    expect(parseRedactPaths(lying)).toBeNull();
+  });
+});

@@ -2,6 +2,7 @@ import { getRedactPathParts, WILDCARD_PATH_SEGMENT } from './path-utils';
 import {
   defineEntry,
   describeContainer,
+  isArrayIndexKey,
   namedArrayKeys,
 } from './container-entries';
 import { isPlainContainer } from './is-plain-container';
@@ -176,7 +177,15 @@ export function snapshotList(value: unknown): unknown[] | null {
     for (const key of Object.keys(value)) {
       // Own index keys only. A named property on an array - `list.note = 'x'` - is not an
       // element and says nothing about the length.
-      if (!/^\d+$/.test(key)) {
+      //
+      // `isArrayIndexKey`, not a `/^\d+$/` of its own, for the reason that predicate
+      // documents: `'007'` and `'4294967296'` match the pattern and are *named properties*,
+      // which JavaScript stores beside the elements rather than in them. Called indexes
+      // here, they read as an index past a shorter `length`, so this refused the list -
+      // and a refusal is fail-closed all the way up: `parseRedactPaths` answers `null` and
+      // the caller replaces the whole payload with `***REDACTION FAILED***`. A caller who
+      // hangs a note on their own redaction list lost every log line's params to it.
+      if (!isArrayIndexKey(key)) {
         continue;
       }
 

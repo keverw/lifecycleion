@@ -2193,6 +2193,195 @@ describe('NodeAdapter.send() — unit branches without server', () => {
     }
   });
 
+  test('one upload-side socket failure after the response is reported once', async () => {
+    // A single reset arrives twice: the writer's own per-write `req.once('error', ...)`
+    // rejects with it, and this request's `'error'` handler is handed the same error a
+    // tick later. Both then rendered it onto the host's `'error'` channel and armed a
+    // grace deadline of their own, so one failure read as two.
+    const req = new MockClientRequest();
+    const res = new MockIncomingMessage(200, { 'content-type': 'text/plain' });
+    const failure = new Error('read ECONNRESET');
+
+    const requestSpy = spyOn(http, 'request').mockImplementation(
+      (_options, callback) => {
+        const cb = callback as
+          ((res: http.IncomingMessage) => void) | undefined;
+
+        queueMicrotask(() => {
+          cb?.(res as unknown as http.IncomingMessage);
+          queueMicrotask(() => {
+            res.emit('data', Buffer.from('ok'));
+            res.emit('end');
+            res.emit('close');
+            // Both channels, as a real socket reset reaches both.
+            req.emit('error', failure);
+          });
+        });
+
+        return req as unknown as http.ClientRequest;
+      },
+    );
+
+    const reports: unknown[] = [];
+    const onError = (event: Event): void => {
+      reports.push(event);
+      event.preventDefault();
+    };
+
+    globalThis.addEventListener('error', onError);
+
+    try {
+      const response = await new NodeAdapter().send({
+        requestURL: 'http://example.test/upload',
+        method: 'POST',
+        headers: {},
+        body: 'x'.repeat(64 * 1024),
+      });
+
+      expect(response.status).toBe(200);
+
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      expect(reports.length).toBe(1);
+    } finally {
+      globalThis.removeEventListener('error', onError);
+      requestSpy.mockRestore();
+    }
+  });
+
+  test('the stall watchdog settles the upload outcome it gives up on', async () => {
+    // `endBodyWrite` and `reportWriteErrorAfterResponse` both answer `requestBodySettled`
+    // because the writer may never come back to answer it itself. The watchdog destroyed
+    // the request and answered nothing: a writer parked with no pending callback - inside
+    // `Blob.stream()`'s `read()`, or on a `write` that never calls back - has nothing for
+    // the destroy to reject, so it never returns to notice, and
+    // `await response.requestBodySettled` waited forever on an upload this had already
+    // given up on. That is the exact hang `reportWriteErrorAfterResponse` documents fixing,
+    // reached through the other door.
+    //
+    // A `write` that accepts the chunk and never acknowledges it is the parked writer in
+    // its smallest form: `destroy()` on this request emits nothing, exactly as a reader
+    // that never yields hands the writer nothing to unblock on.
+    const req = new MockClientRequest(() => true);
+    const res = new MockIncomingMessage(200, { 'content-type': 'text/plain' });
+
+    const requestSpy = spyOn(http, 'request').mockImplementation(
+      (_options, callback) => {
+        const cb = callback as
+          ((res: http.IncomingMessage) => void) | undefined;
+
+        queueMicrotask(() => {
+          cb?.(res as unknown as http.IncomingMessage);
+          // The server answers in full while the upload is still parked.
+          queueMicrotask(() => {
+            res.emit('data', Buffer.from('ok'));
+            res.emit('end');
+            res.emit('close');
+          });
+        });
+
+        return req as unknown as http.ClientRequest;
+      },
+    );
+
+    try {
+      const response = await new NodeAdapter().send({
+        requestURL: 'http://example.test/upload',
+        method: 'POST',
+        headers: {},
+        body: 'x'.repeat(256 * 1024),
+      });
+
+      expect(response.status).toBe(200);
+
+      const outcome = await Promise.race([
+        response.requestBodySettled,
+        // Two watchdog windows and change: the first re-arms if the opening chunk moved
+        // the counter after it was armed. See `UPLOAD_STALL_GRACE_MS`.
+        new Promise((resolve) => setTimeout(() => resolve('hung'), 12_000)),
+      ]);
+
+      expect(outcome).toBeInstanceOf(Error);
+      expect(req.destroyed).toBe(true);
+    } finally {
+      requestSpy.mockRestore();
+    }
+  }, 30000);
+
+  test('a socket error while the streamResponse factory is still opening settles', async () => {
+    // The one window where "the response side always settles on its own" is not true.
+    // `res`'s own handlers are installed by `streamResponseBody`, which does not run until
+    // the factory has resolved - so a socket reset during an `await`ed factory reached
+    // nothing at all: the request's `'error'` handler stood down because the headers had
+    // already arrived, `res` had no listeners to see it, and the adapter promise never
+    // settled. The caller hung until its own signal, with no timeout of the adapter's own.
+    const req = new MockClientRequest();
+    const res = new MockIncomingMessage(200, {
+      'content-type': 'application/octet-stream',
+    });
+    const writable = new EventEmitter() as unknown as WritableLike;
+    let destroyCalls = 0;
+    writable.write = () => true;
+    writable.end = (callback?: () => void) => {
+      callback?.();
+    };
+    writable.destroy = () => {
+      destroyCalls++;
+      return writable;
+    };
+
+    const requestSpy = spyOn(http, 'request').mockImplementation(
+      (_options, callback) => {
+        const cb = callback as
+          ((res: http.IncomingMessage) => void) | undefined;
+
+        queueMicrotask(() => {
+          cb?.(res as unknown as http.IncomingMessage);
+          // Mid-setup, while the factory below is still opening its sink.
+          queueMicrotask(() => {
+            req.emit('error', new Error('read ECONNRESET'));
+          });
+        });
+
+        return req as unknown as http.ClientRequest;
+      },
+    );
+
+    try {
+      const result = await Promise.race([
+        new NodeAdapter().send({
+          requestURL: 'http://example.test/data',
+          method: 'GET',
+          headers: {},
+          streamResponse: async () => {
+            await new Promise((resolve) => setTimeout(resolve, 20));
+
+            return writable;
+          },
+        }),
+        new Promise((resolve) => setTimeout(() => resolve('timeout'), 500)),
+      ]);
+
+      expect(result).not.toBe('timeout');
+
+      const response = result as AdapterResponse;
+
+      expect(response.status).toBe(200);
+      expect(response.isStreamError).toBe(true);
+      expect(response.streamErrorCode).toBe('stream_response_error');
+      expect(response.errorCause?.message).toContain('ECONNRESET');
+      expect(req.destroyed).toBe(true);
+
+      // The factory's sink arrives after the request is over, and is closed rather than
+      // left open: the stream signal is aborted, which is what the post-await check reads.
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      expect(destroyCalls).toBe(1);
+    } finally {
+      requestSpy.mockRestore();
+    }
+  });
+
   test('aborted streamed responses settle as stream_response_error', async () => {
     const req = new MockClientRequest();
     const res = new MockIncomingMessage(200, {

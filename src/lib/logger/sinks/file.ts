@@ -40,6 +40,32 @@ const MIN_CLOSE_FLUSH_MS = 100;
  */
 const MAX_ROTATION_NAME_ATTEMPTS = 100;
 
+/** Megabytes a log file grows to before it is rotated, where the caller named nothing. */
+const DEFAULT_MAX_SIZE_MB = 10;
+
+/**
+ * The rotation threshold this sink will honour, in megabytes.
+ *
+ * The sibling of `resolveMaxQueueSize` and `resolveMaxRetries`, and here for a sharper
+ * reason than tidiness: a threshold of zero or less makes a *freshly opened, empty* file
+ * satisfy `currentLogSize >= maxSizeBytes`, so `setupLogFile` rotates it, reopens, and
+ * finds the new empty file over the limit as well. That loop never yields to anything
+ * that could stop it - `initPromise` never settles, so `flush()` hangs and `close()` can
+ * only time out - and every pass reserves a fresh collision-free archive name, so it
+ * fills the log directory as fast as the disk will take files.
+ *
+ * `Infinity` is left alone: it is the honest spelling of "never rotate on size". Anything
+ * unusable - zero, negative, `NaN`, a non-number from untyped config - takes the default
+ * rather than being honoured literally, the same answer the queue options give.
+ */
+function resolveMaxSizeMB(requested?: number): number {
+  if (typeof requested !== 'number' || Number.isNaN(requested)) {
+    return DEFAULT_MAX_SIZE_MB;
+  }
+
+  return requested > 0 ? requested : DEFAULT_MAX_SIZE_MB;
+}
+
 export interface FileSinkOptions {
   logDir: string;
   basename: string;
@@ -185,7 +211,7 @@ export class FileSink implements LogSink {
   constructor(options: FileSinkOptions) {
     this.logDir = options.logDir;
     this.basename = options.basename;
-    this.maxSizeMB = options.maxSizeMB ?? 10;
+    this.maxSizeMB = resolveMaxSizeMB(options.maxSizeMB);
     this.jsonFormat = options.jsonFormat ?? false;
     this.maxRetries = resolveMaxRetries(options.maxRetries);
     this.closeTimeoutMS = options.closeTimeoutMS ?? 30000;

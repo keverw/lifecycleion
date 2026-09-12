@@ -191,10 +191,29 @@ function forwardingContainerCopy(
       // the lint rule against `for...in` over an array is making the same point.
       const asRecord = elements as unknown as Record<string, unknown>;
 
+      // Counted against the same bound the indexes were, and continuing from them: the
+      // length check above bounds only what `length` admits to, and an `ownKeys` trap is as
+      // free to invent a million *named* keys as a `length` trap is to invent a million
+      // elements - a `Proxy` over `[]` answering `0` for `length` walked straight past that
+      // check and then ran a million `defineProperty` calls synchronously inside
+      // `logger.info()`. Refused rather than truncated, for the reason the length check is:
+      // a partial copy is installed in place of the original and silently loses the rest.
+      let definedNamed = length;
+
       for (const key of Object.keys(asRecord)) {
         if (Object.prototype.hasOwnProperty.call(copy, key)) {
           continue;
         }
+
+        if (definedNamed >= MAX_REDACTION_ENTRIES) {
+          copies.delete(source);
+          copies.delete(copy);
+          aliases.delete(copy);
+
+          return null;
+        }
+
+        definedNamed++;
 
         const named = key;
 

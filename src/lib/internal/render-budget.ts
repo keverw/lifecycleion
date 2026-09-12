@@ -67,6 +67,34 @@ export function capKey(text: string): string {
 }
 
 /**
+ * {@link capKey} for a key whose every character is emitted more than once.
+ *
+ * The same relationship {@link chargeNestedText} has to {@link chargeText}, on the other
+ * column. A renderer that wraps a long key inside a narrow key column and pads each of the
+ * resulting lines out to the full table width emits several characters per character of
+ * key, so a key cut at {@link MAX_RENDER_LENGTH} still rendered past it - measured at
+ * 2,251,070 characters for a five-megabyte key against a one-megabyte cap. The cut is made
+ * against the per-level allowance, so what is kept still fits once multiplied.
+ *
+ * `levels` is how many characters one character of key costs: 1 is exactly {@link capKey}.
+ */
+export function capNestedKey(text: string, levels: number): string {
+  const factor = Math.max(1, levels);
+
+  if (factor === 1) {
+    return capKey(text);
+  }
+
+  const allowance = Math.max(1, Math.floor(MAX_RENDER_LENGTH / factor));
+
+  if (text.length <= allowance) {
+    return text;
+  }
+
+  return `${text.slice(0, allowance)}${TRUNCATED_LENGTH}`;
+}
+
+/**
  * Cut `text` to the whole render's allowance, for a leaf that has no budget to charge.
  *
  * The one such leaf is a string handed to `stringifyTemplateValue` as the *root* value:

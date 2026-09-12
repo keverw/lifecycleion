@@ -18,7 +18,7 @@ import { readMember } from './internal/read-member';
 import { stringifyTemplateValue } from './internal/stringify-template-value';
 import { isErrorValue } from './to-error';
 import {
-  capKey,
+  capNestedKey,
   charge,
   chargeNestedText,
   chargeText,
@@ -609,7 +609,25 @@ export function errorToString(
     );
 
     return table.toString();
-  } catch {
+  } catch (error_) {
+    // Said, not swallowed - the one degradation site in this file that was silent. What
+    // reaches here is everything the per-value guards could not hold: a `RangeError` from
+    // a graph deep enough to exhaust the stack, or a throw out of
+    // `KeyValueASCIITable.toString()` itself. The caller is handed a placeholder with the
+    // error's message, name, `stack` and `cause` all gone, so without this a
+    // caller-supplied `onFormatError` - the whole point of which is to learn that a render
+    // degraded - heard nothing at all about the one degradation that loses everything.
+    //
+    // Guarded, because the reporter is reached from a `catch` that must return a string
+    // however badly this goes: `onFormatError` is caller code, and a throw from it here
+    // would replace `<error could not be rendered>` with a failure raised while reporting
+    // that the render failed.
+    try {
+      reportRender(error_, '<error>');
+    } catch {
+      // Nothing left to report with. The placeholder below is still the honest answer.
+    }
+
     return '<error could not be rendered>';
   }
 }
@@ -987,7 +1005,10 @@ function errorToASCIITable(
           // straight through the one-megabyte cap, amplified here by the row framing: the
           // same payload as `additionalInfo` rendered 11,251,061 characters. Values were
           // bounded when the cap went in; keys were the leaf nobody cut.
-          const renderedKey = charge(budget, capKey(key));
+          const renderedKey = charge(
+            budget,
+            capNestedKey(key, keyTextLevels(maxRowLength, depth)),
+          );
 
           chargeUnits(budget, rowFrameCost(maxRowLength, depth));
 
@@ -1236,6 +1257,26 @@ function rowTextLevels(
 
 /** Borders, padding and the key column's separator around one wrapped line of text. */
 const ROW_FRAME_WIDTH = 6;
+
+/**
+ * What one character of a *key* costs, the {@link rowTextLevels} of the other column.
+ *
+ * A key is billed by {@link capKey} at its raw character count, and a raw count is not what
+ * it renders to: the key column is roughly half the table width, so a key longer than that
+ * wraps, and `KeyValueASCIITable` pads every one of those wrapped lines out to the *full*
+ * width. A five-megabyte key cut to the one-megabyte cap rendered 2,251,070 characters at
+ * the default width - the cap restored in name only, and by exactly the amplification the
+ * value side already bills for.
+ */
+function keyTextLevels(maxRowLength: number, depth: number): number {
+  const width = Math.max(MIN_ROW_COST, maxRowLength);
+
+  // The key column as `KeyValueASCIITable.calculateColumnWidths` clamps it, which is what
+  // a long key actually gets to wrap inside.
+  const keyColumn = Math.max(1, Math.floor((width - 7) / 2));
+
+  return ((depth + 1) * width) / keyColumn;
+}
 
 /**
  * How many lines `text` is written over before any wrapping.
@@ -1656,7 +1697,10 @@ function stringifyValueInner(
         // `capKey` first, for the reason the `additionalInfo` walk above does it: a key is
         // a variable-length leaf like any value, and billing one without cutting it leaves
         // the cap unenforced against a payload whose *keys* are large.
-        const renderedKey = charge(budget, capKey(key));
+        const renderedKey = charge(
+          budget,
+          capNestedKey(key, keyTextLevels(maxRowLength, depth)),
+        );
 
         chargeUnits(budget, rowFrameCost(maxRowLength, depth));
 

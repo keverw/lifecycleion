@@ -1198,6 +1198,41 @@ describe('errorToString', () => {
       expect(rendered.length).toBeLessThan(2_000_000);
     });
 
+    it('should cut an oversized additionalInfo key by what it renders to', () => {
+      // `capKey` cut the key at the raw cap and the row then amplified it: the key column
+      // is roughly half the table width, so a key longer than that wraps and every wrapped
+      // line is padded out to the *full* width. A five-megabyte key cut to one million
+      // characters rendered 2,251,070 - the cap restored in name only, by exactly the
+      // amplification the value side already bills for.
+      const error = Object.assign(new Error('boom'), {
+        additionalInfo: { ['k'.repeat(5_000_000)]: 1 },
+      });
+
+      const rendered = errorToString(error);
+
+      expect(rendered).toContain('boom');
+      expect(rendered).toContain('[max length exceeded]');
+      expect(rendered.length).toBeLessThan(1_200_000);
+
+      // The same key one level down, where the nested walk cuts it too.
+      const nested = Object.assign(new Error('boom'), {
+        additionalInfo: { inner: { ['k'.repeat(5_000_000)]: 1 } },
+      });
+
+      expect(errorToString(nested).length).toBeLessThan(1_200_000);
+
+      // An ordinary key is untouched: the cut only ever reaches one that could not fit the
+      // cap on its own.
+      const plain = errorToString(
+        Object.assign(new Error('boom'), {
+          additionalInfo: { userIdentifier: 42 },
+        }),
+      );
+
+      expect(plain).toContain('userIdentifier');
+      expect(plain).not.toContain('[max length exceeded]');
+    });
+
     it('should not throw on a BigInt nested in additionalInfo', () => {
       const error = Object.assign(new Error('boom'), {
         additionalInfo: { big: { nested: 10n } },

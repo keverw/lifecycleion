@@ -1522,9 +1522,9 @@ describe('Logger', () => {
       // They terminate at the console, and the second top-level report proves the lease
       // was released.
       expect(consoled).toHaveLength(4);
-      expect(consoled.every((entry) => String(entry).includes('Render failed'))).toBe(
-        true,
-      );
+      expect(
+        consoled.every((entry) => String(entry).includes('Render failed')),
+      ).toBe(true);
     });
 
     test('should register reportError listener', () => {
@@ -2431,6 +2431,52 @@ describe('Logger - a redactedKeys list that will not be read twice', () => {
     expect(failures[0]?.[0]).toBe('<redactedKeys>');
     expect(sink.logs[0]?.message).not.toContain(SECRET);
     expect(JSON.stringify(sink.logs[0]?.redactedParams)).not.toContain(SECRET);
+  });
+
+  test('a params pass that fails both ways reports both, not one of them', () => {
+    // `applyRedaction` keeps two reporters on purpose - a container that refuses to
+    // enumerate is `'redaction'`, a leaf whose `toString` throws on its way to the mask is
+    // `'render'` - because each fires once per operation and sharing one let an
+    // unrenderable value consume the report a genuinely broken redaction still needed.
+    // Funnelling both into one backstop here re-collapsed exactly that: the logger called
+    // `onFormatError` once, with the kind rewritten to `'redaction'`, and the other failure
+    // was mentioned to nobody.
+    const seen: [string, string][] = [];
+    const sink = new ArraySink();
+    const logger = new Logger({
+      sinks: [sink],
+      callProcessExit: false,
+      onFormatError: (_error, kind, key) => seen.push([kind, key]),
+    });
+
+    class Token {
+      public toString(): string {
+        throw new Error('toString refused');
+      }
+    }
+
+    const unreadable = new Proxy(
+      { a: 1 },
+      {
+        ownKeys() {
+          throw new Error('ownKeys refused');
+        },
+      },
+    );
+
+    logger.info('login {{token}}', {
+      params: { token: new Token(), bag: unreadable },
+      redactedKeys: ['token', 'bag.a'],
+    });
+
+    const kinds = seen.map(([kind]) => kind);
+
+    expect(kinds).toContain('redaction');
+    expect(kinds).toContain('render');
+
+    // Still once per kind, never once per value.
+    expect(kinds.filter((kind) => kind === 'redaction').length).toBe(1);
+    expect(kinds.filter((kind) => kind === 'render').length).toBe(1);
   });
 
   test('a genuinely empty list is still read as "nothing was asked for"', () => {

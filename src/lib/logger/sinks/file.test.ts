@@ -2193,4 +2193,86 @@ describe('FileSink - entries written during close', () => {
     expect(sink.getHealth().droppedEntries).toBe(0);
     expect(failures).toEqual([]);
   });
+  // A rotation threshold of zero makes a *freshly opened, empty* file already over the
+  // limit, so `setupLogFile` rotates it, reopens, and finds the new empty file over the
+  // limit too. Nothing in that loop yields to anything that could stop it: `initPromise`
+  // never settles, so `flush()` hangs, `close()` can only time out, and every pass reserves
+  // another archive name and fills the directory.
+  test('refuses a maxSizeMB that would rotate an empty file forever', async () => {
+    const logDir = `${tmpDir.path}/zero-max-size`;
+
+    const sink = new FileSink({
+      logDir,
+      basename: 'zero',
+      maxSizeMB: 0,
+      jsonFormat: false,
+    });
+
+    const message = 'written under a zero rotation threshold';
+
+    sink.write({
+      timestamp: Date.now(),
+      type: 'info',
+      serviceName: 'TestService',
+      template: message,
+      message,
+    });
+
+    await sink.close();
+
+    const written = await fsPromises.readdir(logDir);
+
+    // The default took over, so this is one live log and no archives at all.
+    expect(written.length).toBe(1);
+
+    const content = await fsPromises.readFile(
+      `${logDir}/${written[0]}`,
+      'utf8',
+    );
+
+    expect(content).toContain(message);
+  });
+
+  test('refuses a negative or unreadable maxSizeMB the same way', async () => {
+    const logDir = `${tmpDir.path}/negative-max-size`;
+
+    const sink = new FileSink({
+      logDir,
+      basename: 'negative',
+      maxSizeMB: -5,
+      jsonFormat: false,
+    });
+
+    sink.write({
+      timestamp: Date.now(),
+      type: 'info',
+      serviceName: 'TestService',
+      template: 'negative threshold',
+      message: 'negative threshold',
+    });
+
+    await sink.close();
+
+    expect((await fsPromises.readdir(logDir)).length).toBe(1);
+
+    const nanDir = `${tmpDir.path}/nan-max-size`;
+    const nanSink = new FileSink({
+      logDir: nanDir,
+      basename: 'nan',
+      maxSizeMB: Number.NaN,
+      jsonFormat: false,
+    });
+
+    nanSink.write({
+      timestamp: Date.now(),
+      type: 'info',
+      serviceName: 'TestService',
+      template: 'NaN threshold',
+      message: 'NaN threshold',
+    });
+
+    await nanSink.close();
+
+    expect((await fsPromises.readdir(nanDir)).length).toBe(1);
+  });
 });

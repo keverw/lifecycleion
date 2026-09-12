@@ -449,4 +449,36 @@ describe('CurlyBrackets - one budget across the whole template', () => {
     expect(compiled({ a: big }).length).toBe(900_000);
     expect(compiled({ a: big }).length).toBe(900_000);
   });
+  test('stops rendering once the budget is gone rather than rendering and discarding', () => {
+    // `chargeText` bounds what is *emitted* and nothing about what is *produced*: the
+    // render was evaluated as its argument, so every placeholder after the budget ran out
+    // still walked its value in full - each under a fresh allowance of its own - only for
+    // the result to be cut to the marker and thrown away. The work is quadratic in the
+    // template's placeholder count against one large param.
+    const wide: Record<string, unknown> = {};
+
+    for (let index = 0; index < 20_000; index++) {
+      wide[`k${String(index)}`] = 'value';
+    }
+
+    const params = { big: 'x'.repeat(1_000_000), wide };
+    const template = `{{big}}${'{{wide}}'.repeat(200)}`;
+
+    const startedAt = Date.now();
+    const rendered = CurlyBrackets(template, params);
+    const elapsed = Date.now() - startedAt;
+
+    expect(rendered).toContain('[max length exceeded]');
+
+    // Measured at 1.7 seconds when the exhausted placeholders still rendered, against
+    // roughly fifty milliseconds when they stop at the check - the whole of which is the
+    // one placeholder that legitimately renders. The bound sits between the two with room
+    // for a slow machine; the point is that the renders do not happen, not how fast they
+    // are.
+    expect(elapsed).toBeLessThan(600);
+
+    // And the exhausted placeholders are not charged for a marker nobody budgeted, so the
+    // total stays at the cap rather than creeping past it once per placeholder.
+    expect(rendered.length).toBeLessThan(1_100_000);
+  });
 });

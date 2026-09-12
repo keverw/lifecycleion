@@ -623,7 +623,12 @@ describe('applyRedaction - non-identifier key names', () => {
 
     expect(result['user']['profile']['password']).toBeUndefined();
     expect(result['user']['profile']['name']).toBe('Alice');
-  });
+    // Given its own deadline: a million-slot wildcard is roughly three seconds of honest
+    // work on an idle machine, which sits close enough to the five-second default to fail
+    // on load rather than on a regression. The assertions above are what this test is
+    // about; the walk being *bounded* is the neighbouring tests' subject, and they carry
+    // their own explicit bounds.
+  }, 30000);
 
   test('scans a container reachable from many aliases once, not once per alias', () => {
     // `copies` deduplicates the copy but not the *descent*, so one array reachable from
@@ -1606,6 +1611,33 @@ describe('the redaction walk is bounded by entries, not by a reported length', (
 
     expect(Date.now() - startedAt).toBeLessThan(5_000);
     // Fails closed rather than leaking: the budget ran out before the key was reached.
+    expect(redacted.password).not.toBe(SECRET);
+  });
+
+  test('an array whose named keys are invented cannot stall the copy', () => {
+    // The length check bounds only what `length` admits to. An `ownKeys` trap is as free to
+    // invent a million *named* properties as a `length` trap is to invent a million
+    // elements, and the named pass ran one `defineProperty` per key with nothing counting
+    // them - a `Proxy` over `[]` answering `0` for `length` walked straight past the
+    // element bound and then spun synchronously inside `logger.info()`.
+    const invented = Array.from(
+      { length: 1_200_000 },
+      (_unused, index) => `note${String(index)}`,
+    );
+
+    const wide = new Proxy([] as unknown[], {
+      ownKeys: () => invented,
+      getOwnPropertyDescriptor: () => ({
+        value: 1,
+        enumerable: true,
+        configurable: true,
+      }),
+    });
+
+    const startedAt = Date.now();
+    const redacted = applyRedaction({ wide, password: SECRET }, ['password']);
+
+    expect(Date.now() - startedAt).toBeLessThan(5_000);
     expect(redacted.password).not.toBe(SECRET);
   });
 

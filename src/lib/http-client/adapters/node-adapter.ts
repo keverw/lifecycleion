@@ -465,6 +465,24 @@ export class NodeAdapter implements HTTPAdapter {
       let isStreamFactoryPending = false;
 
       /**
+       * Settle a socket failure that lands while a `streamResponse` factory is setting up.
+       *
+       * The one window where "the response side always settles on its own" is not true.
+       * `res`'s own `'error'`, `'aborted'` and `'close'` handlers are installed by
+       * `streamResponseBody`, which does not run until the factory has resolved, so a
+       * socket reset during an `await`ed factory reached nothing: the request `'error'`
+       * handler stood down on {@link didReceiveResponse}, `res` had no listeners to see it,
+       * and the adapter promise never settled - the caller hung until its own signal.
+       *
+       * Set only for the duration of that await, and cleared the moment the factory
+       * returns; from there `streamResponseBody`'s handlers have it. Aborting the stream
+       * signal is what lets the factory's own cleanup listeners run, and the
+       * `streamAbort.signal.aborted` check after the await then destroys a writable that
+       * arrived too late.
+       */
+      let failStreamSetupOnSocketError: ((error: Error) => void) | undefined;
+
+      /**
        * Whether the server has already answered.
        *
        * A body write that fails after this is not the failure worth reporting. A server is
@@ -509,6 +527,9 @@ export class NodeAdapter implements HTTPAdapter {
       /** The most recent `loaded` any upload-progress report carried. */
       let uploadedBytesSeen = 0;
 
+      /** Whether a post-response write failure has already been reported and scheduled. */
+      let didReportWriteErrorAfterResponse = false;
+
       /**
        * Destroy an upload the server has stopped reading, once the response is in.
        *
@@ -552,6 +573,25 @@ export class NodeAdapter implements HTTPAdapter {
           }
 
           if (uploadedBytesSeen === bytesAtLastTick) {
+            // Answered here, as `reportWriteErrorAfterResponse` answers it, and for the
+            // same reason: the destroy below is not guaranteed to reach the writer. A
+            // writer parked inside `Blob.stream()`'s `read()` has no pending `req.write`
+            // to reject, so it never returns to run `endBodyWrite`, and
+            // `await response.requestBodySettled` waited forever on an upload this
+            // watchdog had already given up on. Settled first, so a `destroy()` that
+            // throws cannot leave the caller waiting - which also makes this the answer
+            // the caller sees: `settleBodyOutcome` is first-call-wins, so a writer that
+            // does notice the destroy and reports its own `EPIPE` afterwards is recorded
+            // nowhere. That is the trade this makes deliberately. An upload the watchdog
+            // reached had made no progress for a full grace window, so "stalled after the
+            // response arrived" is the failure worth reporting, and the alternative -
+            // waiting for a writer that may never return - is the hang this closes.
+            settleBodyOutcome(
+              new Error(
+                'Request body upload stalled after the response arrived',
+              ),
+            );
+
             destroyQuietly();
 
             return;
@@ -673,30 +713,12 @@ export class NodeAdapter implements HTTPAdapter {
           request.requestURL,
           request.headers,
           {
-            ...(upload.outcome
-              ? { requestBodySettled: upload.outcome }
-              : {}),
+            ...(upload.outcome ? { requestBodySettled: upload.outcome } : {}),
             ...response,
           },
         );
       };
 
-      /**
-       * Reject with the upload outcome attached, the mirror of {@link settleResponse}.
-       *
-       * Every throw out of this adapter goes through here for the same reason every
-       * resolve goes through `settleResponse`: `requestBodySettled` is documented as
-       * present on every bodied request, and the paths that throw are the ones where it
-       * carries the most - a cancel or a timeout tears the request down mid-upload, and
-       * the writer's failure is then the only record that the body never went out. With
-       * the promise stranded in this closure, `HTTPClient` built its response without the
-       * field, and `await undefined` reported a clean upload for a body that was cut off.
-       *
-       * The error is passed through unchanged, tag or no tag, so a frozen or exotic error
-       * still rejects with exactly what the caller threw. Attaching is best-effort: it is
-       * strictly additive to the failure being reported, and losing the tag must never
-       * replace that failure with a `TypeError` raised on the way to reporting it.
-       */
       /**
        * Reject with the upload outcome attached, the mirror of {@link settleResponse}.
        *
@@ -759,6 +781,19 @@ export class NodeAdapter implements HTTPAdapter {
        * That is the outcome `didReceiveResponse` exists to prevent.
        */
       const reportWriteErrorAfterResponse = (error: unknown): void => {
+        // Once per request, because a single upload-side socket failure arrives twice: the
+        // writer's own per-write `req.once('error', ...)` rejects with it, and this
+        // request's `'error'` handler is handed the same error a tick later. Both then
+        // rendered the same failure onto the host's `'error'` channel and armed a grace
+        // deadline of their own, so one reset read as two and the request carried two
+        // pending destroys. The body is over after the first, and everything below is
+        // about ending a request that has already been given up on.
+        if (didReportWriteErrorAfterResponse) {
+          return;
+        }
+
+        didReportWriteErrorAfterResponse = true;
+
         const failure = normalizeError(error);
 
         // This body is over, so answer `requestBodySettled` now rather than leaving it to
@@ -915,6 +950,19 @@ export class NodeAdapter implements HTTPAdapter {
 
             try {
               isStreamFactoryPending = true;
+              failStreamSetupOnSocketError = (error: Error): void => {
+                failStreamSetupOnSocketError = undefined;
+                streamAbort.abort();
+                req.destroy();
+                settleResponse({
+                  status,
+                  headers,
+                  body: null,
+                  isStreamError: true,
+                  streamErrorCode: 'stream_response_error',
+                  errorCause: error,
+                });
+              };
               writable = await request.streamResponse(
                 {
                   status: 200,
@@ -927,6 +975,7 @@ export class NodeAdapter implements HTTPAdapter {
               );
             } catch (error) {
               isStreamFactoryPending = false;
+              failStreamSetupOnSocketError = undefined;
               // Factory threw — non-retryable setup error, equivalent to an
               // interceptor throw. Abort the stream signal so any partial cleanup
               // listeners run, destroy the request, and propagate as a setup failure.
@@ -936,6 +985,7 @@ export class NodeAdapter implements HTTPAdapter {
               return;
             }
             isStreamFactoryPending = false;
+            failStreamSetupOnSocketError = undefined;
 
             // The request may have been cancelled or timed out while an async
             // factory was still setting up its sink. In that case the outer
@@ -1173,6 +1223,14 @@ export class NodeAdapter implements HTTPAdapter {
         // Reported rather than dropped, and the request torn down once the response has
         // been consumed: see `reportWriteErrorAfterResponse`.
         if (didReceiveResponse) {
+          // Except in the one window where the response side has nobody listening yet:
+          // see `failStreamSetupOnSocketError`.
+          if (failStreamSetupOnSocketError) {
+            failStreamSetupOnSocketError(normalizeError(error));
+
+            return;
+          }
+
           reportWriteErrorAfterResponse(error);
 
           return;
@@ -1290,7 +1348,9 @@ export class NodeAdapter implements HTTPAdapter {
                 'Request aborted during streamResponse setup',
               );
               abortErr.name = 'AbortError';
-              failRequest(markStreamFactoryError(abortErr, req, request.headers));
+              failRequest(
+                markStreamFactoryError(abortErr, req, request.headers),
+              );
               return;
             }
 

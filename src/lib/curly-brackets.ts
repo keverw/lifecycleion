@@ -1,5 +1,9 @@
 import { getPathParts } from './internal/path-utils';
-import { chargeText, createRenderBudget } from './internal/render-budget';
+import {
+  TRUNCATED_LENGTH,
+  chargeText,
+  createRenderBudget,
+} from './internal/render-budget';
 import { stringifyValue } from './stringify-value';
 import {
   createFormatReporter,
@@ -205,6 +209,20 @@ CurlyBrackets.compileTemplate = function (
 
       if (replacement === undefined || replacement === null) {
         return fallback;
+      }
+
+      // Checked, not only charged - the same guard the sibling walks keep, and for the
+      // same reason. `chargeText` bounds what is *emitted* and does nothing about what is
+      // *produced*: `stringifyValue` is evaluated as its argument, so every placeholder
+      // after the budget ran out still rendered its value in full - each opening a fresh
+      // `MAX_RENDER_LENGTH` of its own - only for the result to be cut to the marker and
+      // thrown away. One 60,000-key param behind 500 placeholders spent 1.9 seconds
+      // synchronously inside `logger.info()` rendering 500 megabyte-scale strings nobody
+      // would ever see. The marker is emitted uncharged, since the budget it would be
+      // billed against is already gone and a template's placeholder count is the author's,
+      // not the payload's.
+      if (budget.remaining <= 0) {
+        return TRUNCATED_LENGTH;
       }
 
       try {
