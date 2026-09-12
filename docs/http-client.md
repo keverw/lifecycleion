@@ -285,6 +285,8 @@ interface HTTPResponse<T = unknown> {
 
 #### Uploads That Outlive the Response
 
+Most REST APIs read and process the whole upload before they answer, so by the time you have a response the body is long gone out. If that is your situation, ignore `requestBodySettled` — it will not be there. It exists for the uncommon shapes where the answer can arrive first: early-ack, unbuffered, and duplex endpoints, and `NodeAdapter` only.
+
 With request buffering disabled — nginx `proxy_request_buffering off`, or any endpoint that acks a streaming upload as soon as it has what it needs — the answer arrives while the upload is still going. The response is real and is delivered immediately, and what happens to the rest of the body afterwards used to be invisible: it can fail on its own (a `File` that yields fewer bytes than its `Blob.size` puts a body on the wire short of its `Content-Length`), or be cut short by the adapter's stall watchdog seconds after you already read a clean `2xx`.
 
 `requestBodySettled` is that outcome. It is present only when a body writer was still running when the response resolved, it resolves with the failure or with `undefined`, and it never rejects:
