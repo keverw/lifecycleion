@@ -550,23 +550,6 @@ export class NodeAdapter implements HTTPAdapter {
       const watchForStalledUpload = (): void => {
         let bytesAtLastTick = uploadedBytesSeen;
 
-        /**
-         * Guarded, because this one runs from a timer.
-         *
-         * Every other `req.destroy()` here is inside the request's own promise chain, where
-         * a throw is rejected into it. This one has no such home: a socket already gone can
-         * answer `ERR_SOCKET_CLOSED` from `destroy()` on some runtimes, and a throw out of a
-         * timer callback is the uncaught exception the rest of this file's absorbers exist
-         * to prevent - taking the process down over a teardown that had already happened.
-         */
-        const destroyQuietly = (): void => {
-          try {
-            req.destroy();
-          } catch {
-            // Already torn down, which is the state this was trying to reach.
-          }
-        };
-
         const tick = (): void => {
           if (!isWritingBody || req.writableEnded || req.destroyed) {
             return;
@@ -592,7 +575,14 @@ export class NodeAdapter implements HTTPAdapter {
               ),
             );
 
-            destroyQuietly();
+            // Quietly, because this one runs from a timer. Every other `req.destroy()`
+            // here is inside the request's own promise chain, where a throw is rejected
+            // into it. This one has no such home: a socket already gone can answer
+            // `ERR_SOCKET_CLOSED` from `destroy()` on some runtimes, and a throw out of a
+            // timer callback is the uncaught exception the rest of this file's absorbers
+            // exist to prevent - taking the process down over a teardown that had already
+            // happened.
+            destroyRequestQuietly(req);
 
             return;
           }
@@ -751,37 +741,6 @@ export class NodeAdapter implements HTTPAdapter {
         openBodyOutcome();
       }
 
-      // Tears the request down whatever state it is in. A cancel has to reach the socket
-      // even once the body is fully written: `req.end()` runs synchronously in this
-      // executor for every bodiless request, so a `writableEnded` guard here would make
-      // `AbortController.abort()` and every timeout a no-op on the transport - the promise
-      // rejecting while the response kept streaming into `chunks[]` and the connection
-      // stayed open. Only `destroyed` is worth skipping, and the `catch` covers a socket
-      // that is already gone answering `ERR_SOCKET_CLOSED`.
-      const destroyRequestQuietly = (): void => {
-        if (req.destroyed) {
-          return;
-        }
-
-        try {
-          req.destroy();
-        } catch {
-          // Already torn down, which is the state this was trying to reach.
-        }
-      };
-
-      // The narrower sibling, for the paths whose business is an *unfinished* request -
-      // one whose body writer died before `req.end()`. A request that ended has nothing
-      // left to clean up there, and destroying it could cut short a response still
-      // arriving on the same socket, which is the whole reason those paths wait.
-      const destroyUnfinishedRequestQuietly = (): void => {
-        if (req.writableEnded) {
-          return;
-        }
-
-        destroyRequestQuietly();
-      };
-
       /**
        * A body write that failed after the server had already answered.
        *
@@ -837,7 +796,7 @@ export class NodeAdapter implements HTTPAdapter {
 
         // Only once the response is fully in. See `didResponseClose`.
         if (didResponseClose) {
-          destroyUnfinishedRequestQuietly();
+          destroyUnfinishedRequestQuietly(req);
 
           return;
         }
@@ -861,7 +820,7 @@ export class NodeAdapter implements HTTPAdapter {
               return;
             }
 
-            destroyUnfinishedRequestQuietly();
+            destroyUnfinishedRequestQuietly(req);
           }, UPLOAD_STALL_GRACE_MS);
 
           // Never a reason for the process to stay up, exactly as the stall watchdog's
@@ -870,7 +829,7 @@ export class NodeAdapter implements HTTPAdapter {
         } catch {
           // No way to schedule it, so the request is torn down now rather than left to
           // hang. A response mid-flight is the lesser loss of the two.
-          destroyUnfinishedRequestQuietly();
+          destroyUnfinishedRequestQuietly(req);
         }
       };
 
@@ -928,7 +887,7 @@ export class NodeAdapter implements HTTPAdapter {
             return;
           }
 
-          destroyRequestQuietly();
+          destroyRequestQuietly(req);
         });
 
         void (async () => {
@@ -978,7 +937,7 @@ export class NodeAdapter implements HTTPAdapter {
                 // uncaught exception the rest of this file's absorbers exist to prevent -
                 // and a socket already gone can answer `ERR_SOCKET_CLOSED` from `destroy()`
                 // on some runtimes, which is precisely the state this is reached in.
-                destroyRequestQuietly();
+                destroyRequestQuietly(req);
                 settleResponse({
                   status,
                   headers,
@@ -1322,7 +1281,7 @@ export class NodeAdapter implements HTTPAdapter {
       if (request.signal) {
         if (request.signal.aborted) {
           // Signal already aborted before we even started (e.g., pre-cancelled builder)
-          destroyRequestQuietly();
+          destroyRequestQuietly(req);
           const abortErr = new Error('Request aborted');
           abortErr.name = 'AbortError';
           failRequest(abortErr);
@@ -1341,7 +1300,7 @@ export class NodeAdapter implements HTTPAdapter {
               // `AbortSignal` event, where a throw is an uncaught exception rather than a
               // rejection into this request's promise - and a socket torn down by the same
               // abort can answer `ERR_SOCKET_CLOSED` from `destroy()` on some runtimes.
-              destroyRequestQuietly();
+              destroyRequestQuietly(req);
 
               const error = new Error(
                 'Request aborted during response streaming',
@@ -1362,7 +1321,7 @@ export class NodeAdapter implements HTTPAdapter {
             if (activeBufferedResponse) {
               const { status, headers } = activeBufferedResponse;
               activeBufferedResponse = undefined;
-              destroyRequestQuietly();
+              destroyRequestQuietly(req);
 
               const error = new Error(
                 'Request aborted during response streaming',
@@ -1381,7 +1340,7 @@ export class NodeAdapter implements HTTPAdapter {
             }
 
             if (isStreamFactoryPending) {
-              destroyRequestQuietly();
+              destroyRequestQuietly(req);
               const abortErr = new Error(
                 'Request aborted during streamResponse setup',
               );
@@ -1392,7 +1351,7 @@ export class NodeAdapter implements HTTPAdapter {
               return;
             }
 
-            destroyRequestQuietly();
+            destroyRequestQuietly(req);
             const abortErr = new Error('Request aborted');
             abortErr.name = 'AbortError';
             failRequest(abortErr);
@@ -2358,6 +2317,37 @@ function resolveAdapterResponse(
       fallbackHeaders,
     ),
   });
+}
+
+// Tears the request down whatever state it is in. A cancel has to reach the socket
+// even once the body is fully written: `req.end()` runs synchronously in the request
+// executor for every bodiless request, so a `writableEnded` guard here would make
+// `AbortController.abort()` and every timeout a no-op on the transport - the promise
+// rejecting while the response kept streaming into `chunks[]` and the connection
+// stayed open. Only `destroyed` is worth skipping, and the `catch` covers a socket
+// that is already gone answering `ERR_SOCKET_CLOSED`.
+function destroyRequestQuietly(req: http.ClientRequest): void {
+  if (req.destroyed) {
+    return;
+  }
+
+  try {
+    req.destroy();
+  } catch {
+    // Already torn down, which is the state this was trying to reach.
+  }
+}
+
+// The narrower sibling, for the paths whose business is an *unfinished* request -
+// one whose body writer died before `req.end()`. A request that ended has nothing
+// left to clean up there, and destroying it could cut short a response still
+// arriving on the same socket, which is the whole reason those paths wait.
+function destroyUnfinishedRequestQuietly(req: http.ClientRequest): void {
+  if (req.writableEnded) {
+    return;
+  }
+
+  destroyRequestQuietly(req);
 }
 
 function destroyWritableQuietly(writable: WritableLike): void {
