@@ -1414,6 +1414,14 @@ and holding the whole process open. A blocking open of a pipe nobody is reading 
 returns and cannot be cancelled. The sink keeps asking on an `unref`'d one-second timer, so
 it opens and flushes the queue on its own if a reader turns up later.
 
+`close()` gets one last chance at the pipe. If entries are still queued and the sink has no
+open stream, it re-probes for a reader across a short grace window (500ms, polled every
+50ms) before giving up, because the process reading a FIFO is often restarted alongside the
+one writing to it and a probe at that instant answers "no reader" for a consumer that is
+back a moment later. The probe is non-blocking, so a pipe nobody is reading costs a handful
+of immediate syscalls and the close returns at the end of the window - never the full
+`closeTimeoutMS`. A sink with an empty queue skips the window entirely and closes at once.
+
 `NamedPipeSink.reconnect()` remains available for reconnecting on demand. Because the sink
 now reopens on its own, a `reconnect()` that races one of those automatic attempts answers
 `already_reconnecting`, meaning the reconnection it would have performed is already under way.

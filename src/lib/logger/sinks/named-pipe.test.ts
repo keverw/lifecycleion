@@ -3061,4 +3061,79 @@ describe('NamedPipeSink', () => {
 
     reader.stop();
   }, 15000);
+
+  test('close() waits out a reader that is restarting, and only briefly', async () => {
+    // The consumer of a FIFO is often restarted alongside the process writing to it, so a
+    // probe that answers `ENXIO` at shutdown usually means "back in a moment" rather than
+    // "nothing is listening". `close()` re-asks across a short grace window for exactly
+    // that, and gives up at the end of it: a reader that is genuinely gone must not turn a
+    // shutdown into a `closeTimeoutMS` wait.
+    const pipePath = `${tmpDir.path}/close-regrace.pipe`;
+    await createNamedPipe(pipePath);
+
+    const sink = new NamedPipeSink({
+      pipePath,
+      jsonFormat: false,
+      closeTimeoutMS: 8000,
+    });
+
+    const testMessage = 'written while the reader was restarting';
+
+    sink.write({
+      timestamp: Date.now(),
+      type: 'info',
+      serviceName: 'TestService',
+      template: testMessage,
+      message: testMessage,
+    });
+
+    let restarted: ReturnType<typeof startPipeReader> | undefined;
+
+    // Attached after the sink has already found no reader, inside the grace window.
+    const readerTimer = setTimeout(() => {
+      restarted = startPipeReader(pipePath);
+    }, 150);
+
+    await sink.close();
+    clearTimeout(readerTimer);
+
+    await new Promise((resolve) => setTimeout(resolve, 200));
+
+    expect(restarted?.data.join('')).toContain(testMessage);
+    expect(sink.getHealth().droppedEntries).toBe(0);
+
+    restarted?.stop();
+  }, 15000);
+
+  test('close() gives up on a reader that never comes back', async () => {
+    // The other half of the grace window: nothing is reading, and the close returns in
+    // roughly the window rather than holding for `closeTimeoutMS`.
+    const pipePath = `${tmpDir.path}/close-regrace-none.pipe`;
+    await createNamedPipe(pipePath);
+
+    const sink = new NamedPipeSink({
+      pipePath,
+      jsonFormat: false,
+      closeTimeoutMS: 8000,
+    });
+
+    sink.write({
+      timestamp: Date.now(),
+      type: 'info',
+      serviceName: 'TestService',
+      template: 'nobody is listening',
+      message: 'nobody is listening',
+    });
+
+    const startedAt = Date.now();
+
+    await sink.close();
+
+    const elapsed = Date.now() - startedAt;
+
+    // Comfortably inside `closeTimeoutMS`, which is what the grace window exists to stay
+    // clear of; the upper bound is loose so a slow machine does not make this flake.
+    expect(elapsed).toBeLessThan(3000);
+    expect(sink.getHealth().droppedEntries).toBe(1);
+  }, 15000);
 });

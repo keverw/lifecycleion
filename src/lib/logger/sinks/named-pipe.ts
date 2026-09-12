@@ -174,6 +174,20 @@ interface QueuedPipeEntry extends RenderedLine {
  */
 const MIN_CLOSE_FLUSH_MS = 100;
 
+/**
+ * How long `close()` keeps asking for a reader before giving up on its backlog.
+ *
+ * A FIFO's consumer is frequently restarted with the process writing to it, so at shutdown
+ * the probe's `ENXIO` often means "the reader is coming back in a moment", not "nothing is
+ * listening". A window this size covers that restart and nothing longer: a reader that is
+ * genuinely gone must not hold a shutdown, which is why this is a fraction of
+ * `closeTimeoutMS` rather than a share of it.
+ */
+const CLOSE_REOPEN_GRACE_MS = 500;
+
+/** How often {@link CLOSE_REOPEN_GRACE_MS} re-asks. Each attempt is one non-blocking probe. */
+const CLOSE_REOPEN_POLL_MS = 50;
+
 const REOPEN_COOLDOWN_MS = 1000;
 
 /**
@@ -730,6 +744,55 @@ export class NamedPipeSink implements LogSink {
     // have written every one of them. A graceful shutdown losing the tail of the log it is
     // shutting down is the one moment those lines matter most.
     //
+    // One attempt to reach the pipe again, when there is a backlog and nothing to write it
+    // with.
+    //
+    // `FileSink`'s drain reopens its destination inline - `writeEntry` calls
+    // `setupLogFile()` whenever the stream is missing - so its close keeps trying to reach
+    // the file until the deadline. This sink could not: `drainQueue` only runs against a
+    // stream that is already open, and `ensureConnection` refuses outright once `closing`
+    // is set, so a sink sitting between reopen attempts - the ordinary state for a FIFO
+    // whose reader was late - abandoned its whole backlog the moment `close()` was called,
+    // with a reader attached and consuming.
+    //
+    // Bounded by the same deadline as everything else, and cheap when it fails: `openPipe`
+    // asks `openWriteProbe` first, which answers `ENXIO` immediately when nothing is
+    // reading, so a shutdown with no reader on the other end returns as fast as it always
+    // did rather than holding for `closeTimeoutMS`. One attempt, not a retry loop, for the
+    // same reason: waiting on a reader that has not arrived yet is the stall this sink's
+    // whole non-blocking design exists to avoid.
+    // Retried for a short grace window rather than asked exactly once: the reader on the
+    // other end of a FIFO is often the thing being restarted alongside this process, and a
+    // consumer that is down for the few hundred milliseconds of its own restart is the most
+    // ordinary reason for a probe to answer `ENXIO` at shutdown. A single question catches
+    // only the reader that happens to be up at that instant.
+    //
+    // {@link CLOSE_REOPEN_GRACE_MS} is deliberately far shorter than `closeTimeoutMS`: this
+    // is a blip, not an outage, and a reader that is genuinely gone must not turn a
+    // shutdown into a thirty-second wait. Whichever bound is nearer wins, so a close with
+    // little budget left never overruns it for this.
+    const reopenGraceUntil =
+      Date.now() + Math.min(CLOSE_REOPEN_GRACE_MS, this.closeTimeoutMS);
+
+    while (
+      this.writeQueue.length > 0 &&
+      this.pipeStream === undefined &&
+      this.pendingStream === undefined &&
+      !this.isOpening &&
+      Date.now() < reopenGraceUntil &&
+      Date.now() - startTime < this.closeTimeoutMS
+    ) {
+      await this.reopenForCloseDrain(startTime, reopenGraceUntil);
+
+      if (this.pipeStream !== undefined || this.pendingStream !== undefined) {
+        break;
+      }
+
+      // Spaced out, so a reader that never comes back costs a handful of immediate
+      // syscalls across the window rather than a spin.
+      await new Promise((resolve) => setTimeout(resolve, CLOSE_REOPEN_POLL_MS));
+    }
+
     // An open still in flight counts as a stream to wait for, exactly as an open one does.
     // `waitForOpen` answers at `OPEN_WAIT_MS` whether or not the FIFO's write side has
     // opened, so a reader that attaches after those two seconds - and well inside a
@@ -935,6 +998,64 @@ export class NamedPipeSink implements LogSink {
     } catch {
       clearTimeout(timer);
       destroy();
+    }
+  }
+
+  /**
+   * One non-blocking attempt to reopen the pipe for a close that still has a backlog.
+   *
+   * `ensureConnection` cannot be used here: it refuses while `closing` is set, and it keeps
+   * a cooldown whose whole purpose is to stop a dead pipe becoming a syscall storm - both
+   * right for the running sink and both wrong for the last attempt a close gets to make.
+   * `openPipe` is called directly instead, which still probes with `O_NONBLOCK` first, so
+   * an absent reader costs one syscall rather than a wait.
+   *
+   * Raced against what is left of the close's budget rather than awaited outright.
+   * `openPipe` waits up to `OPEN_WAIT_MS` for the stream to open, which is its own bound
+   * and not this one; a stream that opens after this returns is either promoted by the
+   * `'open'` handler and ended by the close, or left pending and destroyed by the close's
+   * own cleanup, exactly as any other in-flight open is.
+   */
+  private async reopenForCloseDrain(
+    startTime: number,
+    graceUntil: number,
+  ): Promise<void> {
+    // The *grace* deadline, not the close's whole budget. `openPipe` waits up to
+    // `OPEN_WAIT_MS` for a stream it has already committed to opening, so an attempt raced
+    // only against `closeTimeoutMS` could sit here for the entire budget - thirty seconds
+    // by default - which is the stall this window exists to bound. The open is left in
+    // flight either way and the drain loop below picks up the stream if it lands.
+    const remainingMS = Math.min(
+      this.closeTimeoutMS - (Date.now() - startTime),
+      graceUntil - Date.now(),
+    );
+
+    if (remainingMS <= 0) {
+      return;
+    }
+
+    let timeoutHandle: NodeJS.Timeout | undefined;
+
+    try {
+      const attempt = this.initializePipe();
+
+      // Held so a failure after the race is not an unhandled rejection, the way `close()`
+      // holds the init promise it may stop waiting on.
+      this.initPromise = attempt.catch(() => {
+        // Reported by `openPipe` itself; nothing further to do here.
+      });
+
+      const timeoutPromise = new Promise<void>((resolve) => {
+        timeoutHandle = setTimeout(resolve, remainingMS);
+      });
+
+      await Promise.race([this.initPromise, timeoutPromise]);
+    } catch {
+      // `openPipe` reports its own failures; a close does not get to raise one.
+    } finally {
+      if (timeoutHandle) {
+        clearTimeout(timeoutHandle);
+      }
     }
   }
 
