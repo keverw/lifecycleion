@@ -4,6 +4,8 @@ import {
   restoreConsoleError,
 } from './internal/console-test-utils';
 import {
+  reportCallbackError,
+  runCallbackSafely,
   safeHandleCallback,
   safeHandleCallbackAndWait,
 } from './safe-handle-callback';
@@ -258,6 +260,186 @@ describe('safeHandleCallbackAndWait', () => {
     globalThis.dispatchEvent(new ErrorEvent('error', { error: result.error }));
 
     globalThis.removeEventListener('error', errorHandler);
+  });
+});
+
+describe('runCallbackSafely', () => {
+  // The extension seam `EventEmitterProtected.emit` builds on: every way a callback can
+  // fail reaches `onError`, and nothing reaches the global channel unless `onError` sends
+  // it there.
+  it('calls the callback with its arguments and reports nothing on success', () => {
+    const received: unknown[][] = [];
+    const failures: unknown[] = [];
+
+    runCallbackSafely(
+      'cb',
+      (...args: unknown[]) => {
+        received.push(args);
+      },
+      [1, 'two'],
+      (error) => failures.push(error),
+    );
+
+    expect(received).toEqual([[1, 'two']]);
+    expect(failures).toEqual([]);
+  });
+
+  it('routes a synchronous throw to onError', () => {
+    const failures: unknown[] = [];
+    const thrown = new Error('sync');
+
+    runCallbackSafely(
+      'cb',
+      () => {
+        throw thrown;
+      },
+      [],
+      (error) => failures.push(error),
+    );
+
+    expect(failures).toEqual([thrown]);
+  });
+
+  it('routes a rejection to onError without awaiting it', async () => {
+    const failures: unknown[] = [];
+    const rejection = new Error('async');
+
+    runCallbackSafely(
+      'cb',
+      () => Promise.reject(rejection),
+      [],
+      (error) => failures.push(error),
+    );
+
+    // Not yet: the rejection is reported when it lands, never awaited here.
+    expect(failures).toEqual([]);
+
+    await sleep(1);
+
+    expect(failures).toEqual([rejection]);
+  });
+
+  it('routes a non-function to onError with the same message safeHandleCallback used', () => {
+    const failures: unknown[] = [];
+
+    runCallbackSafely('myHook', 'not callable', [], (error) =>
+      failures.push(error),
+    );
+
+    expect(failures).toHaveLength(1);
+    expect((failures[0] as Error).message).toBe(
+      'Callback provided for myHook is not a function',
+    );
+  });
+
+  it('keeps a non-Error throw as the value it was', () => {
+    const failures: unknown[] = [];
+
+    runCallbackSafely(
+      'cb',
+      () => {
+        // eslint-disable-next-line @typescript-eslint/only-throw-error -- a non-Error throw is the case
+        throw 'boom';
+      },
+      [],
+      (error) => failures.push(error),
+    );
+
+    expect(failures).toEqual(['boom']);
+  });
+
+  it('does not touch the global error channel on its own', () => {
+    const events: unknown[] = [];
+    const onGlobalError = (event: Event): void => {
+      events.push(event);
+      event.preventDefault();
+    };
+
+    globalThis.addEventListener('error', onGlobalError);
+
+    try {
+      runCallbackSafely(
+        'cb',
+        () => {
+          throw new Error('kept local');
+        },
+        [],
+        () => {},
+      );
+
+      expect(events).toEqual([]);
+    } finally {
+      globalThis.removeEventListener('error', onGlobalError);
+    }
+  });
+});
+
+describe('reportCallbackError', () => {
+  it('dispatches a cancelable ErrorEvent wrapping the thrown value as cause', () => {
+    const events: ErrorEvent[] = [];
+    const onGlobalError = (event: Event): void => {
+      events.push(event as ErrorEvent);
+      event.preventDefault();
+    };
+
+    globalThis.addEventListener('error', onGlobalError);
+
+    try {
+      const thrown = new Error('inner');
+
+      reportCallbackError('myHook', thrown);
+
+      expect(events).toHaveLength(1);
+      expect(events[0]?.cancelable).toBe(true);
+      expect(events[0]?.error).toBeInstanceOf(Error);
+      expect((events[0]?.error as Error).message).toBe(
+        'Error in a callback myHook',
+      );
+      expect((events[0]?.error as Error).cause).toBe(thrown);
+    } finally {
+      globalThis.removeEventListener('error', onGlobalError);
+    }
+  });
+
+  it('carries a non-object throw on cause rather than dropping it', () => {
+    const events: ErrorEvent[] = [];
+    const onGlobalError = (event: Event): void => {
+      events.push(event as ErrorEvent);
+      event.preventDefault();
+    };
+
+    globalThis.addEventListener('error', onGlobalError);
+
+    try {
+      reportCallbackError('myHook', 42);
+
+      expect((events[0]?.error as Error).cause).toBe(42);
+    } finally {
+      globalThis.removeEventListener('error', onGlobalError);
+    }
+  });
+
+  it('falls through to console.error naming the callback when nothing claims it', () => {
+    const captured = muteConsoleError();
+
+    reportCallbackError('myHook', new Error('inner'));
+
+    expect(captured.some((line) => line.includes('myHook'))).toBe(true);
+    expect(captured.some((line) => line.includes('inner'))).toBe(true);
+  });
+
+  it('never throws, even for a value that cannot be rendered', () => {
+    muteConsoleError();
+
+    const hostile = new Error('hostile');
+
+    Object.defineProperty(hostile, 'stack', {
+      get() {
+        throw new Error('no stack for you');
+      },
+    });
+
+    expect(() => reportCallbackError('myHook', hostile)).not.toThrow();
   });
 });
 

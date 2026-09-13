@@ -9,6 +9,7 @@ import {
   type StringifyValueOptions,
   type TruncationInfo,
 } from './stringify-value';
+import { TRUNCATED_LENGTH } from './internal/render-budget';
 import { applyRedaction } from './logger/utils/redaction';
 import type { RedactFunction } from './logger/types';
 
@@ -2291,6 +2292,79 @@ describe('maxRenderLength and onTruncate', () => {
     });
 
     expect(cuts).toHaveLength(1);
+  });
+
+  it('cuts an oversized redactFunction replacement to maxRenderLength in the structure', () => {
+    // Charging the excess degraded the siblings after an oversized replacement, but the
+    // replacement itself was handed back whole: `redactValue` returned a half-megabyte
+    // leaf under a ten-thousand-character cap while `onTruncate` reported the bound had
+    // held. The text render was bounded on its second pass; the structure a caller keeps
+    // had no second pass.
+    const cuts: TruncationInfo[] = [];
+
+    const result = redactValue(
+      { a: 'secret' },
+      {
+        redactedKeys: ['a'],
+        redactFunction: () => 'R'.repeat(500_000),
+        maxRenderLength: 10_000,
+        onTruncate: (info) => cuts.push(info),
+      },
+    ) as { a: string };
+
+    expect(result.a.length).toBeLessThanOrEqual(
+      10_000 + TRUNCATED_LENGTH.length,
+    );
+    expect(result.a.endsWith(TRUNCATED_LENGTH)).toBe(true);
+    expect(result.a.startsWith('RRRR')).toBe(true);
+    expect(cuts).toHaveLength(1);
+    expect(cuts[0]?.reason).toBe('length');
+    expect(cuts[0]?.dropped).toBeGreaterThan(400_000);
+  });
+
+  it("leaves a replacement that fits the caller's cap whole", () => {
+    // The cut is against what the caller allowed, not the fixed constant, and a
+    // replacement under it is what the caller asked to appear.
+    const cuts: TruncationInfo[] = [];
+
+    const result = redactValue(
+      { a: 'secret' },
+      {
+        redactedKeys: ['a'],
+        redactFunction: () => 'R'.repeat(5_000),
+        maxRenderLength: 10_000,
+        onTruncate: (info) => cuts.push(info),
+      },
+    ) as { a: string };
+
+    expect(result.a).toBe('R'.repeat(5_000));
+    expect(cuts).toHaveLength(0);
+  });
+
+  it('bounds the sum of replacements across redactedParams siblings', () => {
+    // Each leaf's replacement is cut against what the siblings before it left, so the
+    // structure as a whole stays inside the cap rather than each leaf separately.
+    const params: Record<string, string> = {};
+
+    for (let index = 0; index < 20; index++) {
+      params[`k${String(index)}`] = 'secret';
+    }
+
+    const result = redactValue(params, {
+      redactedKeys: Object.keys(params),
+      redactFunction: () => 'R'.repeat(50_000),
+      maxRenderLength: 100_000,
+    }) as Record<string, string>;
+
+    const total = Object.values(result).reduce(
+      (sum, leaf) => sum + leaf.length,
+      0,
+    );
+
+    // The input leaves and the structure's own delimiters are charged too, so the total
+    // sits a little over the cap, never at twenty times it.
+    expect(total).toBeLessThan(110_000);
+    expect(total).toBeGreaterThan(90_000);
   });
 
   it('honours Infinity and falls back on anything else unusable', () => {

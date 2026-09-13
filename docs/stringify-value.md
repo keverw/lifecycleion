@@ -46,7 +46,11 @@ interface StringifyValueOptions {
   redactedKeys?: string[];
   /** Decides how a matched value is replaced. */
   redactFunction?: (key: string, value: string) => RedactFunctionResult;
-  /** Notified when redaction or rendering fails. Defaults to `console.error`. */
+  /**
+   * Notified when redaction or rendering fails. With no handler set, a standalone call
+   * reports on the global `'error'` channel - so `logger.registerReportErrorListener()`
+   * records it - and falls back to `console.error` only when nothing claims the event.
+   */
   onFormatError?: (
     error: Error,
     kind: 'redaction' | 'render',

@@ -1207,10 +1207,12 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
       // rethrow of an outcome already recorded, not a second one - from a genuine throw
       // after a settled attempt.
       let didReport = false;
+      let reportedStatus: ReportResultStatus | undefined;
       let reportedValue: unknown;
 
       const reportResult: ReportResult = (status, value) => {
         didReport = true;
+        reportedStatus = status;
         reportedValue = value;
 
         if (status === 'success' || status === 'skip') {
@@ -1242,7 +1244,19 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
         // `catch (e) { reportResult('error', e); throw e; }`. That is precisely the harm
         // the aborted case above is excluded for. A throw carrying anything else still
         // reports, which is the failure that would otherwise disappear.
-        if (didReport && context.handled && error === reportedValue) {
+        //
+        // Only a rethrow of a reported *error* is that shape. Comparing against whatever
+        // was reported matched a throw against success data too: `reportResult('success')`
+        // and `reportResult('skip')` store `undefined`, so a later `throw undefined` or a
+        // bare `Promise.reject()` from a cleanup step compared equal and was dropped - the
+        // runner stayed `completed`/`success` and the `'error'` channel never heard of it,
+        // which is precisely the post-success failure `handleReportResult` exists to keep.
+        if (
+          didReport &&
+          context.handled &&
+          reportedStatus === 'error' &&
+          error === reportedValue
+        ) {
           return;
         }
 

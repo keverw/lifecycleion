@@ -1082,6 +1082,47 @@ describe('CookieJar', () => {
       );
     });
 
+    test('returns how many cookies were restored, so a short restore is visible', () => {
+      // `setCookie` refuses a cookie with a missing or invalid domain and says so by
+      // returning `false`; `fromJSON` used to throw that answer away and return `void`, so
+      // a persisted jar could come back short with nothing to say it had.
+      const jar2 = new CookieJar();
+
+      const restored = jar2.fromJSON({
+        cookies: [
+          {
+            name: 'good',
+            value: '1',
+            domain: 'example.com',
+            path: '/',
+            createdAt: Date.now(),
+          },
+          {
+            name: 'bad',
+            value: '2',
+            domain: '',
+            path: '/',
+            createdAt: Date.now(),
+          },
+          {
+            name: 'also-good',
+            value: '3',
+            domain: 'example.com',
+            path: '/',
+            createdAt: Date.now(),
+          },
+        ],
+      });
+
+      expect(restored).toBe(2);
+      expect(jar2.getCookieFor('good', 'https://example.com')?.value).toBe('1');
+      expect(jar2.getCookieFor('bad', 'https://example.com')).toBeUndefined();
+    });
+
+    test('returns zero for an empty payload', () => {
+      expect(new CookieJar().fromJSON({ cookies: [] })).toBe(0);
+    });
+
     test('re-hydrates Date objects from JSON strings', () => {
       const expires = new Date(Date.now() + 10_000);
       jar.setCookie({

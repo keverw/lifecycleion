@@ -19,6 +19,7 @@ import {
   noteTruncation,
   createRenderBudget,
   MAX_RENDER_DEPTH,
+  TRUNCATED_LENGTH,
   type RenderBudget,
 } from './render-budget';
 
@@ -140,8 +141,15 @@ export function maskValueDeep(
     // billed, so ordinary masking - which returns roughly what it was given - costs the
     // budget exactly what it did before, and a sibling after an inflating replacement
     // degrades the way every other over-budget value does.
+    //
+    // Billed *and cut*, not billed alone. Charging the excess made the siblings after an
+    // oversized replacement degrade, but still handed the replacement back whole - so
+    // `redactValue` under `maxRenderLength: 10_000` returned a half-megabyte leaf while
+    // its `onTruncate` said the bound had held. The text render was bounded on its second
+    // pass; the structure a caller keeps had no second pass. `capToMaxRenderLength` is
+    // the fixed constant, not this pass's allowance, so it never saw the caller's cap.
     if (typeof masked === 'string' && masked.length > text.length) {
-      chargeUnits(budget, masked.length - text.length);
+      return chargeReplacementExcess(budget, text, masked);
     }
 
     return masked;
@@ -386,4 +394,45 @@ export function maskValueDeep(
     // the second being reported as a cycle.
     seen.delete(value);
   }
+}
+
+/**
+ * Bill a replacement that came back longer than the leaf it stands for, cutting it to
+ * what the budget can still carry.
+ *
+ * `text` has already been charged by the caller, so only the growth is new cost. A
+ * replacement whose growth fits is charged and returned whole. One whose growth does not
+ * fit is cut to the leaf's length plus whatever remains - the same rule `chargeText`
+ * applies to a rendered leaf - with the marker on the end saying where it stopped, and
+ * the cut recorded on the budget so `onTruncate` and the returned leaf agree.
+ *
+ * Cut against `remaining` rather than against `limit`: a replacement is one more thing
+ * the pass emits, and the allowance it competes for is what the siblings before it left.
+ */
+function chargeReplacementExcess(
+  budget: RenderBudget,
+  text: string,
+  replacement: string,
+): string {
+  const excess = replacement.length - text.length;
+
+  if (excess <= budget.remaining) {
+    chargeUnits(budget, excess);
+
+    return replacement;
+  }
+
+  // `Math.max`, because the budget can already be negative: the leaf above was charged
+  // whether or not it fit, so a replacement can arrive with nothing left at all.
+  const kept = replacement.slice(
+    0,
+    text.length + Math.max(0, budget.remaining),
+  );
+  const emitted = `${kept}${TRUNCATED_LENGTH}`;
+
+  noteTruncation(budget, 'length', replacement.length - kept.length);
+
+  chargeUnits(budget, emitted.length - text.length);
+
+  return emitted;
 }

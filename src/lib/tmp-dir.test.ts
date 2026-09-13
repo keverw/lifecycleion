@@ -86,6 +86,67 @@ describe('TmpDir', () => {
     expect(err).toBeInstanceOf(ErrTmpDirCleanupFailedNotEmpty);
   });
 
+  test('safe cleanup removes an empty directory', async () => {
+    // `fs.rm` without `recursive` refuses a directory outright with `ERR_FS_EISDIR`, empty
+    // or not, so the safe path could never complete: every `cleanup()` on the default
+    // configuration reported an unexpected error for a directory with nothing in it.
+    const anotherTempDir = await createTempDir({
+      baseDirectory: tempDir.path,
+    });
+
+    const dirPath = anotherTempDir.path;
+
+    expect((await fs.stat(dirPath)).isDirectory()).toBe(true);
+
+    await anotherTempDir.cleanup();
+
+    let doesDirExist = true;
+
+    try {
+      await fs.stat(dirPath);
+    } catch {
+      doesDirExist = false;
+    }
+
+    expect(doesDirExist).toBe(false);
+    expect(() => anotherTempDir.path).toThrow(ErrTmpDirWasCleanedUp);
+  });
+
+  test('cleanup of a directory already gone counts as done', async () => {
+    // Gone already is the state cleanup was asked to reach. Reported as an unexpected
+    // error, it also never marked the object cleaned up, so every later `cleanup()` threw
+    // again and it could not reach a terminal state.
+    const anotherTempDir = await createTempDir({
+      baseDirectory: tempDir.path,
+    });
+
+    const dirPath = anotherTempDir.path;
+
+    await fs.rm(dirPath, { recursive: true, force: true });
+
+    await anotherTempDir.cleanup();
+
+    expect(() => anotherTempDir.path).toThrow(ErrTmpDirWasCleanedUp);
+
+    // Terminal: a second cleanup has nothing to do and nothing to complain about.
+    await anotherTempDir.cleanup();
+  });
+
+  test('unsafe cleanup of a directory already gone counts as done too', async () => {
+    const anotherTempDir = await createTempDir({
+      unsafeCleanup: true,
+      baseDirectory: tempDir.path,
+    });
+
+    const dirPath = anotherTempDir.path;
+
+    await fs.rm(dirPath, { recursive: true, force: true });
+
+    await anotherTempDir.cleanup();
+
+    expect(() => anotherTempDir.path).toThrow(ErrTmpDirWasCleanedUp);
+  });
+
   test('unsafeCleanup with a non-empty directory with unsafeCleanup set true', async () => {
     const anotherTempDir = await createTempDir({
       unsafeCleanup: true,

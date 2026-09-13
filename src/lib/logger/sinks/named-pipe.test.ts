@@ -69,6 +69,29 @@ async function waitForOpenPipe(
   return false;
 }
 
+// A reader's data arrives whenever the FIFO delivers it, which under a full suite run can
+// be well after any fixed delay. Waited for by content rather than by clock: the assertion
+// wants the line, not a moment.
+async function waitForReaderData(
+  reader: { data: string[] },
+  predicate: (text: string) => boolean,
+  timeoutMS = 5000,
+): Promise<string> {
+  const deadline = Date.now() + timeoutMS;
+
+  while (Date.now() < deadline) {
+    const text = reader.data.join('');
+
+    if (predicate(text)) {
+      return text;
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+
+  return reader.data.join('');
+}
+
 describe('NamedPipeSink', () => {
   // Only run these tests on supported platforms
   const platform = os.platform();
@@ -325,9 +348,12 @@ describe('NamedPipeSink', () => {
     // Synchronously after `write`, so the queue cannot have been drained yet.
     params['password'] = 'hunter2secret';
 
-    await new Promise((resolve) => setTimeout(resolve, 200));
-
-    const allData = reader.data.join('');
+    // Waited for the line itself rather than a fixed delay: under a full suite run the
+    // reader was still empty after 200 ms and the assertion failed on an entry that
+    // arrived a moment later.
+    const allData = await waitForReaderData(reader, (text) =>
+      text.includes('"foo":"bar"'),
+    );
 
     expect(allData).toContain('"foo":"bar"');
     expect(allData).not.toContain('hunter2secret');

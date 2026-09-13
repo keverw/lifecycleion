@@ -1885,9 +1885,11 @@ async function streamResponseBody(
       // asked for it explicitly. `cleanup` takes `onWritableError` off unconditionally, so
       // the moment it runs the writable has no `'error'` listener of ours left - and an
       // `'error'` event with no listener is an uncaught exception that ends the process.
-      // (A writable with no removal method keeps the permanent fan-out listener, but that
-      // one dispatches to nobody once this request has deregistered, so the absorber is
-      // what has to catch the event there too.)
+      // (A writable with no removal method is the one shape this does not cover, and
+      // does not need to: `absorbPendingWritableError` returns early for it, and the
+      // permanent fan-out listener from `attachWritableListener` stays on the writable
+      // whatever this request does, so the `'error'` channel is never unhandled there.
+      // A late error lands on `onWritableError` and settles nothing.)
       //
       // The three call sites that asked were the ones where a `write`/`end` throw made the
       // late error obvious, which left the ordinary paths uncovered: `settle(true)` on

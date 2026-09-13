@@ -697,6 +697,9 @@ export class BaseHTTPClient {
         let lastAttemptNumber = 0;
         let currentHopInfo: RedirectHopInfo | undefined;
 
+        /** The upload's outcome from the latest hop that had a body. See below. */
+        let uploadOutcome: Promise<Error | undefined> | undefined;
+
         while (true) {
           // Send request through the adapter with retry support. Each hop gets
           // its own call; the shared retryPolicy tracks budget across all hops.
@@ -730,9 +733,19 @@ export class BaseHTTPClient {
            * response's own field and dropped it. An early `3xx` mid-upload is exactly the
            * shape where it is not empty.
            */
-          const uploadOutcome =
+          //
+          // Carried across hops, not recomputed per hop. A followed `301`/`302`/`303`
+          // rewrites a `POST` to a bodiless `GET`, so the final hop has no writer and
+          // nothing of its own to report - and reading only that hop answered
+          // `undefined`, the documented "the body went out" value, for exactly the
+          // early-ack `POST` -> `302` -> `GET` shape this field exists for. The latest
+          // hop that had a body is the answer: a `307`/`308` resends the body and its
+          // own outcome is the one that reached the final response, while a bodiless
+          // hop after it changes nothing about what the upload did.
+          uploadOutcome =
             attemptResult.requestBodySettled ??
-            adapterResponse?.requestBodySettled;
+            adapterResponse?.requestBodySettled ??
+            uploadOutcome;
           lastAttemptNumber = attemptResult.attemptCount;
           isRetriesExhausted = attemptResult.isRetriesExhausted;
           completedAttemptCount = attemptResult.attemptCount;
@@ -2248,6 +2261,18 @@ export class BaseHTTPClient {
       wasRedirectFollowed || (adapterResponse?.wasRedirectDetected ?? false);
     const detectedRedirectURL = adapterResponse?.detectedRedirectURL;
 
+    // The caller's word first, on every branch below. The explicit parameter was
+    // honoured only on the no-response branch and the others read the adapter
+    // response's own field, which is right for a single hop and wrong after a
+    // followed redirect: the final hop's response is usually a bodiless `GET` with
+    // nothing on it, while the parameter carries the outcome from the hop that
+    // actually uploaded. Adopted either way, for the reason `getRequestBodySettled`
+    // gives: the field came from an adapter and may not be a promise this client
+    // can trust.
+    const settled = adoptRequestBodySettled(
+      requestBodySettled ?? adapterResponse?.requestBodySettled,
+    );
+
     if (!adapterResponse) {
       return {
         status: 0,
@@ -2277,7 +2302,7 @@ export class BaseHTTPClient {
         // the documented *success* value - `await undefined` is `undefined` - for
         // a cancelled or timed-out upload, which is the one case where a caller
         // most needs the real answer. Absent only when there was no body writer.
-        ...(requestBodySettled ? { requestBodySettled } : {}),
+        ...(settled ? { requestBodySettled: settled } : {}),
       };
     }
 
@@ -2307,9 +2332,7 @@ export class BaseHTTPClient {
         redirectHistory,
         requestID,
         adapterType,
-        requestBodySettled: adoptRequestBodySettled(
-          adapterResponse?.requestBodySettled,
-        ),
+        requestBodySettled: settled,
       };
     }
 
@@ -2342,9 +2365,7 @@ export class BaseHTTPClient {
         redirectHistory,
         requestID,
         adapterType,
-        requestBodySettled: adoptRequestBodySettled(
-          adapterResponse?.requestBodySettled,
-        ),
+        requestBodySettled: settled,
       };
     }
 
@@ -2376,9 +2397,7 @@ export class BaseHTTPClient {
         redirectHistory,
         requestID,
         adapterType,
-        requestBodySettled: adoptRequestBodySettled(
-          adapterResponse?.requestBodySettled,
-        ),
+        requestBodySettled: settled,
       };
     }
 
@@ -2436,9 +2455,7 @@ export class BaseHTTPClient {
       redirectHistory,
       requestID,
       adapterType,
-      requestBodySettled: adoptRequestBodySettled(
-        adapterResponse.requestBodySettled,
-      ),
+      requestBodySettled: settled,
     };
   }
 

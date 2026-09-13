@@ -598,6 +598,130 @@ describe('HTTPClient — basic HTTP methods', () => {
     expect(await response.requestBodySettled).toBe(uploadFailure);
   });
 
+  test('a followed redirect keeps the upload outcome from the hop that had the body', async () => {
+    // A followed `302` rewrites a `POST` to a bodiless `GET`, and the outcome was
+    // recomputed per hop off the final hop's own response - which has no writer and
+    // nothing to report. `await response.requestBodySettled` then answered `undefined`,
+    // the documented "the body went out" value, for exactly the early-ack
+    // `POST` -> `302` -> `GET` shape the field exists to expose.
+    const uploadFailure = new Error('server answered before the body finished');
+    const sent: Array<{ method: string; hasBody: boolean }> = [];
+
+    const adapter: HTTPAdapter = {
+      getType: () => 'node',
+      send: (request: AdapterRequest): Promise<AdapterResponse> => {
+        sent.push({
+          method: request.method,
+          hasBody: request.body !== undefined && request.body !== null,
+        });
+
+        if (sent.length === 1) {
+          return Promise.resolve({
+            status: 302,
+            headers: { location: '/done' },
+            body: null,
+            requestBodySettled: Promise.resolve(uploadFailure),
+          });
+        }
+
+        return Promise.resolve({
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+          body: new TextEncoder().encode('{"ok":true}'),
+        });
+      },
+    };
+
+    const response = await new HTTPClient({
+      adapter,
+      baseURL: 'http://example.test',
+      followRedirects: true,
+    })
+      .post('/upload')
+      .json({ a: 1 })
+      .send<{ ok: boolean }>();
+
+    expect(sent).toEqual([
+      { method: 'POST', hasBody: true },
+      { method: 'GET', hasBody: false },
+    ]);
+    expect(response.status).toBe(200);
+    expect(response.wasRedirectFollowed).toBe(true);
+    expect(response.requestBodySettled).toBeDefined();
+    expect(await response.requestBodySettled).toBe(uploadFailure);
+  });
+
+  test('a 307 that resends the body reports the resent upload, not the first', async () => {
+    // The latest hop that had a body is the answer: a `307` puts the body on the wire
+    // again, and its outcome is the one behind the final response.
+    const firstFailure = new Error('first hop cut short');
+    let hop = 0;
+
+    const adapter: HTTPAdapter = {
+      getType: () => 'node',
+      send: (_request: AdapterRequest): Promise<AdapterResponse> => {
+        hop++;
+
+        if (hop === 1) {
+          return Promise.resolve({
+            status: 307,
+            headers: { location: '/again' },
+            body: null,
+            requestBodySettled: Promise.resolve(firstFailure),
+          });
+        }
+
+        return Promise.resolve({
+          status: 200,
+          headers: {},
+          body: null,
+          requestBodySettled: Promise.resolve(undefined),
+        });
+      },
+    };
+
+    const response = await new HTTPClient({
+      adapter,
+      baseURL: 'http://example.test',
+      followRedirects: true,
+    })
+      .post('/upload')
+      .json({ a: 1 })
+      .send();
+
+    expect(hop).toBe(2);
+    expect(response.requestBodySettled).toBeDefined();
+    expect(await response.requestBodySettled).toBeUndefined();
+  });
+
+  test('a redirect loop after a bodied hop still carries the upload outcome', async () => {
+    const uploadFailure = new Error('cut short');
+
+    const adapter: HTTPAdapter = {
+      getType: () => 'node',
+      send: (_request: AdapterRequest): Promise<AdapterResponse> =>
+        Promise.resolve({
+          status: 307,
+          headers: { location: '/loop' },
+          body: null,
+          requestBodySettled: Promise.resolve(uploadFailure),
+        }),
+    };
+
+    const response = await new HTTPClient({
+      adapter,
+      baseURL: 'http://example.test',
+      followRedirects: true,
+      maxRedirects: 2,
+    })
+      .post('/upload')
+      .json({ a: 1 })
+      .send();
+
+    expect(response.isFailed).toBe(true);
+    expect(await response.requestBodySettled).toBe(uploadFailure);
+  });
+
   test('a timed-out bodied request carries the upload outcome', async () => {
     const uploadFailure = new Error('upload never finished');
 

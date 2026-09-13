@@ -1250,6 +1250,225 @@ describe('ProcessSignalManager', () => {
     });
   });
 
+  describe('raw mode restore failure', () => {
+    const SHARED_STATE_KEY = Symbol.for('lifecycleion.ProcessSignalManager.v1');
+
+    interface SharedState {
+      attachedInstances: Set<string>;
+      rawModeOwner: string | null;
+      rawModeEnabledByManager: boolean;
+    }
+
+    function readShared(): SharedState | undefined {
+      return (globalThis as unknown as Record<symbol, SharedState | undefined>)[
+        SHARED_STATE_KEY
+      ];
+    }
+
+    function resetShared(): void {
+      const shared = readShared();
+
+      // Created lazily by the first manager, so there is nothing to reset before one.
+      if (shared === undefined) {
+        return;
+      }
+
+      shared.attachedInstances.clear();
+      shared.rawModeOwner = null;
+      shared.rawModeEnabledByManager = false;
+    }
+
+    test('a detach whose setRawMode(false) throws reports it and keeps ownership so a later instance can retry', () => {
+      // A terminal left in raw mode is the user's shell broken, and this said nothing
+      // about it. Reported on the global `'error'` channel, with the shared state left in
+      // the shape a later `attach()` can adopt and repair from.
+      const wasOriginallyTTY = process.stdin.isTTY;
+      const wasOriginallyRaw = (process.stdin as any).isRaw;
+      // eslint-disable-next-line @typescript-eslint/unbound-method
+      const savedSetRawMode = process.stdin.setRawMode;
+      // eslint-disable-next-line @typescript-eslint/unbound-method
+      const savedPause = process.stdin.pause;
+      // eslint-disable-next-line @typescript-eslint/unbound-method
+      const savedResume = process.stdin.resume;
+
+      let isRaw = false;
+      let shouldFailDisable = true;
+
+      (process.stdin as any).isTTY = true;
+      Object.defineProperty(process.stdin, 'isRaw', {
+        configurable: true,
+        get: () => isRaw,
+      });
+      (process.stdin as any).setRawMode = mock((enableRaw: boolean) => {
+        if (!enableRaw && shouldFailDisable) {
+          throw new Error('tty refused');
+        }
+
+        isRaw = enableRaw;
+      });
+      (process.stdin as any).pause = mock(() => {});
+      (process.stdin as any).resume = mock(() => {});
+
+      const events: ErrorEvent[] = [];
+      const onGlobalError = (event: Event): void => {
+        events.push(event as ErrorEvent);
+        event.preventDefault();
+      };
+
+      globalThis.addEventListener('error', onGlobalError);
+
+      try {
+        resetShared();
+
+        manager = new ProcessSignalManager({
+          onShutdownRequested: shutdownCallback,
+        });
+        manager.attach();
+
+        expect(isRaw).toBe(true);
+
+        manager.detach();
+
+        expect(events).toHaveLength(1);
+        expect((events[0]?.error as Error).message).toContain(
+          'stdin raw mode restore',
+        );
+        expect(((events[0]?.error as Error).cause as Error).message).toBe(
+          'tty refused',
+        );
+
+        // Nothing attached, raw mode still ours, and an owner left on record: exactly
+        // what a later instance needs to adopt ownership and try again.
+        const shared = readShared();
+
+        expect(shared?.attachedInstances.size).toBe(0);
+        expect(shared?.rawModeEnabledByManager).toBe(true);
+        expect(shared?.rawModeOwner).not.toBeNull();
+        expect(isRaw).toBe(true);
+
+        // A later instance adopts and, with a working tty, restores the terminal.
+        shouldFailDisable = false;
+
+        const later = new ProcessSignalManager({
+          onShutdownRequested: shutdownCallback,
+        });
+
+        later.attach();
+        later.detach();
+
+        expect(isRaw).toBe(false);
+        expect(readShared()?.rawModeEnabledByManager).toBe(false);
+        expect(readShared()?.rawModeOwner).toBeNull();
+        expect(events).toHaveLength(1);
+      } finally {
+        globalThis.removeEventListener('error', onGlobalError);
+        resetShared();
+        (process.stdin as any).isTTY = wasOriginallyTTY;
+        Object.defineProperty(process.stdin, 'isRaw', {
+          configurable: true,
+          writable: true,
+          value: wasOriginallyRaw,
+        });
+        (process.stdin as any).setRawMode = savedSetRawMode;
+        (process.stdin as any).pause = savedPause;
+        (process.stdin as any).resume = savedResume;
+      }
+    });
+
+    test('a failed attach whose raw-mode rollback also fails reports after the shared state is repaired', () => {
+      // `setRawMode(true)` can throw after actually enabling raw mode, and the rollback's
+      // own `setRawMode(false)` can fail too. The report runs a global `'error'` listener
+      // synchronously, and a listener that reads the shared state from there must see it
+      // already repaired - an owner on record and the manager flag set - rather than the
+      // half-way shape where nothing is attached and nothing can be adopted.
+      const wasOriginallyTTY = process.stdin.isTTY;
+      const wasOriginallyRaw = (process.stdin as any).isRaw;
+      // eslint-disable-next-line @typescript-eslint/unbound-method
+      const savedSetRawMode = process.stdin.setRawMode;
+      // eslint-disable-next-line @typescript-eslint/unbound-method
+      const savedPause = process.stdin.pause;
+      // eslint-disable-next-line @typescript-eslint/unbound-method
+      const savedResume = process.stdin.resume;
+
+      let isRaw = false;
+
+      (process.stdin as any).isTTY = true;
+      Object.defineProperty(process.stdin, 'isRaw', {
+        configurable: true,
+        get: () => isRaw,
+      });
+      (process.stdin as any).setRawMode = mock((enableRaw: boolean) => {
+        if (enableRaw) {
+          // Enabled, then threw.
+          isRaw = true;
+          throw new Error('enable threw late');
+        }
+
+        throw new Error('disable refused');
+      });
+      (process.stdin as any).pause = mock(() => {});
+      (process.stdin as any).resume = mock(() => {});
+
+      const seenDuringReport: Array<{
+        message: string;
+        owner: string | null;
+        enabled: boolean;
+        attached: number;
+      }> = [];
+      const onGlobalError = (event: Event): void => {
+        const shared = readShared();
+
+        seenDuringReport.push({
+          message: String(((event as ErrorEvent).error as Error)?.message),
+          owner: shared?.rawModeOwner ?? null,
+          enabled: shared?.rawModeEnabledByManager ?? false,
+          attached: shared?.attachedInstances.size ?? -1,
+        });
+        event.preventDefault();
+      };
+
+      globalThis.addEventListener('error', onGlobalError);
+
+      try {
+        resetShared();
+
+        const failing = new ProcessSignalManager({
+          onShutdownRequested: shutdownCallback,
+        });
+
+        expect(() => failing.attach()).toThrow('enable threw late');
+        expect(failing.isAttached).toBe(false);
+
+        // Two reports, not one: the rollback inside `listenForKeyPresses` tries the
+        // restore and fails, and `attach`'s own catch runs `restoreStdin`, which retries
+        // it - a second genuine attempt, reported when it fails too. Each must be
+        // dispatched only after the shared state was repaired.
+        expect(seenDuringReport.map((entry) => entry.message)).toEqual([
+          'Error in a callback ProcessSignalManager stdin raw mode restore',
+          'Error in a callback ProcessSignalManager stdin raw mode restore',
+        ]);
+
+        for (const seen of seenDuringReport) {
+          expect(seen.attached).toBe(0);
+          expect(seen.enabled).toBe(true);
+          expect(seen.owner).not.toBeNull();
+        }
+      } finally {
+        globalThis.removeEventListener('error', onGlobalError);
+        resetShared();
+        (process.stdin as any).isTTY = wasOriginallyTTY;
+        Object.defineProperty(process.stdin, 'isRaw', {
+          configurable: true,
+          writable: true,
+          value: wasOriginallyRaw,
+        });
+        (process.stdin as any).setRawMode = savedSetRawMode;
+        (process.stdin as any).pause = savedPause;
+        (process.stdin as any).resume = savedResume;
+      }
+    });
+  });
+
   describe('error handling', () => {
     test('handles error in shutdown callback gracefully', () => {
       const errorCallback = mock(() => {

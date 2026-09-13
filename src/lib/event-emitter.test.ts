@@ -230,6 +230,62 @@ describe('EventEmitterProtected', () => {
     globalThis.removeEventListener('error', errorHandler);
   });
 
+  test('handleEventHandlerFailure override keeps failures off the global channel and siblings running', async () => {
+    // The hook exists so an emitter whose own events are logged can keep its handler
+    // failures out of the global `'error'` channel. An override must see every failure -
+    // a sync throw and a rejection alike - the handlers after a failing one must still
+    // run, and nothing may reach the global listener.
+    const seen: Array<{ event: string; error: unknown }> = [];
+
+    class QuietEmitter extends EventEmitterProtected {
+      public triggerEvent(): void {
+        this.emit('test', 'payload');
+      }
+
+      protected override handleEventHandlerFailure(
+        event: string,
+        error: unknown,
+      ): void {
+        seen.push({ event, error });
+      }
+    }
+
+    const emitter = new QuietEmitter();
+    const globalHandler = mock((event: Event) => event.preventDefault());
+    const sibling = mock(() => {});
+    const syncFailure = new Error('sync');
+    const asyncFailure = new Error('async');
+
+    globalThis.addEventListener('error', globalHandler);
+
+    try {
+      emitter.on('test', () => {
+        throw syncFailure;
+      });
+      emitter.on('test', sibling);
+      emitter.on('test', () => Promise.reject(asyncFailure));
+      emitter.on('test', 'not a function' as unknown as () => void);
+
+      emitter.triggerEvent();
+
+      // The rejection lands on a later tick.
+      await new Promise((resolve) => setTimeout(resolve, 1));
+
+      expect(sibling).toHaveBeenCalledWith('payload');
+      expect(globalHandler).not.toHaveBeenCalled();
+      expect(seen.map((entry) => entry.event)).toEqual([
+        'test',
+        'test',
+        'test',
+      ]);
+      expect(seen[0]?.error).toBe(syncFailure);
+      expect((seen[1]?.error as Error).message).toContain('is not a function');
+      expect(seen[2]?.error).toBe(asyncFailure);
+    } finally {
+      globalThis.removeEventListener('error', globalHandler);
+    }
+  });
+
   test('all subscription methods work with protected emitter', () => {
     class MyEmitter extends EventEmitterProtected {
       public triggerEvent(data: string): void {
