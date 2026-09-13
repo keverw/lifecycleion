@@ -679,13 +679,21 @@ export class NamedPipeSink implements LogSink {
       // Whatever the old stream was waiting to drain is no longer anyone's business.
       this.isAwaitingDrain = false;
 
-      // Nothing new is opened past the cap, and nothing pending is abandoned to make room
-      // either: a `reconnect()` on a "reader is ready" signal that fires while the kernel
-      // still holds the cap's worth of blocked opens would otherwise add a third, and
-      // this was the one entry point that never asked. The caller is told why rather
-      // than handed a generic failure, since `ReconnectStatus` is the only place it can
-      // read the diagnosis.
-      if (this.isAtAbandonedOpenCap()) {
+      // Nothing new is opened past the cap: a `reconnect()` on a "reader is ready" signal
+      // that fires while the kernel still holds the cap's worth of blocked opens would
+      // otherwise add one more, and this was the one entry point that never asked. The
+      // caller is told why rather than handed a generic failure, since `ReconnectStatus`
+      // is the only place it can read the diagnosis.
+      //
+      // Counted *with* the open this call is about to abandon. Checking the counter alone
+      // first, then abandoning, let the ordinary sequence through: one abandoned open, a
+      // second still pending, `reconnect()` abandons the second - now two - and starts a
+      // third `open(2)`, which is exactly the bound the constant documents. The pending
+      // open is left in place when the cap would be reached, since abandoning it changes
+      // nothing about the kernel's count and the open may yet answer.
+      const openIfAbandoned = this.pendingStream === undefined ? 0 : 1;
+
+      if (this.isAtAbandonedOpenCapAfter(openIfAbandoned)) {
         return {
           success: false,
           reason: 'error',
@@ -1101,6 +1109,13 @@ export class NamedPipeSink implements LogSink {
     );
 
     if (remainingMS <= 0) {
+      return;
+    }
+
+    // The same bound every other open honours. A close that reaches this with the cap's
+    // worth of opens still blocked has nothing to gain from a third: the drain loop below
+    // waits on the stream that would land, and none is going to.
+    if (this.isAtAbandonedOpenCap()) {
       return;
     }
 
@@ -2035,7 +2050,16 @@ export class NamedPipeSink implements LogSink {
    * sink is then trying again and reaching the cap later is a new fact.
    */
   private isAtAbandonedOpenCap(): boolean {
-    if (this.abandonedOpens < MAX_ABANDONED_OPENS) {
+    return this.isAtAbandonedOpenCapAfter(0);
+  }
+
+  /**
+   * {@link isAtAbandonedOpenCap}, counting `pendingAbandons` opens the caller is about to
+   * abandon as though it already had - for `reconnect()`, which gives up the pending open
+   * before it starts its own.
+   */
+  private isAtAbandonedOpenCapAfter(pendingAbandons: number): boolean {
+    if (this.abandonedOpens + pendingAbandons < MAX_ABANDONED_OPENS) {
       return false;
     }
 

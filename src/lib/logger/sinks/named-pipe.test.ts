@@ -2599,6 +2599,74 @@ describe('NamedPipeSink', () => {
     }
   }, 15000);
 
+  test('reconnect() with one open abandoned and one pending does not abandon-then-open a third', async () => {
+    // The cap was checked before the pending open was abandoned: one abandoned, one
+    // pending, the check passed, the pending one was abandoned - two - and a third open
+    // started. Counted with the open about to be given up, `reconnect()` refuses and
+    // leaves the pending open where it is.
+    const pipePath = `${tmpDir.path}/reconnect-cap.pipe`;
+    await createNamedPipe(pipePath);
+
+    const failures: SinkFailure[] = [];
+    const sink = new NamedPipeSink({
+      pipePath,
+      onError: (failure) => {
+        failures.push(failure);
+      },
+    });
+
+    const internals = sink as unknown as {
+      abandonedOpens: number;
+      pendingStream: unknown;
+      isOpening: boolean;
+    };
+
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+
+      let destroyed = 0;
+      const pending = {
+        once: () => {},
+        destroy: () => {
+          destroyed++;
+        },
+      };
+
+      internals.abandonedOpens = 1;
+      internals.pendingStream = pending;
+
+      const status = await sink.reconnect();
+
+      expect(status.success).toBe(false);
+      expect(status.success === false && status.reason).toBe('error');
+      // Not abandoned, not replaced, nothing new started.
+      expect(destroyed).toBe(0);
+      expect(internals.pendingStream).toBe(pending);
+      expect(internals.abandonedOpens).toBe(1);
+      expect(internals.isOpening).toBe(false);
+      expect(
+        failures.filter((f) => f.error.message.includes('Gave up reopening')),
+      ).toHaveLength(1);
+
+      // Under the cap by one with nothing pending, a reconnect is allowed to try.
+      internals.pendingStream = undefined;
+
+      const readerFd = fs.openSync(
+        pipePath,
+        fs.constants.O_RDONLY | fs.constants.O_NONBLOCK,
+      );
+
+      try {
+        expect((await sink.reconnect()).success).toBe(true);
+      } finally {
+        fs.closeSync(readerFd);
+      }
+    } finally {
+      internals.pendingStream = undefined;
+      await sink.close();
+    }
+  }, 15000);
+
   test('at the abandoned-open cap, neither a write nor reconnect() starts another open', async () => {
     // The cap was only read while a stale `pendingStream` existed, and abandoning one
     // clears it - so after two real abandons the next `write()` found nothing pending,
