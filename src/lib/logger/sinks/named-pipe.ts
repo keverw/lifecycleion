@@ -679,6 +679,22 @@ export class NamedPipeSink implements LogSink {
       // Whatever the old stream was waiting to drain is no longer anyone's business.
       this.isAwaitingDrain = false;
 
+      // Nothing new is opened past the cap, and nothing pending is abandoned to make room
+      // either: a `reconnect()` on a "reader is ready" signal that fires while the kernel
+      // still holds the cap's worth of blocked opens would otherwise add a third, and
+      // this was the one entry point that never asked. The caller is told why rather
+      // than handed a generic failure, since `ReconnectStatus` is the only place it can
+      // read the diagnosis.
+      if (this.isAtAbandonedOpenCap()) {
+        return {
+          success: false,
+          reason: 'error',
+          error: new Error(
+            `Cannot reopen named pipe at ${this.pipePath}: ${String(MAX_ABANDONED_OPENS)} earlier opens are still blocked`,
+          ),
+        };
+      }
+
       // And abandon an open still in flight, which a caller asking to reconnect has
       // implicitly given up on. Left in place it would make the attempt below a no-op.
       if (this.pendingStream) {
@@ -1986,24 +2002,7 @@ export class NamedPipeSink implements LogSink {
       return;
     }
 
-    if (this.abandonedOpens >= MAX_ABANDONED_OPENS) {
-      // Said once, not on every `write()` that arrives afterwards: this state persists for
-      // as long as the kernel holds those opens, and a sink already in trouble must not
-      // become its own flood. Without it the cap put the sink straight back into the
-      // wedged-and-silent state `STALE_OPEN_MS` exists to end - refusing every attempt with
-      // nothing anywhere saying it had stopped trying.
-      if (!this.reportedAbandonedOpenCap) {
-        this.reportedAbandonedOpenCap = true;
-
-        this.handleError(
-          'write',
-          new Error(
-            `Gave up reopening named pipe at ${this.pipePath}: ${String(MAX_ABANDONED_OPENS)} opens are still blocked and will not be retried until one of them returns`,
-          ),
-          { countsAgainstHealth: false },
-        );
-      }
-
+    if (this.isAtAbandonedOpenCap()) {
       return;
     }
 
@@ -2016,6 +2015,43 @@ export class NamedPipeSink implements LogSink {
       ),
       { countsAgainstHealth: false },
     );
+  }
+
+  /**
+   * Whether {@link MAX_ABANDONED_OPENS} opens are still blocked, saying so once if they are.
+   *
+   * Asked before every open this sink starts, not only before abandoning a stale one. The
+   * cap used to be read in `releaseStalePendingOpen` alone, which only runs while a stale
+   * `pendingStream` exists - and abandoning clears `pendingStream`. So after two real
+   * abandons the next `write()` found no pending open, passed the in-flight guard, and
+   * started a third blocked `open(2)`; `reconnect()` never read the cap at all, and
+   * abandoned whatever was pending on every call. The bound the constant documents - two
+   * slots of the default four-thread pool, and no more - did not hold on the one path it
+   * exists for.
+   *
+   * Said once, not on every `write()` that arrives afterwards: this state persists for as
+   * long as the kernel holds those opens, and a sink already in trouble must not become
+   * its own flood. Re-armed by `abandonPendingOpen` when one of them returns, since the
+   * sink is then trying again and reaching the cap later is a new fact.
+   */
+  private isAtAbandonedOpenCap(): boolean {
+    if (this.abandonedOpens < MAX_ABANDONED_OPENS) {
+      return false;
+    }
+
+    if (!this.reportedAbandonedOpenCap) {
+      this.reportedAbandonedOpenCap = true;
+
+      this.handleError(
+        'write',
+        new Error(
+          `Gave up reopening named pipe at ${this.pipePath}: ${String(MAX_ABANDONED_OPENS)} opens are still blocked and will not be retried until one of them returns`,
+        ),
+        { countsAgainstHealth: false },
+      );
+    }
+
+    return true;
   }
 
   /**
@@ -2039,6 +2075,13 @@ export class NamedPipeSink implements LogSink {
     // Before the in-flight guard below, because that guard is what a stuck open turns into
     // a permanent refusal. See {@link STALE_OPEN_MS}.
     this.releaseStalePendingOpen();
+
+    // And before starting anything: with the cap's worth of opens still blocked in the
+    // threadpool, one more is the starvation the cap exists to prevent. See
+    // {@link isAtAbandonedOpenCap}.
+    if (this.isAtAbandonedOpenCap()) {
+      return;
+    }
 
     if (
       this.isInitialized ||

@@ -829,6 +829,9 @@ describe('HTTPClient — basic HTTP methods', () => {
     expect(Date.now() - startedAt).toBeLessThan(2000);
     expect(response.isCancelled).toBe(true);
     expect(hop).toBe(1);
+    // Carried off the hop the cancel interrupted: the upload was still going out, and
+    // `undefined` here would read as "the body went out in full".
+    expect(response.requestBodySettled).toBeDefined();
   });
 
   test("a cancel during that wait keeps the caller's abort reason", async () => {

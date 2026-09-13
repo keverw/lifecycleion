@@ -330,10 +330,9 @@ function normalizeAlongRedactPaths(
   // the work charges the same array five times over and runs out four times sooner than
   // the work warrants. Charged once here, which is what makes the budget below a measure
   // of containers normalized rather than of entries written.
-  const stack: {
-    container: Record<string, unknown>;
-    node: RedactPrefixNode;
-  }[] = [{ container: bag, node: redactPathPrefixes(paths) }];
+  const stack: NormalizationFrame[] = [
+    { container: bag, node: redactPathPrefixes(paths) },
+  ];
 
   // A wildcard turns a path from a chain into a fan-out - `a[*].b[*].c` reaches the
   // product of two array lengths - and this runs *before* the walk that
@@ -376,12 +375,17 @@ function normalizeAlongRedactPaths(
   // developer's own `redactedKeys` can write, and one no payload can provoke on its own.
   // There is no payload-only shape left that stalls.
   //
-  // Running out still normalizes fewer containers than asked, and that is a real loss
-  // rather than a safe one - but there is no cheaper answer, since refusing the whole bag
-  // would leave every key already widened half-applied. It is *said*, though: a walk
-  // that gave up on a named path with a value it never reached used to report nothing,
-  // and the one channel that exists for "this render is not what was asked" is exactly
-  // where an operator would look for it.
+  // Running out normalizes fewer containers than asked. It used to be left at that - a
+  // real loss, said through `onFormatError` but otherwise fail-open: every container the
+  // walk had not reached stayed the caller's original, and a key only a property read
+  // can find - one a `Proxy` hides from `ownKeys`, a non-enumerable own property - was
+  // still resolved by the renderer and printed, on the one shape the rest of this pass
+  // exists to close. Now every container still waiting to be descended is withheld with
+  // the marker instead, at the key its parent holds it under, which is what the walk
+  // already does to a container it cannot copy. A path *did* descend into each of them,
+  // so everything beneath was named for masking; over-masking is the safe direction, and
+  // it costs one write per stacked pair rather than the scan that ran out. Still *said*,
+  // since a marker only says that a value was withheld and this is the why.
   let budget = MAX_REDACTION_ENTRIES;
 
   // The `(container, node)` pairs already descended. Re-descending one is a strict no-op -
@@ -393,10 +397,8 @@ function normalizeAlongRedactPaths(
   const descended = new WeakMap<object, Set<RedactPrefixNode>>();
 
   while (stack.length > 0) {
-    const { container, node } = stack.pop() as {
-      container: Record<string, unknown>;
-      node: RedactPrefixNode;
-    };
+    const current = stack.pop() as NormalizationFrame;
+    const { container, node } = current;
 
     for (const [part, child] of node.children) {
       // A leaf names the value to mask, not a container to descend into.
@@ -408,10 +410,12 @@ function normalizeAlongRedactPaths(
         if (budget <= 0) {
           report(
             new Error(
-              `redactedKeys normalization stopped after ${String(MAX_REDACTION_ENTRIES)} containers; paths below the ones reached may not be masked`,
+              `redactedKeys normalization stopped after ${String(MAX_REDACTION_ENTRIES)} containers; every container not yet reached was withheld`,
             ),
             '<redactedKeys>',
           );
+
+          withholdUnreached(current, stack);
 
           return;
         }
@@ -502,8 +506,54 @@ function normalizeAlongRedactPaths(
         alreadyUnder.add(child);
 
         budget--;
-        stack.push({ container: copy as Record<string, unknown>, node: child });
+        stack.push({
+          container: copy as Record<string, unknown>,
+          node: child,
+          parent: container,
+          key,
+        });
       }
+    }
+  }
+}
+
+/**
+ * One `(container, node)` pair waiting to be descended, and where its parent holds it, so
+ * the whole container can be withheld if the walk runs out before reaching it.
+ */
+interface NormalizationFrame {
+  container: Record<string, unknown>;
+  node: RedactPrefixNode;
+  /** Absent for the root bag, which has no parent to hold it. */
+  parent?: Record<string, unknown>;
+  key?: string;
+}
+
+/**
+ * Withhold every container the normalization did not get to: the one it was inside when
+ * the budget ran out, and every one still stacked behind it.
+ *
+ * Each is replaced at its parent's key with the marker, as a container that could not be
+ * copied is. The root bag has no parent; what the walk had not reached beneath it is
+ * covered by the frames stacked under it, since a root child is only ever reached by
+ * being pushed. A parent is the bag or a copy this module built, so the write cannot
+ * fail; guarded regardless, as every write on this path is.
+ */
+function withholdUnreached(
+  current: NormalizationFrame,
+  stack: NormalizationFrame[],
+): void {
+  const frames = [current, ...stack];
+
+  for (const frame of frames) {
+    if (frame.parent === undefined || frame.key === undefined) {
+      continue;
+    }
+
+    try {
+      defineEntry(frame.parent, frame.key, REDACTION_FAILED_MARKER);
+    } catch {
+      // See above.
     }
   }
 }

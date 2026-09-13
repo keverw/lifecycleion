@@ -694,6 +694,33 @@ describe('applyRedaction - non-identifier key names', () => {
     expect(reports).toEqual(['<redactedKeys>']);
   }, 60000);
 
+  test('withholds every container the budget did not reach, so a hidden key cannot survive it', () => {
+    // Exhaustion used to leave the unreached containers as the caller's originals: a key
+    // a `Proxy` hides from `ownKeys` was still resolved by the renderer's property read
+    // and printed - fail-open on the one shape this pass exists to close. Each container
+    // still waiting is replaced at its parent's key with the marker instead.
+    const hidden = new Proxy(
+      { name: 'Alice', password: 'secret123' },
+      { ownKeys: () => ['name'] },
+    );
+    const items = Array.from({ length: 999_999 }, () => ({ x: 1 }));
+    const reports: string[] = [];
+
+    // `user` is pushed first and so popped last: `items` spends the budget before the
+    // walk gets to it.
+    const result = applyRedaction(
+      { user: { profile: hidden }, items },
+      ['user.profile.password', 'items[*].x'],
+      undefined,
+      (_error, _kind, key) => reports.push(key),
+    );
+
+    expect(reports).toEqual(['<redactedKeys>']);
+    expect(result['user']).toBe(REDACTION_FAILED_MARKER);
+    expect(result['items']).toBe(REDACTION_FAILED_MARKER);
+    expect(JSON.stringify(result)).not.toContain('secret123');
+  }, 60000);
+
   test('scans a container reachable from many aliases once, not once per alias', () => {
     // `copies` deduplicates the copy but not the *descent*, so one array reachable from
     // four thousand places was pushed four thousand times and rescanned in full each time:

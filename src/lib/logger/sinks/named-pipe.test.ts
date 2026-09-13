@@ -2599,6 +2599,101 @@ describe('NamedPipeSink', () => {
     }
   }, 15000);
 
+  test('at the abandoned-open cap, neither a write nor reconnect() starts another open', async () => {
+    // The cap was only read while a stale `pendingStream` existed, and abandoning one
+    // clears it - so after two real abandons the next `write()` found nothing pending,
+    // passed the in-flight guard, and started a third blocked `open(2)`. `reconnect()`
+    // never read the cap at all. Starts from the state the race leaves behind: the cap's
+    // worth of opens counted, nothing pending, no stream.
+    const pipePath = `${tmpDir.path}/open-cap.pipe`;
+    await createNamedPipe(pipePath);
+
+    const failures: SinkFailure[] = [];
+    const sink = new NamedPipeSink({
+      pipePath,
+      onError: (failure) => {
+        failures.push(failure);
+      },
+    });
+
+    const internals = sink as unknown as {
+      abandonedOpens: number;
+      pendingStream: unknown;
+      isOpening: boolean;
+      _isReconnecting: boolean;
+      lastReopenAttempt: number;
+      ensureConnection: () => void;
+    };
+
+    const capReports = (): SinkFailure[] =>
+      failures.filter((f) => f.error.message.includes('Gave up reopening'));
+
+    // A reader, so an open the sink *does* start would complete at once and be visible
+    // as `isInitialized`.
+    const readerFd = fs.openSync(
+      pipePath,
+      fs.constants.O_RDONLY | fs.constants.O_NONBLOCK,
+    );
+
+    try {
+      expect(await waitForOpenPipe(sink)).toBe(true);
+
+      // Back to "no stream, cap reached", as if two stale opens had just been abandoned.
+      await sink.reconnect();
+      (sink as unknown as { isInitialized: boolean }).isInitialized = false;
+      (sink as unknown as { pipeStream: unknown }).pipeStream = undefined;
+      internals.abandonedOpens = 2;
+      internals.lastReopenAttempt = 0;
+
+      // A write asks for a connection and is refused one; the cap is said once.
+      sink.write({
+        timestamp: Date.now(),
+        type: 'info',
+        template: 'held',
+        message: 'held',
+      });
+      internals.ensureConnection();
+      internals.ensureConnection();
+
+      await new Promise((resolve) => setTimeout(resolve, 100));
+
+      expect(sink.getHealth().isInitialized).toBe(false);
+      expect(internals.isOpening).toBe(false);
+      expect(internals._isReconnecting).toBe(false);
+      expect(capReports()).toHaveLength(1);
+      expect(capReports()[0]?.disposition).toBe('no_entry');
+      expect(sink.getHealth().queueSize).toBe(1);
+
+      // `reconnect()` is refused too, and says why.
+      const status = await sink.reconnect();
+
+      expect(status.success).toBe(false);
+      expect(status.success === false && status.reason).toBe('error');
+      expect(
+        status.success === false &&
+          status.reason === 'error' &&
+          status.error.message,
+      ).toContain('still blocked');
+      expect(sink.getHealth().isInitialized).toBe(false);
+      expect(capReports()).toHaveLength(1);
+
+      // One of the blocked opens returns: the sink opens again and drains the line.
+      internals.abandonedOpens = 1;
+      (sink as unknown as { reportedAbandonedOpenCap: boolean }).reportedAbandonedOpenCap =
+        false;
+
+      expect((await sink.reconnect()).success).toBe(true);
+      expect(sink.getHealth().isInitialized).toBe(true);
+
+      await new Promise((resolve) => setTimeout(resolve, 100));
+
+      expect(sink.getHealth().queueSize).toBe(0);
+    } finally {
+      await sink.close();
+      fs.closeSync(readerFd);
+    }
+  }, 15000);
+
   test('a write that fails after close is reported, once', async () => {
     // The drain loop pushes the backlog into the stream's buffer and sets `closed` without
     // awaiting the write callbacks, so a callback that errors afterwards lands in
