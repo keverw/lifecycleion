@@ -2484,6 +2484,121 @@ describe('NamedPipeSink', () => {
     }
   }, 15000);
 
+  test('a pending open past STALE_OPEN_MS is abandoned and reported, and the cap is said once', async () => {
+    // The race this covers - a reader that hangs up between the probe and the open, then
+    // recreates the FIFO so the blocked open points at an unlinked inode - cannot be
+    // produced on demand. The path itself can: it reads only `pendingStream` and when it
+    // was started. A stand-in stream rather than a real blocked `open(2)`, which would
+    // hold a threadpool slot for the rest of the run.
+    const pipePath = `${tmpDir.path}/stale-open.pipe`;
+    await createNamedPipe(pipePath);
+
+    const failures: SinkFailure[] = [];
+    // No reader, so the constructor's probe finds nobody and starts no open of its own.
+    const sink = new NamedPipeSink({
+      pipePath,
+      onError: (failure) => {
+        failures.push(failure);
+      },
+    });
+
+    const internals = sink as unknown as {
+      pendingStream: unknown;
+      pendingStreamSince: number | undefined;
+      abandonedOpens: number;
+      releaseStalePendingOpen: () => void;
+    };
+
+    const closeHandlers: Array<() => void> = [];
+    let destroyed = 0;
+
+    const installStuckOpen = (ageMS: number): void => {
+      internals.pendingStream = {
+        once: (event: string, handler: () => void) => {
+          if (event === 'close') {
+            closeHandlers.push(handler);
+          }
+        },
+        destroy: () => {
+          destroyed++;
+        },
+      };
+      internals.pendingStreamSince = Date.now() - ageMS;
+    };
+
+    const staleReports = (): SinkFailure[] =>
+      failures.filter((f) => f.error.message.includes('did not complete within'));
+    const capReports = (): SinkFailure[] =>
+      failures.filter((f) => f.error.message.includes('Gave up reopening'));
+
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+
+      // Not yet stale: left alone.
+      installStuckOpen(0);
+      internals.releaseStalePendingOpen();
+
+      expect(destroyed).toBe(0);
+      expect(staleReports()).toHaveLength(0);
+
+      // Stale: abandoned, counted, reported, and the sink keeps trying.
+      internals.pendingStreamSince = Date.now() - 60_000;
+      internals.releaseStalePendingOpen();
+
+      expect(destroyed).toBe(1);
+      expect(internals.pendingStream).toBeUndefined();
+      expect(internals.abandonedOpens).toBe(1);
+      expect(staleReports()).toHaveLength(1);
+      expect(staleReports()[0]?.kind).toBe('write');
+      expect(staleReports()[0]?.disposition).toBe('no_entry');
+      expect(capReports()).toHaveLength(0);
+      // A stale open is not a write failure and must not mark the sink unhealthy.
+      expect(sink.getHealth().consecutiveFailures).toBe(0);
+
+      // A second stale open reaches the cap of two.
+      installStuckOpen(60_000);
+      internals.releaseStalePendingOpen();
+
+      expect(internals.abandonedOpens).toBe(2);
+      expect(staleReports()).toHaveLength(2);
+
+      // At the cap: the third is held, not destroyed, and the cap is reported once even
+      // though every later write() would come through here.
+      installStuckOpen(60_000);
+      internals.releaseStalePendingOpen();
+      internals.releaseStalePendingOpen();
+      internals.releaseStalePendingOpen();
+
+      expect(destroyed).toBe(2);
+      expect(internals.pendingStream).toBeDefined();
+      expect(capReports()).toHaveLength(1);
+      expect(capReports()[0]?.error.message).toContain('2 opens are still blocked');
+
+      // The kernel releases one: the count drops, the cap re-arms, and the held open is
+      // abandoned on the next pass.
+      closeHandlers[0]?.();
+
+      expect(internals.abandonedOpens).toBe(1);
+
+      internals.releaseStalePendingOpen();
+
+      expect(destroyed).toBe(3);
+      expect(internals.abandonedOpens).toBe(2);
+      expect(staleReports()).toHaveLength(3);
+
+      // Back at the cap, it is a new fact and is said again - once.
+      installStuckOpen(60_000);
+      internals.releaseStalePendingOpen();
+      internals.releaseStalePendingOpen();
+
+      expect(capReports()).toHaveLength(2);
+    } finally {
+      internals.pendingStream = undefined;
+      internals.pendingStreamSince = undefined;
+      await sink.close();
+    }
+  }, 15000);
+
   test('a write that fails after close is reported, once', async () => {
     // The drain loop pushes the backlog into the stream's buffer and sets `closed` without
     // awaiting the write callbacks, so a callback that errors afterwards lands in

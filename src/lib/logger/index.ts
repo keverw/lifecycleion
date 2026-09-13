@@ -1218,9 +1218,9 @@ export class Logger extends EventEmitter {
     // no sink is involved here, so there would be nothing honest to pass.
     // The shared rung, and it never broadcasts - which for this channel is the whole
     // point. A `'logger'` event is emitted *by* logging, so reporting a handler's failure
-    // anywhere a logger might hear it is logged, which emits again, which fails again:
-    // with a handler that reliably rejects that is an unbounded cycle rather than a stack
-    // overflow, so no re-entrancy guard closes it.
+    // anywhere a logger might hear it is logged, which emits again, which fails again -
+    // an unbounded cycle. Keeping it off the global channel closes that edge; the guard
+    // below closes the one a logging `onEventHandlerError` reopens.
     //
     // `runCallbackSafely` states the requirement this satisfies outright - "`onError` must
     // not throw: it runs on the failure path, and there is nothing above it left to catch"
