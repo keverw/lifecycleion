@@ -1,4 +1,12 @@
-import { afterEach, beforeEach, describe, expect, it, test } from 'bun:test';
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  mock,
+  test,
+} from 'bun:test';
 import {
   muteConsoleError,
   restoreConsoleError,
@@ -11,6 +19,8 @@ import {
 } from './stringify-value';
 import { TRUNCATED_LENGTH } from './internal/render-budget';
 import { applyRedaction } from './logger/utils/redaction';
+import * as redactPaths from './internal/redact-paths';
+import { REDACTION_FAILED_MARKER } from './internal/default-redact-function';
 import type { RedactFunction } from './logger/types';
 
 // These suites deliberately drive the paths that fall through to `console.error` when
@@ -2718,5 +2728,56 @@ describe('maxRenderLength and onTruncate', () => {
     stringifyValue(big, { onFormatError: (error) => failures.push(error) });
 
     expect(failures).toHaveLength(0);
+  });
+});
+
+/**
+ * The pin `applyRedaction` has in `redaction.fail-closed.test.ts`, on the two entry points
+ * that share the pass since it moved into `internal/`. The one catch no input can reach:
+ * every read inside `normalizeAlongRedactPaths` is guarded, so the fault is injected at
+ * its only seam, the prefix tree `redactPathPrefixes` builds.
+ */
+describe('stringifyValue / redactValue - a throw out of nested-path normalization', () => {
+  test('fails closed on the whole value rather than walking a part-normalized bag', () => {
+    const original = { ...redactPaths };
+
+    void mock.module('./internal/redact-paths', () => ({
+      ...original,
+      redactPathPrefixes: () => {
+        throw new Error('prefix tree refused');
+      },
+    }));
+
+    try {
+      const value = {
+        user: { password: 'hunter2secret' },
+        token: 'abc123secret',
+        other: 'safe',
+      };
+      const redactedKeys = ['user.password', 'token'];
+      const reported: string[] = [];
+      const onFormatError = (error: Error, kind: string, key: string): void => {
+        reported.push(`${kind}:${key}:${error.message}`);
+      };
+
+      const masked = redactValue(value, { redactedKeys, onFormatError });
+
+      // A throw must not let the walk continue: the bag may hold an alias under one key
+      // and not yet under its sibling. The whole value is withheld, nothing inspected.
+      expect(masked).toBe(REDACTION_FAILED_MARKER);
+      expect(JSON.stringify(masked)).not.toContain('secret');
+
+      const rendered = stringifyValue(value, { redactedKeys, onFormatError });
+
+      expect(rendered).toBe(REDACTION_FAILED_MARKER);
+      expect(rendered).not.toContain('secret');
+
+      expect(reported).toEqual([
+        'redaction:<value>:prefix tree refused',
+        'redaction:<value>:prefix tree refused',
+      ]);
+    } finally {
+      void mock.module('./internal/redact-paths', () => ({ ...original }));
+    }
   });
 });

@@ -26,7 +26,7 @@ import {
   serializeBody,
 } from './utils';
 import {
-  DEFAULT_TIMEOUT_MS,
+  resolveRequestTimeoutMS,
   DEFAULT_REQUEST_ID_HEADER,
   DEFAULT_REQUEST_ATTEMPT_HEADER,
   DEFAULT_USER_AGENT,
@@ -141,7 +141,7 @@ export class BaseHTTPClient {
       adapter: this._adapter,
       baseURL: config.baseURL,
       defaultHeaders: config.defaultHeaders ?? {},
-      timeout: config.timeout ?? DEFAULT_TIMEOUT_MS,
+      timeout: resolveRequestTimeoutMS(config.timeout),
       cookieJar: config.cookieJar,
       retryPolicy: config.retryPolicy,
       retryNonIdempotentMethods: config.retryNonIdempotentMethods ?? false,
@@ -406,7 +406,12 @@ export class BaseHTTPClient {
       effectiveBaseURL,
       this._isBrowserRuntime,
     );
-    const timeout = options.timeout ?? this._config.timeout;
+    // Resolved here as well as in the constructor: a per-request `.timeout(n)` is the
+    // caller's number too, and `NaN` or `Infinity` from it broke the same two timers.
+    const timeout = resolveRequestTimeoutMS(
+      options.timeout,
+      this._config.timeout,
+    );
 
     // When the request's upload last reported progress, across every hop and attempt.
     // Stamped by the upload-progress wrapper each attempt hands the adapter, and read by

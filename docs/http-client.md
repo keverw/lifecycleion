@@ -125,7 +125,9 @@ interface HTTPClientConfig {
   adapter?: HTTPAdapter; // Default: FetchAdapter
   baseURL?: string; // Origin / prefix for relative paths. If set, MockAdapter, NodeAdapter, and server-side FetchAdapter require an absolute http(s):// URL.
   defaultHeaders?: Record<string, string | string[]>;
-  timeout?: number; // Default: 30,000 ms; <= 0 disables the per-attempt timeout
+  timeout?: number; // Default: 30,000 ms; <= 0 disables the per-attempt timeout.
+  // NaN or a non-number takes the default; Infinity disables it like 0 does.
+  // Same rules for the per-request override, whose default is this value.
   cookieJar?: CookieJar | null; // Cookie management (null disables)
   retryPolicy?: RetryPolicyOptions; // Retry strategy (disabled by default)
   retryNonIdempotentMethods?: boolean; // Default: false — do not retry POST/PATCH. See Non-Idempotent Methods

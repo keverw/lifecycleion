@@ -931,6 +931,11 @@ console.log(logger.getSinks().length); // 0
 - `removeSink()` does NOT close the sink - you are responsible for closing it if needed
 - `logger.close()` closes all sinks AND removes them from the logger
 - After `logger.close()`, the logger is marked as closed and will not accept new log messages
+- The logger is marked closed _before_ its sinks close. A sink `onError` handler that logs
+  the `'close'` failures a sink reports while closing (`disposition: 'lost'` / `'no_entry'`)
+  through the same logger is logging into a closed one: the line is dropped without a
+  further report. Send close-time failures to `console.error` or a sink that is not being
+  closed instead
 - Adding a sink after `logger.close()` does not reopen the logger. Create a new `Logger`
   instance for a fresh start
 

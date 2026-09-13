@@ -59,6 +59,42 @@ export const NON_IDEMPOTENT_METHODS: ReadonlySet<HTTPMethod> =
 
 export const DEFAULT_TIMEOUT_MS = 30_000;
 
+/**
+ * The longest wait a `setTimeout` can keep: 2^31 - 1 ms, about 24.8 days. A duration past
+ * it is coerced to 1 ms by the timer. See {@link resolveRequestTimeoutMS}.
+ */
+export const MAX_TIMER_MS = 2_147_483_647;
+
+/**
+ * The per-attempt timeout a request will actually run under.
+ *
+ * `HTTPClientConfig.timeout` and `HTTPRequestOptions.timeout` both document `<= 0` as
+ * "disable the per-attempt timer", and that reading is kept. What used to be taken
+ * literally is everything else a `number` can be: `NaN` - `Number(process.env.UNSET)` -
+ * passed both the `> 0` check that arms the timer and the `<= 0` check that disables the
+ * upload-settle wait, so the attempt ran with no timer while the wait re-armed a `NaN`
+ * timer every millisecond and could never expire; `Infinity` did the same to the wait and
+ * fired the attempt timer after 1 ms. `NaN` and a non-number now take the default.
+ * `Infinity` is what a caller writes to mean "no timeout", and that is what `0` already
+ * means, so it disables the timer rather than being bounded at a number nobody chose. A
+ * finite value past {@link MAX_TIMER_MS} is clamped there, the closest wait a timer can
+ * keep.
+ */
+export function resolveRequestTimeoutMS(
+  requested: unknown,
+  defaultMS: number = DEFAULT_TIMEOUT_MS,
+): number {
+  if (typeof requested !== 'number' || Number.isNaN(requested)) {
+    return defaultMS;
+  }
+
+  if (requested <= 0 || requested === Number.POSITIVE_INFINITY) {
+    return 0;
+  }
+
+  return Math.min(requested, MAX_TIMER_MS);
+}
+
 export const DEFAULT_REQUEST_ID_HEADER = 'x-local-client-request-id';
 
 export const DEFAULT_REQUEST_ATTEMPT_HEADER = 'x-local-client-request-attempt';

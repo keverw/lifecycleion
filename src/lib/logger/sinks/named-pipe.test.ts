@@ -2527,7 +2527,9 @@ describe('NamedPipeSink', () => {
     };
 
     const staleReports = (): SinkFailure[] =>
-      failures.filter((f) => f.error.message.includes('did not complete within'));
+      failures.filter((f) =>
+        f.error.message.includes('did not complete within'),
+      );
     const capReports = (): SinkFailure[] =>
       failures.filter((f) => f.error.message.includes('Gave up reopening'));
 
@@ -2572,7 +2574,9 @@ describe('NamedPipeSink', () => {
       expect(destroyed).toBe(2);
       expect(internals.pendingStream).toBeDefined();
       expect(capReports()).toHaveLength(1);
-      expect(capReports()[0]?.error.message).toContain('2 opens are still blocked');
+      expect(capReports()[0]?.error.message).toContain(
+        '2 opens are still blocked',
+      );
 
       // The kernel releases one: the count drops, the cap re-arms, and the held open is
       // abandoned on the next pass.
@@ -2747,8 +2751,9 @@ describe('NamedPipeSink', () => {
 
       // One of the blocked opens returns: the sink opens again and drains the line.
       internals.abandonedOpens = 1;
-      (sink as unknown as { reportedAbandonedOpenCap: boolean }).reportedAbandonedOpenCap =
-        false;
+      (
+        sink as unknown as { reportedAbandonedOpenCap: boolean }
+      ).reportedAbandonedOpenCap = false;
 
       expect((await sink.reconnect()).success).toBe(true);
       expect(sink.getHealth().isInitialized).toBe(true);
@@ -2887,9 +2892,9 @@ describe('NamedPipeSink', () => {
         entry.error.message.includes('still buffered');
 
       expect(failures.filter(isBufferedLoss)).toHaveLength(1);
-      expect(
-        failures.filter((entry) => entry.kind === 'close'),
-      ).toHaveLength(2);
+      expect(failures.filter((entry) => entry.kind === 'close')).toHaveLength(
+        2,
+      );
 
       // The in-flight write is blocked in the threadpool behind the full pipe, and
       // `destroy()` defers until it returns - so until the reader goes away nothing errors
@@ -2903,7 +2908,9 @@ describe('NamedPipeSink', () => {
 
       await new Promise((resolve) => setTimeout(resolve, 100));
 
-      expect(failures.filter((entry) => entry.kind === 'close')).toHaveLength(2);
+      expect(failures.filter((entry) => entry.kind === 'close')).toHaveLength(
+        2,
+      );
       expect(sink.getHealth().droppedEntries).toBeGreaterThanOrEqual(
         droppedAtResolve,
       );

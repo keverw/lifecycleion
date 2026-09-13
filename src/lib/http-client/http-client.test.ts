@@ -17,7 +17,9 @@ import { scalarHeader } from './utils';
 import {
   DEFAULT_REQUEST_ATTEMPT_HEADER,
   DEFAULT_REQUEST_ID_HEADER,
+  DEFAULT_TIMEOUT_MS,
   DEFAULT_USER_AGENT,
+  MAX_TIMER_MS,
   NON_RETRYABLE_HTTP_CLIENT_CALLBACK_ERROR_FLAG,
   REQUEST_BODY_SETTLED_KEY,
   RESPONSE_STREAM_ABORT_FLAG,
@@ -3296,6 +3298,108 @@ describe('HTTPClient — FormData upload', () => {
     expect(res.status).toBe(200);
     expect(res.body.received).toBe(true);
     expect(res.body.fields.username).toBe('alice');
+  });
+});
+
+describe('HTTPClient — timeout resolution', () => {
+  // `Number(process.env.UNSET)` is `NaN`, and taken literally it passed the `> 0` check
+  // that arms the per-attempt timer *and* the `<= 0` check that disables the
+  // upload-settle wait: no timer on the attempt, and a wait that re-armed a `NaN` timer
+  // every millisecond and could never expire. `Infinity` fired the attempt timer after
+  // 1 ms, since the timer coerces anything past 2^31 - 1 to 1. `NaN` now takes the
+  // default and `Infinity` disables the timer, on the config and the per-request override.
+  const observed = async (
+    config: { timeout?: number },
+    perRequest?: number,
+  ): Promise<number | undefined> => {
+    const client = makeClient(config);
+    let seen: number | undefined;
+
+    client.addResponseObserver((_res, req) => {
+      seen = req.timeout;
+    });
+
+    const builder = client.get('/api/users/1');
+
+    if (perRequest !== undefined) {
+      builder.timeout(perRequest);
+    }
+
+    await builder.send();
+
+    return seen;
+  };
+
+  test('NaN takes the default, on the config and per request', async () => {
+    expect(await observed({ timeout: Number.NaN })).toBe(DEFAULT_TIMEOUT_MS);
+    expect(await observed({ timeout: 4_321 }, Number.NaN)).toBe(4_321);
+  });
+
+  test('Infinity means no timeout, the same as 0', async () => {
+    expect(await observed({ timeout: Number.POSITIVE_INFINITY })).toBe(0);
+    expect(await observed({}, Number.POSITIVE_INFINITY)).toBe(0);
+  });
+
+  test('a finite value past the timer ceiling is clamped to it', async () => {
+    expect(await observed({ timeout: MAX_TIMER_MS + 1 })).toBe(MAX_TIMER_MS);
+  });
+
+  test('zero and a negative value still disable the per-attempt timer', async () => {
+    expect(await observed({ timeout: 0 })).toBe(0);
+    expect(await observed({ timeout: -5 })).toBe(0);
+    expect(await observed({ timeout: 4_321 }, 0)).toBe(0);
+  });
+
+  test('a NaN timeout no longer leaves a never-settling upload wait spinning', async () => {
+    // The redirect variant of the settle-wait test above, under the misconfiguration.
+    // `NaN` is the per-request value here, over a 100ms client default, so the number the
+    // wait runs under is the one `NaN` resolved to: taken literally it re-armed a `NaN`
+    // timer every millisecond and never failed, and this test would hang at its own
+    // deadline rather than fail at 100ms.
+    let hop = 0;
+
+    const adapter: HTTPAdapter = {
+      getType: () => 'fetch',
+      send: (_request: AdapterRequest): Promise<AdapterResponse> => {
+        hop++;
+
+        return Promise.resolve({
+          status: 307,
+          headers: { location: '/again' },
+          body: null,
+          requestBodySettled: new Promise(() => {}),
+        });
+      },
+    };
+
+    const reports: ErrorEvent[] = [];
+    const onGlobalError = (event: Event): void => {
+      reports.push(event as ErrorEvent);
+      event.preventDefault();
+    };
+
+    globalThis.addEventListener('error', onGlobalError);
+
+    try {
+      const startedAt = Date.now();
+      const response = await new HTTPClient({
+        adapter,
+        baseURL: 'http://example.test',
+        followRedirects: true,
+        timeout: 100,
+      })
+        .post('/upload')
+        .json({ a: 1 })
+        .timeout(Number.NaN)
+        .send();
+
+      expect(Date.now() - startedAt).toBeLessThan(2000);
+      expect(hop).toBe(1);
+      expect(response.isTimeout).toBe(true);
+      expect(reports).toHaveLength(1);
+    } finally {
+      globalThis.removeEventListener('error', onGlobalError);
+    }
   });
 });
 

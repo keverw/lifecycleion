@@ -840,6 +840,17 @@ export class Logger extends EventEmitter {
   /**
    * Close all sinks and cleanup resources
    * After closing, the logger is marked as closed and all sinks are removed
+   *
+   * The logger is marked closed *before* the sinks are, and stays so: `handleLog` is a
+   * no-op from the first line of this method. That is deliberate - the global error
+   * listener and every other `_closed` reader rely on it being set first - but it has a
+   * consequence for sink `onError` handlers. Close is when `FileSink` and `NamedPipeSink`
+   * report the entries they gave up on, as `'close'` failures carrying `'lost'` or
+   * `'no_entry'`, and a handler that logs those through *this* logger logs into one that
+   * is already closed: the line is dropped, with no second report and no fallback count.
+   * Report close-time failures somewhere else - `console.error`, or a sink that is not
+   * being closed - as the sink docs show. Dispatching to sinks that are mid-close instead
+   * would hand the same handler a write that fails for the same reason, and recurse.
    */
   public async close(): Promise<void> {
     this._closed = true;

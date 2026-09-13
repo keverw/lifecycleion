@@ -345,7 +345,8 @@ describe('Logger', () => {
       expect(log.message).not.toContain('secret123');
       expect(log.message).toContain('john');
       expect(
-        (log.redactedParams?.user as Record<string, unknown> | undefined)?.password,
+        (log.redactedParams?.user as Record<string, unknown> | undefined)
+          ?.password,
       ).not.toBe('secret123');
     });
 
@@ -1890,7 +1891,9 @@ describe('Logger', () => {
         // The original log and the one the handler wrote, each emitting once.
         expect(handlerCalls).toBe(2);
         expect(reports).toBe(1);
-        expect(captured.some((line) => line.includes('handler boom'))).toBe(true);
+        expect(captured.some((line) => line.includes('handler boom'))).toBe(
+          true,
+        );
       } finally {
         restoreConsoleError();
       }
@@ -1923,7 +1926,9 @@ describe('Logger', () => {
         // The handler's own log emitted `'logger'` and failed again while the guard was
         // up, so that failure went to the console rather than back to the handler.
         expect(reports).toBe(1);
-        expect(captured.some((line) => line.includes('handler boom'))).toBe(true);
+        expect(captured.some((line) => line.includes('handler boom'))).toBe(
+          true,
+        );
 
         // Settled, so the next failure reaches the handler again.
         recursiveLogger.info('again');

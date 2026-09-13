@@ -1255,6 +1255,38 @@ describe('CookieJar', () => {
   });
 
   describe('clear', () => {
+    test('clear(host, hostname) matches the stored scope, not a mutated domain', () => {
+      // The send path already anchors where a cookie goes on the scope it was filed
+      // under, so a `domain` written through `getAllCookies()` cannot widen it. The clear
+      // compared the live field: after the same mutation, `clear('app.example.com',
+      // 'hostname')` missed the cookie while `getCookieHeaderString()` went on sending it
+      // for app.example.com - a cookie you had cleared, still on the wire.
+      jar.setCookie({
+        name: 'sid',
+        value: 'secret',
+        domain: 'app.example.com',
+        hostOnly: true,
+        path: '/',
+      });
+
+      for (const cookie of jar.getAllCookies()) {
+        cookie.hostOnly = false;
+        cookie.domain = 'example.com';
+      }
+
+      expect(jar.getStoredDomains()).toEqual([
+        { domain: 'app.example.com', count: 1 },
+      ]);
+      expect(jar.clear('example.com', 'hostname')).toBe(0);
+      expect(jar.getCookieHeaderString('https://app.example.com/')).toBe(
+        'sid=secret',
+      );
+
+      expect(jar.clear('app.example.com', 'hostname')).toBe(1);
+      expect(jar.getCookieHeaderString('https://app.example.com/')).toBe('');
+      expect(jar.getAllCookies()).toHaveLength(0);
+    });
+
     test('clear() removes all cookies', () => {
       jar.setCookie({
         name: 'a',

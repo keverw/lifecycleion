@@ -232,7 +232,11 @@ export class CookieJar {
 
     for (const bucket of this.buckets.values()) {
       for (const cookie of bucket.values()) {
-        const domain = cookie.domain ?? '';
+        // The scope the cookie was filed under, not the live object: `getAllCookies()`
+        // hands out the stored cookies themselves, and a `domain` written through one
+        // must not move the cookie in this listing while the send path, which reads the
+        // same stored scope, still sends it where it was filed.
+        const domain = this.storedScopes.get(cookie)?.domain ?? '';
         counts.set(domain, (counts.get(domain) ?? 0) + 1);
       }
     }
@@ -445,7 +449,10 @@ export class CookieJar {
       let count = 0;
 
       for (const [key, cookie] of bucket.entries()) {
-        if (cookie.domain === normalizedHost) {
+        // Matched on the stored scope, as the send path matches. Comparing the live
+        // `domain` let a cookie mutated through `getAllCookies()` dodge the clear while
+        // `getCookieHeaderString()` went on sending it from the scope it was filed under.
+        if (this.storedScopes.get(cookie)?.domain === normalizedHost) {
           bucket.delete(key);
           count++;
         }

@@ -560,3 +560,63 @@ function* stepKeys(container: object, part: string): Generator<string> {
     yield String(index);
   }
 }
+
+/**
+ * Names the root of a value that has no key of its own, as the render walk spells it.
+ *
+ * Also the key `stringifyValue`, `redactValue` and `errorToString` root a value under when
+ * they hand it to {@link normalizeAlongRedactPaths}: the pass needs a parent to install the
+ * first copy into, and the value's own parent belongs to the caller, so each entry point
+ * wraps it in a one-key bag of its own and unwraps the walk's answer with
+ * {@link unwrapRedactionRoot}.
+ */
+export const ANONYMOUS_ROOT = '<value>';
+
+/**
+ * A failure subject spelled as if the walk had been given the value rather than the bag.
+ *
+ * The walk names a position by joining the path it is standing on, and a caller that roots
+ * every path at {@link ANONYMOUS_ROOT} before handing it over would see a leaf it knows as
+ * `user.token` reported as `<value>.user.token`. The wrapping is an implementation detail
+ * of how the value is normalized; it must not reach the handler.
+ *
+ * Only the rooted form is rewritten. A subject the walk did not build from a path - an
+ * entry as the caller wrote it, `<root>` for the bag itself - is already what it should
+ * be and is passed through.
+ */
+export function unrootedSubject(path: string): string {
+  if (path === ANONYMOUS_ROOT) {
+    // The value as a whole, which is what `<root>` meant when the value *was* the root.
+    return '<root>';
+  }
+
+  return path.startsWith(`${ANONYMOUS_ROOT}.`)
+    ? path.slice(ANONYMOUS_ROOT.length + 1)
+    : path;
+}
+
+/** A reporter that spells its subject with {@link unrootedSubject} first. */
+export function unrootedReport(
+  report: ReportFormatFailure,
+): ReportFormatFailure {
+  return (error: unknown, path: string): void => {
+    report(error, unrootedSubject(path));
+  };
+}
+
+/**
+ * The masked value back out of the bag it was walked in.
+ *
+ * The walk returns either the bag itself, a rebuilt copy of it, or - when the root's own
+ * keys could not be read at all - a single {@link REDACTION_FAILED_MARKER} standing in for
+ * the whole thing. Only the first two carry the value, and a marker where a bag was
+ * expected is the walk having failed closed, so it is handed on as one rather than being
+ * unwrapped into `undefined`, which would read as "there was nothing here".
+ */
+export function unwrapRedactionRoot(walked: unknown): unknown {
+  if (!isPlainContainer(walked) || Array.isArray(walked)) {
+    return REDACTION_FAILED_MARKER;
+  }
+
+  return (walked as Record<string, unknown>)[ANONYMOUS_ROOT];
+}

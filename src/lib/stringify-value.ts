@@ -4,7 +4,12 @@ import {
   type ForwardingAliases,
   type RedactPath,
 } from './internal/redact-paths';
-import { normalizeAlongRedactPaths } from './internal/redact-normalization';
+import {
+  ANONYMOUS_ROOT,
+  normalizeAlongRedactPaths,
+  unrootedReport,
+  unwrapRedactionRoot,
+} from './internal/redact-normalization';
 import { isPlainContainer } from './internal/is-plain-container';
 import { stringifyTemplateValue } from './internal/stringify-template-value';
 import {
@@ -173,9 +178,6 @@ export function redactValue(
   }
 }
 
-/** Names the root of a value that has no key of its own, as the render walk spells it. */
-const ANONYMOUS_ROOT = '<value>';
-
 /** Whether a report's subject is one of the bracketed names for a whole input. */
 function isBracketedSubject(path: string): boolean {
   return path.startsWith('<') && path.endsWith('>');
@@ -203,55 +205,6 @@ function rootedRenderReport(report: ReportFormatFailure): ReportFormatFailure {
       isBracketedSubject(path) ? path : `${ANONYMOUS_ROOT}.${path}`,
     );
   };
-}
-
-/**
- * A failure subject spelled as if the walk had been given the value rather than the bag.
- *
- * The walk names a position by joining the path it is standing on, and `redactValueWith`
- * roots every path at a synthetic key before handing it over - so a leaf a caller knows as
- * `user.token` would be reported as `<value>.user.token` on the redaction channel and,
- * once {@link rootedRenderReport} added its own root, as `<value>.<value>.user.token` on
- * the render one. The wrapping is an implementation detail of how the value is normalized;
- * it must not reach the handler.
- *
- * Only the rooted form is rewritten. A subject the walk did not build from a path - an
- * entry as the caller wrote it, `<root>` for the bag itself - is already what it should
- * be and is passed through.
- */
-function unrootedSubject(path: string): string {
-  if (path === ANONYMOUS_ROOT) {
-    // The value as a whole, which is what `<root>` meant when the value *was* the root.
-    return '<root>';
-  }
-
-  return path.startsWith(`${ANONYMOUS_ROOT}.`)
-    ? path.slice(ANONYMOUS_ROOT.length + 1)
-    : path;
-}
-
-/** A reporter that spells its subject with {@link unrootedSubject} first. */
-function unrootedReport(report: ReportFormatFailure): ReportFormatFailure {
-  return (error: unknown, path: string): void => {
-    report(error, unrootedSubject(path));
-  };
-}
-
-/**
- * The masked value back out of the bag it was walked in.
- *
- * The walk returns either the bag itself, a rebuilt copy of it, or - when the root's own
- * keys could not be read at all - a single {@link REDACTION_FAILED_MARKER} standing in for
- * the whole thing. Only the first two carry the value, and a marker where a bag was
- * expected is the walk having failed closed, so it is handed on as one rather than being
- * unwrapped into `undefined`, which would read as "there was nothing here".
- */
-function unwrapRedactionRoot(walked: unknown): unknown {
-  if (!isPlainContainer(walked) || Array.isArray(walked)) {
-    return REDACTION_FAILED_MARKER;
-  }
-
-  return (walked as Record<string, unknown>)[ANONYMOUS_ROOT];
 }
 
 /**

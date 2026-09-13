@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
 import stringWidth from 'string-width';
 import {
   muteConsoleError,
@@ -14,6 +14,7 @@ import {
   REDACTION_FAILED_MARKER,
 } from './logger/utils/redaction';
 import { EOL } from './constants';
+import * as redactPaths from './internal/redact-paths';
 import type { RedactFunction } from './logger/types';
 
 // These suites deliberately drive the paths that fall through to `console.error` when
@@ -2180,6 +2181,168 @@ describe('errorToString - nested values stay inside the frame', () => {
       for (const line of errorToString(error, width).split('\n')) {
         expect(stringWidth(line)).toBeLessThanOrEqual(width);
       }
+    }
+  });
+});
+
+describe('errorToString - a container that answers differently the second time', () => {
+  // The same leak `stringifyValue` and `redactValue` closed, on the third entry point.
+  // The masking walk reads each member once and hands a subtree that matched nothing back
+  // by reference; the table then reads that member again and renders it with no paths of
+  // its own. A `Proxy` whose `get` trap answers `{}` first and a secret afterwards was
+  // therefore masked on the read nobody sees and printed on the read everybody does.
+  // `errorToString` now runs the same pre-walk normalization over `additionalInfo` and
+  // over `cause`, so the two reads are of one snapshot.
+
+  const LEAKED = 'LEAKED_SECRET';
+
+  /** Answers `{}` under `key` once, then a bag holding a secret. */
+  const lying = (key: string, leaf: string): Record<string, unknown> => {
+    let reads = 0;
+
+    return new Proxy(
+      { [key]: {} },
+      {
+        get(target, property, receiver): unknown {
+          if (property === key) {
+            reads++;
+
+            return reads === 1 ? {} : { [leaf]: LEAKED };
+          }
+
+          return Reflect.get(target, property, receiver);
+        },
+      },
+    );
+  };
+
+  it('cannot swap a secret in below a named additionalInfo path', () => {
+    const rendered = errorToString(
+      Object.assign(new Error('boom'), {
+        additionalInfo: { g: lying('up', 'password') },
+        sensitiveFieldNames: ['g.up.password'],
+      }),
+    );
+
+    expect(rendered).toContain('boom');
+    expect(rendered).not.toContain(LEAKED);
+    // What the pass vetted is what comes out: the empty object the first read answered,
+    // rendered as a nested row with nothing under it.
+    expect(rendered).toContain('AdditionalInfo.g');
+    expect(rendered).toMatch(/up:\s*\|/);
+    expect(rendered).not.toContain('password');
+  });
+
+  it('cannot swap a secret in at the additionalInfo root either', () => {
+    const rendered = errorToString(
+      Object.assign(new Error('boom'), {
+        additionalInfo: lying('up', 'password'),
+        sensitiveFieldNames: ['up.password'],
+      }),
+    );
+
+    expect(rendered).not.toContain(LEAKED);
+    expect(rendered).toContain('AdditionalInfo.up');
+    expect(rendered).not.toContain('password');
+  });
+
+  it('cannot swap a secret in below a named cause path', () => {
+    const rendered = errorToString(
+      Object.assign(new Error('boom'), {
+        cause: { g: lying('up', 'token') },
+        sensitiveFieldNames: ['cause.g.up.token'],
+      }),
+    );
+
+    expect(rendered).not.toContain(LEAKED);
+    expect(rendered).toContain('Cause');
+    expect(rendered).toMatch(/up:\s*\|/);
+    expect(rendered).not.toContain('token');
+  });
+
+  it('still masks the secret the snapshot does hold', () => {
+    // The other direction, so the fix is not just "a hostile value renders empty": what
+    // the first read answers is what gets masked, trap or no trap.
+    const honest = new Proxy({ up: { password: 'hunter2secret' } }, {});
+
+    const rendered = errorToString(
+      Object.assign(new Error('boom'), {
+        additionalInfo: { g: honest },
+        sensitiveFieldNames: ['g.up.password'],
+      }),
+    );
+
+    expect(rendered).not.toContain('hunter2secret');
+    expect(rendered).toContain('password:');
+    expect(rendered).toContain('h***********t');
+  });
+
+  it("never writes into the caller's additionalInfo", () => {
+    const info = { g: { up: { password: 'hunter2secret' } } };
+    const before = JSON.stringify(info);
+
+    errorToString(
+      Object.assign(new Error('boom'), {
+        additionalInfo: info,
+        sensitiveFieldNames: ['g.up.password'],
+      }),
+    );
+
+    expect(JSON.stringify(info)).toBe(before);
+    expect(Object.getOwnPropertyDescriptor(info, 'g')?.value).toBe(info.g);
+  });
+});
+
+/**
+ * The pin `applyRedaction`, `stringifyValue` and `redactValue` each carry, on the third
+ * surface that runs the pass. The one catch no input can reach: every read inside
+ * `normalizeAlongRedactPaths` is guarded, so the fault is injected at its only seam, the
+ * prefix tree `redactPathPrefixes` builds.
+ */
+describe('errorToString - a throw out of nested-path normalization', () => {
+  it('fails additionalInfo and cause closed rather than walking a part-normalized bag', () => {
+    const original = { ...redactPaths };
+
+    void mock.module('./internal/redact-paths', () => ({
+      ...original,
+      redactPathPrefixes: () => {
+        throw new Error('prefix tree refused');
+      },
+    }));
+
+    try {
+      const reported: string[] = [];
+
+      const rendered = errorToString(
+        Object.assign(new Error('boom'), {
+          additionalInfo: {
+            user: { password: 'hunter2secret' },
+            other: 'safe',
+          },
+          cause: { token: 'abc123secret' },
+          sensitiveFieldNames: ['user.password', 'cause.token'],
+        }),
+        80,
+        {
+          onFormatError: (error, kind, key) => {
+            reported.push(`${kind}:${key}:${error.message}`);
+          },
+        },
+      );
+
+      expect(rendered).toContain('boom');
+      expect(rendered).not.toContain('secret');
+      // Withheld whole, the marker where the bag and the cause would have been; even the
+      // safe sibling is not carried, since nothing was inspected.
+      expect(rendered).toContain(REDACTION_FAILED_MARKER);
+      expect(rendered).not.toContain('safe');
+      // One report, not two: the redaction reporter is bounded to once per render, and
+      // the cause's refusal is the same failure on the same list.
+      expect(reported).toEqual([
+        'redaction:<sensitiveFieldNames>:prefix tree refused',
+      ]);
+    } finally {
+      void mock.module('./internal/redact-paths', () => ({ ...original }));
     }
   });
 });

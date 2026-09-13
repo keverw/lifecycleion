@@ -6,8 +6,15 @@ import {
 import {
   parseRedactPaths,
   redactMatchedPaths,
+  type ForwardingAliases,
   type RedactPath,
 } from './internal/redact-paths';
+import {
+  ANONYMOUS_ROOT,
+  normalizeAlongRedactPaths,
+  unrootedReport,
+  unwrapRedactionRoot,
+} from './internal/redact-normalization';
 import {
   REDACTION_FAILED_MARKER,
   type RedactValueFunction,
@@ -500,6 +507,21 @@ function asAddressableBag(
  * cannot disagree. The input is never mutated: copies are built only along the branches
  * that lead to a mask.
  *
+ * Preceded by the same pre-walk normalization the logger's params and `stringifyValue`
+ * get, and for the same reason. The walk reads each member once and hands a subtree that
+ * matched nothing back by reference; the table that follows reads that member again, and
+ * `stringifyValue` renders it with no paths of its own. A `Proxy` under `additionalInfo`
+ * that answers `{}` to the walk's read and `{ password: 'secret' }` to the render's was
+ * therefore masked on the read nobody sees and printed on the read everybody does.
+ * Normalizing first reads every container along a named path once into a copy that
+ * stands in for the original, so the walk and the rows after it look at one snapshot.
+ *
+ * Rooted under {@link ANONYMOUS_ROOT} in a bag of this function's own, because the
+ * normalization needs a parent to install the first copy into and the value's own parent
+ * is the caller's - the `additionalInfo` bag is the caller's object when it is a plain
+ * container. A non-plain value is walked bare: there is no container beneath it for the
+ * walk to hand back by reference, so there is no second read to disagree with the first.
+ *
  * Fully guarded. The walk reads caller properties and calls the caller's `redactFunction`,
  * and this sits on a reporting path that must not raise an error of its own. A failure
  * fails closed on the whole value rather than falling through to the unmasked original.
@@ -521,16 +543,52 @@ function redactAddressedValue(
     // everywhere else: a leaf renders on its way to the mask, and a `toString` that throws
     // there is a `'render'` failure. Passing only `report` labelled it `'redaction'` and
     // spent the one redaction report a broken `redactFunction` still needs.
-    return redactMatchedPaths(
-      value,
-      paths,
-      redactFunction,
-      report,
-      undefined,
-      reportRender,
-      // This render's own allowance, so masking and the table that follows spend one
-      // budget between them. See `StringifyValueOptions.maxRenderLength`.
-      budget,
+    if (!isPlainContainer(value)) {
+      return redactMatchedPaths(
+        value,
+        paths,
+        redactFunction,
+        report,
+        undefined,
+        reportRender,
+        // This render's own allowance, so masking and the table that follows spend one
+        // budget between them. See `StringifyValueOptions.maxRenderLength`.
+        budget,
+      );
+    }
+
+    const bag: Record<string, unknown> = { [ANONYMOUS_ROOT]: value };
+    const rootedPaths = paths.map((path): RedactPath => ({
+      parts: [ANONYMOUS_ROOT, ...path.parts],
+      // The entry as the caller wrote it, untouched: it is what a custom
+      // `redactFunction` is handed as the key.
+      entry: path.entry,
+    }));
+
+    // Copies standing in for the caller's containers, so the walk recognizes a back-edge
+    // pointing at an original it is holding a copy of.
+    const aliases: ForwardingAliases = new WeakMap();
+
+    // Inside the guard, so a throw out of normalization fails closed to the marker below
+    // rather than walking a half-normalized bag - an alias written under one key and not
+    // yet under its sibling is a shape neither the walk nor the table was promised.
+    normalizeAlongRedactPaths(
+      bag,
+      rootedPaths,
+      aliases,
+      unrootedReport(report),
+    );
+
+    return unwrapRedactionRoot(
+      redactMatchedPaths(
+        bag,
+        rootedPaths,
+        redactFunction,
+        unrootedReport(report),
+        aliases,
+        unrootedReport(reportRender),
+        budget,
+      ),
     );
   } catch (error) {
     report(error, '<sensitiveFieldNames>');
