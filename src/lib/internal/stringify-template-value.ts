@@ -11,6 +11,7 @@ import {
 import {
   capKey,
   capToMaxRenderLength,
+  cutAt,
   keyAllowance,
   charge,
   chargeText,
@@ -201,8 +202,13 @@ function quoteWithinLimit(
   text: string,
   limit: number,
 ): { encoded: string; kept: number } {
-  let keep = Math.min(text.length, limit);
-  let encoded = quote(`${text.slice(0, keep)}${TRUNCATED_LENGTH}`);
+  // Every prefix goes through `cutAt`, so a cut that would land between the halves of an
+  // astral character drops the pair instead of quoting a lone surrogate. `kept` reports
+  // what the prefix actually is rather than where the cut was asked for, so the caller's
+  // truncation count still matches the emitted text.
+  let prefix = cutAt(text, Math.min(text.length, limit));
+  let keep = prefix.length;
+  let encoded = quote(`${prefix}${TRUNCATED_LENGTH}`);
 
   // The marker itself, quoted, is the floor: below that there is nothing to say.
   const cap = Math.max(limit, quote(TRUNCATED_LENGTH).length);
@@ -214,8 +220,9 @@ function quoteWithinLimit(
   ) {
     const ratio = cap / encoded.length;
 
-    keep = Math.floor(keep * ratio);
-    encoded = quote(`${text.slice(0, keep)}${TRUNCATED_LENGTH}`);
+    prefix = cutAt(text, Math.floor(keep * ratio));
+    keep = prefix.length;
+    encoded = quote(`${prefix}${TRUNCATED_LENGTH}`);
   }
 
   if (encoded.length <= cap) {
@@ -226,22 +233,25 @@ function quoteWithinLimit(
   // and zero is known to, so the search closes on a fitting answer.
   let low = 0;
   let high = keep;
+  let kept = 0;
 
   encoded = quote(TRUNCATED_LENGTH);
 
   while (low < high) {
     const middle = Math.ceil((low + high) / 2);
-    const candidate = quote(`${text.slice(0, middle)}${TRUNCATED_LENGTH}`);
+    const candidate = cutAt(text, middle);
+    const quoted = quote(`${candidate}${TRUNCATED_LENGTH}`);
 
-    if (candidate.length <= cap) {
+    if (quoted.length <= cap) {
       low = middle;
-      encoded = candidate;
+      kept = candidate.length;
+      encoded = quoted;
     } else {
       high = middle - 1;
     }
   }
 
-  return { encoded, kept: low };
+  return { encoded, kept };
 }
 
 /**

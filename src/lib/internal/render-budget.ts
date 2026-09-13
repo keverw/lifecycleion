@@ -84,6 +84,34 @@ export const TRUNCATED_LENGTH = '[max length exceeded]';
 export const MIN_KEY_ALLOWANCE = 256;
 
 /**
+ * Cut `text` at `end` without splitting a surrogate pair.
+ *
+ * `slice` counts UTF-16 code units, so a cut that lands between the two halves of an
+ * astral character keeps a lone surrogate: `stringifyValue('😀'.repeat(200), {
+ * maxRenderLength: 5 })` emitted `"😀😀\ud83d[max length exceeded]"`, a string
+ * `isWellFormed()` rejects and a JSON consumer or a terminal renders as a replacement
+ * character. A truncation marker is an ordinary degradation and should not also corrupt
+ * the text it is appended to - the grapheme-aware `splitWord` in the table renderer
+ * already holds to that on the wrapping side.
+ *
+ * Only ever cuts one unit *shorter*, never longer, so every budget charged against the
+ * result stays within its allowance.
+ */
+export function cutAt(text: string, end: number): string {
+  const limit = Math.max(0, Math.min(end, text.length));
+
+  if (limit === 0 || limit === text.length) {
+    return text.slice(0, limit);
+  }
+
+  // A high surrogate immediately before the cut has its low half on the other side of it.
+  const last = text.charCodeAt(limit - 1);
+  const isSplitPair = last >= 0xd800 && last <= 0xdbff;
+
+  return text.slice(0, isSplitPair ? limit - 1 : limit);
+}
+
+/**
  * How long a key this render may still emit.
  *
  * What is left of the budget, never more than the whole allowance and never less than
@@ -124,7 +152,7 @@ export function capKey(budget: RenderBudget, text: string): string {
     return text;
   }
 
-  const kept = text.slice(0, Math.max(0, allowance));
+  const kept = cutAt(text, allowance);
 
   noteTruncation(budget, 'length', text.length - kept.length);
 
@@ -164,7 +192,7 @@ export function capNestedKey(
     return text;
   }
 
-  const kept = text.slice(0, allowance);
+  const kept = cutAt(text, allowance);
 
   noteTruncation(budget, 'length', text.length - kept.length);
 
@@ -190,7 +218,7 @@ export function capToMaxRenderLength(
     return text;
   }
 
-  return `${text.slice(0, limit)}${TRUNCATED_LENGTH}`;
+  return `${cutAt(text, limit)}${TRUNCATED_LENGTH}`;
 }
 
 /** Remaining output allowance for one render, shared by every level of it. */
@@ -433,7 +461,7 @@ export function chargeText(budget: RenderBudget, text: string): string {
   // keys are charged before its values, so a leaf can arrive with nothing left at all,
   // and `slice` reads a negative end as counting back from the end of the string - which
   // would emit the wrong part of the value rather than none of it.
-  const kept = text.slice(0, Math.max(0, budget.remaining));
+  const kept = cutAt(text, budget.remaining);
   const emitted = `${kept}${TRUNCATED_LENGTH}`;
 
   // What this cut, before the charge below moves `remaining`.

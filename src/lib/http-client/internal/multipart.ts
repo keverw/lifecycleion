@@ -456,6 +456,21 @@ export async function serializeMultipartFormData(
           }
 
           if (chunk) {
+            // Refused *before* the write, not counted after it. The check below this
+            // function catches the same overrun, but only once the whole body has been
+            // written: a `File` that grew after the sizing pass had its surplus already on
+            // the wire past a `Content-Length` the server reads as the start of the next
+            // request, and throwing afterwards could not take those bytes back. The
+            // shortfall check has no equivalent problem - bytes that were never written
+            // need no undoing - which is why only this side needs the early exit.
+            if (uploadedBytes + chunk.byteLength > totalSize) {
+              await cancelReaderQuietly(reader);
+
+              throw new Error(
+                `Request body wrote ${String(uploadedBytes + chunk.byteLength)} bytes against a Content-Length of ${String(totalSize)}`,
+              );
+            }
+
             // Each chunk contributes to upload progress immediately after write.
             await write(chunk);
           }

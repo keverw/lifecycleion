@@ -862,9 +862,20 @@ export class NamedPipeSink implements LogSink {
     // Bounded by `closeTimeoutMS` either way, which is what makes waiting on a pending open
     // safe: a reader that never comes costs the close its budget and no more, and the
     // pending open is destroyed below exactly as before.
+    //
+    // `isOpening` counts too, for the same reason and on the one gate that omitted it.
+    // `reopenForCloseDrain` races its init against a deadline and can return with the
+    // open still in flight: `pendingStream` is assigned only after the `stat`, so a
+    // reopen that got as far as opening but not as far as that left `isOpening` true and
+    // `pendingStream` undefined, this test read "no stream to wait for", and `close()`
+    // fell straight to `abandonQueueOnClose()` with ~29.5s of a thirty-second budget
+    // unspent. `ensureConnection` has always tested `isOpening || pendingStream`; these
+    // now agree with it.
     while (
       (this.writeQueue.length > 0 || this.isProcessing) &&
-      (this.pendingStream !== undefined || this.hasLiveStream()) &&
+      (this.pendingStream !== undefined ||
+        this.isOpening ||
+        this.hasLiveStream()) &&
       Date.now() - startTime <= this.closeTimeoutMS
     ) {
       // Asked for explicitly: nothing else drives a pass while this loop is awaiting, and

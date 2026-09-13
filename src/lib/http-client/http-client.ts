@@ -1802,9 +1802,12 @@ export class BaseHTTPClient {
             // elapsed and attempt two was dispatched with attempt one's body still going
             // out on its own socket - a second upload of the same body beside the first,
             // the double-send the redirect wait was added to prevent. The outcome never
-            // rejects and always settles (the stall watchdog sees to that), and the wait
-            // is raced against the cancel signal, so a caller who gives up during it is
-            // not held. After the delay rather than before it, since an upload that
+            // rejects, and it settles on every path the adapter can take: the writer's
+            // own end, the stall watchdog once a response has arrived, and - for a
+            // request that failed before any response, where no watchdog is ever armed -
+            // the transport-error handler, which answers it rather than leaving a parked
+            // writer to. The wait is also raced against the cancel signal, so a caller
+            // who gives up during it is not held. After the delay rather than before it, since an upload that
             // finishes during the backoff costs nothing extra to wait for.
             await settleUploadBeforeNextDispatch(
               adapterResponse.requestBodySettled,

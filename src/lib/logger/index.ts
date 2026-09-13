@@ -38,6 +38,15 @@ import { prepareErrorObjectLog } from './utils/error-object';
 import { LoggerService } from './logger-service';
 
 /**
+ * How many `onFormatError` calls may be in flight before the rest go to the console.
+ *
+ * The bound on an `async` handler that logs: see {@link Logger.formatErrorHandler}. High
+ * enough that an ordinary burst of unrelated failures is never diverted, low enough that a
+ * recursing handler stops within a few turns.
+ */
+const MAX_PENDING_FORMAT_REPORTS = 8;
+
+/**
  * Main Logger class with sink-based architecture and EventEmitter support
  */
 /**
@@ -230,9 +239,26 @@ export class Logger extends EventEmitter {
 
   private _reportErrorListenerRegistered = false;
   private _isHandlingReportedError = false;
-  private _isHandlingSinkError = false;
+  /**
+   * See {@link handleSinkError}: the sinks whose failure handler has not settled.
+   *
+   * Per sink rather than one flag, because a flag cannot tell re-entry from a second
+   * independent failure. `handleLog` writes to every sink in a loop, so three failing
+   * sinks produce three unrelated reports in one pass - and with an `async onSinkError`
+   * the flag was still up for the second and third, which were diverted to the console
+   * the handler was installed to replace. The cycle this guards is a handler that logs
+   * back into the sink that just failed, which is the *same* sink; a set still bounds it
+   * at one report per sink and lets the unrelated ones through.
+   */
+  private readonly _sinksHandlingError = new WeakSet<LogSink>();
   /** See {@link handleEventHandlerFailure}: held until `onEventHandlerError` settles. */
   private _isHandlingEventHandlerError = false;
+  /** See {@link formatErrorHandler}: nesting depth of synchronous `onFormatError` calls. */
+  private _formatErrorDepth = 0;
+  /** See {@link formatErrorHandler}: `onFormatError` calls that have not settled. */
+  private _pendingFormatReports = 0;
+  /** See {@link handleSinkError}: nesting depth of synchronous `onSinkError` calls. */
+  private _sinkErrorDepth = 0;
   private _reportErrorListener: ((event: Event) => void) | null = null;
   private _reportErrorListenerCapture = false;
 
@@ -934,7 +960,23 @@ export class Logger extends EventEmitter {
     // caller's own array was handed to every sink by reference, which is the retention
     // `inertKeys` was introduced to remove. A list too hostile to copy leaves this
     // `undefined`, exactly as a hostile `redactedKeys` does.
-    const tags = snapshotList(options?.tags) as string[] | null;
+    const snapshotTags = snapshotList(options?.tags) as string[] | null;
+
+    // Strings only, the check `redactedKeys` gets below and for the same reason:
+    // `snapshotList` reports what a list *holds*, not what its elements are, so
+    // `tags: [{ toString() { throw } }]` was copied and handed to every sink with the
+    // caller's object and its traps intact - the retention the copy exists to remove. A
+    // sink then does the ordinary thing with the field, `.join(',')`, and throws inside
+    // `sink.write`, turning one bad list into an `onSinkError` per registered sink.
+    //
+    // A list that is not all strings leaves this `null`, the same answer an unreadable
+    // one already gets: `tags` is an optional label, so dropping it costs the entry a
+    // field rather than its content.
+    const tags =
+      snapshotTags !== null &&
+      snapshotTags.every((tag) => typeof tag === 'string')
+        ? snapshotTags
+        : null;
     const requested = options?.redactedKeys;
 
     // The requested list, copied once, and everything below reads the copy.
@@ -1284,7 +1326,87 @@ export class Logger extends EventEmitter {
    * A caller who wants these somewhere else sets `onFormatError` and this is never used.
    */
   private formatErrorHandler(): FormatErrorHandler {
-    return this.onFormatError ?? consoleFormatHandler();
+    const handler = this.onFormatError;
+
+    if (handler === undefined) {
+      return consoleFormatHandler();
+    }
+
+    const fallback = consoleFormatHandler();
+
+    // Re-entry goes to the console rung, not back to the handler - the brake
+    // `handleSinkError` and `handleEventHandlerFailure` both have, and the one channel
+    // that had none. An `onFormatError` that logs is the obvious thing to write, and
+    // logging renders and redacts: a param whose `toString` throws reported, was logged,
+    // rendered, threw again and re-entered this handler inside its own frame, measured at
+    // 1708 spurious sink entries before the stack gave out.
+    //
+    // Two counters rather than one flag, because the two loops this has to stop are not
+    // the same loop and one bound cannot answer both.
+    //
+    // `_formatErrorDepth` is the synchronous one, raised for the duration of the call and
+    // lowered when it returns: a handler that logs re-enters this from inside its own
+    // frame, and a depth of one is enough to see that. It is deliberately *not* held
+    // across an `await`, so an unrelated format failure in another log call - which is
+    // not re-entry at all - still reaches the handler rather than the console. A flag held
+    // until an `async` handler settled diverted every one of those.
+    //
+    // `_pendingFormatReports` is the asynchronous one. An `async onFormatError` that
+    // awaits and then logs finds the depth back at zero and would run again, once per
+    // turn, forever - the loop no synchronous guard can see. Capping the calls still in
+    // flight ends it: the cascade widens to the cap, the rest go to the console, and
+    // nothing there logs. The cap is generous because a legitimate burst of unrelated
+    // failures is the case that must not be starved; a handler that recurses reaches it
+    // in a handful of turns either way.
+    return (error: Error, kind: FormatFailureKind, path: string): void => {
+      if (
+        this._formatErrorDepth > 0 ||
+        this._pendingFormatReports >= MAX_PENDING_FORMAT_REPORTS
+      ) {
+        fallback(error, kind, path);
+
+        return;
+      }
+
+      this._formatErrorDepth++;
+      this._pendingFormatReports++;
+
+      let didDefer = false;
+      let didRelease = false;
+
+      // Once only: the deferred path and the `finally` below must not both spend it.
+      const release = (): void => {
+        if (didRelease) {
+          return;
+        }
+
+        didRelease = true;
+        this._pendingFormatReports--;
+      };
+
+      try {
+        const result: unknown = handler(error, kind, path);
+
+        if (isPromise(result)) {
+          didDefer = true;
+
+          // Lowered when the handler settles, and the promise itself is handed back
+          // below: `createFormatReporter` returns what this returns so a rejecting
+          // `async` handler lands on the console rung instead of becoming an unhandled
+          // rejection, and a `.then` here must not be the thing that swallows it.
+          void Promise.resolve(result).then(release, release);
+        }
+
+        // Returned for the reason `createFormatReporter`'s binding is expression-bodied.
+        return result as void;
+      } finally {
+        this._formatErrorDepth--;
+
+        if (!didDefer) {
+          release();
+        }
+      }
+    };
   }
 
   /**
@@ -1343,13 +1465,25 @@ export class Logger extends EventEmitter {
     // and ran itself again on the next turn, once per turn, for as long as the sink kept
     // failing. The sinks hold their `formatReportsInFlight` guard the same way for the
     // same reason, and `reportThroughHandler` follows a promise to say when it settled.
-    if (this._isHandlingSinkError) {
+    // Nesting is bounded alongside the per-sink entry, and the two answer different
+    // halves of the same loop. The set stops a handler that logs back into the sink that
+    // just failed; on its own it does not stop the *other* sinks from opening further
+    // nested reports, and with N sinks failing at once - a full disk, an EPIPE, the case
+    // this channel exists for - each nested `handleLog` writes to every sink not yet in
+    // the set, which is N! renders of one entry rather than the one the old boolean
+    // allowed. The depth counter caps that at a single nested level: the first report of a
+    // pass reaches the handler, anything raised from inside it goes to the console.
+    //
+    // Raised for the synchronous call only, not held until an `async` handler settles, so
+    // an unrelated sink failing later in the same loop is still a report the handler gets.
+    if (this._sinkErrorDepth > 0 || this._sinksHandlingError.has(sink)) {
       reportThroughHandler(undefined, line);
 
       return;
     }
 
-    this._isHandlingSinkError = true;
+    this._sinksHandlingError.add(sink);
+    this._sinkErrorDepth++;
 
     try {
       // The shared rung, so this channel cannot drift from the other three. It never
@@ -1363,13 +1497,17 @@ export class Logger extends EventEmitter {
             () => this.onSinkError?.(failure, context, sink),
         line,
         () => {
-          this._isHandlingSinkError = false;
+          this._sinksHandlingError.delete(sink);
         },
       );
     } catch {
       // `reportThroughHandler` does not throw, but the guard must not be left up if that
-      // ever changes: a stuck flag would route every later sink failure to the console.
-      this._isHandlingSinkError = false;
+      // ever changes: a stuck entry would route every later failure of this sink to the
+      // console.
+      this._sinksHandlingError.delete(sink);
+    } finally {
+      // The synchronous call is over either way; only the per-sink entry outlives it.
+      this._sinkErrorDepth--;
     }
   }
 

@@ -111,6 +111,11 @@ describe('KeyValueASCIITable', () => {
     expect(EOL + table.toString()).toMatchSnapshot();
   });
 
+  // 30s, not the 5s default. The fixture has to clear the engine's argument limit to
+  // exercise what it is here for, and two tables of it render in a little over four
+  // seconds - close enough to the default to fail on a loaded CI box while the code under
+  // test is perfectly correct. Scaling is linear (12.5k lines -> 165ms, 200k -> 2.3s), so
+  // the budget is the thing to raise rather than the fixture the thing to shrink.
   it('renders an empty message with more lines than a spread could pass', () => {
     // The empty-state lines were assembled with a spread, which hands every line to
     // `Array` as an argument; a message with enough lines exceeded the argument limit
@@ -131,7 +136,7 @@ describe('KeyValueASCIITable', () => {
     });
 
     expect(multi.toString().split('\n').length).toBeGreaterThanOrEqual(lines);
-  });
+  }, 30_000);
 
   it('should handle empty tables with a very long custom empty message', () => {
     const table = new KeyValueASCIITable({

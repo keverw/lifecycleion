@@ -609,6 +609,46 @@ export class FileSink implements LogSink {
   }
 
   /**
+   * Report bytes a *rotation's* flush gave up on.
+   *
+   * `close()` has always named what its flush timeout abandoned; the two rotation paths
+   * discarded the same number. A size- or midnight-triggered rotation on a stalled mount
+   * ended the stream, waited out `closeTimeoutMS`, then opened the next file and returned
+   * - and whatever the old stream still held went with the descriptor, with
+   * `entriesFailed: 0`, `droppedEntries: 0` and `onError` never firing. That is the
+   * silent-loss shape the close-path report was added to close, reached through the door
+   * this sink goes through far more often.
+   *
+   * `kind: 'close'`, because a rotation's loss happens while ending a stream and that is
+   * what the close channel names; `disposition: 'no_entry'`, because the bytes are a
+   * stream buffer rather than any one entry this sink could hand back.
+   */
+  private reportRotationFlushLoss(bytesLeft: number, target: string): void {
+    if (bytesLeft <= 0) {
+      return;
+    }
+
+    const failure = new FileSinkError(
+      `Rotation abandoned ${String(bytesLeft)} bytes still buffered for ${target} (closeTimeoutMS=${String(this.closeTimeoutMS)}); whether they reached the file is unknown`,
+    );
+
+    this.lastError = failure;
+
+    reportThroughHandler(
+      this.onError === undefined
+        ? undefined
+        : () =>
+            this.onError?.({
+              kind: 'close',
+              error: failure,
+              target,
+              disposition: 'no_entry',
+            }),
+      () => describeError(failure),
+    );
+  }
+
+  /**
    * End the current stream and wait for it to flush, giving up after `timeoutMS`.
    *
    * The bound is the whole point, and it is needed wherever the sink waits on a flush -
@@ -1617,8 +1657,16 @@ export class FileSink implements LogSink {
       // the life of the process, and whatever sat in its buffer was never flushed - not by
       // `close()`, which only ends the stream that is current by then.
       //
-      // Bounded, like every other flush this sink waits on: see `endStreamWithin`.
-      await this.endStreamWithin(this.closeTimeoutMS);
+      // Bounded, like every other flush this sink waits on: see `endStreamWithin`. What
+      // the bound gave up on is reported rather than dropped: see
+      // `reportRotationFlushLoss`.
+      const bytesLeft = await this.endStreamWithin(this.closeTimeoutMS);
+
+      this.reportRotationFlushLoss(
+        bytesLeft,
+        this.currentLogFile ?? this.logDir,
+      );
+
       await this.setupLogFile();
 
       return;
@@ -1653,8 +1701,11 @@ export class FileSink implements LogSink {
 
     const currentDate = new Date().toISOString().slice(0, 10); // YYYY-MM-DD (UTC)
 
-    // Close current stream, bounded: see `endStreamWithin`.
-    await this.endStreamWithin(this.closeTimeoutMS);
+    // Close current stream, bounded: see `endStreamWithin`. Read before the rename below
+    // moves the file, so the report names the file the bytes were written for.
+    const bytesLeft = await this.endStreamWithin(this.closeTimeoutMS);
+
+    this.reportRotationFlushLoss(bytesLeft, this.currentLogFile);
 
     // Rename with timestamp, disambiguated when one second holds more than one rotation.
     //

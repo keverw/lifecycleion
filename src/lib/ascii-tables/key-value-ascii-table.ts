@@ -208,12 +208,24 @@ export class KeyValueASCIITable {
         value instanceof MultiColumnASCIITable ||
         Array.isArray(value)
       ) {
-        const keyString = ASCIITableUtils.centerText(
-          key,
-          columnWidths[0] + columnWidths[1] + 3,
-        );
+        const keySpan = columnWidths[0] + columnWidths[1] + 3;
 
-        tableString += `| ${keyString} |\n`;
+        // Wrapped to the span before centering, not handed to `centerText` whole.
+        // `padCenterPreferRight` returns anything already wider than the target unchanged,
+        // so a nested value's key longer than the two columns it spans emitted a row wider
+        // than the table it sits in - `errorToString(err, 15)` produced a 20-character
+        // `| AdditionalInfo.a |` inside a 15-character frame. Every value in this renderer
+        // already wraps to its column; the banner key was the one line that did not.
+        //
+        // The length test, not `|| ['']`: an empty array is truthy, so `||` would pass it
+        // straight through and the row would lose its line. `wrapText` returns nothing for
+        // an empty key, and the row still needs a blank line to keep the frame closed.
+        const keyLines = ASCIITableUtils.wrapText(key, keySpan);
+
+        for (const keyLine of keyLines.length > 0 ? keyLines : ['']) {
+          tableString += `| ${ASCIITableUtils.centerText(keyLine, keySpan)} |\n`;
+        }
+
         tableString += rowSeparator + '\n';
 
         let valueString = '';

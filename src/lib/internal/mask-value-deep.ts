@@ -127,14 +127,20 @@ export function maskValueDeep(
     // emitted its `[unrenderable: ...]` marker into the masked output and told nobody, so
     // an installed `onFormatError` never fired for the one surface where a failure to
     // render is also a failure to redact.
-    const text = stringifyTemplateValue(value, key, reportRender);
-
-    charge(budget, text);
+    //
+    // Rendered *against this pass's budget*, not bare. Called without one,
+    // `stringifyTemplateValue` falls back to the fixed `MAX_RENDER_LENGTH` and the
+    // `charge` that followed billed the leaf without cutting it - so a caller's
+    // `maxRenderLength: 10_000` was handed a megabyte-long masked leaf while its
+    // `onTruncate` never fired, the same escape the replacement path below closed.
+    // `chargeText` inside bills and cuts in one step, so nothing is charged twice.
+    const text = stringifyTemplateValue(value, key, reportRender, budget);
 
     const masked = mask(key, text, isDerived);
 
-    // Charged for what masking *added*, not just for what it was handed. `charge` above
-    // bills the input leaf, and a replacement is capped one at a time by
+    // Charged for what masking *added*, not just for what it was handed. `chargeText`,
+    // inside the render above, bills the input leaf and cuts it to what the budget had
+    // left; a replacement is capped one at a time by
     // `capToMaxRenderLength` - so nothing anywhere billed the aggregate: 200 named leaves
     // each answered a `MAX_RENDER_LENGTH` replacement produced 200 times the pass's whole
     // allowance, in the structured `redactedParams` a sink is handed. Only the excess is

@@ -880,7 +880,9 @@ export class ProcessSignalManager {
         // global `'error'` listener synchronously, and a listener that calls `attach()`
         // from there observed the shared state half-repaired - no attached instances,
         // `rawModeEnabledByManager` still true, and no owner to adopt. The twin at
-        // `restoreStdin` has nothing after its report, so it needs no such ordering.
+        // `restoreStdin` does have work after its report - it pauses stdin - and answers
+        // the same hazard the other way, by re-reading `attachedInstances` rather than
+        // trusting the flag it computed before reporting.
         reportCallbackError(
           'ProcessSignalManager stdin raw mode restore',
           error,
@@ -969,8 +971,13 @@ export class ProcessSignalManager {
       }
     }
 
-    // Pause stdin when last instance detaches
-    if (isLastInstance) {
+    // Pause stdin when last instance detaches - re-checked here rather than trusted from
+    // the `isLastInstance` read above. `reportCallbackError` dispatches a global `'error'`
+    // *synchronously*, so a listener that calls `attach()` from inside the restore report
+    // above returns here with an instance freshly attached, and the stale flag then paused
+    // stdin under it: the new instance's keypress handler was registered and silent. The
+    // set is the live answer.
+    if (isLastInstance && shared.attachedInstances.size === 0) {
       try {
         process.stdin.pause();
       } catch {

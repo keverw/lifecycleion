@@ -1296,6 +1296,23 @@ export class NodeAdapter implements HTTPAdapter {
           return;
         }
 
+        // The body writer is over too, for the reason `reportWriteErrorAfterResponse`
+        // settles it: the request is failing and about to be torn down, and a writer
+        // parked inside `Blob.stream()`'s `read()` has no pending `req.write` to reject,
+        // so it never returns to run `endBodyWrite`. Nothing else would answer here - the
+        // stall watchdog is armed only from the response's `'close'`, which a request that
+        // never got a response does not reach - so `await response.requestBodySettled`
+        // waited forever, and the client's own `settleUploadBeforeNextDispatch` waited
+        // with it: a retryable `PUT` whose socket reset mid-upload hung instead of
+        // retrying. First-call-wins, so a writer that does notice the teardown and reports
+        // its own `EPIPE` afterwards changes nothing.
+        //
+        // `isWritingBody` is deliberately left as it is: this answers the caller and does
+        // not claim the writer has stopped.
+        if (upload.settle !== null) {
+          settleBodyOutcome(error);
+        }
+
         // TLS certificate errors → 495. This is non-standard but widely
         // understood for client cert / server cert validation failures. We
         // preserve the diagnostic 495 status, but still flag it as a transport
@@ -2484,10 +2501,21 @@ function attachWritableListener(
   listener: (() => void) | ((error: Error) => void),
 ): void {
   if (getWritableListenerRemover(writable) !== null) {
-    if (event === 'error') {
-      writable.on('error', listener);
-    } else {
-      writable.on('drain', listener as () => void);
+    // Guarded like every other interaction with a caller-supplied `WritableLike` in this
+    // file. `on` is the sink's own method and free to throw, and an unguarded throw here
+    // left `writeToWritable` reporting a *request* failure for a response that had
+    // arrived intact - a `streamResponse` factory's writable misclassified as a network
+    // error. Losing the listener costs this writable its `'drain'` or `'error'` channel,
+    // which the write loop already tolerates; raising out of the attach does not.
+    try {
+      if (event === 'error') {
+        writable.on('error', listener);
+      } else {
+        writable.on('drain', listener as () => void);
+      }
+    } catch {
+      // No channel on this writable, and nothing to undo: `on` either registered the
+      // listener or it did not.
     }
 
     return;
@@ -2523,13 +2551,25 @@ function attachWritableListener(
     }
   };
 
-  if (event === 'error') {
-    writable.on('error', dispatch as unknown as (error: Error) => void);
+  // Guarded for the reason the own-remover branch above is, and the map entry is rolled
+  // back when it fails: left in place with nothing dispatching into it, every later
+  // request on this writable would join a set no event ever reaches.
+  try {
+    if (event === 'error') {
+      writable.on('error', dispatch as unknown as (error: Error) => void);
 
-    return;
+      return;
+    }
+
+    writable.on('drain', dispatch as unknown as () => void);
+  } catch {
+    // The entry goes, so a later request attaches a fresh `dispatch` rather than joining a
+    // set nothing reaches. A sink whose `on` registered the listener and *then* threw is
+    // the one case this cannot tidy: `dispatch` stays attached to a set now unreachable
+    // from `detachWritableListener`, which costs a stale listener and no correctness -
+    // there is no way to tell that case from one where nothing was registered at all.
+    events.delete(event);
   }
-
-  writable.on('drain', dispatch as unknown as () => void);
 }
 
 function detachWritableListener(
