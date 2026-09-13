@@ -1515,9 +1515,11 @@ interface SinkFailure {
 A `close()` that gives up at `closeTimeoutMS` reports differently on the two sinks, because
 they know different things. `FileSink` waits on one write at a time, so the write it
 abandons may already be on disk: reported as `'close'` / `'no_entry'` and not counted in
-`droppedEntries`. `NamedPipeSink` hands the stream a burst, so what it abandons is whatever
-is still buffered for a reader that did not take it: reported once as `'close'` / `'lost'`,
-with each entry counted as its write callback fails. Neither report carries an `entry` -
+`droppedEntries`; bytes the stream still held when the final flush timed out are reported
+the same way, before `close()` resolves. `NamedPipeSink` hands the stream a burst, so what
+it abandons is whatever is still buffered for a reader that did not take it: reported once
+as `'close'` / `'lost'` before `close()` resolves, with each entry counted as its write
+callback fails. Neither report carries an `entry` -
 the bytes in the stream's buffer are no longer lines the sink can name - so a fallback
 handler learns that lines were lost, and how many from `getHealth().droppedEntries`.
 

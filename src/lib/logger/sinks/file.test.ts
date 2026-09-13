@@ -2519,6 +2519,52 @@ describe('FileSink - entries refused at the door', () => {
     expect(closeFailures[0]?.disposition).toBe('lost');
   });
 
+  test('a close whose flush times out with bytes still buffered says so before it resolves', async () => {
+    // This sink writes one line at a time and waits for the callback, so the stream's
+    // buffer holds nothing the in-flight report does not already name. The backstop for
+    // the case that model rules out: a stream that still holds bytes when `end()` times
+    // out is reported once, as `'close'` / `'no_entry'`, before `await close()` answers -
+    // the same report at the same moment as `NamedPipeSink`.
+    const failures: SinkFailure[] = [];
+    const sink = new FileSink({
+      logDir: tmpDir.path,
+      basename: 'buffered-close',
+      closeTimeoutMS: 200,
+      onError: (failure) => {
+        failures.push(failure);
+      },
+    });
+
+    await sink.flush();
+
+    // Stand in for a stream on a hung mount: bytes accepted, `end()` never calls back.
+    let destroyed = 0;
+    const stuck = {
+      destroyed: false,
+      writableLength: 4096,
+      end: () => {},
+      once: () => {},
+      on: () => {},
+      removeListener: () => {},
+      destroy() {
+        destroyed++;
+        this.destroyed = true;
+      },
+    };
+
+    (sink as unknown as { logFileStream: unknown }).logFileStream = stuck;
+
+    await sink.close();
+
+    const closeFailures = failures.filter((f) => f.kind === 'close');
+
+    expect(destroyed).toBe(1);
+    expect(closeFailures).toHaveLength(1);
+    expect(closeFailures[0]?.disposition).toBe('no_entry');
+    expect(closeFailures[0]?.error.message).toContain('4096 bytes still buffered');
+    expect(sink.getHealth().droppedEntries).toBe(0);
+  });
+
   test('a rotation that finds no free archive name says so before it overwrites', async () => {
     // After `MAX_ROTATION_NAME_ATTEMPTS` collisions the last candidate is used anyway,
     // and `rename` onto it overwrites an archive - which used to happen with no `onError`

@@ -577,7 +577,35 @@ export class FileSink implements LogSink {
       this.closeTimeoutMS - (Date.now() - startTime),
     );
 
-    await this.endStreamWithin(remainingCloseMS);
+    const bytesLeft = await this.endStreamWithin(remainingCloseMS);
+
+    // What the flush timeout gave up on, said before this resolves - the same report at
+    // the same moment as `NamedPipeSink.close()`. This sink writes one line at a time and
+    // waits for its callback, so the stream's buffer can hold nothing but the write that
+    // was in flight when the drain gave up, and that one is reported just above. This is
+    // the backstop for the case the model says cannot happen: bytes the stream still
+    // held at the timeout that no report has named. Skipped when the in-flight report
+    // fired, since it would describe the same bytes twice.
+    if (bytesLeft > 0 && !didAbandonInFlightWrite) {
+      const failure = new FileSinkError(
+        `Closed with ${String(bytesLeft)} bytes still buffered for ${this.currentLogFile ?? this.logDir} (closeTimeoutMS=${String(this.closeTimeoutMS)}); whether they reached the file is unknown`,
+      );
+
+      this.lastError = failure;
+
+      reportThroughHandler(
+        this.onError === undefined
+          ? undefined
+          : () =>
+              this.onError?.({
+                kind: 'close',
+                error: failure,
+                target: this.currentLogFile ?? this.logDir,
+                disposition: 'no_entry',
+              }),
+        () => describeError(failure),
+      );
+    }
   }
 
   /**
@@ -592,7 +620,7 @@ export class FileSink implements LogSink {
    * up on the flush loses what was buffered in that one stream; a rotation that never
    * returns loses the sink.
    */
-  private async endStreamWithin(timeoutMS: number): Promise<void> {
+  private async endStreamWithin(timeoutMS: number): Promise<number> {
     const stream = this.logFileStream;
 
     let flushTimeout: NodeJS.Timeout | undefined;
@@ -621,8 +649,13 @@ export class FileSink implements LogSink {
 
     // Whatever `end()` did not manage in that window is not going to happen: the descriptor
     // is released rather than held for the life of the process. Cleared only if it is still
-    // the stream this found, matching `endStream()`'s own check.
+    // the stream this found, matching `endStream()`'s own check. How much it still held is
+    // answered to the caller, so `close()` can say so.
+    let bytesLeft = 0;
+
     if (stream && !stream.destroyed) {
+      bytesLeft = stream.writableLength;
+
       try {
         stream.destroy();
       } catch {
@@ -633,6 +666,8 @@ export class FileSink implements LogSink {
     if (this.logFileStream === stream) {
       this.logFileStream = undefined;
     }
+
+    return bytesLeft;
   }
 
   /**
