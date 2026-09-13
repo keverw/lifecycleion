@@ -1625,6 +1625,7 @@ describe('NamedPipeSink', () => {
         requeue: (queued: {
           formatted: string | undefined;
           formatError: Error | undefined;
+          entry: LogEntry;
           attempts: number;
         }) => void;
       };
@@ -1634,6 +1635,12 @@ describe('NamedPipeSink', () => {
       privateSink.requeue({
         formatted: 'late-callback-from-a-replaced-stream\n',
         formatError: undefined,
+        entry: {
+          timestamp: Date.now(),
+          type: 'info',
+          template: 'late',
+          message: 'late',
+        },
         attempts: 0,
       });
 
@@ -2257,6 +2264,10 @@ describe('NamedPipeSink', () => {
 
       expect(queueFull).toHaveLength(1);
       expect(queueFull[0]?.disposition).toBe('lost');
+      // The oldest line the cap evicted, as `FileSink` reports it: a dropped entry,
+      // never one still queued, so a handler that re-emits on `'lost'` does not
+      // duplicate a line the pipe will still get.
+      expect(queueFull[0]?.entry?.message).toBe('under-cap-0');
       expect(sink.getHealth().queueSize).toBe(5);
     } finally {
       await sink.close();
@@ -2391,6 +2402,88 @@ describe('NamedPipeSink', () => {
     }
   }, 15000);
 
+  test('a failure tied to a line hands onError the LogEntry, as FileSink does', async () => {
+    // This sink used to drop the `LogEntry` once rendered, so every report arrived with
+    // `entry` absent and a handler that falls back on `'lost'` could re-emit a FileSink
+    // line but not a pipe line. Kept now, under the same `maxQueueSize` bound FileSink
+    // holds its entries under.
+    const pipePath = `${tmpDir.path}/entry-on-failure.pipe`;
+    await createNamedPipe(pipePath);
+
+    const readerFd = fs.openSync(
+      pipePath,
+      fs.constants.O_RDONLY | fs.constants.O_NONBLOCK,
+    );
+    const failures: SinkFailure[] = [];
+    const sink = new NamedPipeSink({
+      pipePath,
+      maxRetries: 0,
+      closeTimeoutMS: 1000,
+      onError: (failure) => {
+        failures.push(failure);
+      },
+    });
+
+    try {
+      expect(await waitForOpenPipe(sink)).toBe(true);
+
+      // Reader gone: the write fails, and with no retries left it is lost.
+      fs.closeSync(readerFd);
+
+      sink.write({
+        timestamp: Date.now(),
+        type: 'info',
+        template: 'orphaned {id}',
+        message: 'orphaned 7',
+        params: { id: 7 },
+        redactedParams: { id: 7 },
+      });
+
+      await new Promise((resolve) => setTimeout(resolve, 200));
+
+      const writeFailures = failures.filter((entry) => entry.kind === 'write');
+
+      expect(writeFailures.length).toBeGreaterThan(0);
+      expect(writeFailures[0]?.entry?.message).toBe('orphaned 7');
+      expect(writeFailures[0]?.entry?.redactedParams).toEqual({ id: 7 });
+
+      // A formatter that throws is reported as `'fallback'` with the entry the default
+      // format then rendered in its place.
+      const throwing = new NamedPipeSink({
+        pipePath,
+        formatter: () => {
+          throw new Error('formatter refused');
+        },
+        onError: (failure) => {
+          failures.push(failure);
+        },
+      });
+
+      try {
+        throwing.write({
+          timestamp: Date.now(),
+          type: 'info',
+          template: 'unrenderable',
+          message: 'unrenderable',
+        });
+
+        await new Promise((resolve) => setTimeout(resolve, 100));
+
+        const formatFailures = failures.filter(
+          (entry) => entry.kind === 'format',
+        );
+
+        expect(formatFailures.length).toBeGreaterThan(0);
+        expect(formatFailures[0]?.disposition).toBe('fallback');
+        expect(formatFailures[0]?.entry?.message).toBe('unrenderable');
+      } finally {
+        await throwing.close();
+      }
+    } finally {
+      await sink.close();
+    }
+  }, 15000);
+
   test('a write that fails after close is reported, once', async () => {
     // The drain loop pushes the backlog into the stream's buffer and sets `closed` without
     // awaiting the write callbacks, so a callback that errors afterwards lands in
@@ -2426,12 +2519,22 @@ describe('NamedPipeSink', () => {
       );
 
       const internals = sink as unknown as {
-        requeue: (queued: { formatted: string; attempts: number }) => void;
+        requeue: (queued: {
+          formatted: string;
+          entry: LogEntry;
+          attempts: number;
+        }) => void;
       };
 
       for (let index = 0; index < 3; index++) {
         internals.requeue({
           formatted: `late-${String(index)}\n`,
+          entry: {
+            timestamp: Date.now(),
+            type: 'info',
+            template: `late-${String(index)}`,
+            message: `late-${String(index)}`,
+          },
           attempts: 0,
         });
       }
@@ -2447,6 +2550,7 @@ describe('NamedPipeSink', () => {
       expect(closeFailures[0]?.error.message).toContain(
         'after the sink was closed',
       );
+      expect(closeFailures[0]?.entry?.message).toBe('late-0');
     } finally {
       fs.closeSync(readerFd);
     }

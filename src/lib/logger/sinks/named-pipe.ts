@@ -57,9 +57,11 @@ export interface NamedPipeSinkOptions {
    * pipe path, and `attempt` / `disposition` say which try this was and what became of
    * the line.
    *
-   * `entry` is always absent here: this sink drops the `LogEntry` once its line is
-   * rendered, so that a queue stalled behind an unusable pipe does not pin the caller's
-   * params graph for the length of the outage. See {@link SinkFailure}.
+   * `entry` is set on a failure tied to a line - a write that failed, a render that
+   * threw, the oldest line dropped at the cap or abandoned at close - exactly as
+   * `FileSink` sets it, so one handler can fall back on `disposition: 'lost'` for either
+   * sink. See {@link SinkFailure}. The queue is bounded by `maxQueueSize`, which is what
+   * bounds how much of the caller's params a stalled pipe can hold.
    */
   onError?: SinkErrorHandler;
   formatter?: (entry: LogEntry) => string;
@@ -140,24 +142,23 @@ export type ReconnectStatus =
   | { success: false; reason: 'error'; error: Error };
 
 /**
- * One entry waiting for the pipe, reduced to what the flush actually needs.
+ * One entry waiting for the pipe: the rendered line, the entry it came from, and how
+ * many writes it has been through - the same shape `FileSink` queues.
  *
- * {@link RenderedLine} alone: the `LogEntry` is deliberately not kept. Rendering happens at
- * `write` time, so nothing on the flush path reads the entry again, and holding it would
- * pin the caller's whole params graph beside a serialized copy of it for as long as the
- * queue is stalled. `FileSink` keeps its entry because its public `onError` hands it to the
- * caller; this sink's `onError` takes only the error type and the pipe path.
+ * Rendering happens at `write` time, so nothing on the flush path reads the entry again.
+ * It is kept for `onError`: a failure tied to a line hands the caller the `LogEntry`, as
+ * `FileSink` does, so a handler that falls back on `disposition: 'lost'` can re-emit the
+ * line rather than only learn that one was lost. This sink used to drop the entry once
+ * rendered so a stalled queue could not pin the caller's params graph - but `FileSink`
+ * holds the same graph under the same `maxQueueSize` bound, and the memory argument was
+ * never a reason for one sink's handler to be told less than the other's.
  */
 interface QueuedPipeEntry extends RenderedLine {
+  entry: LogEntry;
   /**
-   * Writes already attempted for this line.
-   *
-   * The one thing this sink keeps beyond the rendered line, and it is what makes a failed
-   * write recoverable rather than terminal: the entry goes back on the queue and is tried
-   * again when the pipe is usable, up to `maxRetries`, exactly as `FileSink` has always
-   * done. The `LogEntry` itself is still deliberately not kept - holding it would pin the
-   * caller's whole params graph for as long as the queue is stalled, and this sink's
-   * `onError` takes only the error type and the pipe path.
+   * Writes already attempted for this line. What makes a failed write recoverable rather
+   * than terminal: the entry goes back on the queue and is tried again when the pipe is
+   * usable, up to `maxRetries`, exactly as `FileSink` has always done.
    */
   attempts: number;
 }
@@ -522,7 +523,7 @@ export class NamedPipeSink implements LogSink {
           new Error(
             `Entry logged after close() began for ${this.pipePath}; it was not written, and further ones are counted in droppedEntries without being reported`,
           ),
-          { disposition: 'lost' },
+          { disposition: 'lost', entry },
         );
       }
 
@@ -533,6 +534,7 @@ export class NamedPipeSink implements LogSink {
     // holds the caller's stack.
     const rendered: QueuedPipeEntry = {
       ...this.renderEntry(entry),
+      entry,
       attempts: 0,
     };
 
@@ -985,6 +987,10 @@ export class NamedPipeSink implements LogSink {
       return;
     }
 
+    // The oldest abandoned entry, as a sample, as `FileSink` reports it. Every entry in
+    // the queue was lost, so there is no surviving line to confuse this with.
+    const firstAbandoned = this.writeQueue[0]?.entry;
+
     this.writeQueue = [];
     this.countDropped('close', abandoned);
 
@@ -993,7 +999,7 @@ export class NamedPipeSink implements LogSink {
       new Error(
         `Closed with ${String(abandoned)} entr${abandoned === 1 ? 'y' : 'ies'} still queued for ${this.pipePath}; they were not written`,
       ),
-      { disposition: 'lost' },
+      { disposition: 'lost', entry: firstAbandoned },
     );
   }
 
@@ -1746,7 +1752,7 @@ export class NamedPipeSink implements LogSink {
           new Error(
             `Write to ${this.pipePath} failed after the sink was closed; the entry was not written`,
           ),
-          { disposition: 'lost' },
+          { disposition: 'lost', entry: queued.entry },
         );
       }
 
@@ -1768,6 +1774,7 @@ export class NamedPipeSink implements LogSink {
           {
             attempt: queued.attempts + 1,
             disposition: 'lost',
+            entry: queued.entry,
             // The stream this entry could not be written to is already gone - that is why
             // it is here - so this says nothing about whatever replaced it. Same question
             // the write callback asks before counting a failure against health.
@@ -2103,8 +2110,13 @@ export class NamedPipeSink implements LogSink {
     }
 
     let didEvict = false;
+    let firstDropped: LogEntry | undefined;
 
     while (this.writeQueue.length > limit) {
+      // A dropped entry, never a surviving one, as `FileSink`'s cap report: a handler
+      // that reads `'lost'` as "this line is gone" and writes it elsewhere would
+      // otherwise duplicate an entry still queued for the pipe.
+      firstDropped ??= this.writeQueue[0]?.entry;
       this.writeQueue.shift();
       this.countDropped('queue_full');
       didEvict = true;
@@ -2130,7 +2142,7 @@ export class NamedPipeSink implements LogSink {
       new Error(
         `Pipe queue is full (maxQueueSize=${limit}); dropping the oldest entries`,
       ),
-      { disposition: 'lost' },
+      { disposition: 'lost', entry: firstDropped },
     );
   }
 
@@ -2187,6 +2199,7 @@ export class NamedPipeSink implements LogSink {
           attempt: queued.attempts + 1,
           // No line was produced, and rendering is never repeated, so this one is gone.
           disposition: 'lost',
+          entry: queued.entry,
           onReported: () => {
             this.formatReportsInFlight--;
           },
@@ -2246,6 +2259,7 @@ export class NamedPipeSink implements LogSink {
             attempt: queued.attempts + 1,
             disposition:
               queued.attempts < this.maxRetries ? 'retrying' : 'lost',
+            entry: queued.entry,
             // Only the stream still in hand may be marked unhealthy by this. The callback
             // runs later than the write that started it, and `reconnect()` may have put a
             // working stream in place in between - the failure belongs to the one that is
@@ -2274,6 +2288,7 @@ export class NamedPipeSink implements LogSink {
       this.handleError('write', error, {
         attempt: queued.attempts + 1,
         disposition: queued.attempts < this.maxRetries ? 'retrying' : 'lost',
+        entry: queued.entry,
       });
       // The line never reached the pipe, so it goes back on the queue and out on a later
       // attempt - the same answer `FileSink` gives a throwing write. Reported just above,
@@ -2319,6 +2334,7 @@ export class NamedPipeSink implements LogSink {
 
           this.handleError('format', error, {
             disposition: 'fallback',
+            entry,
             onReported: () => {
               this.formatReportsInFlight--;
             },
@@ -2340,6 +2356,7 @@ export class NamedPipeSink implements LogSink {
 
           this.handleError('format', error, {
             disposition: 'fallback',
+            entry,
             onReported: () => {
               this.formatReportsInFlight--;
             },
@@ -2375,6 +2392,8 @@ export class NamedPipeSink implements LogSink {
       countsAgainstHealth?: boolean;
       attempt?: number;
       disposition?: SinkFailureDisposition;
+      /** The line this failure is about, when the sink still has it. See `QueuedPipeEntry`. */
+      entry?: LogEntry;
       /** Called once the handler has settled, `async` or not. See `formatReportsInFlight`. */
       onReported?: () => void;
     },
@@ -2410,7 +2429,7 @@ export class NamedPipeSink implements LogSink {
               kind,
               error: failure,
               target: this.pipePath,
-              // No `entry`: this sink keeps the rendered line, not the `LogEntry`.
+              entry: options?.entry,
               attempt: options?.attempt,
               disposition: options?.disposition ?? 'no_entry',
             }),

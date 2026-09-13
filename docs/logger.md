@@ -1495,9 +1495,9 @@ interface SinkFailure {
     | 'unsupported_platform';
   error: Error; // always an Error; the original thrown value is on `cause`
   target: string; // the pipe path, or the log file being written at the time
-  entry?: LogEntry; // when the sink still has it — never for NamedPipeSink, which
-  // deliberately drops it so a stalled queue cannot pin your params. Carries the raw
-  // `params` alongside `redactedParams`; forward the redacted bag, not the entry
+  entry?: LogEntry; // when the failure is about a line: a failed write or render, the
+  // oldest line dropped at the cap or abandoned at close. Both sinks set it. Carries the
+  // raw `params` alongside `redactedParams`; forward the redacted bag, not the entry
   attempt?: number; // 1-based, for a failure tied to an entry
 
   // What became of the line. This, not `kind`, is what says whether to write it
@@ -1517,9 +1517,9 @@ they know different things. `FileSink` waits on one write at a time, so the writ
 abandons may already be on disk: reported as `'close'` / `'no_entry'` and not counted in
 `droppedEntries`. `NamedPipeSink` hands the stream a burst, so what it abandons is whatever
 is still buffered for a reader that did not take it: reported once as `'close'` / `'lost'`,
-with each entry counted as its write callback fails. Neither report carries an `entry`, so
-a fallback handler cannot re-emit those lines from the report; it learns that lines were
-lost, and how many from `getHealth().droppedEntries`.
+with each entry counted as its write callback fails. Neither report carries an `entry` -
+the bytes in the stream's buffer are no longer lines the sink can name - so a fallback
+handler learns that lines were lost, and how many from `getHealth().droppedEntries`.
 
 #### Error Handling & Reconnection
 
