@@ -232,9 +232,16 @@ export function parseRedactPaths(
    * Only this case. A valid path that matches nothing is not reported - shared lists
    * miss all the time and there is nothing to learn from a payload without the key -
    * and a list that is not usable at all is refused with `null`, as before.
+   *
+   * Told only once the whole list has parsed. A reporter is once per kind, so a typo
+   * reported mid-loop would have spent the redaction report before a later non-string
+   * entry refused the list - and the caller would then read "typo" for a bag that was
+   * blanked for a different reason. The stronger outcome gets the diagnostic.
    */
   onUnparseable?: (entry: string) => void,
 ): RedactPath[] | null {
+  const refused: string[] = [];
+
   try {
     const entries = snapshotList(value);
 
@@ -267,9 +274,13 @@ export function parseRedactPaths(
         if (parts !== null && parts.length > 0) {
           paths.push({ parts, entry });
         } else {
-          onUnparseable?.(entry);
+          refused.push(entry);
         }
       }
+    }
+
+    for (const entry of refused) {
+      onUnparseable?.(entry);
     }
 
     return paths;

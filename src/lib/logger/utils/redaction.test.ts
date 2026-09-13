@@ -765,6 +765,23 @@ describe('applyRedaction - non-identifier key names', () => {
     ).toEqual({ 'users[0].password.': '***REDACTED***' });
   });
 
+  test('a list that fails closed reports that, not a typo beside it', () => {
+    // The reporter is once per kind. Reporting the typo as it was met spent that one
+    // report before the non-string refused the list, so the caller read "typo" for a
+    // bag blanked for a different reason - and a typo alone would have blanked nothing.
+    const seen: string[] = [];
+
+    const result = applyRedaction(
+      { password: 'hunter2', keep: 'diag' },
+      ['users[0].password.', 42 as unknown as string],
+      undefined,
+      (_error, kind, key) => seen.push(`${kind}:${key}`),
+    );
+
+    expect(seen).toEqual(['redaction:<redactedKeys>']);
+    expect(result['keep']).not.toBe('diag');
+  });
+
   test('does not report a valid path that simply matches nothing', () => {
     // Shared lists miss all the time; a miss is not knowable without the payload and is
     // not a config error.
