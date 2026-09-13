@@ -311,6 +311,8 @@ With `followRedirects: true`, the outcome belongs to the _upload_, not to the la
 
 A retry waits the same way a redirect does. An early `503` to a bodied `PUT` can arrive while the body is still going out; the next attempt is dispatched only once that upload has settled, after the backoff, so the retry never uploads the same body beside the attempt it is replacing. A cancel ends the wait, and the result carries the outcome of the attempt that was waited on.
 
+Both waits are bounded by the request's `timeout`. `NodeAdapter` settles `requestBodySettled` well inside that through its upload stall watchdog, so an ordinary request never sees the bound. A custom adapter that sets the field and never settles it used to hold the redirect, or the retry, until the caller aborted; past the bound the request now fails as a timeout rather than dispatching a second upload beside one that may still be going out, and the broken contract is reported on the global `'error'` channel naming the adapter. `timeout: 0` leaves the wait unbounded, as it leaves the per-attempt timer.
+
 The promise exists from the moment the request has a body, not from the first byte written, so an abort that lands before the writer starts is reported the same way rather than falling back to `undefined`. Absence is left to mean one thing: no adapter reported an upload outcome for this request - it had no body, it was never dispatched (cancelled or refused by an interceptor before it reached an adapter), or the adapter does not report this at all, which today is every adapter but `NodeAdapter`.
 
 It is advisory and changes nothing the client decides. `status`, `isFailed`, `isNetworkError`, and retries are all untouched. That is deliberate: carried on the response as a transport failure instead, a `413` that answered and stopped reading would reach you as a network error with the server's own explanation dropped. Every such failure is also reported on the global `'error'` channel, whether or not anyone awaits this. `NodeAdapter` is the only adapter that reports it today.
@@ -737,7 +739,11 @@ const ok = jar.setCookie({
   httpOnly: true,
 });
 
-// Read cookies for a URL
+// Read cookies for a URL. Both return copies, not the stored objects: `name`, `domain`,
+// `path`, `hostOnly` and `secure` come from the scope `setCookie` accepted, and every
+// other field is read once, so a stored cookie mutated through `getAllCookies()` cannot
+// be sent with a wider scope or a different framing than it was stored with. Writing to
+// a returned cookie does not change the jar — use `setCookie` to update a stored cookie.
 const cookies = jar.getCookiesFor('https://api.example.com/users');
 const session = jar.getCookieFor('session', 'https://api.example.com/');
 

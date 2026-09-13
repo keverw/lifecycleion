@@ -1,5 +1,6 @@
 import { generateID } from '../id-helpers';
 import { safeHandleCallback } from '../safe-handle-callback';
+import { reportToHost } from '../internal/report-to-host';
 import { deepClone } from '../deep-clone';
 import { RetryPolicy } from '../retry-utils';
 import { FetchAdapter } from './adapters/fetch-adapter';
@@ -1054,19 +1055,33 @@ export class BaseHTTPClient {
             // is not held for it. Only the adapter's word is waited on: a hop that threw
             // has no socket left to wait for.
             if (adapterResponse.requestBodySettled !== undefined) {
-              await settleUploadBeforeNextDispatch(
+              const wait = await settleUploadBeforeNextDispatch(
                 adapterResponse.requestBodySettled,
                 cancelSignal,
+                timeout,
               );
 
               // A cancel that ended the wait ends the request here, before another hop
               // is dispatched, exactly as a redirect interceptor's cancel does above.
               // The caller's own reason is kept, as every other abort path keeps it.
-              if (cancelSignal.aborted) {
-                const signalReason = getSignalCancelReason(cancelSignal);
+              //
+              // A deadline ends it the same way, as a timeout: the next hop would resend
+              // the body beside an upload nobody can say has finished, which is the
+              // double-send this wait exists to prevent, and a hop that cannot be
+              // dispatched safely is a failed request rather than a risky one.
+              if (wait !== 'settled') {
+                if (wait === 'cancelled') {
+                  const signalReason = getSignalCancelReason(cancelSignal);
 
-                if (signalReason !== undefined) {
-                  cancelReason = signalReason;
+                  if (signalReason !== undefined) {
+                    cancelReason = signalReason;
+                  }
+                } else {
+                  reportUploadSettleDeadline(
+                    this._adapter.getType(),
+                    timeout,
+                    'redirect',
+                  );
                 }
 
                 observerRequest = this._bestEffortAttemptRequestFromPending(
@@ -1078,8 +1093,8 @@ export class BaseHTTPClient {
                 response = this._buildResponse<T>({
                   adapterResponse: null,
                   requestID,
-                  wasCancelled: true,
-                  wasTimeout: false,
+                  wasCancelled: wait === 'cancelled',
+                  wasTimeout: wait === 'deadline',
                   adapterType: this._adapter.getType(),
                   initialURL: finalRequest.requestURL,
                   requestURL: redirectedRequestURL,
@@ -1809,16 +1824,32 @@ export class BaseHTTPClient {
             // writer to. The wait is also raced against the cancel signal, so a caller
             // who gives up during it is not held. After the delay rather than before it, since an upload that
             // finishes during the backoff costs nothing extra to wait for.
-            await settleUploadBeforeNextDispatch(
+            const wait = await settleUploadBeforeNextDispatch(
               adapterResponse.requestBodySettled,
               cancelSignal,
+              timeout,
             );
             previousUploadOutcome = adoptRequestBodySettled(
               adapterResponse.requestBodySettled,
             );
 
-            if (cancelSignal.aborted) {
-              const signalReason = getSignalCancelReason(cancelSignal);
+            // A deadline fails the request as a timeout, for the reason the redirect
+            // path gives: the retry would put the body on the wire beside an upload
+            // nobody can say has finished.
+            if (wait !== 'settled') {
+              const signalReason =
+                wait === 'cancelled'
+                  ? getSignalCancelReason(cancelSignal)
+                  : undefined;
+
+              if (wait === 'deadline') {
+                reportUploadSettleDeadline(
+                  this._adapter.getType(),
+                  timeout,
+                  'retry',
+                );
+              }
+
               return {
                 adapterResponse: null,
                 // Carried off the response this attempt did get, as the throw path
@@ -1832,8 +1863,8 @@ export class BaseHTTPClient {
                   : {}),
                 sentRequest: observedSentRequest,
                 attemptCount: attemptNumber,
-                wasCancelled: true,
-                wasTimeout: false,
+                wasCancelled: wait === 'cancelled',
+                wasTimeout: wait === 'deadline',
                 isRetriesExhausted: false,
                 ...(signalReason !== undefined
                   ? { cancelReason: signalReason }
@@ -2271,18 +2302,34 @@ export class BaseHTTPClient {
             // still open, and without this the backoff elapsed and the next attempt was
             // dispatched beside it: the double-send the wait exists to prevent. Raced
             // against the cancel signal, so a caller who gives up during it is not held.
-            await settleUploadBeforeNextDispatch(uploadOutcome, cancelSignal);
+            const wait = await settleUploadBeforeNextDispatch(
+              uploadOutcome,
+              cancelSignal,
+              timeout,
+            );
             previousUploadOutcome = uploadOutcome;
 
-            if (cancelSignal.aborted) {
-              const signalReason = getSignalCancelReason(cancelSignal);
+            if (wait !== 'settled') {
+              const signalReason =
+                wait === 'cancelled'
+                  ? getSignalCancelReason(cancelSignal)
+                  : undefined;
+
+              if (wait === 'deadline') {
+                reportUploadSettleDeadline(
+                  this._adapter.getType(),
+                  timeout,
+                  'retry',
+                );
+              }
+
               return {
                 adapterResponse: null,
                 ...(uploadOutcome ? { requestBodySettled: uploadOutcome } : {}),
                 sentRequest,
                 attemptCount: attemptNumber,
-                wasCancelled: true,
-                wasTimeout: false,
+                wasCancelled: wait === 'cancelled',
+                wasTimeout: wait === 'deadline',
                 isRetriesExhausted: false,
                 ...(signalReason !== undefined
                   ? { cancelReason: signalReason }
@@ -3199,6 +3246,9 @@ function adoptRequestBodySettled(
   );
 }
 
+/** How a wait on the previous attempt's upload ended. */
+type UploadSettleWait = 'settled' | 'cancelled' | 'deadline';
+
 /**
  * Wait for an attempt's upload to settle before the next dispatch - the next redirect hop,
  * or the retry that replaces it.
@@ -3206,31 +3256,83 @@ function adoptRequestBodySettled(
  * Never throws and never rejects, whatever the adapter handed over: the outcome is adopted
  * first, and a cancel ends the wait rather than the request - the dispatch that follows
  * sees the signal for itself.
+ *
+ * Bounded by `deadlineMS`, the request's own per-attempt timeout. `requestBodySettled` is
+ * documented as settling in bounded time, and `NodeAdapter`'s does - its stall watchdog
+ * sees to that - but `HTTPAdapter` is a public extension point, and a custom adapter that
+ * set the field and never settled it held a followed `307`/`308`, or a retry, until the
+ * caller aborted: no timeout, no error, nothing on any channel. The caller's `timeout` is
+ * the longest they agreed to wait on any one attempt, so it is the bound here too; `0`
+ * disables it exactly as it disables the per-attempt timer. What happens on the deadline
+ * is the caller's decision at each site - the request fails as a timeout rather than
+ * dispatching a second upload beside one that may still be going out.
  */
 async function settleUploadBeforeNextDispatch(
   settled: unknown,
   cancelSignal: AbortSignal,
-): Promise<void> {
+  deadlineMS: number,
+): Promise<UploadSettleWait> {
+  // The cancel is answered first, before there is any promise to wait on. Both retry
+  // sites reach here straight after the backoff delay, and a cancel that landed during
+  // that delay is read off this answer - a response with no upload outcome to wait on
+  // still has to report it, or the cancel is missed and the next attempt is dispatched.
+  if (cancelSignal.aborted) {
+    return 'cancelled';
+  }
+
   const adopted = adoptRequestBodySettled(settled);
 
-  if (adopted === undefined || cancelSignal.aborted) {
-    return;
+  if (adopted === undefined) {
+    return 'settled';
   }
 
   let onAbort: (() => void) | undefined;
+  let deadlineID: ReturnType<typeof setTimeout> | undefined;
 
-  const cancelled = new Promise<void>((resolve) => {
-    onAbort = () => resolve();
+  const cancelled = new Promise<UploadSettleWait>((resolve) => {
+    onAbort = () => resolve('cancelled');
     cancelSignal.addEventListener('abort', onAbort, { once: true });
   });
 
+  const expired = new Promise<UploadSettleWait>((resolve) => {
+    if (deadlineMS > 0) {
+      deadlineID = setTimeout(() => resolve('deadline'), deadlineMS);
+    }
+  });
+
   try {
-    await Promise.race([adopted, cancelled]);
+    return await Promise.race([
+      adopted.then((): UploadSettleWait => 'settled'),
+      cancelled,
+      expired,
+    ]);
   } finally {
     if (onAbort !== undefined) {
       cancelSignal.removeEventListener('abort', onAbort);
     }
+
+    if (deadlineID !== undefined) {
+      clearTimeout(deadlineID);
+    }
   }
+}
+
+/**
+ * Say, on the global `'error'` channel, that an adapter broke the `requestBodySettled`
+ * contract. The request itself fails as a timeout; this names the cause, which the
+ * timeout error cannot, and lands where every other library-consumer bug - a throwing
+ * callback, a non-function hook - is already reported.
+ */
+function reportUploadSettleDeadline(
+  adapterType: AdapterType,
+  deadlineMS: number,
+  nextDispatch: 'redirect' | 'retry',
+): void {
+  reportToHost(
+    new Error(
+      `HTTPClient waited ${String(deadlineMS)}ms for the previous attempt's upload to settle before the next ${nextDispatch} and it never did; the '${adapterType}' adapter's requestBodySettled must settle in bounded time. The request failed as a timeout rather than dispatching a second upload beside the first.`,
+    ),
+  );
 }
 
 /**

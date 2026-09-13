@@ -199,10 +199,12 @@ export interface AdapterResponse {
    *
    * An adapter that sets this must settle it in bounded time. `HTTPClient` waits on
    * it before the next redirect hop and before a retry, so that one body is not
-   * written twice at once; the only other way out of that wait is the caller's
-   * cancel signal. A promise that never settles holds a followed `307`/`308`, or a
-   * retry, until the caller aborts. `NodeAdapter` bounds its own through the
-   * upload stall watchdog; a custom adapter has to bring its own bound.
+   * written twice at once. The wait is bounded by the request's `timeout`: past
+   * it, the request fails as a timeout rather than dispatching a second upload
+   * beside one that may still be going out, and the broken contract is reported on
+   * the global `'error'` channel. `NodeAdapter` settles its own well inside that,
+   * through the upload stall watchdog; a custom adapter that never settles the
+   * field turns every followed `307`/`308` and every retry into a timeout.
    */
   requestBodySettled?: Promise<Error | undefined>;
 }

@@ -1,4 +1,11 @@
-import { parseRedactPaths, redactMatchedPaths } from './internal/redact-paths';
+import {
+  parseRedactPaths,
+  redactMatchedPaths,
+  type ForwardingAliases,
+  type RedactPath,
+} from './internal/redact-paths';
+import { normalizeAlongRedactPaths } from './logger/utils/redaction';
+import { isPlainContainer } from './internal/is-plain-container';
 import { stringifyTemplateValue } from './internal/stringify-template-value';
 import {
   createRenderBudget,
@@ -112,11 +119,19 @@ export interface StringifyValueOptions {
  * themselves. Paths and the `redactFunction` contract are exactly the logger's, so a
  * function written for one works here.
  *
- * The value passed in is never modified. Copies are built only along the branches that
- * lead to a mask, so anything not named comes back as it went in - a `Date` is still that
- * `Date`, an `Error` still carries its `message` and `stack`. Naming a plain object or
- * array masks each value inside it and keeps the shape, so what comes back is still an
- * object or an array.
+ * The value passed in is never modified. Copies are built only along the branches a path
+ * names - the value itself, the containers on the way down, and the leaf that is masked -
+ * so anything not named comes back as it went in: a `Date` is still that `Date`, an
+ * `Error` still carries its `message` and `stack`. Naming a plain object or array masks
+ * each value inside it and keeps the shape, so what comes back is still an object or an
+ * array.
+ *
+ * A named branch is rebuilt whether or not the path found anything under it, so a
+ * container on one is *equal* to the one passed in rather than identical to it. That is
+ * the price of the result being a snapshot of what this pass actually read: a `Proxy` is
+ * free to answer one thing while it is being masked and another to whoever reads the
+ * result afterwards, and only a copy taken on the way down settles which of the two
+ * answers is the one that was vetted.
  *
  * **Masking covers exactly what {@link stringifyValue} prints: own enumerable
  * string-keyed properties of plain objects and arrays.** Anything `Object.entries` does
@@ -124,7 +139,8 @@ export interface StringifyValueOptions {
  * `Proxy` hides from `ownKeys` - is neither masked nor printed. The result is therefore
  * safe to *render*, and is not a sanitized object for an arbitrary consumer: hand it to
  * `Object.getOwnPropertyNames`, a different serializer, or a sink that walks properties
- * directly, and hidden state comes with it.
+ * directly, and hidden state comes with it - everywhere except on a named branch, whose
+ * copy carries exactly the keys `for...in` yielded and nothing else.
  *
  * Never throws. A failure yields the redaction marker rather than the original value.
  *
@@ -187,6 +203,55 @@ function rootedRenderReport(report: ReportFormatFailure): ReportFormatFailure {
       isBracketedSubject(path) ? path : `${ANONYMOUS_ROOT}.${path}`,
     );
   };
+}
+
+/**
+ * A failure subject spelled as if the walk had been given the value rather than the bag.
+ *
+ * The walk names a position by joining the path it is standing on, and `redactValueWith`
+ * roots every path at a synthetic key before handing it over - so a leaf a caller knows as
+ * `user.token` would be reported as `<value>.user.token` on the redaction channel and,
+ * once {@link rootedRenderReport} added its own root, as `<value>.<value>.user.token` on
+ * the render one. The wrapping is an implementation detail of how the value is normalized;
+ * it must not reach the handler.
+ *
+ * Only the rooted form is rewritten. A subject the walk did not build from a path - an
+ * entry as the caller wrote it, `<root>` for the bag itself - is already what it should
+ * be and is passed through.
+ */
+function unrootedSubject(path: string): string {
+  if (path === ANONYMOUS_ROOT) {
+    // The value as a whole, which is what `<root>` meant when the value *was* the root.
+    return '<root>';
+  }
+
+  return path.startsWith(`${ANONYMOUS_ROOT}.`)
+    ? path.slice(ANONYMOUS_ROOT.length + 1)
+    : path;
+}
+
+/** A reporter that spells its subject with {@link unrootedSubject} first. */
+function unrootedReport(report: ReportFormatFailure): ReportFormatFailure {
+  return (error: unknown, path: string): void => {
+    report(error, unrootedSubject(path));
+  };
+}
+
+/**
+ * The masked value back out of the bag it was walked in.
+ *
+ * The walk returns either the bag itself, a rebuilt copy of it, or - when the root's own
+ * keys could not be read at all - a single {@link REDACTION_FAILED_MARKER} standing in for
+ * the whole thing. Only the first two carry the value, and a marker where a bag was
+ * expected is the walk having failed closed, so it is handed on as one rather than being
+ * unwrapped into `undefined`, which would read as "there was nothing here".
+ */
+function unwrapRedactionRoot(walked: unknown): unknown {
+  if (!isPlainContainer(walked) || Array.isArray(walked)) {
+    return REDACTION_FAILED_MARKER;
+  }
+
+  return (walked as Record<string, unknown>)[ANONYMOUS_ROOT];
 }
 
 /**
@@ -273,22 +338,86 @@ function redactValueWith(
     // `onTruncate` still hears about them.
     const maskBudget = createSiblingBudget(budget);
 
+    // The value wrapped in a bag of this function's own, with every path rooted at the one
+    // key that bag holds, so `normalizeAlongRedactPaths` can run over it exactly as it runs
+    // over the logger's params - the value itself being the first container it descends
+    // into, since every rooted path is at least two steps long.
+    //
+    // That normalization is what the logger has and this did not, and it is the difference
+    // between masking a hostile value and printing it. The walk reads each member once and
+    // hands a subtree that matched nothing back by reference; whatever reads the result
+    // afterwards - the render below, a sink, the caller - reads that member again. A
+    // `Proxy` that answers `{}` to the walk's read and `{ password: 'secret' }` to the
+    // second one is therefore masked on the read nobody sees and printed on the read
+    // everybody does, and `isUnstableEntry` cannot catch it: it asks
+    // `getOwnPropertyDescriptor`, and the same trap that lies about the value is free to
+    // report a plain data property. Normalizing first settles the question a different
+    // way - every container along a named path is read once into a copy that is installed
+    // in place of the original - so the walk and everything after it are looking at one
+    // snapshot, whatever the trap does on the reads that follow.
+    //
+    // Rooted rather than walked bare because the normalization needs a parent to install
+    // that first copy into, and the value's own parent is the caller's. The bag is this
+    // function's, so nothing the caller passed in is ever written to.
+    //
+    // A plain container only. Wrapping is what gives a path a step onto the value, and a
+    // non-plain root is a leaf with no keys for one to address: `redactedKeys: ['password']`
+    // against an `Error` would stop meaning "reach nothing" and start meaning "something is
+    // named inside this leaf, so mask it whole", which is the bug that turned every
+    // non-plain root into `***REDACTED***`. Nothing is lost by leaving it bare - there is no
+    // container beneath it for the walk to hand back by reference, so there is no second
+    // read to disagree with the first.
+    const isContainerRoot = isPlainContainer(value);
+
+    const bag: Record<string, unknown> = { [ANONYMOUS_ROOT]: value };
+    const rootedPaths = isContainerRoot
+      ? paths.map((path): RedactPath => ({
+          parts: [ANONYMOUS_ROOT, ...path.parts],
+          // The entry as the caller wrote it, untouched: it is what a custom
+          // `redactFunction` is handed as the key, and it names a path rooted at the
+          // value.
+          entry: path.entry,
+        }))
+      : paths;
+
+    // Copies standing in for the caller's containers, so the walk recognizes a back-edge
+    // pointing at an original it is holding a copy of. `redactValueWith` used to pass none,
+    // which was right while it handed the walk the caller's own value and is not once it
+    // hands it copies.
+    const aliases: ForwardingAliases = new WeakMap();
+
+    // Inside the guarded region, so a throw out of normalization lands in the catch below
+    // and fails closed to the marker, the way `applyRedaction` answers the same throw with
+    // `markAllRedactionFailed`. A half-normalized bag is the one shape this must not walk
+    // with a secret in it: an alias written under one key and not yet under its sibling is
+    // a shape neither the walk nor the renderer was promised.
+    if (isContainerRoot) {
+      normalizeAlongRedactPaths(
+        bag,
+        rootedPaths,
+        aliases,
+        unrootedReport(reportRedaction),
+      );
+    }
+
     try {
-      return redactMatchedPaths(
-        value,
-        paths,
+      const walked = redactMatchedPaths(
+        isContainerRoot ? bag : value,
+        rootedPaths,
         options?.redactFunction,
-        report,
-        undefined,
+        unrootedReport(reportRedaction),
+        aliases,
         // A `'render'` reporter, never `report`: a leaf that refuses to render while
         // being masked is a render failure, and reporting it through `report` would
         // label it `'redaction'` and spend the single redaction report a broken
         // `redactFunction` still needs. The caller's own when there is one -
         // `stringifyValue` renders what this returns, so both halves share one reporter
         // - and one of this call's own otherwise.
-        rootedRenderReport(
-          renderReport ??
-            createFormatReporter('render', options?.onFormatError),
+        unrootedReport(
+          rootedRenderReport(
+            renderReport ??
+              createFormatReporter('render', options?.onFormatError),
+          ),
         ),
         // Sized from the caller's allowance, so `maxRenderLength` bounds this half of
         // the operation too: without it a `redactFunction` answering oversized
@@ -296,6 +425,8 @@ function redactValueWith(
         // the truncation it caused was invisible to `onTruncate`.
         maskBudget,
       );
+
+      return isContainerRoot ? unwrapRedactionRoot(walked) : walked;
     } finally {
       foldTruncations(budget, maskBudget);
     }

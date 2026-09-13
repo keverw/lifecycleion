@@ -2330,6 +2330,38 @@ describe('LifecycleManager - Registration & Individual Lifecycle', () => {
       expect(stoppedEvents[0].status?.state).toBe('stopped');
     });
 
+    test('a successful restart clears lastError from the previous run', async () => {
+      // `lastError` on a component that is running again described a run that is over.
+      // A reader taking it for the current one - a health dashboard, a restart policy -
+      // was told the restart had not worked.
+      const lifecycle = new LifecycleManager({ logger });
+
+      let reportFn!: (err?: Error) => boolean;
+
+      class SelfStoppingComponent extends BaseComponent {
+        public start(): void {
+          reportFn = (err?: Error) => this.reportUnexpectedStop(err);
+        }
+        public stop(): void {}
+      }
+
+      await lifecycle.registerComponent(
+        new SelfStoppingComponent(logger, { name: 'again' }),
+      );
+      await lifecycle.startComponent('again');
+
+      expect(reportFn(new Error('first run crash'))).toBe(true);
+      expect(lifecycle.getComponentStatus('again')?.lastError?.message).toBe(
+        'first run crash',
+      );
+
+      const result = await lifecycle.startComponent('again');
+
+      expect(result.success).toBe(true);
+      expect(lifecycle.getComponentStatus('again')?.state).toBe('running');
+      expect(lifecycle.getComponentStatus('again')?.lastError).toBeNull();
+    });
+
     test("a new start clears the record of the previous run's unexpected stop", async () => {
       // The flag describes a stop that already happened, and `startComponent`'s
       // overlapping-failure rule reads it to decide whose error the caller is told about.

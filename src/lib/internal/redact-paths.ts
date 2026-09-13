@@ -678,6 +678,11 @@ function pathPointingBelow(
  * defeat every other question asked of it - the leak this closes is the getter, which is
  * ordinary, not the hostile proxy, which is not.
  *
+ * The proxy is closed a level up instead, and by both callers now: `applyRedaction` and
+ * `redactValueWith` normalize every container along a named path into a copy read once and
+ * installed in place of the original, so what this walk reads and what reads its result
+ * afterwards are the same snapshot whatever the trap answers next.
+ *
  * An absent descriptor is *not* one of these. An array hole has none - `[1, , 3]`,
  * `new Array(n)`, anything whose `length` runs past its defined indices - and the index
  * loop walks it by `length`, so treating "no descriptor" as unstable rebuilt every sparse

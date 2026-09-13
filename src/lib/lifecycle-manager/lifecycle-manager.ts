@@ -3788,6 +3788,7 @@ export class LifecycleManager
       if (this.isShuttingDown || shutdownTokenAtStart !== this.shutdownToken) {
         this.componentStates.set(name, 'running');
         this.runningComponents.add(name);
+        this.componentErrors.set(name, null);
         this.stalledComponents.delete(name);
         this.updateStartedFlag();
 
@@ -3817,9 +3818,13 @@ export class LifecycleManager
         };
       }
 
-      // Update state
+      // Update state. The previous run's error goes with it: `lastError` on a component
+      // that is running again described a run that is over, and a reader taking it for
+      // the current one - a health dashboard, a restart policy - was told the restart
+      // had not worked. A clean late stop already clears it for the same reason.
       this.componentStates.set(name, 'running');
       this.runningComponents.add(name);
+      this.componentErrors.set(name, null);
       this.stalledComponents.delete(name); // Clear stalled state if component was previously stalled
       if (shouldForceStalled) {
         // A successful forceStalled start creates a new run. Any late stop

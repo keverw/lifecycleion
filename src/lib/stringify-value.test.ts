@@ -469,10 +469,23 @@ describe('redactValue - values it was not asked to touch', () => {
     expect(masked.user['lastSeen']).toBe(when);
   });
 
-  test('returns the original value when no path matches anything', () => {
-    const value = { a: { b: 1 } };
+  test('returns an equal value, branches untouched, when no path matches', () => {
+    const inner = { b: 1 };
+    const value = { a: inner };
 
-    expect(redactValue(value, { redactedKeys: ['nothing.here'] })).toBe(value);
+    const masked = redactValue(value, { redactedKeys: ['nothing.here'] }) as {
+      a: unknown;
+    };
+
+    expect(masked).toEqual(value);
+
+    // Not `toBe(value)`, and this is the one identity the pass gives up. The value is
+    // read once into a copy before the walk runs, because a `Proxy` that answers `{}` to
+    // the walk and a secret to whoever reads the result afterwards is otherwise handed
+    // back by reference with the secret still in it. A branch no path names is still the
+    // caller's own object.
+    expect(masked).not.toBe(value);
+    expect(masked.a).toBe(inner);
   });
 
   test('does not mutate the value it was given', () => {
@@ -1288,12 +1301,107 @@ describe('redactValue - a cycle nobody named is left alone', () => {
   });
 });
 
+describe('a container that answers differently the second time', () => {
+  // The walk reads each member once and hands a subtree that matched nothing back by
+  // reference; the render, the sink, and the caller then read it again. A `Proxy` whose
+  // `get` trap answers `{}` first and a secret afterwards is therefore masked on the read
+  // nobody sees and printed on the read everybody does - and `isUnstableEntry` cannot
+  // catch it, because the same trap that lies about the value reports an ordinary data
+  // property from `getOwnPropertyDescriptor`. The logger never had this leak: its params
+  // are normalized into forwarding copies along every named path before the walk runs, so
+  // the two reads are of one snapshot. These entry points now run that same normalization.
+
+  const LEAKED = 'LEAKED_SECRET';
+
+  /** Answers `{}` under `key` once, then a bag holding a secret. */
+  const lying = (key: string, leaf: string): Record<string, unknown> => {
+    let reads = 0;
+
+    return new Proxy(
+      { [key]: {} },
+      {
+        get(target, property, receiver): unknown {
+          if (property === key) {
+            reads++;
+
+            return reads === 1 ? {} : { [leaf]: LEAKED };
+          }
+
+          return Reflect.get(target, property, receiver);
+        },
+      },
+    );
+  };
+
+  test('cannot swap a secret in below a named path', () => {
+    const redactedKeys = ['a.g.up.password'];
+
+    const rendered = stringifyValue(
+      { a: { g: lying('up', 'password') } },
+      { redactedKeys },
+    );
+
+    // What the pass vetted is what comes out: the empty object the first read answered,
+    // with the secret the later reads offer nowhere in it.
+    expect(rendered).not.toContain(LEAKED);
+    expect(rendered).toBe('{"a":{"g":{"up":{}}}}');
+
+    const masked = redactValue(
+      { a: { g: lying('up', 'password') } },
+      { redactedKeys },
+    );
+
+    expect(JSON.stringify(masked)).not.toContain(LEAKED);
+    expect(masked).toEqual({ a: { g: { up: {} } } });
+  });
+
+  test('cannot swap a secret in at the root either', () => {
+    const redactedKeys = ['up.password'];
+
+    expect(
+      stringifyValue(lying('up', 'password'), { redactedKeys }),
+    ).not.toContain(LEAKED);
+    expect(stringifyValue(lying('up', 'password'), { redactedKeys })).toBe(
+      '{"up":{}}',
+    );
+    expect(
+      JSON.stringify(redactValue(lying('up', 'password'), { redactedKeys })),
+    ).not.toContain(LEAKED);
+  });
+
+  test('cannot swap a secret in under a wildcard', () => {
+    // A wildcard descends through every element exactly as an index does, so the elements
+    // are normalized exactly as `items[0].up.token` normalizes one.
+    const value = { items: [lying('up', 'token'), lying('up', 'token')] };
+    const redactedKeys = ['items[*].up.token'];
+
+    const rendered = stringifyValue(value, { redactedKeys });
+
+    expect(rendered).not.toContain(LEAKED);
+    expect(rendered).toBe('{"items":[{"up":{}},{"up":{}}]}');
+    expect(JSON.stringify(redactValue(value, { redactedKeys }))).not.toContain(
+      LEAKED,
+    );
+  });
+
+  test('still masks the secret the snapshot does hold', () => {
+    // The other direction, so the fix is not just "a hostile value renders empty": what
+    // the first read answers is what gets masked, trap or no trap.
+    const honest = new Proxy({ up: { password: 'hunter2secret' } }, {});
+
+    expect(
+      stringifyValue({ g: honest }, { redactedKeys: ['g.up.password'] }),
+    ).toBe('{"g":{"up":{"password":"h***********t"}}}');
+  });
+});
+
 describe('redactValue - what masking reaches', () => {
   test('does not mask state the renderer cannot see either', () => {
     // Masking covers own enumerable string-keyed properties, which is exactly what gets
     // printed. Anything hidden from `Object.entries` is neither masked nor printed, so no
-    // log line leaks - but the returned object still holds it, which makes `redactValue`
-    // safe to render rather than a sanitizer for an arbitrary consumer.
+    // log line leaks - and off a named branch the returned object still holds it, which
+    // makes `redactValue` safe to render rather than a sanitizer for an arbitrary
+    // consumer.
     //
     // Deliberately not fixed with a reachability check: testing whether a name exists
     // rather than whether it prints is what caused a stale entry to blank a whole value
@@ -1322,13 +1430,18 @@ describe('redactValue - what masking reaches', () => {
       ),
     ).toBe('{"o":{"visible":1}}');
 
-    // But not removed from the returned structure either.
+    // Nor masked in the returned structure: `o` is on a named branch, so it comes back as
+    // the copy this pass read - exactly the keys `for...in` yielded - and a property no
+    // enumeration can see is simply not carried over. Dropping it is a side effect of
+    // snapshotting the branch, not a sanitizing pass: the same property one level to the
+    // side, under no path at all, still comes back on the caller's own object.
     const masked = redactValue(
-      { o: withNonEnumerable() },
+      { o: withNonEnumerable(), aside: withNonEnumerable() },
       { redactedKeys: ['o.password'] },
-    ) as { o: Record<string, unknown> };
+    ) as { o: Record<string, unknown>; aside: Record<string, unknown> };
 
-    expect(masked.o['password']).toBe(hidden);
+    expect(masked.o['password']).toBeUndefined();
+    expect(masked.aside['password']).toBe(hidden);
 
     // Naming the container masks every leaf it can see and keeps the shape - so the
     // hidden property is not covered by that either. Only a value the renderer prints

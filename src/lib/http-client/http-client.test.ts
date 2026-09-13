@@ -869,17 +869,123 @@ describe('HTTPClient — basic HTTP methods', () => {
     expect(builder.error?.cancelReason).toBe('gave up waiting');
   });
 
-  test('an adapter whose requestBodySettled never settles holds the redirect until the caller cancels', async () => {
-    // The contract, pinned: there is no client-side backstop on this wait. `NodeAdapter`
-    // bounds its own promise through the upload stall watchdog, and a custom adapter is
-    // documented as having to bring its own bound. A promise that never settles is that
-    // adapter's bug, and the only way out of it is the caller's cancel - which must still
-    // work, so the wait can never be worse than an ordinary hung request.
+  test('an adapter whose requestBodySettled never settles fails the redirect as a timeout at the request timeout', async () => {
+    // `NodeAdapter` bounds its own promise through the upload stall watchdog. A custom
+    // adapter is a public extension point, and one that set the field and never settled
+    // it held a followed `307`/`308` until the caller aborted - no timeout, no error,
+    // nothing on any channel. Bounded now by the caller's own `timeout`, and what
+    // happens at the bound is a failed request, not a second hop: dispatching the body
+    // again beside an upload nobody can say has finished is the double-send the wait
+    // exists to prevent.
+    let hop = 0;
+
+    const adapter: HTTPAdapter = {
+      getType: () => 'fetch',
+      send: (_request: AdapterRequest): Promise<AdapterResponse> => {
+        hop++;
+
+        return Promise.resolve({
+          status: 307,
+          headers: { location: '/again' },
+          body: null,
+          requestBodySettled: new Promise(() => {}),
+        });
+      },
+    };
+
+    const reports: ErrorEvent[] = [];
+    const onGlobalError = (event: Event): void => {
+      reports.push(event as ErrorEvent);
+      event.preventDefault();
+    };
+
+    globalThis.addEventListener('error', onGlobalError);
+
+    try {
+      const startedAt = Date.now();
+      const response = await new HTTPClient({
+        adapter,
+        baseURL: 'http://example.test',
+        followRedirects: true,
+        timeout: 100,
+      })
+        .post('/upload')
+        .json({ a: 1 })
+        .send();
+
+      expect(Date.now() - startedAt).toBeLessThan(2000);
+      expect(hop).toBe(1);
+      expect(response.isTimeout).toBe(true);
+      expect(response.isCancelled).toBe(false);
+      // Still carried, so the caller can await the adapter's word if it ever comes.
+      expect(response.requestBodySettled).toBeDefined();
+
+      // The timeout error cannot say why; this does, and names the adapter.
+      expect(reports).toHaveLength(1);
+      expect((reports[0]?.error as Error).message).toContain(
+        "'fetch' adapter's requestBodySettled must settle in bounded time",
+      );
+      expect((reports[0]?.error as Error).message).toContain('redirect');
+    } finally {
+      globalThis.removeEventListener('error', onGlobalError);
+    }
+  });
+
+  test('an adapter whose requestBodySettled never settles fails the retry as a timeout at the request timeout', async () => {
+    // The retry path waits the same way, after the backoff, and is bounded the same
+    // way: a `503` answered mid-upload must not have its next attempt dispatched beside
+    // the first attempt's body.
+    let attempts = 0;
+
+    const adapter: HTTPAdapter = {
+      getType: () => 'fetch',
+      send: (_request: AdapterRequest): Promise<AdapterResponse> => {
+        attempts++;
+
+        return Promise.resolve({
+          status: 503,
+          headers: {},
+          body: null,
+          requestBodySettled: new Promise(() => {}),
+        });
+      },
+    };
+
+    const reports: ErrorEvent[] = [];
+    const onGlobalError = (event: Event): void => {
+      reports.push(event as ErrorEvent);
+      event.preventDefault();
+    };
+
+    globalThis.addEventListener('error', onGlobalError);
+
+    try {
+      const response = await new HTTPClient({
+        adapter,
+        baseURL: 'http://example.test',
+        timeout: 100,
+        retryPolicy: { strategy: 'fixed', maxRetryAttempts: 2, delayMS: 0 },
+      })
+        .put('/upload')
+        .json({ a: 1 })
+        .send();
+
+      expect(attempts).toBe(1);
+      expect(response.isTimeout).toBe(true);
+      expect(response.requestBodySettled).toBeDefined();
+      expect(reports).toHaveLength(1);
+      expect((reports[0]?.error as Error).message).toContain('retry');
+    } finally {
+      globalThis.removeEventListener('error', onGlobalError);
+    }
+  });
+
+  test('a timeout of 0 leaves the wait unbounded, as it leaves the per-attempt timer', async () => {
     const controller = new AbortController();
     let hop = 0;
 
     const adapter: HTTPAdapter = {
-      getType: () => 'node',
+      getType: () => 'fetch',
       send: (_request: AdapterRequest): Promise<AdapterResponse> => {
         hop++;
 
@@ -896,6 +1002,7 @@ describe('HTTPClient — basic HTTP methods', () => {
       adapter,
       baseURL: 'http://example.test',
       followRedirects: true,
+      timeout: 0,
     })
       .post('/upload')
       .json({ a: 1 })
@@ -906,20 +1013,19 @@ describe('HTTPClient — basic HTTP methods', () => {
     const outcome = await Promise.race([
       pending,
       new Promise<typeof stillWaiting>((resolve) => {
-        setTimeout(() => resolve(stillWaiting), 200);
+        setTimeout(() => resolve(stillWaiting), 150);
       }),
     ]);
 
-    // Neither timed out on its own nor moved on to the second hop.
     expect(outcome).toBe(stillWaiting);
     expect(hop).toBe(1);
 
-    controller.abort('adapter never settled its upload');
+    controller.abort('gave up');
 
     const response = await pending;
 
     expect(response.isCancelled).toBe(true);
-    expect(hop).toBe(1);
+    expect(response.isTimeout).toBe(false);
   });
 
   test('a 307 that resends the body reports the resent upload, not the first', async () => {
@@ -6953,7 +7059,9 @@ describe('HTTPClient — phase-aware interceptors', () => {
         throw new Error('error observer rejected');
       });
 
-      const broken = await failingClient.get('https://example.com/broken').send();
+      const broken = await failingClient
+        .get('https://example.com/broken')
+        .send();
 
       expect(broken.isFailed).toBe(true);
       expect(errorObserverCalls).toBe(2);

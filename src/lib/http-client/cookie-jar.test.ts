@@ -188,9 +188,9 @@ describe('CookieJar', () => {
       expect(jar.setCookie({ ...base, maxAge: Number.POSITIVE_INFINITY })).toBe(
         false,
       );
-      expect(jar.setCookie({ ...base, maxAge: 60, createdAt: Number.NaN })).toBe(
-        false,
-      );
+      expect(
+        jar.setCookie({ ...base, maxAge: 60, createdAt: Number.NaN }),
+      ).toBe(false);
       expect(
         jar.setCookie({
           ...base,
@@ -199,7 +199,9 @@ describe('CookieJar', () => {
       ).toBe(false);
 
       expect(jar.getAllCookies()).toHaveLength(0);
-      expect(jar.getCookieFor('session', 'https://example.com')).toBeUndefined();
+      expect(
+        jar.getCookieFor('session', 'https://example.com'),
+      ).toBeUndefined();
 
       expect(jar.setCookie({ ...base, maxAge: 60 })).toBe(true);
       expect(jar.getCookieFor('session', 'https://example.com')?.value).toBe(
@@ -270,6 +272,141 @@ describe('CookieJar', () => {
 
       expect(jar.getCookieHeaderString('https://example.com/')).toBe('ok=1');
       expect(jar.getCookieFor('sid', 'https://example.com/')).toBeUndefined();
+    });
+
+    test('a stored cookie mutated to clear Secure is still withheld on http', () => {
+      // `secure` used to be read live off the stored object at send time, so clearing it
+      // after the cookie was stored for https sent a session cookie in the clear.
+      jar.setCookie({
+        name: 'sid',
+        value: 'secret',
+        domain: 'app.example.com',
+        path: '/',
+        secure: true,
+      });
+
+      for (const cookie of jar.getAllCookies()) {
+        cookie.secure = false;
+      }
+
+      expect(jar.getCookieHeaderString('http://app.example.com/')).toBe('');
+      expect(
+        jar.getCookieFor('sid', 'http://app.example.com/'),
+      ).toBeUndefined();
+
+      // Still sent where it was stored to be sent.
+      expect(jar.getCookieHeaderString('https://app.example.com/')).toBe(
+        'sid=secret',
+      );
+    });
+
+    test('a stored cookie mutated to widen its scope is withheld from the wider scope', () => {
+      // Same live read, for the fields that decide *where* a cookie goes. Cookies are
+      // bucketed by apex, so the reachable widening is within one registrable domain:
+      // host-only for app.example.com, on /admin, mutated into a /-wide cookie for
+      // every example.com host.
+      jar.setCookie({
+        name: 'sid',
+        value: 'secret',
+        domain: 'app.example.com',
+        hostOnly: true,
+        path: '/admin',
+      });
+
+      for (const cookie of jar.getAllCookies()) {
+        cookie.hostOnly = false;
+        cookie.domain = 'example.com';
+        cookie.path = '/';
+      }
+
+      expect(jar.getCookieHeaderString('https://other.example.com/')).toBe('');
+      expect(jar.getCookieHeaderString('https://app.example.com/public')).toBe(
+        '',
+      );
+      expect(
+        jar.getCookieFor('sid', 'https://other.example.com/'),
+      ).toBeUndefined();
+
+      // The scope it was stored with is untouched.
+      expect(jar.getCookieHeaderString('https://app.example.com/admin')).toBe(
+        'sid=secret',
+      );
+    });
+
+    test('a name or value getter cannot answer the check and the header differently', () => {
+      // The check read `value`, then the header read it again. A getter answering a safe
+      // string first and `x; other=evil` next passed the check and put a second pair on
+      // the wire. Each field is read once now and the header is built from that read, so
+      // the second answer is never asked for: what was vetted is what goes out, and the
+      // header stays one pair per cookie.
+      const base = { domain: 'example.com', path: '/' };
+
+      expect(jar.setCookie({ ...base, name: 'ok', value: '1' })).toBe(true);
+      expect(jar.setCookie({ ...base, name: 'sid', value: 'x' })).toBe(true);
+      expect(jar.setCookie({ ...base, name: 'alt', value: 'y' })).toBe(true);
+
+      for (const cookie of jar.getAllCookies()) {
+        if (cookie.name === 'sid') {
+          let reads = 0;
+
+          Object.defineProperty(cookie, 'value', {
+            get: () => (reads++ === 0 ? 'ok' : 'x; other=evil'),
+          });
+        }
+
+        if (cookie.name === 'alt') {
+          let reads = 0;
+
+          Object.defineProperty(cookie, 'name', {
+            get: () => (reads++ === 0 ? 'alt' : 'alt=1; other'),
+          });
+        }
+      }
+
+      const header = jar.getCookieHeaderString('https://example.com/');
+
+      expect(header).not.toContain('other');
+      expect(header.split('; ').sort()).toEqual(['alt=y', 'ok=1', 'sid=ok']);
+    });
+
+    test('a getter that throws withholds the cookie rather than throwing out', () => {
+      // A stored field can be an accessor, and reading one can throw. Fails closed, the
+      // way the expiry check does, instead of taking down every other cookie's header.
+      const base = { domain: 'example.com', path: '/' };
+
+      expect(jar.setCookie({ ...base, name: 'ok', value: '1' })).toBe(true);
+      expect(jar.setCookie({ ...base, name: 'boom', value: 'x' })).toBe(true);
+
+      for (const cookie of jar.getAllCookies()) {
+        if (cookie.name === 'boom') {
+          Object.defineProperty(cookie, 'value', {
+            get: () => {
+              throw new Error('nope');
+            },
+          });
+        }
+      }
+
+      expect(jar.getCookieHeaderString('https://example.com/')).toBe('ok=1');
+      expect(jar.getCookieFor('boom', 'https://example.com/')).toBeUndefined();
+      expect(jar.getCookiesFor('https://example.com/')).toHaveLength(1);
+    });
+
+    test('getCookiesFor returns copies, so writing to one does not change the jar', () => {
+      jar.setCookie({
+        name: 'sid',
+        value: 'secret',
+        domain: 'example.com',
+        path: '/',
+      });
+
+      const [cookie] = jar.getCookiesFor('https://example.com/');
+      cookie.value = 'tampered';
+
+      expect(jar.getCookieHeaderString('https://example.com/')).toBe(
+        'sid=secret',
+      );
+      expect(jar.getAllCookies()[0].value).toBe('secret');
     });
 
     test('getCookieHeaderString stays one pair per cookie', () => {
@@ -461,7 +598,10 @@ describe('CookieJar', () => {
     });
 
     test('RFC 6265 §5.2.4 — a Path without a leading slash is ignored; default-path applies', () => {
-      jar.parseSetCookieHeader('sid=1; Path=foo', 'https://example.com/app/page');
+      jar.parseSetCookieHeader(
+        'sid=1; Path=foo',
+        'https://example.com/app/page',
+      );
 
       const stored = jar.getAllCookies();
 
@@ -1354,8 +1494,12 @@ describe('CookieJar', () => {
       } as unknown as Parameters<CookieJar['fromJSON']>[0]);
 
       expect(restored).toBe(1);
-      expect(jar.getCookieFor('garbage', 'https://example.com')).toBeUndefined();
-      expect(jar.getCookieFor('invalid-date', 'https://example.com')).toBeUndefined();
+      expect(
+        jar.getCookieFor('garbage', 'https://example.com'),
+      ).toBeUndefined();
+      expect(
+        jar.getCookieFor('invalid-date', 'https://example.com'),
+      ).toBeUndefined();
       expect(jar.getCookieFor('kept', 'https://example.com')?.value).toBe('x');
       expect(jar.clearExpiredCookies()).toBe(0);
     });
@@ -1376,8 +1520,17 @@ describe('CookieJar', () => {
         cookies: [
           { ...base, name: 'string-max-age', maxAge: 'not-a-number' },
           { ...base, name: 'nan-max-age', maxAge: Number.NaN },
-          { ...base, name: 'infinite-max-age', maxAge: Number.POSITIVE_INFINITY },
-          { ...base, name: 'string-created-at', maxAge: 60, createdAt: 'yesterday' },
+          {
+            ...base,
+            name: 'infinite-max-age',
+            maxAge: Number.POSITIVE_INFINITY,
+          },
+          {
+            ...base,
+            name: 'string-created-at',
+            maxAge: 60,
+            createdAt: 'yesterday',
+          },
           { ...base, name: 'object-created-at', maxAge: 60, createdAt: {} },
           {
             ...base,
@@ -1414,7 +1567,9 @@ describe('CookieJar', () => {
       // of `getCookiesFor` and counted by `clearExpiredCookies`.
       const base = { value: 'x', domain: 'example.com', path: '/' };
 
-      expect(jar.setCookie({ ...base, name: 'by-max-age', maxAge: 60 })).toBe(true);
+      expect(jar.setCookie({ ...base, name: 'by-max-age', maxAge: 60 })).toBe(
+        true,
+      );
       expect(
         jar.setCookie({
           ...base,
@@ -1454,7 +1609,10 @@ describe('CookieJar', () => {
 
       expect(restored).toBe(2);
 
-      const nullMaxAge = jar.getCookieFor('null-max-age', 'https://example.com');
+      const nullMaxAge = jar.getCookieFor(
+        'null-max-age',
+        'https://example.com',
+      );
       expect(nullMaxAge).toBeDefined();
       expect('maxAge' in (nullMaxAge ?? {})).toBe(false);
 

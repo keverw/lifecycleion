@@ -46,6 +46,23 @@ export interface CookieJarJSON {
 }
 
 /**
+ * The scope a cookie was accepted with, kept beside the stored cookie rather than on it.
+ *
+ * `name`, `domain` and `path` are the components of the key the cookie is filed under,
+ * and `hostOnly` / `secure` decide which host and which scheme it may go to. All five are
+ * recorded exactly as `setCookie` vetted them so a later write through `getAllCookies()`
+ * cannot widen them — see {@link CookieJar.snapshotForSend}. `hostOnly` and `secure` are
+ * held as written, absent included, so a cookie handed back reads as it was stored.
+ */
+interface StoredCookieScope {
+  name: string;
+  domain: string;
+  path: string;
+  hostOnly?: boolean;
+  secure?: boolean;
+}
+
+/**
  * Shareable, standalone cookie jar.
  *
  * Cookies are bucketed by apex domain (via tldts Public Suffix List) for efficient
@@ -98,6 +115,11 @@ export class CookieJar {
   // Inner key: composite 'name@domain/path' for deduplication
   private buckets: Map<string, Map<string, Cookie>> = new Map();
 
+  // The scope each stored cookie was accepted with. Keyed by the stored object and held
+  // off it, because the object itself is handed out by `getAllCookies()` and is writable
+  // from there; dropped with the cookie when the bucket entry goes.
+  private storedScopes: WeakMap<Cookie, StoredCookieScope> = new WeakMap();
+
   /**
    * Stores or updates a cookie. Returns false if the domain is missing or
    * not a valid hostname/IP (e.g. empty string, spaces, garbage input), or if the
@@ -122,31 +144,56 @@ export class CookieJar {
    * validation and domain-suffix checks on top of the syntax check here.
    */
   public setCookie(cookie: CookieInput): boolean {
-    const domain = cookie.domain ?? '';
+    // Copied before any field is read, so every check below and the object that is stored
+    // see the same values. The argument is the caller's object and may carry accessors,
+    // and checking one read while storing another is the write-time half of what
+    // `snapshotForSend` closes on the way out.
+    let input: CookieInput;
+
+    try {
+      input = { ...cookie };
+    } catch {
+      return false;
+    }
+
+    const domain = input.domain ?? '';
 
     if (!this.isSyntaxValidDomain(domain)) {
       return false;
     }
 
-    if (!this.hasReadableExpiry(cookie)) {
+    if (!this.hasReadableExpiry(input)) {
       return false;
     }
 
-    if (!this.hasWritableNameAndValue(cookie)) {
+    if (!this.hasWritableNameAndValue(input)) {
       return false;
     }
 
     const normalizedDomain = this.normalizeStoredDomain(domain);
-    const path = cookie.path ?? '/';
-    const createdAt = cookie.createdAt ?? Date.now();
+    const path = input.path ?? '/';
+    const createdAt = input.createdAt ?? Date.now();
     const bucket = this.getOrCreateBucket(this.apexFor(normalizedDomain));
 
-    bucket.set(this.cookieKey(cookie.name, normalizedDomain, path), {
-      ...cookie,
+    const stored: Cookie = {
+      ...input,
       createdAt,
       domain: normalizedDomain,
       path,
-    });
+    };
+
+    bucket.set(this.cookieKey(stored.name, normalizedDomain, path), stored);
+
+    const scope: StoredCookieScope = {
+      name: stored.name,
+      domain: normalizedDomain,
+      path,
+    };
+
+    this.copyIfPresent(stored, scope, 'hostOnly');
+    this.copyIfPresent(stored, scope, 'secure');
+
+    this.storedScopes.set(stored, scope);
 
     return true;
   }
@@ -169,7 +216,8 @@ export class CookieJar {
    * Returns the named cookie applicable for the given URL (domain + path
    * matching, unexpired), or undefined.
    *
-   * Applies the same rules as getCookiesFor — domain, path, and expiry are all checked.
+   * Applies the same rules as getCookiesFor — domain, path, and expiry are all checked —
+   * and returns a copy of the stored cookie for the same reason.
    */
   public getCookieFor(name: string, url: string): Cookie | undefined {
     return this.getCookiesFor(url).find((c) => c.name === name);
@@ -245,6 +293,17 @@ export class CookieJar {
    *
    * Only scans the apex-domain bucket for the URL — O(cookies in that domain)
    * instead of O(all cookies).
+   *
+   * Returns *copies*, not the stored objects. A cookie's `name`, `domain`, `path`,
+   * `hostOnly` and `secure` come from the scope `setCookie` accepted it with, and every
+   * other field is read exactly once; all the checks run against that copy and the header
+   * is built from it. So a stored cookie mutated through `getAllCookies()` — a cleared
+   * `secure`, a widened `domain` or `path`, a `value` getter that answers differently on
+   * the second read — cannot reach the wire with a scope or a framing it was never stored
+   * with. A cookie whose fields cannot be read at all (an accessor that throws) is
+   * withheld, as one whose expiry cannot be read already is. Writing to a returned cookie
+   * therefore does not change the jar; use `setCookie` to update a stored cookie, and
+   * `getAllCookies()` to reach the live objects.
    */
   public getCookiesFor(url: string): Cookie[] {
     let hostname: string;
@@ -269,17 +328,17 @@ export class CookieJar {
     const apexBucket = this.buckets.get(apex);
 
     if (apexBucket) {
-      for (const cookie of apexBucket.values()) {
-        if (this.isExpired(cookie, now)) {
+      for (const stored of apexBucket.values()) {
+        // Every check below runs against the snapshot, never the stored object: the
+        // fields were read once each, so what is vetted is what goes out. A cookie whose
+        // snapshot cannot be trusted is withheld.
+        const cookie = this.snapshotForSend(stored);
+
+        if (cookie === null) {
           continue;
         }
 
-        // Checked again on the way out, not only on the way in. `getAllCookies()` hands
-        // out the stored objects, and a `value` written onto one afterwards never went
-        // through `setCookie` - so `x; other=evil` set that way was interpolated into
-        // the header as two pairs, the framing the write-time check exists to refuse.
-        // The expiry check above already fails closed on the same mutation path.
-        if (!this.hasWritableNameAndValue(cookie)) {
+        if (this.isExpired(cookie, now)) {
           continue;
         }
 
@@ -295,7 +354,7 @@ export class CookieJar {
           continue;
         }
 
-        if (cookie.secure && requestScheme !== 'https:') {
+        if (cookie.secure === true && requestScheme !== 'https:') {
           continue;
         }
 
@@ -319,7 +378,9 @@ export class CookieJar {
   /**
    * Returns a `Cookie: name=value; name2=value2` string for the given URL.
    * Uses `getCookiesFor`, so expired cookies are never included (same as RFC
-   * behavior on the wire).
+   * behavior on the wire), and the pairs are built from the copies it vetted rather than
+   * re-read off the stored objects — one pair per cookie, whatever a caller has since
+   * written onto them.
    */
   public getCookieHeaderString(url: string): string {
     return this.getCookiesFor(url)
@@ -920,6 +981,110 @@ export class CookieJar {
       isHeaderSafeCookieText(name, '= ') &&
       isHeaderSafeCookieText(value, '')
     );
+  }
+
+  /**
+   * A plain copy of a stored cookie with every field read exactly once, or `null` when
+   * the cookie must be withheld from the request.
+   *
+   * `getAllCookies()` hands out the stored objects, so every field is caller-writable -
+   * and can be replaced by an accessor. Two things follow, and both were reachable:
+   *
+   * - Reading a field for the check and again for the header let the two reads disagree.
+   *   A `value` getter answering `'ok'` to {@link hasWritableNameAndValue} and
+   *   `'x; other=evil'` to the header put a second pair on the wire, which is exactly
+   *   the framing that check exists to refuse.
+   * - A snapshot alone would not help the fields that decide *where* a cookie goes,
+   *   because the write lands on the stored object itself: clearing `secure` on a session
+   *   cookie stored for `https:` sent it in the clear, and clearing `hostOnly` while
+   *   widening `domain` and `path` sent it to a sibling host and a path it was never
+   *   stored for. So those come from {@link StoredCookieScope}, recorded by `setCookie`
+   *   and held off the cookie, along with the `name` - the other half of the key the
+   *   cookie is filed under, and what the header calls it. Bucketing by apex already
+   *   bounded the widening to one registrable domain; this bounds it to what was stored.
+   *
+   * `value` is not anchored that way: it is the cookie's payload rather than its
+   * identity, and writing a new one through `getAllCookies()` is a supported update. It
+   * is read once and vetted, so what the header carries is what passed the check.
+   *
+   * A read that throws withholds the cookie, the way {@link isExpired} already fails
+   * closed on an expiry it cannot read. So does a `secure` or `hostOnly` that was stored
+   * as something other than a boolean, where coercion would land on the looser side, and
+   * a cookie with no recorded scope, which is a cookie no `setCookie` filed.
+   */
+  private snapshotForSend(stored: Cookie): Cookie | null {
+    const scope = this.storedScopes.get(stored);
+
+    if (scope === undefined) {
+      return null;
+    }
+
+    if (scope.secure !== undefined && typeof scope.secure !== 'boolean') {
+      return null;
+    }
+
+    if (scope.hostOnly !== undefined && typeof scope.hostOnly !== 'boolean') {
+      return null;
+    }
+
+    let cookie: Cookie;
+
+    try {
+      // Each mutable field read once, and an absent one left absent rather than written
+      // as an own `undefined`: `toJSON` and callers test presence with `in`.
+      cookie = {
+        name: scope.name,
+        value: stored.value,
+        createdAt: stored.createdAt,
+        domain: scope.domain,
+        path: scope.path,
+      };
+
+      if (scope.hostOnly !== undefined) {
+        cookie.hostOnly = scope.hostOnly;
+      }
+
+      if (scope.secure !== undefined) {
+        cookie.secure = scope.secure;
+      }
+
+      this.copyIfPresent(stored, cookie, 'expires');
+      this.copyIfPresent(stored, cookie, 'maxAge');
+      this.copyIfPresent(stored, cookie, 'httpOnly');
+      this.copyIfPresent(stored, cookie, 'sameSite');
+    } catch {
+      return null;
+    }
+
+    if (!this.hasWritableNameAndValue(cookie)) {
+      return null;
+    }
+
+    // `createdAt` is the sort key as well as half the Max-Age arithmetic.
+    if (!Number.isFinite(cookie.createdAt) || !this.hasReadableExpiry(cookie)) {
+      return null;
+    }
+
+    // Own copy of the date too, so the returned cookie carries nothing the jar still
+    // holds a reference to.
+    if (cookie.expires !== undefined) {
+      cookie.expires = new Date(cookie.expires);
+    }
+
+    return cookie;
+  }
+
+  /** Copies `key` from `from` to `to` only when it is present, reading it once. */
+  private copyIfPresent<K extends keyof Cookie>(
+    from: Cookie,
+    to: Partial<Pick<Cookie, K>>,
+    key: K,
+  ): void {
+    const value = from[key];
+
+    if (value !== undefined) {
+      to[key] = value;
+    }
   }
 
   private isExpired(cookie: Cookie, now: number): boolean {

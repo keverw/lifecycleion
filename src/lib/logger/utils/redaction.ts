@@ -315,8 +315,14 @@ function forwardingContainerCopy(
  * The copy is installed in place of the original, which is safe because the only things
  * written into are this module's own: the bag from {@link normalizeParamsBag} at the first
  * step, and a copy made here at every step after it.
+ *
+ * Exported because `redactValue` and `stringifyValue` need the same pass over the value
+ * they are given. They have no params bag, so they build a synthetic one-key bag and root
+ * their paths at it - see `redactValueWith` - which is what lets one normalization serve
+ * both surfaces rather than the two drifting apart. The requirement is only that `bag` is
+ * the caller's own object: this writes into it.
  */
-function normalizeAlongRedactPaths(
+export function normalizeAlongRedactPaths(
   bag: Record<string, unknown>,
   paths: RedactPath[],
   aliases: ForwardingAliases,
