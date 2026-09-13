@@ -17,7 +17,7 @@ import {
   type StringifyValueOptions,
   type TruncationInfo,
 } from './stringify-value';
-import { TRUNCATED_LENGTH } from './internal/render-budget';
+import { cutAt, TRUNCATED_LENGTH } from './internal/render-budget';
 import { applyRedaction } from './logger/utils/redaction';
 import * as redactPaths from './internal/redact-paths';
 import { REDACTION_FAILED_MARKER } from './internal/default-redact-function';
@@ -2779,5 +2779,124 @@ describe('stringifyValue / redactValue - a throw out of nested-path normalizatio
     } finally {
       void mock.module('./internal/redact-paths', () => ({ ...original }));
     }
+  });
+});
+
+/**
+ * A container whose named member throws on the first read and answers a secret after.
+ *
+ * The pre-walk normalization reads each container along a named path once into a copy.
+ * A read that threw used to be *skipped*, leaving the caller's accessor in the copy for
+ * the walk and the renderer to call again - and an accessor that throws once and answers
+ * afterwards is exactly the second-read disagreement the pass exists to settle. It is
+ * withheld with the marker now, as a container the pass could not copy already was.
+ */
+const throwsOnceThenAnswers = (
+  key: string,
+  answer: Record<string, unknown>,
+): Record<string, unknown> => {
+  let reads = 0;
+
+  return {
+    get [key](): Record<string, unknown> {
+      reads++;
+
+      if (reads === 1) {
+        throw new Error('first read refused');
+      }
+
+      return answer;
+    },
+  };
+};
+
+describe('stringifyValue / redactValue - a named member that throws once and answers afterwards', () => {
+  test('is withheld with the marker on both entry points', () => {
+    const value = (): Record<string, unknown> => ({
+      user: throwsOnceThenAnswers('profile', { password: 'hunter2secret' }),
+      other: 'safe',
+    });
+    const redactedKeys = ['user.profile.password'];
+
+    const rendered = stringifyValue(value(), { redactedKeys });
+
+    expect(rendered).not.toContain('secret');
+    expect(rendered).toContain(REDACTION_FAILED_MARKER);
+    expect(rendered).toContain('safe');
+
+    const masked = redactValue(value(), { redactedKeys }) as Record<
+      string,
+      Record<string, unknown>
+    >;
+
+    expect(JSON.stringify(masked)).not.toContain('secret');
+    expect(masked.user?.profile).toBe(REDACTION_FAILED_MARKER);
+  });
+});
+
+describe('cutAt - a cut inside a character steps back to a boundary', () => {
+  test('leaves plain text and a clean cut alone', () => {
+    expect(cutAt('abcdef', 3)).toBe('abc');
+    expect(cutAt('abcdef', 0)).toBe('');
+    expect(cutAt('abcdef', 6)).toBe('abcdef');
+    expect(cutAt('abcdef', 99)).toBe('abcdef');
+  });
+
+  test('does not leave a combining mark on the far side of the cut', () => {
+    // `e` + U+0301: cut between them and the `e` renders unaccented.
+    expect(cutAt('ae\u0301b', 2)).toBe('a');
+    expect(cutAt('ae\u0301b', 3)).toBe('ae\u0301');
+  });
+
+  test('does not split a surrogate pair, a joiner sequence, or a variation selector', () => {
+    expect(cutAt('x😀y', 2)).toBe('x');
+    // Family: 👨 ZWJ 👩. A cut after the joiner, or between it and the next face, steps
+    // back to before the whole sequence.
+    expect(cutAt('x\u{1F468}\u200D\u{1F469}', 4)).toBe('x');
+    expect(cutAt('x\u{1F468}\u200D\u{1F469}', 5)).toBe('x');
+    expect(cutAt('x\u{1F468}\u200D\u{1F469}', 6)).toBe(
+      'x\u{1F468}\u200D\u{1F469}',
+    );
+    // ❤ + U+FE0F, and a thumbs-up with a skin tone.
+    expect(cutAt('\u2764\uFE0F', 1)).toBe('');
+    expect(cutAt('\u{1F44D}\u{1F3FD}', 2)).toBe('');
+  });
+
+  test('does not split a flag', () => {
+    // 🇺🇸🇫🇷 is four regional indicators; a cut after three is inside the second flag.
+    const flags = '\u{1F1FA}\u{1F1F8}\u{1F1EB}\u{1F1F7}';
+
+    expect(cutAt(flags, 6)).toBe('\u{1F1FA}\u{1F1F8}');
+    expect(cutAt(flags, 4)).toBe('\u{1F1FA}\u{1F1F8}');
+    expect(cutAt(flags, 2)).toBe('');
+  });
+
+  test('a render cut inside a character is still well-formed', () => {
+    const rendered = stringifyValue('e\u0301'.repeat(200), {
+      maxRenderLength: 7,
+    });
+
+    expect(rendered).toContain('[max length exceeded]');
+    // Never a bare `e` at the end of the kept text: every kept `e` has its mark.
+    expect(rendered.split('[max length exceeded]')[0]).toMatch(/^(e\u0301)*$/);
+  });
+});
+
+/** An options object whose every member read throws. */
+const hostileOptions = <T extends object>(): T =>
+  new Proxy({} as T, {
+    get(): never {
+      throw new Error('option read refused');
+    },
+  });
+
+describe('stringifyValue / redactValue - an options object that refuses to be read', () => {
+  test('falls back to the defaults rather than throwing', () => {
+    expect(
+      stringifyValue({ a: 1 }, hostileOptions<StringifyValueOptions>()),
+    ).toBe('{"a":1}');
+    expect(
+      redactValue({ a: 1 }, hostileOptions<StringifyValueOptions>()),
+    ).toEqual({ a: 1 });
   });
 });

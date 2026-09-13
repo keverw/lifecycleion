@@ -2362,6 +2362,46 @@ describe('LifecycleManager - Registration & Individual Lifecycle', () => {
       expect(lifecycle.getComponentStatus('again')?.lastError).toBeNull();
     });
 
+    test('lastError from the previous run stays readable while the restart is starting', async () => {
+      // Documented on `ComponentStatus.lastError`: it is cleared when the new run reaches
+      // `running`, not when it begins. A reader that wants "is this component failed"
+      // reads it together with `state`.
+      const lifecycle = new LifecycleManager({ logger });
+
+      let reportFn!: (err?: Error) => boolean;
+      let starts = 0;
+
+      class SlowRestartComponent extends BaseComponent {
+        public async start(): Promise<void> {
+          starts++;
+          reportFn = (err?: Error) => this.reportUnexpectedStop(err);
+
+          if (starts === 2) {
+            await sleep(30);
+          }
+        }
+        public stop(): void {}
+      }
+
+      await lifecycle.registerComponent(
+        new SlowRestartComponent(logger, { name: 'slow' }),
+      );
+      await lifecycle.startComponent('slow');
+
+      expect(reportFn(new Error('first run crash'))).toBe(true);
+
+      const restarting = lifecycle.startComponent('slow');
+      await sleep(5);
+
+      expect(lifecycle.getComponentStatus('slow')?.state).toBe('starting');
+      expect(lifecycle.getComponentStatus('slow')?.lastError?.message).toBe(
+        'first run crash',
+      );
+
+      expect((await restarting).success).toBe(true);
+      expect(lifecycle.getComponentStatus('slow')?.lastError).toBeNull();
+    });
+
     test("a new start clears the record of the previous run's unexpected stop", async () => {
       // The flag describes a stop that already happened, and `startComponent`'s
       // overlapping-failure rule reads it to decide whose error the caller is told about.

@@ -4,6 +4,7 @@ import {
   type ForwardingAliases,
   type RedactPath,
 } from './internal/redact-paths';
+import { snapshotMembers } from './internal/read-member';
 import {
   ANONYMOUS_ROOT,
   normalizeAlongRedactPaths,
@@ -157,16 +158,16 @@ export interface StringifyValueOptions {
  */
 export function redactValue(
   value: unknown,
-  options?: StringifyValueOptions,
+  rawOptions?: StringifyValueOptions,
 ): unknown {
+  // Read once, guarded: see `errorToString`, and `snapshotMembers`.
+  const options = snapshotOptions(rawOptions);
+
   const budget = createRenderBudget(
-    resolveMaxRenderLength(options?.maxRenderLength),
+    resolveMaxRenderLength(options.maxRenderLength),
   );
 
-  const reportTruncation = createTruncationReporter(
-    budget,
-    options?.onTruncate,
-  );
+  const reportTruncation = createTruncationReporter(budget, options.onTruncate);
 
   try {
     return redactValueWith(value, options, null, budget);
@@ -176,6 +177,19 @@ export function redactValue(
     // to notice than one who could scan for the marker.
     reportTruncation(ANONYMOUS_ROOT);
   }
+}
+
+/** Every option the two entry points read, each read once and guarded. */
+function snapshotOptions(
+  options: StringifyValueOptions | undefined,
+): StringifyValueOptions {
+  return snapshotMembers(options, [
+    'onFormatError',
+    'maxRenderLength',
+    'onTruncate',
+    'redactFunction',
+    'redactedKeys',
+  ]);
 }
 
 /** Whether a report's subject is one of the bracketed names for a whole input. */
@@ -434,12 +448,17 @@ function redactValueWith(
  */
 export function stringifyValue(
   value: unknown,
-  options?: StringifyValueOptions,
+  rawOptions?: StringifyValueOptions,
 ): string {
+  // Read once, guarded: the reads below sit outside the `try` that keeps the
+  // never-throws promise, and an options object with a throwing accessor escaped it.
+  // See `snapshotMembers`.
+  const options = snapshotOptions(rawOptions);
+
   // Defaults to the console, as every other failure channel in this library does. One
   // small closure per call, which is what `applyRedaction` and `errorToString` already
   // allocate for their own reporters.
-  const report = createFormatReporter('render', options?.onFormatError);
+  const report = createFormatReporter('render', options.onFormatError);
 
   // The allowance for this call, created here rather than inside the walk so it is the
   // caller's `maxRenderLength` that bounds both halves of the operation. The masking pass
@@ -447,13 +466,10 @@ export function stringifyValue(
   // render below re-emits everything the masking produced, and one budget for both
   // charged every masked leaf twice.
   const budget = createRenderBudget(
-    resolveMaxRenderLength(options?.maxRenderLength),
+    resolveMaxRenderLength(options.maxRenderLength),
   );
 
-  const reportTruncation = createTruncationReporter(
-    budget,
-    options?.onTruncate,
-  );
+  const reportTruncation = createTruncationReporter(budget, options.onTruncate);
 
   try {
     return stringifyTemplateValue(

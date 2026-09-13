@@ -205,6 +205,26 @@ function describeResourceTarget(event: Event): string | undefined {
   return undefined;
 }
 
+/**
+ * A service or entity name as the sinks may frame it.
+ *
+ * Each run of control characters - C0, DEL, C1, and the Unicode line and paragraph
+ * separators - becomes one space and the result is trimmed, so a name cannot break a text sink's line or
+ * hide inside its `[service] [entity]` prefix. Empty after that means no name.
+ */
+function sanitizeScopeName(name: string | undefined): string | undefined {
+  if (name === undefined) {
+    return undefined;
+  }
+
+  const cleaned = name
+    // eslint-disable-next-line no-control-regex
+    .replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g, ' ')
+    .trim();
+
+  return cleaned || undefined;
+}
+
 export class Logger extends EventEmitter {
   public readonly isLoggerClass = true;
 
@@ -962,8 +982,12 @@ export class Logger extends EventEmitter {
 
     // Extract options
     const exitCode = options?.exitCode;
-    const serviceName = options?.serviceName?.trim() || undefined;
-    const entityName = options?.entityName?.trim() || undefined;
+    // Control characters are stripped as well as the ends trimmed. The text sinks frame
+    // these as `[service] [entity]` prefixes with nothing escaped, so a name carrying a
+    // line break - one built from request data, say - ended the line early and started
+    // a second one that read as a whole separate entry with any prefix it liked.
+    const serviceName = sanitizeScopeName(options?.serviceName);
+    const entityName = sanitizeScopeName(options?.entityName);
     const params = options?.params;
     // Snapshotted like `redactedKeys` below, and for the reasons given there: `tags` is a
     // caller-supplied list, so `length` can be a trap that throws - `logger.info('x',

@@ -21,7 +21,7 @@ import {
 } from './internal/default-redact-function';
 import { describeContainer } from './internal/container-entries';
 import { isPlainContainer } from './internal/is-plain-container';
-import { readMember } from './internal/read-member';
+import { readMember, snapshotMembers } from './internal/read-member';
 import {
   noteLeafCut,
   renderLeafWithinBudget,
@@ -770,16 +770,27 @@ function stringifyPrimitive(
 export function errorToString(
   error: unknown,
   maxRowLength = 80,
-  options?: ErrorToStringOptions,
+  rawOptions?: ErrorToStringOptions,
 ): string {
-  const report = createFormatReporter('redaction', options?.onFormatError);
+  // Read once, guarded, before anything else: the reads below sit outside the `try` that
+  // keeps the never-throws promise, and an options object with a throwing accessor
+  // escaped it. A refused read is the option being absent, which is its documented
+  // default. See `snapshotMembers`.
+  const options = snapshotMembers(rawOptions, [
+    'onFormatError',
+    'maxRenderLength',
+    'onTruncate',
+    'redactFunction',
+  ]);
+
+  const report = createFormatReporter('redaction', options.onFormatError);
 
   // Defaults to the console, exactly as the redaction reporter does. The two failures are
   // equally exceptional: this fires only when a read actually *threw*, never for the
   // ordinary degradations - `[Function]`, `[circular]`, `[max depth exceeded]` - which
   // never reach a reporter at all. Silence by default would leave the swallow this channel
   // exists to end as the behaviour almost everyone gets.
-  const reportRender = createFormatReporter('render', options?.onFormatError);
+  const reportRender = createFormatReporter('render', options.onFormatError);
 
   // The root goes in `seen` before the walk, the same way `serializeError` registers
   // it. Without that, `err.cause = err` was not a cycle until the *second* time round:
@@ -795,13 +806,10 @@ export function errorToString(
   // One allowance for this call. Held here rather than built inline so the truncation
   // reporter below can watch the same counters the walk moves.
   const budget = createRenderBudget(
-    resolveMaxRenderLength(options?.maxRenderLength),
+    resolveMaxRenderLength(options.maxRenderLength),
   );
 
-  const reportTruncation = createTruncationReporter(
-    budget,
-    options?.onTruncate,
-  );
+  const reportTruncation = createTruncationReporter(budget, options.onTruncate);
 
   try {
     const table = errorToASCIITable(
@@ -811,7 +819,7 @@ export function errorToString(
       seen,
       0,
       budget,
-      options?.redactFunction,
+      options.redactFunction,
       report,
       reportRender,
     );

@@ -2346,3 +2346,69 @@ describe('errorToString - a throw out of nested-path normalization', () => {
     }
   });
 });
+
+/**
+ * A container whose named member throws on the first read and answers a secret after.
+ *
+ * The pre-walk normalization reads each container along a named path once into a copy.
+ * A read that threw used to be *skipped*, leaving the caller's accessor in the copy for
+ * the walk and the renderer to call again - and an accessor that throws once and answers
+ * afterwards is exactly the second-read disagreement the pass exists to settle. It is
+ * withheld with the marker now, as a container the pass could not copy already was.
+ */
+const throwsOnceThenAnswers = (
+  key: string,
+  answer: Record<string, unknown>,
+): Record<string, unknown> => {
+  let reads = 0;
+
+  return {
+    get [key](): Record<string, unknown> {
+      reads++;
+
+      if (reads === 1) {
+        throw new Error('first read refused');
+      }
+
+      return answer;
+    },
+  };
+};
+
+describe('errorToString - a named member that throws once and answers afterwards', () => {
+  it('is withheld with the marker under additionalInfo', () => {
+    const rendered = errorToString(
+      Object.assign(new Error('boom'), {
+        additionalInfo: {
+          user: throwsOnceThenAnswers('profile', { password: 'hunter2secret' }),
+          other: 'safe',
+        },
+        sensitiveFieldNames: ['user.profile.password'],
+      }),
+    );
+
+    expect(rendered).not.toContain('secret');
+    expect(rendered).toContain(REDACTION_FAILED_MARKER);
+    expect(rendered).toContain('safe');
+  });
+});
+
+/** An options object whose every member read throws. */
+const hostileOptions = <T extends object>(): T =>
+  new Proxy({} as T, {
+    get(): never {
+      throw new Error('option read refused');
+    },
+  });
+
+describe('errorToString - an options object that refuses to be read', () => {
+  it('falls back to the defaults rather than throwing', () => {
+    const rendered = errorToString(
+      new Error('boom'),
+      80,
+      hostileOptions<NonNullable<Parameters<typeof errorToString>[2]>>(),
+    );
+
+    expect(rendered).toContain('boom');
+  });
+});

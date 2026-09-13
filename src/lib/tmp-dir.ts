@@ -119,6 +119,15 @@ export class TmpDir {
   private isInitialized = false;
   private wasCleanedUp = false;
   private fullTempDirPath = '';
+  /**
+   * The `initialize()` in flight, shared by every caller that arrives while it runs.
+   *
+   * The exclusive create closes the race between two *processes*. Two calls on one
+   * instance raced each other instead: both read `isInitialized` as false, both created a
+   * leaf of their own, and the loser's path was overwritten and never cleaned up - an
+   * orphan a safe-mode `cleanup()` could not have removed even had it known about it.
+   */
+  private initializing: Promise<void> | null = null;
 
   // configuration properties
   private allowUnsafeCleanup = false;
@@ -195,51 +204,17 @@ export class TmpDir {
   }
 
   public async initialize(): Promise<void> {
-    if (!this.isInitialized) {
-      // The parent once, so each attempt below can be an *exclusive* create of the leaf.
-      // `mkdir` with `recursive: true` succeeds on a directory that already exists, which
-      // is why the old stat-then-mkdir could not be made exclusive by itself.
-      await fs.mkdir(this.baseDirectory, { recursive: true });
-
-      let attemptsMade = 0;
-
-      // attempt this while the attemptsMade is less than the maxTries
-      while (attemptsMade < this.maxTries) {
-        attemptsMade++; // increment the attempts made
-
-        // generate a temporary directory name
-        const name = this.generateTempDirName();
-        const fullPath = path.join(this.baseDirectory, name);
-
-        // Created, not checked and then created. A `stat` that found nothing followed by
-        // a `mkdir` left a window in which another process - or another instance in this
-        // one, given the same random name - could create the same path first, and the
-        // `recursive` create then adopted their directory as this one's. A plain `mkdir`
-        // fails with `EEXIST` on a path that is already there, which is the answer the
-        // check was trying to get, only without the window.
-        try {
-          await fs.mkdir(fullPath);
-        } catch (error) {
-          if (
-            error instanceof Error &&
-            (error as NodeJS.ErrnoException).code === 'EEXIST'
-          ) {
-            continue;
-          }
-
-          throw error;
-        }
-
-        // set isInitialized to true and return
-        this.fullTempDirPath = fullPath;
-        this.isInitialized = true;
-
-        return;
-      }
-
-      // if the loop completes without finding a unique directory, throw an error
-      throw new ErrTmpDirInitializeMaxTriesExceeded();
+    if (this.isInitialized) {
+      return;
     }
+
+    if (this.initializing === null) {
+      this.initializing = this.createTempDir().finally(() => {
+        this.initializing = null;
+      });
+    }
+
+    await this.initializing;
   }
 
   public async cleanup(): Promise<void> {
@@ -294,6 +269,54 @@ export class TmpDir {
           originalError: error as Error,
         });
       }
+    }
+  }
+
+  private async createTempDir(): Promise<void> {
+    if (!this.isInitialized) {
+      // The parent once, so each attempt below can be an *exclusive* create of the leaf.
+      // `mkdir` with `recursive: true` succeeds on a directory that already exists, which
+      // is why the old stat-then-mkdir could not be made exclusive by itself.
+      await fs.mkdir(this.baseDirectory, { recursive: true });
+
+      let attemptsMade = 0;
+
+      // attempt this while the attemptsMade is less than the maxTries
+      while (attemptsMade < this.maxTries) {
+        attemptsMade++; // increment the attempts made
+
+        // generate a temporary directory name
+        const name = this.generateTempDirName();
+        const fullPath = path.join(this.baseDirectory, name);
+
+        // Created, not checked and then created. A `stat` that found nothing followed by
+        // a `mkdir` left a window in which another process - or another instance in this
+        // one, given the same random name - could create the same path first, and the
+        // `recursive` create then adopted their directory as this one's. A plain `mkdir`
+        // fails with `EEXIST` on a path that is already there, which is the answer the
+        // check was trying to get, only without the window.
+        try {
+          await fs.mkdir(fullPath);
+        } catch (error) {
+          if (
+            error instanceof Error &&
+            (error as NodeJS.ErrnoException).code === 'EEXIST'
+          ) {
+            continue;
+          }
+
+          throw error;
+        }
+
+        // set isInitialized to true and return
+        this.fullTempDirPath = fullPath;
+        this.isInitialized = true;
+
+        return;
+      }
+
+      // if the loop completes without finding a unique directory, throw an error
+      throw new ErrTmpDirInitializeMaxTriesExceeded();
     }
   }
 

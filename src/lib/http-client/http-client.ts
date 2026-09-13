@@ -1095,6 +1095,9 @@ export class BaseHTTPClient {
                     timeout,
                     'redirect',
                   );
+                  // The hop whose upload was given up on is torn down with the request,
+                  // as a per-attempt timeout tears one down. See `abortAttempt`.
+                  attemptResult.abortAttempt?.();
                 }
 
                 observerRequest = this._bestEffortAttemptRequestFromPending(
@@ -1372,6 +1375,15 @@ export class BaseHTTPClient {
     adapterCause?: Error;
     cancelReason?: string;
     /**
+     * Tears down the attempt that produced `adapterResponse`, as a per-attempt timeout
+     * would have: fires the attempt's own abort signal, which `NodeAdapter` answers by
+     * destroying the request and settling its upload outcome. For the redirect loop,
+     * which gives up on that attempt's upload at the settle deadline - the per-attempt
+     * timer is cleared once `send()` resolves, so nothing else would end an upload the
+     * client has already reported as timed out.
+     */
+    abortAttempt?: () => void;
+    /**
      * The request body's outcome for an attempt that *threw*, where there is no
      * adapter response to carry it. Read off the tagged error; absent when the
      * request had no body writer at all. See {@link REQUEST_BODY_SETTLED_KEY}.
@@ -1527,6 +1539,19 @@ export class BaseHTTPClient {
         }, timeout);
       }
 
+      // The settle deadline's teardown. Giving up on this attempt's upload at that
+      // deadline fails the request as a timeout, and a timeout that left the upload
+      // running was only half of one: the per-attempt timer is cleared once `send()`
+      // resolves, so a `NodeAdapter` writer parked on a slow source - given a minute by
+      // its own watchdog - went on putting bytes on a socket the caller had been told was
+      // finished, and a custom adapter that ignores `requestBodySettled` had no end at
+      // all. Fired through the attempt's own controller, which `NodeAdapter` answers by
+      // destroying the request and settling the outcome; the flag is not set, since the
+      // attempt is already classified by the time this runs.
+      const abortAttempt = (): void => {
+        timeoutController.abort();
+      };
+
       // Final signal: cancel OR timeout
       const attemptSignal = this._composeSignals(
         cancelSignal,
@@ -1648,6 +1673,14 @@ export class BaseHTTPClient {
       const onDownloadProgress = options.onDownloadProgress;
 
       let observedSentRequest: AttemptRequest = sentRequest;
+
+      // Dispatch counts as activity, so the settle wait's stall clock starts from the
+      // moment this attempt's upload could have begun rather than from a report on some
+      // earlier hop - or, for an adapter that never reports progress, from the start of
+      // the request. The wait checks the clock on entry (see
+      // `settleUploadBeforeNextDispatch`), and without this stamp a progress-less
+      // adapter's second hop was already "quiet" for the whole of the first.
+      uploadActivity.at = Date.now();
 
       try {
         const rawAdapterResponse = await this._adapter.send({
@@ -1875,6 +1908,7 @@ export class BaseHTTPClient {
                   timeout,
                   'retry',
                 );
+                abortAttempt();
               }
 
               return {
@@ -1933,6 +1967,7 @@ export class BaseHTTPClient {
           isRetriesExhausted,
           errorCode: streamErrorCode,
           adapterCause: responseCause,
+          abortAttempt,
         };
       } catch (error) {
         clearTimeout(timeoutID);
@@ -2349,6 +2384,7 @@ export class BaseHTTPClient {
                   timeout,
                   'retry',
                 );
+                abortAttempt();
               }
 
               return {
@@ -3353,7 +3389,21 @@ async function settleUploadBeforeNextDispatch(
       }, sinceMS);
     };
 
-    arm(stallMS);
+    // The clock is read on entry too. Silence before the wait began is still silence:
+    // an upload that last moved long before the early response arrived - stalled at one
+    // second, answered at twenty-five against a thirty-second bound - was given a whole
+    // further bound from here, since the first arm always slept for all of it. Every
+    // attempt stamps the clock when it dispatches, so the clock cannot be older than
+    // the attempt whose upload this waits on.
+    const quietOnEntryMS = Date.now() - lastActivityAt();
+
+    if (quietOnEntryMS >= stallMS) {
+      resolve('deadline');
+
+      return;
+    }
+
+    arm(stallMS - Math.max(0, quietOnEntryMS));
   });
 
   try {

@@ -58,3 +58,31 @@ export function readUnknownMember(source: unknown, key: PropertyKey): unknown {
 
   return readMember(source, key);
 }
+
+/**
+ * The named members of an options object, each read once through {@link readMember}.
+ *
+ * An entry point that promises never to throw reads its options before it reaches the
+ * `try` that keeps that promise, so an options object with a throwing accessor - a
+ * `Proxy`, a getter - escaped it. Reading each member here, once, into a plain object
+ * turns a refused read into the member being absent, which is the documented fallback
+ * for every option this is used on: the console reporter, the default cap, no truncation
+ * hook, the default mask. The object handed back is this function's own, so a getter
+ * that answers differently on a second read is never asked again either.
+ */
+export function snapshotMembers<T extends object, K extends keyof T>(
+  source: T | undefined,
+  keys: readonly K[],
+): { [P in K]?: T[P] } {
+  const snapshot: { [P in K]?: T[P] } = {};
+
+  if (source === null || typeof source !== 'object') {
+    return snapshot;
+  }
+
+  for (const key of keys) {
+    snapshot[key] = readMember(source, key) as T[K] | undefined;
+  }
+
+  return snapshot;
+}

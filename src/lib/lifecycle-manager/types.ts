@@ -61,7 +61,14 @@ export interface ComponentStatus {
   /** Unix timestamp (ms) when stop() completed */
   stoppedAt: number | null;
 
-  /** Last error from start/stop/message */
+  /**
+   * Last error from start/stop/message.
+   *
+   * Kept across a restart until the new run reaches `running`: while a component is
+   * `starting` again after a failure, `lastError` still names that failure, and it is
+   * cleared when the start succeeds - or by a clean stop. A reader that treats a
+   * non-null `lastError` as "failed" should read it together with `state`.
+   */
   lastError: Error | null;
 
   /** If stalled, details about why */

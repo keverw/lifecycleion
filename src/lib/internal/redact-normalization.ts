@@ -343,7 +343,29 @@ export function normalizeAlongRedactPaths(
 
         try {
           value = container[key];
-        } catch {
+        } catch (error) {
+          // Withheld, not skipped. A skip left the caller's own accessor in this parent -
+          // the bag's forwarding getter, or the copy's - for the walk and the renderer to
+          // call again, and an accessor that throws once and answers afterwards is the
+          // second-read class this pass exists to close: nothing was snapshotted, so the
+          // walk's read and the render's read were free to disagree. A path named this
+          // key, so every value beneath it was named for masking; the marker is the safe
+          // direction, exactly as it is for a copy that was refused below.
+          report(
+            new Error(
+              'container could not be read for redaction and was withheld',
+              { cause: error },
+            ),
+            key,
+          );
+
+          try {
+            defineEntry(container, key, REDACTION_FAILED_MARKER);
+          } catch {
+            // The parent is the bag or a copy this module built; see the refused-copy
+            // branch below.
+          }
+
           continue;
         }
 

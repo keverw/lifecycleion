@@ -227,6 +227,29 @@ describe('TmpDir', () => {
     await first.cleanup();
   });
 
+  test('two initialize() calls on one instance create one directory', async () => {
+    // The exclusive create closes the race between processes; two calls on one instance
+    // raced each other instead, each creating a leaf, with the loser's path overwritten
+    // and orphaned. The second call now joins the first.
+    const dir = new TmpDir({ baseDirectory: tempDir.path });
+    const spied = dir as unknown as { generateTempDirName: () => string };
+    const original = spied.generateTempDirName.bind(dir);
+    let names = 0;
+
+    spied.generateTempDirName = (): string => {
+      names++;
+
+      return original();
+    };
+
+    await Promise.all([dir.initialize(), dir.initialize(), dir.initialize()]);
+
+    expect(names).toBe(1);
+    expect((await fs.stat(dir.path)).isDirectory()).toBe(true);
+
+    await dir.cleanup();
+  });
+
   test('creates a base directory that is not there yet', async () => {
     const base = path.join(tempDir.path, 'nested', 'base');
     const dir = await createTempDir({ baseDirectory: base });

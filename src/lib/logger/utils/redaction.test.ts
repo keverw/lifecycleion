@@ -1876,3 +1876,56 @@ describe('markAllRedactionFailed', () => {
     expect(markAllRedactionFailed(undefined)).toEqual({});
   });
 });
+
+/**
+ * A container whose named member throws on the first read and answers a secret after.
+ *
+ * The pre-walk normalization reads each container along a named path once into a copy.
+ * A read that threw used to be *skipped*, leaving the caller's accessor in the copy for
+ * the walk and the renderer to call again - and an accessor that throws once and answers
+ * afterwards is exactly the second-read disagreement the pass exists to settle. It is
+ * withheld with the marker now, as a container the pass could not copy already was.
+ */
+const throwsOnceThenAnswers = (
+  key: string,
+  answer: Record<string, unknown>,
+): Record<string, unknown> => {
+  let reads = 0;
+
+  return {
+    get [key](): Record<string, unknown> {
+      reads++;
+
+      if (reads === 1) {
+        throw new Error('first read refused');
+      }
+
+      return answer;
+    },
+  };
+};
+
+describe('applyRedaction - a named member that throws once and answers afterwards', () => {
+  test('is withheld with the marker rather than read again by the walk', () => {
+    const reported: string[] = [];
+
+    const redacted = applyRedaction(
+      {
+        user: throwsOnceThenAnswers('profile', { password: 'hunter2secret' }),
+        other: 'safe',
+      },
+      ['user.profile.password'],
+      undefined,
+      (_error, kind, key) => {
+        reported.push(`${kind}:${key}`);
+      },
+    );
+
+    expect(JSON.stringify(redacted)).not.toContain('secret');
+    expect((redacted.user as Record<string, unknown>).profile).toBe(
+      REDACTION_FAILED_MARKER,
+    );
+    expect(redacted.other).toBe('safe');
+    expect(reported).toEqual(['redaction:profile']);
+  });
+});

@@ -881,10 +881,16 @@ describe('HTTPClient — basic HTTP methods', () => {
     // exists to prevent.
     let hop = 0;
 
+    const signals: AbortSignal[] = [];
+
     const adapter: HTTPAdapter = {
       getType: () => 'fetch',
-      send: (_request: AdapterRequest): Promise<AdapterResponse> => {
+      send: (request: AdapterRequest): Promise<AdapterResponse> => {
         hop++;
+
+        if (request.signal) {
+          signals.push(request.signal);
+        }
 
         return Promise.resolve({
           status: 307,
@@ -921,6 +927,12 @@ describe('HTTPClient — basic HTTP methods', () => {
       expect(response.isCancelled).toBe(false);
       // Still carried, so the caller can await the adapter's word if it ever comes.
       expect(response.requestBodySettled).toBeDefined();
+      // And the hop given up on is torn down, as a per-attempt timeout tears one down:
+      // the request has been reported as timed out, so its upload must not go on
+      // putting bytes on the wire. `NodeAdapter` answers this signal by destroying the
+      // request; a custom adapter is expected to.
+      expect(signals).toHaveLength(1);
+      expect(signals[0]?.aborted).toBe(true);
 
       // The timeout error cannot say why; this does, and names the adapter.
       expect(reports).toHaveLength(1);
@@ -938,11 +950,16 @@ describe('HTTPClient — basic HTTP methods', () => {
     // way: a `503` answered mid-upload must not have its next attempt dispatched beside
     // the first attempt's body.
     let attempts = 0;
+    const signals: AbortSignal[] = [];
 
     const adapter: HTTPAdapter = {
       getType: () => 'fetch',
-      send: (_request: AdapterRequest): Promise<AdapterResponse> => {
+      send: (request: AdapterRequest): Promise<AdapterResponse> => {
         attempts++;
+
+        if (request.signal) {
+          signals.push(request.signal);
+        }
 
         return Promise.resolve({
           status: 503,
@@ -977,6 +994,61 @@ describe('HTTPClient — basic HTTP methods', () => {
       expect(response.requestBodySettled).toBeDefined();
       expect(reports).toHaveLength(1);
       expect((reports[0]?.error as Error).message).toContain('retry');
+      // The attempt given up on is torn down with the request; see the redirect test.
+      expect(signals[0]?.aborted).toBe(true);
+    } finally {
+      globalThis.removeEventListener('error', onGlobalError);
+    }
+  });
+
+  test('silence before the wait began counts toward the stall bound', async () => {
+    // The first arm always slept for the whole bound, so an upload that had gone quiet
+    // long before the early response arrived was given a further full bound from the
+    // moment the wait began. The clock is read on entry now: a hop that answers 60ms
+    // after dispatch and never reports progress has 60ms of silence already, and the
+    // wait under a 100ms bound expires about 40ms later, not 100ms.
+    let hop = 0;
+
+    const adapter: HTTPAdapter = {
+      getType: () => 'fetch',
+      send: async (_request: AdapterRequest): Promise<AdapterResponse> => {
+        hop++;
+        await new Promise((resolve) => setTimeout(resolve, 60));
+
+        return {
+          status: 307,
+          headers: { location: '/again' },
+          body: null,
+          requestBodySettled: new Promise(() => {}),
+        };
+      },
+    };
+
+    const onGlobalError = (event: Event): void => {
+      event.preventDefault();
+    };
+
+    globalThis.addEventListener('error', onGlobalError);
+
+    try {
+      const startedAt = Date.now();
+      const response = await new HTTPClient({
+        adapter,
+        baseURL: 'http://example.test',
+        followRedirects: true,
+        timeout: 100,
+      })
+        .post('/upload')
+        .json({ a: 1 })
+        .send();
+
+      const elapsed = Date.now() - startedAt;
+
+      expect(hop).toBe(1);
+      expect(response.isTimeout).toBe(true);
+      // One bound from dispatch, not one bound from the response: 100ms, not 160ms.
+      expect(elapsed).toBeGreaterThanOrEqual(90);
+      expect(elapsed).toBeLessThan(150);
     } finally {
       globalThis.removeEventListener('error', onGlobalError);
     }

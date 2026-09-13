@@ -941,6 +941,8 @@ console.log(logger.getSinks().length); // 0
 
 ### Service Loggers
 
+Service and entity names are trimmed, and each run of control characters in them (line breaks included) becomes one space, before they reach any sink. The text sinks frame the two as `[service] [entity]` with nothing escaped, so a name carrying a newline could otherwise end the line and start a forged entry.
+
 ```typescript
 const logger = new Logger({
   sinks: [new ConsoleSink({ colors: true, typeLabels: true })],

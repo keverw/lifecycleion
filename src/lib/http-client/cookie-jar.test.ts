@@ -498,6 +498,29 @@ describe('CookieJar', () => {
   });
 
   describe('parseSetCookieHeader', () => {
+    test('a Set-Cookie value carrying CR or LF never reaches the wire', () => {
+      // `setCookie` refuses a name or value with a line break; this is the server-fed
+      // road onto the same check, which was only pinned from the programmatic side.
+      jar.parseSetCookieHeader(
+        'sid=evil\r\nInjected: 1',
+        'https://example.com',
+      );
+      jar.parseSetCookieHeader(
+        'ok=1; Path=/\r\nSet-Cookie: forged=1',
+        'https://example.com',
+      );
+
+      for (const cookie of jar.getAllCookies()) {
+        expect(cookie.name).not.toMatch(/[\r\n]/);
+        expect(cookie.value).not.toMatch(/[\r\n]/);
+      }
+
+      expect(jar.getCookieHeaderString('https://example.com/')).not.toMatch(
+        /[\r\n]/,
+      );
+      expect(jar.getCookieFor('forged', 'https://example.com')).toBeUndefined();
+    });
+
     test('parses a basic Set-Cookie header', () => {
       jar.parseSetCookieHeader(
         'session=abc; Path=/; HttpOnly',

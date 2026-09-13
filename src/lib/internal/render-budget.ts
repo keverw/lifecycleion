@@ -104,11 +104,108 @@ export function cutAt(text: string, end: number): string {
     return text.slice(0, limit);
   }
 
-  // A high surrogate immediately before the cut has its low half on the other side of it.
-  const last = text.charCodeAt(limit - 1);
-  const isSplitPair = last >= 0xd800 && last <= 0xdbff;
+  return text.slice(0, graphemeSafeCut(text, limit));
+}
 
-  return text.slice(0, isSplitPair ? limit - 1 : limit);
+/**
+ * Whether the code point is one that attaches to the character before it.
+ *
+ * Combining marks (`\p{M}`), the zero-width joiner, variation selectors, emoji skin-tone
+ * modifiers, and the tag characters a subdivision flag is spelled with. A cut that lands
+ * in front of one of these leaves the base on one side and its attachment on the other,
+ * so the text before the cut renders differently from how it was written.
+ */
+function isAttachingCodePoint(codePoint: number): boolean {
+  return (
+    codePoint === 0x200d ||
+    (codePoint >= 0xfe00 && codePoint <= 0xfe0f) ||
+    (codePoint >= 0x1f3fb && codePoint <= 0x1f3ff) ||
+    (codePoint >= 0xe0020 && codePoint <= 0xe007f) ||
+    ATTACHING_MARK.test(String.fromCodePoint(codePoint))
+  );
+}
+
+const ATTACHING_MARK = /^\p{M}$/u;
+
+/** Whether the code point is a regional indicator, half of a flag. */
+function isRegionalIndicator(codePoint: number): boolean {
+  return codePoint >= 0x1f1e6 && codePoint <= 0x1f1ff;
+}
+
+/** The index at which the code point ending at `end` begins. */
+function codePointStartBefore(text: string, end: number): number {
+  const low = text.charCodeAt(end - 1);
+
+  if (end >= 2 && low >= 0xdc00 && low <= 0xdfff) {
+    const high = text.charCodeAt(end - 2);
+
+    if (high >= 0xd800 && high <= 0xdbff) {
+      return end - 2;
+    }
+  }
+
+  return end - 1;
+}
+
+/**
+ * The nearest cut at or before `limit` that does not split a character.
+ *
+ * Steps back off a high surrogate, then off anything the character after the cut would
+ * attach to: a combining mark or variation selector left on the far side, a joiner on
+ * either side of the cut, and the first half of a flag. Bounded by the text, and only
+ * ever shorter than `limit`.
+ */
+function graphemeSafeCut(text: string, limit: number): number {
+  let cut = limit;
+
+  // A high surrogate immediately before the cut has its low half on the other side of it.
+  const last = text.charCodeAt(cut - 1);
+
+  if (last >= 0xd800 && last <= 0xdbff) {
+    cut -= 1;
+  }
+
+  while (cut > 0 && cut < text.length) {
+    const next = text.codePointAt(cut) ?? 0;
+    const previousStart = codePointStartBefore(text, cut);
+    const previous = text.codePointAt(previousStart) ?? 0;
+
+    // The character after the cut attaches to the one before it, or the one before is a
+    // joiner waiting for the one after: either way the cut is inside a character.
+    if (isAttachingCodePoint(next) || previous === 0x200d) {
+      cut = previousStart;
+
+      continue;
+    }
+
+    // Two regional indicators make one flag. Left with an odd run of them before the
+    // cut and another after it, the cut is inside a flag.
+    if (isRegionalIndicator(next) && isRegionalIndicator(previous)) {
+      let run = 0;
+      let at = cut;
+
+      while (at > 0) {
+        const start = codePointStartBefore(text, at);
+
+        if (!isRegionalIndicator(text.codePointAt(start) ?? 0)) {
+          break;
+        }
+
+        run++;
+        at = start;
+      }
+
+      if (run % 2 === 1) {
+        cut = previousStart;
+
+        continue;
+      }
+    }
+
+    break;
+  }
+
+  return cut;
 }
 
 /**

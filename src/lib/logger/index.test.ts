@@ -33,6 +33,18 @@ describe('Logger', () => {
   });
 
   describe('Basic Logging', () => {
+    test('a service or entity name cannot carry a line break into the sinks', () => {
+      // The text sinks frame these as `[service] [entity]` with nothing escaped, so a
+      // name holding a newline ended the line and started a second, forged, entry.
+      logger.service('svc\nfake').info('one');
+      logger.service('svc').entity('ent\r\n[error] forged').info('two');
+      logger.service('\t\u0000  ').info('three');
+
+      expect(arraySink.logs[0].serviceName).toBe('svc fake');
+      expect(arraySink.logs[1].entityName).toBe('ent [error] forged');
+      expect(arraySink.logs[2].serviceName).toBeUndefined();
+    });
+
     test('should log info message', () => {
       logger.info('Test info message');
 
