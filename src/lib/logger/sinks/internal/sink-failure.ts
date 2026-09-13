@@ -92,10 +92,11 @@ export interface SinkFailure {
   /**
    * The entry that failed, when the sink still has it.
    *
-   * Absent for a failure that belongs to no particular entry - a failed rotation, a queue
-   * that overflowed - and absent from `NamedPipeSink` entirely, which deliberately drops
-   * the `LogEntry` once its line is rendered so that a stalled queue does not pin the
-   * caller's params graph for the length of an outage.
+   * Absent for a failure that belongs to no particular entry - a failed rotation, a
+   * reconnect that never came back. A queue that overflowed carries the oldest entry it
+   * dropped as a sample, not every one it lost. Both `FileSink` and `NamedPipeSink` keep
+   * the entry queued alongside its rendered line and hand it over here, so a handler can
+   * write a lost line somewhere else.
    */
   entry?: LogEntry;
   /** Which attempt this was, 1-based, for a failure that is tied to an entry. */

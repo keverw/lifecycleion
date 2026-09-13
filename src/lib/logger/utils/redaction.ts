@@ -897,12 +897,17 @@ export function applyRedaction(
 
   // The same normalization, continued down the paths the caller named, so the walk and
   // the renderer agree about a nested key exactly as they already do about a top-level
-  // one. Guarded because it reads caller properties; a failure leaves the originals in
-  // place, where the walk's own guards still apply.
+  // one. Guarded because it reads caller properties. A throw here fails closed the same
+  // way the bag-level one above does: the bag may be part-normalized at that point, with
+  // an alias written under one key and not yet under its sibling, and walking that shape
+  // is the one thing this function must not do with a secret in it. Budget exhaustion
+  // inside it is not a throw; it withholds what it did not reach and lets the walk run.
   try {
     normalizeAlongRedactPaths(guarded, paths, aliases, report);
   } catch (error) {
     report(error, '<params>');
+
+    return markAllRedactionFailed(entries);
   }
 
   // Never fall through with the originals: a sensitive key still holding its own value is

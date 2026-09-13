@@ -3662,8 +3662,11 @@ export class LifecycleManager
       };
     }
 
-    // Set state to starting
+    // Set state to starting. The unexpected-stop record from the previous run is cleared
+    // with it: that flag describes a stop that already happened, and a start that reads
+    // it later would take an old failure for a new one.
     this.componentStates.set(name, 'starting');
+    this.componentUnexpectedStopHadError.delete(name);
     this.logger.entity(name).info('Starting component');
     this.lifecycleEvents.componentStarting(name);
 

@@ -12,6 +12,7 @@ import { describe, expect, test, beforeEach } from 'bun:test';
 import { Logger } from '../logger';
 import type { LoggerService } from '../logger/logger-service';
 import { ArraySink } from '../logger/sinks/array';
+import type { LogEntry } from '../logger/types';
 import { BaseComponent } from './base-component';
 import { LifecycleManager } from './lifecycle-manager';
 
@@ -309,6 +310,176 @@ describe('LifecycleManager - hostile thrown values', () => {
       expect(rejections).toEqual([]);
 
       await lifecycle.stopAllComponents();
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
+  });
+
+  /** The first log with `message`, polled for up to `deadlineMS`; `undefined` past it. */
+  async function untilLogged(
+    sink: ArraySink,
+    message: string,
+    deadlineMS: number,
+  ): Promise<LogEntry | undefined> {
+    const startedAt = Date.now();
+
+    for (;;) {
+      const found = sink.logs.find((log) => log.message === message);
+
+      if (found !== undefined || Date.now() - startedAt > deadlineMS) {
+        return found;
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+  }
+
+  /**
+   * A logger whose `entity(name).<level>(message)` throws for exactly one message, so a
+   * detached chain's *body* fails while the handler that reports the failure still works.
+   */
+  function loggerThatRefuses(
+    sink: ArraySink,
+    level: 'info' | 'warn',
+    refusedMessage: string,
+  ): Logger {
+    const refusing = new Logger({ sinks: [sink], callProcessExit: false });
+    const realService = refusing.service.bind(refusing);
+
+    refusing.service = (serviceName: string): LoggerService => {
+      const service = realService(serviceName);
+      const realEntity = service.entity.bind(service);
+
+      service.entity = (entityName: string): LoggerService => {
+        const entity = realEntity(entityName);
+        const realLog = entity[level].bind(entity);
+
+        entity[level] = (
+          message: string,
+          ...rest: unknown[]
+        ): ReturnType<LoggerService[typeof level]> => {
+          if (message === refusedMessage) {
+            throw new Error(`the logger refused: ${message}`);
+          }
+
+          return (realLog as (...args: unknown[]) => void)(message, ...rest);
+        };
+
+        return entity;
+      };
+
+      return service;
+    };
+
+    return refusing;
+  }
+
+  test('a late stop resolution that fails is logged as such, not dropped or fatal', async () => {
+    // `handleLateStopResolution` mutates state in sequence, and a throw partway leaves the
+    // component half-transitioned. The chain that runs it reports that through
+    // `'Late stop resolution failed'`; without that report the only trace was a stuck
+    // state read much later, and without the terminal `.catch` an unhandled rejection.
+    const refusing = loggerThatRefuses(
+      arraySink,
+      'info',
+      'Stalled component completed stop late, stall cleared',
+    );
+    const lifecycle = new LifecycleManager({ logger: refusing });
+
+    class SlowStop extends BaseComponent {
+      constructor() {
+        super(logger, {
+          name: 'slow',
+          shutdownGracefulTimeoutMS: 1000,
+          shutdownForceTimeoutMS: 500,
+        });
+      }
+      public start(): void {}
+      public async stop(): Promise<void> {
+        await new Promise((resolve) => setTimeout(resolve, 1500));
+      }
+    }
+
+    const rejections: unknown[] = [];
+    const onUnhandled = (reason: unknown): void => {
+      rejections.push(reason);
+    };
+
+    process.on('unhandledRejection', onUnhandled);
+
+    try {
+      await lifecycle.registerComponent(new SlowStop());
+      await lifecycle.startComponent('slow');
+
+      const result = await lifecycle.stopComponent('slow');
+
+      expect(result.code).toBe('component_shutdown_timeout');
+      expect(lifecycle.getComponentStatus('slow')?.state).toBe('stalled');
+
+      // Polled rather than slept for a fixed margin: `stop()` resolves 500ms past the
+      // graceful timeout, and a loaded CI runner can stretch that.
+      const report = await untilLogged(
+        arraySink,
+        'Late stop resolution failed',
+        3000,
+      );
+
+      expect(report?.type).toBe('warn');
+      expect((report?.params?.['error'] as Error).message).toBe(
+        'the logger refused: Stalled component completed stop late, stall cleared',
+      );
+      expect(rejections).toEqual([]);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
+  }, 5000);
+
+  test('a late startup completion whose handling fails is logged as such, not dropped or fatal', async () => {
+    // The recovery body stops a component that finished starting after the manager gave
+    // up on it. A failure there means that stop silently did not happen, which is what
+    // `'Late startup completion handling ended in a failure'` exists to say.
+    const refusing = loggerThatRefuses(
+      arraySink,
+      'warn',
+      'Component completed startup after timeout, stopping automatically',
+    );
+    const lifecycle = new LifecycleManager({ logger: refusing });
+
+    class LateStart extends BaseComponent {
+      constructor() {
+        super(logger, { name: 'late', startupTimeoutMS: 20 });
+      }
+      public async start(): Promise<void> {
+        await new Promise((resolve) => setTimeout(resolve, 80));
+      }
+      public stop(): void {}
+    }
+
+    const rejections: unknown[] = [];
+    const onUnhandled = (reason: unknown): void => {
+      rejections.push(reason);
+    };
+
+    process.on('unhandledRejection', onUnhandled);
+
+    try {
+      await lifecycle.registerComponent(new LateStart());
+
+      const result = await lifecycle.startComponent('late');
+
+      expect(result.code).toBe('component_startup_timeout');
+
+      const report = await untilLogged(
+        arraySink,
+        'Late startup completion handling ended in a failure',
+        2000,
+      );
+
+      expect(report?.type).toBe('debug');
+      expect((report?.params?.['error'] as Error).message).toBe(
+        'the logger refused: Component completed startup after timeout, stopping automatically',
+      );
+      expect(rejections).toEqual([]);
     } finally {
       process.off('unhandledRejection', onUnhandled);
     }

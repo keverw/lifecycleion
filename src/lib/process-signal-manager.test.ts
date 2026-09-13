@@ -1375,6 +1375,103 @@ describe('ProcessSignalManager', () => {
       }
     });
 
+    test('an attach() from inside the restore report does not have stdin paused under it by the detach that raised it', () => {
+      // `reportCallbackError` dispatches the global `'error'` synchronously, so a listener
+      // that answers a broken restore by attaching a fresh instance returns into the
+      // middle of `restoreStdin`. The stale `isLastInstance` read then paused stdin under
+      // the new instance, whose keypress handler was registered and silent. The pause is
+      // gated on the live set, and this is the path that pins it.
+      const wasOriginallyTTY = process.stdin.isTTY;
+      const wasOriginallyRaw = (process.stdin as any).isRaw;
+      // eslint-disable-next-line @typescript-eslint/unbound-method
+      const savedSetRawMode = process.stdin.setRawMode;
+      // eslint-disable-next-line @typescript-eslint/unbound-method
+      const savedPause = process.stdin.pause;
+      // eslint-disable-next-line @typescript-eslint/unbound-method
+      const savedResume = process.stdin.resume;
+
+      let isRaw = false;
+      let shouldFailDisable = true;
+
+      (process.stdin as any).isTTY = true;
+      Object.defineProperty(process.stdin, 'isRaw', {
+        configurable: true,
+        get: () => isRaw,
+      });
+      (process.stdin as any).setRawMode = mock((enableRaw: boolean) => {
+        if (!enableRaw && shouldFailDisable) {
+          throw new Error('tty refused');
+        }
+
+        isRaw = enableRaw;
+      });
+      const pause = mock(() => {});
+      (process.stdin as any).pause = pause;
+      (process.stdin as any).resume = mock(() => {});
+
+      let replacement: ProcessSignalManager | undefined;
+      const events: ErrorEvent[] = [];
+      const onGlobalError = (event: Event): void => {
+        events.push(event as ErrorEvent);
+        event.preventDefault();
+
+        if (
+          replacement === undefined &&
+          ((event as ErrorEvent).error as Error).message.includes(
+            'stdin raw mode restore',
+          )
+        ) {
+          replacement = new ProcessSignalManager({
+            onShutdownRequested: shutdownCallback,
+          });
+          replacement.attach();
+        }
+      };
+
+      globalThis.addEventListener('error', onGlobalError);
+
+      try {
+        resetShared();
+
+        manager = new ProcessSignalManager({
+          onShutdownRequested: shutdownCallback,
+        });
+        manager.attach();
+        manager.detach();
+
+        expect(events).toHaveLength(1);
+        expect(replacement?.getStatus().isAttached).toBe(true);
+        expect(readShared()?.attachedInstances.size).toBe(1);
+        // The whole point: stdin was left running for the instance now on it.
+        expect(pause).not.toHaveBeenCalled();
+        // And the replacement adopted the raw-mode ownership the failed restore left.
+        expect(readShared()?.rawModeEnabledByManager).toBe(true);
+        expect(
+          readShared()?.attachedInstances.has(readShared()?.rawModeOwner ?? ''),
+        ).toBe(true);
+
+        shouldFailDisable = false;
+        replacement?.detach();
+
+        expect(isRaw).toBe(false);
+        expect(pause).toHaveBeenCalledTimes(1);
+        expect(readShared()?.attachedInstances.size).toBe(0);
+        expect(events).toHaveLength(1);
+      } finally {
+        globalThis.removeEventListener('error', onGlobalError);
+        resetShared();
+        (process.stdin as any).isTTY = wasOriginallyTTY;
+        Object.defineProperty(process.stdin, 'isRaw', {
+          configurable: true,
+          writable: true,
+          value: wasOriginallyRaw,
+        });
+        (process.stdin as any).setRawMode = savedSetRawMode;
+        (process.stdin as any).pause = savedPause;
+        (process.stdin as any).resume = savedResume;
+      }
+    });
+
     test('a failed attach whose raw-mode rollback also fails reports after the shared state is repaired', () => {
       // `setRawMode(true)` can throw after actually enabling raw mode, and the rollback's
       // own `setRawMode(false)` can fail too. The report runs a global `'error'` listener

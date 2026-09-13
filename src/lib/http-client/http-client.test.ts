@@ -869,6 +869,59 @@ describe('HTTPClient — basic HTTP methods', () => {
     expect(builder.error?.cancelReason).toBe('gave up waiting');
   });
 
+  test('an adapter whose requestBodySettled never settles holds the redirect until the caller cancels', async () => {
+    // The contract, pinned: there is no client-side backstop on this wait. `NodeAdapter`
+    // bounds its own promise through the upload stall watchdog, and a custom adapter is
+    // documented as having to bring its own bound. A promise that never settles is that
+    // adapter's bug, and the only way out of it is the caller's cancel - which must still
+    // work, so the wait can never be worse than an ordinary hung request.
+    const controller = new AbortController();
+    let hop = 0;
+
+    const adapter: HTTPAdapter = {
+      getType: () => 'node',
+      send: (_request: AdapterRequest): Promise<AdapterResponse> => {
+        hop++;
+
+        return Promise.resolve({
+          status: 307,
+          headers: { location: '/again' },
+          body: null,
+          requestBodySettled: new Promise(() => {}),
+        });
+      },
+    };
+
+    const pending = new HTTPClient({
+      adapter,
+      baseURL: 'http://example.test',
+      followRedirects: true,
+    })
+      .post('/upload')
+      .json({ a: 1 })
+      .signal(controller.signal)
+      .send();
+
+    const stillWaiting = Symbol('still waiting');
+    const outcome = await Promise.race([
+      pending,
+      new Promise<typeof stillWaiting>((resolve) => {
+        setTimeout(() => resolve(stillWaiting), 200);
+      }),
+    ]);
+
+    // Neither timed out on its own nor moved on to the second hop.
+    expect(outcome).toBe(stillWaiting);
+    expect(hop).toBe(1);
+
+    controller.abort('adapter never settled its upload');
+
+    const response = await pending;
+
+    expect(response.isCancelled).toBe(true);
+    expect(hop).toBe(1);
+  });
+
   test('a 307 that resends the body reports the resent upload, not the first', async () => {
     // The latest hop that had a body is the answer: a `307` puts the body on the wire
     // again, and its outcome is the one behind the final response.

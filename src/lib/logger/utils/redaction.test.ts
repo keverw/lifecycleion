@@ -892,6 +892,36 @@ describe('applyRedaction - ambiguous dotted keys', () => {
       other: 'safe',
     });
   });
+
+  test('a path the grammar refuses keeps only its literal reading, and says so', () => {
+    // `user.` and `user[` are typos for `user.password`, and neither can be read as a
+    // nested path. The nested secret is *not* masked - a config error is the caller's to
+    // fix, and blanking every line over one bad entry would be the worse outcome - but the
+    // report is mandatory and names the entry as written, so the miss is never silent.
+    for (const entry of ['user.', 'user[', 'user[password']) {
+      const reported: { key: string; message: string }[] = [];
+
+      const result = applyRedaction(
+        { user: { password: 'hunter2' } },
+        [entry],
+        undefined,
+        (error, _kind, key) => {
+          reported.push({ key, message: error.message });
+        },
+      );
+
+      expect(reported).toEqual([
+        {
+          key: entry,
+          message:
+            'redaction path could not be parsed; only its literal reading is used',
+        },
+      ]);
+      expect((result['user'] as Record<string, unknown>)['password']).toBe(
+        'hunter2',
+      );
+    }
+  });
 });
 
 describe('applyRedaction - containers keep their shape', () => {

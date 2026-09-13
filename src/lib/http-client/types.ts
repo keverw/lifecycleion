@@ -196,6 +196,13 @@ export interface AdapterResponse {
    * Nothing here affects `isFailed`, `isNetworkError`, retries, or the status,
    * and every such failure is still reported on the global `'error'` channel
    * whether or not anyone awaits this.
+   *
+   * An adapter that sets this must settle it in bounded time. `HTTPClient` waits on
+   * it before the next redirect hop and before a retry, so that one body is not
+   * written twice at once; the only other way out of that wait is the caller's
+   * cancel signal. A promise that never settles holds a followed `307`/`308`, or a
+   * retry, until the caller aborts. `NodeAdapter` bounds its own through the
+   * upload stall watchdog; a custom adapter has to bring its own bound.
    */
   requestBodySettled?: Promise<Error | undefined>;
 }

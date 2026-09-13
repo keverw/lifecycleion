@@ -2330,6 +2330,56 @@ describe('LifecycleManager - Registration & Individual Lifecycle', () => {
       expect(stoppedEvents[0].status?.state).toBe('stopped');
     });
 
+    test("a new start clears the record of the previous run's unexpected stop", async () => {
+      // The flag describes a stop that already happened, and `startComponent`'s
+      // overlapping-failure rule reads it to decide whose error the caller is told about.
+      // Left set across a restart it is an old crash answering for a new run, so it is
+      // cleared with the state - the same reset the register, unregister and forced-stop
+      // paths already do. Asserted on the map directly: no public reading of it survives
+      // the restart, which is exactly the point. The rejection below is the shape that
+      // would consult it, and it must come back as its own failure.
+      const lifecycle = new LifecycleManager({ logger });
+
+      let reportFn!: (err?: Error) => boolean;
+      let starts = 0;
+
+      class CrashThenRejectComponent extends BaseComponent {
+        public async start(): Promise<void> {
+          starts++;
+          reportFn = (err?: Error) => this.reportUnexpectedStop(err);
+
+          if (starts === 2) {
+            await sleep(10);
+            throw new Error('start rejected on restart');
+          }
+        }
+        public stop(): void {}
+      }
+
+      await lifecycle.registerComponent(
+        new CrashThenRejectComponent(logger, { name: 'restart' }),
+      );
+      await lifecycle.startComponent('restart');
+
+      expect(reportFn(new Error('crashed the first time'))).toBe(true);
+      expect(lifecycle.getComponentStatus('restart')?.state).toBe('stopped');
+
+      const flags = (
+        lifecycle as unknown as {
+          componentUnexpectedStopHadError: Map<string, boolean>;
+        }
+      ).componentUnexpectedStopHadError;
+
+      expect(flags.get('restart')).toBe(true);
+
+      const result = await lifecycle.startComponent('restart');
+
+      expect(flags.has('restart')).toBe(false);
+      expect(result.success).toBe(false);
+      expect(result.code).toBe('unknown_error');
+      expect(result.reason).toBe('start rejected on restart');
+    });
+
     test('startComponent fails if component stops unexpectedly before start() completes', async () => {
       const lifecycle = new LifecycleManager({ logger });
 
