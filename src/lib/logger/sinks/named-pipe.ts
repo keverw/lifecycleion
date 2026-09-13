@@ -1378,7 +1378,7 @@ export class NamedPipeSink implements LogSink {
       // Initialized means *open*, not merely constructed. Until this fires there is
       // nowhere to put a line that Node would not buffer without limit, so entries wait
       // in this sink's own queue, under its own cap, where `getHealth()` can see them.
-      stream.on('open', () => {
+      stream.on('open', (fd: number) => {
         // Only the stream this sink is still waiting on may be promoted. An open that
         // completes after `reconnect()` abandoned it belongs to nothing, and installing it
         // would replace a live connection with one nobody is holding.
@@ -1406,6 +1406,46 @@ export class NamedPipeSink implements LogSink {
           } catch {
             // Nothing further to try for a stream nothing is using.
           }
+
+          return;
+        }
+
+        // Asked of the descriptor this stream actually holds, not of the path. The `stat`
+        // and the probe above both answered for the path as it was a moment ago, and
+        // `createWriteStream` opens it again by name: a path swapped in that window - the
+        // FIFO replaced by a regular file, or by a symlink to one - passed the `not_a_pipe`
+        // check and then had every log line appended to whatever now sat there. `fstat`
+        // on the open descriptor cannot be raced the same way; what it describes is what
+        // the writes go to. Synchronous because it is one syscall on an fd already open,
+        // and an `await` here would reopen the promotion race this handler closes.
+        // Refused on the terms the path check refuses on: reported once per outage under
+        // the same kind, and retried, so a FIFO put back is picked up.
+        let isFIFO = false;
+
+        try {
+          isFIFO = fs.fstatSync(fd).isFIFO();
+        } catch {
+          // Treated as not a pipe: a descriptor that cannot be described is not one to
+          // trust with the log.
+        }
+
+        if (!isFIFO) {
+          this.pendingStream = undefined;
+          this.pendingStreamSince = undefined;
+
+          try {
+            stream.destroy();
+          } catch {
+            // Nothing further to try for a stream this sink refuses to use.
+          }
+
+          this.reportOpenFailure(
+            'not_a_pipe',
+            `${this.pipePath} was not a named pipe (FIFO) when opened`,
+            undefined,
+          );
+
+          this.scheduleReopen(REOPEN_COOLDOWN_MS);
 
           return;
         }
@@ -1643,9 +1683,12 @@ export class NamedPipeSink implements LogSink {
    * write that did not land is not the same as a line the caller did not want. It goes
    * back on the queue and out when the pipe is next usable, up to `maxRetries`.
    *
-   * Re-queued at the **back**, which is the same trade `FileSink` makes: it costs
+   * Re-queued at the **back**, which is the opposite of `FileSink`'s front: it costs
    * ordering against a failing entry blocking everything behind it, and during an outage
-   * nothing is being written in order anyway.
+   * nothing is being written in order anyway. Under `maxQueueSize` the two also differ in
+   * what a full queue evicts: `enforceQueueLimit` drops the oldest, so here a retried
+   * entry survives at the tail while a newer line that never failed is the one lost,
+   * where `FileSink`'s retried line is the oldest and goes first.
    *
    * An entry that has used up its attempts is counted as a drop rather than vanishing,
    * so `getHealth().droppedEntries` means "lines this sink did not deliver" whatever the

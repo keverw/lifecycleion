@@ -119,6 +119,8 @@ console.log(displayName); // Outputs: "Alice - USR-12345"
 
 More precisely, the fallback is used when any intermediate segment cannot be traversed, or when the final resolved value is `null` or `undefined`. Final values like `false`, `0`, and `''` are rendered normally. Supported path syntax is dot notation, numeric indexes, and quoted bracket keys. Wildcards are not supported.
 
+An unquoted segment may hold Unicode letters, digits, and marks plus `_`, `$`, `@`, and `-`, so `{{user.password-hash}}` and `{{user.@id}}` resolve without quoting. Braces holding anything else - a space, a comma, `!` - are not a path and are left exactly as written. Note the consequence: a hyphenated phrase such as `{{opt-in}}` or `{{2024-01-01}}` _is_ a path, resolves to nothing, and renders the fallback. Escape the braces to render one literally. Substituted values are never re-scanned, so a value that contains such text survives intact.
+
 ### Escaping Brackets
 
 Prevent placeholders from being replaced by escaping them:

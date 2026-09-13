@@ -160,6 +160,72 @@ describe('LifecycleManager - hostile thrown values', () => {
     expect(result.code).not.toBe('component_unexpected_stop');
   });
 
+  test('a logger that throws during a signal-driven shutdown is not fatal', async () => {
+    // The signal handler starts `stopAllComponentsInternal` and lets it float, and that
+    // method is `try`/`finally` with no `catch`. A logger that threw while the shutdown
+    // was being logged - the caller's own object, so their guarantee, not this file's -
+    // rejected the floating promise with nothing attached: an unhandled rejection on
+    // `SIGTERM`, fatal under Node's default, before any component was stopped.
+    const throwingLogger = new Logger({
+      sinks: [arraySink],
+      callProcessExit: false,
+    });
+
+    const realService = throwingLogger.service.bind(throwingLogger);
+
+    throwingLogger.service = (serviceName: string): LoggerService => {
+      const service = realService(serviceName);
+      const realInfo = service.info.bind(service);
+
+      service.info = (...args: Parameters<typeof service.info>) => {
+        if (args[0] === 'Stopping all components') {
+          throw new Error('the logger itself is broken');
+        }
+
+        return realInfo(...args);
+      };
+
+      return service;
+    };
+
+    const lifecycle = new LifecycleManager({ logger: throwingLogger });
+
+    const rejections: unknown[] = [];
+    const onUnhandled = (reason: unknown): void => {
+      rejections.push(reason);
+    };
+
+    const reports: unknown[] = [];
+    const onError = (event: Event): void => {
+      reports.push((event as ErrorEvent).error);
+      event.preventDefault();
+    };
+
+    process.on('unhandledRejection', onUnhandled);
+    globalThis.addEventListener('error', onError);
+
+    try {
+      // The signal handler's own entry point, without raising a real signal.
+      (
+        lifecycle as unknown as {
+          handleShutdownRequest: (method: 'SIGTERM') => void;
+        }
+      ).handleShutdownRequest('SIGTERM');
+
+      await new Promise((resolve) => setTimeout(resolve, 100));
+
+      expect(rejections).toEqual([]);
+      expect(reports.length).toBe(1);
+      expect((reports[0] as Error).message).toContain('shutdown after SIGTERM');
+      expect(((reports[0] as Error).cause as Error).message).toBe(
+        'the logger itself is broken',
+      );
+    } finally {
+      globalThis.removeEventListener('error', onError);
+      process.off('unhandledRejection', onUnhandled);
+    }
+  });
+
   test('a logger that throws while reporting a late failure is not fatal', async () => {
     // Seven detached `Promise.resolve(x).catch(...)` chains had their previously-empty
     // handler bodies changed to call `this.logger.entity(name).debug/warn(...)`. Nothing

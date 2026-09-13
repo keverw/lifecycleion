@@ -5,6 +5,7 @@ import {
   ErrTmpDirCleanupFailedNotEmpty,
   ErrTmpDirConfigErrorBaseDirectory,
   ErrTmpDirConfigErrorMaxTries,
+  ErrTmpDirConfigErrorNamePart,
   ErrTmpDirInitializeMaxTriesExceeded,
   ErrTmpDirNotInitialized,
   ErrTmpDirWasCleanedUp,
@@ -39,6 +40,30 @@ describe('TmpDir', () => {
     expect(parts[0]).toBe('tmp');
     expect(parts[1]).toBe(process.pid.toString());
     expect(parts[2].length).toBe(12);
+  });
+
+  test('refuses a prefix or postfix that could leave baseDirectory', () => {
+    // `path.join(baseDirectory, '../escape-<pid>-<random>')` normalizes to a sibling of
+    // `baseDirectory`, and `initialize()` created it there - with `unsafeCleanup`, the
+    // later cleanup was a recursive delete outside the one directory this class promises
+    // to stay in. Refused at construction, as `baseDirectory` is.
+    for (const part of ['../escape', 'a/b', 'a\\b', 'a\0b', 'a\nb']) {
+      expect(() => new TmpDir({ prefix: part })).toThrow(
+        ErrTmpDirConfigErrorNamePart,
+      );
+      expect(() => new TmpDir({ postfix: part })).toThrow(
+        ErrTmpDirConfigErrorNamePart,
+      );
+    }
+
+    // `..` alone is only ever joined with `-` and the pid, never a segment of its own.
+    expect(() => new TmpDir({ prefix: '..', postfix: '..' })).not.toThrow();
+
+    try {
+      new TmpDir({ postfix: 'a/b' });
+    } catch (error) {
+      expect((error as ErrTmpDirConfigErrorNamePart).option).toBe('postfix');
+    }
   });
 
   test('should create a temporary directory with the specified prefix and postfix', async () => {

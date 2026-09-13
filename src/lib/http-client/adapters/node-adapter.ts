@@ -569,11 +569,40 @@ export class NodeAdapter implements HTTPAdapter {
             // reached had made no progress for a full grace window, so "stalled after the
             // response arrived" is the failure worth reporting, and the alternative -
             // waiting for a writer that may never return - is the hang this closes.
-            settleBodyOutcome(
-              new Error(
-                'Request body upload stalled after the response arrived',
-              ),
+            const stalled = new Error(
+              'Request body upload stalled after the response arrived',
             );
+
+            settleBodyOutcome(stalled);
+
+            // On the host's `'error'` channel too, as `reportWriteErrorAfterResponse`
+            // puts every other late upload failure there: the docs promise that a
+            // failure after the response is reported whether or not anyone awaits
+            // `requestBodySettled`, and this one - the watchdog cutting an upload short
+            // seconds after a clean `2xx` was read - is the example they give. It was the
+            // one late failure that settled the promise and said nothing else, so a
+            // caller who never awaited it heard nothing. Rendered for the console rung
+            // for the reason given there. After the settle, so a report that throws
+            // cannot leave the caller waiting; before the destroy, so a writer that
+            // notices the teardown and reports its own `EPIPE` finds the one-shot
+            // already taken and does not put a second line on the channel for the same
+            // upload. The one-shot is honoured in the other direction too: a write
+            // failure reported from the request's `'error'` handler settles the outcome
+            // but leaves `isWritingBody` set on purpose (see `settleBodyOutcome`), and
+            // hands the request to a grace deadline of its own rather than destroying
+            // it, so this tick still runs and would otherwise say "stalled" over an
+            // upload already reported as reset. The settle and the destroy still happen
+            // here: the first is a no-op the second time, the second is the teardown
+            // that deadline was going to do anyway.
+            if (!didReportWriteErrorAfterResponse) {
+              didReportWriteErrorAfterResponse = true;
+
+              try {
+                reportToHost(stalled, () => describeError(stalled));
+              } catch {
+                // Nothing left to report with; the outcome is already settled.
+              }
+            }
 
             // Quietly, because this one runs from a timer. Every other `req.destroy()`
             // here is inside the request's own promise chain, where a throw is rejected

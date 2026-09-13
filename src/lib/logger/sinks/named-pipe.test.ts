@@ -292,6 +292,61 @@ describe('NamedPipeSink', () => {
     await sink.close();
   });
 
+  test('refuses a path swapped for a regular file between the probe and the open', async () => {
+    // The `stat` and the probe answer for the path as it was; `createWriteStream` opens
+    // it again by name. A FIFO replaced by a regular file in that window passed the
+    // `not_a_pipe` check and then took every line as an append to an ordinary file. The
+    // check now runs on the descriptor the stream actually opened. The swap is
+    // simulated by pointing the open at a regular file after the probe has passed.
+    const pipePath = `${tmpDir.path}/swapped.pipe`;
+    const filePath = `${tmpDir.path}/swapped-in.txt`;
+    await createNamedPipe(pipePath);
+    await fsPromises.writeFile(filePath, '');
+
+    const reader = startPipeReader(pipePath);
+    const errors: SinkFailure[] = [];
+
+    const realCreate = fs.createWriteStream.bind(fs);
+    const createSpy = spyOn(fs, 'createWriteStream').mockImplementation(
+      (
+        target: fs.PathLike,
+        options?: Parameters<typeof fs.createWriteStream>[1],
+      ): fs.WriteStream =>
+        realCreate(target === pipePath ? filePath : target, options),
+    );
+
+    const sink = new NamedPipeSink({
+      pipePath,
+      onError: (failure) => {
+        errors.push(failure);
+      },
+    });
+
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 300));
+
+      expect(sink.getHealth().isInitialized).toBe(false);
+      expect(errors.map((failure) => failure.kind)).toContain(
+        'not_a_pipe' satisfies SinkFailureKind,
+      );
+
+      sink.write({
+        timestamp: Date.now(),
+        type: 'info',
+        template: 'must not land in the file',
+        message: 'must not land in the file',
+      });
+
+      await new Promise((resolve) => setTimeout(resolve, 100));
+
+      expect(await fsPromises.readFile(filePath, 'utf8')).toBe('');
+    } finally {
+      createSpy.mockRestore();
+      await sink.close();
+      reader.stop();
+    }
+  });
+
   test('should queue writes before initialization', async () => {
     const pipePath = `${tmpDir.path}/queue-test.pipe`;
     await createNamedPipe(pipePath);

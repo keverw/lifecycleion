@@ -359,6 +359,17 @@ export class CookieJar {
    * cookies that were there before. Only a payload that cannot be read at all leaves the
    * jar untouched. Snapshot with `toJSON()` first if a short restore should be rolled back.
    *
+   * A cookie whose `expires` cannot be read as a date is refused the same way a cookie
+   * with a bad domain is: left out of the jar and out of the count. It used to be
+   * restored with `new Date('garbage')` - an `Invalid Date`, which is truthy, so
+   * `isExpired` compared `now` against `NaN`, found it never greater, and the cookie
+   * was sent for the life of the jar and never purged. One corrupt date in a persisted
+   * jar made an immortal cookie. Refused rather than restored as a session cookie,
+   * because a cookie that was persisted with an expiry was not a session cookie, and
+   * the header parser drops an unreadable `Expires` attribute for the same reason.
+   * `null` - what `JSON.stringify` writes for an `Invalid Date` - and `undefined` mean
+   * no expiry, as they do on a live cookie.
+   *
    * @returns How many cookies were restored. Compare against `data.cookies.length` to learn
    *          whether any were refused.
    * @throws {TypeError} When `data.cookies` is not an array or holds a non-object. The
@@ -371,7 +382,9 @@ export class CookieJar {
       throw new TypeError('CookieJar.fromJSON: data.cookies must be an array');
     }
 
-    const prepared: Cookie[] = cookies.map((entry: unknown, index) => {
+    const prepared: Cookie[] = [];
+
+    for (const [index, entry] of (cookies as unknown[]).entries()) {
       if (entry === null || typeof entry !== 'object') {
         throw new TypeError(
           `CookieJar.fromJSON: data.cookies[${String(index)}] is not a cookie`,
@@ -379,13 +392,26 @@ export class CookieJar {
       }
 
       const cookie: Cookie = { ...(entry as Cookie) };
+      const rawExpires: unknown = cookie.expires;
 
-      if (cookie.expires && !(cookie.expires instanceof Date)) {
-        cookie.expires = new Date(cookie.expires);
+      if (rawExpires === undefined || rawExpires === null) {
+        delete cookie.expires;
+      } else {
+        const expires =
+          rawExpires instanceof Date
+            ? rawExpires
+            : new Date(rawExpires as string | number);
+
+        if (Number.isNaN(expires.getTime())) {
+          // Refused: see above.
+          continue;
+        }
+
+        cookie.expires = expires;
       }
 
-      return cookie;
-    });
+      prepared.push(cookie);
+    }
 
     this.buckets.clear();
 

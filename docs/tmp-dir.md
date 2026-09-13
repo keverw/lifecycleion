@@ -114,8 +114,8 @@ Options object accepted by `new TmpDir(options)` and `createTempDir(options)`.
 | `unsafeCleanup` | `boolean` | `false`       | Allow deleting a non-empty directory during cleanup                                                        |
 | `baseDirectory` | `string`  | `os.tmpdir()` | Absolute path in which to create the temp dir                                                              |
 | `maxTries`      | `number`  | `3`           | Maximum attempts to find a unique directory name. Values are floored to an integer and must be at least 1. |
-| `prefix`        | `string`  | `'tmp'`       | Prepended to the directory name (separator `-` is added automatically)                                     |
-| `postfix`       | `string`  | `''`          | Appended to the directory name (separator `-` is added automatically)                                      |
+| `prefix`        | `string`  | `'tmp'`       | Prepended to the directory name (separator `-` is added automatically). No `/`, `\`, or control characters |
+| `postfix`       | `string`  | `''`          | Appended to the directory name (separator `-` is added automatically). No `/`, `\`, or control characters  |
 
 Directory names follow the pattern: `<prefix>-<pid>-<random12chars>[-<postfix>]`
 
@@ -123,7 +123,8 @@ Notes:
 
 - `baseDirectory` is trimmed before validation and must be an absolute path.
 - `random12chars` uses upper/lowercase letters and digits.
-- Unknown option keys and invalid option value types are ignored. Invalid `baseDirectory` or `maxTries` values throw a configuration error.
+- Unknown option keys and invalid option value types are ignored. Invalid `baseDirectory`, `maxTries`, `prefix`, or `postfix` values throw a configuration error.
+- `prefix` and `postfix` are refused if they carry a path separator or a control character, so the directory always sits directly inside `baseDirectory`. A `prefix` of `'../escape'` used to create, and with `unsafeCleanup` delete, a directory outside it.
 
 ### Error Classes
 
@@ -133,6 +134,7 @@ Notes:
 | `ErrTmpDirWasCleanedUp`               | Reading `.path` after successful `cleanup()`                                                      |
 | `ErrTmpDirConfigErrorBaseDirectory`   | `baseDirectory` is not an absolute path                                                           |
 | `ErrTmpDirConfigErrorMaxTries`        | `maxTries` floors to a value that is not a positive integer (e.g. `0`, negative, `Infinity`)      |
+| `ErrTmpDirConfigErrorNamePart`        | `prefix` or `postfix` contains a path separator or control character. `option` names which one    |
 | `ErrTmpDirInitializeMaxTriesExceeded` | A unique directory could not be created within `maxTries` attempts                                |
 | `ErrTmpDirCleanupFailedNotEmpty`      | Cleanup encountered a non-empty directory while `unsafeCleanup` is `false`                        |
 | `ErrTmpDirCleanupUnexpectedError`     | Any other cleanup filesystem error. Original error is available on `additionalInfo.originalError` |

@@ -1168,6 +1168,62 @@ describe('CookieJar', () => {
       expect(new CookieJar().fromJSON({ cookies: [] })).toBe(0);
     });
 
+    test('refuses a cookie whose expires cannot be read as a date', () => {
+      // `new Date('garbage')` is an `Invalid Date`: truthy, with a `getTime()` of `NaN`.
+      // `isExpired` compared `now > NaN`, found it never true, and the cookie was sent
+      // for the life of the jar and never purged - one corrupt date in a persisted jar
+      // made an immortal cookie.
+      const base = {
+        value: 'x',
+        domain: 'example.com',
+        path: '/',
+        createdAt: Date.now(),
+      };
+
+      const restored = jar.fromJSON({
+        cookies: [
+          { ...base, name: 'garbage', expires: 'not-a-date' },
+          { ...base, name: 'invalid-date', expires: new Date('nope') },
+          { ...base, name: 'kept', expires: new Date(Date.now() + 10_000) },
+        ],
+      } as unknown as Parameters<CookieJar['fromJSON']>[0]);
+
+      expect(restored).toBe(1);
+      expect(jar.getCookieFor('garbage', 'https://example.com')).toBeUndefined();
+      expect(jar.getCookieFor('invalid-date', 'https://example.com')).toBeUndefined();
+      expect(jar.getCookieFor('kept', 'https://example.com')?.value).toBe('x');
+      expect(jar.clearExpiredCookies()).toBe(0);
+    });
+
+    test('reads a null or absent expires as no expiry and a number as epoch milliseconds', () => {
+      // `JSON.stringify` writes `null` for an `Invalid Date`, and `0` was skipped by the
+      // old truthiness check and left in the jar as a number typed as a `Date`.
+      const base = {
+        value: 'x',
+        domain: 'example.com',
+        path: '/',
+        createdAt: Date.now(),
+      };
+
+      const restored = jar.fromJSON({
+        cookies: [
+          { ...base, name: 'nulled', expires: null },
+          { ...base, name: 'absent' },
+          { ...base, name: 'epoch', expires: 0 },
+        ],
+      } as unknown as Parameters<CookieJar['fromJSON']>[0]);
+
+      expect(restored).toBe(3);
+
+      const nulled = jar.getCookieFor('nulled', 'https://example.com');
+      expect(nulled).toBeDefined();
+      expect('expires' in (nulled ?? {})).toBe(false);
+      expect(jar.getCookieFor('absent', 'https://example.com')).toBeDefined();
+      // 1970 is in the past, so the cookie is expired rather than immortal.
+      expect(jar.getCookieFor('epoch', 'https://example.com')).toBeUndefined();
+      expect(jar.clearExpiredCookies()).toBe(1);
+    });
+
     test('re-hydrates Date objects from JSON strings', () => {
       const expires = new Date(Date.now() + 10_000);
       jar.setCookie({

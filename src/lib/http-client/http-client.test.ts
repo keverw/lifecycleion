@@ -4696,6 +4696,203 @@ describe('HTTPClient — builder state', () => {
     expect(await res.requestBodySettled).toBe(uploadFailure);
   });
 
+  test("a retry waits for the previous attempt's upload to settle first", async () => {
+    // The redirect loop waits on `requestBodySettled` before the next hop; the retry
+    // loop did not. `NodeAdapter.send()` resolves when the response is consumed, so an
+    // early `503` to a bodied `PUT` arrives with the writer still running, the backoff
+    // elapsed, and attempt two was dispatched beside attempt one's upload - the same
+    // double-send the redirect wait exists to prevent.
+    let settledAt = 0;
+    let secondAttemptStartedAt = 0;
+    let attempt = 0;
+
+    const adapter: HTTPAdapter = {
+      getType: () => 'node',
+      send: (_request: AdapterRequest): Promise<AdapterResponse> => {
+        attempt++;
+
+        if (attempt === 1) {
+          return Promise.resolve({
+            status: 503,
+            headers: {},
+            body: null,
+            requestBodySettled: new Promise((resolve) => {
+              setTimeout(() => {
+                settledAt = Date.now();
+                resolve(undefined);
+              }, 80);
+            }),
+          });
+        }
+
+        secondAttemptStartedAt = Date.now();
+
+        return Promise.resolve({ status: 200, headers: {}, body: null });
+      },
+    };
+
+    const response = await new HTTPClient({ adapter })
+      .put('https://example.com/upload')
+      .json({ a: 1 })
+      .retryPolicy({ strategy: 'fixed', maxRetryAttempts: 2, delayMS: 10 })
+      .send();
+
+    expect(response.status).toBe(200);
+    expect(attempt).toBe(2);
+    expect(settledAt).toBeGreaterThan(0);
+    expect(secondAttemptStartedAt).toBeGreaterThanOrEqual(settledAt);
+  });
+
+  test('a cancel during the retry upload wait is not held for the upload', async () => {
+    const controller = new AbortController();
+    let attempt = 0;
+
+    const adapter: HTTPAdapter = {
+      getType: () => 'node',
+      send: (_request: AdapterRequest): Promise<AdapterResponse> => {
+        attempt++;
+
+        return Promise.resolve({
+          status: 503,
+          headers: {},
+          body: null,
+          // Never settles: the wait must end on the cancel alone.
+          requestBodySettled: new Promise(() => {}),
+        });
+      },
+    };
+
+    const client = new HTTPClient({ adapter });
+    const builder = client
+      .put('https://example.com/upload')
+      .json({ a: 1 })
+      .signal(controller.signal)
+      .retryPolicy({ strategy: 'fixed', maxRetryAttempts: 2, delayMS: 10 })
+      .onAttemptEnd((e) => {
+        if (e.willRetry) {
+          // After the backoff, during the upload wait.
+          setTimeout(() => controller.abort('gave up'), 30);
+        }
+      });
+
+    const start = Date.now();
+    const res = await builder.send();
+
+    expect(res.isCancelled).toBe(true);
+    expect(builder.error?.cancelReason).toBe('gave up');
+    expect(attempt).toBe(1);
+    expect(Date.now() - start).toBeLessThan(2000);
+    // Carried off the response the attempt did get, as the cancel-during-delay exit
+    // carries it.
+    expect(res.requestBodySettled).toBeDefined();
+  });
+
+  test('a retry-phase interceptor cancel carries the previous upload outcome', async () => {
+    // The interceptor runs at the top of the next attempt, where the previous
+    // attempt's response was already out of scope, so its exit carried no upload
+    // outcome: an early-acked `503` whose upload the adapter tore down reported the
+    // documented "the body went out in full".
+    const uploadFailure = new Error('upload torn down');
+
+    const adapter: HTTPAdapter = {
+      getType: () => 'node',
+      send: (_request: AdapterRequest): Promise<AdapterResponse> =>
+        Promise.resolve({
+          status: 503,
+          headers: {},
+          body: null,
+          requestBodySettled: Promise.resolve(uploadFailure),
+        }),
+    };
+
+    const client = new HTTPClient({ adapter });
+
+    client.addRequestInterceptor(
+      () => ({ cancel: true as const, reason: 'no more retries' }),
+      { phases: ['retry'] },
+    );
+
+    const res = await client
+      .put('https://example.com/upload')
+      .json({ a: 1 })
+      .retryPolicy({ strategy: 'fixed', maxRetryAttempts: 3, delayMS: 10 })
+      .send();
+
+    expect(res.isCancelled).toBe(true);
+    expect(res.requestBodySettled).toBeDefined();
+    expect(await res.requestBodySettled).toBe(uploadFailure);
+  });
+
+  test('a retry-phase interceptor throw carries the previous upload outcome', async () => {
+    const uploadFailure = new Error('upload torn down');
+
+    const adapter: HTTPAdapter = {
+      getType: () => 'node',
+      send: (_request: AdapterRequest): Promise<AdapterResponse> =>
+        Promise.resolve({
+          status: 503,
+          headers: {},
+          body: null,
+          requestBodySettled: Promise.resolve(uploadFailure),
+        }),
+    };
+
+    const client = new HTTPClient({ adapter });
+
+    client.addRequestInterceptor(
+      () => {
+        throw new Error('retry interceptor failed');
+      },
+      { phases: ['retry'] },
+    );
+
+    const res = await client
+      .put('https://example.com/upload')
+      .json({ a: 1 })
+      .retryPolicy({ strategy: 'fixed', maxRetryAttempts: 3, delayMS: 10 })
+      .send();
+
+    expect(res.isFailed).toBe(true);
+    expect(res.requestBodySettled).toBeDefined();
+    expect(await res.requestBodySettled).toBe(uploadFailure);
+  });
+
+  test('a response with no upload outcome has no requestBodySettled property at all', async () => {
+    // Absence is the documented signal for "no adapter reported an upload outcome". The
+    // buffered, streamed, and failure branches of `_buildResponse` assigned the field
+    // unconditionally, so a bodiless `GET` carried an own property holding `undefined`:
+    // `'requestBodySettled' in response` said an outcome was reported where none was.
+    const adapter: HTTPAdapter = {
+      getType: () => 'node',
+      send: (_request: AdapterRequest): Promise<AdapterResponse> =>
+        Promise.resolve({
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+          body: new TextEncoder().encode('{"ok":true}'),
+        }),
+    };
+
+    const ok = await new HTTPClient({ adapter })
+      .get('https://example.com/plain')
+      .send();
+
+    expect(ok.status).toBe(200);
+    expect('requestBodySettled' in ok).toBe(false);
+
+    const failing: HTTPAdapter = {
+      getType: () => 'node',
+      send: (_request: AdapterRequest): Promise<AdapterResponse> =>
+        Promise.resolve({ status: 0, headers: {}, body: null }),
+    };
+
+    const failed = await new HTTPClient({ adapter: failing })
+      .get('https://example.com/down')
+      .send();
+
+    expect(failed.isFailed).toBe(true);
+    expect('requestBodySettled' in failed).toBe(false);
+  });
+
   test('cancel after retry delay begins resolves via the abort listener', async () => {
     const adapter: HTTPAdapter = {
       getType: () => 'mock',

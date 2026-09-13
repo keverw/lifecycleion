@@ -91,7 +91,24 @@ function normalizeParamsBag(
   // recognized as the node it is already inside.
   aliases.set(copy, params);
 
+  // Bounded as every nested container's copy is, and for the same reason: this runs
+  // before the walk the cap exists to bound, and reads every value where the nested copy
+  // only forwards to them. A root bag with a million keys - a request body spread into
+  // `params`, or a `Proxy` whose `ownKeys` trap invents them - paid the whole cost the
+  // nested caps refuse, synchronously inside `logger.info()`. Refused outright rather than
+  // truncated, as an oversized array is: the thrown error reaches the caller's guard,
+  // which reports it and fails the bag closed.
+  let defined = 0;
+
   for (const key in params) {
+    if (defined >= MAX_REDACTION_ENTRIES) {
+      throw new Error(
+        `params has more than ${String(MAX_REDACTION_ENTRIES)} keys; redaction refused the bag`,
+      );
+    }
+
+    defined++;
+
     let value: unknown;
 
     try {
@@ -805,7 +822,8 @@ export function applyRedaction(
     guarded = normalizeParamsBag(params, unreadable, aliases);
   } catch (error) {
     // `Object.keys` itself refused - a revoked `Proxy`, an `ownKeys` trap that throws -
-    // so there is no key to read safely and nothing to mark but the redacted ones.
+    // or the bag is past `MAX_REDACTION_ENTRIES`, so there is no key to read safely and
+    // nothing to mark but the redacted ones.
     //
     // Said, not only marked. Every sibling branch here reports its cause, and this was the
     // one that failed closed in silence: the operator saw `***REDACTION FAILED***` in the

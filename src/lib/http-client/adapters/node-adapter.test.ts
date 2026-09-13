@@ -2284,6 +2284,17 @@ describe('NodeAdapter.send() — unit branches without server', () => {
       },
     );
 
+    // The docs promise every late upload failure on the host's `'error'` channel whether
+    // or not anyone awaits the promise, and name the watchdog as one of them. It was the
+    // one late failure that settled the promise and said nothing else.
+    const reports: ErrorEvent[] = [];
+    const onError = (event: Event): void => {
+      reports.push(event as ErrorEvent);
+      event.preventDefault();
+    };
+
+    globalThis.addEventListener('error', onError);
+
     try {
       const response = await new NodeAdapter().send({
         requestURL: 'http://example.test/upload',
@@ -2303,7 +2314,11 @@ describe('NodeAdapter.send() — unit branches without server', () => {
 
       expect(outcome).toBeInstanceOf(Error);
       expect(req.destroyed).toBe(true);
+
+      expect(reports.length).toBe(1);
+      expect(reports[0]?.error).toBe(outcome);
     } finally {
+      globalThis.removeEventListener('error', onError);
       requestSpy.mockRestore();
     }
   }, 30000);

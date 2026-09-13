@@ -628,6 +628,25 @@ describe('applyRedaction - non-identifier key names', () => {
     ).toBeUndefined();
   });
 
+  test('refuses a root params bag past the entry cap and fails it closed', () => {
+    // Every nested container's copy is bounded by `MAX_REDACTION_ENTRIES`; the root
+    // bag's own copy was not, and it reads every value where the nested copies only
+    // forward to them - so a million-key bag paid the whole cost the caps exist to
+    // refuse, synchronously inside `logger.info()`. Refused like an oversized array: the
+    // named keys are marked and nothing else is handed to the renderer.
+    const wide: Record<string, unknown> = { password: 'secret123' };
+
+    for (let index = 0; index <= 1_000_000; index++) {
+      wide[`k${String(index)}`] = index;
+    }
+
+    const result = applyRedaction(wide, ['password']);
+
+    expect(result['password']).toBe(REDACTION_FAILED_MARKER);
+    expect(result['k0']).toBeUndefined();
+    expect(Object.keys(result)).toEqual(['password']);
+  }, 15_000);
+
   test('does not let a wildcard over primitives starve a sibling entry', () => {
     // The bound has to count containers descended into, not keys inspected. `items[*].x`
     // normalizes nothing at all - every slot holds a number - so charging it a million

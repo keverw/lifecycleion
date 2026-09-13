@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from 'bun:test';
+import { afterEach, describe, expect, spyOn, test } from 'bun:test';
 import {
   breakConsoleError,
   restoreConsoleError,
@@ -8,6 +8,7 @@ import type { LogSink } from './types';
 import { NamedPipeSink } from './sinks/named-pipe';
 import { installGlobalEventTarget } from '../global-event-target';
 import { sleep } from '../sleep';
+import { stringifyValue } from '../stringify-value';
 
 /**
  * The last rung of every reporting path is `console.error`, and it is a call that can
@@ -114,6 +115,53 @@ function openTrackedPipeSink(
 
   return sink;
 }
+
+describe('several registered listeners', () => {
+  test('a failing sink under two registered loggers costs one write per logger and stops', () => {
+    // Each logger's listener guards only its own re-entry. What keeps two of them from
+    // compounding - each logging the other's report through a sink that fails again - is
+    // the lease `reportToHost` holds across its dispatch: a report raised while an earlier
+    // one is still being delivered goes to the console rung, not back through the
+    // listeners. Linear, then: the write that failed plus one per registered logger.
+    let writes = 0;
+
+    const hostile = {
+      get boom(): never {
+        throw new Error('getter');
+      },
+    };
+
+    const failingSink: LogSink = {
+      write: () => {
+        writes++;
+
+        if (writes > 50) {
+          throw new Error('runaway fan-out');
+        }
+
+        // Standalone use inside a log call: reports on the global channel.
+        stringifyValue(hostile);
+      },
+      close: () => Promise.resolve(),
+    };
+
+    const first = new Logger({ sinks: [failingSink], callProcessExit: false });
+    const second = new Logger({ sinks: [failingSink], callProcessExit: false });
+
+    expect(registerListener(first)).toBe('success');
+    expect(registerListener(second)).toBe('success');
+
+    const consoleError = spyOn(console, 'error').mockImplementation(() => {});
+
+    try {
+      first.info('trigger');
+    } finally {
+      consoleError.mockRestore();
+    }
+
+    expect(writes).toBe(3);
+  });
+});
 
 describe('reporting rungs survive a broken console', () => {
   describe("Logger's own 'logger' handler failures", () => {

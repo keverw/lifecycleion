@@ -136,13 +136,14 @@ export function reportThroughHandler(
  * logged again. Verified: a sink whose formatter fails on every value it is given costs
  * two sink writes and stops.
  *
- * That guard is per-logger, so it does not bound *several* loggers that have each
- * registered a listener - each blocks only its own re-entry, and one failing log call then
- * costs `a(n) = n * a(n-1) + 1` sink writes, synchronously: 5 at two loggers, 326 at five,
- * 109,601 at eight. Left undefended on purpose. Registering the global listener is a
- * deliberate opt-in and only one listener can usefully claim a report, so one per process
- * is the ordinary shape; bounding the rest needs a process-wide re-entrancy flag on the
- * broadcast rung, which is machinery for a shape nobody builds.
+ * That guard is per-logger. What bounds *several* loggers that have each registered a
+ * listener is the lease `reportToHost` holds across its dispatch: a report raised while
+ * an earlier one is still being delivered - every listener logging it through sinks
+ * whose formatter fails again - finds the lease taken and goes to the console rung
+ * instead of back through the listeners. One failing log call then costs one write per
+ * registered logger plus the one that failed, linearly: 3 at two loggers, 9 at eight.
+ * Without that lease each listener's own re-entry guard blocked only itself, and the
+ * cost was `a(n) = n * a(n-1) + 1` - 109,601 writes at eight loggers, synchronously.
  *
  * **Fires at most once per operation**, and that bound is the point rather than a nicety.
  * These failures are raised per *value*, so one broken function or one hostile payload

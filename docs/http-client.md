@@ -305,9 +305,11 @@ if (response.status === 200) {
 
 It rides on every response to a bodied request, not only the successful ones: a failed response stream (`isStreamError`), a connection reset before any headers, a TLS failure. Those are the shapes where the writer is most likely to have been mid-flight, so `undefined` there means the body went out, never "no one was looking".
 
-That includes the responses the client builds itself, with no adapter response behind them at all - a cancel, a per-attempt timeout, an adapter that threw, and the terminal redirect outcomes (`redirect_disabled`, a redirect loop, a redirect interceptor that threw). The adapter carries the promise on the error it throws and the client reads it off there, which is what makes `undefined` safe to read as "the body went out" everywhere: while the field was absent on those paths, `await response.requestBodySettled` answered `undefined` for an upload that had been torn down mid-flight - the documented success value, on the one path where you would most likely think to ask.
+That includes the responses the client builds itself, with no adapter response behind them at all - a cancel, a per-attempt timeout, an adapter that threw, a retry-phase interceptor that cancelled or threw, and the terminal redirect outcomes (`redirect_disabled`, a redirect loop, a redirect interceptor that threw). The adapter carries the promise on the error it throws and the client reads it off there, which is what makes `undefined` safe to read as "the body went out" everywhere: while the field was absent on those paths, `await response.requestBodySettled` answered `undefined` for an upload that had been torn down mid-flight - the documented success value, on the one path where you would most likely think to ask.
 
 With `followRedirects: true`, the outcome belongs to the _upload_, not to the last hop. A `301`, `302` or `303` rewrites a `POST` to a bodiless `GET`, so the final response was never behind a body writer of its own; `requestBodySettled` on it carries the outcome from the latest hop that had a body. A `307` or `308` resends the body, and that resend is the latest bodied hop, so its outcome is the one reported. A `POST` that an early `302` answered mid-upload and a bodiless `GET` completed therefore resolves with the truncation, not with `undefined`. The redirect-phase response observers see each hop's own outcome.
+
+A retry waits the same way a redirect does. An early `503` to a bodied `PUT` can arrive while the body is still going out; the next attempt is dispatched only once that upload has settled, after the backoff, so the retry never uploads the same body beside the attempt it is replacing. A cancel ends the wait, and the result carries the outcome of the attempt that was waited on.
 
 The promise exists from the moment the request has a body, not from the first byte written, so an abort that lands before the writer starts is reported the same way rather than falling back to `undefined`. Absence is left to mean one thing: no adapter reported an upload outcome for this request - it had no body, it was never dispatched (cancelled or refused by an interceptor before it reached an adapter), or the adapter does not report this at all, which today is every adapter but `NodeAdapter`.
 
@@ -755,7 +757,8 @@ jar.getStoredDomains(); // [{ domain, count }]
 const data = jar.toJSON();
 const restored = jar.fromJSON(data); // Clears existing cookies first, then loads from the snapshot
 // `fromJSON` returns how many cookies it actually restored. A cookie with a missing or
-// invalid domain is refused, so compare against `data.cookies.length` to detect drops.
+// invalid domain, or an `expires` that cannot be read as a date, is refused, so compare
+// against `data.cookies.length` to detect drops.
 ```
 
 ## Redirect Handling

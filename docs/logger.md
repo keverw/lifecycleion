@@ -1224,7 +1224,7 @@ import { FileSink, LogLevel } from 'lifecycleion/logger';
 
 new FileSink({
   logDir: './logs', // Directory for log files
-  basename: 'app', // Base filename (creates app-2024-01-15.log); one path segment, no `/` - the constructor throws otherwise
+  basename: 'app', // Base filename (creates app-2024-01-15.log); one path segment, no `/` or control characters - the constructor throws otherwise. One writing process per logDir + basename
   maxSizeMB: 10, // Rotate at 10MB (default: 10)
   jsonFormat: true, // Use JSON format (default: false)
   maxRetries: 3, // Retry failed writes (default: 3)
@@ -1809,7 +1809,7 @@ const result = logger.registerReportErrorListener();
 
 One call covers the whole process: the listener sits on `globalThis`, so it captures reports from every Lifecycleion module in the application, no per-instance wiring. Each error is logged through `errorObject(prefix, error)` and also emitted as a `'logger'` event with `{ eventType: 'uncaughtException', error }`.
 
-Register it on **one logger per process**. Each logger's listener guards against re-entering itself, but not against the others: with several registered, a sink failure that reports on this channel while a logger is logging it reaches every other listener, each of which logs it through its own sinks, and the fan-out is factorial in the number of listeners. Two loggers cost a handful of extra sink writes; eight cost over a hundred thousand, synchronously. Only one listener can usefully claim a report anyway, so pick the logger that owns process-wide errors and register there.
+Register it on **one logger per process**. Only one listener can usefully claim a report, so pick the logger that owns process-wide errors and register there. With several registered, every report is logged once through each of them. That fan-out is linear, not compounding: a sink failure raised while a report is still being delivered goes to the console rather than back through the listeners, so a failing sink under two registered loggers costs three writes and stops, eight loggers cost nine.
 
 **Parameters:**
 

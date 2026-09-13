@@ -284,6 +284,27 @@ describe('CurlyBrackets', () => {
     ).toEqual('{{u.my key}}');
   });
 
+  it('renders the fallback for a placeholder holding a hyphenated or @-prefixed name', () => {
+    // The unquoted segment grammar admits `-`, `@` and `$` so that `{{user.password-hash}}`
+    // and `{{user.@id}}` resolve (and redact). The cost, accepted rather than avoided: a
+    // hyphenated phrase in braces parses as a path, resolves to nothing, and renders the
+    // fallback where it used to round-trip verbatim. Pinned here so the trade is visible.
+    for (const prose of ['Hello-world', 'opt-in', '2024-01-01', '@mention']) {
+      expect(CurlyBrackets(`Note: {{${prose}}} done`, {}, '(???)')).toEqual(
+        'Note: (???) done',
+      );
+    }
+
+    // Substituted text is not re-scanned, so a value that *contains* such a placeholder
+    // survives as written. This is what keeps a component's own error text intact when
+    // `LifecycleManager` logs `'...: {{error.message}}'` with the error as a param.
+    expect(
+      CurlyBrackets('Component failed: {{error.message}}', {
+        error: new Error('Cannot reach {{svc-a}} after {{opt-in}}'),
+      }),
+    ).toEqual('Component failed: Cannot reach {{svc-a}} after {{opt-in}}');
+  });
+
   it('should leave unsupported placeholder path syntax unchanged', () => {
     // Wildcards remain unsupported.
     expect(

@@ -58,6 +58,15 @@ export class ErrTmpDirConfigErrorMaxTries extends Error {
   }
 }
 
+export class ErrTmpDirConfigErrorNamePart extends Error {
+  constructor(public readonly option: 'prefix' | 'postfix') {
+    super(
+      `An error occurred with the configuration. \`${option}\` must not contain path separators or control characters.`,
+    );
+    this.name = 'ErrTmpDirConfigErrorNamePart';
+  }
+}
+
 export class ErrTmpDirInitializeMaxTriesExceeded extends Error {
   constructor() {
     super('Could not create a unique temporary directory, maxTries exceeded.');
@@ -156,11 +165,25 @@ export class TmpDir {
         }
       }
 
+      // Refused at construction, as `baseDirectory` is. Both are joined into the leaf
+      // name, and `path.join` normalizes, so `prefix: '../escape'` created and later
+      // cleaned up a directory *outside* `baseDirectory` - with `unsafeCleanup`, a
+      // recursive delete outside the one directory this class promises to stay in. A
+      // `NUL` is refused with the separators because `fs` refuses it later, from
+      // `initialize()`, after the constructor that checks configuration has returned.
       if (isString(options.prefix)) {
+        if (!isValidNamePart(options.prefix)) {
+          throw new ErrTmpDirConfigErrorNamePart('prefix');
+        }
+
         this.prefix = options.prefix;
       }
 
       if (isString(options.postfix)) {
+        if (!isValidNamePart(options.postfix)) {
+          throw new ErrTmpDirConfigErrorNamePart('postfix');
+        }
+
         this.postfix = options.postfix;
       }
     }
@@ -283,6 +306,30 @@ export class TmpDir {
       this.postfix.length > 0 ? '-' + this.postfix : '',
     ].join('');
   }
+}
+
+/**
+ * Whether a `prefix` or `postfix` stays inside one path segment.
+ *
+ * Separators are what let it leave `baseDirectory`; control characters are refused with
+ * them because `fs` refuses a `NUL` and nothing lists a name holding a newline cleanly.
+ * `..` on its own is fine: it is only ever joined with `-` and the pid, never a segment.
+ */
+function isValidNamePart(part: string): boolean {
+  for (const character of part) {
+    const code = character.codePointAt(0) ?? 0;
+
+    if (
+      character === '/' ||
+      character === '\\' ||
+      code < 0x20 ||
+      code === 0x7f
+    ) {
+      return false;
+    }
+  }
+
+  return true;
 }
 
 export async function createTempDir(options?: TmpDirOptions): Promise<TmpDir> {

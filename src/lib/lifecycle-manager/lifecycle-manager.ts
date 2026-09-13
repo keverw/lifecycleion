@@ -85,7 +85,10 @@ import {
   type ShutdownSignal,
 } from '../process-signal-manager';
 import { isPromise } from '../is-promise';
-import { safeHandleCallback } from '../safe-handle-callback';
+import {
+  reportCallbackError,
+  safeHandleCallback,
+} from '../safe-handle-callback';
 import { describeError, isErrorValue, toError } from '../to-error';
 import { finiteClampMin } from '../clamp';
 
@@ -5674,9 +5677,18 @@ export class LifecycleManager
       this.lifecycleEvents.signalShutdown(method, false);
     }
 
-    // Initiate shutdown asynchronously (don't await in signal handler)
-    void this.stopAllComponentsInternal(method, {
+    // Initiate shutdown asynchronously (don't await in signal handler). With a handler
+    // on the rejection: `stopAllComponentsInternal` is `try`/`finally` with no `catch`,
+    // and `this.logger` is the caller's own object, so a logger that throws while the
+    // shutdown is being logged rejected this floating promise with nothing attached.
+    // On `SIGINT`/`SIGTERM` that is an unhandled rejection - fatal under Node's default
+    // `--unhandled-rejections=throw`, taking the process down before the components
+    // it was about to stop were stopped. Reported on the global channel rather than
+    // through the logger, since the logger is the likeliest thing to have thrown.
+    this.stopAllComponentsInternal(method, {
       ...this.shutdownOptions,
+    }).catch((error: unknown) => {
+      reportCallbackError(`shutdown after ${method}`, error);
     });
   }
 

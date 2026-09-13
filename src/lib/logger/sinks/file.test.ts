@@ -2210,6 +2210,103 @@ describe('FileSink - jsonFormat renders what JSON.stringify refuses', () => {
   });
 });
 
+describe('FileSink - accounting across a rotation', () => {
+  beforeEach(async () => {
+    tmpDir = new TmpDir({ prefix: 'filesink-accounting-' });
+    await tmpDir.initialize();
+  });
+
+  afterEach(async () => {
+    await tmpDir.cleanup().catch(() => {
+      // Best effort - the sinks below may still hold a handle.
+    });
+  });
+
+  const entryFor = (message: string): LogEntry => ({
+    timestamp: Date.now(),
+    type: 'info',
+    serviceName: 'Accounting',
+    template: message,
+    message,
+  });
+
+  test('a write acknowledged after its stream was rotated away is not charged to the new file', async () => {
+    // The error branch of the write callback already checks that the stream it belongs
+    // to is still current; the success branch did not. A callback from a rotated-away
+    // stream added its bytes to the fresh file's counter - bytes that sit in the
+    // archive - so the new file rotated early.
+    const sink = new FileSink({
+      logDir: tmpDir.path,
+      basename: 'late-success',
+      closeTimeoutMS: 200,
+    });
+
+    await sink.flush();
+
+    const privateSink = sink as unknown as {
+      logFileStream?: {
+        write: (chunk: unknown, cb: (err?: Error | null) => void) => boolean;
+      };
+      currentLogSize: number;
+      rotateFile: () => Promise<void>;
+    };
+
+    const stale = privateSink.logFileStream;
+
+    if (!stale) {
+      throw new Error('the sink opened no stream');
+    }
+
+    // Hold the acknowledgement so a rotation can slip in before it.
+    const realWrite = stale.write.bind(stale);
+    let release: (() => void) | undefined;
+
+    stale.write = (chunk, cb) =>
+      realWrite(chunk, (err) => {
+        release = () => cb(err);
+      });
+
+    sink.write(entryFor('held until after the rotation'));
+
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    expect(release).toBeDefined();
+
+    await privateSink.rotateFile();
+
+    const sizeAfterRotation = privateSink.currentLogSize;
+
+    release?.();
+
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    expect(privateSink.currentLogSize).toBe(sizeAfterRotation);
+
+    await sink.close();
+  });
+
+  test('overlapping flushes partition the written lines rather than both reporting them', async () => {
+    // Each flush counts from a baseline the previous one advanced as it settled. Two in
+    // flight together both read the same baseline, so both reported the same lines and a
+    // caller summing the results counted every line twice.
+    const sink = new FileSink({ logDir: tmpDir.path, basename: 'overlap' });
+
+    sink.write(entryFor('one'));
+    sink.write(entryFor('two'));
+
+    const [first, second] = await Promise.all([sink.flush(), sink.flush()]);
+
+    expect(first.success).toBe(true);
+    expect(second.success).toBe(true);
+    expect(first.entriesWritten + second.entriesWritten).toBe(2);
+
+    // A later flush with nothing new reports nothing new.
+    expect((await sink.flush()).entriesWritten).toBe(0);
+
+    await sink.close();
+  });
+});
+
 describe('FileSink - basename stays inside logDir', () => {
   test('refuses a basename carrying a path separator at construction', () => {
     for (const basename of [
@@ -2219,6 +2316,8 @@ describe('FileSink - basename stays inside logDir', () => {
       '.',
       '..',
       '',
+      'app\0',
+      'app\n',
     ]) {
       // Thrown before `initialize` runs, so no directory is ever created.
       expect(

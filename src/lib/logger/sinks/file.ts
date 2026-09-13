@@ -89,19 +89,49 @@ function resolveBasename(requested: string): string {
     requested === '.' ||
     requested === '..' ||
     requested.includes('/') ||
-    requested.includes('\\')
+    requested.includes('\\') ||
+    hasControlCharacter(requested)
   ) {
     throw new FileSinkError(
-      `FileSink basename must be a file name inside logDir, without path separators; got ${JSON.stringify(requested)}`,
+      `FileSink basename must be a file name inside logDir, without path separators or control characters; got ${JSON.stringify(requested)}`,
     );
   }
 
   return requested;
 }
 
+/**
+ * Whether a name carries a C0 control character or `DEL`.
+ *
+ * A `NUL` is the one that matters: on a path it reaches `fs`, Node refuses it with
+ * `ERR_INVALID_ARG_VALUE` - asynchronously, from `initialize()`, after the constructor
+ * that promised to refuse a bad name has already returned. The rest are refused with it
+ * because a log file whose name holds a newline or an escape sequence is a name nothing
+ * lists or greps cleanly, and a config typo is the only way one arrives.
+ */
+function hasControlCharacter(name: string): boolean {
+  for (const character of name) {
+    const code = character.codePointAt(0) ?? 0;
+
+    if (code < 0x20 || code === 0x7f) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
 export interface FileSinkOptions {
   logDir: string;
-  /** Base file name, a single path segment: no `/` or `\\`, and not `.` or `..`. */
+  /**
+   * Base file name, a single path segment: no `/` or `\\`, no control characters, and
+   * not `.` or `..`.
+   *
+   * One writing process per `logDir` + `basename`: rotation reserves an archive name by
+   * checking for it and then renaming onto it, and rotations are serialized on this sink
+   * only. Two processes sharing a log file can race that reservation and overwrite each
+   * other's archive. Give each process its own `basename`.
+   */
   basename: string;
   maxSizeMB?: number;
   jsonFormat?: boolean;
@@ -234,6 +264,8 @@ export class FileSink implements LogSink {
    */
   private flushBaselineWritten = 0;
   private flushBaselineDropped = 0;
+  /** The flush in flight, if any; see {@link flush}. Never rejects. */
+  private pendingFlush: Promise<void> = Promise.resolve();
   private didReportDrop = false;
   private isInitialized = false;
   private initPromise?: Promise<void>;
@@ -439,100 +471,23 @@ export class FileSink implements LogSink {
     // exactly the case a caller sets one for.
     const startTime = Date.now();
 
-    // `droppedEntries`, which every loss path bumps. A separate counter held only the
-    // writes that exhausted their retries, so a flush that lost lines to a queue overflow
-    // or to a `close()` abandoning its backlog - the conditions `maxQueueSize` exists for -
-    // answered `{ success: true, entriesFailed: 0 }` about them. One counter, so `flush()`
-    // and `getHealth()` cannot disagree about what was lost.
-    //
-    // Measured from where the *last* flush stopped counting rather than from this call's
-    // own entry, which is the window a caller is actually asking about. `enforceQueueLimit`
-    // runs synchronously inside `write()` and the queue only drains between turns of the
-    // event loop, so every eviction a synchronous logging loop causes has already happened
-    // by the time `flush()` is entered: 25,000 `write()` calls under the default 10,000
-    // cap then answered `{ success: true, entriesWritten: 10000, entriesFailed: 0 }` while
-    // `getHealth()` reported 15,000 dropped - a batch job's all-clear for losing most of
-    // its log. Counted from the last flush, those losses are in the result that follows
-    // them, and every line is accounted for exactly once across successive flushes.
-    //
-    // Both baselines are read before the wait below rather than after it, so a loss that
-    // lands while the init is still settling is inside this call's answer rather than
-    // deferred to the next one.
-    const startWritten = this.flushBaselineWritten;
-    const startFailed = this.flushBaselineDropped;
+    // One flush at a time. The counts below are windows between baselines that each
+    // flush advances as it settles, which partitions the lines between *successive*
+    // flushes exactly once - and two flushes in flight together both read the same
+    // baselines before either advanced them, so both reported the same window: two
+    // callers each told the same line was written, or the same line lost, and a caller
+    // summing results double-counted. Chained rather than shared, since each caller
+    // asked about the lines up to its own call. The clock above is this call's, so a
+    // flush that waited behind another still answers within its own timeout.
+    const previous = this.pendingFlush;
+    const run = previous.then(() => this.flushWindow(timeoutMS, startTime));
 
-    // Wait for initialization, bounded by the caller's own budget. `close()` has always
-    // raced this wait against its timeout; `flush()` awaited it outright, so a `mkdir` or
-    // `stat` hung on an unresponsive mount made `flush(1000)` never return at all - the
-    // shape a timeout exists to rule out.
-    if (this.initPromise) {
-      const initPromise = this.initPromise;
-      let timeoutHandle: NodeJS.Timeout | undefined;
-      const timeoutSentinel = { timedOut: true } as const;
+    this.pendingFlush = run.then(
+      () => undefined,
+      () => undefined,
+    );
 
-      try {
-        const timeoutPromise = new Promise<typeof timeoutSentinel>(
-          (resolve) => {
-            timeoutHandle = setTimeout(
-              () => resolve(timeoutSentinel),
-              timeoutMS,
-            );
-          },
-        );
-
-        const result = await Promise.race([
-          initPromise.then(() => undefined),
-          timeoutPromise,
-        ]);
-
-        if (result === timeoutSentinel) {
-          // Prevent an unhandled rejection if the init fails after this returns, exactly
-          // as `close()` does on the same race.
-          Promise.resolve(initPromise).catch(() => {
-            // Intentionally ignored after the timeout.
-          });
-
-          return this.settleFlush({
-            success: false,
-            entriesWritten: this.totalEntriesWritten - startWritten,
-            entriesFailed: this.droppedEntries - startFailed,
-            timedOut: true,
-          });
-        }
-      } finally {
-        if (timeoutHandle) {
-          clearTimeout(timeoutHandle);
-        }
-      }
-    }
-
-    // Wait for queue to finish processing with timeout
-    while (this.writeQueue.length > 0 || this.isProcessing) {
-      if (Date.now() - startTime > timeoutMS) {
-        // Timeout reached
-        const entriesWritten = this.totalEntriesWritten - startWritten;
-        const entriesFailed = this.droppedEntries - startFailed;
-
-        return this.settleFlush({
-          success: false,
-          entriesWritten,
-          entriesFailed,
-          timedOut: true,
-        });
-      }
-
-      await new Promise((resolve) => setTimeout(resolve, 10));
-    }
-
-    const entriesWritten = this.totalEntriesWritten - startWritten;
-    const entriesFailed = this.droppedEntries - startFailed;
-
-    return this.settleFlush({
-      success: entriesFailed === 0,
-      entriesWritten,
-      entriesFailed,
-      timedOut: false,
-    });
+    return run;
   }
 
   /**
@@ -1016,6 +971,109 @@ export class FileSink implements LogSink {
     }
   }
 
+  /** The body of {@link flush}, run one at a time; see there. */
+  private async flushWindow(
+    timeoutMS: number,
+    startTime: number,
+  ): Promise<FlushResult> {
+    // `droppedEntries`, which every loss path bumps. A separate counter held only the
+    // writes that exhausted their retries, so a flush that lost lines to a queue overflow
+    // or to a `close()` abandoning its backlog - the conditions `maxQueueSize` exists for -
+    // answered `{ success: true, entriesFailed: 0 }` about them. One counter, so `flush()`
+    // and `getHealth()` cannot disagree about what was lost.
+    //
+    // Measured from where the *last* flush stopped counting rather than from this call's
+    // own entry, which is the window a caller is actually asking about. `enforceQueueLimit`
+    // runs synchronously inside `write()` and the queue only drains between turns of the
+    // event loop, so every eviction a synchronous logging loop causes has already happened
+    // by the time `flush()` is entered: 25,000 `write()` calls under the default 10,000
+    // cap then answered `{ success: true, entriesWritten: 10000, entriesFailed: 0 }` while
+    // `getHealth()` reported 15,000 dropped - a batch job's all-clear for losing most of
+    // its log. Counted from the last flush, those losses are in the result that follows
+    // them, and every line is accounted for exactly once across successive flushes.
+    //
+    // Both baselines are read before the wait below rather than after it, so a loss that
+    // lands while the init is still settling is inside this call's answer rather than
+    // deferred to the next one.
+    const startWritten = this.flushBaselineWritten;
+    const startFailed = this.flushBaselineDropped;
+
+    // Wait for initialization, bounded by the caller's own budget. `close()` has always
+    // raced this wait against its timeout; `flush()` awaited it outright, so a `mkdir` or
+    // `stat` hung on an unresponsive mount made `flush(1000)` never return at all - the
+    // shape a timeout exists to rule out.
+    if (this.initPromise) {
+      const initPromise = this.initPromise;
+      let timeoutHandle: NodeJS.Timeout | undefined;
+      const timeoutSentinel = { timedOut: true } as const;
+
+      try {
+        const timeoutPromise = new Promise<typeof timeoutSentinel>(
+          (resolve) => {
+            timeoutHandle = setTimeout(
+              () => resolve(timeoutSentinel),
+              // What is left of this call's budget, not the whole of it: the clock
+              // started in `flush()`, and this call may have waited behind another.
+              Math.max(0, timeoutMS - (Date.now() - startTime)),
+            );
+          },
+        );
+
+        const result = await Promise.race([
+          initPromise.then(() => undefined),
+          timeoutPromise,
+        ]);
+
+        if (result === timeoutSentinel) {
+          // Prevent an unhandled rejection if the init fails after this returns, exactly
+          // as `close()` does on the same race.
+          Promise.resolve(initPromise).catch(() => {
+            // Intentionally ignored after the timeout.
+          });
+
+          return this.settleFlush({
+            success: false,
+            entriesWritten: this.totalEntriesWritten - startWritten,
+            entriesFailed: this.droppedEntries - startFailed,
+            timedOut: true,
+          });
+        }
+      } finally {
+        if (timeoutHandle) {
+          clearTimeout(timeoutHandle);
+        }
+      }
+    }
+
+    // Wait for queue to finish processing with timeout
+    while (this.writeQueue.length > 0 || this.isProcessing) {
+      if (Date.now() - startTime > timeoutMS) {
+        // Timeout reached
+        const entriesWritten = this.totalEntriesWritten - startWritten;
+        const entriesFailed = this.droppedEntries - startFailed;
+
+        return this.settleFlush({
+          success: false,
+          entriesWritten,
+          entriesFailed,
+          timedOut: true,
+        });
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+
+    const entriesWritten = this.totalEntriesWritten - startWritten;
+    const entriesFailed = this.droppedEntries - startFailed;
+
+    return this.settleFlush({
+      success: entriesFailed === 0,
+      entriesWritten,
+      entriesFailed,
+      timedOut: false,
+    });
+  }
+
   /**
    * Move the flush baselines past what this result reported, and hand it back.
    *
@@ -1227,7 +1285,14 @@ export class FileSink implements LogSink {
 
           reject(new FileSinkError('Error writing to log file', err));
         } else {
-          this.currentLogSize += messageBytes;
+          // The same identity guard as the error branch. Charged unconditionally, a
+          // callback belonging to a stream a rotation had since replaced added its bytes
+          // to the *new* file's counter: they are in the archive, the fresh file is
+          // that much smaller than the counter says, and it rotated early.
+          if (this.logFileStream === writingTo) {
+            this.currentLogSize += messageBytes;
+          }
+
           resolve();
         }
       });
