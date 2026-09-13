@@ -817,7 +817,7 @@ describe('HTTPClient — basic HTTP methods', () => {
       .signal(controller.signal)
       .send();
 
-    setTimeout(() => controller.abort(), 30);
+    setTimeout(() => controller.abort('gave up waiting'), 30);
 
     const startedAt = Date.now();
     const response = await pending;
@@ -825,6 +825,41 @@ describe('HTTPClient — basic HTTP methods', () => {
     expect(Date.now() - startedAt).toBeLessThan(2000);
     expect(response.isCancelled).toBe(true);
     expect(hop).toBe(1);
+  });
+
+  test("a cancel during that wait keeps the caller's abort reason", async () => {
+    // Every other abort path reads the signal's reason onto the error; this one built
+    // the cancelled response and broke to the failure block with the reason unset.
+    const controller = new AbortController();
+
+    const adapter: HTTPAdapter = {
+      getType: () => 'node',
+      send: (_request: AdapterRequest): Promise<AdapterResponse> =>
+        Promise.resolve({
+          status: 307,
+          headers: { location: '/again' },
+          body: null,
+          requestBodySettled: new Promise(() => {}),
+        }),
+    };
+
+    const builder = new HTTPClient({
+      adapter,
+      baseURL: 'http://example.test',
+      followRedirects: true,
+    })
+      .post('/upload')
+      .json({ a: 1 })
+      .signal(controller.signal);
+
+    const pending = builder.send();
+
+    setTimeout(() => controller.abort('gave up waiting'), 30);
+
+    const response = await pending;
+
+    expect(response.isCancelled).toBe(true);
+    expect(builder.error?.cancelReason).toBe('gave up waiting');
   });
 
   test('a 307 that resends the body reports the resent upload, not the first', async () => {

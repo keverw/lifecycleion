@@ -1061,7 +1061,14 @@ export class BaseHTTPClient {
 
               // A cancel that ended the wait ends the request here, before another hop
               // is dispatched, exactly as a redirect interceptor's cancel does above.
+              // The caller's own reason is kept, as every other abort path keeps it.
               if (cancelSignal.aborted) {
+                const signalReason = getSignalCancelReason(cancelSignal);
+
+                if (signalReason !== undefined) {
+                  cancelReason = signalReason;
+                }
+
                 observerRequest = this._bestEffortAttemptRequestFromPending(
                   sanitizedRedirectRequest,
                   timeout,
