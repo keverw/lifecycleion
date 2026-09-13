@@ -916,6 +916,29 @@ export class NamedPipeSink implements LogSink {
         };
 
         const timeoutHandle = setTimeout(() => {
+          // Said before this resolves, not after. `destroy()` below errors the callback of
+          // every write still buffered in the stream, and each lands in `requeue` past
+          // `closed` - counted there, and reported once as `'close'` / `'lost'`. But those
+          // callbacks fire on a later tick, so the one report arrived *after* `await
+          // close()` had answered, and a shutdown handler that exits on that answer never
+          // heard it. `FileSink` reports its in-flight write before its close resolves;
+          // this is the same report at the same moment. The flag is set here so the
+          // callbacks do not say it a second time; the per-entry count still comes from
+          // them, since bytes buffered say nothing about how many lines they hold.
+          const bufferedBytes = stream.writableLength;
+
+          if (bufferedBytes > 0 && !this.didReportPostCloseLoss) {
+            this.didReportPostCloseLoss = true;
+
+            this.handleError(
+              'close',
+              new Error(
+                `Closed with ${String(bufferedBytes)} bytes still buffered for ${this.pipePath} (closeTimeoutMS=${String(this.closeTimeoutMS)}); the reader did not take them and they were not written`,
+              ),
+              { disposition: 'lost' },
+            );
+          }
+
           // Destroyed rather than left pending, so the descriptor is not held for the life
           // of the process by a flush that is never going to happen.
           try {

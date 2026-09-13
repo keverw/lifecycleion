@@ -2452,6 +2452,86 @@ describe('NamedPipeSink', () => {
     }
   }, 15000);
 
+  test('a close that times out with writes still buffered reports the loss before it resolves', async () => {
+    // The stream's buffered writes are errored by `destroy()` and land in `requeue` past
+    // `closed`, which reports once - but on a later tick, after `await close()` had
+    // answered, so a shutdown handler that exits on that answer never heard it.
+    // `FileSink` reports its in-flight write before its close resolves; this sink now
+    // says the same thing at the same moment, and the callbacks do not repeat it.
+    const pipePath = `${tmpDir.path}/close-buffered-loss.pipe`;
+    await createNamedPipe(pipePath);
+
+    // A reader that never reads: once the kernel buffer is full, everything else stays
+    // in the stream's buffer with its callback pending.
+    const readerFd = fs.openSync(
+      pipePath,
+      fs.constants.O_RDONLY | fs.constants.O_NONBLOCK,
+    );
+    let isReaderOpen = true;
+    const failures: SinkFailure[] = [];
+    const sink = new NamedPipeSink({
+      pipePath,
+      closeTimeoutMS: 300,
+      onError: (failure) => {
+        failures.push(failure);
+      },
+    });
+
+    try {
+      expect(await waitForOpenPipe(sink)).toBe(true);
+
+      const line = 'x'.repeat(4096);
+
+      // Well past a 64 KiB pipe buffer.
+      for (let index = 0; index < 64; index++) {
+        sink.write({
+          timestamp: Date.now(),
+          type: 'info',
+          template: line,
+          message: line,
+        });
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      await sink.close();
+
+      // Backpressure parks the rest of the backlog in the sink's own queue, and
+      // `abandonQueueOnClose()` reports that separately: two distinct losses, each said
+      // once. The one this test is about names the stream's buffer.
+      const isBufferedLoss = (entry: SinkFailure): boolean =>
+        entry.kind === 'close' &&
+        entry.disposition === 'lost' &&
+        entry.error.message.includes('still buffered');
+
+      expect(failures.filter(isBufferedLoss)).toHaveLength(1);
+      expect(
+        failures.filter((entry) => entry.kind === 'close'),
+      ).toHaveLength(2);
+
+      // The in-flight write is blocked in the threadpool behind the full pipe, and
+      // `destroy()` defers until it returns - so until the reader goes away nothing errors
+      // and no callback fires. That is why the report above is the only timely one.
+      // Releasing the reader errors the write and the buffer behind it; those callbacks
+      // land in `requeue` past `closed`, counted, and not reported a second time.
+      const droppedAtResolve = sink.getHealth().droppedEntries;
+
+      fs.closeSync(readerFd);
+      isReaderOpen = false;
+
+      await new Promise((resolve) => setTimeout(resolve, 100));
+
+      expect(failures.filter((entry) => entry.kind === 'close')).toHaveLength(2);
+      expect(sink.getHealth().droppedEntries).toBeGreaterThanOrEqual(
+        droppedAtResolve,
+      );
+    } finally {
+      if (isReaderOpen) {
+        fs.closeSync(readerFd);
+      }
+    }
+  }, 15000);
+
   test('the close drain retries a failed write and reports what it still cannot send', async () => {
     // The other half of the same fix: with retries left the entry goes back on the queue
     // rather than being counted immediately, so `close()`'s drain loop gets to try it
