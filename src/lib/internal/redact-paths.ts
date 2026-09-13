@@ -220,7 +220,21 @@ export function snapshotList(value: unknown): unknown[] | null {
  *          than to mask nothing, since the caller asked for masking and this cannot tell
  *          what for.
  */
-export function parseRedactPaths(value: unknown): RedactPath[] | null {
+export function parseRedactPaths(
+  value: unknown,
+  /**
+   * Told of an entry that has path syntax but that the grammar refused - a trailing
+   * dot, an unterminated bracket. Its literal reading is kept regardless; this exists
+   * because the nested reading the caller evidently meant was dropped, and a masking
+   * rule that quietly names nothing is the one failure a caller cannot see in the
+   * output: the line looks successful.
+   *
+   * Only this case. A valid path that matches nothing is not reported - shared lists
+   * miss all the time and there is nothing to learn from a payload without the key -
+   * and a list that is not usable at all is refused with `null`, as before.
+   */
+  onUnparseable?: (entry: string) => void,
+): RedactPath[] | null {
   try {
     const entries = snapshotList(value);
 
@@ -252,6 +266,8 @@ export function parseRedactPaths(value: unknown): RedactPath[] | null {
 
         if (parts !== null && parts.length > 0) {
           paths.push({ parts, entry });
+        } else {
+          onUnparseable?.(entry);
         }
       }
     }

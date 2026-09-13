@@ -737,13 +737,47 @@ describe('applyRedaction - non-identifier key names', () => {
     ).toEqual({ users: [{ password: '***REDACTED***' }] });
   });
 
-  test('still redacts nothing for genuinely unsupported syntax', () => {
-    // A trailing dot is still unparseable, so it names nothing and warns about nothing.
+  test('reports a path-syntax entry the grammar refuses, and keeps its literal reading', () => {
+    // A trailing dot names no nested location, and dropping that reading used to be
+    // silent: the caller asked for `users[0].password` and got a line that looked
+    // successful with the secret in the clear. It is a config error, knowable without
+    // the payload, so it is reported under the entry as written. The literal reading is
+    // still used, the rest of the bag is left alone, and nothing is failed closed -
+    // there is no location to plant a marker on for a path that did not parse.
+    const seen: string[] = [];
+
     expect(
-      applyRedaction({ users: [{ password: 'hunter2' }] }, [
+      applyRedaction(
+        { users: [{ password: 'hunter2' }], keep: 'diag' },
+        ['users[0].password.'],
+        undefined,
+        (_error, kind, key) => seen.push(`${kind}:${key}`),
+      ),
+    ).toEqual({ users: [{ password: 'hunter2' }], keep: 'diag' });
+
+    expect(seen).toEqual(['redaction:users[0].password.']);
+
+    // And if someone genuinely has that key, it still masks.
+    expect(
+      applyRedaction({ 'users[0].password.': 'hunter2' }, [
         'users[0].password.',
       ]),
-    ).toEqual({ users: [{ password: 'hunter2' }] });
+    ).toEqual({ 'users[0].password.': '***REDACTED***' });
+  });
+
+  test('does not report a valid path that simply matches nothing', () => {
+    // Shared lists miss all the time; a miss is not knowable without the payload and is
+    // not a config error.
+    const seen: string[] = [];
+
+    applyRedaction(
+      { name: 'alice' },
+      ['password', 'user.password', 'items[0].token'],
+      undefined,
+      (_error, kind, key) => seen.push(`${kind}:${key}`),
+    );
+
+    expect(seen).toEqual([]);
   });
 });
 

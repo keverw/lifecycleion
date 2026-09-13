@@ -236,7 +236,18 @@ function redactValueWith(
     // from one read, refusing anything it cannot use, so a list that will not be read now
     // fails closed with a `<redactedKeys>` report like any other unusable one, and an empty
     // list still hands the value back two exits lower.
-    const paths = parseRedactPaths(entries);
+    // An entry with path syntax the grammar refuses is reported under the entry as
+    // written - a config error, knowable without the payload - while a valid path that
+    // misses stays silent. See the logger's `applyRedaction`.
+    const reportRedaction = report;
+    const paths = parseRedactPaths(entries, (entry) =>
+      reportRedaction(
+        new Error(
+          'redaction path could not be parsed; only its literal reading is used',
+        ),
+        entry,
+      ),
+    );
 
     // Fails closed, as `sensitiveFieldNames` does: a list that is present but unusable
     // means the caller asked for masking and this cannot tell what for, so nothing is

@@ -524,7 +524,7 @@ This falls out of what a path means and is not an oversight to work around. Mask
 
 #### Path Grammar
 
-An unquoted path segment is a run of name characters - letters, digits, combining marks, `_`, `$`, `@` and `-` - so ordinary key names need no quoting: `user.password-hash` and `users[0].api-key` both work. A key that contains anything else, including a delimiter, whitespace, or any other punctuation, needs the quoted bracket form, which is the only way to disambiguate it: `user["a.b"]`, `user["my key"]`, `user["a+b"]`. An entry the grammar rejects, such as a trailing dot or an unterminated bracket, redacts **nothing** and does not warn.
+An unquoted path segment is a run of name characters - letters, digits, combining marks, `_`, `$`, `@` and `-` - so ordinary key names need no quoting: `user.password-hash` and `users[0].api-key` both work. A key that contains anything else, including a delimiter, whitespace, or any other punctuation, needs the quoted bracket form, which is the only way to disambiguate it: `user["a.b"]`, `user["my key"]`, `user["a+b"]`. An entry the grammar rejects, such as a trailing dot or an unterminated bracket, keeps only its literal reading - a key spelled exactly that way - and its nested reading is dropped. That drop is **reported** through `onFormatError` under `kind: 'redaction'` with the entry as written, because it is a configuration error you can act on without seeing the payload. A valid path that simply matches nothing is not reported.
 
 `*` and `[*]` are segments of their own, and only as a whole segment: `users[*].password` and `users.*.password` parse, while a partial wildcard such as `us*rs` or `a.*b` does not and therefore redacts nothing. The quoted `["*"]` is the same segment rather than an escape hatch - see [Wildcards Over Arrays](#wildcards-over-arrays).
 
@@ -709,7 +709,7 @@ Two things about it are deliberate:
 Don't log from inside it, for the reason above. The same option is available on
 `stringifyValue`, `redactValue`, and `errorToString`.
 
-The guarantee is about redaction _failing_: a key that this attempts to redact never keeps its original value. It is not a guarantee that every sensitive value is found. A `redactedKeys` entry that does not resolve to anything in `params` redacts nothing and is skipped, exactly as it always was, so a typo such as `'password.'` silently protects nothing. A dotted entry is treated as ambiguous and both readings are covered: `'user.password'` redacts the nested `params.user.password` _and_ a literal key spelled `'user.password'`, when either exists.
+The guarantee is about redaction _failing_: a key that this attempts to redact never keeps its original value. It is not a guarantee that every sensitive value is found. A `redactedKeys` entry that does not resolve to anything in `params` redacts nothing and is skipped, exactly as it always was. A typo that the grammar cannot parse, such as `'password.'`, protects nothing either - but that one is reported through `onFormatError`, since it is knowable from the list alone; a valid entry that merely misses is not. A dotted entry is treated as ambiguous and both readings are covered: `'user.password'` redacts the nested `params.user.password` _and_ a literal key spelled `'user.password'`, when either exists.
 
 #### Controlling How a Value Is Masked
 

@@ -254,7 +254,19 @@ function readOwnSensitivePaths(
     return [];
   }
 
-  const parsed = parseRedactPaths(isReadFailure(raw) ? undefined : raw);
+  // An entry with path syntax the grammar refuses is reported under the entry as
+  // written, the same as the logger and `stringifyValue` do; a valid path that misses
+  // stays silent.
+  const parsed = parseRedactPaths(
+    isReadFailure(raw) ? undefined : raw,
+    (entry) =>
+      report(
+        new Error(
+          'redaction path could not be parsed; only its literal reading is used',
+        ),
+        entry,
+      ),
+  );
 
   // Fails closed. A `sensitiveFieldNames` that is present but is not a usable list of
   // strings - a comma-joined string, a `Set`, a non-string entry, or an accessor that

@@ -179,7 +179,7 @@ An unquoted path segment is a run of name characters - letters, digits, combinin
 
 A wildcard segment addresses **every element of an array**, with `*` and `[*]` the same rule written two ways - so `users[*].password` and `users.*.password` both mask the password of every user. It stands in for an array index and only for one: against a plain object it is the key literally spelled `*`, and an array's named properties are not expanded over either. The quoted `["*"]` is the same segment rather than an escape hatch, for the reason quoting never changes a segment's meaning: `users[0]`, `users["0"]` and `users.0` are already one entry too. See [Wildcards Over Arrays](./logger.md#wildcards-over-arrays), which covers this surface too.
 
-Entries the grammar rejects mask **nothing at all**, silently. That covers a trailing dot, an unterminated bracket, and a partial wildcard such as `us*rs`. The logger's `redactedKeys` behaves identically.
+Entries the grammar rejects mask **nothing** beyond a key spelled literally that way. A trailing dot or an unterminated bracket is reported through `onFormatError` under `kind: 'redaction'` with the entry as written, since it is a configuration error knowable without the payload; a partial wildcard such as `us*rs` has no path syntax and is simply a literal key name. The logger's `redactedKeys` behaves identically.
 
 A dotted or bracketed entry is treated as ambiguous and both readings are covered, the same way the logger's `redactedKeys` does: `'user.password'` masks the nested `additionalInfo.user.password` _and_ a literal key spelled `'user.password'`, when either exists.
 
@@ -223,7 +223,7 @@ Pass `onFormatError` to find out why a value failed to redact - it receives the 
 
 If the `redactFunction` throws, or reading the value throws, the result is `***REDACTION FAILED***` - never the original value. That is the same marker the logger uses for the same condition, and it is deliberately distinct from a successful mask so a broken `redactFunction` cannot hide behind output that looks fine.
 
-Masking **fails closed** when the _list itself_ is unusable. A comma-joined string, a `Set`, a non-string entry, or an accessor that throws all mean the caller asked for masking and this cannot tell what for, so `additionalInfo` is dropped wholesale and replaced with `*** (sensitiveFieldNames unreadable)` rather than rendered in the clear. This does **not** extend to an individual entry: one that does not parse, or that parses but matches nothing, simply masks nothing and leaves the other entries working, exactly as an unmatched `redactedKeys` entry redacts nothing in the logger.
+Masking **fails closed** when the _list itself_ is unusable. A comma-joined string, a `Set`, a non-string entry, or an accessor that throws all mean the caller asked for masking and this cannot tell what for, so `additionalInfo` is dropped wholesale and replaced with `*** (sensitiveFieldNames unreadable)` rather than rendered in the clear. This does **not** extend to an individual entry: one that parses but matches nothing simply masks nothing and leaves the other entries working, exactly as an unmatched `redactedKeys` entry redacts nothing in the logger, and one with path syntax that does not parse masks nothing beyond its literal reading and is reported.
 
 ## Never Throws
 

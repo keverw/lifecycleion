@@ -328,16 +328,26 @@ describe('errorToString', () => {
       ).toContain(SECRET);
     });
 
-    it('should mask nothing for genuinely unsupported syntax', () => {
-      // A trailing dot is still unparseable, and an unparseable entry is not the
-      // fail-closed case: it masks nothing and leaves the other fields rendering.
-      const rendered = render({ users: [{ password: SECRET }], keep: 'diag' }, [
-        'users[0].password.',
-      ]);
+    it('reports a path-syntax entry the grammar refuses without failing closed', () => {
+      // A trailing dot is unparseable, and an unparseable entry is not the fail-closed
+      // case: it masks nothing and leaves the other fields rendering. But it is a config
+      // error the caller can act on, so it is reported under the entry as written rather
+      // than dropped in silence. The logger and `stringifyValue` do the same.
+      const seen: string[] = [];
+
+      const error = Object.assign(new Error('auth failed'), {
+        additionalInfo: { users: [{ password: SECRET }], keep: 'diag' },
+        sensitiveFieldNames: ['users[0].password.'],
+      });
+
+      const rendered = errorToString(error, 80, {
+        onFormatError: (_error, kind, key) => seen.push(`${kind}:${key}`),
+      });
 
       expect(rendered).toContain(SECRET);
       expect(rendered).toContain('diag');
       expect(rendered).not.toContain('sensitiveFieldNames unreadable');
+      expect(seen).toEqual(['redaction:users[0].password.']);
     });
 
     it('should mask a key spelled literally like a path', () => {

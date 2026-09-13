@@ -2210,6 +2210,37 @@ describe('a key is a variable-length leaf too', () => {
   });
 });
 
+describe('an unparseable redactedKeys entry is reported', () => {
+  it('names the entry as written, on the redaction channel, and masks nothing else', () => {
+    const seen: string[] = [];
+
+    const result = redactValue(
+      { users: [{ password: 'hunter2' }], keep: 'diag' },
+      {
+        redactedKeys: ['users[0].password.'],
+        onFormatError: (_error, kind, key) => seen.push(`${kind}:${key}`),
+      },
+    );
+
+    expect(result).toEqual({ users: [{ password: 'hunter2' }], keep: 'diag' });
+    expect(seen).toEqual(['redaction:users[0].password.']);
+  });
+
+  it('stays silent for a valid path that misses', () => {
+    const seen: string[] = [];
+
+    stringifyValue(
+      { name: 'alice' },
+      {
+        redactedKeys: ['user.password'],
+        onFormatError: (_error, kind, key) => seen.push(`${kind}:${key}`),
+      },
+    );
+
+    expect(seen).toEqual([]);
+  });
+});
+
 describe('maxRenderLength and onTruncate', () => {
   const big = 'x'.repeat(2_000_000);
 

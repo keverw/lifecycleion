@@ -687,7 +687,18 @@ export function applyRedaction(
   // it only ever writes the marker, and fails to `{}` if the list refuses - but handing it
   // the caller's object re-entered their traps a second, third and fourth time during an
   // already-failing pass, and let a lying list decide which keys the failure names.
-  const paths = parseRedactPaths(entries);
+  // A path-syntax entry the grammar refuses is reported under the entry as written. It
+  // is a config error a caller can act on without the payload - unlike a valid path that
+  // simply misses, which stays silent - and it used to drop the nested reading without a
+  // word, leaving the secret the caller thought they had named in the clear.
+  const paths = parseRedactPaths(entries, (entry) =>
+    report(
+      new Error(
+        'redaction path could not be parsed; only its literal reading is used',
+      ),
+      entry,
+    ),
+  );
 
   if (paths === null) {
     report(
