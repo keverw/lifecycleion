@@ -816,12 +816,18 @@ export class Logger extends EventEmitter {
     // Close all sinks
     await Promise.all(
       this.sinks.map(async (sink) => {
-        if (sink.close) {
-          try {
+        try {
+          // The property *read* is inside the guard too. A sink is caller-supplied, so
+          // `close` can be an accessor that throws, and a read outside rejected
+          // `Promise.all` - out of `close()`, which `processExit` calls as
+          // `void this.close().finally(...)` with no `catch`: an unhandled rejection from
+          // the shutdown path, fatal under Node's default `--unhandled-rejections=throw`,
+          // and `this.sinks = []` and the `'close'` event both skipped behind it.
+          if (sink.close) {
             await sink.close();
-          } catch (error) {
-            this.handleSinkError(error, 'close', sink);
           }
+        } catch (error) {
+          this.handleSinkError(error, 'close', sink);
         }
       }),
     );
@@ -911,7 +917,13 @@ export class Logger extends EventEmitter {
     const serviceName = options?.serviceName?.trim() || undefined;
     const entityName = options?.entityName?.trim() || undefined;
     const params = options?.params;
-    const tags = options?.tags;
+    // Snapshotted like `redactedKeys` below, and for the reasons given there: `tags` is a
+    // caller-supplied list, so `length` can be a trap that throws - `logger.info('x',
+    // { tags: proxyWhoseLengthThrows })` threw straight out of the log call - and the
+    // caller's own array was handed to every sink by reference, which is the retention
+    // `inertKeys` was introduced to remove. A list too hostile to copy leaves this
+    // `undefined`, exactly as a hostile `redactedKeys` does.
+    const tags = snapshotList(options?.tags) as string[] | null;
     const requested = options?.redactedKeys;
 
     // The requested list, copied once, and everything below reads the copy.
@@ -1138,7 +1150,7 @@ export class Logger extends EventEmitter {
       redactedKeys: didRequestRedaction ? inertKeys : undefined,
       error: options?.error,
       exitCode: isNumber(exitCode) ? exitCode : undefined,
-      tags: tags && tags.length > 0 ? tags : undefined,
+      tags: tags !== null && tags.length > 0 ? tags : undefined,
     };
 
     // Write to all sinks

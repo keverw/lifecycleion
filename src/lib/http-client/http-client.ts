@@ -2307,7 +2307,9 @@ export class BaseHTTPClient {
         redirectHistory,
         requestID,
         adapterType,
-        requestBodySettled: adapterResponse?.requestBodySettled,
+        requestBodySettled: adoptRequestBodySettled(
+          adapterResponse?.requestBodySettled,
+        ),
       };
     }
 
@@ -2340,7 +2342,9 @@ export class BaseHTTPClient {
         redirectHistory,
         requestID,
         adapterType,
-        requestBodySettled: adapterResponse?.requestBodySettled,
+        requestBodySettled: adoptRequestBodySettled(
+          adapterResponse?.requestBodySettled,
+        ),
       };
     }
 
@@ -2372,7 +2376,9 @@ export class BaseHTTPClient {
         redirectHistory,
         requestID,
         adapterType,
-        requestBodySettled: adapterResponse?.requestBodySettled,
+        requestBodySettled: adoptRequestBodySettled(
+          adapterResponse?.requestBodySettled,
+        ),
       };
     }
 
@@ -2430,7 +2436,9 @@ export class BaseHTTPClient {
       redirectHistory,
       requestID,
       adapterType,
-      requestBodySettled: adapterResponse.requestBodySettled,
+      requestBodySettled: adoptRequestBodySettled(
+        adapterResponse.requestBodySettled,
+      ),
     };
   }
 
@@ -3001,6 +3009,26 @@ function getRequestBodySettled(
   // following the docs and awaiting it without a `try` would throw, and one that ignores
   // the field would get an unhandled rejection against the response object. A rejection
   // becomes the failure it is; `Promise.resolve` also flattens a foreign thenable.
+  return adoptRequestBodySettled(settled);
+}
+
+/**
+ * Adopt whatever an adapter put on `requestBodySettled` onto a promise this client owns.
+ *
+ * The same treatment on the resolve path as {@link getRequestBodySettled} gives the throw
+ * path, because the hazard is the adapter and not which way it answered: `HTTPAdapter` is
+ * a public extension point, and an adapter resolving with a rejecting promise - or with a
+ * foreign thenable, or with something that is not a promise at all - put it straight onto
+ * a field documented never to reject. A caller following the docs and awaiting it without
+ * a `try` then throws, and one that ignores the field gets an unhandled rejection.
+ */
+function adoptRequestBodySettled(
+  settled: unknown,
+): Promise<Error | undefined> | undefined {
+  if (!isPromise(settled)) {
+    return undefined;
+  }
+
   return Promise.resolve(settled).then(
     (value) => (value === undefined ? undefined : normalizeError(value)),
     (error: unknown) => normalizeError(error),

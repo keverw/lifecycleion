@@ -1320,10 +1320,11 @@ Two expectations the adapter relies on:
 
 - **Define `off` or `removeListener`.** Both are optional on the type so an existing
   object still compiles, but the adapter attaches listeners for the life of a request and
-  takes them off again afterwards. With neither method it cannot, so rather than attach
-  listeners it could never remove, it keeps the ones it has. A sink reused across
-  many requests accumulates them until Node warns about a leak. Either name works. A Node
-  stream has both.
+  takes them off again afterwards. With neither method it cannot, so it attaches one
+  permanent listener per event to that writable instead and registers each request behind
+  it - rather than adding a listener per request to a sink reused across many of them,
+  until Node warns about a leak. Behaviour is unchanged either way; what you save by
+  defining one is that listener. Either name works. A Node stream has both.
 - **Report a failed write.** Either call the callback passed to `write` / `end` with the
   error, or emit `'error'`, which is what a Node stream does. A write that fails destroys
   the stream and its `'error'` often arrives after the request has already settled, so the
@@ -1356,12 +1357,12 @@ One `'error'` listener is shared per writable rather than per request, so ten co
 downloads into one sink attach one listener between them, not ten. It comes off at the
 first of these:
 
-| Signal                             | What happens                                                                                                                                                                                                                            |
-| ---------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| The `'error'` arrives              | Absorbed, and reported through the host error reporter unless the request already handed it to you as `errorCause`. Released one turn later, so a sibling request's late error is still covered                                         |
-| `'close'`                          | The stream has finished tearing down and nothing further is coming, so it is released immediately                                                                                                                                       |
+| Signal                             | What happens                                                                                                                                                                                                                           |
+| ---------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| The `'error'` arrives              | Absorbed, and reported through the host error reporter unless the request already handed it to you as `errorCause`. Released one turn later, so a sibling request's late error is still covered                                        |
+| `'close'`                          | The stream has finished tearing down and nothing further is coming, so it is released immediately                                                                                                                                      |
 | ~1 second with neither             | The per-request window. Every request that settles while the listener is already attached restarts it, so each gets a window of its own rather than the remainder of the first one's, clamped by whatever is left of the ceiling below |
-| ~5 seconds since it first attached | The absolute ceiling on one listener, which no amount of restarting extends                                                                                                                                                             |
+| ~5 seconds since it first attached | The absolute ceiling on one listener, which no amount of restarting extends                                                                                                                                                            |
 
 That last row is the one to hold on to: **the absorber does not live forever, and it is not
 per process.** Without the ceiling, a caller streaming continuously into `process.stdout` or
@@ -1411,12 +1412,12 @@ Two things deliberately do **not** set the flag. A caller's own `AbortSignal` fi
 
 #### Adapter Support
 
-| Adapter        | `isStreamError` | Notes                                                                                                                                               |
-| -------------- | --------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `NodeAdapter`  | Full            | Streamed and buffered bodies, distinguishing `stream_write_error` from `stream_response_error`                                                       |
+| Adapter        | `isStreamError` | Notes                                                                                                                                                     |
+| -------------- | --------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `NodeAdapter`  | Full            | Streamed and buffered bodies, distinguishing `stream_write_error` from `stream_response_error`                                                            |
 | `FetchAdapter` | Buffered bodies | Server runtimes and browsers alike. Always reports `stream_response_error` because `fetch` buffers the body, so there is no per-chunk delivery to inspect |
-| `MockAdapter`  | Simulated       | Opt in per response with `streamError: true`, or name the code explicitly                                                                           |
-| `XHRAdapter`   | Not reported    | `XMLHttpRequest` discards the status on a network error, leaving nothing to qualify                                                                 |
+| `MockAdapter`  | Simulated       | Opt in per response with `streamError: true`, or name the code explicitly                                                                                 |
+| `XHRAdapter`   | Not reported    | `XMLHttpRequest` discards the status on a network error, leaving nothing to qualify                                                                       |
 
 `FetchAdapter` is not limited to server runtimes here. Headers have already arrived when the body read starts, so the status is readable in a browser exactly as it is under Node or Bun, and a truncated body rejects the same way.
 

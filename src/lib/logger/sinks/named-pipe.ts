@@ -270,6 +270,19 @@ const STALE_OPEN_MS = OPEN_WAIT_MS * 3;
 const MAX_ABANDONED_OPENS = 2;
 
 /**
+ * Which failure kind an open that threw should be reported as.
+ *
+ * `'not_found'` is a claim about the destination - that it is not there - and only
+ * `ENOENT` supports it. Anything else that stops an open is a `'setup'` failure: the
+ * destination may well exist and could not be opened.
+ */
+function openFailureKind(error: unknown): SinkFailureKind {
+  const code = (error as NodeJS.ErrnoException | undefined)?.code;
+
+  return code === 'ENOENT' ? 'not_found' : 'setup';
+}
+
+/**
  * NamedPipeSink writes logs to a named pipe (FIFO)
  * Only supported on Linux and macOS
  */
@@ -649,16 +662,10 @@ export class NamedPipeSink implements LogSink {
       // And abandon an open still in flight, which a caller asking to reconnect has
       // implicitly given up on. Left in place it would make the attempt below a no-op.
       if (this.pendingStream) {
-        const pending = this.pendingStream;
-
-        this.pendingStream = undefined;
-        this.pendingStreamSince = undefined;
-
-        try {
-          pending.destroy();
-        } catch {
-          // Nothing further to try; a new stream is about to replace it.
-        }
+        // Through the accounting, not a bare `destroy()`: the open this gives up on is
+        // very likely blocked on a reader that never came, and one abandoned outside the
+        // count is one `MAX_ABANDONED_OPENS` cannot see. See {@link abandonPendingOpen}.
+        this.abandonPendingOpen(this.pendingStream);
       }
 
       this.isInitialized = false;
@@ -771,12 +778,19 @@ export class NamedPipeSink implements LogSink {
     // is a blip, not an outage, and a reader that is genuinely gone must not turn a
     // shutdown into a thirty-second wait. Whichever bound is nearer wins, so a close with
     // little budget left never overruns it for this.
+    // A destroyed `pipeStream` is no stream, which is what `hasLiveStream` is for. A
+    // `WriteStream` sets `destroyed` synchronously when a write fails and `pipeStream` is
+    // cleared only later, from the asynchronous `'error'` handler - so a `close()` entered
+    // in that window (the ordinary shape: an `onError` handler calling `sink.close()`)
+    // found `pipeStream !== undefined`, skipped this reopen loop, then failed the drain
+    // loop's liveness test below and abandoned the whole backlog without one attempt to
+    // reopen. `write()` has always used the stronger test; these two now agree with it.
     const reopenGraceUntil =
       Date.now() + Math.min(CLOSE_REOPEN_GRACE_MS, this.closeTimeoutMS);
 
     while (
       this.writeQueue.length > 0 &&
-      this.pipeStream === undefined &&
+      !this.hasLiveStream() &&
       this.pendingStream === undefined &&
       !this.isOpening &&
       Date.now() < reopenGraceUntil &&
@@ -784,7 +798,7 @@ export class NamedPipeSink implements LogSink {
     ) {
       await this.reopenForCloseDrain(startTime, reopenGraceUntil);
 
-      if (this.pipeStream !== undefined || this.pendingStream !== undefined) {
+      if (this.hasLiveStream() || this.pendingStream !== undefined) {
         break;
       }
 
@@ -806,8 +820,7 @@ export class NamedPipeSink implements LogSink {
     // pending open is destroyed below exactly as before.
     while (
       (this.writeQueue.length > 0 || this.isProcessing) &&
-      (this.pendingStream !== undefined ||
-        (this.pipeStream !== undefined && !this.pipeStream.destroyed)) &&
+      (this.pendingStream !== undefined || this.hasLiveStream()) &&
       Date.now() - startTime <= this.closeTimeoutMS
     ) {
       // Asked for explicitly: nothing else drives a pass while this loop is awaiting, and
@@ -836,16 +849,10 @@ export class NamedPipeSink implements LogSink {
     // complete without the reader that never came, and holding it would keep a descriptor
     // and a threadpool slot for the life of the process.
     if (this.pendingStream) {
-      const pending = this.pendingStream;
-
-      this.pendingStream = undefined;
-      this.pendingStreamSince = undefined;
-
-      try {
-        pending.destroy();
-      } catch {
-        // Nothing further to try; the sink is closing either way.
-      }
+      // Counted like every other abandonment, even here: a `close()` is usually terminal,
+      // but the count is what `MAX_ABANDONED_OPENS` reads and a sink can be closed while
+      // other opens from its own earlier life are still blocked.
+      this.abandonPendingOpen(this.pendingStream);
     }
 
     if (this.pipeStream && !this.pipeStream.destroyed) {
@@ -1421,8 +1428,14 @@ export class NamedPipeSink implements LogSink {
         this.scheduleReopen(STALE_OPEN_MS + REOPEN_COOLDOWN_MS);
       }
     } catch (error) {
+      // Classified rather than assumed. This block is reached by the `stat` failing *and*
+      // by a synchronous throw from `createWriteStream`, and only `ENOENT` means what
+      // `'not_found'` says - "the destination does not exist". `EACCES`, `ELOOP` and
+      // `ENOTDIR` all arrive here too, and a handler switching on `kind` to decide whether
+      // to recreate the FIFO acted on a false premise for every one of them. `'setup'` is
+      // the kind the probe path above already chose for exactly these.
       this.reportOpenFailure(
-        'not_found',
+        openFailureKind(error),
         `Could not open named pipe at ${this.pipePath}: ${describeError(error)}`,
         error,
       );
@@ -1825,6 +1838,41 @@ export class NamedPipeSink implements LogSink {
   }
 
   /**
+   * Let go of an open still in flight, and keep the count of them that says so.
+   *
+   * `destroy()` cannot cancel a blocked `open(2)`: the call sits in the runtime's file-I/O
+   * thread pool until a reader arrives or the process ends, holding a descriptor and a
+   * pool slot, and `'close'` only fires once it finally returns. {@link MAX_ABANDONED_OPENS}
+   * is the bound on how many of those this sink may be holding at once, so every
+   * abandonment has to go through this counter - a bare `pending.destroy()` elsewhere left
+   * the cap blind to opens it was still accumulating, and an app calling `reconnect()` on
+   * a "reader is ready" signal could strand unbounded blocked opens and starve every other
+   * filesystem operation in the process with the cap never engaging.
+   */
+  private abandonPendingOpen(pending: fs.WriteStream): void {
+    this.pendingStream = undefined;
+    this.pendingStreamSince = undefined;
+    this.abandonedOpens++;
+
+    // Decremented if the kernel ever releases it, so a pipe that recovers after a long
+    // outage is not held against the cap forever. `'close'` fires once `destroy()` has
+    // been able to run, which for a blocked open is when that open finally returns.
+    pending.once('close', () => {
+      this.abandonedOpens--;
+
+      // Armed again, because the sink is no longer at the cap: a later outage that reaches
+      // it is a new fact and has to be reported as one.
+      this.reportedAbandonedOpenCap = false;
+    });
+
+    try {
+      pending.destroy();
+    } catch {
+      // Nothing further to try for a stream this sink has already let go of.
+    }
+  }
+
+  /**
    * Give up on an open that has been in flight too long, so recovery can start again.
    *
    * `destroy()` does not cancel the underlying `open(2)`; it only stops this sink from
@@ -1868,26 +1916,7 @@ export class NamedPipeSink implements LogSink {
       return;
     }
 
-    this.pendingStream = undefined;
-    this.pendingStreamSince = undefined;
-    this.abandonedOpens++;
-
-    // Decremented if the kernel ever releases it, so a pipe that recovers after a long
-    // outage is not held against the cap forever. `'close'` fires once `destroy()` has
-    // been able to run, which for a blocked open is when that open finally returns.
-    pending.once('close', () => {
-      this.abandonedOpens--;
-
-      // Armed again, because the sink is no longer at the cap: a later outage that reaches
-      // it is a new fact and has to be reported as one.
-      this.reportedAbandonedOpenCap = false;
-    });
-
-    try {
-      pending.destroy();
-    } catch {
-      // Nothing further to try for a stream this sink has already let go of.
-    }
+    this.abandonPendingOpen(pending);
 
     this.handleError(
       'write',
@@ -1963,6 +1992,17 @@ export class NamedPipeSink implements LogSink {
     void this.initPromise.catch(() => {
       // Nothing left to report with.
     });
+  }
+
+  /**
+   * Whether this sink currently holds a stream it can still write through.
+   *
+   * The test `write()` makes, and the one `close()`'s loops make: a `WriteStream` marks
+   * itself `destroyed` synchronously on a failed write while `pipeStream` is cleared only
+   * when the `'error'` event lands, so "set" and "usable" are not the same question.
+   */
+  private hasLiveStream(): boolean {
+    return this.pipeStream !== undefined && !this.pipeStream.destroyed;
   }
 
   /**

@@ -117,12 +117,12 @@ prototype chain, and it costs nothing: read anything off the result with `descri
 
 ### Which One Do I Want?
 
-| You need                                                         | Use                                     |
-| ---------------------------------------------------------------- | --------------------------------------- |
-| Text for a `console.error`, a template literal, or a log line    | `describeError`                         |
-| The `Error` object itself, to rethrow or pass to a callback      | `toError`                               |
-| The full multi-line render, with `name`, `code`, and `stack`     | [`errorToString`](./error-to-string.md) |
-| To know whether a value _is_ an error, without coercing it       | `isErrorValue`                          |
+| You need                                                      | Use                                     |
+| ------------------------------------------------------------- | --------------------------------------- |
+| Text for a `console.error`, a template literal, or a log line | `describeError`                         |
+| The `Error` object itself, to rethrow or pass to a callback   | `toError`                               |
+| The full multi-line render, with `name`, `code`, and `stack`  | [`errorToString`](./error-to-string.md) |
+| To know whether a value _is_ an error, without coercing it    | `isErrorValue`                          |
 
 All four are safe to call on a reporting path. None of them throws.
 

@@ -1103,9 +1103,10 @@ function errorToASCIITable(
           // straight through the one-megabyte cap, amplified here by the row framing: the
           // same payload as `additionalInfo` rendered 11,251,061 characters. Values were
           // bounded when the cap went in; keys were the leaf nobody cut.
-          const renderedKey = charge(
+          const renderedKey = chargeKeyRow(
             budget,
-            capNestedKey(key, keyTextLevels(maxRowLength, depth)),
+            key,
+            keyTextLevels(maxRowLength, depth),
           );
 
           chargeUnits(budget, rowFrameCost(maxRowLength, depth));
@@ -1362,6 +1363,28 @@ function rowTextLevels(
   const content = Math.max(1, maxRowLength - ROW_FRAME_WIDTH - keyColumn);
 
   return ((depth + 1) * maxRowLength) / content;
+}
+
+/**
+ * Cut a key to the allowance that will hold it, and bill what it will actually cost.
+ *
+ * The two halves have to agree. {@link capNestedKey} cuts against the per-level allowance
+ * - a key wrapped in the narrow key column and padded out to the full width costs several
+ * characters per character - while `charge` bills the raw count, so the budget was told a
+ * key cost a fraction of what it emitted: three 450,000-character `additionalInfo` keys
+ * rendered 3,038,876 characters against a 1,000,000 cap, each one billed 450,000 and the
+ * loop's `remaining <= 0` guard never tripping until the third had already gone out.
+ */
+function chargeKeyRow(
+  budget: RenderBudget,
+  key: string,
+  levels: number,
+): string {
+  const rendered = capNestedKey(budget, key, levels);
+
+  chargeUnits(budget, rendered.length * Math.max(1, levels));
+
+  return rendered;
 }
 
 /** Borders, padding and the key column's separator around one wrapped line of text. */
@@ -1857,9 +1880,10 @@ function stringifyValueInner(
         // `capKey` first, for the reason the `additionalInfo` walk above does it: a key is
         // a variable-length leaf like any value, and billing one without cutting it leaves
         // the cap unenforced against a payload whose *keys* are large.
-        const renderedKey = charge(
+        const renderedKey = chargeKeyRow(
           budget,
-          capNestedKey(key, keyTextLevels(maxRowLength, depth)),
+          key,
+          keyTextLevels(maxRowLength, depth),
         );
 
         chargeUnits(budget, rowFrameCost(maxRowLength, depth));

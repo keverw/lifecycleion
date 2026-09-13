@@ -2,6 +2,8 @@ import { parseRedactPaths, redactMatchedPaths } from './internal/redact-paths';
 import { stringifyTemplateValue } from './internal/stringify-template-value';
 import {
   createRenderBudget,
+  createSiblingBudget,
+  foldTruncations,
   resolveMaxRenderLength,
   type RenderBudget,
   type TruncationHandler,
@@ -252,28 +254,40 @@ function redactValueWith(
       return value;
     }
 
-    return redactMatchedPaths(
-      value,
-      paths,
-      options?.redactFunction,
-      report,
-      undefined,
-      // A `'render'` reporter, never `report`: a leaf that refuses to render while being
-      // masked is a render failure, and reporting it through `report` would label it
-      // `'redaction'` and spend the single redaction report a broken `redactFunction`
-      // still needs. The caller's own when there is one - `stringifyValue` renders what
-      // this returns, so both halves share one budget - and one of this call's own
-      // otherwise.
-      rootedRenderReport(
-        renderReport ?? createFormatReporter('render', options?.onFormatError),
-      ),
-      // The caller's allowance, so masking and the render that follows spend one budget
-      // between them rather than a megabyte each. Without it `maxRenderLength` bounded
-      // only half the operation: a `redactFunction` answering oversized replacements got
-      // a fresh cap of its own whatever the caller had asked for, and the truncation it
-      // caused was invisible to `onTruncate`.
-      budget,
-    );
+    // A sibling allowance rather than the caller's own: `stringifyValue` renders what
+    // this returns, so a leaf masked here is charged twice against one budget - once as
+    // it is replaced and once as it is emitted - and redacting a single key shrank the
+    // effective cap from 1,000,000 characters to 400,028. The cap still holds, since the
+    // render is what emits the output; the cuts this pass makes are folded back below so
+    // `onTruncate` still hears about them.
+    const maskBudget = createSiblingBudget(budget);
+
+    try {
+      return redactMatchedPaths(
+        value,
+        paths,
+        options?.redactFunction,
+        report,
+        undefined,
+        // A `'render'` reporter, never `report`: a leaf that refuses to render while
+        // being masked is a render failure, and reporting it through `report` would
+        // label it `'redaction'` and spend the single redaction report a broken
+        // `redactFunction` still needs. The caller's own when there is one -
+        // `stringifyValue` renders what this returns, so both halves share one reporter
+        // - and one of this call's own otherwise.
+        rootedRenderReport(
+          renderReport ??
+            createFormatReporter('render', options?.onFormatError),
+        ),
+        // Sized from the caller's allowance, so `maxRenderLength` bounds this half of
+        // the operation too: without it a `redactFunction` answering oversized
+        // replacements got a fresh cap of its own whatever the caller had asked for, and
+        // the truncation it caused was invisible to `onTruncate`.
+        maskBudget,
+      );
+    } finally {
+      foldTruncations(budget, maskBudget);
+    }
   } catch (error) {
     // Reported when there is a reporter to report with. Nothing above is expected to
     // throw - `parseRedactPaths` is guarded throughout and the walk guards every read it
@@ -332,9 +346,11 @@ export function stringifyValue(
   // allocate for their own reporters.
   const report = createFormatReporter('render', options?.onFormatError);
 
-  // One allowance for this call, created here rather than inside the walk so the same
-  // budget covers the redaction pass's own masking and the render that follows it - two
-  // halves of one operation, as `redactValueWith` already documents for the reporter.
+  // The allowance for this call, created here rather than inside the walk so it is the
+  // caller's `maxRenderLength` that bounds both halves of the operation. The masking pass
+  // spends a sibling of it rather than this one - see `redactValueWith` - because the
+  // render below re-emits everything the masking produced, and one budget for both
+  // charged every masked leaf twice.
   const budget = createRenderBudget(
     resolveMaxRenderLength(options?.maxRenderLength),
   );

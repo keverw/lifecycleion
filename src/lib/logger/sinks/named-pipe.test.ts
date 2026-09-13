@@ -2594,6 +2594,66 @@ describe('NamedPipeSink', () => {
     await sink.close();
   }, 15000);
 
+  test('an open that failed for anything but absence is not called not_found', async () => {
+    // The catch-all reported every failure escaping the open as `'not_found'` - "the
+    // destination does not exist" - and that block covers `stat` failing with `EACCES`,
+    // `ELOOP` or `ENOTDIR` as well as a synchronous throw from `createWriteStream`. A
+    // handler switching on `kind` to decide whether to recreate the FIFO acted on a false
+    // premise for every one of them. `'setup'` is what the probe path already chose for
+    // exactly these.
+    const filePath = `${tmpDir.path}/an-ordinary-file`;
+
+    await fsPromises.writeFile(filePath, 'not a directory', 'utf8');
+
+    const kinds: SinkFailureKind[] = [];
+
+    const sink = new NamedPipeSink({
+      pipePath: `${filePath}/under-a-file.pipe`,
+      closeTimeoutMS: 2000,
+      onError: (failure: SinkFailure) => {
+        kinds.push(failure.kind);
+      },
+    });
+
+    sink.write({
+      timestamp: Date.now(),
+      type: 'info',
+      serviceName: 'TestService',
+      template: 'nowhere to go',
+      message: 'nowhere to go',
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 300));
+
+    expect(kinds).toContain('setup');
+    expect(kinds).not.toContain('not_found');
+
+    // And a path that genuinely is not there still says so.
+    const missingKinds: SinkFailureKind[] = [];
+    const missing = new NamedPipeSink({
+      pipePath: `${tmpDir.path}/never-created.pipe`,
+      closeTimeoutMS: 2000,
+      onError: (failure: SinkFailure) => {
+        missingKinds.push(failure.kind);
+      },
+    });
+
+    missing.write({
+      timestamp: Date.now(),
+      type: 'info',
+      serviceName: 'TestService',
+      template: 'nowhere to go',
+      message: 'nowhere to go',
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 300));
+
+    expect(missingKinds).toContain('not_found');
+
+    await sink.close();
+    await missing.close();
+  }, 15000);
+
   test('a path that is not a FIFO is reported once, and does not trap the sink', async () => {
     // This one was both a flood and a dead end. Reporting directly rather than through the
     // once-per-outage path meant six callbacks in four seconds against an ordinary file,
@@ -3103,6 +3163,67 @@ describe('NamedPipeSink', () => {
     expect(sink.getHealth().droppedEntries).toBe(0);
 
     restarted?.stop();
+  }, 15000);
+
+  test('close() reopens for a stream that was destroyed but not yet cleared', async () => {
+    // A `WriteStream` marks itself `destroyed` synchronously when a write fails, while
+    // `pipeStream` is cleared only later from the asynchronous `'error'` handler. Both
+    // drain loops tested `pipeStream === undefined`, so a `close()` entered in that window
+    // - the ordinary shape, an `onError` handler calling `sink.close()` - skipped the
+    // reopen loop, failed the drain loop's liveness test below and abandoned the whole
+    // backlog with a reader on the other end and the grace window unspent.
+    const pipePath = `${tmpDir.path}/close-destroyed-stream.pipe`;
+    await createNamedPipe(pipePath);
+
+    // A held descriptor rather than a read stream: destroying the sink's writer below
+    // makes the FIFO writerless for a moment, which ends a `createReadStream` and takes
+    // the reader away with it - the state this test is *not* about.
+    const readerFD = fs.openSync(
+      pipePath,
+      fs.constants.O_RDONLY | fs.constants.O_NONBLOCK,
+    );
+
+    const sink = new NamedPipeSink({
+      pipePath,
+      jsonFormat: false,
+      closeTimeoutMS: 8000,
+    });
+
+    expect(await waitForOpenPipe(sink)).toBe(true);
+
+    const privateSink = sink as unknown as {
+      pipeStream?: { destroy: () => void };
+    };
+
+    // Destroyed without clearing the reference, exactly as a synchronous write failure
+    // leaves it before the `'error'` event lands.
+    privateSink.pipeStream?.destroy();
+
+    const testMessage = 'queued behind a destroyed stream';
+
+    sink.write({
+      timestamp: Date.now(),
+      type: 'info',
+      serviceName: 'TestService',
+      template: testMessage,
+      message: testMessage,
+    });
+
+    await sink.close();
+
+    const buffer = Buffer.alloc(65536);
+    let bytesRead = 0;
+
+    try {
+      bytesRead = fs.readSync(readerFD, buffer, 0, buffer.length, null);
+    } finally {
+      fs.closeSync(readerFD);
+    }
+
+    expect(buffer.subarray(0, bytesRead).toString('utf8')).toContain(
+      testMessage,
+    );
+    expect(sink.getHealth().droppedEntries).toBe(0);
   }, 15000);
 
   test('close() gives up on a reader that never comes back', async () => {

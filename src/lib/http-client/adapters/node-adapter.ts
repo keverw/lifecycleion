@@ -1552,9 +1552,10 @@ async function streamResponseBody(
      * absorber attached to one could never be taken back: the `setImmediate` would drop
      * the `WeakMap` entry while the listener stayed, and the next failure would attach
      * another, which is the unbounded growth this exists to prevent. Nothing is lost by
-     * skipping it - `cleanup` could not have detached `onWritableError` from such a
-     * writable either, so that listener is still attached and absorbs the late error on
-     * its own, settling nothing because `settle` has already run.
+     * skipping it - such a writable is listened to through the permanent fan-out at
+     * {@link attachWritableListener}, whose listener stays attached whatever this request
+     * does, so a late error still lands on `onWritableError` and settles nothing because
+     * `settle` has already run.
      */
     const absorbPendingWritableError = (): void => {
       // Captured once, here, rather than looked up again inside the removal below. Two
@@ -1884,6 +1885,9 @@ async function streamResponseBody(
       // asked for it explicitly. `cleanup` takes `onWritableError` off unconditionally, so
       // the moment it runs the writable has no `'error'` listener of ours left - and an
       // `'error'` event with no listener is an uncaught exception that ends the process.
+      // (A writable with no removal method keeps the permanent fan-out listener, but that
+      // one dispatches to nobody once this request has deregistered, so the absorber is
+      // what has to catch the event there too.)
       //
       // The three call sites that asked were the ones where a `write`/`end` throw made the
       // late error obvious, which left the ordinary paths uncovered: `settle(true)` on
@@ -1898,8 +1902,8 @@ async function streamResponseBody(
       // delivery or on `'close'`.
       absorbPendingWritableError();
 
-      removeWritableListener(writable, 'drain', onWritableDrain);
-      removeWritableListener(writable, 'error', onWritableError);
+      detachWritableListener(writable, 'drain', onWritableDrain);
+      detachWritableListener(writable, 'error', onWritableError);
 
       res.off('data', onResponseData);
       res.off('end', onResponseEnd);
@@ -2121,8 +2125,14 @@ async function streamResponseBody(
       settle({ code: 'stream_response_error', cause: streamError });
     };
 
-    writable.on('drain', onWritableDrain);
-    writable.on('error', onWritableError);
+    // Through `attachWritableListener`, which for a writable that defines neither `off`
+    // nor `removeListener` registers with one permanent listener per event instead of
+    // adding another of its own. `off` and `removeListener` are both optional on
+    // `WritableLike`, and a sink reused across requests accumulated two listeners plus the
+    // retained request closure behind each of them, request after request.
+    attachWritableListener(writable, 'drain', onWritableDrain);
+    attachWritableListener(writable, 'error', onWritableError);
+
     res.on('data', onResponseData);
     res.on('end', onResponseEnd);
     res.on('error', onResponseError);
@@ -2370,6 +2380,93 @@ type WritableListenerRemover = (
   event: 'drain' | 'error' | 'close',
   listener: (() => void) | ((error: Error) => void),
 ) => unknown;
+
+/**
+ * One permanent listener per writable and event, fanning out to whoever is listening now.
+ *
+ * For the writable that defines neither `off` nor `removeListener`. Attaching a listener
+ * per request to one of those is unbounded growth - a sink reused across many requests
+ * accumulates two listeners and the request closure behind each, until Node warns about a
+ * leak - and attaching none at all loses the `'error'` channel entirely, which
+ * {@link WritableLike} documents as a sufficient way for a sink to report a failed write:
+ * a sink that reports only that way settled a truncated download as a success.
+ *
+ * So one listener is attached, ever, and the set behind it is what changes. Registering
+ * and deregistering is a `Set` operation on an entry keyed weakly by the writable, so
+ * nothing accumulates and nothing is missed.
+ */
+const sharedWritableListeners = new WeakMap<
+  WritableLike,
+  Map<string, Set<(argument: never) => void>>
+>();
+
+function attachWritableListener(
+  writable: WritableLike,
+  event: 'drain' | 'error',
+  listener: (() => void) | ((error: Error) => void),
+): void {
+  if (getWritableListenerRemover(writable) !== null) {
+    if (event === 'error') {
+      writable.on('error', listener);
+    } else {
+      writable.on('drain', listener as () => void);
+    }
+
+    return;
+  }
+
+  let events = sharedWritableListeners.get(writable);
+
+  if (events === undefined) {
+    events = new Map();
+    sharedWritableListeners.set(writable, events);
+  }
+
+  const existing = events.get(event);
+
+  if (existing !== undefined) {
+    existing.add(listener);
+
+    return;
+  }
+
+  const listeners = new Set<(argument: never) => void>([listener]);
+
+  events.set(event, listeners);
+
+  // Copied before dispatch: a listener that settles its request deregisters itself from
+  // this very set, and mutating a `Set` while iterating it would skip the sibling behind
+  // it - two concurrent downloads into one sink, and only one of them hears the failure.
+  const dispatch = (argument: never): void => {
+    for (const registered of [...listeners]) {
+      if (listeners.has(registered)) {
+        registered(argument);
+      }
+    }
+  };
+
+  if (event === 'error') {
+    writable.on('error', dispatch as unknown as (error: Error) => void);
+
+    return;
+  }
+
+  writable.on('drain', dispatch as unknown as () => void);
+}
+
+function detachWritableListener(
+  writable: WritableLike,
+  event: 'drain' | 'error',
+  listener: (() => void) | ((error: Error) => void),
+): void {
+  if (getWritableListenerRemover(writable) !== null) {
+    removeWritableListener(writable, event, listener);
+
+    return;
+  }
+
+  sharedWritableListeners.get(writable)?.get(event)?.delete(listener);
+}
 
 /**
  * The writable's own listener-removal method, or `null` when it has none.

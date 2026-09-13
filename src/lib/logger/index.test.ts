@@ -2531,6 +2531,75 @@ describe('Logger - a redactedKeys list that will not be read twice', () => {
     expect(JSON.stringify(entry?.redactedParams)).not.toContain(SECRET);
   });
 
+  test('a hostile tags list neither throws nor reaches a sink', () => {
+    // `tags && tags.length > 0` was an unguarded read of a caller-supplied list, in the
+    // same object literal where `redactedKeys` is snapshotted for exactly this reason: a
+    // `length` that throws threw straight out of the log call, and the caller's own array
+    // travelled to every sink by reference with its traps still attached.
+    const sink = new ArraySink();
+    const logger = new Logger({
+      sinks: [sink],
+      callProcessExit: false,
+      onFormatError: () => {},
+    });
+
+    const hostile = new Proxy([] as string[], {
+      get: (target, property, receiver) => {
+        if (property === 'length') {
+          throw new Error('length blew up');
+        }
+
+        return Reflect.get(target, property, receiver);
+      },
+    });
+
+    expect(() => {
+      logger.info('hello', { tags: hostile });
+    }).not.toThrow();
+
+    expect(sink.logs[0]?.tags).toBeUndefined();
+
+    const caller = ['live'];
+
+    logger.info('hello again', { tags: caller });
+
+    caller[0] = 'rewritten';
+
+    expect(sink.logs[1]?.tags).toEqual(['live']);
+  });
+
+  test('a sink whose close is a throwing accessor does not reject close()', async () => {
+    // The `if (sink.close)` property *read* sat outside the `try`, so a throwing accessor
+    // rejected `Promise.all` - and `processExit` calls `close()` as
+    // `void this.close().finally(...)` with no `catch`, which is an unhandled rejection
+    // from the shutdown path, fatal under Node's default `--unhandled-rejections=throw`.
+    // `this.sinks = []` and the `'close'` event were both skipped behind it too.
+    const sink = new ArraySink();
+    const hostileSink = {
+      write: () => {
+        // Nothing to record; this sink exists for its `close`.
+      },
+      get close(): () => Promise<void> {
+        throw new Error('close getter blew up');
+      },
+    };
+
+    const logger = new Logger({
+      sinks: [hostileSink, sink],
+      callProcessExit: false,
+      onSinkError: () => {
+        // Expected: the getter's failure is reported through this channel.
+      },
+    });
+
+    await logger.close();
+
+    // Reached despite the throwing getter: `close()` resolved, so the sinks were cleared.
+    logger.info('after close');
+
+    expect(sink.logs).toHaveLength(0);
+  });
+
   test('a list of strings is still handed to the sink as an inert copy', () => {
     // The counterpart the check above must not break. The copy is also what keeps the
     // caller's own array off the entry, so a later mutation of it cannot rewrite what a

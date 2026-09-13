@@ -127,7 +127,21 @@ export interface FileSinkHealth {
 
 export interface FlushResult {
   success: boolean;
+  /**
+   * Entries written since the previous flush returned, or since this sink was made.
+   *
+   * Counted from the last flush rather than from this call's entry, as
+   * {@link FlushResult.entriesFailed} is: a sink is written to between flushes, not only
+   * while one is waiting, so a window that opened at the call would answer for none of it.
+   */
   entriesWritten: number;
+  /**
+   * Entries lost since the previous flush returned - retries exhausted, evicted at
+   * `maxQueueSize`, or abandoned by `close()`.
+   *
+   * `getHealth().droppedEntries` is the cumulative figure. Successive flushes partition
+   * the losses between them, so each one is reported exactly once.
+   */
   entriesFailed: number;
   timedOut: boolean;
 }
@@ -174,6 +188,15 @@ export class FileSink implements LogSink {
   private writeQueue: QueuedEntry[] = [];
   private maxQueueSize?: number;
   private droppedEntries = 0;
+  /**
+   * Where the last {@link flush} stopped counting, so the next one starts there.
+   *
+   * A flush reports what happened to this sink *since the caller last asked*, not only
+   * what happened while it was waiting - see the accounting in `flush()` for why the
+   * narrower window let a whole batch of losses go unreported.
+   */
+  private flushBaselineWritten = 0;
+  private flushBaselineDropped = 0;
   private didReportDrop = false;
   private isInitialized = false;
   private initPromise?: Promise<void>;
@@ -334,19 +357,21 @@ export class FileSink implements LogSink {
     // answered `{ success: true, entriesFailed: 0 }` about them. One counter, so `flush()`
     // and `getHealth()` cannot disagree about what was lost.
     //
-    // A delta over the flush window, as `entriesWritten` is, and it means the same thing
-    // as that one: what happened to this sink while the flush was waiting. So an eviction
-    // that happened in an earlier `write()` is not in it - `getHealth().droppedEntries` is
-    // the cumulative figure and the one to poll for that - and a concurrent burst that
-    // overflows the queue during the window is, even though the flush was not waiting on
-    // the entries it evicted.
+    // Measured from where the *last* flush stopped counting rather than from this call's
+    // own entry, which is the window a caller is actually asking about. `enforceQueueLimit`
+    // runs synchronously inside `write()` and the queue only drains between turns of the
+    // event loop, so every eviction a synchronous logging loop causes has already happened
+    // by the time `flush()` is entered: 25,000 `write()` calls under the default 10,000
+    // cap then answered `{ success: true, entriesWritten: 10000, entriesFailed: 0 }` while
+    // `getHealth()` reported 15,000 dropped - a batch job's all-clear for losing most of
+    // its log. Counted from the last flush, those losses are in the result that follows
+    // them, and every line is accounted for exactly once across successive flushes.
     //
-    // Both baselines are read before the wait below rather than after it, so the window
-    // they measure is the whole call. Read after, a loss that landed while the init was
-    // still settling fell outside the delta and a flush that lost a line answered
-    // `{ entriesFailed: 0, success: true }` about it.
-    const startWritten = this.totalEntriesWritten;
-    const startFailed = this.droppedEntries;
+    // Both baselines are read before the wait below rather than after it, so a loss that
+    // lands while the init is still settling is inside this call's answer rather than
+    // deferred to the next one.
+    const startWritten = this.flushBaselineWritten;
+    const startFailed = this.flushBaselineDropped;
 
     // Wait for initialization, bounded by the caller's own budget. `close()` has always
     // raced this wait against its timeout; `flush()` awaited it outright, so a `mkdir` or
@@ -379,12 +404,12 @@ export class FileSink implements LogSink {
             // Intentionally ignored after the timeout.
           });
 
-          return {
+          return this.settleFlush({
             success: false,
             entriesWritten: this.totalEntriesWritten - startWritten,
             entriesFailed: this.droppedEntries - startFailed,
             timedOut: true,
-          };
+          });
         }
       } finally {
         if (timeoutHandle) {
@@ -400,12 +425,12 @@ export class FileSink implements LogSink {
         const entriesWritten = this.totalEntriesWritten - startWritten;
         const entriesFailed = this.droppedEntries - startFailed;
 
-        return {
+        return this.settleFlush({
           success: false,
           entriesWritten,
           entriesFailed,
           timedOut: true,
-        };
+        });
       }
 
       await new Promise((resolve) => setTimeout(resolve, 10));
@@ -414,12 +439,12 @@ export class FileSink implements LogSink {
     const entriesWritten = this.totalEntriesWritten - startWritten;
     const entriesFailed = this.droppedEntries - startFailed;
 
-    return {
+    return this.settleFlush({
       success: entriesFailed === 0,
       entriesWritten,
       entriesFailed,
       timedOut: false,
-    };
+    });
   }
 
   /**
@@ -842,9 +867,24 @@ export class FileSink implements LogSink {
           }
 
           if (willRetry) {
-            // Re-queue with incremented attempt count
+            // Re-queued at the *front*, where it came from, and not at the back.
+            //
+            // The queue drains with `shift`, so pushing moved a failed line behind every
+            // line that arrived after it: one transient `ENOSPC` or `EAGAIN` wrote the
+            // file out of timestamp order. Under `maxQueueSize` it cost more than order -
+            // `enforceQueueLimit` evicts the *oldest* entry to make room, so the re-pushed
+            // line survived at the tail while a newer line that had never failed was
+            // dropped for it, up to `maxRetries` of them per failing entry.
+            //
+            // Retried immediately as a result, which is what the attempt count bounds: the
+            // entry gets no more than `maxRetries` further tries and is then given up on,
+            // and a stream that needs recreating is recreated by `writeEntry` on the next
+            // one. Fewer if the queue is at `maxQueueSize` - it is the oldest entry again
+            // once it is back at the head, so the eviction below can take it, which is the
+            // drop-oldest policy applied to the line that has already failed rather than
+            // to a newer one that has not.
             queuedEntry.attempts++;
-            this.writeQueue.push(queuedEntry);
+            this.writeQueue.unshift(queuedEntry);
             this.enforceQueueLimit();
           } else {
             // Max retries exceeded - entry is lost
@@ -874,9 +914,19 @@ export class FileSink implements LogSink {
   }
 
   /**
-   * Write a single entry to the file
-   * If stream is broken, it will be recreated on next attempt
+   * Move the flush baselines past what this result reported, and hand it back.
+   *
+   * On every exit including the timeouts: a flush that gave up still reported the writes
+   * and losses it had seen, and counting them again in the next result would double-report
+   * them.
    */
+  private settleFlush(result: FlushResult): FlushResult {
+    this.flushBaselineWritten = this.totalEntriesWritten;
+    this.flushBaselineDropped = this.droppedEntries;
+
+    return result;
+  }
+
   /**
    * Discard the oldest entries once the queue is over `maxQueueSize`.
    *
@@ -969,6 +1019,10 @@ export class FileSink implements LogSink {
     return 'write';
   }
 
+  /**
+   * Write a single entry to the file
+   * If stream is broken, it will be recreated on next attempt
+   */
   private async writeEntry(queued: QueuedEntry): Promise<void> {
     // Before the stream is touched: there is no line to write, and this cannot become one
     // by trying again. Raised as an ordinary write failure so `onError`, `lastError` and
@@ -1172,6 +1226,18 @@ export class FileSink implements LogSink {
             stream.destroy();
           } catch {
             // Nothing further to try for a stream nothing is using.
+          }
+
+          // An open that never completed still leaves the sink uninitialized, even when
+          // nobody is holding the stream any more. A queued write reaching `stream.write()`
+          // first runs `destroyStream()` from its own callback, so the `'error'` event that
+          // follows arrives here rather than at the branch below that clears the flag: with
+          // a log path that is a directory, twenty consecutive failed writes and not one
+          // successful open still answered `{ isInitialized: true }`. Only when nothing has
+          // taken this stream's place - a rotation replaces it with a live one, and that
+          // sink is initialized.
+          if (stream.pending && this.logFileStream === undefined) {
+            this.isInitialized = false;
           }
 
           return;

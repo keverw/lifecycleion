@@ -585,12 +585,12 @@ REDACTION_FAILED_MARKER; // '***REDACTION FAILED***'
 
 Four failure modes, all fail closed:
 
-| What failed                                                                         | Result                                                                                                          |
-| ----------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
-| Your `redactFunction` throws for a key                                              | That key becomes the marker, while every other param redacts normally                                           |
-| A value cannot be stringified (a `toString` that throws)                            | Same - that key becomes the marker                                                                              |
+| What failed                                                                         | Result                                                                                                           |
+| ----------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| Your `redactFunction` throws for a key                                              | That key becomes the marker, while every other param redacts normally                                            |
+| A value cannot be stringified (a `toString` that throws)                            | Same - that key becomes the marker                                                                               |
 | A param cannot be read (a getter that throws)                                       | That key becomes the marker where it sits, while every other param, including the redacted one, redacts normally |
-| The `params` object cannot be read at all (a revoked `Proxy`, a throwing `ownKeys`) | **Only** the redacted keys are returned, each set to the marker. Other params are dropped from `redactedParams` |
+| The `params` object cannot be read at all (a revoked `Proxy`, a throwing `ownKeys`) | **Only** the redacted keys are returned, each set to the marker. Other params are dropped from `redactedParams`  |
 
 The marker is deliberately distinct from an ordinary `***` mask. An operator seeing `***`
 concludes redaction worked, so a broken `redactFunction` would otherwise hide itself behind
@@ -1363,9 +1363,9 @@ const result = await fileSink.flush();
 console.log(result);
 // {
 //   success: true,        // false if any entries failed or timeout
-//   entriesWritten: 42,   // Number of entries successfully written
-//   entriesFailed: 0,     // Entries this sink lost during the flush - retries exhausted,
-//                         // evicted at maxQueueSize, or abandoned by close()
+//   entriesWritten: 42,   // Entries written since the last flush
+//   entriesFailed: 0,     // Entries this sink lost since the last flush - retries
+//                         // exhausted, evicted at maxQueueSize, or abandoned by close()
 //   timedOut: false       // true if flush timed out
 // }
 

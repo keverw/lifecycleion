@@ -768,6 +768,102 @@ describe('FileSink', () => {
     await sink.close();
   });
 
+  test('a retried entry keeps its place in the file', async () => {
+    // The queue drains with `shift`, so re-queueing with `push` moved a failed line behind
+    // every line that arrived after it: one transient `EAGAIN` wrote the file out of
+    // timestamp order, and under `maxQueueSize` the re-pushed line survived at the tail
+    // while `enforceQueueLimit` evicted a newer line that had never failed.
+    const entryFor = (message: string): LogEntry => ({
+      timestamp: Date.now(),
+      type: 'info',
+      serviceName: 'TestService',
+      template: message,
+      message,
+    });
+
+    const sink = new FileSink({
+      logDir: tmpDir.path,
+      basename: 'retry-order',
+      jsonFormat: false,
+      maxRetries: 3,
+      onError: () => {
+        // One transient failure is expected.
+      },
+    });
+
+    await sink.flush();
+
+    const privateSink = sink as unknown as {
+      writeEntry: (entry: unknown) => Promise<void>;
+    };
+    const realWriteEntry = privateSink.writeEntry.bind(sink);
+    let failuresLeft = 1;
+
+    privateSink.writeEntry = async (entry: unknown): Promise<void> => {
+      if (failuresLeft > 0) {
+        failuresLeft--;
+
+        throw new Error('transient write failure');
+      }
+
+      return realWriteEntry(entry);
+    };
+
+    sink.write(entryFor('first'));
+    sink.write(entryFor('second'));
+
+    await sink.flush();
+
+    const files = await fsPromises.readdir(tmpDir.path);
+    const logFile = files.find((name) => name.startsWith('retry-order'));
+    const contents = await fsPromises.readFile(
+      `${tmpDir.path}/${logFile ?? ''}`,
+      'utf8',
+    );
+
+    expect(contents.indexOf('first')).toBeLessThan(contents.indexOf('second'));
+    expect(contents).toContain('second');
+
+    await sink.close();
+  });
+
+  test('an open that never completed leaves the sink uninitialized', async () => {
+    // `isInitialized` is set as soon as `createWriteStream` returns, and the `'error'`
+    // handler cleared it only for a stream this sink was still holding. A queued write
+    // reaching `stream.write()` first runs `destroyStream()` from its own callback, so the
+    // `'error'` event that followed took the "stream nobody holds" early return: twenty
+    // consecutive failed opens still answered `{ isInitialized: true }`.
+    const today = new Date().toISOString().slice(0, 10);
+
+    await fsPromises.mkdir(`${tmpDir.path}/blocked-${today}.log`);
+
+    const sink = new FileSink({
+      logDir: tmpDir.path,
+      basename: 'blocked',
+      onError: () => {
+        // Every open fails here; that is the point.
+      },
+    });
+
+    for (let index = 0; index < 5; index++) {
+      sink.write({
+        timestamp: Date.now(),
+        type: 'info',
+        serviceName: 'TestService',
+        template: `entry-${String(index)}`,
+        message: `entry-${String(index)}`,
+      });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+
+    const health = sink.getHealth();
+
+    expect(health.isInitialized).toBe(false);
+    expect(health.isHealthy).toBe(false);
+
+    await sink.close();
+  });
+
   test('should format raw type logs without type prefix', async () => {
     const sink = new FileSink({
       logDir: tmpDir.path,
@@ -1251,6 +1347,40 @@ describe('FileSink - bounded queue', () => {
 
     expect(health.queueSize).toBeLessThanOrEqual(5);
     expect(health.droppedEntries).toBeGreaterThan(0);
+
+    await sink.close();
+  });
+
+  test('reports a burst that overflowed before flush() was called', async () => {
+    // `enforceQueueLimit` runs synchronously inside `write()` and the queue only drains
+    // between turns of the event loop, so every eviction a synchronous logging loop causes
+    // has already happened by the time `flush()` is entered. Counted from the call, those
+    // losses fell outside the window: 25,000 writes under a 10,000 cap answered
+    // `{ success: true, entriesFailed: 0 }` while `getHealth()` reported 15,000 dropped.
+    const sink = new FileSink({
+      logDir: tmpDir.path,
+      basename: 'flush-window',
+      maxQueueSize: 5,
+      onError: () => {
+        // The overflow report is expected; the assertion is on what `flush()` says.
+      },
+    });
+
+    for (let index = 0; index < 50; index++) {
+      sink.write(makeEntry(`entry-${index}`));
+    }
+
+    const result = await sink.flush();
+
+    expect(result.entriesFailed).toBe(sink.getHealth().droppedEntries);
+    expect(result.entriesFailed).toBeGreaterThan(0);
+    expect(result.success).toBe(false);
+
+    // And reported exactly once: successive flushes partition the losses between them.
+    const second = await sink.flush();
+
+    expect(second.entriesFailed).toBe(0);
+    expect(second.success).toBe(true);
 
     await sink.close();
   });

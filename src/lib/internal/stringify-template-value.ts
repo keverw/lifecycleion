@@ -11,13 +11,13 @@ import {
 import {
   capKey,
   capToMaxRenderLength,
+  keyAllowance,
   charge,
   chargeText,
   chargeUnits,
   createRenderBudget,
   MAX_RENDER_DEPTH,
   noteTruncation,
-  MAX_RENDER_LENGTH,
   TRUNCATED,
   TRUNCATED_LENGTH,
   type RenderBudget,
@@ -150,19 +150,31 @@ function quoteWithinBudget(budget: RenderBudget, text: string): string {
 }
 
 /**
- * `key`, quoted, cut so the quoted form fits {@link MAX_RENDER_LENGTH}.
+ * `key`, quoted, cut so the quoted form fits the render's whole allowance.
  *
  * The cheap test first: a key that cannot expand past the cap even if every character
  * escapes is the ordinary case, and it pays one length comparison.
+ *
+ * Counted once however many passes shortened it: `capKey` records the raw cut, and the
+ * re-cut below only records when the raw one fitted - a key cut twice is still one key
+ * that did not survive.
  */
-function quoteKeyWithinCap(key: string): string {
-  const quoted = quote(capKey(key));
+function quoteKeyWithinCap(budget: RenderBudget, key: string): string {
+  const allowance = keyAllowance(budget);
+  const truncationsBefore = budget.truncations;
+  const quoted = quote(capKey(budget, key));
 
-  if (quoted.length <= MAX_RENDER_LENGTH) {
+  if (quoted.length <= allowance) {
     return quoted;
   }
 
-  return quoteWithinLimit(key, MAX_RENDER_LENGTH).encoded;
+  const recut = quoteWithinLimit(key, allowance);
+
+  if (budget.truncations === truncationsBefore) {
+    noteTruncation(budget, 'length', key.length - recut.kept);
+  }
+
+  return recut.encoded;
 }
 
 /**
@@ -357,6 +369,13 @@ export function renderLeafWithinBudget(
       budget.remaining === Number.POSITIVE_INFINITY
         ? budget.remaining
         : Math.floor(budget.remaining / factor),
+    // Scaled like `remaining`, and for the same reason: a key cut inside this leaf is
+    // re-emitted once per enclosing level too, so cutting it at the caller's whole
+    // allowance would let it render past that allowance `factor` times over.
+    limit:
+      budget.limit === Number.POSITIVE_INFINITY
+        ? budget.limit
+        : Math.max(1, Math.floor(budget.limit / factor)),
     truncations: 0,
     droppedChars: 0,
   };
@@ -505,20 +524,25 @@ function renderContainer(
     // `stringifyValue({ ['k'.repeat(5_000_000)]: 1 })` returned 5,000,028 characters
     // against a 1,000,000 cap. Cut inside the quotes, so the result is still JSON.
     //
-    // Cut against the cap and not against what is *left* of the budget, which is what
-    // separates this from the value side: a key names where the render stopped, so an
-    // ordinary key still goes out whole once the budget is spent - and it is billed whole,
-    // exactly as `charge` bills every other string it hands back.
+    // Cut against `keyAllowance` and not against bare `budget.remaining`, which is what
+    // separates this from the value side: a key names where the render stopped, so it
+    // keeps a short allowance of its own however spent the budget is, and an ordinary key
+    // still goes out whole - billed whole too, exactly as `charge` bills every other
+    // string it hands back.
     //
     // The quoting is part of the cut for the reason it is on the value side too: `capKey`
     // cuts the raw key and the escaping happens after, so a key of a million NUL characters
     // - six characters each once quoted - was cut to the cap and then emitted at six times
     // it. The identical string as a value had been charged what it emits since
     // `quoteWithinBudget` went in.
-    const renderedKey = charge(budget, `${quoteKeyWithinCap(key)}:`);
-
     // Stops the loop rather than only this entry, for the reason the array branch does:
     // the entries still to come would each be walked in full to no purpose.
+    //
+    // Tested *before* this key is charged rather than after, which is what keeps the cap
+    // from reopening once per key: a key is cut against the render's whole allowance and
+    // not against what is left of it, so charging first let every oversized key through
+    // at full size - two 900 KB keys emitted 1,800,035 characters against a 1 MB cap,
+    // each one billed after the budget it had already spent was checked.
     //
     // Emitted as this key's *value*, below the key rather than in place of the whole
     // entry. A bare `"[max length exceeded]"` pushed among parts that are all `"key":value`
@@ -529,10 +553,17 @@ function renderContainer(
     // key also says *where* the render stopped rather than only that it did.
     if (budget.remaining <= 0) {
       noteTruncation(budget, 'length');
-      parts.push(`${renderedKey}${charge(budget, quote(TRUNCATED_LENGTH))}`);
+      parts.push(
+        `${charge(budget, `${quoteKeyWithinCap(budget, key)}:`)}${charge(
+          budget,
+          quote(TRUNCATED_LENGTH),
+        )}`,
+      );
 
       break;
     }
+
+    const renderedKey = charge(budget, `${quoteKeyWithinCap(budget, key)}:`);
 
     // The read is inside the guard with the render, exactly as the array branch reads its
     // elements inside one: an entry backed by a throwing accessor degrades to a marker in

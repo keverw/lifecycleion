@@ -2306,6 +2306,74 @@ describe('maxRenderLength and onTruncate', () => {
     }
   });
 
+  it("holds keys to the caller's allowance, not to the fixed cap", () => {
+    // Keys were cut against `MAX_RENDER_LENGTH` whatever the caller asked for, and the
+    // cut was never reported: `maxRenderLength: Infinity` still came back at 1,000,004
+    // characters with `onTruncate` silent, so the documented "unlimited" was false for
+    // the one leaf nothing else bounds.
+    const cuts: TruncationInfo[] = [];
+    const wide = { ['k'.repeat(5_000_000)]: 1 };
+
+    expect(
+      stringifyValue(wide, { maxRenderLength: Number.POSITIVE_INFINITY })
+        .length,
+    ).toBeGreaterThan(5_000_000);
+
+    const bounded = stringifyValue(wide, {
+      onTruncate: (info) => cuts.push(info),
+    });
+
+    expect(bounded.length).toBeLessThan(1_100_000);
+    expect(cuts).toHaveLength(1);
+    expect(cuts[0]?.dropped).toBeGreaterThan(3_000_000);
+  });
+
+  it('does not reopen the allowance for every oversized key', () => {
+    // Each key was measured against a cap none of its siblings had spent, so two 900 KB
+    // keys emitted 1,800,011 characters against a 1,000,000 cap - and any number of them
+    // scaled from there.
+    const many: Record<string, number> = {};
+
+    for (const letter of ['a', 'b', 'c']) {
+      many[letter.repeat(900_000)] = 1;
+    }
+
+    expect(stringifyValue(many).length).toBeLessThan(1_100_000);
+  });
+
+  it('does not shrink the cap when a value is redacted', () => {
+    // Masking and the render shared one budget, so a masked leaf was charged twice - once
+    // as it was replaced and once as it was emitted - and redacting one key took the
+    // effective cap from 1,000,000 characters to 400,028.
+    const value = { a: 'x'.repeat(600_000), b: 'y'.repeat(600_000) };
+
+    expect(stringifyValue(value, { redactedKeys: ['a'] }).length).toBe(
+      stringifyValue(value).length,
+    );
+  });
+
+  it('reports a named container that gave up on its tail', () => {
+    // The object branch of the masking walk was the one stopping point that broke out
+    // with a placeholder and counted nothing, so a mask cut short answered `truncations:
+    // 0` while the equivalent array reported the cut.
+    const many: Record<string, string> = {};
+
+    for (let index = 0; index < 50; index++) {
+      many[`k${String(index)}`] = 'secret';
+    }
+
+    const cuts: TruncationInfo[] = [];
+
+    redactValue(many, {
+      redactedKeys: Object.keys(many),
+      maxRenderLength: 40,
+      onTruncate: (info) => cuts.push(info),
+    });
+
+    expect(cuts).toHaveLength(1);
+    expect(cuts[0]?.reason).toBe('length');
+  });
+
   it('does not route truncation through onFormatError', () => {
     const failures: unknown[] = [];
 

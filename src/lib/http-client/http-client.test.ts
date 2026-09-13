@@ -521,6 +521,38 @@ describe('HTTPClient — basic HTTP methods', () => {
     expect(await response.requestBodySettled).toBeInstanceOf(Error);
   });
 
+  test('adopts a rejecting `requestBodySettled` from an adapter that resolves', async () => {
+    // `HTTPAdapter` is a public extension point, and the resolve path handed the adapter's
+    // promise straight through with none of the normalization the throw path gets. An
+    // adapter answering with a rejecting promise therefore put it on a field documented
+    // never to reject: an unhandled rejection for a caller that ignores the field, and a
+    // throw for one that awaits it as the docs say to.
+    const adapter: HTTPAdapter = {
+      getType: () => 'node',
+      send: (_request: AdapterRequest): Promise<AdapterResponse> =>
+        Promise.resolve({
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+          body: new TextEncoder().encode('{"ok":true}'),
+          requestBodySettled: Promise.reject(new Error('upload blew up')),
+        }),
+    };
+
+    const response = await new HTTPClient({
+      adapter,
+      baseURL: 'http://example.test',
+    })
+      .post('/upload')
+      .send<{ ok: boolean }>();
+
+    expect(response.status).toBe(200);
+
+    const settled = await response.requestBodySettled;
+
+    expect(settled).toBeInstanceOf(Error);
+    expect((settled as Error).message).toContain('upload blew up');
+  });
+
   test('a cancelled bodied request carries the upload outcome, not a silent success', async () => {
     // The hole this closes: a cancel settles with no adapter response, so the field was
     // omitted - and `await undefined` is `undefined`, which is the documented value for an

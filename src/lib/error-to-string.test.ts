@@ -1237,6 +1237,25 @@ describe('errorToString', () => {
       expect(plain).not.toContain('[max length exceeded]');
     });
 
+    it('should hold several oversized additionalInfo keys to one cap', () => {
+      // The key was cut against the per-level allowance and then billed at its raw
+      // character count, so the budget was told each key cost a fraction of what it
+      // emitted and the loop's `remaining <= 0` guard never tripped: three 450,000
+      // character keys rendered 3,038,876 characters against the 1,000,000 cap.
+      const info: Record<string, number> = {};
+
+      for (const letter of ['a', 'b', 'c']) {
+        info[letter.repeat(450_000)] = 1;
+      }
+
+      const rendered = errorToString(
+        Object.assign(new Error('boom'), { additionalInfo: info }),
+      );
+
+      expect(rendered).toContain('boom');
+      expect(rendered.length).toBeLessThan(1_200_000);
+    });
+
     it('should not throw on a BigInt nested in additionalInfo', () => {
       const error = Object.assign(new Error('boom'), {
         additionalInfo: { big: { nested: 10n } },

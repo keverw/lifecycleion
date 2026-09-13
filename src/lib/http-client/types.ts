@@ -238,10 +238,11 @@ export interface WritableLike {
   /**
    * Listener removal. Optional so an existing implementation still satisfies this type,
    * but define one: the adapter attaches listeners for the life of a request and takes
-   * them off again afterwards, and with neither method it has no way to. It then keeps
-   * the listeners it added rather than attaching ones it could never remove, so a
-   * writable reused across requests accumulates them. Either name works - both are
-   * `EventEmitter`'s, and a Node stream has both.
+   * them off again afterwards, and with neither method it has no way to. It then attaches
+   * one permanent listener per event to the writable and registers each request behind
+   * that, rather than adding one per request to a writable reused across many of them.
+   * Behaviour is the same either way; the listener is what defining one saves. Either
+   * name works - both are `EventEmitter`'s, and a Node stream has both.
    */
   off?(
     event: 'drain' | 'error' | 'close',

@@ -68,6 +68,35 @@ export function resolveMaxRenderLength(requested: number | undefined): number {
 export const TRUNCATED_LENGTH = '[max length exceeded]';
 
 /**
+ * The shortest key a cut will leave, whatever the budget is doing.
+ *
+ * A key does not only carry text, it *names where the render stopped*: the truncation
+ * branch emits `"c":"[max length exceeded]"` so a reader learns which entry was cut, and
+ * cutting the key against a budget that is already spent replaced that name with the
+ * marker too - leaving `"[max length exceeded]":"[max length exceeded]"` and no way to
+ * tell where the render got to. This floor is what keeps an ordinary key whole there.
+ *
+ * The caller's own cap still wins over it: a render asked for `maxRenderLength: 1` gets
+ * one character and not this, since a floor that outranked the cap would be a bound the
+ * caller set and this module quietly ignored - the very thing the key path was fixed for.
+ * Naming where the render stopped is what a floor *within* the allowance buys.
+ */
+export const MIN_KEY_ALLOWANCE = 256;
+
+/**
+ * How long a key this render may still emit.
+ *
+ * What is left of the budget, never more than the whole allowance and never less than
+ * {@link MIN_KEY_ALLOWANCE}. Reading the whole allowance alone - which is what this did -
+ * bounded *one* key and not a render: each key was measured against a cap none of its
+ * siblings had spent, so two 900 KB keys emitted 1,800,011 characters against a
+ * 1,000,000 cap, and any number of them scaled from there.
+ */
+export function keyAllowance(budget: RenderBudget): number {
+  return Math.min(budget.limit, Math.max(budget.remaining, MIN_KEY_ALLOWANCE));
+}
+
+/**
  * Cut `text` to the whole render's allowance, independent of what is left of it.
  *
  * For the one leaf that is not a value: a container's *keys*. {@link charge} bills a key
@@ -76,7 +105,7 @@ export const TRUNCATED_LENGTH = '[max length exceeded]';
  * from JSON carries whatever names arrived. `stringifyValue({ ['k'.repeat(5_000_000)]: 1 })`
  * returned 5,000,028 characters against a 1,000,000 cap.
  *
- * Cut against {@link MAX_RENDER_LENGTH} rather than `budget.remaining`, which is what
+ * Cut against {@link keyAllowance} rather than bare `budget.remaining`, which is what
  * separates this from {@link chargeText}. A key does not only carry text, it *names where
  * the render stopped*: the truncation branch emits `"c":"[max length exceeded]"` so a
  * reader learns which entry was cut, and cutting the key against a budget that is already
@@ -88,8 +117,18 @@ export const TRUNCATED_LENGTH = '[max length exceeded]';
  * Charging is left to the caller, which knows whether its key needs quoting, a separator,
  * or row framing around it.
  */
-export function capKey(text: string): string {
-  return capToMaxRenderLength(text);
+export function capKey(budget: RenderBudget, text: string): string {
+  const allowance = keyAllowance(budget);
+
+  if (text.length <= allowance) {
+    return text;
+  }
+
+  const kept = text.slice(0, Math.max(0, allowance));
+
+  noteTruncation(budget, 'length', text.length - kept.length);
+
+  return `${kept}${TRUNCATED_LENGTH}`;
 }
 
 /**
@@ -98,26 +137,38 @@ export function capKey(text: string): string {
  * The same relationship {@link chargeNestedText} has to {@link chargeText}, on the other
  * column. A renderer that wraps a long key inside a narrow key column and pads each of the
  * resulting lines out to the full table width emits several characters per character of
- * key, so a key cut at {@link MAX_RENDER_LENGTH} still rendered past it - measured at
+ * key, so a key cut at the render's whole allowance still rendered past it - measured at
  * 2,251,070 characters for a five-megabyte key against a one-megabyte cap. The cut is made
  * against the per-level allowance, so what is kept still fits once multiplied.
  *
  * `levels` is how many characters one character of key costs: 1 is exactly {@link capKey}.
  */
-export function capNestedKey(text: string, levels: number): string {
+export function capNestedKey(
+  budget: RenderBudget,
+  text: string,
+  levels: number,
+): string {
   const factor = Math.max(1, levels);
 
   if (factor === 1) {
-    return capKey(text);
+    return capKey(budget, text);
   }
 
-  const allowance = Math.max(1, Math.floor(MAX_RENDER_LENGTH / factor));
+  const base = keyAllowance(budget);
+  const allowance =
+    base === Number.POSITIVE_INFINITY
+      ? base
+      : Math.max(1, Math.floor(base / factor));
 
   if (text.length <= allowance) {
     return text;
   }
 
-  return `${text.slice(0, allowance)}${TRUNCATED_LENGTH}`;
+  const kept = text.slice(0, allowance);
+
+  noteTruncation(budget, 'length', text.length - kept.length);
+
+  return `${kept}${TRUNCATED_LENGTH}`;
 }
 
 /**
@@ -142,6 +193,16 @@ export function capToMaxRenderLength(text: string): string {
 /** Remaining output allowance for one render, shared by every level of it. */
 export interface RenderBudget {
   remaining: number;
+  /**
+   * The whole allowance this render opened with, unchanged as `remaining` is spent.
+   *
+   * Kept because a key is cut against the render's *total* rather than against what is
+   * left of it - see {@link capKey} - and the total was previously read from the
+   * {@link MAX_RENDER_LENGTH} constant, which is not what the caller asked for: a render
+   * given `maxRenderLength: Infinity` still had its keys cut at one megabyte, and one
+   * given a smaller cap let a single key run past it.
+   */
+  limit: number;
   /**
    * How many times this render has cut something short.
    *
@@ -188,7 +249,46 @@ export interface RenderBudget {
 export function createRenderBudget(
   limit: number = MAX_RENDER_LENGTH,
 ): RenderBudget {
-  return { remaining: limit, truncations: 0, droppedChars: 0 };
+  return { remaining: limit, limit, truncations: 0, droppedChars: 0 };
+}
+
+/**
+ * A second allowance of the same size, for a pass whose output another pass re-renders.
+ *
+ * Two passes over one value are not two halves of one output: `stringifyValue` masks the
+ * value and then renders what the masking returned, so every masked leaf is charged
+ * once as it is replaced and again as it is emitted. Sharing one budget therefore made
+ * redaction shrink the cap it was supposed to be rendering under - the same value came
+ * out at 1,000,000 characters plain and 400,028 with one key redacted, which is neither
+ * the documented cap nor the documented equality between `stringifyValue(v, o)` and
+ * `stringifyValue(redactValue(v, o))`.
+ *
+ * The cap still holds, because the *render* is what emits the characters and it is still
+ * bounded. What the second budget buys is that the first pass is bounded too, rather than
+ * being free or being paid for twice. Fold its counters back with
+ * {@link foldTruncations}, so a cut made while masking still reaches `onTruncate`.
+ */
+export function createSiblingBudget(budget: RenderBudget): RenderBudget {
+  return createRenderBudget(budget.limit);
+}
+
+/**
+ * Carry a sibling budget's cuts into the one the caller reports from.
+ *
+ * The counters only - `remaining` is exactly what is not shared. See
+ * {@link createSiblingBudget}.
+ */
+export function foldTruncations(
+  target: RenderBudget,
+  source: RenderBudget,
+): void {
+  if (source.truncations === 0) {
+    return;
+  }
+
+  target.truncations += source.truncations;
+  target.droppedChars += source.droppedChars;
+  target.firstReason ??= source.firstReason;
 }
 
 /**

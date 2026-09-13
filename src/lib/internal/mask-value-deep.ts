@@ -338,6 +338,14 @@ export function maskValueDeep(
       // equivalent array stopped after fifteen thousand elements in seven. One
       // placeholder stands for the tail, which is what the rest would have been.
       if (budget.remaining <= 0) {
+        // Counted like every other stopping point in this file. Missed here, this was the
+        // one container that gave up silently: a fifty-key object masked under a forty
+        // character budget came back with five keys and `truncations: 0`, while the
+        // equivalent array reported `truncations: 1, firstReason: 'length'` - so a caller
+        // reading the budget was told an intact mask, and the placeholder standing for
+        // the dropped tail read as an ordinary mask.
+        noteTruncation(budget, 'length');
+
         // `defineEntry`, like every other write in this loop: a plain assignment to
         // `__proto__` is a no-op for a string, so a budget that ran out on exactly that
         // key would have dropped the marker and made the truncation invisible.

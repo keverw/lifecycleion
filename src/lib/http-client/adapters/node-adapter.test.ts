@@ -3090,13 +3090,14 @@ describe('NodeAdapter.send() — unit branches without server', () => {
     expect(emitter.listenerCount('error')).toBe(0);
   });
 
-  test('a writable with no removal method gets no absorber it cannot take back', async () => {
-    // `off`/`removeListener` are optional on `WritableLike`, and an absorber attached to
-    // a writable without either could never be removed: the scheduled cleanup would drop
-    // its bookkeeping while the listener stayed, and the next failure would attach
-    // another. Nothing is lost by skipping it - the request's own 'error' listener could
-    // not be detached from such a writable either, so it is still there and absorbs the
-    // late error itself.
+  test('a writable with no removal method gets one listener, not one per request', async () => {
+    // `off`/`removeListener` are optional on `WritableLike`, and a listener attached to a
+    // writable without either could never be removed: the request's own `'drain'` and
+    // `'error'` piled up two per request plus the closure behind each, and an absorber
+    // attached there could never be taken back either. Attaching none at all is not the
+    // answer, because `'error'` is a channel `WritableLike` documents as sufficient on its
+    // own - a sink that reports only that way would settle a truncated download as a
+    // success. So one permanent listener per event fans out to whoever is listening now.
     const handlers: ((error: Error) => void)[] = [];
     const track = (event: string, listener: (error: Error) => void): void => {
       if (event === 'error') {
@@ -3158,8 +3159,7 @@ describe('NodeAdapter.send() — unit branches without server', () => {
 
     await runOnce();
 
-    // One listener per request - the request's own, which it could not detach - and no
-    // second absorber piled on top of it.
+    // One `'error'` listener: the permanent fan-out, and no absorber piled on top of it.
     expect(handlers.length).toBe(1);
 
     // It still absorbs the error the torn-down writable delivers late, and settles
@@ -3169,6 +3169,10 @@ describe('NodeAdapter.send() — unit branches without server', () => {
     await new Promise<void>((done) => {
       setImmediate(done);
     });
+
+    // And a second request through the same sink adds none: this is what a reused sink
+    // used to pay two listeners and a retained request closure for, every time.
+    await runOnce();
 
     expect(handlers.length).toBe(1);
   });
