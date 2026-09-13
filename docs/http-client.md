@@ -725,7 +725,9 @@ const jar = new CookieJar();
 // `createdAt` that is not a finite number - such a cookie would never be found expired),
 // or if the name or value cannot be sent as one `name=value` pair: a name that is empty
 // or holds `=`, `;`, whitespace or a control character, or a value holding `;` or a
-// control character.
+// control character. Looser than RFC 6265's cookie-octet grammar on purpose: spaces,
+// commas, quotes and backslashes in a value are accepted, as browsers accept them,
+// because real servers send them. Only what would change the header's framing is refused.
 const ok = jar.setCookie({
   name: 'session',
   value: 'abc123',
