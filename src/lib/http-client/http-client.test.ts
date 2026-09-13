@@ -980,6 +980,66 @@ describe('HTTPClient — basic HTTP methods', () => {
     }
   });
 
+  test('an upload still reporting progress past the request timeout is not cut', async () => {
+    // A stall bound, not a deadline. The adapter here keeps reporting progress every
+    // 30ms for 250ms after answering the `307`, against a `timeout` of 100ms, and only
+    // then settles: the wait must follow it to the end and dispatch the second hop, not
+    // fail at 100ms with the body still moving.
+    let hop = 0;
+    let settleFirst!: () => void;
+
+    const adapter: HTTPAdapter = {
+      getType: () => 'fetch',
+      send: (request: AdapterRequest): Promise<AdapterResponse> => {
+        hop++;
+
+        if (hop === 2) {
+          return Promise.resolve({ status: 200, headers: {}, body: null });
+        }
+
+        const settled = new Promise<Error | undefined>((resolve) => {
+          settleFirst = () => resolve(undefined);
+        });
+
+        let ticks = 0;
+        const ticker = setInterval(() => {
+          ticks++;
+          request.onUploadProgress?.({
+            loaded: ticks,
+            total: 10,
+            progress: ticks / 10,
+          });
+
+          if (ticks >= 8) {
+            clearInterval(ticker);
+            settleFirst();
+          }
+        }, 30);
+
+        return Promise.resolve({
+          status: 307,
+          headers: { location: '/again' },
+          body: null,
+          requestBodySettled: settled,
+        });
+      },
+    };
+
+    const response = await new HTTPClient({
+      adapter,
+      baseURL: 'http://example.test',
+      followRedirects: true,
+      timeout: 100,
+    })
+      .post('/upload')
+      .json({ a: 1 })
+      .send();
+
+    expect(hop).toBe(2);
+    expect(response.status).toBe(200);
+    expect(response.isTimeout).toBe(false);
+  });
+
   test('a timeout of 0 leaves the wait unbounded, as it leaves the per-attempt timer', async () => {
     const controller = new AbortController();
     let hop = 0;

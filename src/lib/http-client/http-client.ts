@@ -408,6 +408,12 @@ export class BaseHTTPClient {
     );
     const timeout = options.timeout ?? this._config.timeout;
 
+    // When the request's upload last reported progress, across every hop and attempt.
+    // Stamped by the upload-progress wrapper each attempt hands the adapter, and read by
+    // the wait on `requestBodySettled` before the next dispatch: the bound on that wait
+    // is a *stall* bound, not a deadline, so an upload that is still moving is never cut.
+    const uploadActivity: UploadActivity = { at: Date.now() };
+
     // Merge headers
     const baseHeaders = mergeHeaders(
       this._config.defaultHeaders,
@@ -712,6 +718,7 @@ export class BaseHTTPClient {
             request: currentInterceptedRequest,
             timeout,
             cancelSignal,
+            uploadActivity,
             retryPolicy,
             requestID,
             options,
@@ -1059,6 +1066,7 @@ export class BaseHTTPClient {
                 adapterResponse.requestBodySettled,
                 cancelSignal,
                 timeout,
+                () => uploadActivity.at,
               );
 
               // A cancel that ended the wait ends the request here, before another hop
@@ -1335,6 +1343,8 @@ export class BaseHTTPClient {
     callbacks: BuilderCallbacks<T>;
     /** The original URL before any redirects — used in callbacks so consumers can correlate attempts across hops. */
     initialURL: string;
+    /** See the declaration in `_execute`: stamped on every upload-progress report. */
+    uploadActivity: UploadActivity;
     /** First attempt number for this dispatch (continues from previous hops). Defaults to 1. */
     startAttemptNumber?: number;
     /** Accumulated redirect history — passed to interceptor context. */
@@ -1367,6 +1377,7 @@ export class BaseHTTPClient {
       request: baseRequest,
       timeout,
       cancelSignal,
+      uploadActivity,
       retryPolicy: policy,
       requestID,
       options,
@@ -1649,14 +1660,24 @@ export class BaseHTTPClient {
           // itself.
           attemptNumber,
           requestID: requestID,
-          onUploadProgress: onUploadProgress
-            ? (e) =>
-                onUploadProgress({
-                  ...e,
-                  attemptNumber,
-                  ...(hopContext ? { hopNumber: hopContext.hopNumber } : {}),
-                })
-            : undefined,
+          // Always handed over for a bodied request, whether or not the caller asked for
+          // progress: the stamp is what lets the wait on `requestBodySettled` tell an
+          // upload that is still moving from one that has stalled. A bodiless request
+          // has no upload to watch, so the adapter is told nothing it was not told before.
+          onUploadProgress:
+            onUploadProgress || (sentRequest.body ?? null) !== null
+              ? (e) => {
+                  uploadActivity.at = Date.now();
+
+                  // Returned, so a caller's `async` hook that rejects still reaches the
+                  // adapter's guard as a promise and is reported, not dropped here.
+                  return onUploadProgress?.({
+                    ...e,
+                    attemptNumber,
+                    ...(hopContext ? { hopNumber: hopContext.hopNumber } : {}),
+                  });
+                }
+              : undefined,
           onDownloadProgress: onDownloadProgress
             ? (e) =>
                 onDownloadProgress({
@@ -1828,6 +1849,7 @@ export class BaseHTTPClient {
               adapterResponse.requestBodySettled,
               cancelSignal,
               timeout,
+              () => uploadActivity.at,
             );
             previousUploadOutcome = adoptRequestBodySettled(
               adapterResponse.requestBodySettled,
@@ -2306,6 +2328,7 @@ export class BaseHTTPClient {
               uploadOutcome,
               cancelSignal,
               timeout,
+              () => uploadActivity.at,
             );
             previousUploadOutcome = uploadOutcome;
 
@@ -3249,6 +3272,11 @@ function adoptRequestBodySettled(
 /** How a wait on the previous attempt's upload ended. */
 type UploadSettleWait = 'settled' | 'cancelled' | 'deadline';
 
+/** When a request's upload last reported progress, as epoch ms. One per request. */
+interface UploadActivity {
+  at: number;
+}
+
 /**
  * Wait for an attempt's upload to settle before the next dispatch - the next redirect hop,
  * or the retry that replaces it.
@@ -3257,20 +3285,23 @@ type UploadSettleWait = 'settled' | 'cancelled' | 'deadline';
  * first, and a cancel ends the wait rather than the request - the dispatch that follows
  * sees the signal for itself.
  *
- * Bounded by `deadlineMS`, the request's own per-attempt timeout. `requestBodySettled` is
- * documented as settling in bounded time, and `NodeAdapter`'s does - its stall watchdog
- * sees to that - but `HTTPAdapter` is a public extension point, and a custom adapter that
- * set the field and never settled it held a followed `307`/`308`, or a retry, until the
- * caller aborted: no timeout, no error, nothing on any channel. The caller's `timeout` is
- * the longest they agreed to wait on any one attempt, so it is the bound here too; `0`
- * disables it exactly as it disables the per-attempt timer. What happens on the deadline
- * is the caller's decision at each site - the request fails as a timeout rather than
+ * Bounded by `stallMS`, the request's own per-attempt timeout, as a *stall* bound: the
+ * clock restarts every time the upload reports progress, so what fails is an upload that
+ * has gone silent for that long, never one that is still moving however long it takes.
+ * `requestBodySettled` is documented as settling in bounded time, and `NodeAdapter`'s does
+ * - its stall watchdog sees to that - but `HTTPAdapter` is a public extension point, and
+ * a custom adapter that set the field and never settled it held a followed `307`/`308`,
+ * or a retry, until the caller aborted: no timeout, no error, nothing on any channel. An
+ * adapter that reports no progress at all gets the bound flat, from the moment the wait
+ * begins. `0` disables it exactly as it disables the per-attempt timer. What happens at
+ * the bound is decided at each site - the request fails as a timeout rather than
  * dispatching a second upload beside one that may still be going out.
  */
 async function settleUploadBeforeNextDispatch(
   settled: unknown,
   cancelSignal: AbortSignal,
-  deadlineMS: number,
+  stallMS: number,
+  lastActivityAt: () => number,
 ): Promise<UploadSettleWait> {
   // The cancel is answered first, before there is any promise to wait on. Both retry
   // sites reach here straight after the backoff delay, and a cancel that landed during
@@ -3295,9 +3326,29 @@ async function settleUploadBeforeNextDispatch(
   });
 
   const expired = new Promise<UploadSettleWait>((resolve) => {
-    if (deadlineMS > 0) {
-      deadlineID = setTimeout(() => resolve('deadline'), deadlineMS);
+    if (stallMS <= 0) {
+      return;
     }
+
+    // Re-armed rather than reset on every report: a timer touched from inside a progress
+    // callback would run on the adapter's cadence. When it fires, the question is only
+    // whether anything moved since the wait was last armed - if so, the stall is
+    // measured from that report, and the timer sleeps for the remainder.
+    const arm = (sinceMS: number): void => {
+      deadlineID = setTimeout(() => {
+        const quietForMS = Date.now() - lastActivityAt();
+
+        if (quietForMS >= stallMS) {
+          resolve('deadline');
+
+          return;
+        }
+
+        arm(stallMS - quietForMS);
+      }, sinceMS);
+    };
+
+    arm(stallMS);
   });
 
   try {
@@ -3330,7 +3381,7 @@ function reportUploadSettleDeadline(
 ): void {
   reportToHost(
     new Error(
-      `HTTPClient waited ${String(deadlineMS)}ms for the previous attempt's upload to settle before the next ${nextDispatch} and it never did; the '${adapterType}' adapter's requestBodySettled must settle in bounded time. The request failed as a timeout rather than dispatching a second upload beside the first.`,
+      `HTTPClient waited for the previous attempt's upload to settle before the next ${nextDispatch}, and it reported no progress for ${String(deadlineMS)}ms without settling; the '${adapterType}' adapter's requestBodySettled must settle in bounded time. The request failed as a timeout rather than dispatching a second upload beside the first.`,
     ),
   );
 }
