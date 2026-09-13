@@ -4657,6 +4657,45 @@ describe('HTTPClient — builder state', () => {
     expect(elapsed).toBeLessThan(1000);
   });
 
+  test('cancel during retry delay keeps requestBodySettled from the retried response', async () => {
+    // The resolved-response retry path nulled `adapterResponse` on a cancel during the
+    // backoff and carried no upload promise of its own, so the hop loop had nowhere to
+    // read it: a bodied `POST` early-acked with a `503` and cancelled while waiting to
+    // retry answered `undefined` - the documented "the body went out" - for an upload the
+    // adapter had torn down. The throw path already carried it; this is the other half.
+    const uploadFailure = new Error('upload torn down');
+
+    const adapter: HTTPAdapter = {
+      getType: () => 'node',
+      send: (_request: AdapterRequest): Promise<AdapterResponse> =>
+        Promise.resolve({
+          status: 503,
+          headers: {},
+          body: null,
+          requestBodySettled: Promise.resolve(uploadFailure),
+        }),
+    };
+
+    const client = new HTTPClient({ adapter });
+    // `PUT`, not `POST`: a non-idempotent method is never replayed on a real response,
+    // so a `POST` would not have entered the retry wait at all.
+    const builder = client
+      .put('https://example.com/always-503')
+      .json({ payload: 'x' })
+      .retryPolicy({ strategy: 'fixed', maxRetryAttempts: 3, delayMS: 5000 })
+      .onAttemptEnd((e) => {
+        if (e.willRetry) {
+          builder.cancel();
+        }
+      });
+
+    const res = await builder.send();
+
+    expect(res.isCancelled).toBe(true);
+    expect(res.requestBodySettled).toBeDefined();
+    expect(await res.requestBodySettled).toBe(uploadFailure);
+  });
+
   test('cancel after retry delay begins resolves via the abort listener', async () => {
     const adapter: HTTPAdapter = {
       getType: () => 'mock',

@@ -6,6 +6,7 @@ import type { LogEntry, LogSink } from '../types';
 import { LogLevel, getLogLevel } from '../types';
 import { describeError, toError } from '../../to-error';
 import { renderOnce, type RenderedLine } from './internal/rendered-line';
+import { renderJSONLine } from './internal/render-json-line';
 import { reportThroughHandler } from '../../internal/failure-reporter';
 import { readUnknownMember } from '../../internal/read-member';
 import {
@@ -14,10 +15,13 @@ import {
   resolveMaxRetries,
   resolveTimeoutMS,
 } from './internal/queue-policy';
-import type {
-  SinkErrorHandler,
-  SinkFailureDisposition,
-  SinkFailureKind,
+import {
+  createDroppedEntryCounts,
+  type DroppedEntryCounts,
+  type DroppedEntryKind,
+  type SinkErrorHandler,
+  type SinkFailureDisposition,
+  type SinkFailureKind,
 } from './internal/sink-failure';
 
 export type {
@@ -112,6 +116,8 @@ export interface NamedPipeSinkHealth {
    * The same meaning as `FileSinkHealth.droppedEntries`.
    */
   droppedEntries: number;
+  /** `droppedEntries` by reason. See {@link DroppedEntryCounts}. */
+  droppedByKind: DroppedEntryCounts;
   /** Whether the pipe is currently open for writing. */
   isInitialized: boolean;
   /** Whether a reconnect - manual or automatic - is in flight. */
@@ -371,6 +377,7 @@ export class NamedPipeSink implements LogSink {
   private maxRetries: number;
   private minLevel: LogLevel;
   private droppedEntries = 0;
+  private readonly droppedByKind = createDroppedEntryCounts();
   private didReportDrop = false;
   /** Whether the one post-close loss report has gone out. See {@link requeue}. */
   private didReportPostCloseLoss = false;
@@ -452,7 +459,7 @@ export class NamedPipeSink implements LogSink {
    * See the guard in {@link formatEntry}. A nested format failure is not lost output: the
    * line still renders through the default format and still goes out.
    */
-  private isReportingFormatFailure = false;
+  private formatReportsInFlight = 0;
 
   /**
    * Whether the first entry refused because the sink is closing has been reported.
@@ -503,7 +510,7 @@ export class NamedPipeSink implements LogSink {
       // silent, `getHealth()` claiming a clean shutdown. `abandonQueueOnClose` counts the
       // lines that were already queued; these are the ones refused at the door, and they
       // went nowhere just the same.
-      this.droppedEntries++;
+      this.countDropped('close');
 
       // Once, for the reason the abandoned queue reports once: an application still
       // logging through a thirty-second close would otherwise get a callback per line.
@@ -604,6 +611,7 @@ export class NamedPipeSink implements LogSink {
         this.consecutiveFailures === 0 && this.isInitialized && !this.closing,
       queueSize: this.writeQueue.length,
       droppedEntries: this.droppedEntries,
+      droppedByKind: { ...this.droppedByKind },
       isInitialized: this.isInitialized,
       isReconnecting: this._isReconnecting,
       lastError: this.lastError,
@@ -955,7 +963,7 @@ export class NamedPipeSink implements LogSink {
     }
 
     this.writeQueue = [];
-    this.droppedEntries += abandoned;
+    this.countDropped('close', abandoned);
 
     this.handleError(
       'close',
@@ -1653,7 +1661,7 @@ export class NamedPipeSink implements LogSink {
       // Past `abandonQueueOnClose()`, so nothing is going to carry this one any further.
       // Counted rather than dropped silently, because the entry was already shifted off
       // `writeQueue` and so was not among the ones that call reported.
-      this.droppedEntries++;
+      this.countDropped('close');
 
       // And said out loud, once. The drain loop in `close()` pushes the backlog into the
       // stream's buffer and sets `closed` without awaiting the write callbacks, so every
@@ -1680,7 +1688,7 @@ export class NamedPipeSink implements LogSink {
     }
 
     if (queued.attempts >= this.maxRetries) {
-      this.droppedEntries++;
+      this.countDropped('write');
 
       if (!wasReported) {
         // Synthesized rather than re-reporting `lastError`, which may be an unrelated
@@ -2032,7 +2040,7 @@ export class NamedPipeSink implements LogSink {
 
     while (this.writeQueue.length > limit) {
       this.writeQueue.shift();
-      this.droppedEntries++;
+      this.countDropped('queue_full');
       didEvict = true;
     }
 
@@ -2096,13 +2104,28 @@ export class NamedPipeSink implements LogSink {
       // failed renders reported three `format`/`lost` callbacks while `getHealth()` still
       // answered `{ isHealthy: true, queueSize: 0, droppedEntries: 0 }`, so an operator
       // polling health saw a sink in perfect condition that had delivered nothing.
-      this.droppedEntries++;
+      this.countDropped('format');
 
-      this.handleError('format', queued.formatError, {
-        attempt: queued.attempts + 1,
-        // No line was produced, and rendering is never repeated, so this one is gone.
-        disposition: 'lost',
-      });
+      // The same guard `formatEntry` holds over a throwing `formatter`, for the half it
+      // did not cover. That guard stops a formatter that throws from being reported
+      // without bound, but a line that fails to render *without* a formatter - `jsonFormat`
+      // over a `BigInt`, say - arrives here from `write()` on the caller's stack, and an
+      // `onError` that logs through this sink re-entered `write()`, failed to render its
+      // own line for the same reason, and reached this branch again: a synchronous
+      // recursion that ended in a stack overflow. The nested line is counted above and
+      // left unreported, which is where the chain stops.
+      if (this.formatReportsInFlight === 0) {
+        this.formatReportsInFlight++;
+
+        this.handleError('format', queued.formatError, {
+          attempt: queued.attempts + 1,
+          // No line was produced, and rendering is never repeated, so this one is gone.
+          disposition: 'lost',
+          onReported: () => {
+            this.formatReportsInFlight--;
+          },
+        });
+      }
 
       return;
     }
@@ -2222,14 +2245,18 @@ export class NamedPipeSink implements LogSink {
         // again, runs the same throwing `formatter` again, and reports again, without
         // bound. The queue short-circuit that stops the no-pipe path does not help here:
         // the render happens before anything is queued.
-        if (!this.isReportingFormatFailure) {
-          this.isReportingFormatFailure = true;
+        // Held until the handler settles, not until it returns: an `async` handler that
+        // logged after its first `await` found a flag already cleared. A count, since a
+        // second report can start while the first is still pending.
+        if (this.formatReportsInFlight === 0) {
+          this.formatReportsInFlight++;
 
-          try {
-            this.handleError('format', error, { disposition: 'fallback' });
-          } finally {
-            this.isReportingFormatFailure = false;
-          }
+          this.handleError('format', error, {
+            disposition: 'fallback',
+            onReported: () => {
+              this.formatReportsInFlight--;
+            },
+          });
         }
       }
     }
@@ -2237,13 +2264,21 @@ export class NamedPipeSink implements LogSink {
     let formatted: string;
 
     if (this.jsonFormat) {
-      formatted = JSON.stringify({
-        timestamp: entry.timestamp,
-        type: entry.type,
-        serviceName: entry.serviceName,
-        entityName: entry.entityName,
-        message: entry.message,
-        params: entry.redactedParams,
+      // The logger's own renderer over the redacted bag, not a second `JSON.stringify`:
+      // see `renderJSONLine`. A value it cannot render becomes a marker and is reported
+      // as `'format'`/`'fallback'` - the line is still written. Guarded like the
+      // throwing-formatter report above, and for the same reason.
+      formatted = renderJSONLine(entry, (error) => {
+        if (this.formatReportsInFlight === 0) {
+          this.formatReportsInFlight++;
+
+          this.handleError('format', error, {
+            disposition: 'fallback',
+            onReported: () => {
+              this.formatReportsInFlight--;
+            },
+          });
+        }
       });
     } else {
       let text = '';
@@ -2274,6 +2309,8 @@ export class NamedPipeSink implements LogSink {
       countsAgainstHealth?: boolean;
       attempt?: number;
       disposition?: SinkFailureDisposition;
+      /** Called once the handler has settled, `async` or not. See `formatReportsInFlight`. */
+      onReported?: () => void;
     },
   ): void {
     // Normalized rather than trusted: `error` reaches here from Node's stream and
@@ -2312,6 +2349,16 @@ export class NamedPipeSink implements LogSink {
               disposition: options?.disposition ?? 'no_entry',
             }),
       () => `NamedPipeSink error (${kind}): ${describeError(failure)}`,
+      options?.onReported,
     );
+  }
+
+  /**
+   * One more line this sink did not deliver, and why. The total and the breakdown move
+   * together so they cannot disagree.
+   */
+  private countDropped(kind: DroppedEntryKind, count = 1): void {
+    this.droppedEntries += count;
+    this.droppedByKind[kind] += count;
   }
 }

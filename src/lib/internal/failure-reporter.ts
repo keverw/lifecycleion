@@ -43,10 +43,18 @@ export type ReportFailure = (error: unknown, subject: string) => void;
  * @param line   What the console rung should say. Built by the caller, since only it knows
  *               what its arguments mean. Evaluated lazily so an unset handler that
  *               succeeds costs nothing.
+ * @param onSettled Called exactly once when the report is over: after a synchronous
+ *               handler returns or throws, after an `async` one resolves or rejects, or
+ *               straight away when there is no handler. For a caller holding a re-entry
+ *               guard across the report - the sinks hold one over a `'format'` failure -
+ *               a boolean cleared on return was cleared before an `async` handler had
+ *               done anything, and the loop it guards against resumed on the far side of
+ *               the handler's first `await`.
  */
 export function reportThroughHandler(
   invoke: (() => unknown) | undefined,
   line: () => string,
+  onSettled?: () => void,
 ): void {
   if (invoke !== undefined) {
     try {
@@ -60,12 +68,20 @@ export function reportThroughHandler(
       // never raise one. Followed, it lands on the console rung like any other broken
       // handler.
       if (isPromise(result)) {
-        result.catch((handlerError: unknown) => {
-          reportToConsole(
-            `${line()} (the failure handler also rejected: ${describeError(handlerError)})`,
-          );
-        });
+        result
+          .catch((handlerError: unknown) => {
+            reportToConsole(
+              `${line()} (the failure handler also rejected: ${describeError(handlerError)})`,
+            );
+          })
+          .finally(() => {
+            onSettled?.();
+          });
+
+        return;
       }
+
+      onSettled?.();
 
       return;
     } catch (handlerError) {
@@ -81,11 +97,14 @@ export function reportThroughHandler(
         `${line()} (the failure handler also threw: ${describeError(handlerError)})`,
       );
 
+      onSettled?.();
+
       return;
     }
   }
 
   reportToConsole(line());
+  onSettled?.();
 }
 
 /**

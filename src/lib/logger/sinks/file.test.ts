@@ -18,6 +18,18 @@ import {
   restoreConsoleError,
 } from '../../internal/console-test-utils';
 
+/**
+ * A message the JSON envelope cannot serialize: `JSON.stringify` calls `toJSON` and it
+ * throws. The one way left to make `jsonFormat` fail to render, now that the params bag
+ * goes through the logger's own renderer and a `BigInt` or a cycle there is a marker
+ * rather than a failure. A hostile cast, since `LogEntry.message` is a string.
+ */
+const UNRENDERABLE_MESSAGE = {
+  toJSON(): never {
+    throw new Error('message refused to serialize');
+  },
+} as unknown as string;
+
 let tmpDir: TmpDir;
 
 // Save the original Date.prototype.toISOString at module scope before any tests run
@@ -1147,18 +1159,18 @@ describe('FileSink', () => {
     });
 
     // The shared-subtree gap this guards. `redactedParams` hands back the caller's own
-    // nested object wherever nothing under it was masked, so a `BigInt` placed there
-    // fails the render at `write` time and the caller can then remove it - which is
-    // exactly what would let a second render succeed and serialize the token added
-    // beside it, under a `redactedKeys` path that masked nothing because the key did
-    // not exist yet.
-    const shared: Record<string, unknown> = { name: 'kev', big: 1n };
+    // nested object wherever nothing under it was masked, so a message the envelope
+    // refuses fails the render at `write` time and the caller can then mutate that
+    // object - which is exactly what would let a second render succeed and serialize
+    // the token added to it, under a `redactedKeys` path that masked nothing because
+    // the key did not exist yet.
+    const shared: Record<string, unknown> = { name: 'kev' };
 
     const entry: LogEntry = {
       timestamp: Date.now(),
       type: 'info',
       template: 'hi',
-      message: 'hi',
+      message: UNRENDERABLE_MESSAGE,
       redactedParams: { user: shared },
       redactedKeys: ['user.token'],
     };
@@ -1795,14 +1807,13 @@ describe('FileSink - bounded queue', () => {
 
     await sink.flush();
 
-    // A `BigInt` is not serializable, so the render throws and no line can be produced.
+    // The envelope refuses the message, so the render throws and no line can be produced.
     sink.write({
       timestamp: Date.now(),
       type: 'info',
       serviceName: 'TestService',
       template: 'unrenderable',
-      message: 'unrenderable',
-      redactedParams: { big: 1n },
+      message: UNRENDERABLE_MESSAGE,
     });
 
     await sink.flush();
@@ -1834,6 +1845,386 @@ describe('FileSink - bounded queue', () => {
     );
 
     expect(contents).toContain('still-working');
+  });
+
+  test('a self-logging onError cannot spin the drain loop on an unrenderable entry', async () => {
+    // The realistic handler: log the failure through the same logger, failure included.
+    // The failure carries the `entry` that would not render, so the handler's own line
+    // will not render either - and `processQueue` was still draining when it was queued,
+    // so the outer loop picked it up, reported it, and the handler logged again. A drain
+    // that never returned, with every later line stuck behind it.
+    let calls = 0;
+    let depth = 0;
+    let maxDepth = 0;
+
+    const self: { sink?: FileSink } = {};
+
+    const sink = new FileSink({
+      logDir: tmpDir.path,
+      basename: 'self-logging-format',
+      jsonFormat: true,
+      onError: (failure) => {
+        calls++;
+        depth++;
+        maxDepth = Math.max(maxDepth, depth);
+
+        self.sink?.write({
+          timestamp: Date.now(),
+          type: 'error',
+          template: 'the log sink failed',
+          message: UNRENDERABLE_MESSAGE,
+          redactedParams: { failure },
+        });
+
+        depth--;
+      },
+    });
+
+    self.sink = sink;
+
+    await sink.flush();
+
+    sink.write({
+      timestamp: Date.now(),
+      type: 'info',
+      template: 'unrenderable',
+      message: UNRENDERABLE_MESSAGE,
+    });
+
+    // Would never resolve before the guard.
+    await sink.flush();
+
+    expect(maxDepth).toBe(1);
+    expect(calls).toBe(1);
+
+    // Both lines counted: the one that started this and the handler's own, which was
+    // refused at the door rather than silently forgotten.
+    expect(sink.getHealth().droppedEntries).toBe(2);
+
+    // And the sink keeps writing.
+    sink.write(makeEntry('still-working'));
+
+    await sink.flush();
+    await sink.close();
+
+    const files = await fsPromises.readdir(tmpDir.path);
+    const logFile = files.find((name) =>
+      name.startsWith('self-logging-format'),
+    );
+
+    const contents = await fsPromises.readFile(
+      `${tmpDir.path}/${logFile ?? ''}`,
+      'utf8',
+    );
+
+    expect(contents).toContain('still-working');
+  });
+});
+
+describe('FileSink - async self-logging onError', () => {
+  beforeEach(async () => {
+    tmpDir = new TmpDir({
+      unsafeCleanup: true,
+      prefix: 'file-sink-async-self-log',
+    });
+    await tmpDir.initialize();
+  });
+
+  afterEach(async () => {
+    await tmpDir.cleanup();
+  });
+
+  test('the guard holds until an async onError settles', async () => {
+    // A flag cleared when the handler *returned* was cleared at its first `await`, so a
+    // handler that logged the failure back after awaiting found no guard, and the chain
+    // ran on: one report per turn of the event loop, for as long as the process lived.
+    let calls = 0;
+
+    const self: { sink?: FileSink } = {};
+
+    const sink = new FileSink({
+      logDir: tmpDir.path,
+      basename: 'async-self-logging',
+      jsonFormat: true,
+      onError: async (failure) => {
+        calls++;
+
+        await new Promise((resolve) => setTimeout(resolve, 5));
+
+        self.sink?.write({
+          timestamp: Date.now(),
+          type: 'error',
+          template: 'the log sink failed',
+          message: UNRENDERABLE_MESSAGE,
+          redactedParams: { failure },
+        });
+      },
+    });
+
+    self.sink = sink;
+
+    await sink.flush();
+
+    sink.write({
+      timestamp: Date.now(),
+      type: 'info',
+      template: 'unrenderable',
+      message: UNRENDERABLE_MESSAGE,
+    });
+
+    // Long enough for several rounds of the loop this used to be.
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    await sink.flush();
+
+    expect(calls).toBe(1);
+    expect(sink.getHealth().droppedEntries).toBe(2);
+    // Both were format losses, and the breakdown says so.
+    expect(sink.getHealth().droppedByKind).toEqual({
+      queue_full: 0,
+      write: 0,
+      format: 2,
+      close: 0,
+    });
+
+    await sink.close();
+  });
+
+  test('droppedByKind splits the total by reason and always sums to it', async () => {
+    const makeEntry = (message: string): LogEntry => ({
+      timestamp: Date.now(),
+      type: 'info',
+      template: message,
+      message,
+    });
+
+    // A total said *that* lines were lost and left "why" to whoever kept the `onError`
+    // calls. Three different losses here - one unrenderable, two evicted at the cap
+    // while the file is not yet open, one refused after close - and each lands in its
+    // own bucket.
+    const sink = new FileSink({
+      logDir: tmpDir.path,
+      basename: 'dropped-by-kind',
+      jsonFormat: true,
+      maxQueueSize: 1,
+    });
+
+    // Two lines into a one-slot queue before the file is open, so nothing drains between
+    // them: the older is evicted.
+    sink.write(makeEntry('first'));
+    sink.write(makeEntry('second'));
+
+    await sink.flush();
+
+    expect(sink.getHealth().droppedByKind.queue_full).toBe(1);
+
+    sink.write({
+      timestamp: Date.now(),
+      type: 'info',
+      template: 'unrenderable',
+      message: UNRENDERABLE_MESSAGE,
+    });
+
+    await sink.flush();
+
+    expect(sink.getHealth().droppedByKind.format).toBe(1);
+
+    const closing = sink.close();
+
+    sink.write(makeEntry('after close'));
+
+    await closing;
+
+    const health = sink.getHealth();
+    const byKind = health.droppedByKind;
+
+    expect(byKind.format).toBe(1);
+    expect(byKind.queue_full).toBe(1);
+    expect(byKind.close).toBe(1);
+    expect(byKind.write).toBe(0);
+    expect(
+      byKind.queue_full + byKind.write + byKind.format + byKind.close,
+    ).toBe(health.droppedEntries);
+  });
+});
+
+describe('FileSink - jsonFormat renders what JSON.stringify refuses', () => {
+  const makeEntry = (message: string): LogEntry => ({
+    timestamp: Date.now(),
+    type: 'info',
+    template: message,
+    message,
+  });
+
+  beforeEach(async () => {
+    tmpDir = new TmpDir({
+      unsafeCleanup: true,
+      prefix: 'file-sink-json-render',
+    });
+    await tmpDir.initialize();
+  });
+
+  afterEach(async () => {
+    await tmpDir.cleanup();
+  });
+
+  test('writes one parseable line with markers, and reports the fallback once', async () => {
+    // A plain `JSON.stringify` over the bag lost the whole line to a `BigInt` or a cycle
+    // the logger's own renderer handles. Now the line is written with a marker where the
+    // value was, still one JSON object, and the one value that would not render is said
+    // once as `'format'`/`'fallback'`.
+    const failures: SinkFailure[] = [];
+    const cyclic: Record<string, unknown> = { a: 1 };
+
+    cyclic.self = cyclic;
+
+    const sink = new FileSink({
+      logDir: tmpDir.path,
+      basename: 'json-render',
+      jsonFormat: true,
+      onError: (failure) => {
+        failures.push(failure);
+      },
+    });
+
+    await sink.flush();
+
+    sink.write({
+      timestamp: Date.now(),
+      type: 'info',
+      template: 'markers',
+      message: 'markers',
+      redactedParams: {
+        big: 1n,
+        cyclic,
+        gone: undefined,
+        get boom(): never {
+          throw new Error('getter exploded');
+        },
+      },
+    });
+    sink.write(makeEntry('plain'));
+
+    await sink.flush();
+    await sink.close();
+
+    const files = await fsPromises.readdir(tmpDir.path);
+    const logFile = files.find((name) => name.startsWith('json-render'));
+    const lines = (
+      await fsPromises.readFile(`${tmpDir.path}/${logFile ?? ''}`, 'utf8')
+    )
+      .trim()
+      .split('\n');
+
+    expect(lines).toHaveLength(2);
+
+    const first = JSON.parse(lines[0] ?? '') as {
+      message: string;
+      params: Record<string, unknown>;
+    };
+
+    expect(first.message).toBe('markers');
+    expect(first.params['big']).toBe('1');
+    expect((first.params['cyclic'] as Record<string, unknown>)['self']).toBe(
+      '[circular]',
+    );
+    expect(first.params['gone']).toBe('[undefined]');
+    expect(first.params['boom']).toBe('[unrenderable: value]');
+    expect(JSON.parse(lines[1] ?? '')).toMatchObject({ message: 'plain' });
+
+    // Only the getter was a failure; the rest are ordinary renders.
+    expect(failures).toHaveLength(1);
+    expect(failures[0]?.kind).toBe('format' satisfies SinkFailureKind);
+    expect(failures[0]?.disposition).toBe('fallback');
+    expect(failures[0]?.error.message).toContain('a marker was written');
+    // Advisory: the line went out, so the sink is not less healthy for it.
+    expect(sink.getHealth().droppedEntries).toBe(0);
+  });
+
+  test('a self-logging onError cannot recurse through the fallback report', async () => {
+    // The handler logs the failure back, carrying the same throwing getter. Its line
+    // renders - marker and all - and is queued; only the nested report is skipped.
+    let calls = 0;
+    let maxDepth = 0;
+    let depth = 0;
+
+    const self: { sink?: FileSink } = {};
+
+    const hostile = {
+      get boom(): never {
+        throw new Error('getter exploded');
+      },
+    };
+
+    const sink = new FileSink({
+      logDir: tmpDir.path,
+      basename: 'json-fallback-self-log',
+      jsonFormat: true,
+      onError: () => {
+        calls++;
+        depth++;
+        maxDepth = Math.max(maxDepth, depth);
+
+        self.sink?.write({
+          timestamp: Date.now(),
+          type: 'error',
+          template: 'the log sink failed',
+          message: 'the log sink failed',
+          redactedParams: { hostile },
+        });
+
+        depth--;
+      },
+    });
+
+    self.sink = sink;
+
+    await sink.flush();
+
+    sink.write({
+      timestamp: Date.now(),
+      type: 'info',
+      template: 'first',
+      message: 'first',
+      redactedParams: { hostile },
+    });
+
+    await sink.flush();
+    await sink.close();
+
+    expect(calls).toBe(1);
+    expect(maxDepth).toBe(1);
+
+    const files = await fsPromises.readdir(tmpDir.path);
+    const logFile = files.find((name) =>
+      name.startsWith('json-fallback-self-log'),
+    );
+    const contents = await fsPromises.readFile(
+      `${tmpDir.path}/${logFile ?? ''}`,
+      'utf8',
+    );
+
+    // Both lines written, the handler's included.
+    expect(contents).toContain('"message":"first"');
+    expect(contents).toContain('"message":"the log sink failed"');
+    expect(sink.getHealth().droppedEntries).toBe(0);
+  });
+});
+
+describe('FileSink - basename stays inside logDir', () => {
+  test('refuses a basename carrying a path separator at construction', () => {
+    for (const basename of [
+      '../outside',
+      'sub/app',
+      'sub\\app',
+      '.',
+      '..',
+      '',
+    ]) {
+      // Thrown before `initialize` runs, so no directory is ever created.
+      expect(
+        () => new FileSink({ logDir: './never-created', basename }),
+      ).toThrow(/basename must be a file name inside logDir/);
+    }
   });
 });
 

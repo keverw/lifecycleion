@@ -653,6 +653,28 @@ describe('applyRedaction - non-identifier key names', () => {
     // their own explicit bounds.
   }, 30000);
 
+  test('reports when the normalization budget runs out before a named path is reached', () => {
+    // Exhaustion is a real loss: a path the walk never reached is not normalized, and a
+    // key only a property read can find stays on the original. There is no cheaper
+    // answer than stopping, but stopping in silence left an operator nothing to trace a
+    // surviving secret to. Said through `onFormatError`, once, like every other
+    // shortfall of the redaction pass.
+    const reports: string[] = [];
+
+    // Under the copy cap, so the array itself is normalized rather than withheld; it is
+    // the million distinct element containers beneath it that spend the budget.
+    const items = Array.from({ length: 999_999 }, () => ({ x: 1 }));
+
+    applyRedaction(
+      { items, user: { profile: { password: 'secret123' } } },
+      ['items[*].x', 'user.profile.password'],
+      undefined,
+      (_error, _kind, key) => reports.push(key),
+    );
+
+    expect(reports).toEqual(['<redactedKeys>']);
+  }, 60000);
+
   test('scans a container reachable from many aliases once, not once per alias', () => {
     // `copies` deduplicates the copy but not the *descent*, so one array reachable from
     // four thousand places was pushed four thousand times and rescanned in full each time:

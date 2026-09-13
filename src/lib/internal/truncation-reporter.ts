@@ -1,3 +1,4 @@
+import { reportThroughHandler } from './failure-reporter';
 import type {
   RenderBudget,
   TruncationHandler,
@@ -57,13 +58,16 @@ export function createTruncationReporter(
       dropped: dropped > 0 ? dropped : undefined,
     };
 
-    try {
-      handler(info);
-    } catch {
-      // A notification about a degradation, not a step in producing the output, so a
-      // handler that throws must not take the render down with it. Not reported onward
-      // either: `onFormatError` is for a value that refused to render, and spending its
-      // one report on a broken callback would hide the failure it exists for.
-    }
+    // The same rung `onFormatError` and the sinks' `onError` stand on. A notification
+    // about a degradation is not a step in producing the output, so a handler that throws
+    // must not take the render down with it - but it was swallowed outright, the one
+    // callback in the logger whose breakage nobody could see. The console, never
+    // `onFormatError`: that channel is for a value that refused to render, and spending
+    // its one report on a broken callback would hide the failure it exists for.
+    reportThroughHandler(
+      () => handler(info),
+      () =>
+        `Truncation of ${subject} (${info.reason}) could not be reported to onTruncate`,
+    );
   };
 }

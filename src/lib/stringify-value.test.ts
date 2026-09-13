@@ -2325,6 +2325,52 @@ describe('maxRenderLength and onTruncate', () => {
     expect(cuts).toHaveLength(1);
   });
 
+  it('sends an onTruncate handler that throws to the console, and keeps the render', () => {
+    // The one callback in the logger whose breakage was swallowed outright. It stands on
+    // the same rung as `onFormatError` now: the render is unaffected, and the console
+    // says the handler is broken so its silence is not mistaken for a complete render.
+    const consoleErrors = muteConsoleError();
+
+    try {
+      const rendered = stringifyValue(big, {
+        maxRenderLength: 1_000,
+        onTruncate: () => {
+          throw new Error('truncation handler exploded');
+        },
+      });
+
+      expect(rendered.endsWith(TRUNCATED_LENGTH)).toBe(true);
+      expect(
+        consoleErrors.some((line) =>
+          line.includes('truncation handler exploded'),
+        ),
+      ).toBe(true);
+    } finally {
+      restoreConsoleError();
+    }
+  });
+
+  it('holds the cap when escaping density is front-loaded', () => {
+    // The ratio cut estimates the prefix from the average expansion, and a value whose
+    // escaping sits at the front defeats the estimate: each pass shrinks towards the dense
+    // part, so each lands closer and none land. Four passes over two hundred thousand NULs
+    // ahead of plain text returned 1.2 million characters under a one-million cap - a
+    // bound the documentation promises for untrusted values, off by a fifth.
+    const limit = 1_000_000;
+    const rendered = stringifyValue(
+      { v: '\0'.repeat(200_000) + 'a'.repeat(900_000) },
+      { maxRenderLength: limit },
+    );
+
+    // The documented marker overhead, and no more.
+    expect(rendered.length).toBeLessThanOrEqual(
+      limit + TRUNCATED_LENGTH.length,
+    );
+    expect(rendered).toContain(TRUNCATED_LENGTH);
+    // Not vacuous: the value really was cut to the cap rather than to nothing.
+    expect(rendered.length).toBeGreaterThan(limit - 1_000);
+  });
+
   it('cuts an oversized redactFunction replacement to maxRenderLength in the structure', () => {
     // Charging the excess degraded the siblings after an oversized replacement, but the
     // replacement itself was handed back whole: `redactValue` returned a half-megabyte

@@ -184,10 +184,18 @@ function quoteKeyWithinCap(budget: RenderBudget, key: string): string {
  * both callers had: cutting the raw text and quoting afterwards emits whatever the escaping
  * expanded it to, which for a run of NUL characters is six times the cut.
  *
- * Cut by ratio rather than by search: one pass usually lands it, since the expansion is
- * uniform enough, and the loop is bounded so a pathological mixture costs a few
- * re-encodings rather than a binary search. The marker always survives - a limit with
- * nothing left still says it ran out rather than emitting an empty string.
+ * Cut by ratio first: one pass usually lands it, since the expansion is uniform enough,
+ * and a few re-encodings are cheaper than a search. But the ratio is only an estimate,
+ * and a mixture whose escaping density is front-loaded defeats it - a run of NUL
+ * characters (six bytes each) ahead of plain text shrinks the prefix towards the dense
+ * part, so every pass lands closer and none of them land. Four passes over such a value
+ * still returned a fifth more than the cap, and the cap is the promise `maxRenderLength`
+ * makes about untrusted input. So the ratio passes are followed by a binary search over
+ * whatever is left, which cannot fail to fit: the encoded length is monotone in the
+ * prefix, and the marker alone always fits.
+ *
+ * The marker always survives - a limit with nothing left still says it ran out rather
+ * than emitting an empty string.
  */
 function quoteWithinLimit(
   text: string,
@@ -197,20 +205,43 @@ function quoteWithinLimit(
   let encoded = quote(`${text.slice(0, keep)}${TRUNCATED_LENGTH}`);
 
   // The marker itself, quoted, is the floor: below that there is nothing to say.
-  const floor = quote(TRUNCATED_LENGTH).length;
+  const cap = Math.max(limit, quote(TRUNCATED_LENGTH).length);
 
   for (
     let attempt = 0;
-    attempt < 4 && keep > 0 && encoded.length > Math.max(limit, floor);
+    attempt < 4 && keep > 0 && encoded.length > cap;
     attempt++
   ) {
-    const ratio = Math.max(limit, floor) / encoded.length;
+    const ratio = cap / encoded.length;
 
     keep = Math.floor(keep * ratio);
     encoded = quote(`${text.slice(0, keep)}${TRUNCATED_LENGTH}`);
   }
 
-  return { encoded, kept: keep };
+  if (encoded.length <= cap) {
+    return { encoded, kept: keep };
+  }
+
+  // Largest prefix in `[0, keep)` whose quoted form fits. `keep` itself is known not to,
+  // and zero is known to, so the search closes on a fitting answer.
+  let low = 0;
+  let high = keep;
+
+  encoded = quote(TRUNCATED_LENGTH);
+
+  while (low < high) {
+    const middle = Math.ceil((low + high) / 2);
+    const candidate = quote(`${text.slice(0, middle)}${TRUNCATED_LENGTH}`);
+
+    if (candidate.length <= cap) {
+      low = middle;
+      encoded = candidate;
+    } else {
+      high = middle - 1;
+    }
+  }
+
+  return { encoded, kept: low };
 }
 
 /**

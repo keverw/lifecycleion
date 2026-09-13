@@ -11,6 +11,18 @@ import { LogLevel } from '../types';
 import type { LogEntry } from '../types';
 import { TmpDir } from '../../tmp-dir';
 
+/**
+ * A message the JSON envelope cannot serialize: `JSON.stringify` calls `toJSON` and it
+ * throws. The one way left to make `jsonFormat` fail to render, now that the params bag
+ * goes through the logger's own renderer and a `BigInt` or a cycle there is a marker
+ * rather than a failure. A hostile cast, since `LogEntry.message` is a string.
+ */
+const UNRENDERABLE_MESSAGE = {
+  toJSON(): never {
+    throw new Error('message refused to serialize');
+  },
+} as unknown as string;
+
 const execAsync = promisify(exec);
 
 let tmpDir: TmpDir;
@@ -913,17 +925,17 @@ describe('NamedPipeSink', () => {
       },
     });
 
-    // Queued while the pipe is still opening. The shared-subtree gap: a `BigInt` under
-    // `params.user` fails the render at `write` time, and the caller can then remove it
-    // during the outage - which is what would let a second render succeed and serialize
-    // the token added beside it on the same shared object.
-    const shared: Record<string, unknown> = { name: 'kev', big: 1n };
+    // Queued while the pipe is still opening. The shared-subtree gap: a message the
+    // envelope refuses fails the render at `write` time, and the caller can then mutate
+    // the shared bag during the outage - which is what would let a second render succeed
+    // and serialize the token added to it.
+    const shared: Record<string, unknown> = { name: 'kev' };
 
     const entry: LogEntry = {
       timestamp: Date.now(),
       type: 'info',
       template: 'hi',
-      message: 'hi',
+      message: UNRENDERABLE_MESSAGE,
       redactedParams: { user: shared },
       redactedKeys: ['user.token'],
     };
@@ -1725,10 +1737,9 @@ describe('NamedPipeSink', () => {
           timestamp: Date.now(),
           type: 'info',
           template: 'unrenderable',
-          message: 'unrenderable',
-          // `JSON.stringify` refuses a `BigInt`, so the default format throws too and
+          // The envelope refuses this message, so the default format throws too and
           // there is no fallback left to produce a line.
-          redactedParams: { size: BigInt(1) },
+          message: UNRENDERABLE_MESSAGE,
         });
       }
 
@@ -1770,10 +1781,9 @@ describe('NamedPipeSink', () => {
         timestamp: Date.now(),
         type: 'info',
         template: 'unrenderable',
-        message: 'unrenderable',
-        // `JSON.stringify` refuses a `BigInt`, so the default format throws too and there
+        // The envelope refuses this message, so the default format throws too and there
         // is no fallback left to produce a line.
-        redactedParams: { size: BigInt(1) },
+        message: UNRENDERABLE_MESSAGE,
       });
 
       await new Promise((resolve) => setTimeout(resolve, 150));
@@ -2947,6 +2957,228 @@ describe('NamedPipeSink', () => {
     expect(sink.getHealth().queueSize).toBe(2);
 
     await sink.close();
+  }, 15000);
+
+  test('a self-logging onError cannot recurse through an unrenderable jsonFormat entry', async () => {
+    // The third half of the invariant: no `formatter` at all, and the default `jsonFormat`
+    // render refusing the entry. That line is handed to `writeEntry` on the caller's
+    // stack, reported from there, and the handler's own line - carrying the same
+    // unrenderable value - failed the same way and reached the same report: a
+    // synchronous recursion that ended in a stack overflow.
+    const pipePath = `${tmpDir.path}/self-logging-json.pipe`;
+
+    let calls = 0;
+    let depth = 0;
+    let maxDepth = 0;
+
+    const self: { sink?: NamedPipeSink } = {};
+
+    const sink = new NamedPipeSink({
+      pipePath,
+      closeTimeoutMS: 500,
+      jsonFormat: true,
+      onError: (failure) => {
+        calls++;
+        depth++;
+        maxDepth = Math.max(maxDepth, depth);
+
+        self.sink?.write({
+          timestamp: Date.now(),
+          type: 'error',
+          template: 'the log sink failed',
+          message: UNRENDERABLE_MESSAGE,
+          redactedParams: { failure },
+        });
+
+        depth--;
+      },
+    });
+
+    self.sink = sink;
+
+    sink.write({
+      timestamp: Date.now(),
+      type: 'info',
+      template: 'unrenderable',
+      message: UNRENDERABLE_MESSAGE,
+    });
+
+    expect(maxDepth).toBe(1);
+    expect(calls).toBe(1);
+
+    // Both lines counted: the one that started this and the handler's own.
+    expect(sink.getHealth().droppedEntries).toBe(2);
+
+    await sink.close();
+  }, 15000);
+
+  test('the format guard holds until an async onError settles', async () => {
+    // A flag cleared when the handler returned was cleared at its first `await`, so an
+    // `async` handler that logged the unrenderable failure back after awaiting found no
+    // guard and reported again, once per turn of the event loop.
+    const pipePath = `${tmpDir.path}/async-self-logging.pipe`;
+
+    let calls = 0;
+
+    const self: { sink?: NamedPipeSink } = {};
+
+    const sink = new NamedPipeSink({
+      pipePath,
+      closeTimeoutMS: 500,
+      jsonFormat: true,
+      onError: async (failure) => {
+        // Only the reports under test: the missing pipe reports `'not_found'` on its own
+        // schedule, and those are a different subject.
+        if (failure.kind !== 'format') {
+          return;
+        }
+
+        calls++;
+
+        await new Promise((resolve) => setTimeout(resolve, 5));
+
+        self.sink?.write({
+          timestamp: Date.now(),
+          type: 'error',
+          template: 'the log sink failed',
+          message: UNRENDERABLE_MESSAGE,
+        });
+      },
+    });
+
+    self.sink = sink;
+
+    sink.write({
+      timestamp: Date.now(),
+      type: 'info',
+      template: 'unrenderable',
+      message: UNRENDERABLE_MESSAGE,
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    expect(calls).toBe(1);
+    expect(sink.getHealth().droppedEntries).toBe(2);
+    // Both were format losses, and the breakdown says so.
+    expect(sink.getHealth().droppedByKind).toEqual({
+      queue_full: 0,
+      write: 0,
+      format: 2,
+      close: 0,
+    });
+
+    await sink.close();
+  }, 15000);
+
+  test('droppedByKind splits the total by reason and always sums to it', async () => {
+    const makeEntry = (message: string): LogEntry => ({
+      timestamp: Date.now(),
+      type: 'info',
+      template: message,
+      message,
+    });
+
+    // No reader on this pipe, so every ordinary line queues; a one-slot queue then evicts
+    // the older of two, an unrenderable line is a format loss, the survivor is abandoned
+    // by `close()`, and a line after close is refused at the door.
+    const pipePath = `${tmpDir.path}/dropped-by-kind.pipe`;
+
+    const sink = new NamedPipeSink({
+      pipePath,
+      closeTimeoutMS: 100,
+      jsonFormat: true,
+      maxQueueSize: 1,
+    });
+
+    sink.write({
+      timestamp: Date.now(),
+      type: 'info',
+      template: 'unrenderable',
+      message: UNRENDERABLE_MESSAGE,
+    });
+    sink.write(makeEntry('first'));
+    sink.write(makeEntry('second'));
+
+    expect(sink.getHealth().droppedByKind.format).toBe(1);
+    expect(sink.getHealth().droppedByKind.queue_full).toBe(1);
+
+    const closing = sink.close();
+
+    sink.write(makeEntry('after close'));
+
+    await closing;
+
+    const health = sink.getHealth();
+    const byKind = health.droppedByKind;
+
+    expect(byKind.format).toBe(1);
+    expect(byKind.queue_full).toBe(1);
+    // The abandoned survivor and the one refused after close.
+    expect(byKind.close).toBe(2);
+    expect(byKind.write).toBe(0);
+    expect(
+      byKind.queue_full + byKind.write + byKind.format + byKind.close,
+    ).toBe(health.droppedEntries);
+  }, 15000);
+
+  test('jsonFormat writes one parseable line with markers, and reports the fallback once', async () => {
+    // A plain `JSON.stringify` over the bag lost the whole line to a `BigInt` or a cycle
+    // the logger's own renderer handles. Now the line reaches the reader with a marker
+    // where the value was, still one JSON object, and the one value that would not render
+    // is said once as `'format'`/`'fallback'`.
+    const pipePath = `${tmpDir.path}/json-render.pipe`;
+
+    await createNamedPipe(pipePath);
+
+    const reader = startPipeReader(pipePath);
+    const failures: SinkFailure[] = [];
+    const cyclic: Record<string, unknown> = { a: 1 };
+
+    cyclic.self = cyclic;
+
+    const sink = new NamedPipeSink({
+      pipePath,
+      jsonFormat: true,
+      onError: (failure) => {
+        failures.push(failure);
+      },
+    });
+
+    expect(await waitForOpenPipe(sink)).toBe(true);
+
+    sink.write({
+      timestamp: Date.now(),
+      type: 'info',
+      template: 'markers',
+      message: 'markers',
+      redactedParams: {
+        big: 1n,
+        cyclic,
+        get boom(): never {
+          throw new Error('getter exploded');
+        },
+      },
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    await sink.close();
+
+    reader.stop();
+
+    const line = reader.data.join('').trim();
+    const parsed = JSON.parse(line) as { params: Record<string, unknown> };
+
+    expect(parsed.params['big']).toBe('1');
+    expect((parsed.params['cyclic'] as Record<string, unknown>)['self']).toBe(
+      '[circular]',
+    );
+    expect(parsed.params['boom']).toBe('[unrenderable: value]');
+
+    const formats = failures.filter((failure) => failure.kind === 'format');
+
+    expect(formats).toHaveLength(1);
+    expect(formats[0]?.disposition).toBe('fallback');
+    expect(sink.getHealth().droppedEntries).toBe(0);
   }, 15000);
 
   test('an entry written during close() is counted and reported once', async () => {

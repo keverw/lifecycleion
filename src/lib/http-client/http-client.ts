@@ -1776,6 +1776,15 @@ export class BaseHTTPClient {
               const signalReason = getSignalCancelReason(cancelSignal);
               return {
                 adapterResponse: null,
+                // Carried off the response this attempt did get, as the throw path
+                // below carries it off the error. With `adapterResponse` nulled, the hop
+                // loop has nowhere else to read it, and a bodied request cancelled while
+                // waiting to retry a `503` answered `undefined` - the documented "the
+                // body went out" - for an upload the adapter may have early-acked and
+                // then torn down.
+                ...(adapterResponse.requestBodySettled
+                  ? { requestBodySettled: adapterResponse.requestBodySettled }
+                  : {}),
                 sentRequest: observedSentRequest,
                 attemptCount: attemptNumber,
                 wasCancelled: true,

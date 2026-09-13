@@ -1224,7 +1224,7 @@ import { FileSink, LogLevel } from 'lifecycleion/logger';
 
 new FileSink({
   logDir: './logs', // Directory for log files
-  basename: 'app', // Base filename (creates app-2024-01-15.log)
+  basename: 'app', // Base filename (creates app-2024-01-15.log); one path segment, no `/` - the constructor throws otherwise
   maxSizeMB: 10, // Rotate at 10MB (default: 10)
   jsonFormat: true, // Use JSON format (default: false)
   maxRetries: 3, // Retry failed writes (default: 3)
@@ -1291,12 +1291,20 @@ console.log(debugSink.getMinLevel()); // LogLevel.WARN
 
 FileSink automatically retries failed writes up to `maxRetries` times (default: 3). The `onError` callback is invoked for each failure:
 
-> **One failure is never retried.** An entry whose line could not be serialized is
+> **One failure is never retried.** An entry whose line could not be rendered at all is
 > reported once and dropped. The line is rendered when `write()` is called, so that the
 > params cannot change underneath it, and re-rendering later is exactly what that
 > prevents - so a second attempt could not come out differently. `onError` receives a
-> `FileSinkError` with the message `Failed to format log entry` and the underlying
-> serialization error on its `cause`.
+> `FileSinkError` with the message `Failed to format log entry` and the underlying error
+> on its `cause`.
+>
+> That is rare with `jsonFormat: true`. The params are rendered by the same serializer
+> the logger uses for templates, not by a plain `JSON.stringify`, so a `BigInt`, a
+> cycle, an `undefined`, a function or a getter that throws does not lose the line: the
+> value becomes a marker (`"1"`, `"[circular]"`, `"[undefined]"`, `"[Function: f]"`,
+> `"[unrenderable: value]"`) inside a line that is still one JSON object. A value that
+> would not render is reported once per entry as `kind: 'format'` with
+> `disposition: 'fallback'`, meaning the line was written with the marker in it.
 
 ```typescript
 import { FileSink, type LogEntry } from 'lifecycleion/logger';
@@ -1331,6 +1339,10 @@ const fileSink = new FileSink({
 });
 ```
 
+Two things to know about `failure.entry`. It is the full `LogEntry`, so it carries `params` as well as `redactedParams`: a handler that serializes the whole failure for paging or a backup sink is serializing the raw values, including any the log line masked. Forward `redactedParams ?? params`, or only `message`, rather than the entry itself. And a handler that logs the failure back through this sink is safe: the sink refuses, and counts in `droppedEntries`, a line from inside a `'format'` report that cannot render either, which is what stops a failure carrying an unrenderable `entry` from reporting itself forever. A `'write'` failure is reported on every attempt, so a handler that logs each one through a sink that is also failing multiplies the queue by `maxRetries + 1` per line; the queue cap bounds it, but log elsewhere.
+
+In text mode (`jsonFormat: false`) the message is written as given, so a message that contains a newline spans two lines in the file, and one built from untrusted input can forge a line. Use `jsonFormat: true` where that matters: every field is escaped there, and one entry is always one line.
+
 #### Health Monitoring
 
 Check the health status of the sink to monitor failures and queue size:
@@ -1344,7 +1356,13 @@ console.log(health);
 //   lastError: undefined,      // Last error that occurred
 //   consecutiveFailures: 0,    // Consecutive failed *writes* since the last success
 //   isInitialized: true,       // Whether sink is ready
-//   droppedEntries: 0          // Lines this sink did not deliver
+//   droppedEntries: 0,         // Lines this sink did not deliver
+//   droppedByKind: {           // The same lines, by reason - always sums to droppedEntries
+//     queue_full: 0,           //   evicted at maxQueueSize
+//     write: 0,                //   out of retries against a destination that kept failing
+//     format: 0,               //   could not be rendered at all (a 'fallback' marker is not a drop)
+//     close: 0,                //   refused or abandoned because close() had begun
+//   },
 // }
 ```
 
@@ -1391,9 +1409,10 @@ Both queueing sinks, `FileSink` and `NamedPipeSink`, answer a failed write the s
   (both sinks report `getHealth().droppedEntries`) and the first
   drop is reported through `onError`
 - `getHealth().droppedEntries` means "lines this sink did not deliver": evicted at the
-  cap, still queued when `close()` gave up on them, and for `NamedPipeSink` also out of
-  retries and failed by a write still in flight when `close()` finished (`FileSink` counts
-  its retry drops in its own `flush()` result instead). A close that abandons a queue
+  cap, out of retries, unrenderable, still queued when `close()` gave up on them, or
+  failed by a write still in flight when `close()` finished. `droppedByKind` splits the
+  same total by reason (`queue_full`, `write`, `format`, `close`), named as `onError`
+  names them, so health alone says why. A close that abandons a queue
   reports it once as a `'close'` failure with `disposition: 'lost'` rather than once per
   entry
 - a broken stream is reopened automatically on a later write, so neither sink needs an API
@@ -1440,9 +1459,10 @@ const pipeSink = new NamedPipeSink({
     console.error(`Pipe ${kind} failed for ${target}:`, error.message);
 
     // Only reconnect on a failure that means the pipe itself is broken. Not every kind
-    // does: 'format' says your `formatter` threw and the default format was used
-    // instead, so the line was written and the pipe is healthy — reconnecting on that
-    // would tear the sink down and rebuild it once per log call.
+    // does: 'format' with disposition 'fallback' says your `formatter` threw and the
+    // default format was used instead, or a param would not render and a marker was
+    // written for it - either way the line was written and the pipe is healthy, and
+    // reconnecting on that would tear the sink down and rebuild it once per log call.
     //
     // The sink also reopens on its own, so this is rarely needed; see above.
     if (kind === 'write') {
@@ -1476,15 +1496,17 @@ interface SinkFailure {
   error: Error; // always an Error; the original thrown value is on `cause`
   target: string; // the pipe path, or the log file being written at the time
   entry?: LogEntry; // when the sink still has it — never for NamedPipeSink, which
-  // deliberately drops it so a stalled queue cannot pin your params
+  // deliberately drops it so a stalled queue cannot pin your params. Carries the raw
+  // `params` alongside `redactedParams`; forward the redacted bag, not the entry
   attempt?: number; // 1-based, for a failure tied to an entry
 
   // What became of the line. This, not `kind`, is what says whether to write it
   // somewhere else:
   //   'retrying'  — the sink will try again; a fallback write here duplicates it
   //   'lost'      — it will not arrive: out of retries, unrenderable, or dropped at the cap
-  //   'fallback'  — the sink substituted its own format and carried on with the line
-  //                  (a custom formatter threw); a later failure is reported separately
+  //   'fallback'  — the line was written, degraded: a custom formatter threw and the
+  //                  default format was used, or a param would not render and a marker
+  //                  stands in for it; a later failure is reported separately
   //   'no_entry'  — the failure is not about a particular line (open, rotate, close)
   disposition: 'retrying' | 'lost' | 'fallback' | 'no_entry';
 }
@@ -1786,6 +1808,8 @@ const result = logger.registerReportErrorListener();
 ```
 
 One call covers the whole process: the listener sits on `globalThis`, so it captures reports from every Lifecycleion module in the application, no per-instance wiring. Each error is logged through `errorObject(prefix, error)` and also emitted as a `'logger'` event with `{ eventType: 'uncaughtException', error }`.
+
+Register it on **one logger per process**. Each logger's listener guards against re-entering itself, but not against the others: with several registered, a sink failure that reports on this channel while a logger is logging it reaches every other listener, each of which logs it through its own sinks, and the fan-out is factorial in the number of listeners. Two loggers cost a handful of extra sink writes; eight cost over a hundred thousand, synchronously. Only one listener can usefully claim a report anyway, so pick the logger that owns process-wide errors and register there.
 
 **Parameters:**
 

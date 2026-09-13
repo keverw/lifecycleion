@@ -350,7 +350,10 @@ function normalizeAlongRedactPaths(
   //
   // Running out still normalizes fewer containers than asked, and that is a real loss
   // rather than a safe one - but there is no cheaper answer, since refusing the whole bag
-  // would leave every key already widened half-applied.
+  // would leave every key already widened half-applied. It is *said*, though: a walk
+  // that gave up on a named path with a value it never reached used to report nothing,
+  // and the one channel that exists for "this render is not what was asked" is exactly
+  // where an operator would look for it.
   let budget = MAX_REDACTION_ENTRIES;
 
   // The `(container, node)` pairs already descended. Re-descending one is a strict no-op -
@@ -375,6 +378,13 @@ function normalizeAlongRedactPaths(
 
       for (const key of stepKeys(container, part)) {
         if (budget <= 0) {
+          report(
+            new Error(
+              `redactedKeys normalization stopped after ${String(MAX_REDACTION_ENTRIES)} containers; paths below the ones reached may not be masked`,
+            ),
+            '<redactedKeys>',
+          );
+
           return;
         }
 

@@ -86,15 +86,27 @@ export class XHRAdapter implements HTTPAdapter {
           return;
         }
 
-        request.signal.addEventListener(
+        const signal = request.signal;
+        const onAbort = (): void => {
+          xhr.abort();
+        };
+
+        signal.addEventListener(
           'abort',
-          () => {
-            xhr.abort();
-          },
+          onAbort,
           // once: true — the XHR is already done after the first abort, no
           // need to keep the listener alive and risk a second call.
           { once: true },
         );
+
+        // And removed when the request ends any other way. `once` only fires on
+        // abort, so on a long-lived shared signal - one controller over a whole
+        // page session - every completed request left its listener behind, one
+        // per request, until the signal finally aborted or was collected.
+        // `loadend` fires after load, error, timeout and abort alike.
+        xhr.addEventListener('loadend', () => {
+          signal.removeEventListener('abort', onAbort);
+        });
       }
 
       // --- Upload progress ---

@@ -2,15 +2,19 @@ import fs, { promises as fsPromises } from 'fs';
 import { describeError, toError } from '../../to-error';
 import { renderOnce, type RenderedLine } from './internal/rendered-line';
 import { reportThroughHandler } from '../../internal/failure-reporter';
+import { renderJSONLine } from './internal/render-json-line';
 import {
   DEFAULT_CLOSE_TIMEOUT_MS,
   resolveMaxQueueSize,
   resolveMaxRetries,
   resolveTimeoutMS,
 } from './internal/queue-policy';
-import type {
-  SinkErrorHandler,
-  SinkFailureKind,
+import {
+  createDroppedEntryCounts,
+  type DroppedEntryCounts,
+  type DroppedEntryKind,
+  type SinkErrorHandler,
+  type SinkFailureKind,
 } from './internal/sink-failure';
 
 import type { LogEntry, LogSink } from '../types';
@@ -68,8 +72,36 @@ function resolveMaxSizeMB(requested?: number): number {
   return requested > 0 ? requested : DEFAULT_MAX_SIZE_MB;
 }
 
+/**
+ * `basename` as given, or a throw for one that would leave `logDir`.
+ *
+ * The file name is `logDir` joined with `basename`, and nothing between them resolved
+ * the result: `basename: '../../outside'` wrote and rotated two directories up. That is
+ * app configuration rather than request input, so this is a trust-boundary check, not a
+ * defence - but a sink whose whole promise is "these files live in `logDir`" should not
+ * break that promise on a config typo either. Refused at construction, where a bad
+ * option is a bug to fix rather than a log file to hunt for.
+ */
+function resolveBasename(requested: string): string {
+  if (
+    typeof requested !== 'string' ||
+    requested.length === 0 ||
+    requested === '.' ||
+    requested === '..' ||
+    requested.includes('/') ||
+    requested.includes('\\')
+  ) {
+    throw new FileSinkError(
+      `FileSink basename must be a file name inside logDir, without path separators; got ${JSON.stringify(requested)}`,
+    );
+  }
+
+  return requested;
+}
+
 export interface FileSinkOptions {
   logDir: string;
+  /** Base file name, a single path segment: no `/` or `\\`, and not `.` or `..`. */
   basename: string;
   maxSizeMB?: number;
   jsonFormat?: boolean;
@@ -125,6 +157,8 @@ export interface FileSinkHealth {
    * `close()` gave up on them. Always 0 when neither has happened.
    */
   droppedEntries: number;
+  /** `droppedEntries` by reason. See {@link DroppedEntryCounts}. */
+  droppedByKind: DroppedEntryCounts;
 }
 
 export interface FlushResult {
@@ -190,6 +224,7 @@ export class FileSink implements LogSink {
   private writeQueue: QueuedEntry[] = [];
   private maxQueueSize?: number;
   private droppedEntries = 0;
+  private readonly droppedByKind = createDroppedEntryCounts();
   /**
    * Where the last {@link flush} stopped counting, so the next one starts there.
    *
@@ -233,9 +268,31 @@ export class FileSink implements LogSink {
   private closed = false;
   private closeTimeoutMS: number;
 
+  /**
+   * How many `'format'` failures are being reported right now, so an `onError` that logs
+   * through this same sink cannot feed the loop that reported it.
+   *
+   * The shape `NamedPipeSink` guards against in `formatEntry`, reached here by a longer
+   * road. A handler that re-logs the failure it was handed - `logger.error('sink failed',
+   * { failure })` is the natural one - serializes the `entry` the failure carries, and the
+   * `BigInt` or cycle that made *that* entry unrenderable makes the handler's own line
+   * unrenderable too. That line was queued, `processQueue` reached it on its next turn,
+   * reported it, and the handler logged again: a drain loop that never ended, with every
+   * later line stuck behind it. While this is above zero, a line that fails to render is
+   * counted in `droppedEntries` and not reported, which is where the chain stops.
+   *
+   * A count held until the handler *settles*, not a flag cleared on return. An `async`
+   * handler returns at its first `await`, and a flag cleared there was down again by the
+   * time the handler resumed and logged - so the chain ran on, one report per turn of the
+   * event loop. And a count rather than a flag because the drain loop keeps going while
+   * that handler is still pending: a second failure reported meanwhile must not clear the
+   * guard the first one still holds.
+   */
+  private formatReportsInFlight = 0;
+
   constructor(options: FileSinkOptions) {
     this.logDir = options.logDir;
-    this.basename = options.basename;
+    this.basename = resolveBasename(options.basename);
     this.maxSizeMB = resolveMaxSizeMB(options.maxSizeMB);
     this.jsonFormat = options.jsonFormat ?? false;
     this.maxRetries = resolveMaxRetries(options.maxRetries);
@@ -269,7 +326,7 @@ export class FileSink implements LogSink {
       // through this early return with `droppedEntries` unmoved, `onError` silent and
       // `getHealth()` reporting a clean shutdown. `abandonQueueOnClose` counts what was
       // already queued; these are the ones refused at the door.
-      this.droppedEntries++;
+      this.countDropped('close');
 
       // Once, for the reason the abandoned queue reports once: an application still
       // logging through a thirty-second close would otherwise get a callback per line.
@@ -304,6 +361,14 @@ export class FileSink implements LogSink {
     // `rotateIfNeeded` have been awaited: by then the caller has had the chance to mutate
     // the bag `entry.redactedParams` points at, since redaction no longer copies it.
     const rendered = renderOnce(() => this.formatEntry(entry));
+
+    // See `formatReportsInFlight`. Only the unrenderable line is refused: a handler's
+    // line that does render is queued as any other, since it cannot re-enter the report.
+    if (rendered.formatError !== undefined && this.formatReportsInFlight > 0) {
+      this.countDropped('format');
+
+      return;
+    }
 
     // Add to queue with retry tracking
     this.writeQueue.push({ entry, attempts: 0, ...rendered });
@@ -347,6 +412,7 @@ export class FileSink implements LogSink {
       consecutiveFailures: this.consecutiveFailures,
       isInitialized: this.isInitialized,
       droppedEntries: this.droppedEntries,
+      droppedByKind: { ...this.droppedByKind },
     };
   }
 
@@ -705,7 +771,7 @@ export class FileSink implements LogSink {
     const firstAbandoned = this.writeQueue[0]?.entry;
 
     this.writeQueue = [];
-    this.droppedEntries += abandoned;
+    this.countDropped('close', abandoned);
 
     const failure = new FileSinkError(
       `Closed with ${String(abandoned)} entr${abandoned === 1 ? 'y' : 'ies'} still queued (closeTimeoutMS=${String(this.closeTimeoutMS)}); they were not written`,
@@ -868,6 +934,16 @@ export class FileSink implements LogSink {
           // under a logging loop turns that into the flood the fallback is supposed to
           // rescue you from. One line per entry actually lost says the same thing.
           if (this.onError !== undefined || !willRetry) {
+            // Held across the report for a `'format'` failure only, and until the handler
+            // settles rather than returns - see `formatReportsInFlight`. A write failure
+            // is retried and the handler hears every attempt by contract; the chain this
+            // breaks is the one where the handler's own line cannot render either.
+            const shouldGuardReentry = kind === 'format';
+
+            if (shouldGuardReentry) {
+              this.formatReportsInFlight++;
+            }
+
             reportThroughHandler(
               this.onError === undefined
                 ? undefined
@@ -885,6 +961,11 @@ export class FileSink implements LogSink {
                     }),
               () =>
                 `FileSink error writing to ${this.currentLogFile ?? this.logDir}: ${describeError(err)}`,
+              shouldGuardReentry
+                ? () => {
+                    this.formatReportsInFlight--;
+                  }
+                : undefined,
             );
           }
 
@@ -917,7 +998,7 @@ export class FileSink implements LogSink {
             // `{ isHealthy: true, droppedEntries: 0 }` - against that field's own
             // documented meaning, "lines this sink did not deliver". `flush()` reads the
             // same counter, so the two can no longer disagree about what was lost.
-            this.droppedEntries++;
+            this.countDropped(kind === 'format' ? 'format' : 'write');
           }
         }
       }
@@ -973,7 +1054,7 @@ export class FileSink implements LogSink {
       const dropped = this.writeQueue.shift();
 
       firstDropped ??= dropped?.entry;
-      this.droppedEntries++;
+      this.countDropped('queue_full');
       didEvict = true;
     }
 
@@ -1160,13 +1241,11 @@ export class FileSink implements LogSink {
     let formatted: string;
 
     if (this.jsonFormat) {
-      formatted = JSON.stringify({
-        timestamp: entry.timestamp,
-        type: entry.type,
-        serviceName: entry.serviceName,
-        entityName: entry.entityName,
-        message: entry.message,
-        params: entry.redactedParams, // Use redacted params for file output
+      // The logger's own renderer over the redacted bag, not a second `JSON.stringify`:
+      // see `renderJSONLine`. A value it cannot render becomes a marker and is reported
+      // as `'format'`/`'fallback'` - the line is still written.
+      formatted = renderJSONLine(entry, (error) => {
+        this.reportRenderFallback(entry, error);
       });
     } else {
       let text = '';
@@ -1538,5 +1617,56 @@ export class FileSink implements LogSink {
     }
 
     return candidate;
+  }
+
+  /**
+   * A value in `entry` would not render and a marker was written in its place.
+   *
+   * `'fallback'`, because the line goes out: this is advisory, and does not touch
+   * `consecutiveFailures`. Guarded by `formatReportsInFlight` for the same reason the
+   * lost-line report is - an `onError` that logs the failure back with the same
+   * unrenderable value in it would report from inside its own report, without bound.
+   * Under the guard the handler's line still renders, marker and all, and is queued;
+   * only the nested report is skipped.
+   */
+  private reportRenderFallback(entry: LogEntry, error: Error): void {
+    if (this.formatReportsInFlight > 0) {
+      return;
+    }
+
+    const failure = new FileSinkError(
+      'Failed to render a value in the log entry; a marker was written in its place',
+      error,
+    );
+
+    this.lastError = failure;
+    this.formatReportsInFlight++;
+
+    reportThroughHandler(
+      this.onError === undefined
+        ? undefined
+        : () =>
+            this.onError?.({
+              kind: 'format',
+              error: failure,
+              target: this.currentLogFile ?? this.logDir,
+              entry,
+              disposition: 'fallback',
+            }),
+      () =>
+        `FileSink error rendering an entry for ${this.currentLogFile ?? this.logDir}: ${describeError(failure)}`,
+      () => {
+        this.formatReportsInFlight--;
+      },
+    );
+  }
+
+  /**
+   * One more line this sink did not deliver, and why. The total and the breakdown move
+   * together so they cannot disagree.
+   */
+  private countDropped(kind: DroppedEntryKind, count = 1): void {
+    this.droppedEntries += count;
+    this.droppedByKind[kind] += count;
   }
 }

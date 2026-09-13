@@ -44,6 +44,29 @@ export type SinkFailureKind =
   | 'not_a_pipe'
   | 'unsupported_platform';
 
+/**
+ * Why a line this sink did not deliver was lost, keyed as {@link SinkFailure.kind} names
+ * the failure - so a count here and the `onError` calls that reported it use one word.
+ *
+ * - `'queue_full'` - evicted at `maxQueueSize` to make room.
+ * - `'write'` - out of retries against a destination that kept failing.
+ * - `'format'` - could not be rendered, so there was never a line to write.
+ * - `'close'` - refused or abandoned because `close()` had begun.
+ */
+export type DroppedEntryKind = 'queue_full' | 'write' | 'format' | 'close';
+
+/**
+ * How many lines were lost to each reason. The four always sum to `droppedEntries`; a
+ * total alone said *that* lines were lost and left "why" to whoever kept the `onError`
+ * calls, which is not the shape an operator polling health is in.
+ */
+export type DroppedEntryCounts = Record<DroppedEntryKind, number>;
+
+/** A zeroed {@link DroppedEntryCounts}. */
+export function createDroppedEntryCounts(): DroppedEntryCounts {
+  return { queue_full: 0, write: 0, format: 0, close: 0 };
+}
+
 /** What became of the line a failure is about. See {@link SinkFailure.disposition}. */
 export type SinkFailureDisposition =
   'retrying' | 'lost' | 'fallback' | 'no_entry';

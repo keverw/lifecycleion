@@ -16,6 +16,8 @@ export {
 // The one shape every sink reports a failure in, so a consumer can write a single handler
 // and hand it to both.
 export type {
+  DroppedEntryCounts,
+  DroppedEntryKind,
   SinkErrorHandler,
   SinkFailure,
   SinkFailureDisposition,
