@@ -321,6 +321,34 @@ describe('Logger', () => {
       expect(log.redactedParams?.username).toBe('john');
     });
 
+    test('a nested key hidden from enumeration is still masked in the template', () => {
+      // `redactValue()` leaves a non-enumerable key on an unchanged subtree, and
+      // `CurlyBrackets` resolves `{{user.password}}` by property read, so the two composed
+      // naively would print the secret. The logger normalizes along every redaction path
+      // before rendering, so the template sees the masked copy.
+      const user: Record<string, unknown> = { name: 'john' };
+
+      Object.defineProperty(user, 'password', {
+        value: 'secret123',
+        enumerable: false,
+        configurable: true,
+        writable: true,
+      });
+
+      logger.info('Login for {{user.name}} with {{user.password}}', {
+        params: { user },
+        redactedKeys: ['user.password'],
+      });
+
+      const log = arraySink.logs[0];
+
+      expect(log.message).not.toContain('secret123');
+      expect(log.message).toContain('john');
+      expect(
+        (log.redactedParams?.user as Record<string, unknown> | undefined)?.password,
+      ).not.toBe('secret123');
+    });
+
     test('should keep the shape of a redacted container', () => {
       logger.info('Failure {{error}} / {{users}} / {{metadata}}', {
         params: {
@@ -1826,6 +1854,83 @@ describe('Logger', () => {
 
         expect(handlerCalls).toBe(1);
         expect(captured.some((line) => line.includes('always'))).toBe(true);
+      } finally {
+        restoreConsoleError();
+      }
+    });
+
+    test('an onEventHandlerError that logs while a logger handler keeps throwing runs once', () => {
+      // The sibling of the `onSinkError` guard. Logging emits `'logger'`; a handler that
+      // throws reaches `handleEventHandlerFailure`; an `onEventHandlerError` that logs
+      // emits `'logger'` again, the handler throws again, and so on until the stack
+      // overflowed. The nested report lands on the console and the handler runs once.
+      const captured = muteConsoleError();
+      let handlerCalls = 0;
+      let reports = 0;
+      const sink = new ArraySink();
+
+      const recursiveLogger: Logger = new Logger({
+        sinks: [sink],
+        callProcessExit: false,
+        onEventHandlerError: (error) => {
+          reports++;
+          recursiveLogger.error(`handler failed: ${error.message}`);
+        },
+      });
+
+      recursiveLogger.on('logger', () => {
+        handlerCalls++;
+
+        throw new Error('handler boom');
+      });
+
+      try {
+        expect(() => recursiveLogger.info('kick it off')).not.toThrow();
+
+        // The original log and the one the handler wrote, each emitting once.
+        expect(handlerCalls).toBe(2);
+        expect(reports).toBe(1);
+        expect(captured.some((line) => line.includes('handler boom'))).toBe(true);
+      } finally {
+        restoreConsoleError();
+      }
+    });
+
+    test('an async onEventHandlerError that logs after an await runs once per failure', async () => {
+      const captured = muteConsoleError();
+      let reports = 0;
+      const sink = new ArraySink();
+
+      const recursiveLogger: Logger = new Logger({
+        sinks: [sink],
+        callProcessExit: false,
+        onEventHandlerError: async (error) => {
+          reports++;
+          await new Promise((resolve) => setTimeout(resolve, 5));
+          recursiveLogger.error(`handler failed: ${error.message}`);
+        },
+      });
+
+      recursiveLogger.on('logger', () => {
+        throw new Error('handler boom');
+      });
+
+      try {
+        recursiveLogger.info('kick it off');
+
+        await new Promise((resolve) => setTimeout(resolve, 60));
+
+        // The handler's own log emitted `'logger'` and failed again while the guard was
+        // up, so that failure went to the console rather than back to the handler.
+        expect(reports).toBe(1);
+        expect(captured.some((line) => line.includes('handler boom'))).toBe(true);
+
+        // Settled, so the next failure reaches the handler again.
+        recursiveLogger.info('again');
+
+        await new Promise((resolve) => setTimeout(resolve, 60));
+
+        expect(reports).toBe(2);
       } finally {
         restoreConsoleError();
       }

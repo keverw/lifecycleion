@@ -107,7 +107,8 @@ export class CookieJar {
    * the life of the jar - see {@link fromJSON}.
    *
    * Also returns false for a name or value that cannot be written into a `Cookie`
-   * header as one cookie-pair: a name that is empty or holds `=`, `;`, whitespace or a
+   * header as one cookie-pair (and `getCookiesFor` withholds a stored cookie that no
+   * longer passes, so a mutation through `getAllCookies()` cannot reach the header): a name that is empty or holds `=`, `;`, whitespace or a
    * control character, or a value holding `;` or a control character. The header is
    * built as `name=value` pairs joined by `; `, so a value of `x; other=evil` was sent
    * as two cookies, and a CR LF was a header injection. The Set-Cookie parser cannot
@@ -270,6 +271,15 @@ export class CookieJar {
     if (apexBucket) {
       for (const cookie of apexBucket.values()) {
         if (this.isExpired(cookie, now)) {
+          continue;
+        }
+
+        // Checked again on the way out, not only on the way in. `getAllCookies()` hands
+        // out the stored objects, and a `value` written onto one afterwards never went
+        // through `setCookie` - so `x; other=evil` set that way was interpolated into
+        // the header as two pairs, the framing the write-time check exists to refuse.
+        // The expiry check above already fails closed on the same mutation path.
+        if (!this.hasWritableNameAndValue(cookie)) {
           continue;
         }
 

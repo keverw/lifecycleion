@@ -245,6 +245,33 @@ describe('CookieJar', () => {
       ).toBe(true);
     });
 
+    test('a stored cookie mutated into an unwritable value is withheld from the header', () => {
+      // `getAllCookies()` hands out the stored objects. A value written onto one never
+      // went through `setCookie`, and the header used to interpolate it as-is: two
+      // pairs, or a CR LF. Withheld on the way out, as an expiry mutated to unreadable
+      // already is.
+      const base = { domain: 'example.com', path: '/' };
+
+      expect(jar.setCookie({ ...base, name: 'ok', value: '1' })).toBe(true);
+      expect(jar.setCookie({ ...base, name: 'sid', value: 'x' })).toBe(true);
+      expect(jar.setCookie({ ...base, name: 'crlf', value: 'y' })).toBe(true);
+
+      for (const cookie of jar.getAllCookies()) {
+        if (cookie.name === 'sid') {
+          cookie.value = 'x; other=evil';
+        }
+
+        if (cookie.name === 'crlf') {
+          cookie.value = {
+            toString: () => 'y\r\nX-Injected: 1',
+          } as unknown as string;
+        }
+      }
+
+      expect(jar.getCookieHeaderString('https://example.com/')).toBe('ok=1');
+      expect(jar.getCookieFor('sid', 'https://example.com/')).toBeUndefined();
+    });
+
     test('getCookieHeaderString stays one pair per cookie', () => {
       const restored = jar.fromJSON({
         cookies: [

@@ -7,6 +7,10 @@ import {
   test,
 } from 'bun:test';
 import { HTTPClient } from './http-client';
+import {
+  muteConsoleError,
+  restoreConsoleError,
+} from '../internal/console-test-utils';
 import { CookieJar } from './cookie-jar';
 import { startTestServer, type TestServer } from './test-helpers/test-server';
 import { scalarHeader } from './utils';
@@ -6838,6 +6842,68 @@ describe('HTTPClient — phase-aware interceptors', () => {
     expect(interceptedURL).toBe('http://localhost/users');
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ ok: true });
+  });
+
+  test('a response or error observer that throws or rejects does not reject send()', async () => {
+    // Observers run through `safeHandleCallbackAndWait`, so a throw is reported and the
+    // request outcome stands. Progress and attempt hooks have this integration test;
+    // observers did not, and a regression here turns a 200 into a rejected `send()`.
+    // The console is muted only to keep the output clean: the failures go out on the
+    // global `'error'` channel, and where they land depends on what else is listening.
+    muteConsoleError();
+    const adapter = new MockAdapter();
+
+    adapter.routes.get('/ok', () => ({ status: 200, body: { ok: true } }));
+
+    const client = new HTTPClient({ adapter });
+    let responseObserverCalls = 0;
+    let errorObserverCalls = 0;
+
+    client.addResponseObserver(() => {
+      responseObserverCalls++;
+
+      throw new Error('response observer boom');
+    });
+    client.addResponseObserver(async () => {
+      responseObserverCalls++;
+      await Promise.resolve();
+
+      throw new Error('response observer rejected');
+    });
+    try {
+      const ok = await client.get('/ok').send<{ ok: boolean }>();
+
+      expect(ok.status).toBe(200);
+      expect(ok.body).toEqual({ ok: true });
+      expect(responseObserverCalls).toBe(2);
+
+      // Error observers run on a transport failure, not on a status: an adapter that
+      // rejects `send()`.
+      const failing: HTTPAdapter = {
+        getType: () => 'node',
+        send: () => Promise.reject(new Error('socket hang up')),
+      };
+      const failingClient = new HTTPClient({ adapter: failing });
+
+      failingClient.addErrorObserver(() => {
+        errorObserverCalls++;
+
+        throw new Error('error observer boom');
+      });
+      failingClient.addErrorObserver(async () => {
+        errorObserverCalls++;
+        await Promise.resolve();
+
+        throw new Error('error observer rejected');
+      });
+
+      const broken = await failingClient.get('https://example.com/broken').send();
+
+      expect(broken.isFailed).toBe(true);
+      expect(errorObserverCalls).toBe(2);
+    } finally {
+      restoreConsoleError();
+    }
   });
 
   test('MockAdapter without baseURL resolves slashless relative requests to http://localhost', async () => {

@@ -231,6 +231,8 @@ export class Logger extends EventEmitter {
   private _reportErrorListenerRegistered = false;
   private _isHandlingReportedError = false;
   private _isHandlingSinkError = false;
+  /** See {@link handleEventHandlerFailure}: held until `onEventHandlerError` settles. */
+  private _isHandlingEventHandlerError = false;
   private _reportErrorListener: ((event: Event) => void) | null = null;
   private _reportErrorListenerCapture = false;
 
@@ -1226,15 +1228,38 @@ export class Logger extends EventEmitter {
     // `logger.info()` that emitted the event, or, for a handler that rejected, became an
     // unhandled rejection from `result.catch(onError)`.
     //
-    // `failure.message` is a plain string, built here rather than handed in.
-    reportThroughHandler(
-      this.onEventHandlerError === undefined
-        ? undefined
-        : // Returned, so an `async` handler that rejects reaches the console rung rather
-          // than becoming an unhandled rejection out of a log call.
-          () => this.onEventHandlerError?.(failure, event),
-      () => failure.message,
-    );
+    // Re-entry goes to the console rung, not back to the handler, as `handleSinkError`
+    // does for `onSinkError` and for the same reason: logging from the handler is the
+    // obvious thing to write, and with a `'logger'` handler that reliably throws it is
+    // the cycle the comment above describes - a stack overflow when synchronous, one
+    // new turn per rejection when `async`. The docs say not to log from here; this is
+    // the brake for the handler that does anyway. Held until the handler settles, so an
+    // `async` one that awaits before logging is covered too.
+    if (this._isHandlingEventHandlerError) {
+      reportThroughHandler(undefined, () => failure.message);
+
+      return;
+    }
+
+    this._isHandlingEventHandlerError = true;
+
+    try {
+      // `failure.message` is a plain string, built here rather than handed in.
+      reportThroughHandler(
+        this.onEventHandlerError === undefined
+          ? undefined
+          : // Returned, so an `async` handler that rejects reaches the console rung
+            // rather than becoming an unhandled rejection out of a log call.
+            () => this.onEventHandlerError?.(failure, event),
+        () => failure.message,
+        () => {
+          this._isHandlingEventHandlerError = false;
+        },
+      );
+    } catch {
+      // `reportThroughHandler` does not throw; the guard must not stay up if that changes.
+      this._isHandlingEventHandlerError = false;
+    }
   }
 
   /**
