@@ -774,6 +774,41 @@ describe('RetryRunner', () => {
       }
     });
 
+    test('a rethrow of the error reported as fatal is not a second outcome either', async () => {
+      // `catch (e) { reportResult('fatal', e); throw e; }` is the same shape with the
+      // other error status, and was still dispatched as a late throw.
+      const captured = muteConsoleError();
+      const events: unknown[] = [];
+      const onGlobalError = (event: unknown): void => {
+        events.push(event);
+      };
+
+      globalThis.addEventListener?.('error', onGlobalError);
+
+      try {
+        const failure = new Error('fatal once');
+
+        const operation = (reportResult: ReportResult): void => {
+          reportResult('fatal', failure);
+          throw failure;
+        };
+
+        const runner = new RetryRunner(policy, operation);
+        const result = await runner.run(true);
+
+        await sleep(10);
+
+        expect(result.status).toBe('attempt_fatal');
+        expect(
+          captured.filter((line) => line.includes('already settled')),
+        ).toEqual([]);
+        expect(events).toEqual([]);
+      } finally {
+        globalThis.removeEventListener?.('error', onGlobalError);
+        restoreConsoleError();
+      }
+    });
+
     test('a genuine double report on an unaborted attempt is still surfaced', async () => {
       // The other half of the same rule: nothing here was aborted, so a second
       // `reportResult` is the caller bug this diagnostic exists for.

@@ -1245,16 +1245,17 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
         // the aborted case above is excluded for. A throw carrying anything else still
         // reports, which is the failure that would otherwise disappear.
         //
-        // Only a rethrow of a reported *error* is that shape. Comparing against whatever
-        // was reported matched a throw against success data too: `reportResult('success')`
-        // and `reportResult('skip')` store `undefined`, so a later `throw undefined` or a
-        // bare `Promise.reject()` from a cleanup step compared equal and was dropped - the
-        // runner stayed `completed`/`success` and the `'error'` channel never heard of it,
-        // which is precisely the post-success failure `handleReportResult` exists to keep.
+        // Only a rethrow of a reported *error* - `'error'` or `'fatal'` - is that shape.
+        // Comparing against whatever was reported matched a throw against success data
+        // too: `reportResult('success')` and `reportResult('skip')` store `undefined`, so
+        // a later `throw undefined` or a bare `Promise.reject()` from a cleanup step
+        // compared equal and was dropped - the runner stayed `completed`/`success` and the
+        // `'error'` channel never heard of it, which is precisely the post-success failure
+        // `handleReportResult` exists to keep.
         if (
           didReport &&
           context.handled &&
-          reportedStatus === 'error' &&
+          (reportedStatus === 'error' || reportedStatus === 'fatal') &&
           error === reportedValue
         ) {
           return;
