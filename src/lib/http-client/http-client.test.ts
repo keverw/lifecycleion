@@ -802,6 +802,84 @@ describe('HTTPClient — basic HTTP methods', () => {
     expect(await response.requestBodySettled).toBe(uploadFailure);
   });
 
+  test('a requestBodySettled whose thenable check throws does not fail the response', async () => {
+    // Deciding whether the field is a thenable reads `.then` on a value the adapter made.
+    // A `Proxy` that throws on that read threw out of `_buildResponse`, after the request
+    // had already succeeded - a `200` turned into a synthetic failed status-0 response
+    // over a field documented as advisory. Unusable is treated as absent.
+    const hostile = new Proxy(
+      {},
+      {
+        get: () => {
+          throw new Error('no then for you');
+        },
+      },
+    );
+
+    const adapter: HTTPAdapter = {
+      getType: () => 'node',
+      send: (_request: AdapterRequest): Promise<AdapterResponse> =>
+        Promise.resolve({
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+          body: new TextEncoder().encode('{"ok":true}'),
+          requestBodySettled: hostile as unknown as Promise<Error | undefined>,
+        }),
+    };
+
+    const response = await new HTTPClient({
+      adapter,
+      baseURL: 'http://example.test',
+    })
+      .post('/upload')
+      .json({ a: 1 })
+      .send<{ ok: boolean }>();
+
+    expect(response.status).toBe(200);
+    expect(response.isFailed).toBe(false);
+    expect(response.body).toEqual({ ok: true });
+    expect(response.requestBodySettled).toBeUndefined();
+  });
+
+  test('a tagged value whose thenable check throws is ignored on the throw path too', async () => {
+    // The same read on the tag an adapter puts on the error it throws.
+    const hostile = new Proxy(
+      {},
+      {
+        get: () => {
+          throw new Error('no then for you');
+        },
+      },
+    );
+    const controller = new AbortController();
+
+    const adapter: HTTPAdapter = {
+      getType: () => 'node',
+      send: (_request: AdapterRequest): Promise<AdapterResponse> => {
+        controller.abort();
+
+        const abortErr = new Error('Request aborted');
+
+        abortErr.name = 'AbortError';
+        Object.assign(abortErr, { [REQUEST_BODY_SETTLED_KEY]: hostile });
+
+        return Promise.reject(abortErr);
+      },
+    };
+
+    const response = await new HTTPClient({
+      adapter,
+      baseURL: 'http://example.test',
+    })
+      .post('/upload')
+      .json({ a: 1 })
+      .signal(controller.signal)
+      .send();
+
+    expect(response.isCancelled).toBe(true);
+    expect(response.requestBodySettled).toBeUndefined();
+  });
+
   test('a tagged value that is not a promise is ignored rather than awaited', async () => {
     // The tag is an ordinary property on an object this client did not create. `await` on
     // a non-thenable resolves to the value itself, so trusting it would report the tag as

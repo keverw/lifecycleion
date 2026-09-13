@@ -3020,17 +3020,16 @@ function getRequestBodySettled(
 ): Promise<Error | undefined> | undefined {
   const settled = readObjectMember(err, REQUEST_BODY_SETTLED_KEY);
 
-  if (!isPromise(settled)) {
-    return undefined;
-  }
-
-  // Adopted rather than handed over as it arrived. `isPromise` accepts any object with a
-  // callable `then`, and `HTTPAdapter` is a public extension point: a custom adapter that
-  // tags `Promise.reject(...)` would otherwise put a rejecting promise on
-  // `HTTPResponse.requestBodySettled`, which is documented never to reject - so a caller
-  // following the docs and awaiting it without a `try` would throw, and one that ignores
-  // the field would get an unhandled rejection against the response object. A rejection
-  // becomes the failure it is; `Promise.resolve` also flattens a foreign thenable.
+  // Adopted rather than handed over as it arrived, and the thenable check made there,
+  // guarded: `readObjectMember` guards the read of the tag, but an `isPromise` on what
+  // came back read `.then` on it unguarded, so a tag that throws on that read escaped.
+  // `isPromise` accepts any object with a callable `then`, and `HTTPAdapter` is a public
+  // extension point: a custom adapter that tags `Promise.reject(...)` would otherwise put
+  // a rejecting promise on `HTTPResponse.requestBodySettled`, which is documented never
+  // to reject - so a caller following the docs and awaiting it without a `try` would
+  // throw, and one that ignores the field would get an unhandled rejection against the
+  // response object. A rejection becomes the failure it is; `Promise.resolve` also
+  // flattens a foreign thenable.
   return adoptRequestBodySettled(settled);
 }
 
@@ -3047,7 +3046,22 @@ function getRequestBodySettled(
 function adoptRequestBodySettled(
   settled: unknown,
 ): Promise<Error | undefined> | undefined {
-  if (!isPromise(settled)) {
+  // Guarded, because deciding whether it is a thenable reads `.then` on a value the
+  // adapter made. A `Proxy` or an accessor that throws there threw out of
+  // `_buildResponse` - and out of a request that had already succeeded - turning a `200`
+  // into a synthetic failed status-0 response over a field documented as advisory.
+  // An unusable value is treated as absent, which is what "no adapter reported an upload
+  // outcome" already means. `Promise.resolve` reads `.then` once more below, but the
+  // specification has it reject the promise on a throwing read rather than throw.
+  let isThenable = false;
+
+  try {
+    isThenable = isPromise(settled);
+  } catch {
+    return undefined;
+  }
+
+  if (!isThenable) {
     return undefined;
   }
 
