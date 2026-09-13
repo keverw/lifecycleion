@@ -1512,6 +1512,15 @@ interface SinkFailure {
 }
 ```
 
+A `close()` that gives up at `closeTimeoutMS` reports differently on the two sinks, because
+they know different things. `FileSink` waits on one write at a time, so the write it
+abandons may already be on disk: reported as `'close'` / `'no_entry'` and not counted in
+`droppedEntries`. `NamedPipeSink` hands the stream a burst, so what it abandons is whatever
+is still buffered for a reader that did not take it: reported once as `'close'` / `'lost'`,
+with each entry counted as its write callback fails. Neither report carries an `entry`, so
+a fallback handler cannot re-emit those lines from the report; it learns that lines were
+lost, and how many from `getHealth().droppedEntries`.
+
 #### Error Handling & Reconnection
 
 When a pipe error occurs (e.g., reader disconnects), the `onError` callback is invoked with a `SinkFailure`. The sink reopens on its own, but `reconnect()` is available to reestablish the connection on demand:
