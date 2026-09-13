@@ -177,6 +177,36 @@ describe('CookieJar', () => {
       expect(jar.getAllCookies()).toHaveLength(0);
     });
 
+    test('returns false for an expiry that cannot be read', () => {
+      // The programmatic path to the same immortal cookie `fromJSON` refuses: an
+      // `Invalid Date` stored as `expires` compares `now` against `NaN` forever, and a
+      // non-finite `maxAge` or `createdAt` does the same through the other branch.
+      const base = { name: 'session', value: 'secret', domain: 'example.com' };
+
+      expect(jar.setCookie({ ...base, expires: new Date('nope') })).toBe(false);
+      expect(jar.setCookie({ ...base, maxAge: Number.NaN })).toBe(false);
+      expect(jar.setCookie({ ...base, maxAge: Number.POSITIVE_INFINITY })).toBe(
+        false,
+      );
+      expect(jar.setCookie({ ...base, maxAge: 60, createdAt: Number.NaN })).toBe(
+        false,
+      );
+      expect(
+        jar.setCookie({
+          ...base,
+          expires: 'soon' as unknown as Date,
+        }),
+      ).toBe(false);
+
+      expect(jar.getAllCookies()).toHaveLength(0);
+      expect(jar.getCookieFor('session', 'https://example.com')).toBeUndefined();
+
+      expect(jar.setCookie({ ...base, maxAge: 60 })).toBe(true);
+      expect(jar.getCookieFor('session', 'https://example.com')?.value).toBe(
+        'secret',
+      );
+    });
+
     test('returns false and does not store for garbage domain', () => {
       const isCookieStored = jar.setCookie({
         name: 'a',
@@ -1192,6 +1222,112 @@ describe('CookieJar', () => {
       expect(jar.getCookieFor('garbage', 'https://example.com')).toBeUndefined();
       expect(jar.getCookieFor('invalid-date', 'https://example.com')).toBeUndefined();
       expect(jar.getCookieFor('kept', 'https://example.com')?.value).toBe('x');
+      expect(jar.clearExpiredCookies()).toBe(0);
+    });
+
+    test('refuses a cookie whose maxAge or createdAt is not a finite number', () => {
+      // The other half of the expiry model. `isExpired` prefers `maxAge` and computes
+      // `createdAt + maxAge * 1000`; one non-numeric field made that `NaN`, `now > NaN`
+      // was never true, and the cookie was immortal - a sound `expires` beside it did
+      // not help, since `maxAge` is checked first.
+      const base = {
+        value: 'x',
+        domain: 'example.com',
+        path: '/',
+        createdAt: Date.now(),
+      };
+
+      const restored = jar.fromJSON({
+        cookies: [
+          { ...base, name: 'string-max-age', maxAge: 'not-a-number' },
+          { ...base, name: 'nan-max-age', maxAge: Number.NaN },
+          { ...base, name: 'infinite-max-age', maxAge: Number.POSITIVE_INFINITY },
+          { ...base, name: 'string-created-at', maxAge: 60, createdAt: 'yesterday' },
+          { ...base, name: 'object-created-at', maxAge: 60, createdAt: {} },
+          {
+            ...base,
+            name: 'masked-expires',
+            maxAge: 'nope',
+            expires: new Date(Date.now() + 10_000),
+          },
+          { ...base, name: 'kept', maxAge: 60 },
+        ],
+      } as unknown as Parameters<CookieJar['fromJSON']>[0]);
+
+      expect(restored).toBe(1);
+
+      for (const name of [
+        'string-max-age',
+        'nan-max-age',
+        'infinite-max-age',
+        'string-created-at',
+        'object-created-at',
+        'masked-expires',
+      ]) {
+        expect(jar.getCookieFor(name, 'https://example.com')).toBeUndefined();
+      }
+
+      expect(jar.getCookieFor('kept', 'https://example.com')?.value).toBe('x');
+      expect(jar.getAllCookies()).toHaveLength(1);
+      expect(jar.clearExpiredCookies()).toBe(0);
+    });
+
+    test('a stored cookie whose expiry turns unreadable is expired, not immortal', () => {
+      // `setCookie` refuses an unreadable expiry, so the only way to a stored one is
+      // through a reference the jar handed out. Belt and braces for the check itself:
+      // `now > NaN` is never true, and the safe side to land on is expired - left out
+      // of `getCookiesFor` and counted by `clearExpiredCookies`.
+      const base = { value: 'x', domain: 'example.com', path: '/' };
+
+      expect(jar.setCookie({ ...base, name: 'by-max-age', maxAge: 60 })).toBe(true);
+      expect(
+        jar.setCookie({
+          ...base,
+          name: 'by-expires',
+          expires: new Date(Date.now() + 10_000),
+        }),
+      ).toBe(true);
+      expect(jar.setCookie({ ...base, name: 'sound', maxAge: 60 })).toBe(true);
+
+      for (const cookie of jar.getAllCookies()) {
+        if (cookie.name === 'by-max-age') {
+          cookie.maxAge = Number.NaN;
+        }
+
+        if (cookie.name === 'by-expires') {
+          cookie.expires = new Date('nope');
+        }
+      }
+
+      const sent = jar.getCookiesFor('https://example.com').map((c) => c.name);
+
+      expect(sent).toEqual(['sound']);
+      expect(jar.clearExpiredCookies()).toBe(2);
+      expect(jar.getAllCookies().map((c) => c.name)).toEqual(['sound']);
+    });
+
+    test('reads a null maxAge or createdAt as absent', () => {
+      const base = { value: 'x', domain: 'example.com', path: '/' };
+      const before = Date.now();
+
+      const restored = jar.fromJSON({
+        cookies: [
+          { ...base, name: 'null-max-age', maxAge: null, createdAt: before },
+          { ...base, name: 'null-created-at', maxAge: 60, createdAt: null },
+        ],
+      } as unknown as Parameters<CookieJar['fromJSON']>[0]);
+
+      expect(restored).toBe(2);
+
+      const nullMaxAge = jar.getCookieFor('null-max-age', 'https://example.com');
+      expect(nullMaxAge).toBeDefined();
+      expect('maxAge' in (nullMaxAge ?? {})).toBe(false);
+
+      const nullCreatedAt = jar.getCookieFor(
+        'null-created-at',
+        'https://example.com',
+      );
+      expect(nullCreatedAt?.createdAt).toBeGreaterThanOrEqual(before);
       expect(jar.clearExpiredCookies()).toBe(0);
     });
 

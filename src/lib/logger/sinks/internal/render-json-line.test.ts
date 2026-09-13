@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { renderJSONLine } from './render-json-line';
+import { renderJSONLine, spliceRenderedParams } from './render-json-line';
 import { TRUNCATED_LENGTH } from '../../../internal/render-budget';
 import type { LogEntry } from '../../types';
 
@@ -118,5 +118,25 @@ describe('renderJSONLine', () => {
     const parsed = JSON.parse(line) as { params: unknown };
 
     expect(typeof parsed.params).toBe('string');
+  });
+
+  test('stays JSON when stringifyValue falls back to its bare marker', () => {
+    // `stringifyValue`'s own catch answers `[unrenderable]` with no braces around it.
+    // Spliced onto the envelope as though it were `{"params":...}`, the line came out
+    // `...,unrenderable]`: not JSON, on the one format whose contract is that every line
+    // parses. No input the walk guards reaches that catch, so the splice is exercised
+    // directly.
+    const envelope = JSON.stringify({ message: 'hello' });
+
+    const line = spliceRenderedParams(envelope, '[unrenderable]');
+    const parsed = JSON.parse(line) as { message: string; params: unknown };
+
+    expect(parsed.message).toBe('hello');
+    expect(parsed.params).toBe('[unrenderable]');
+
+    // The ordinary shape is untouched.
+    expect(
+      JSON.parse(spliceRenderedParams(envelope, '{"params":{"a":1}}')),
+    ).toEqual({ message: 'hello', params: { a: 1 } });
   });
 });

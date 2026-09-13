@@ -4743,6 +4743,97 @@ describe('HTTPClient — builder state', () => {
     expect(secondAttemptStartedAt).toBeGreaterThanOrEqual(settledAt);
   });
 
+  test("a retry after a thrown attempt waits for that attempt's upload to settle first", async () => {
+    // The resolve path waits; the throw path did not, on the grounds that a hop that
+    // threw has no socket left. True of `NodeAdapter`, not of a custom adapter that
+    // rejects `send()` while its upload is still going out and tags the error with the
+    // still-open outcome - the backoff elapsed and attempt two was dispatched beside
+    // attempt one's body.
+    let settledAt = 0;
+    let secondAttemptStartedAt = 0;
+    let attempt = 0;
+
+    const adapter: HTTPAdapter = {
+      getType: () => 'node',
+      send: (_request: AdapterRequest): Promise<AdapterResponse> => {
+        attempt++;
+
+        if (attempt === 1) {
+          const failure = new Error('socket reset mid-upload');
+
+          Object.assign(failure, {
+            [REQUEST_BODY_SETTLED_KEY]: new Promise<Error | undefined>(
+              (resolve) => {
+                setTimeout(() => {
+                  settledAt = Date.now();
+                  resolve(failure);
+                }, 80);
+              },
+            ),
+          });
+
+          return Promise.reject(failure);
+        }
+
+        secondAttemptStartedAt = Date.now();
+
+        return Promise.resolve({ status: 200, headers: {}, body: null });
+      },
+    };
+
+    const response = await new HTTPClient({ adapter })
+      .put('https://example.com/upload')
+      .json({ a: 1 })
+      .retryPolicy({ strategy: 'fixed', maxRetryAttempts: 2, delayMS: 10 })
+      .send();
+
+    expect(response.status).toBe(200);
+    expect(attempt).toBe(2);
+    expect(settledAt).toBeGreaterThan(0);
+    expect(secondAttemptStartedAt).toBeGreaterThanOrEqual(settledAt);
+  });
+
+  test('a cancel during the throw-path retry upload wait is not held for the upload', async () => {
+    const controller = new AbortController();
+    let attempt = 0;
+
+    const adapter: HTTPAdapter = {
+      getType: () => 'node',
+      send: (_request: AdapterRequest): Promise<AdapterResponse> => {
+        attempt++;
+
+        const failure = new Error('socket reset mid-upload');
+
+        Object.assign(failure, {
+          // Never settles: the wait must end on the cancel alone.
+          [REQUEST_BODY_SETTLED_KEY]: new Promise(() => {}),
+        });
+
+        return Promise.reject(failure);
+      },
+    };
+
+    const builder = new HTTPClient({ adapter })
+      .put('https://example.com/upload')
+      .json({ a: 1 })
+      .signal(controller.signal)
+      .retryPolicy({ strategy: 'fixed', maxRetryAttempts: 2, delayMS: 10 })
+      .onAttemptEnd((e) => {
+        if (e.willRetry) {
+          setTimeout(() => controller.abort('gave up'), 30);
+        }
+      });
+
+    const start = Date.now();
+    const res = await builder.send();
+
+    expect(res.isCancelled).toBe(true);
+    expect(builder.error?.cancelReason).toBe('gave up');
+    expect(attempt).toBe(1);
+    expect(Date.now() - start).toBeLessThan(2000);
+    expect(res.requestBodySettled).toBeDefined();
+  });
+
   test('a cancel during the retry upload wait is not held for the upload', async () => {
     const controller = new AbortController();
     let attempt = 0;

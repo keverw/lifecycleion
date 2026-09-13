@@ -66,7 +66,11 @@ export class CookieJar {
 
   /**
    * Stores or updates a cookie. Returns false if the domain is missing or
-   * not a valid hostname/IP (e.g. empty string, spaces, garbage input).
+   * not a valid hostname/IP (e.g. empty string, spaces, garbage input), or if the
+   * cookie's expiry cannot be read: an `expires` that is an `Invalid Date`, or a
+   * `maxAge` or `createdAt` that is not a finite number. Such a cookie would compare
+   * `now` against `NaN` in the expiry check, never be found expired, and be sent for
+   * the life of the jar - see {@link fromJSON}.
    *
    * Valid domains include: hostnames (example.com, localhost, myapp.test),
    * IPv4 (127.0.0.1), and IPv6 ([::1]).
@@ -78,6 +82,10 @@ export class CookieJar {
     const domain = cookie.domain ?? '';
 
     if (!this.isSyntaxValidDomain(domain)) {
+      return false;
+    }
+
+    if (!this.hasReadableExpiry(cookie)) {
       return false;
     }
 
@@ -370,6 +378,13 @@ export class CookieJar {
    * `null` - what `JSON.stringify` writes for an `Invalid Date` - and `undefined` mean
    * no expiry, as they do on a live cookie.
    *
+   * The same refusal covers the other half of the expiry model: a `maxAge` or a
+   * `createdAt` that is not a finite number - a string, `NaN`, an object - made
+   * `createdAt + maxAge * 1000` come out `NaN` and the cookie just as immortal, and
+   * `isExpired` prefers `maxAge` over `expires`, so a sound `expires` beside a corrupt
+   * `maxAge` did not save it. `setCookie` refuses those the way it refuses a bad domain.
+   * A `null` `maxAge` or `createdAt` reads as absent, as a `null` `expires` does.
+   *
    * @returns How many cookies were restored. Compare against `data.cookies.length` to learn
    *          whether any were refused.
    * @throws {TypeError} When `data.cookies` is not an array or holds a non-object. The
@@ -393,6 +408,15 @@ export class CookieJar {
 
       const cookie: Cookie = { ...(entry as Cookie) };
       const rawExpires: unknown = cookie.expires;
+
+      // Absent, so `setCookie` injects `Date.now()`; a tampered value is refused there.
+      if ((cookie.createdAt as unknown) === null) {
+        delete (cookie as Partial<Cookie>).createdAt;
+      }
+
+      if ((cookie.maxAge as unknown) === null) {
+        delete cookie.maxAge;
+      }
 
       if (rawExpires === undefined || rawExpires === null) {
         delete cookie.expires;
@@ -786,13 +810,47 @@ export class CookieJar {
     return !result.isIp && result.domain === null && result.isIcann === true;
   }
 
+  /**
+   * Whether every expiry field the cookie carries can take part in the expiry check.
+   * `setCookie` refuses a cookie this rejects, and `isExpired` fails one closed should
+   * it ever be reached another way, so the jar never holds a cookie whose expiry is
+   * `NaN` and therefore never past.
+   */
+  private hasReadableExpiry(cookie: CookieInput): boolean {
+    const { expires, maxAge, createdAt } = cookie;
+
+    if (
+      expires !== undefined &&
+      (!(expires instanceof Date) || Number.isNaN(expires.getTime()))
+    ) {
+      return false;
+    }
+
+    if (maxAge !== undefined && !Number.isFinite(maxAge)) {
+      return false;
+    }
+
+    if (createdAt !== undefined && !Number.isFinite(createdAt)) {
+      return false;
+    }
+
+    return true;
+  }
+
   private isExpired(cookie: Cookie, now: number): boolean {
+    // Fails closed: `setCookie` refuses an expiry that cannot be read, but a comparison
+    // against `NaN` is never true, and "never expired" is the wrong side to land on for
+    // a cookie whose expiry is unknown.
     if (cookie.maxAge !== undefined) {
-      return now > cookie.createdAt + cookie.maxAge * 1000;
+      const expiresAt = cookie.createdAt + cookie.maxAge * 1000;
+
+      return !Number.isFinite(expiresAt) || now > expiresAt;
     }
 
     if (cookie.expires) {
-      return now > cookie.expires.getTime();
+      const expiresAt = cookie.expires.getTime();
+
+      return Number.isNaN(expiresAt) || now > expiresAt;
     }
 
     return false;

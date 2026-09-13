@@ -2259,8 +2259,16 @@ export class BaseHTTPClient {
 
             await this._cancellableDelay(delayMS, cancelSignal);
 
-            // Not waited on, as the redirect loop does not wait on a hop that threw:
-            // there is no socket left to wait for. Kept for the interceptor exits above.
+            // Waited on as the resolve path above waits, and for the same reason. This
+            // used to skip the wait on the grounds that a hop that threw has no socket
+            // left: true of `NodeAdapter`, which destroys the request on an abort or a
+            // per-attempt timeout and settles the outcome at once, so the wait costs
+            // nothing there. Not true of a custom adapter that rejects `send()` while
+            // its upload is still going out - the outcome it tagged the error with is
+            // still open, and without this the backoff elapsed and the next attempt was
+            // dispatched beside it: the double-send the wait exists to prevent. Raced
+            // against the cancel signal, so a caller who gives up during it is not held.
+            await settleUploadBeforeNextDispatch(uploadOutcome, cancelSignal);
             previousUploadOutcome = uploadOutcome;
 
             if (cancelSignal.aborted) {

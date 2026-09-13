@@ -164,6 +164,23 @@ function forwardingContainerCopy(
     return existing;
   }
 
+  // The copy under construction, held out here so a refusal on any path - the entry cap
+  // in either branch, or a throw - can take it back out of both maps. A refused copy is
+  // never installed, but one left registered kept a large half-built container alive in
+  // `copies` and `aliases` for the rest of the pass.
+  let copy: object | undefined;
+
+  const discard = (): null => {
+    copies.delete(source);
+
+    if (copy !== undefined) {
+      copies.delete(copy);
+      aliases.delete(copy);
+    }
+
+    return null;
+  };
+
   try {
     if (Array.isArray(source)) {
       const elements = source as unknown[];
@@ -183,14 +200,15 @@ function forwardingContainerCopy(
         return null;
       }
 
-      const copy: unknown[] = [];
+      const arrayCopy: unknown[] = [];
 
-      copies.set(source, copy);
-      copies.set(copy, copy);
-      aliases.set(copy, source);
+      copy = arrayCopy;
+      copies.set(source, arrayCopy);
+      copies.set(arrayCopy, arrayCopy);
+      aliases.set(arrayCopy, source);
 
       for (let index = 0; index < length; index++) {
-        Object.defineProperty(copy, index, {
+        Object.defineProperty(arrayCopy, index, {
           get: () => elements[index],
           enumerable: true,
           configurable: true,
@@ -219,38 +237,35 @@ function forwardingContainerCopy(
       let definedNamed = length;
 
       for (const key of Object.keys(asRecord)) {
-        if (Object.prototype.hasOwnProperty.call(copy, key)) {
+        if (Object.prototype.hasOwnProperty.call(arrayCopy, key)) {
           continue;
         }
 
         if (definedNamed >= MAX_REDACTION_ENTRIES) {
-          copies.delete(source);
-          copies.delete(copy);
-          aliases.delete(copy);
-
-          return null;
+          return discard();
         }
 
         definedNamed++;
 
         const named = key;
 
-        Object.defineProperty(copy, named, {
+        Object.defineProperty(arrayCopy, named, {
           get: () => asRecord[named],
           enumerable: true,
           configurable: true,
         });
       }
 
-      return copy;
+      return arrayCopy;
     }
 
     const record = source as Record<string, unknown>;
-    const copy: Record<string, unknown> = {};
+    const recordCopy: Record<string, unknown> = {};
 
-    copies.set(source, copy);
-    copies.set(copy, copy);
-    aliases.set(copy, source);
+    copy = recordCopy;
+    copies.set(source, recordCopy);
+    copies.set(recordCopy, recordCopy);
+    aliases.set(recordCopy, source);
 
     // `for...in`, matching the bag's own copy: a key on the prototype is resolvable by the
     // renderer, so the walk has to see it too.
@@ -261,25 +276,21 @@ function forwardingContainerCopy(
 
     for (const key in record) {
       if (defined >= MAX_REDACTION_ENTRIES) {
-        copies.delete(source);
-
-        return null;
+        return discard();
       }
 
       defined++;
 
-      Object.defineProperty(copy, key, {
+      Object.defineProperty(recordCopy, key, {
         get: () => record[key],
         enumerable: true,
         configurable: true,
       });
     }
 
-    return copy;
+    return recordCopy;
   } catch {
-    copies.delete(source);
-
-    return null;
+    return discard();
   }
 }
 

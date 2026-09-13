@@ -51,7 +51,24 @@ export function renderJSONLine(
     },
   );
 
-  // `{"params":...}` onto the end of the envelope: drop the envelope's closing brace and
-  // the wrapper's opening one.
-  return `${envelope.slice(0, -1)},${rendered.slice(1)}`;
+  return spliceRenderedParams(envelope, rendered);
+}
+
+/**
+ * `{"params":...}` onto the end of the envelope: drop the envelope's closing brace and
+ * the wrapper's opening one.
+ *
+ * The splice assumes the wrapper rendered as an object, which it does on every path but
+ * one: `stringifyValue`'s own catch - an unexpected throw from inside the walk - answers
+ * the bare marker `[unrenderable]`, and spliced in it made `...,unrenderable]`, the one
+ * line this module could emit that is not JSON. Anything that does not open as an object
+ * is quoted instead, so the marker lands where the params would have and the line still
+ * parses. Exported for the test, since no input the walk guards reaches that catch.
+ */
+export function spliceRenderedParams(envelope: string, rendered: string): string {
+  const params = rendered.startsWith('{')
+    ? rendered.slice(1)
+    : `"params":${JSON.stringify(rendered)}}`;
+
+  return `${envelope.slice(0, -1)},${params}`;
 }

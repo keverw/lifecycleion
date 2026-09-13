@@ -720,7 +720,9 @@ When a `CookieJar` is attached to the client:
 const jar = new CookieJar();
 
 // Manually set a cookie (createdAt is optional — injected automatically if omitted)
-// Returns false if domain is missing or syntactically invalid (empty string, spaces, etc.)
+// Returns false if domain is missing or syntactically invalid (empty string, spaces, etc.),
+// or if the expiry cannot be read: an `expires` that is an Invalid Date, or a `maxAge` /
+// `createdAt` that is not a finite number. Such a cookie would never be found expired.
 const ok = jar.setCookie({
   name: 'session',
   value: 'abc123',
@@ -757,8 +759,9 @@ jar.getStoredDomains(); // [{ domain, count }]
 const data = jar.toJSON();
 const restored = jar.fromJSON(data); // Clears existing cookies first, then loads from the snapshot
 // `fromJSON` returns how many cookies it actually restored. A cookie with a missing or
-// invalid domain, or an `expires` that cannot be read as a date, is refused, so compare
-// against `data.cookies.length` to detect drops.
+// invalid domain, an `expires` that cannot be read as a date, or a `maxAge` / `createdAt`
+// that is not a finite number, is refused, so compare against `data.cookies.length` to
+// detect drops. A `null` `expires`, `maxAge` or `createdAt` reads as absent.
 ```
 
 ## Redirect Handling
