@@ -1,5 +1,5 @@
 import type { RedactValueFunction } from './default-redact-function';
-import { capToMaxRenderLength } from './render-budget';
+import { capToMaxRenderLength, MAX_RENDER_LENGTH } from './render-budget';
 import {
   defaultRedactValue,
   matchRedactMaskConfig,
@@ -41,6 +41,11 @@ export function resolveRedaction(
   value: string,
   isDerived: boolean,
   redactFunction: RedactValueFunction | undefined,
+  /**
+   * Where a string replacement is cut when nothing downstream will cut it. Defaults to
+   * {@link MAX_RENDER_LENGTH}; a caller whose walk charges a budget passes `Infinity`.
+   */
+  limit: number = MAX_RENDER_LENGTH,
 ): unknown {
   let requested: unknown = null;
 
@@ -55,7 +60,15 @@ export function resolveRedaction(
       // every sink, per param, per line, while `MAX_RENDER_LENGTH` saw two hundred
       // characters of it. Capped rather than refused: a replacement is what the caller
       // asked to appear, and a marker on the end says where it stopped.
-      return capToMaxRenderLength(requested);
+      //
+      // At `limit`, which is a backstop for a caller with no budget rather than the cap
+      // itself. A walk that charges a budget - `maskValueDeep` - cuts a replacement to
+      // what is left and *records* the cut, so it passes `Infinity` here and this never
+      // fires under it; cutting first at the constant meant `maxRenderLength: Infinity`
+      // still came back at a million characters, a cap raised above the constant was
+      // quietly lowered back to it, and the walk's report counted only the tail of a cut
+      // this had already made in silence.
+      return capToMaxRenderLength(requested, limit);
     }
 
     if (typeof requested === 'number') {

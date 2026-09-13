@@ -651,6 +651,52 @@ describe('HTTPClient — basic HTTP methods', () => {
     expect(await response.requestBodySettled).toBe(uploadFailure);
   });
 
+  test('a terminal 3xx with no Location after a bodied hop still carries the upload outcome', async () => {
+    // The one terminal redirect branch that built from the hop's own response and passed
+    // nothing explicit. After `POST` -> `302` -> `GET` -> `302` with no `Location`, the
+    // last hop is bodiless, so the response had nothing to adopt and `await
+    // response.requestBodySettled` answered `undefined` for the upload hop one cut short.
+    const uploadFailure = new Error('cut short on hop one');
+    let hop = 0;
+
+    const adapter: HTTPAdapter = {
+      getType: () => 'node',
+      send: (_request: AdapterRequest): Promise<AdapterResponse> => {
+        hop++;
+
+        if (hop === 1) {
+          return Promise.resolve({
+            status: 302,
+            headers: { location: '/next' },
+            body: null,
+            requestBodySettled: Promise.resolve(uploadFailure),
+          });
+        }
+
+        return Promise.resolve({
+          status: 302,
+          headers: {},
+          body: null,
+        });
+      },
+    };
+
+    const response = await new HTTPClient({
+      adapter,
+      baseURL: 'http://example.test',
+      followRedirects: true,
+    })
+      .post('/upload')
+      .json({ a: 1 })
+      .send();
+
+    expect(hop).toBe(2);
+    expect(response.status).toBe(302);
+    expect(response.wasRedirectFollowed).toBe(true);
+    expect(response.requestBodySettled).toBeDefined();
+    expect(await response.requestBodySettled).toBe(uploadFailure);
+  });
+
   test('a 307 that resends the body reports the resent upload, not the first', async () => {
     // The latest hop that had a body is the answer: a `307` puts the body on the wire
     // again, and its outcome is the one behind the final response.

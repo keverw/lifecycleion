@@ -3,10 +3,37 @@ import { describe, expect, test } from 'bun:test';
 import {
   DEFAULT_MAX_QUEUE_SIZE,
   DEFAULT_MAX_RETRIES,
+  MAX_TIMER_MS,
   UNLIMITED_QUEUE,
   resolveMaxQueueSize,
   resolveMaxRetries,
+  resolveTimeoutMS,
 } from './queue-policy';
+
+describe('resolveTimeoutMS', () => {
+  test('takes the default for an absent or unusable request', () => {
+    // `NaN` made every `elapsed > timeoutMS` comparison false, so a drain loop bounded
+    // by it never timed out and `close()` hung on a stalled destination.
+    expect(resolveTimeoutMS(undefined, 30_000)).toBe(30_000);
+    expect(resolveTimeoutMS(Number.NaN, 30_000)).toBe(30_000);
+    expect(resolveTimeoutMS('5000' as unknown as number, 30_000)).toBe(30_000);
+    expect(resolveTimeoutMS(-1, 30_000)).toBe(30_000);
+  });
+
+  test('honours zero and any finite wait', () => {
+    expect(resolveTimeoutMS(0, 30_000)).toBe(0);
+    expect(resolveTimeoutMS(150, 30_000)).toBe(150);
+  });
+
+  test('bounds Infinity at the longest wait a timer can keep', () => {
+    // `setTimeout` reads a delay past `2^31 - 1` as `1`, so `Infinity` fired the init
+    // deadline at once rather than never.
+    expect(resolveTimeoutMS(Number.POSITIVE_INFINITY, 30_000)).toBe(
+      MAX_TIMER_MS,
+    );
+    expect(resolveTimeoutMS(MAX_TIMER_MS + 1, 30_000)).toBe(MAX_TIMER_MS);
+  });
+});
 
 describe('resolveMaxQueueSize', () => {
   test('takes the default for an absent or unusable request', () => {

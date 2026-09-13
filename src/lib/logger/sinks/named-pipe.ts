@@ -9,8 +9,10 @@ import { renderOnce, type RenderedLine } from './internal/rendered-line';
 import { reportThroughHandler } from '../../internal/failure-reporter';
 import { readUnknownMember } from '../../internal/read-member';
 import {
+  DEFAULT_CLOSE_TIMEOUT_MS,
   resolveMaxQueueSize,
   resolveMaxRetries,
+  resolveTimeoutMS,
 } from './internal/queue-policy';
 import type {
   SinkErrorHandler,
@@ -469,7 +471,10 @@ export class NamedPipeSink implements LogSink {
     this.jsonFormat = options.jsonFormat ?? false;
     this.onError = options.onError;
     this.formatter = options.formatter;
-    this.closeTimeoutMS = options.closeTimeoutMS ?? 30000;
+    this.closeTimeoutMS = resolveTimeoutMS(
+      options.closeTimeoutMS,
+      DEFAULT_CLOSE_TIMEOUT_MS,
+    );
     this.maxQueueSize = resolveMaxQueueSize(options.maxQueueSize);
     this.maxRetries = resolveMaxRetries(options.maxRetries);
     this.minLevel = options.minLevel ?? LogLevel.INFO;
@@ -591,7 +596,12 @@ export class NamedPipeSink implements LogSink {
    */
   public getHealth(): NamedPipeSinkHealth {
     return {
-      isHealthy: this.consecutiveFailures === 0 && this.isInitialized,
+      // Not while closing, either. `close()` clears `isInitialized` only once its drain has
+      // finished, so for the whole of that drain - up to `closeTimeoutMS` - a sink that
+      // was discarding every new `write()` at the `closing` guard still answered healthy
+      // to anything polling it. The same answer `FileSink` gives.
+      isHealthy:
+        this.consecutiveFailures === 0 && this.isInitialized && !this.closing,
       queueSize: this.writeQueue.length,
       droppedEntries: this.droppedEntries,
       isInitialized: this.isInitialized,

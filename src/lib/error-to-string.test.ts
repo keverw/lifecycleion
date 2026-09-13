@@ -170,6 +170,56 @@ describe('errorToString', () => {
       ).not.toContain(SECRET);
     });
 
+    it('should mask an entry spelled from the error, the way the table spells it', () => {
+      // The root is the `additionalInfo` bag, so `['password']` is the documented entry.
+      // But the rendered table and every `onFormatError` report name that same location
+      // `additionalInfo.password`, and copying that back into `sensitiveFieldNames`
+      // matched nothing and printed the secret.
+      expect(
+        render({ password: SECRET }, ['additionalInfo.password']),
+      ).not.toContain(SECRET);
+      expect(
+        render({ user: { password: SECRET } }, [
+          'additionalInfo.user.password',
+        ]),
+      ).not.toContain(SECRET);
+      expect(
+        render({ items: [{ token: SECRET }] }, [
+          'additionalInfo.items[0].token',
+        ]),
+      ).not.toContain(SECRET);
+    });
+
+    it('keeps the literal reading of an additionalInfo-prefixed entry too', () => {
+      // A bag that genuinely holds a key named `additionalInfo` is masked at both
+      // readings rather than having the literal one taken away.
+      const rendered = render(
+        { additionalInfo: { password: SECRET }, password: SECRET },
+        ['additionalInfo.password'],
+      );
+
+      expect(rendered).not.toContain(SECRET);
+    });
+
+    it('does not alias a bare additionalInfo entry or a non-string one', () => {
+      // `['additionalInfo']` names a top-level key of the bag, as any bare name does, and
+      // a non-string entry still fails the whole list closed.
+      expect(
+        render({ additionalInfo: SECRET }, ['additionalInfo']),
+      ).not.toContain(SECRET);
+      expect(render({ password: SECRET }, ['additionalInfo'])).toContain(
+        SECRET,
+      );
+
+      const rendered = render({ password: SECRET }, [
+        'additionalInfo.password',
+        42,
+      ]);
+
+      expect(rendered).toContain('*** (sensitiveFieldNames unreadable)');
+      expect(rendered).not.toContain(SECRET);
+    });
+
     it('should mask through an array index', () => {
       expect(
         render({ items: [{ token: SECRET }] }, ['items[0].token']),

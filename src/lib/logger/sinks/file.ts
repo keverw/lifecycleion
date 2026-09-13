@@ -3,8 +3,10 @@ import { describeError, toError } from '../../to-error';
 import { renderOnce, type RenderedLine } from './internal/rendered-line';
 import { reportThroughHandler } from '../../internal/failure-reporter';
 import {
+  DEFAULT_CLOSE_TIMEOUT_MS,
   resolveMaxQueueSize,
   resolveMaxRetries,
+  resolveTimeoutMS,
 } from './internal/queue-policy';
 import type {
   SinkErrorHandler,
@@ -237,7 +239,10 @@ export class FileSink implements LogSink {
     this.maxSizeMB = resolveMaxSizeMB(options.maxSizeMB);
     this.jsonFormat = options.jsonFormat ?? false;
     this.maxRetries = resolveMaxRetries(options.maxRetries);
-    this.closeTimeoutMS = options.closeTimeoutMS ?? 30000;
+    this.closeTimeoutMS = resolveTimeoutMS(
+      options.closeTimeoutMS,
+      DEFAULT_CLOSE_TIMEOUT_MS,
+    );
     this.minLevel = options.minLevel ?? LogLevel.INFO;
     this.onError = options.onError;
     this.maxQueueSize = resolveMaxQueueSize(options.maxQueueSize);
@@ -331,7 +336,12 @@ export class FileSink implements LogSink {
    */
   public getHealth(): FileSinkHealth {
     return {
-      isHealthy: this.consecutiveFailures === 0 && this.isInitialized,
+      // Not while closing, either. `close()` clears `isInitialized` only once its drain has
+      // finished, so for the whole of that drain - up to `closeTimeoutMS` - a sink that
+      // was discarding every new `write()` at the `closing` guard still answered healthy
+      // to anything polling it. The same answer `NamedPipeSink` gives.
+      isHealthy:
+        this.consecutiveFailures === 0 && this.isInitialized && !this.closing,
       queueSize: this.writeQueue.length,
       lastError: this.lastError,
       consecutiveFailures: this.consecutiveFailures,
@@ -343,9 +353,21 @@ export class FileSink implements LogSink {
   /**
    * Flush all pending writes and wait for completion
    * Returns statistics about the flush operation
-   * @param timeoutMS Maximum time to wait in milliseconds (default: 30000ms / 30s)
+   * @param requestedTimeoutMS Maximum time to wait in milliseconds (default: 30000ms /
+   *        30s). `NaN`, a non-number, or a negative value takes the default; `Infinity`
+   *        waits as long as a timer can.
    */
-  public async flush(timeoutMS: number = 30000): Promise<FlushResult> {
+  public async flush(
+    requestedTimeoutMS: number = DEFAULT_CLOSE_TIMEOUT_MS,
+  ): Promise<FlushResult> {
+    // Resolved rather than used literally, for the reason `closeTimeoutMS` is: `NaN` made
+    // the deadline check below never true, so `flush(Number(process.env.UNSET))` waited on
+    // a stalled queue for good, and `Infinity` made the init race below give up at once.
+    const timeoutMS = resolveTimeoutMS(
+      requestedTimeoutMS,
+      DEFAULT_CLOSE_TIMEOUT_MS,
+    );
+
     // The clock starts here, before the wait below rather than after it: `timeoutMS` is
     // documented as the maximum time this call takes, and an init that never settles is
     // exactly the case a caller sets one for.

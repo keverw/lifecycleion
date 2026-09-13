@@ -179,6 +179,53 @@ function readMemberOrThrew(
 }
 
 /**
+ * The parsed list, plus each `additionalInfo.`-prefixed entry read from the bag.
+ *
+ * The path root is the `additionalInfo` bag itself, so `['password']` names
+ * `additionalInfo.password` - which is also exactly how the rendered table and every
+ * `onFormatError` report spell that location. Copying that spelling back into
+ * `sensitiveFieldNames` is the obvious thing to do, and it looked for
+ * `additionalInfo.additionalInfo.password`, matched nothing, and printed the secret: a
+ * fail-open answer to the one entry the docs' own output invites. Each such entry now
+ * also names the location it reads as. The original stays too, so a bag that genuinely
+ * holds a key named `additionalInfo` is masked at both readings - over-masking a value
+ * the caller named is the safe direction, and a path names a location either way.
+ *
+ * Applied to the *parsed* list rather than to the raw one, deliberately: expanding the
+ * caller's array first would hand `parseRedactPaths` a clean copy of it, and a hostile
+ * list - one that under-reports its length, or whose entries cannot be read - must reach
+ * the parser as it is so that it is refused as it was. Only the dotted spelling is
+ * aliased; a bracket path with nothing before it is not a path this grammar reads.
+ */
+function withAdditionalInfoAliases(paths: RedactPath[]): RedactPath[] {
+  const aliases: RedactPath[] = [];
+
+  for (const path of paths) {
+    const { entry } = path;
+
+    if (
+      entry.startsWith(`${ADDITIONAL_INFO_PREFIX}.`) &&
+      entry.length > ADDITIONAL_INFO_PREFIX.length + 1 &&
+      // Each entry appears once per reading in `paths`; alias it once.
+      path.parts.length === 1
+    ) {
+      const stripped = parseRedactPaths([
+        entry.slice(ADDITIONAL_INFO_PREFIX.length + 1),
+      ]);
+
+      if (stripped !== null) {
+        aliases.push(...stripped);
+      }
+    }
+  }
+
+  return aliases.length === 0 ? paths : [...paths, ...aliases];
+}
+
+/** The member `sensitiveFieldNames` is rooted at, as the rendered table spells it. */
+const ADDITIONAL_INFO_PREFIX = 'additionalInfo';
+
+/**
  * A value's own `sensitiveFieldNames`, parsed into a fresh path root.
  *
  * Shared by the two places a value can start a root of its own - the error table and the
@@ -218,9 +265,11 @@ function readOwnSensitivePaths(
       new Error('sensitiveFieldNames is not a usable list of paths'),
       '<sensitiveFieldNames>',
     );
+
+    return null;
   }
 
-  return parsed;
+  return withAdditionalInfoAliases(parsed);
 }
 
 /**

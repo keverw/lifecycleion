@@ -852,6 +852,11 @@ export class BaseHTTPClient {
                 initialURL: finalRequest.requestURL,
                 requestURL: attemptResult.sentRequest.requestURL,
                 redirectHistory,
+                // The one terminal branch that built from the hop's own response and
+                // passed nothing: after `POST` -> `302` -> `GET` -> `302` with no
+                // `Location`, the last hop is bodiless and had nothing to adopt, so the
+                // upload from hop one read as having gone out in full.
+                ...(uploadOutcome ? { requestBodySettled: uploadOutcome } : {}),
               });
 
               break;

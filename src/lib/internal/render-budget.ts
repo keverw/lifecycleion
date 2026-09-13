@@ -182,12 +182,15 @@ export function capNestedKey(
  * megabytes to every sink, while `{ wrapper: { body } }` wrote one. Same rule at every
  * level now.
  */
-export function capToMaxRenderLength(text: string): string {
-  if (text.length <= MAX_RENDER_LENGTH) {
+export function capToMaxRenderLength(
+  text: string,
+  limit: number = MAX_RENDER_LENGTH,
+): string {
+  if (text.length <= limit) {
     return text;
   }
 
-  return `${text.slice(0, MAX_RENDER_LENGTH)}${TRUNCATED_LENGTH}`;
+  return `${text.slice(0, limit)}${TRUNCATED_LENGTH}`;
 }
 
 /** Remaining output allowance for one render, shared by every level of it. */

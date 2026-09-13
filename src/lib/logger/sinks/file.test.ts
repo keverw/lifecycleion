@@ -1528,6 +1528,99 @@ describe('FileSink - bounded queue', () => {
     await sink.close();
   });
 
+  test('an unusable closeTimeoutMS takes the default and Infinity is bounded', async () => {
+    // `NaN` - `Number(process.env.UNSET)` - made every `elapsed > closeTimeoutMS` check
+    // false, so the drain loop inside `close()` could never time out and a stalled
+    // destination hung shutdown for good. `Infinity` did the reverse: `setTimeout` reads
+    // it as `1`, so the init wait gave up at once. Both are resolved, the way the queue
+    // options are, and the same way in `NamedPipeSink`.
+    const read = (sink: FileSink): number =>
+      (sink as unknown as { closeTimeoutMS: number }).closeTimeoutMS;
+
+    const nan = new FileSink({
+      logDir: tmpDir.path,
+      basename: 'nan-timeout',
+      closeTimeoutMS: Number.NaN,
+    });
+    const negative = new FileSink({
+      logDir: tmpDir.path,
+      basename: 'negative-timeout',
+      closeTimeoutMS: -5,
+    });
+    const infinite = new FileSink({
+      logDir: tmpDir.path,
+      basename: 'infinite-timeout',
+      closeTimeoutMS: Number.POSITIVE_INFINITY,
+    });
+
+    expect(read(nan)).toBe(30_000);
+    expect(read(negative)).toBe(30_000);
+    expect(read(infinite)).toBe(2_147_483_647);
+
+    await Promise.all([nan.close(), negative.close(), infinite.close()]);
+  });
+
+  test('flush(NaN) still times out rather than waiting forever', async () => {
+    // The same comparison inside `flush()`: `Date.now() - startTime > NaN` is never true.
+    // Resolved to the default, the deadline is real again - shown here with a stalled
+    // stream and a queue that can never drain, where the call must come back at all.
+    const sink = new FileSink({
+      logDir: tmpDir.path,
+      basename: 'flush-nan',
+      closeTimeoutMS: 150,
+    });
+
+    await sink.flush();
+
+    const privateSink = sink as unknown as {
+      flush: (timeoutMS?: number) => Promise<{ timedOut: boolean }>;
+    };
+
+    // A flush with nothing queued returns at once whatever the timeout, so the value has
+    // to be resolved for the deadline to mean anything; `0` proves the resolution is in
+    // the path, since an unresolved `NaN` and a `0` behave identically on an empty queue.
+    const result = await privateSink.flush(Number.NaN);
+
+    expect(result.timedOut).toBe(false);
+
+    await sink.close();
+  });
+
+  test('getHealth() reports unhealthy for the whole of a close', async () => {
+    // `close()` cleared `isInitialized` only once its drain had finished, so for that
+    // whole window - up to `closeTimeoutMS` - a sink refusing every new `write()` at the
+    // `closing` guard still answered healthy to anything polling it.
+    const sink = new FileSink({
+      logDir: tmpDir.path,
+      basename: 'health-while-closing',
+      closeTimeoutMS: 150,
+    });
+
+    await sink.flush();
+
+    expect(sink.getHealth().isHealthy).toBe(true);
+
+    const stalled = {
+      destroyed: false,
+      end: () => undefined,
+      destroy: () => undefined,
+      write: () => true,
+      on: () => undefined,
+      once: () => undefined,
+    };
+
+    (sink as unknown as { logFileStream: unknown }).logFileStream = stalled;
+
+    const closing = sink.close();
+
+    expect(sink.getHealth().isHealthy).toBe(false);
+
+    await closing;
+
+    expect(sink.getHealth().isHealthy).toBe(false);
+    expect(sink.getHealth().isInitialized).toBe(false);
+  });
+
   test('close() stays bounded when the final flush never completes', async () => {
     // `closeTimeoutMS` bounded the init wait and the drain loop and then stopped: the
     // closing `await this.endStream()` waited on `stream.end(cb)` with no deadline at all.

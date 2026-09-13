@@ -42,6 +42,49 @@ export const UNLIMITED_QUEUE = -1;
 /** Attempts a failed write gets before the entry is given up on. */
 export const DEFAULT_MAX_RETRIES = 3;
 
+/** How long `close()` and `flush()` wait before giving up, unless the caller says. */
+export const DEFAULT_CLOSE_TIMEOUT_MS = 30_000;
+
+/**
+ * The longest delay a timer can be given and still fire when asked.
+ *
+ * `setTimeout` reads a delay past `2^31 - 1` milliseconds as `1`, so `Infinity` - the
+ * honest spelling of "wait as long as it takes" - fired the deadline *at once* and a
+ * `close()` given it gave up on its init before the init could possibly finish.
+ */
+export const MAX_TIMER_MS = 2_147_483_647;
+
+/**
+ * A wait bound a sink can actually enforce, from whatever the caller asked for.
+ *
+ * `closeTimeoutMS` and `flush(timeoutMS)` were used literally by both sinks, and two
+ * spellings broke them in opposite directions. `NaN` - `Number(process.env.X)` with the
+ * variable unset - made every `Date.now() - startTime > timeoutMS` comparison false, so
+ * the drain loop that follows the init wait could never time out and `close()` or
+ * `flush()` hung for good on a stalled destination: the shape a bound exists to rule out.
+ * `Infinity` did the reverse, because `setTimeout` reads it as `1`: the init wait gave up
+ * a millisecond in while the loop after it waited forever.
+ *
+ * So: `NaN`, a non-number, and a negative value name no usable wait and take the default;
+ * `0` is honoured as "do not wait"; `Infinity` is bounded at {@link MAX_TIMER_MS}, which
+ * is the longest wait a timer can keep. One rule for both sinks, the way the queue
+ * options already have one.
+ */
+export function resolveTimeoutMS(
+  requested: number | undefined,
+  defaultMS: number,
+): number {
+  if (
+    typeof requested !== 'number' ||
+    Number.isNaN(requested) ||
+    requested < 0
+  ) {
+    return defaultMS;
+  }
+
+  return Math.min(requested, MAX_TIMER_MS);
+}
+
 /**
  * The cap a sink should enforce, or `undefined` for unlimited.
  *

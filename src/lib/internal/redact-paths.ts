@@ -1131,7 +1131,15 @@ function redactPathsInner(
         matched,
         value,
         (key, leaf, isDerived) =>
-          resolveRedaction(key, leaf, isDerived, redactFunction),
+          resolveRedaction(
+            key,
+            leaf,
+            isDerived,
+            redactFunction,
+            // No pre-cut: `maskValueDeep` cuts a replacement against the pass's budget
+            // and records what it dropped, which a silent cut here would hide from it.
+            Number.POSITIVE_INFINITY,
+          ),
         new WeakSet(),
         report,
         undefined,
@@ -1192,7 +1200,15 @@ function redactPathsInner(
         inside,
         value,
         (key, leaf, isDerived) =>
-          resolveRedaction(key, leaf, isDerived, redactFunction),
+          resolveRedaction(
+            key,
+            leaf,
+            isDerived,
+            redactFunction,
+            // No pre-cut: `maskValueDeep` cuts a replacement against the pass's budget
+            // and records what it dropped, which a silent cut here would hide from it.
+            Number.POSITIVE_INFINITY,
+          ),
         new WeakSet(),
         report,
         undefined,

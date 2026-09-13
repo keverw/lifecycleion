@@ -699,6 +699,55 @@ describe('NamedPipeSink', () => {
     await sink.close();
   });
 
+  test('an unusable closeTimeoutMS takes the default and Infinity is bounded', async () => {
+    // The same resolution `FileSink` applies, so the two sinks read the option alike:
+    // `NaN` hung the drain loop for good and `Infinity` fired the init deadline at once.
+    const pipePath = `${tmpDir.path}/timeout-option.pipe`;
+    await createNamedPipe(pipePath);
+
+    const reader = startPipeReader(pipePath);
+
+    const read = (sink: NamedPipeSink): number =>
+      (sink as unknown as { closeTimeoutMS: number }).closeTimeoutMS;
+
+    const nan = new NamedPipeSink({ pipePath, closeTimeoutMS: Number.NaN });
+    const negative = new NamedPipeSink({ pipePath, closeTimeoutMS: -5 });
+    const infinite = new NamedPipeSink({
+      pipePath,
+      closeTimeoutMS: Number.POSITIVE_INFINITY,
+    });
+
+    expect(read(nan)).toBe(30_000);
+    expect(read(negative)).toBe(30_000);
+    expect(read(infinite)).toBe(2_147_483_647);
+
+    await Promise.all([nan.close(), negative.close(), infinite.close()]);
+    reader.stop();
+  });
+
+  test('getHealth() reports unhealthy for the whole of a close', async () => {
+    // `close()` cleared `isInitialized` only once its drain had finished, so for that
+    // whole window a sink refusing every new `write()` at the `closing` guard still
+    // answered healthy to anything polling it. The same answer `FileSink` gives.
+    const pipePath = `${tmpDir.path}/health-while-closing.pipe`;
+    await createNamedPipe(pipePath);
+
+    const reader = startPipeReader(pipePath);
+    const sink = new NamedPipeSink({ pipePath, jsonFormat: false });
+
+    expect(await waitForOpenPipe(sink)).toBe(true);
+    expect(sink.getHealth().isHealthy).toBe(true);
+
+    const closing = sink.close();
+
+    expect(sink.getHealth().isHealthy).toBe(false);
+
+    await closing;
+
+    expect(sink.getHealth().isHealthy).toBe(false);
+    reader.stop();
+  });
+
   test('a successful reconnect() clears the failures it replaced', async () => {
     // `consecutiveFailures` was cleared only by a successful *write*, so a `reconnect()`
     // that opened a fresh pipe over an already-drained queue returned `{ success: true }`

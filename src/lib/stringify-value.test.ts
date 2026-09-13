@@ -2322,6 +2322,38 @@ describe('maxRenderLength and onTruncate', () => {
     expect(cuts[0]?.dropped).toBeGreaterThan(400_000);
   });
 
+  it('lets a replacement past the fixed constant through under Infinity', () => {
+    // The pre-cut in `resolveRedaction` was at the fixed constant whatever the caller
+    // asked for, so `maxRenderLength: Infinity` - the documented "unlimited" - still cut
+    // a replacement at a million characters, and a cap raised above the constant was
+    // lowered back to it.
+    const cuts: TruncationInfo[] = [];
+
+    const result = redactValue(
+      { a: 'secret' },
+      {
+        redactedKeys: ['a'],
+        redactFunction: () => 'R'.repeat(1_500_000),
+        maxRenderLength: Number.POSITIVE_INFINITY,
+        onTruncate: (info) => cuts.push(info),
+      },
+    ) as { a: string };
+
+    expect(result.a.length).toBe(1_500_000);
+    expect(cuts).toHaveLength(0);
+
+    const raised = redactValue(
+      { a: 'secret' },
+      {
+        redactedKeys: ['a'],
+        redactFunction: () => 'R'.repeat(1_500_000),
+        maxRenderLength: 2_000_000,
+      },
+    ) as { a: string };
+
+    expect(raised.a.length).toBe(1_500_000);
+  });
+
   it("leaves a replacement that fits the caller's cap whole", () => {
     // The cut is against what the caller allowed, not the fixed constant, and a
     // replacement under it is what the caller asked to appear.
