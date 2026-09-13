@@ -38,12 +38,18 @@ export function renderJSONLine(
     message: entry.message,
   });
 
-  if (entry.redactedParams === undefined) {
+  // `redactedParams ?? params`, the rule `LogEntry` states: `redactedParams` is present
+  // only when redaction is configured, so reading it alone dropped the whole bag from
+  // every line of an unredacted logger - silently, with no `'format'` report and nothing
+  // counted as dropped.
+  const params = entry.redactedParams ?? entry.params;
+
+  if (params === undefined) {
     return envelope;
   }
 
   const rendered = stringifyValue(
-    { params: entry.redactedParams },
+    { params },
     {
       onFormatError: (error) => {
         onFormatError(error);
@@ -65,7 +71,10 @@ export function renderJSONLine(
  * is quoted instead, so the marker lands where the params would have and the line still
  * parses. Exported for the test, since no input the walk guards reaches that catch.
  */
-export function spliceRenderedParams(envelope: string, rendered: string): string {
+export function spliceRenderedParams(
+  envelope: string,
+  rendered: string,
+): string {
   const params = rendered.startsWith('{')
     ? rendered.slice(1)
     : `"params":${JSON.stringify(rendered)}}`;

@@ -154,3 +154,29 @@ describe('maskValueDeep named array properties', () => {
     expect(Object.keys(masked)).not.toContain('note');
   });
 });
+
+describe('maskValueDeep - a replacement cut mid-character', () => {
+  test('never leaves half a surrogate pair in a truncated mask', () => {
+    // `chargeReplacementExcess` cut a longer-than-the-leaf replacement with a raw `slice`,
+    // so a `redactFunction` returning emoji had its mask cut mid-pair and the malformed
+    // string went on to `redactedParams` and every structured sink behind it.
+    const budget = createRenderBudget(16);
+    const masked = maskValueDeep(
+      'p',
+      'x',
+      () => `a${'😀'.repeat(50)}`,
+      new WeakSet(),
+      undefined,
+      0,
+      budget,
+    );
+
+    // A lone surrogate, which is what a cut between the halves of a pair leaves behind.
+    // `isWellFormed` would say it, but it is ES2024 and this project targets ES2022.
+    expect(
+      /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(
+        String(masked),
+      ),
+    ).toBe(false);
+  });
+});

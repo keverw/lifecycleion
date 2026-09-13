@@ -52,6 +52,11 @@ interface TableRowRegular {
   value: TableRowValue;
 }
 
+/** A wrap that produced nothing still owes its caller one (blank) line. */
+function nonEmpty(lines: string[]): string[] {
+  return lines.length > 0 ? lines : [''];
+}
+
 interface TableRowOwn {
   kind: 'own';
   key: string;
@@ -223,7 +228,18 @@ export class KeyValueASCIITable {
         const keyLines = ASCIITableUtils.wrapText(key, keySpan);
 
         for (const keyLine of keyLines.length > 0 ? keyLines : ['']) {
-          tableString += `| ${ASCIITableUtils.centerText(keyLine, keySpan)} |\n`;
+          // Centered by display width rather than by `centerText`, which pads through
+          // `padCenter` and measures UTF-16 code units. `wrapText` above wraps to display
+          // columns, so a key holding wide graphemes was padded as though it were half as
+          // wide and the banner row overran the frame anyway - the overrun this wrap
+          // exists to stop. `MultiColumnASCIITable` pads by `stringWidth` for the same
+          // reason; the two renderers agree on one notion of width.
+          //
+          // The extra column goes right, as `centerText`'s `padCenterPreferRight` put it.
+          const slack = Math.max(0, keySpan - stringWidth(keyLine));
+          const centered = `${padRight('', Math.floor(slack / 2))}${keyLine}${padRight('', Math.ceil(slack / 2))}`;
+
+          tableString += `| ${centered} |\n`;
         }
 
         tableString += rowSeparator + '\n';
@@ -259,9 +275,39 @@ export class KeyValueASCIITable {
           );
         }
 
-        const valueLines = valueString.split('\n');
+        const availableWidth = tableWidth - 4;
+
+        // Re-wrapped here, not only padded. `formatValue`'s nested-entry branch indents
+        // every level by four spaces and hands the level below a `cellWidth` reduced by
+        // the indent and the key - which goes negative a few levels down, and nothing acts
+        // on it - so a deeply nested value came back with lines wider than the frame
+        // around them. The clamped `padRight` below keeps that from throwing but cannot
+        // pull a long line back inside: a twelve-deep object at `errorToString(err, 40)`
+        // emitted 53-column rows in a 40-column table. Wrapped against the width the row
+        // actually has, with each line's own indent kept on its continuations so the
+        // nesting still reads.
+        //
+        // Only where no nested table is involved. A `KeyValueASCIITable` or
+        // `MultiColumnASCIITable` too wide for its host is left to overhang on purpose -
+        // it is a frame of its own, and folding its border lines in half makes it
+        // unreadable rather than merely wide. That trade is the one the snapshots record.
+        // Asked of the row's whole entry tree rather than of the row's own value, because
+        // a table reached through nested entries reaches this the same way and its borders
+        // fold just as badly; a row that mixes one with plain text keeps the overhang it
+        // has always had rather than having its table broken up.
+        const rawValueLines = valueString.split('\n');
+        const canRewrap =
+          Array.isArray(value) && !KeyValueASCIITable.holdsNestedTable(value);
+        const valueLines = canRewrap
+          ? rawValueLines.flatMap((line) =>
+              stringWidth(line) > availableWidth
+                ? KeyValueASCIITable.wrapIndentedLine(line, availableWidth)
+                : [line],
+            )
+          : rawValueLines;
+
         const paddedValueLines = valueLines.map((line) => {
-          const padding = padRight('', tableWidth - stringWidth(line) - 4, ' ');
+          const padding = padRight('', availableWidth - stringWidth(line), ' ');
 
           return `| ${line}${padding} |`;
         });
@@ -451,6 +497,56 @@ export class KeyValueASCIITable {
     }
 
     return columnWidths;
+  }
+
+  /**
+   * Wrap one already-indented line to `width`, keeping its indent on every continuation.
+   *
+   * The nested-value lines this renderer emits carry four spaces of indent per level, and
+   * wrapping the whole line would put continuations flush against the left border and
+   * lose the nesting. The indent is taken off, the rest is wrapped to what is left, and
+   * the indent goes back on each piece.
+   *
+   * An indent that has already eaten the row leaves nothing to wrap against, so it is
+   * dropped rather than wrapping to a width of zero - a line that deep is past the point
+   * where the indent carries meaning, and the frame matters more.
+   */
+  private static wrapIndentedLine(line: string, width: number): string[] {
+    const indent = line.slice(0, line.length - line.trimStart().length);
+    const body = line.slice(indent.length);
+    const indentWidth = stringWidth(indent);
+    const innerWidth = width - indentWidth;
+
+    if (innerWidth < 1) {
+      // `?? ['']` for the reason below, and for the same line: an indent this deep with
+      // nothing after it has no body to wrap.
+      return nonEmpty(ASCIITableUtils.wrapText(body, Math.max(1, width)));
+    }
+
+    // `wrapText` returns nothing at all for a body of only spaces, so an over-wide blank
+    // line - padding a caller put in a value - dropped out of the `flatMap` and the row
+    // vanished from the block. Blank, then, rather than gone: the padding below fills it.
+    return nonEmpty(
+      ASCIITableUtils.wrapText(body, innerWidth).map(
+        (piece) => `${indent}${piece}`,
+      ),
+    );
+  }
+
+  /**
+   * Whether a nested-entry tree holds an ASCII table anywhere inside it.
+   *
+   * Asked before the banner block re-wraps a row's value: a nested table's border lines
+   * must not be folded, wherever in the tree it sits.
+   */
+  private static holdsNestedTable(entries: NestedKeyValueEntry[]): boolean {
+    return entries.some(
+      (entry) =>
+        entry.value instanceof KeyValueASCIITable ||
+        entry.value instanceof MultiColumnASCIITable ||
+        (Array.isArray(entry.value) &&
+          KeyValueASCIITable.holdsNestedTable(entry.value)),
+    );
   }
 
   private formatValue(

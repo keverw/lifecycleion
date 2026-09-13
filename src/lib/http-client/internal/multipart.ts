@@ -466,8 +466,14 @@ export async function serializeMultipartFormData(
             if (uploadedBytes + chunk.byteLength > totalSize) {
               await cancelReaderQuietly(reader);
 
+              // What actually went on the wire, and the chunk that was refused, kept
+              // apart. Counting the refused chunk into the written total named ~64 KiB
+              // that never left this process - a `File` that grew ten bytes after the
+              // sizing pass reported tens of thousands - which sends a reader looking for
+              // a write that did not happen. The post-write check below says
+              // `uploadedBytes` for the same reason.
               throw new Error(
-                `Request body wrote ${String(uploadedBytes + chunk.byteLength)} bytes against a Content-Length of ${String(totalSize)}`,
+                `Request body source produced more than its Content-Length of ${String(totalSize)}: ${String(uploadedBytes)} bytes written and a further ${String(chunk.byteLength)} refused`,
               );
             }
 

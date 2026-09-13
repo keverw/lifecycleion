@@ -22,6 +22,7 @@ import {
   type RenderBudget,
   TRUNCATED,
   TRUNCATED_LENGTH,
+  cutAt,
 } from './render-budget';
 
 /** Decides the replacement for a redacted value. */
@@ -438,7 +439,9 @@ function pathText(path: readonly RedactPathStep[]): string {
     return text;
   }
 
-  return `${text.slice(0, MAX_PATH_TEXT_LENGTH)}${TRUNCATED_LENGTH}`;
+  // `cutAt`, so a cut that falls between the halves of a surrogate pair steps back off it
+  // rather than leaving a lone surrogate in the reported subject.
+  return `${cutAt(text, MAX_PATH_TEXT_LENGTH)}${TRUNCATED_LENGTH}`;
 }
 
 /**

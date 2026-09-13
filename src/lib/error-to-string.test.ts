@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
+import stringWidth from 'string-width';
 import {
   muteConsoleError,
   restoreConsoleError,
@@ -2117,5 +2118,68 @@ describe('maxRenderLength and onTruncate', () => {
     });
 
     expect(failures).toHaveLength(0);
+  });
+});
+
+describe('errorToString - cuts that fall inside a character', () => {
+  it('never leaves half a surrogate pair behind when a nested value is truncated', () => {
+    // `chargeNestedText` cut with a raw `slice` while its sibling `chargeText` used the
+    // surrogate-aware `cutAt`, so the same payload came back well-formed or broken purely
+    // by which entry point rendered it: an `AdditionalInfo` value cut mid-emoji left a
+    // lone high surrogate in the output, which is not valid UTF-16 and survives into
+    // whatever reads the line.
+    const error = new Error('boom') as Error & {
+      additionalInfo?: Record<string, unknown>;
+    };
+
+    error.additionalInfo = { a: '😀'.repeat(200) };
+
+    const rendered = errorToString(error, 80, { maxRenderLength: 500 });
+
+    // `isWellFormed` is ES2024; this is the same question against the ES2022 lib.
+    expect(
+      /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(
+        rendered,
+      ),
+    ).toBe(false);
+  });
+});
+
+describe('errorToString - nested values stay inside the frame', () => {
+  it('wraps a deeply nested value rather than overhanging the table', () => {
+    // Each nesting level indents four spaces and hands the level below a width reduced by
+    // that indent, which goes negative a few levels down with nothing acting on it: a
+    // twelve-deep payload emitted 53-column rows inside a 40-column frame.
+    let nested: unknown = 'leaf';
+
+    for (let level = 0; level < 12; level++) {
+      nested = { [`k${String(level)}`]: nested };
+    }
+
+    const error = new Error('boom') as Error & {
+      additionalInfo?: Record<string, unknown>;
+    };
+
+    error.additionalInfo = nested as Record<string, unknown>;
+
+    for (const line of errorToString(error, 40).split('\n')) {
+      expect(line.length).toBeLessThanOrEqual(40);
+    }
+  });
+
+  it('keeps a banner key of wide characters inside the frame', () => {
+    // The banner key wrapped by display columns and centred by UTF-16 code units, so a
+    // key of full-width characters was padded as though it were half as wide.
+    const error = new Error('boom') as Error & {
+      additionalInfo?: Record<string, unknown>;
+    };
+
+    error.additionalInfo = { ['漢'.repeat(12)]: { n: 1 } };
+
+    for (const width of [40, 80]) {
+      for (const line of errorToString(error, width).split('\n')) {
+        expect(stringWidth(line)).toBeLessThanOrEqual(width);
+      }
+    }
   });
 });

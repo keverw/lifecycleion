@@ -671,8 +671,21 @@ export class NamedPipeSink implements LogSink {
       // so `'finish'` never fires, and with the reference dropped here the descriptor and
       // everything buffered behind it were pinned for the life of the process, once per
       // call. Flushed if it can be, destroyed if it cannot.
-      if (this.pipeStream && !this.pipeStream.destroyed) {
-        this.abandonStream(this.pipeStream);
+      //
+      // The reference is dropped whether or not the stream was worth flushing, and only
+      // the flush is gated on `destroyed`. A `WriteStream` sets `destroyed` synchronously
+      // on a failed write while `pipeStream` is cleared only from the asynchronous
+      // `'error'` handler, so a `reconnect()` entered in that window - the ordinary shape,
+      // an `onError` handler reconnecting - left the dead stream installed, opened a
+      // replacement, and the dead stream's deferred `'error'` then read itself as current
+      // off `pipeStream` and cleared `pendingStream` out from under the live open. The
+      // replacement was destroyed by its own `'open'` handler as an orphan and the caller
+      // was told the reconnect failed, with the FIFO left with no writer at all.
+      if (this.pipeStream) {
+        if (!this.pipeStream.destroyed) {
+          this.abandonStream(this.pipeStream);
+        }
+
         this.pipeStream = undefined;
       }
 

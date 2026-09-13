@@ -2561,7 +2561,9 @@ describe('FileSink - entries refused at the door', () => {
     expect(destroyed).toBe(1);
     expect(closeFailures).toHaveLength(1);
     expect(closeFailures[0]?.disposition).toBe('no_entry');
-    expect(closeFailures[0]?.error.message).toContain('4096 bytes still buffered');
+    expect(closeFailures[0]?.error.message).toContain(
+      '4096 bytes still buffered',
+    );
     expect(sink.getHealth().droppedEntries).toBe(0);
   });
 
@@ -2585,10 +2587,12 @@ describe('FileSink - entries refused at the door', () => {
     try {
       const base = `${tmpDir.path}/exhausted-2023-11-14-${String(fixedNow)}`;
 
-      // Every name the search will try: the bare one and the first 99 suffixes.
+      // Every name the search will try: the bare one and the first 100 suffixes. The last
+      // one counts - the report only goes out for a rotation that really is about to
+      // replace an archive, so a free `-100` name is taken quietly (the case below).
       await fsPromises.writeFile(`${base}.log`, '');
 
-      for (let attempt = 1; attempt < 100; attempt++) {
+      for (let attempt = 1; attempt <= 100; attempt++) {
         await fsPromises.writeFile(`${base}-${String(attempt)}.log`, '');
       }
 
@@ -2605,6 +2609,47 @@ describe('FileSink - entries refused at the door', () => {
       expect(failures[0]?.target).toBe(reserved);
       expect(failures[0]?.error.message).toContain('No free archive name');
       expect(sink.getHealth().droppedEntries).toBe(0);
+    } finally {
+      nowSpy.mockRestore();
+      await sink.close();
+    }
+  });
+
+  test('a rotation that exhausts the search onto a free name says nothing', async () => {
+    // The last candidate the search forms used to be handed back without ever being
+    // probed, and reported as an archive about to be overwritten - so a rotation onto a
+    // name nothing occupied raised a `'setup'` failure and made a healthy sink look
+    // faulty. Nothing is at stake here, so nothing is said.
+    const failures: SinkFailure[] = [];
+    const sink = new FileSink({
+      logDir: tmpDir.path,
+      basename: 'exhausted-free',
+      onError: (failure) => {
+        failures.push(failure);
+      },
+    });
+
+    const fixedNow = 1_700_000_000_000;
+    const nowSpy = spyOn(Date, 'now').mockReturnValue(fixedNow);
+
+    try {
+      const base = `${tmpDir.path}/exhausted-free-2023-11-14-${String(fixedNow)}`;
+
+      // Everything the search tries except the name it ends on.
+      await fsPromises.writeFile(`${base}.log`, '');
+
+      for (let attempt = 1; attempt < 100; attempt++) {
+        await fsPromises.writeFile(`${base}-${String(attempt)}.log`, '');
+      }
+
+      const reserved = await (
+        sink as unknown as {
+          reserveRotatedFileName: (date: string) => Promise<string>;
+        }
+      ).reserveRotatedFileName('2023-11-14');
+
+      expect(reserved).toBe(`${base}-100.log`);
+      expect(failures).toHaveLength(0);
     } finally {
       nowSpy.mockRestore();
       await sink.close();

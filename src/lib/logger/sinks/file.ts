@@ -930,7 +930,10 @@ export class FileSink implements LogSink {
           // the pipe. The line itself is still reported, with `disposition: 'lost'`:
           // this sink substitutes no default format, so there is nothing to fall back
           // to and the entry does not arrive.
-          if (kind !== 'format') {
+          // `'close'` is excluded for a related reason: the destination answered nothing
+          // at all, the sink is on its way out, and `NamedPipeSink` does not hold a
+          // teardown against the connection either.
+          if (kind !== 'format' && kind !== 'close') {
             this.consecutiveFailures++;
           }
 
@@ -1028,7 +1031,9 @@ export class FileSink implements LogSink {
             // `{ isHealthy: true, droppedEntries: 0 }` - against that field's own
             // documented meaning, "lines this sink did not deliver". `flush()` reads the
             // same counter, so the two can no longer disagree about what was lost.
-            this.countDropped(kind === 'format' ? 'format' : 'write');
+            this.countDropped(
+              kind === 'format' || kind === 'close' ? kind : 'write',
+            );
           }
         }
       }
@@ -1250,6 +1255,15 @@ export class FileSink implements LogSink {
       message.startsWith('Error rotating log file')
     ) {
       return 'setup';
+    }
+
+    // An entry `close()` finished under is not a write that failed: the destination was
+    // fine and the sink was shut down out from under a pass still in flight (see the
+    // second `closed` check in `writeEntry`). Reported and counted as `'write'`, it made a
+    // timed-out shutdown look like a broken disk in `droppedByKind`, and disagreed with
+    // `NamedPipeSink`, which counts the identical event as `'close'`.
+    if (message.startsWith('Cannot write to closed sink')) {
+      return 'close';
     }
 
     return 'write';
@@ -1770,8 +1784,20 @@ export class FileSink implements LogSink {
       candidate = `${base}-${String(attempt)}.log`;
     }
 
+    // The name the loop gives up holding, asked about like every other. Advancing at the
+    // end of each pass left the last candidate - `base-100.log` under the default cap -
+    // formed but never probed, and the report below went out regardless: a rotation onto a
+    // free name announced itself as overwriting an archive that was not there, so a sink
+    // doing exactly the right thing raised a `'setup'` failure. The report is for a
+    // rotation that really is about to replace history.
+    try {
+      await fsPromises.access(candidate);
+    } catch {
+      return candidate;
+    }
+
     const failure = new FileSinkError(
-      `No free archive name after ${String(MAX_ROTATION_NAME_ATTEMPTS)} attempts; rotating over ${candidate}`,
+      `No free archive name after ${String(MAX_ROTATION_NAME_ATTEMPTS + 1)} candidates; rotating over ${candidate}`,
     );
 
     this.lastError = failure;

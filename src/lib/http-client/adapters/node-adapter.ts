@@ -1469,6 +1469,25 @@ export class NodeAdapter implements HTTPAdapter {
           .catch((error: unknown) => {
             endBodyWrite(error);
 
+            // The abort path first, the same priority `req.on('error')` gives it: a
+            // caller tearing its own request down - or a per-attempt timeout doing it -
+            // parks the writer's rejection here too, and against an endpoint that answers
+            // early (a `413`, a redirect, an early `2xx`) `didReceiveResponse` is already
+            // true, so every cancelled upload put a spurious transport failure on the
+            // host's global `'error'` channel for a teardown that was asked for. The
+            // outcome is settled above either way; `failRequest` is first-call-wins, so
+            // the abort listener's own answer stands where it got there first.
+            if (request.signal?.aborted) {
+              destroyRequestQuietly(req);
+
+              const abortErr = new Error('Request aborted');
+
+              abortErr.name = 'AbortError';
+              failRequest(abortErr);
+
+              return;
+            }
+
             // See `didReceiveResponse`: the server has already answered, so the
             // write failing is how that answer arrived, not a transport failure
             // to report over it. The response path resolves with the real status.
@@ -1514,6 +1533,25 @@ export class NodeAdapter implements HTTPAdapter {
           })
           .catch((error: unknown) => {
             endBodyWrite(error);
+
+            // The abort path first, the same priority `req.on('error')` gives it: a
+            // caller tearing its own request down - or a per-attempt timeout doing it -
+            // parks the writer's rejection here too, and against an endpoint that answers
+            // early (a `413`, a redirect, an early `2xx`) `didReceiveResponse` is already
+            // true, so every cancelled upload put a spurious transport failure on the
+            // host's global `'error'` channel for a teardown that was asked for. The
+            // outcome is settled above either way; `failRequest` is first-call-wins, so
+            // the abort listener's own answer stands where it got there first.
+            if (request.signal?.aborted) {
+              destroyRequestQuietly(req);
+
+              const abortErr = new Error('Request aborted');
+
+              abortErr.name = 'AbortError';
+              failRequest(abortErr);
+
+              return;
+            }
 
             // See `didReceiveResponse`: the server has already answered, so the
             // write failing is how that answer arrived, not a transport failure

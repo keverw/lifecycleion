@@ -457,10 +457,10 @@ export function chargeText(budget: RenderBudget, text: string): string {
     return charge(budget, text);
   }
 
-  // `Math.max`, because the budget can already be negative: a container's delimiters and
-  // keys are charged before its values, so a leaf can arrive with nothing left at all,
-  // and `slice` reads a negative end as counting back from the end of the string - which
-  // would emit the wrong part of the value rather than none of it.
+  // `cutAt` rather than a bare `slice`: the budget can already be negative - a container's
+  // delimiters and keys are charged before its values, so a leaf can arrive with nothing
+  // left at all, and a negative end reads as counting back from the end of the string -
+  // and a cut that lands between the halves of a surrogate pair emits a lone surrogate.
   const kept = cutAt(text, budget.remaining);
   const emitted = `${kept}${TRUNCATED_LENGTH}`;
 
@@ -503,13 +503,11 @@ export function chargeNestedText(
     return text;
   }
 
-  // `Math.max`, for the same reason `chargeText` needs it: the budget can already be
-  // negative when a leaf arrives, and a negative end reads as counting back from the end
-  // of the string.
-  const kept = text.slice(
-    0,
-    Math.max(0, Math.floor(budget.remaining / factor)),
-  );
+  // `cutAt`, for the same reason `chargeText` needs it: the budget can already be negative
+  // when a leaf arrives, a negative end reads as counting back from the end of the string,
+  // and a cut that splits a surrogate pair leaves a lone surrogate in the output. Cut
+  // against the per-level allowance, so what is kept still fits once multiplied.
+  const kept = cutAt(text, Math.floor(budget.remaining / factor));
   const emitted = `${kept}${TRUNCATED_LENGTH}`;
 
   // Counted like every other cut. Missed here, a rendered error - whose nested rows are

@@ -16,6 +16,7 @@ import { stringifyTemplateValue } from './stringify-template-value';
 import {
   charge,
   chargeUnits,
+  cutAt,
   noteTruncation,
   createRenderBudget,
   MAX_RENDER_DEPTH,
@@ -428,12 +429,11 @@ function chargeReplacementExcess(
     return replacement;
   }
 
-  // `Math.max`, because the budget can already be negative: the leaf above was charged
-  // whether or not it fit, so a replacement can arrive with nothing left at all.
-  const kept = replacement.slice(
-    0,
-    text.length + Math.max(0, budget.remaining),
-  );
+  // `cutAt` rather than a bare `slice`: the budget can already be negative - the leaf
+  // above was charged whether or not it fit, so a replacement can arrive with nothing
+  // left at all - and a cut that lands between the halves of a surrogate pair would emit
+  // a lone surrogate. `cutAt` clamps the end and steps back off a split pair.
+  const kept = cutAt(replacement, text.length + budget.remaining);
   const emitted = `${kept}${TRUNCATED_LENGTH}`;
 
   noteTruncation(budget, 'length', replacement.length - kept.length);

@@ -140,3 +140,32 @@ describe('renderJSONLine', () => {
     ).toEqual({ message: 'hello', params: { a: 1 } });
   });
 });
+
+describe('renderJSONLine - an entry that was never redacted', () => {
+  test('falls back to `params`, as `LogEntry` says a sink must', () => {
+    // `redactedParams` is assigned only when redaction is configured, so reading it alone
+    // dropped the whole params bag from every line a logger without `redactedKeys` wrote -
+    // silently, with no `'format'` report and nothing counted as dropped.
+    const line = renderJSONLine(
+      { ...base, params: { userID: 5, note: 'payload' } },
+      () => {},
+    );
+
+    expect(JSON.parse(line)).toMatchObject({
+      params: { userID: 5, note: 'payload' },
+    });
+  });
+
+  test('prefers `redactedParams` when both are present', () => {
+    const line = renderJSONLine(
+      {
+        ...base,
+        params: { password: 'secret' },
+        redactedParams: { password: '******' },
+      },
+      () => {},
+    );
+
+    expect(JSON.parse(line)).toMatchObject({ params: { password: '******' } });
+  });
+});
