@@ -19,6 +19,7 @@ import type { RedactFunction } from '../types';
 import {
   createFormatReporter,
   type FormatErrorHandler,
+  type ReportFormatFailure,
 } from '../../internal/format-reporter';
 
 /**
@@ -291,6 +292,7 @@ function normalizeAlongRedactPaths(
   bag: Record<string, unknown>,
   paths: RedactPath[],
   aliases: ForwardingAliases,
+  report: ReportFormatFailure,
 ): void {
   const copies = new Map<object, object>();
 
@@ -404,6 +406,35 @@ function normalizeAlongRedactPaths(
         const copy = forwardingContainerCopy(value, copies, aliases);
 
         if (copy === null) {
+          // Replaced with the marker, not left in place. A refused copy - an array past
+          // `MAX_REDACTION_ENTRIES`, a prototype that enumerates past it, a read that
+          // threw - used to leave the caller's own container here on the assumption that
+          // the walk's guards fail it closed. They do not, if its `Object.keys` look
+          // innocent: the walk matches nothing, hands the original back by reference, and
+          // a key it enumerates nowhere - a non-enumerable own property, one a `Proxy`
+          // hides from `ownKeys`, a named property on an array - is still resolved by the
+          // renderer's property read and printed. That is the hidden-key class this whole
+          // normalization exists to close, and the marker is the only answer that closes
+          // it here. A path *did* descend into this container, so every key beneath it
+          // was named for masking; over-masking the container is the safe direction.
+          //
+          // Reported as well as marked, on the redaction channel, the way the walk reports
+          // a container it cannot read: the marker says *that* a value was withheld, and
+          // `onFormatError` is the promise of *why*.
+          report(
+            new Error(
+              'container could not be normalized for redaction and was withheld',
+            ),
+            key,
+          );
+
+          try {
+            defineEntry(container, key, REDACTION_FAILED_MARKER);
+          } catch {
+            // The parent is the bag or a copy this module built, both plain and
+            // writable, so this cannot fail; the read guards in the walk are the backstop.
+          }
+
           continue;
         }
 
@@ -769,7 +800,7 @@ export function applyRedaction(
   // one. Guarded because it reads caller properties; a failure leaves the originals in
   // place, where the walk's own guards still apply.
   try {
-    normalizeAlongRedactPaths(guarded, paths, aliases);
+    normalizeAlongRedactPaths(guarded, paths, aliases, report);
   } catch (error) {
     report(error, '<params>');
   }

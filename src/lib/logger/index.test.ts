@@ -1799,6 +1799,38 @@ describe('Logger', () => {
       expect(errors[0].context).toBe('write');
     });
 
+    test('an onSinkError that logs into the failing sink does not recurse', () => {
+      // The obvious handler to write logs the failure. Into a sink that throws on every
+      // `write()`, that reached `handleLog`, the sink, and `handleSinkError` again inside
+      // its own frame, until the stack overflowed. The nested report lands on the console
+      // rung instead, and the handler runs once.
+      const captured = muteConsoleError();
+      let handlerCalls = 0;
+      const alwaysThrows = {
+        write: () => {
+          throw new Error('always');
+        },
+      };
+
+      const recursiveLogger: Logger = new Logger({
+        sinks: [alwaysThrows],
+        callProcessExit: false,
+        onSinkError: (error) => {
+          handlerCalls++;
+          recursiveLogger.error(`sink failed: ${error.message}`);
+        },
+      });
+
+      try {
+        expect(() => recursiveLogger.info('Test message')).not.toThrow();
+
+        expect(handlerCalls).toBe(1);
+        expect(captured.some((line) => line.includes('always'))).toBe(true);
+      } finally {
+        restoreConsoleError();
+      }
+    });
+
     test('survives a sink that throws a non-Error value', () => {
       // Sinks are user-supplied, so `write()` can throw anything. Reading `.message` off
       // it unguarded raised a `TypeError` that escaped out of the log call itself.

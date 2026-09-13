@@ -174,6 +174,43 @@ describe('TmpDir', () => {
     expect(doesFileExist).toBe(false);
   });
 
+  test('a name that already exists is skipped rather than adopted', async () => {
+    // Stat-then-mkdir with `recursive: true` adopted a directory another process created
+    // between the two calls. An exclusive create refuses it and tries the next name.
+    const first = await createTempDir({ baseDirectory: tempDir.path });
+
+    const firstName = path.basename(first.path);
+    let calls = 0;
+
+    const second = new TmpDir({ baseDirectory: tempDir.path });
+    const tampered = second as unknown as { generateTempDirName: () => string };
+    const original = tampered.generateTempDirName.bind(second);
+
+    tampered.generateTempDirName = (): string => {
+      calls++;
+
+      return calls === 1 ? firstName : original();
+    };
+
+    await second.initialize();
+
+    expect(calls).toBe(2);
+    expect(second.path).not.toBe(first.path);
+    expect((await fs.stat(second.path)).isDirectory()).toBe(true);
+
+    await second.cleanup();
+    await first.cleanup();
+  });
+
+  test('creates a base directory that is not there yet', async () => {
+    const base = path.join(tempDir.path, 'nested', 'base');
+    const dir = await createTempDir({ baseDirectory: base });
+
+    expect(dir.path.startsWith(base)).toBe(true);
+
+    await dir.cleanup();
+  });
+
   test('maxTries should error when exceeded', async () => {
     const anotherTempDir = await createTempDir({
       baseDirectory: tempDir.path,

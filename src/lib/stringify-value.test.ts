@@ -2399,6 +2399,48 @@ describe('maxRenderLength and onTruncate', () => {
     expect(total).toBeGreaterThan(90_000);
   });
 
+  it('overshoots a tiny cap by a bounded number of markers, never by the payload', () => {
+    // The cap bounds content and the markers sit on top of it uncharged, so the output
+    // can exceed `maxRenderLength` - but only by a fixed few markers, whatever the size
+    // or shape of the value. A thousand keys, twenty levels, or a thousand elements past
+    // a spent budget must not each leave a marker.
+    const wide: Record<string, string> = {};
+
+    for (let index = 0; index < 1_000; index++) {
+      wide[`k${String(index)}`] = 'v'.repeat(50);
+    }
+
+    const deep: Record<string, unknown> = {};
+    let cursor = deep;
+
+    for (let index = 0; index < 20; index++) {
+      const next: Record<string, unknown> = { s: 'x'.repeat(50) };
+
+      cursor['n'] = next;
+      cursor = next;
+    }
+
+    const list = new Array<string>(1_000).fill('abcdef');
+
+    for (const cap of [1, 10, 100]) {
+      // Three markers and a little structure is the most any of these shapes leaves.
+      const bound = cap + 3 * TRUNCATED_LENGTH.length + 16;
+
+      expect(
+        stringifyValue(wide, { maxRenderLength: cap }).length,
+      ).toBeLessThanOrEqual(bound);
+      expect(
+        stringifyValue(deep, { maxRenderLength: cap }).length,
+      ).toBeLessThanOrEqual(bound);
+      expect(
+        stringifyValue(list, { maxRenderLength: cap }).length,
+      ).toBeLessThanOrEqual(bound);
+      expect(
+        stringifyValue('z'.repeat(500), { maxRenderLength: cap }).length,
+      ).toBeLessThanOrEqual(cap + TRUNCATED_LENGTH.length);
+    }
+  });
+
   it('honours Infinity and falls back on anything else unusable', () => {
     expect(
       stringifyValue(big, { maxRenderLength: Number.POSITIVE_INFINITY }).length,

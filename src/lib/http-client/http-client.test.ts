@@ -697,6 +697,136 @@ describe('HTTPClient — basic HTTP methods', () => {
     expect(await response.requestBodySettled).toBe(uploadFailure);
   });
 
+  test('a throw between hops still carries the upload outcome', async () => {
+    // The `catch` around the whole of `send()` was the one terminal path that built with
+    // nothing. A cookie jar that throws while the redirect request is being prepared
+    // lands there after a hop that had a body, and the response it built answered
+    // `undefined` - the documented success value - for an upload that was cut short.
+    const uploadFailure = new Error('cut short');
+
+    const adapter: HTTPAdapter = {
+      getType: () => 'node',
+      send: (_request: AdapterRequest): Promise<AdapterResponse> =>
+        Promise.resolve({
+          status: 302,
+          headers: { location: '/next' },
+          body: null,
+          requestBodySettled: Promise.resolve(uploadFailure),
+        }),
+    };
+
+    const jar = new CookieJar();
+
+    jar.getCookieHeaderString = (url: string): string => {
+      if (url.includes('/next')) {
+        throw new Error('jar refused');
+      }
+
+      return '';
+    };
+
+    const response = await new HTTPClient({
+      adapter,
+      baseURL: 'http://example.test',
+      followRedirects: true,
+      cookieJar: jar,
+    })
+      .post('/upload')
+      .json({ a: 1 })
+      .send();
+
+    expect(response.isFailed).toBe(true);
+    expect(response.status).toBe(0);
+    expect(await response.requestBodySettled).toBe(uploadFailure);
+  });
+
+  test("a followed redirect waits for the hop's upload to settle first", async () => {
+    // `NodeAdapter.send()` resolves when the response is consumed, so an early `3xx`
+    // arrives with the writer still running - and the next hop went out beside it. A
+    // `307` then uploaded the same body twice at once. The hop's upload settles first.
+    let settledAt = 0;
+    let secondHopStartedAt = 0;
+    let hop = 0;
+
+    const adapter: HTTPAdapter = {
+      getType: () => 'node',
+      send: (_request: AdapterRequest): Promise<AdapterResponse> => {
+        hop++;
+
+        if (hop === 1) {
+          return Promise.resolve({
+            status: 307,
+            headers: { location: '/again' },
+            body: null,
+            requestBodySettled: new Promise((resolve) => {
+              setTimeout(() => {
+                settledAt = Date.now();
+                resolve(undefined);
+              }, 60);
+            }),
+          });
+        }
+
+        secondHopStartedAt = Date.now();
+
+        return Promise.resolve({ status: 200, headers: {}, body: null });
+      },
+    };
+
+    const response = await new HTTPClient({
+      adapter,
+      baseURL: 'http://example.test',
+      followRedirects: true,
+    })
+      .post('/upload')
+      .json({ a: 1 })
+      .send();
+
+    expect(response.status).toBe(200);
+    expect(hop).toBe(2);
+    expect(settledAt).toBeGreaterThan(0);
+    expect(secondHopStartedAt).toBeGreaterThanOrEqual(settledAt);
+  });
+
+  test('a cancel during that wait is not held for the upload', async () => {
+    const controller = new AbortController();
+    let hop = 0;
+
+    const adapter: HTTPAdapter = {
+      getType: () => 'node',
+      send: (_request: AdapterRequest): Promise<AdapterResponse> => {
+        hop++;
+
+        return Promise.resolve({
+          status: 307,
+          headers: { location: '/again' },
+          body: null,
+          // Never settles on its own: the wait must end with the cancel.
+          requestBodySettled: new Promise(() => {}),
+        });
+      },
+    };
+
+    const pending = new HTTPClient({
+      adapter,
+      baseURL: 'http://example.test',
+      followRedirects: true,
+    })
+      .post('/upload')
+      .json({ a: 1 })
+      .signal(controller.signal)
+      .send();
+
+    setTimeout(() => controller.abort(), 30);
+
+    const startedAt = Date.now();
+    const response = await pending;
+
+    expect(Date.now() - startedAt).toBeLessThan(2000);
+    expect(response.isCancelled).toBe(true);
+    expect(hop).toBe(1);
+  });
+
   test('a 307 that resends the body reports the resent upload, not the first', async () => {
     // The latest hop that had a body is the answer: a `307` puts the body on the wire
     // again, and its outcome is the one behind the final response.

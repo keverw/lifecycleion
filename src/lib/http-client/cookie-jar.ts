@@ -346,19 +346,52 @@ export class CookieJar {
    * back short with nothing to say it had - and every other mutator on this class
    * (`clear`, `clearExpiredCookies`, `setCookie`) reports what it did.
    *
+   * The payload is read in full before the jar is touched, and each cookie is copied
+   * rather than taken. This used to `clear()` first and mutate `expires` in place, so a
+   * payload with no `cookies`, a `null` entry, or a frozen cookie threw *after* the jar
+   * was already empty - the one order in which a failed restore also loses what was
+   * there - and a caller's own array of cookies came back with `Date` objects written
+   * into it.
+   *
+   * A restore *replaces*: once the payload has been read, the jar is emptied and refilled
+   * with whatever `setCookie` accepts. A well-formed payload whose cookies are all refused
+   * - every domain missing, say - therefore returns `0` and leaves an empty jar, not the
+   * cookies that were there before. Only a payload that cannot be read at all leaves the
+   * jar untouched. Snapshot with `toJSON()` first if a short restore should be rolled back.
+   *
    * @returns How many cookies were restored. Compare against `data.cookies.length` to learn
    *          whether any were refused.
+   * @throws {TypeError} When `data.cookies` is not an array or holds a non-object. The
+   *         jar is left as it was.
    */
   public fromJSON(data: CookieJarJSON): number {
-    this.buckets.clear();
+    const cookies: unknown = data?.cookies;
 
-    let restored = 0;
+    if (!Array.isArray(cookies)) {
+      throw new TypeError('CookieJar.fromJSON: data.cookies must be an array');
+    }
 
-    for (const cookie of data.cookies) {
+    const prepared: Cookie[] = cookies.map((entry: unknown, index) => {
+      if (entry === null || typeof entry !== 'object') {
+        throw new TypeError(
+          `CookieJar.fromJSON: data.cookies[${String(index)}] is not a cookie`,
+        );
+      }
+
+      const cookie: Cookie = { ...(entry as Cookie) };
+
       if (cookie.expires && !(cookie.expires instanceof Date)) {
         cookie.expires = new Date(cookie.expires);
       }
 
+      return cookie;
+    });
+
+    this.buckets.clear();
+
+    let restored = 0;
+
+    for (const cookie of prepared) {
       if (this.setCookie(cookie)) {
         restored++;
       }

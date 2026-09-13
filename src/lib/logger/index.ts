@@ -230,6 +230,7 @@ export class Logger extends EventEmitter {
 
   private _reportErrorListenerRegistered = false;
   private _isHandlingReportedError = false;
+  private _isHandlingSinkError = false;
   private _reportErrorListener: ((event: Event) => void) | null = null;
   private _reportErrorListenerCapture = false;
 
@@ -1294,18 +1295,38 @@ export class Logger extends EventEmitter {
     // it. Normalizing here also makes `onSinkError`'s declared `Error` parameter honest.
     const failure = toError(error);
 
-    // The shared rung, so this channel cannot drift from the other three. It never
-    // broadcasts, and that is structural: a sink can only fail *during* a log call, so
-    // reporting anywhere a logger might hear it would be logged, and logging writes to
-    // sinks - this one included.
-    reportThroughHandler(
-      this.onSinkError === undefined
-        ? undefined
-        : // Returned, for the reason `onEventHandlerError` above is.
-          () => this.onSinkError?.(failure, context, sink),
-      () =>
-        `Error ${context === 'write' ? 'writing to' : 'closing'} sink: ${describeError(failure)}`,
-    );
+    const line = (): string =>
+      `Error ${context === 'write' ? 'writing to' : 'closing'} sink: ${describeError(failure)}`;
+
+    // Synchronous re-entry goes to the console rung, not back to the handler. An
+    // `onSinkError` that logs - the obvious thing to write - into a sink that throws on
+    // every `write()` reached `handleLog`, the sink, and this method again, inside its own
+    // frame, with nothing to stop it until the stack did. The format and event-handler
+    // channels both guard against the same loop; this one did neither. Bounded the same
+    // way `_isHandlingReportedError` is: synchronous re-entry only, cleared in `finally`.
+    if (this._isHandlingSinkError) {
+      reportThroughHandler(undefined, line);
+
+      return;
+    }
+
+    this._isHandlingSinkError = true;
+
+    try {
+      // The shared rung, so this channel cannot drift from the other three. It never
+      // broadcasts, and that is structural: a sink can only fail *during* a log call, so
+      // reporting anywhere a logger might hear it would be logged, and logging writes to
+      // sinks - this one included.
+      reportThroughHandler(
+        this.onSinkError === undefined
+          ? undefined
+          : // Returned, for the reason `onEventHandlerError` above is.
+            () => this.onSinkError?.(failure, context, sink),
+        line,
+      );
+    } finally {
+      this._isHandlingSinkError = false;
+    }
   }
 
   /**

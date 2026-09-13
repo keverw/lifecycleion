@@ -532,6 +532,13 @@ export class BaseHTTPClient {
       let isRetriesExhausted = false;
       let completedAttemptCount = 0;
 
+      /**
+       * The upload's outcome from the latest hop that had a body. Set inside the redirect
+       * loop below; declared here so the `catch` around the whole of `send()` can carry it
+       * too, which is the one terminal path that could not see it.
+       */
+      let uploadOutcome: Promise<Error | undefined> | undefined;
+
       try {
         // streamResponse is NodeAdapter-only. Validate it inside the normal
         // request setup flow so builder/error observer state is updated the same
@@ -696,9 +703,6 @@ export class BaseHTTPClient {
         // initial request → 4,5 on first redirect hop → 6 on second hop).
         let lastAttemptNumber = 0;
         let currentHopInfo: RedirectHopInfo | undefined;
-
-        /** The upload's outcome from the latest hop that had a body. See below. */
-        let uploadOutcome: Promise<Error | undefined> | undefined;
 
         while (true) {
           // Send request through the adapter with retry support. Each hop gets
@@ -1040,6 +1044,48 @@ export class BaseHTTPClient {
               to: redirectedRequestURL,
             };
 
+            // Followed only once this hop's upload has settled. `NodeAdapter.send()`
+            // resolves when the response is consumed, and an early `3xx` arrives while the
+            // writer is still running - so the next hop was dispatched with the previous
+            // one's body still going out on its own socket, and a `307`/`308` started a
+            // second upload of the same body beside the first. The outcome never rejects
+            // and always settles (the adapter's stall watchdog sees to that), so this is a
+            // wait, not a hazard; raced against the cancel signal so a caller who gives up
+            // is not held for it. Only the adapter's word is waited on: a hop that threw
+            // has no socket left to wait for.
+            if (adapterResponse.requestBodySettled !== undefined) {
+              await settleUploadBeforeRedirect(
+                adapterResponse.requestBodySettled,
+                cancelSignal,
+              );
+
+              // A cancel that ended the wait ends the request here, before another hop
+              // is dispatched, exactly as a redirect interceptor's cancel does above.
+              if (cancelSignal.aborted) {
+                observerRequest = this._bestEffortAttemptRequestFromPending(
+                  sanitizedRedirectRequest,
+                  timeout,
+                  requestID,
+                );
+
+                response = this._buildResponse<T>({
+                  adapterResponse: null,
+                  requestID,
+                  wasCancelled: true,
+                  wasTimeout: false,
+                  adapterType: this._adapter.getType(),
+                  initialURL: finalRequest.requestURL,
+                  requestURL: redirectedRequestURL,
+                  redirectHistory,
+                  ...(uploadOutcome
+                    ? { requestBodySettled: uploadOutcome }
+                    : {}),
+                });
+
+                break;
+              }
+            }
+
             continue;
           }
 
@@ -1078,6 +1124,11 @@ export class BaseHTTPClient {
           requestURL: interceptedRequest.requestURL,
           redirectHistory: [],
           isNetworkErrorOverride: false,
+          // The one terminal path that dropped it: a throw *between* hops - a hostile
+          // header read on a redirect, say - lands here after a hop that had a body, and
+          // `await response.requestBodySettled` then answered the documented success value
+          // for an upload that may have been cut short.
+          ...(uploadOutcome ? { requestBodySettled: uploadOutcome } : {}),
         });
 
         const normalizedError = this._makeError(
@@ -3069,6 +3120,39 @@ function adoptRequestBodySettled(
     (value) => (value === undefined ? undefined : normalizeError(value)),
     (error: unknown) => normalizeError(error),
   );
+}
+
+/**
+ * Wait for a hop's upload to settle before the next hop is dispatched.
+ *
+ * Never throws and never rejects, whatever the adapter handed over: the outcome is adopted
+ * first, and a cancel ends the wait rather than the request - the dispatch that follows
+ * sees the signal for itself.
+ */
+async function settleUploadBeforeRedirect(
+  settled: unknown,
+  cancelSignal: AbortSignal,
+): Promise<void> {
+  const adopted = adoptRequestBodySettled(settled);
+
+  if (adopted === undefined || cancelSignal.aborted) {
+    return;
+  }
+
+  let onAbort: (() => void) | undefined;
+
+  const cancelled = new Promise<void>((resolve) => {
+    onAbort = () => resolve();
+    cancelSignal.addEventListener('abort', onAbort, { once: true });
+  });
+
+  try {
+    await Promise.race([adopted, cancelled]);
+  } finally {
+    if (onAbort !== undefined) {
+      cancelSignal.removeEventListener('abort', onAbort);
+    }
+  }
 }
 
 /**

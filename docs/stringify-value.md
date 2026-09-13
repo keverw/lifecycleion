@@ -96,6 +96,13 @@ stringifyValue(value, { maxRenderLength: 20_000_000 });
 stringifyValue(value, { maxRenderLength: Infinity }); // no bound
 ```
 
+The cap bounds the _content_. Every cut leaves a short `[max length exceeded]` marker
+where it stopped, and the markers are not charged against it, so the output can run past
+`maxRenderLength` by a marker or two - never by more than a small, fixed amount, since a
+container that has spent its allowance drops its tail rather than marking every entry.
+`maxRenderLength: 1` renders a few dozen characters, not one. Set the cap for the size you
+can carry and read `onTruncate` for whether it held.
+
 `Infinity` is the only way to render unbounded. Anything else unusable - a negative, zero,
 `NaN`, a non-number - takes the default rather than being honoured, because this is the
 bound that makes an untrusted payload safe to render and a typo must not be what switches

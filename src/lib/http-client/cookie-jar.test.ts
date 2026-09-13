@@ -1119,6 +1119,51 @@ describe('CookieJar', () => {
       expect(jar2.getCookieFor('bad', 'https://example.com')).toBeUndefined();
     });
 
+    test('leaves the jar as it was when the payload is unusable', () => {
+      // `fromJSON` cleared first and validated as it went, so a bad payload emptied the
+      // jar and then threw - a failed restore that also lost what was there.
+      jar.setCookie({
+        name: 'keep',
+        value: 'me',
+        domain: 'example.com',
+        path: '/',
+        createdAt: Date.now(),
+      });
+
+      expect(() =>
+        jar.fromJSON({} as unknown as Parameters<CookieJar['fromJSON']>[0]),
+      ).toThrow(TypeError);
+      expect(() =>
+        jar.fromJSON({
+          cookies: [null],
+        } as unknown as Parameters<CookieJar['fromJSON']>[0]),
+      ).toThrow(TypeError);
+
+      expect(jar.getCookieFor('keep', 'https://example.com')?.value).toBe('me');
+    });
+
+    test("does not write into the caller's cookies", () => {
+      // A frozen cookie, or one the caller keeps: `expires` was re-hydrated in place.
+      const raw = Object.freeze({
+        name: 'frozen',
+        value: 'x',
+        domain: 'example.com',
+        path: '/',
+        expires: new Date(Date.now() + 10_000).toISOString(),
+        createdAt: Date.now(),
+      });
+
+      const restored = jar.fromJSON({
+        cookies: [raw],
+      } as unknown as Parameters<CookieJar['fromJSON']>[0]);
+
+      expect(restored).toBe(1);
+      expect(typeof raw.expires).toBe('string');
+      expect(
+        jar.getCookieFor('frozen', 'https://example.com')?.expires,
+      ).toBeInstanceOf(Date);
+    });
+
     test('returns zero for an empty payload', () => {
       expect(new CookieJar().fromJSON({ cookies: [] })).toBe(0);
     });

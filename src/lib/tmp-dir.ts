@@ -173,6 +173,11 @@ export class TmpDir {
 
   public async initialize(): Promise<void> {
     if (!this.isInitialized) {
+      // The parent once, so each attempt below can be an *exclusive* create of the leaf.
+      // `mkdir` with `recursive: true` succeeds on a directory that already exists, which
+      // is why the old stat-then-mkdir could not be made exclusive by itself.
+      await fs.mkdir(this.baseDirectory, { recursive: true });
+
       let attemptsMade = 0;
 
       // attempt this while the attemptsMade is less than the maxTries
@@ -181,30 +186,32 @@ export class TmpDir {
 
         // generate a temporary directory name
         const name = this.generateTempDirName();
-
-        // check if the path exists
         const fullPath = path.join(this.baseDirectory, name);
 
-        let doesPathExist = false;
+        // Created, not checked and then created. A `stat` that found nothing followed by
+        // a `mkdir` left a window in which another process - or another instance in this
+        // one, given the same random name - could create the same path first, and the
+        // `recursive` create then adopted their directory as this one's. A plain `mkdir`
+        // fails with `EEXIST` on a path that is already there, which is the answer the
+        // check was trying to get, only without the window.
         try {
-          await fs.stat(fullPath);
-          doesPathExist = true;
-        } catch {
-          // Path doesn't exist, which is what we want
-          doesPathExist = false;
+          await fs.mkdir(fullPath);
+        } catch (error) {
+          if (
+            error instanceof Error &&
+            (error as NodeJS.ErrnoException).code === 'EEXIST'
+          ) {
+            continue;
+          }
+
+          throw error;
         }
 
-        // only proceed if path doesn't exist
-        if (!doesPathExist) {
-          // create the directory
-          await fs.mkdir(fullPath, { recursive: true });
+        // set isInitialized to true and return
+        this.fullTempDirPath = fullPath;
+        this.isInitialized = true;
 
-          // set isInitialized to true and return
-          this.fullTempDirPath = fullPath;
-          this.isInitialized = true;
-
-          return;
-        }
+        return;
       }
 
       // if the loop completes without finding a unique directory, throw an error

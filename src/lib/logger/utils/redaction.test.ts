@@ -605,6 +605,29 @@ describe('applyRedaction - non-identifier key names', () => {
     expect(result['user']['name']).toBe('Alice');
   });
 
+  test('fails a container closed when its forwarding copy is refused', () => {
+    // A refused copy left the caller's original in place, on the assumption that the
+    // walk's guards fail it closed. They do not when its `Object.keys` look innocent: an
+    // array past `MAX_REDACTION_ENTRIES` is refused a copy, its indexes are all the walk
+    // enumerates, and a *named* non-enumerable property on it - which `CurlyBrackets`
+    // resolves with a property read - was handed back untouched under a path that named
+    // it for masking.
+    const items: unknown[] = new Array(1_000_001);
+
+    Object.defineProperty(items, 'password', {
+      value: 'secret123',
+      enumerable: false,
+      configurable: true,
+    });
+
+    const result = applyRedaction({ items }, ['items.password']);
+
+    expect(result['items']).toBe(REDACTION_FAILED_MARKER);
+    expect(
+      (result['items'] as Record<string, unknown>)['password'],
+    ).toBeUndefined();
+  });
+
   test('does not let a wildcard over primitives starve a sibling entry', () => {
     // The bound has to count containers descended into, not keys inspected. `items[*].x`
     // normalizes nothing at all - every slot holds a number - so charging it a million
