@@ -527,6 +527,13 @@ export class NodeAdapter implements HTTPAdapter {
       /** The most recent `loaded` any upload-progress report carried. */
       let uploadedBytesSeen = 0;
 
+      /**
+       * When the body writer last parked on its *source* - a `Blob.stream()` read still
+       * outstanding - or `undefined` while it is not. Set by the multipart writer through
+       * `onSourceWait`; see {@link watchForStalledUpload}.
+       */
+      let sourceWaitSince: number | undefined;
+
       /** Whether a post-response write failure has already been reported and scheduled. */
       let didReportWriteErrorAfterResponse = false;
 
@@ -546,12 +553,34 @@ export class NodeAdapter implements HTTPAdapter {
        * as it does, and destroyed the first time it does not. That grace is what decides
        * how slow a receiver may be before it is mistaken for one that has stopped; see the
        * constant.
+       *
+       * Progress is bytes the socket accepted, and a writer parked on its *source* makes
+       * none either: a multipart `File` on a slow or contended disk can leave
+       * `Blob.stream()`'s `read()` outstanding for longer than the grace, with the socket
+       * perfectly willing. That used to be destroyed as a stall too - a healthy upload the
+       * server had already acked, cut short over a slow read. The writer now says when it
+       * is waiting on the source, and that wait is given {@link UPLOAD_SOURCE_STALL_GRACE_MS}
+       * instead: long, because a disk read that has not answered in a minute is stuck rather
+       * than slow, and bounded, because a source that never answers is the parked writer
+       * the hang below was fixed for.
        */
       const watchForStalledUpload = (): void => {
         let bytesAtLastTick = uploadedBytesSeen;
 
         const tick = (): void => {
           if (!isWritingBody || req.writableEnded || req.destroyed) {
+            return;
+          }
+
+          if (
+            uploadedBytesSeen === bytesAtLastTick &&
+            sourceWaitSince !== undefined &&
+            Date.now() - sourceWaitSince < UPLOAD_SOURCE_STALL_GRACE_MS
+          ) {
+            // Not the socket's fault. Watched on, so a source that never answers is still
+            // caught below once its own grace runs out.
+            arm();
+
             return;
           }
 
@@ -570,7 +599,9 @@ export class NodeAdapter implements HTTPAdapter {
             // response arrived" is the failure worth reporting, and the alternative -
             // waiting for a writer that may never return - is the hang this closes.
             const stalled = new Error(
-              'Request body upload stalled after the response arrived',
+              sourceWaitSince === undefined
+                ? 'Request body upload stalled after the response arrived'
+                : 'Request body source stopped answering after the response arrived',
             );
 
             settleBodyOutcome(stalled);
@@ -1410,6 +1441,9 @@ export class NodeAdapter implements HTTPAdapter {
           req,
           boundary,
           reportUploadProgress,
+          (isWaiting) => {
+            sourceWaitSince = isWaiting ? Date.now() : undefined;
+          },
         )
           .then(() => {
             endBodyWrite();
@@ -1524,6 +1558,19 @@ export class NodeAdapter implements HTTPAdapter {
  * socket for five seconds instead of one held to that server's timeout.
  */
 const UPLOAD_STALL_GRACE_MS = 5_000;
+
+/**
+ * How long the body writer may wait on its *source* after the response arrived before
+ * that is called a stall. See `watchForStalledUpload`.
+ *
+ * Separate from {@link UPLOAD_STALL_GRACE_MS} because the two waits mean different things:
+ * a socket that accepted nothing for five seconds has a receiver that stopped, while a
+ * `Blob.stream()` read that has not answered in five seconds has a slow disk under it.
+ * A minute is past any read a live disk answers, and it is a bound rather than a promise
+ * for the same reason the socket grace is: a source that never answers would otherwise
+ * park the writer, the socket and `requestBodySettled` for the life of the process.
+ */
+const UPLOAD_SOURCE_STALL_GRACE_MS = 60_000;
 
 // ---------------------------------------------------------------------------
 // Streaming pipe helper

@@ -2519,6 +2519,52 @@ describe('FileSink - entries refused at the door', () => {
     expect(closeFailures[0]?.disposition).toBe('lost');
   });
 
+  test('a rotation that finds no free archive name says so before it overwrites', async () => {
+    // After `MAX_ROTATION_NAME_ATTEMPTS` collisions the last candidate is used anyway,
+    // and `rename` onto it overwrites an archive - which used to happen with no `onError`
+    // and no counter moved. Still allowed, since a rotation that never finishes parks the
+    // queue for good; now reported, with the archive about to be replaced as the target.
+    const failures: SinkFailure[] = [];
+    const sink = new FileSink({
+      logDir: tmpDir.path,
+      basename: 'exhausted',
+      onError: (failure) => {
+        failures.push(failure);
+      },
+    });
+
+    const fixedNow = 1_700_000_000_000;
+    const nowSpy = spyOn(Date, 'now').mockReturnValue(fixedNow);
+
+    try {
+      const base = `${tmpDir.path}/exhausted-2023-11-14-${String(fixedNow)}`;
+
+      // Every name the search will try: the bare one and the first 99 suffixes.
+      await fsPromises.writeFile(`${base}.log`, '');
+
+      for (let attempt = 1; attempt < 100; attempt++) {
+        await fsPromises.writeFile(`${base}-${String(attempt)}.log`, '');
+      }
+
+      const reserved = await (
+        sink as unknown as {
+          reserveRotatedFileName: (date: string) => Promise<string>;
+        }
+      ).reserveRotatedFileName('2023-11-14');
+
+      expect(reserved).toBe(`${base}-100.log`);
+      expect(failures).toHaveLength(1);
+      expect(failures[0]?.kind).toBe('setup');
+      expect(failures[0]?.disposition).toBe('no_entry');
+      expect(failures[0]?.target).toBe(reserved);
+      expect(failures[0]?.error.message).toContain('No free archive name');
+      expect(sink.getHealth().droppedEntries).toBe(0);
+    } finally {
+      nowSpy.mockRestore();
+      await sink.close();
+    }
+  });
+
   test('two rotations in one second keep both archives', async () => {
     // The rotated name used a *second*-resolution suffix, and `rename` overwrites without
     // a word: any burst that filled `maxSizeMB` twice inside one second destroyed the

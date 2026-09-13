@@ -253,6 +253,13 @@ export async function serializeMultipartFormData(
   req: RequestBodyWritable,
   boundary: string,
   onProgress?: (e: AdapterProgressEvent) => void,
+  /**
+   * Told when the writer is parked waiting on the *source* - a `Blob.stream()` read that
+   * has not answered - rather than on the socket, and again when the read comes back.
+   * A stall watchdog reads byte progress, and a slow disk makes none; without this it
+   * could not tell a file still being read from a receiver that stopped accepting.
+   */
+  onSourceWait?: (isWaiting: boolean) => void,
 ): Promise<void> {
   const totalSize = calculateMultipartFormDataSize(formData, boundary);
 
@@ -428,7 +435,16 @@ export async function serializeMultipartFormData(
             break;
           }
 
-          const { done: isDone, value: chunk } = await reader.read();
+          onSourceWait?.(true);
+
+          let isDone: boolean;
+          let chunk: Uint8Array | undefined;
+
+          try {
+            ({ done: isDone, value: chunk } = await reader.read());
+          } finally {
+            onSourceWait?.(false);
+          }
 
           if (isDone) {
             break;

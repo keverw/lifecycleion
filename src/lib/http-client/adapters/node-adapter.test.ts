@@ -2249,6 +2249,82 @@ describe('NodeAdapter.send() — unit branches without server', () => {
     }
   });
 
+  test('the stall watchdog leaves a writer waiting on a slow source alone', async () => {
+    // Progress is bytes the socket accepted, and a writer parked in `Blob.stream()`'s
+    // `read()` makes none - so a multipart `File` on a slow disk, with the server already
+    // answered, was destroyed as "stalled" after five seconds of the socket doing nothing
+    // wrong. The writer now says when it is waiting on the source, and that wait has a
+    // grace of its own.
+    const req = new MockClientRequest();
+    const res = new MockIncomingMessage(200, { 'content-type': 'text/plain' });
+
+    const requestSpy = spyOn(http, 'request').mockImplementation(
+      (_options, callback) => {
+        const cb = callback as
+          ((res: http.IncomingMessage) => void) | undefined;
+
+        queueMicrotask(() => {
+          cb?.(res as unknown as http.IncomingMessage);
+          // The server answers in full while the file is still being read.
+          queueMicrotask(() => {
+            res.emit('data', Buffer.from('ok'));
+            res.emit('end');
+            res.emit('close');
+          });
+        });
+
+        return req as unknown as http.ClientRequest;
+      },
+    );
+
+    // `FormData` re-wraps a `Blob`, so a subclass override does not reach the writer; the
+    // prototype does. Half the bytes at once, the other half after a gap longer than the
+    // socket grace.
+    const streamSpy = spyOn(Blob.prototype, 'stream').mockImplementation(
+      function (this: Blob) {
+        const size = this.size;
+        const half = Math.floor(size / 2);
+
+        return new ReadableStream<Uint8Array<ArrayBuffer>>({
+          start(controller) {
+            controller.enqueue(new Uint8Array(half));
+            setTimeout(() => {
+              controller.enqueue(new Uint8Array(size - half));
+              controller.close();
+            }, 6_500);
+          },
+        });
+      },
+    );
+
+    try {
+      const fd = new FormData();
+      fd.append('file', new Blob([new Uint8Array(8)]), 'slow.bin');
+
+      const response = await new NodeAdapter().send({
+        requestURL: 'http://example.test/upload',
+        method: 'POST',
+        headers: {},
+        body: fd,
+      });
+
+      expect(response.status).toBe(200);
+
+      const outcome = await Promise.race([
+        response.requestBodySettled,
+        new Promise((resolve) => setTimeout(() => resolve('hung'), 15_000)),
+      ]);
+
+      // Completed, not stalled: the upload finished once the source answered.
+      expect(outcome).toBeUndefined();
+      expect(req.ended).toBe(true);
+      expect(req.destroyed).toBe(false);
+    } finally {
+      streamSpy.mockRestore();
+      requestSpy.mockRestore();
+    }
+  }, 30000);
+
   test('the stall watchdog settles the upload outcome it gives up on', async () => {
     // `endBodyWrite` and `reportWriteErrorAfterResponse` both answer `requestBodySettled`
     // because the writer may never come back to answer it itself. The watchdog destroyed

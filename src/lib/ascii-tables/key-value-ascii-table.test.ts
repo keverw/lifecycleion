@@ -111,6 +111,28 @@ describe('KeyValueASCIITable', () => {
     expect(EOL + table.toString()).toMatchSnapshot();
   });
 
+  it('renders an empty message with more lines than a spread could pass', () => {
+    // The empty-state lines were assembled with a spread, which hands every line to
+    // `Array` as an argument; a message with enough lines exceeded the argument limit
+    // where the counted loops elsewhere in this module do not.
+    const lines = 200_000;
+    const table = new KeyValueASCIITable({
+      tableWidth: 40,
+      autoAdjustWidthWhenPossible: false,
+      emptyMessage: 'x\n'.repeat(lines - 1) + 'x',
+    });
+
+    // Every message line is rendered; the borders around them are the module's business.
+    expect(table.toString().split('\n').length).toBeGreaterThanOrEqual(lines);
+
+    const multi = new MultiColumnASCIITable(['A'], {
+      tableWidth: 40,
+      emptyMessage: 'x\n'.repeat(lines - 1) + 'x',
+    });
+
+    expect(multi.toString().split('\n').length).toBeGreaterThanOrEqual(lines);
+  });
+
   it('should handle empty tables with a very long custom empty message', () => {
     const table = new KeyValueASCIITable({
       tableWidth: 40,

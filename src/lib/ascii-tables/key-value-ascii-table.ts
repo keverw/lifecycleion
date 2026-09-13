@@ -178,7 +178,18 @@ export class KeyValueASCIITable {
         emptyRows.push(`| ${padRight('', emptyTableWidth - 4)} |`);
       }
 
-      return [separator, ...emptyRows, separator].join('\n');
+      // Pushed rather than spread, as every other line list in this module is built: a
+      // spread passes each element as an argument, and an `emptyMessage` with enough
+      // lines exceeds the argument limit.
+      const lines: string[] = [separator];
+
+      for (const row of emptyRows) {
+        lines.push(row);
+      }
+
+      lines.push(separator);
+
+      return lines.join('\n');
     }
 
     const columnWidths = this.calculateColumnWidths(options);

@@ -1662,7 +1662,10 @@ export class FileSink implements LogSink {
    * The counter is only reached when two rotations land in the same millisecond, and it is
    * bounded: after {@link MAX_ROTATION_NAME_ATTEMPTS} the caller gets the last candidate
    * anyway rather than this looping while the queue is parked. A `rename` onto an existing
-   * archive is still better than a rotation that never finishes.
+   * archive is still better than a rotation that never finishes - but it used to happen
+   * without a word, and an archive overwritten in silence is a loss an operator cannot
+   * trace. Reported as a `'setup'` failure before the rename, with the archive about to be
+   * replaced as the target: `'no_entry'`, since no line is at stake, only history.
    */
   private async reserveRotatedFileName(currentDate: string): Promise<string> {
     const timestamp = Date.now();
@@ -1680,6 +1683,25 @@ export class FileSink implements LogSink {
 
       candidate = `${base}-${String(attempt)}.log`;
     }
+
+    const failure = new FileSinkError(
+      `No free archive name after ${String(MAX_ROTATION_NAME_ATTEMPTS)} attempts; rotating over ${candidate}`,
+    );
+
+    this.lastError = failure;
+
+    reportThroughHandler(
+      this.onError === undefined
+        ? undefined
+        : () =>
+            this.onError?.({
+              kind: 'setup',
+              error: failure,
+              target: candidate,
+              disposition: 'no_entry',
+            }),
+      () => describeError(failure),
+    );
 
     return candidate;
   }
