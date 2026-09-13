@@ -58,6 +58,33 @@ export interface CookieJarJSON {
  *
  * IPs and local hostnames like localhost are never treated as public suffixes.
  */
+/**
+ * Whether every character of `text` can be written into a `Cookie` header as part of
+ * one cookie-pair: no control character (a CR LF is a header injection, a DEL or tab is
+ * refused by the header parser on the other side), no `;` (the pair delimiter), and
+ * none of `extra`.
+ */
+function isHeaderSafeCookieText(text: string, extra: string): boolean {
+  for (const char of text) {
+    const code = char.charCodeAt(0);
+
+    if (code <= 0x1f || code === 0x7f || char === ';' || extra.includes(char)) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+/** RFC 6265 §5.2.2 delta-seconds: an optional `-`, then digits only. */
+const MAX_AGE_PATTERN = /^-?\d+$/;
+
+/**
+ * The longest `Max-Age` stored, in seconds: the largest value whose expiry in
+ * milliseconds is still a safe integer.
+ */
+const MAX_COOKIE_MAX_AGE_SECONDS = Math.floor(Number.MAX_SAFE_INTEGER / 1000);
+
 export class CookieJar {
   // Outer key: apex domain from tldts (e.g. 'example.co.uk'), or the hostname
   //            itself for IPs and localhost
@@ -71,6 +98,14 @@ export class CookieJar {
    * `maxAge` or `createdAt` that is not a finite number. Such a cookie would compare
    * `now` against `NaN` in the expiry check, never be found expired, and be sent for
    * the life of the jar - see {@link fromJSON}.
+   *
+   * Also returns false for a name or value that cannot be written into a `Cookie`
+   * header as one cookie-pair: a name that is empty or holds `=`, `;`, whitespace or a
+   * control character, or a value holding `;` or a control character. The header is
+   * built as `name=value` pairs joined by `; `, so a value of `x; other=evil` was sent
+   * as two cookies, and a CR LF was a header injection. The Set-Cookie parser cannot
+   * produce these - it splits on `;` first - so this closes the programmatic path and
+   * a persisted jar that was edited or tampered with.
    *
    * Valid domains include: hostnames (example.com, localhost, myapp.test),
    * IPv4 (127.0.0.1), and IPv6 ([::1]).
@@ -86,6 +121,10 @@ export class CookieJar {
     }
 
     if (!this.hasReadableExpiry(cookie)) {
+      return false;
+    }
+
+    if (!this.hasWritableNameAndValue(cookie)) {
       return false;
     }
 
@@ -510,8 +549,11 @@ export class CookieJar {
             break;
           }
           case 'path': {
-            // RFC 6265 §5.2 — empty Path attribute is ignored (default-path applies).
-            if (attrValue !== '') {
+            // RFC 6265 §5.2.4 — a Path that is empty or does not start with `/` is
+            // ignored (default-path applies). `Path=foo` used to be stored as written;
+            // no request path matches it, so the cookie was never sent, but it was held
+            // and counted for the life of the jar.
+            if (attrValue.startsWith('/')) {
               cookie.path = attrValue;
             }
             break;
@@ -524,9 +566,16 @@ export class CookieJar {
             break;
           }
           case 'max-age': {
-            const maxAge = parseInt(attrValue, 10);
-            if (!isNaN(maxAge)) {
-              cookie.maxAge = maxAge;
+            // RFC 6265 §5.2.2 — an optional `-` then digits, and nothing else; otherwise
+            // the attribute is ignored. `parseInt` read a prefix, so `Max-Age=60abc` was
+            // a minute and `Max-Age=1e9` was one second. Capped so `createdAt + maxAge *
+            // 1000` stays a finite number of milliseconds; a longer lifetime is
+            // indistinguishable from it.
+            if (MAX_AGE_PATTERN.test(attrValue)) {
+              cookie.maxAge = Math.min(
+                parseInt(attrValue, 10),
+                MAX_COOKIE_MAX_AGE_SECONDS,
+              );
             }
             break;
           }
@@ -835,6 +884,25 @@ export class CookieJar {
     }
 
     return true;
+  }
+
+  /**
+   * Whether the cookie's name and value can be written as one `name=value` pair of a
+   * `Cookie` header. See {@link setCookie}.
+   */
+  private hasWritableNameAndValue(cookie: CookieInput): boolean {
+    const { name, value } = cookie;
+
+    if (typeof name !== 'string' || typeof value !== 'string') {
+      return false;
+    }
+
+    // A name is also non-empty and holds no `=` (its own delimiter) and no space.
+    return (
+      name !== '' &&
+      isHeaderSafeCookieText(name, '= ') &&
+      isHeaderSafeCookieText(value, '')
+    );
   }
 
   private isExpired(cookie: Cookie, now: number): boolean {

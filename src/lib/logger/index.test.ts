@@ -1831,6 +1831,48 @@ describe('Logger', () => {
       }
     });
 
+    test('an async onSinkError that logs into the failing sink after an await runs once', async () => {
+      // The guard used to clear in a synchronous `finally`, so it covered a synchronous
+      // handler only. One that awaited first found the flag down, logged, failed, and
+      // was called again on the next turn - once per turn for as long as the sink kept
+      // failing. Held until the handler settles, the second report lands on the console.
+      const captured = muteConsoleError();
+      let handlerCalls = 0;
+      const alwaysThrows = {
+        write: () => {
+          throw new Error('always');
+        },
+      };
+
+      const recursiveLogger: Logger = new Logger({
+        sinks: [alwaysThrows],
+        callProcessExit: false,
+        onSinkError: async (error) => {
+          handlerCalls++;
+          await new Promise((resolve) => setTimeout(resolve, 5));
+          recursiveLogger.error(`sink failed: ${error.message}`);
+        },
+      });
+
+      try {
+        recursiveLogger.info('Test message');
+
+        await new Promise((resolve) => setTimeout(resolve, 60));
+
+        expect(handlerCalls).toBe(1);
+        expect(captured.some((line) => line.includes('always'))).toBe(true);
+
+        // Settled, so the guard is down again and the next failure reaches the handler.
+        recursiveLogger.info('Another message');
+
+        await new Promise((resolve) => setTimeout(resolve, 60));
+
+        expect(handlerCalls).toBe(2);
+      } finally {
+        restoreConsoleError();
+      }
+    });
+
     test('survives a sink that throws a non-Error value', () => {
       // Sinks are user-supplied, so `write()` can throw anything. Reading `.message` off
       // it unguarded raised a `TypeError` that escaped out of the log call itself.

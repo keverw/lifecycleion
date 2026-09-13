@@ -993,7 +993,7 @@ export class NodeAdapter implements HTTPAdapter {
               // interceptor throw. Abort the stream signal so any partial cleanup
               // listeners run, destroy the request, and propagate as a setup failure.
               streamAbort.abort();
-              req.destroy();
+              destroyRequestQuietly(req);
               failRequest(markStreamFactoryError(error, req, request.headers));
               return;
             }
@@ -1026,7 +1026,7 @@ export class NodeAdapter implements HTTPAdapter {
                   : undefined;
 
               streamAbort.abort();
-              req.destroy();
+              destroyRequestQuietly(req);
               const abortErr = new Error(
                 'Request cancelled by streamResponse factory',
               );
@@ -1079,7 +1079,7 @@ export class NodeAdapter implements HTTPAdapter {
               //   - Non-retryable once streaming has started
               streamAbort.abort();
               destroyWritableQuietly(writable);
-              req.destroy();
+              destroyRequestQuietly(req);
               settleResponse({
                 status,
                 headers,
@@ -1429,7 +1429,7 @@ export class NodeAdapter implements HTTPAdapter {
               return;
             }
 
-            req.destroy();
+            destroyRequestQuietly(req);
             settleResponse({
               // No isRetryable veto: that would stop retrying an idempotent
               // PUT or DELETE. Delivery is unproven rather than disproven, so
@@ -1475,7 +1475,7 @@ export class NodeAdapter implements HTTPAdapter {
               return;
             }
 
-            req.destroy();
+            destroyRequestQuietly(req);
             settleResponse({
               // No isRetryable veto: that would stop retrying an idempotent
               // PUT or DELETE. Delivery is unproven rather than disproven, so

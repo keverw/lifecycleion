@@ -1298,12 +1298,18 @@ export class Logger extends EventEmitter {
     const line = (): string =>
       `Error ${context === 'write' ? 'writing to' : 'closing'} sink: ${describeError(failure)}`;
 
-    // Synchronous re-entry goes to the console rung, not back to the handler. An
-    // `onSinkError` that logs - the obvious thing to write - into a sink that throws on
-    // every `write()` reached `handleLog`, the sink, and this method again, inside its own
-    // frame, with nothing to stop it until the stack did. The format and event-handler
-    // channels both guard against the same loop; this one did neither. Bounded the same
-    // way `_isHandlingReportedError` is: synchronous re-entry only, cleared in `finally`.
+    // Re-entry goes to the console rung, not back to the handler. An `onSinkError` that
+    // logs - the obvious thing to write - into a sink that throws on every `write()`
+    // reached `handleLog`, the sink, and this method again, inside its own frame, with
+    // nothing to stop it until the stack did. The format and event-handler channels both
+    // guard against the same loop; this one did neither.
+    //
+    // Held until the handler *settles*, not until it returns. Cleared in a synchronous
+    // `finally`, the guard covered a synchronous handler only: an `async onSinkError`
+    // that awaited and then logged into the failing sink found the flag already down,
+    // and ran itself again on the next turn, once per turn, for as long as the sink kept
+    // failing. The sinks hold their `formatReportsInFlight` guard the same way for the
+    // same reason, and `reportThroughHandler` follows a promise to say when it settled.
     if (this._isHandlingSinkError) {
       reportThroughHandler(undefined, line);
 
@@ -1323,8 +1329,13 @@ export class Logger extends EventEmitter {
           : // Returned, for the reason `onEventHandlerError` above is.
             () => this.onSinkError?.(failure, context, sink),
         line,
+        () => {
+          this._isHandlingSinkError = false;
+        },
       );
-    } finally {
+    } catch {
+      // `reportThroughHandler` does not throw, but the guard must not be left up if that
+      // ever changes: a stuck flag would route every later sink failure to the console.
       this._isHandlingSinkError = false;
     }
   }

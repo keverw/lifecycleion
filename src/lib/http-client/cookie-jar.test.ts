@@ -207,6 +207,68 @@ describe('CookieJar', () => {
       );
     });
 
+    test('returns false for a name or value the Cookie header cannot carry as one pair', () => {
+      // The header is `name=value` pairs joined by `; `, so a value holding `;` was sent
+      // as two cookies, and a control character was a header injection. The Set-Cookie
+      // parser splits on `;` first and cannot produce these; `setCookie` and a persisted
+      // jar could.
+      const base = { domain: 'example.com', path: '/' };
+
+      expect(
+        jar.setCookie({ ...base, name: 'sid', value: 'x; other=evil' }),
+      ).toBe(false);
+      expect(
+        jar.setCookie({ ...base, name: 'sid', value: 'x\r\nX-Injected: 1' }),
+      ).toBe(false);
+      expect(jar.setCookie({ ...base, name: 'sid', value: 'tab\there' })).toBe(
+        false,
+      );
+      expect(jar.setCookie({ ...base, name: '', value: 'x' })).toBe(false);
+      expect(jar.setCookie({ ...base, name: 'a=b', value: 'x' })).toBe(false);
+      expect(jar.setCookie({ ...base, name: 'a;b', value: 'x' })).toBe(false);
+      expect(jar.setCookie({ ...base, name: 'a b', value: 'x' })).toBe(false);
+      expect(jar.setCookie({ ...base, name: 'a\nb', value: 'x' })).toBe(false);
+      expect(
+        jar.setCookie({
+          ...base,
+          name: 42 as unknown as string,
+          value: 'x',
+        }),
+      ).toBe(false);
+
+      expect(jar.getAllCookies()).toHaveLength(0);
+
+      // What the header can carry: an empty value, and the characters RFC 6265 allows.
+      expect(jar.setCookie({ ...base, name: 'empty', value: '' })).toBe(true);
+      expect(
+        jar.setCookie({ ...base, name: 'sid', value: 'a-b_c.d:e/f=g+h' }),
+      ).toBe(true);
+    });
+
+    test('getCookieHeaderString stays one pair per cookie', () => {
+      const restored = jar.fromJSON({
+        cookies: [
+          {
+            name: 'sid',
+            value: 'x; other=evil',
+            domain: 'example.com',
+            path: '/',
+            createdAt: Date.now(),
+          },
+          {
+            name: 'ok',
+            value: '1',
+            domain: 'example.com',
+            path: '/',
+            createdAt: Date.now(),
+          },
+        ],
+      });
+
+      expect(restored).toBe(1);
+      expect(jar.getCookieHeaderString('https://example.com/')).toBe('ok=1');
+    });
+
     test('returns false and does not store for garbage domain', () => {
       const isCookieStored = jar.setCookie({
         name: 'a',
@@ -369,6 +431,52 @@ describe('CookieJar', () => {
         '/',
       );
       expect(jar.getCookieFor('sid', 'https://example.com/')).toBeDefined();
+    });
+
+    test('RFC 6265 §5.2.4 — a Path without a leading slash is ignored; default-path applies', () => {
+      jar.parseSetCookieHeader('sid=1; Path=foo', 'https://example.com/app/page');
+
+      const stored = jar.getAllCookies();
+
+      expect(stored).toHaveLength(1);
+      expect(stored[0]?.path).toBe('/app');
+      expect(jar.getCookieFor('sid', 'https://example.com/app/x')?.value).toBe(
+        '1',
+      );
+    });
+
+    test('RFC 6265 §5.2.2 — a Max-Age that is not digits is ignored', () => {
+      // `parseInt` read a prefix: `60abc` was a minute and `1e9` was one second.
+      jar.parseSetCookieHeader('a=1; Max-Age=60abc', 'https://example.com');
+      jar.parseSetCookieHeader('b=1; Max-Age=1e9', 'https://example.com');
+      jar.parseSetCookieHeader('c=1; Max-Age=', 'https://example.com');
+      jar.parseSetCookieHeader('d=1; Max-Age=-', 'https://example.com');
+      jar.parseSetCookieHeader('e=1; Max-Age=60', 'https://example.com');
+      jar.parseSetCookieHeader('f=1; Max-Age=-5', 'https://example.com');
+
+      const byName = new Map(jar.getAllCookies().map((c) => [c.name, c]));
+
+      expect(byName.get('a')?.maxAge).toBeUndefined();
+      expect(byName.get('b')?.maxAge).toBeUndefined();
+      expect(byName.get('c')?.maxAge).toBeUndefined();
+      expect(byName.get('d')?.maxAge).toBeUndefined();
+      expect(byName.get('e')?.maxAge).toBe(60);
+      // A negative Max-Age still deletes.
+      expect(byName.has('f')).toBe(false);
+      expect(jar.clearExpiredCookies()).toBe(0);
+    });
+
+    test('a Max-Age past what milliseconds can hold is capped, not refused', () => {
+      jar.parseSetCookieHeader(
+        `long=1; Max-Age=${'9'.repeat(40)}`,
+        'https://example.com',
+      );
+
+      const stored = jar.getCookieFor('long', 'https://example.com');
+
+      expect(stored).toBeDefined();
+      expect(Number.isFinite(stored?.maxAge)).toBe(true);
+      expect(jar.clearExpiredCookies()).toBe(0);
     });
 
     test('RFC 6265 §5.2 — empty Path= is ignored; default-path still applies', () => {
