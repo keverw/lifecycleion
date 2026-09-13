@@ -1837,6 +1837,8 @@ logger.registerReportErrorListener('Uncaught exception', {
 
 **Scope:** this listens on the platform `'error'` channel, so in a browser it also receives genuine uncaught script errors, not just Lifecycleion's own callback reports. Those can arrive with no `error` object. The event's `message` is logged instead. With the default `preventDefault: true`, the console line for that traffic is suppressed as well.
 
+The channel is open on purpose. Any `'error'` event dispatched on the global object is taken as a report and logged, including a plain `new Event('error')` with no payload - it is logged as `Unknown error reported by an error event` and, with the default `preventDefault: true`, cancelled. That is the reporting pattern this library uses everywhere: anything can announce a failure on the global channel rather than swallow it, and a registered logger records it. The two things the listener leaves alone are signals that belong to someone else - a `CustomEvent` named `'error'`, and an untrusted `error` event on an element - because those are dispatched to be branched on, not reported. An application that wants a global `'error'` event of its own to stay uncancelled should dispatch a `CustomEvent`.
+
 Resource-load failures (a broken `<img>` or `<script>` tag) are **not** included by default. Those `error` events fire on the element and do not bubble, so a global listener registered without capture never sees them. They behave exactly as they would with no logger involved: the element's own handlers run and the browser reports the failed request in the console.
 
 Set `captureResourceErrors: true` to take them as well:

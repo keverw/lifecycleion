@@ -538,6 +538,14 @@ export class Logger extends EventEmitter {
       // Keyed on the target being an element rather than on it not being `globalThis`,
       // because on Node the reports meant for this listener arrive through the polyfill's
       // backing `EventTarget` and so do not target the global object either.
+      //
+      // Deliberately *not* excluded: a bare, untrusted `new Event('error')` dispatched on
+      // the global object with no payload. It is logged as an unknown error and, by
+      // default, cancelled. The channel is open to anything that wants to report rather
+      // than swallow a failure - that is the library's reporting pattern - and the global
+      // object is where reports go. A page that wants a global `'error'` event of its own
+      // to stay uncancelled dispatches a `CustomEvent`, which is left alone above. See
+      // the "Scope" note in the logger docs.
       if (
         resource === undefined &&
         (isElementTarget(event) || isForeignCustomEvent(event))
