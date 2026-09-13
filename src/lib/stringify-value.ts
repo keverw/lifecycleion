@@ -4,7 +4,7 @@ import {
   type ForwardingAliases,
   type RedactPath,
 } from './internal/redact-paths';
-import { normalizeAlongRedactPaths } from './logger/utils/redaction';
+import { normalizeAlongRedactPaths } from './internal/redact-normalization';
 import { isPlainContainer } from './internal/is-plain-container';
 import { stringifyTemplateValue } from './internal/stringify-template-value';
 import {
