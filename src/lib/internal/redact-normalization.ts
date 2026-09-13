@@ -359,12 +359,11 @@ export function normalizeAlongRedactPaths(
             key,
           );
 
-          try {
-            defineEntry(container, key, REDACTION_FAILED_MARKER);
-          } catch {
-            // The parent is the bag or a copy this module built; see the refused-copy
-            // branch below.
-          }
+          // Not guarded: the parent is the bag or a copy this module built, both plain
+          // and writable, so this cannot fail - and if it does, the throw is the
+          // fallback, since every caller answers a throw out of this pass by failing the
+          // whole value closed. See the install below.
+          defineEntry(container, key, REDACTION_FAILED_MARKER);
 
           continue;
         }
@@ -400,12 +399,8 @@ export function normalizeAlongRedactPaths(
             key,
           );
 
-          try {
-            defineEntry(container, key, REDACTION_FAILED_MARKER);
-          } catch {
-            // The parent is the bag or a copy this module built, both plain and
-            // writable, so this cannot fail; the read guards in the walk are the backstop.
-          }
+          // Not guarded, for the reason the install below gives.
+          defineEntry(container, key, REDACTION_FAILED_MARKER);
 
           continue;
         }
@@ -416,11 +411,14 @@ export function normalizeAlongRedactPaths(
         // walk hands that value back by reference - so the original reaches
         // `redactedParams` with every key a property read can still resolve on it, while
         // the parent that was descended holds a copy carrying none of them.
-        try {
-          defineEntry(container, key, copy);
-        } catch {
-          continue;
-        }
+        //
+        // Not guarded. A failed install skipped with the parent's forwarding getter onto
+        // the caller's own container still in place - the same shape as a skipped read,
+        // on the write - and the parent is one this module built, so a failure here is a
+        // broken invariant rather than hostile input. The throw is the fail-closed
+        // answer: `applyRedaction` marks every named key, and `stringifyValue`,
+        // `redactValue` and `errorToString` withhold the whole value.
+        defineEntry(container, key, copy);
 
         let alreadyUnder = descended.get(copy);
 
@@ -467,7 +465,10 @@ interface NormalizationFrame {
  * copied is. The root bag has no parent; what the walk had not reached beneath it is
  * covered by the frames stacked under it, since a root child is only ever reached by
  * being pushed. A parent is the bag or a copy this module built, so the write cannot
- * fail; guarded regardless, as every write on this path is.
+ * fail - and it is not guarded, for the reason the walk's own installs are not: a failure
+ * here is a broken invariant, and the throw reaches the caller, which fails the whole
+ * value closed. A swallowed failure would leave the parent's forwarding getter onto the
+ * caller's own container in place, on exactly the frame this was called to withhold.
  */
 function withholdUnreached(
   current: NormalizationFrame,
@@ -480,11 +481,7 @@ function withholdUnreached(
       continue;
     }
 
-    try {
-      defineEntry(frame.parent, frame.key, REDACTION_FAILED_MARKER);
-    } catch {
-      // See above.
-    }
+    defineEntry(frame.parent, frame.key, REDACTION_FAILED_MARKER);
   }
 }
 

@@ -1004,16 +1004,17 @@ describe('HTTPClient — basic HTTP methods', () => {
   test('silence before the wait began counts toward the stall bound', async () => {
     // The first arm always slept for the whole bound, so an upload that had gone quiet
     // long before the early response arrived was given a further full bound from the
-    // moment the wait began. The clock is read on entry now: a hop that answers 60ms
-    // after dispatch and never reports progress has 60ms of silence already, and the
-    // wait under a 100ms bound expires about 40ms later, not 100ms.
+    // moment the wait began. The clock is read on entry now: a hop that answers 200ms
+    // after dispatch and never reports progress has 200ms of silence already, and the
+    // wait under a 300ms bound expires about 100ms later, not 300ms. The margins are
+    // wide because a loaded runner adds latency; the old behaviour lands near 500ms.
     let hop = 0;
 
     const adapter: HTTPAdapter = {
       getType: () => 'fetch',
       send: async (_request: AdapterRequest): Promise<AdapterResponse> => {
         hop++;
-        await new Promise((resolve) => setTimeout(resolve, 60));
+        await new Promise((resolve) => setTimeout(resolve, 200));
 
         return {
           status: 307,
@@ -1036,7 +1037,7 @@ describe('HTTPClient — basic HTTP methods', () => {
         adapter,
         baseURL: 'http://example.test',
         followRedirects: true,
-        timeout: 100,
+        timeout: 300,
       })
         .post('/upload')
         .json({ a: 1 })
@@ -1046,9 +1047,9 @@ describe('HTTPClient — basic HTTP methods', () => {
 
       expect(hop).toBe(1);
       expect(response.isTimeout).toBe(true);
-      // One bound from dispatch, not one bound from the response: 100ms, not 160ms.
-      expect(elapsed).toBeGreaterThanOrEqual(90);
-      expect(elapsed).toBeLessThan(150);
+      // One bound from dispatch, not one bound from the response: ~300ms, not ~500ms.
+      expect(elapsed).toBeGreaterThanOrEqual(280);
+      expect(elapsed).toBeLessThan(450);
     } finally {
       globalThis.removeEventListener('error', onGlobalError);
     }
