@@ -520,13 +520,17 @@ export class BaseHTTPClient {
       abortController.abort(reason);
     });
 
-    // Compose user signal with our internal abort controller
+    // Compose user signal with our internal abort controller. Every composition made
+    // for this request - this one and one per attempt - registers how to release its
+    // listeners here, and the request's `finally` runs them; see `_composeSignals`.
+    const signalReleasers: Array<() => void> = [];
     let cancelSignal: AbortSignal = abortController.signal;
 
     if (options.signal) {
       cancelSignal = this._composeSignals(
         options.signal,
         abortController.signal,
+        signalReleasers,
       );
     }
 
@@ -723,6 +727,7 @@ export class BaseHTTPClient {
             request: currentInterceptedRequest,
             timeout,
             cancelSignal,
+            signalReleasers,
             uploadActivity,
             retryPolicy,
             requestID,
@@ -1241,6 +1246,10 @@ export class BaseHTTPClient {
       return finalResponse;
     } finally {
       this._tracker.remove(requestID);
+
+      for (const release of signalReleasers) {
+        release();
+      }
     }
   }
 
@@ -1345,6 +1354,8 @@ export class BaseHTTPClient {
     timeout: number;
     /** Cancellation signal from user cancel / cancelAll / external AbortSignal — NOT timeout. Also used to abort retry delays. */
     cancelSignal: AbortSignal;
+    /** Where each attempt's signal composition registers its release; see `_composeSignals`. */
+    signalReleasers: Array<() => void>;
     retryPolicy: RetryPolicy | null;
     requestID: string;
     options: ResolvedBuilderOptions;
@@ -1394,6 +1405,7 @@ export class BaseHTTPClient {
       request: baseRequest,
       timeout,
       cancelSignal,
+      signalReleasers,
       uploadActivity,
       retryPolicy: policy,
       requestID,
@@ -1556,6 +1568,7 @@ export class BaseHTTPClient {
       const attemptSignal = this._composeSignals(
         cancelSignal,
         timeoutController.signal,
+        signalReleasers,
       );
 
       // Set internal headers unconditionally on every attempt — this is
@@ -2963,20 +2976,62 @@ export class BaseHTTPClient {
     await this._errorObservers.run(error, request, phase);
   }
 
-  private _composeSignals(a: AbortSignal, b: AbortSignal): AbortSignal {
+  /**
+   * Compose two abort signals into one that aborts when either does.
+   *
+   * On a runtime with `AbortSignal.any` that is all this is. The fallback for older
+   * runtimes listens on both sources and mirrors the first abort, and the listeners it
+   * adds are released through `releasers` - run by `_execute` once the request has
+   * ended, since a listener on the caller's own signal, or on the request's cancel
+   * signal, otherwise outlives the request it was added for: nothing ever aborts on the
+   * success path, so a `{ once: true }` listener never fires and is never removed. A
+   * caller's signal reused across requests accumulated one listener per request until
+   * the runtime warned of a leak.
+   *
+   * Released when the request ends rather than when the attempt does: an attempt's
+   * signal stays in an adapter's hands after `send()` resolves - `NodeAdapter` listens
+   * on it for the settle-deadline teardown of an early-ack upload - and the attempt loop
+   * has several exits, where the request has one. What the fallback gives up by that is
+   * only a cancel arriving *after* the response was handed back, which would no longer
+   * reach an upload still trailing on that attempt's socket; the adapter's own stall
+   * watchdog ends such an upload regardless.
+   */
+  private _composeSignals(
+    a: AbortSignal,
+    b: AbortSignal,
+    releasers: Array<() => void>,
+  ): AbortSignal {
     if (typeof AbortSignal.any === 'function') {
       return AbortSignal.any([a, b]);
     }
 
     const controller = new AbortController();
 
+    /**
+     * Mirror one source signal's abort onto the composed one.
+     *
+     * An unreadable reason degrades to `undefined`, which is already correct:
+     * spec and runtimes normalize that to a fresh `AbortError` DOMException,
+     * exactly what a bare `abort()` produces.
+     */
+    const abort = (signal: AbortSignal) =>
+      controller.abort(readObjectMember(signal, 'reason'));
+
     if (a.aborted) {
-      abortComposedSignal(controller, a);
+      abort(a);
     } else if (b.aborted) {
-      abortComposedSignal(controller, b);
+      abort(b);
     } else {
-      relayAbort(a, controller);
-      relayAbort(b, controller);
+      const onAbortA = () => abort(a);
+      const onAbortB = () => abort(b);
+
+      a.addEventListener('abort', onAbortA, { once: true });
+      b.addEventListener('abort', onAbortB, { once: true });
+
+      releasers.push(() => {
+        a.removeEventListener('abort', onAbortA);
+        b.removeEventListener('abort', onAbortB);
+      });
     }
 
     return controller.signal;
@@ -3306,83 +3361,6 @@ type UploadSettleWait = 'settled' | 'cancelled' | 'deadline';
 /** When a request's upload last reported progress, as epoch ms. One per request. */
 interface UploadActivity {
   at: number;
-}
-
-/**
- * Fallback composition for runtimes without `AbortSignal.any`.
- *
- * One listener per *source* signal, for the life of that signal, fanning out to every
- * composed signal still alive - not one listener per composition. The cancel signal is
- * composed once per attempt, and a caller's own signal once per `send()`, so the old
- * `{ once: true }` listener per composition was never removed on the success path: a
- * signal reused across requests, or a long redirect-plus-retry chain on one, accumulated
- * a listener per attempt until the runtime's listener-count warning fired. The composed
- * signals are held weakly, the way the spec has `AbortSignal.any` hold its sources'
- * dependents, so a finished attempt's signal can be collected while the source lives on.
- *
- * `composedControllers` keeps each composed controller reachable from its own signal:
- * a signal does not reference its controller, so a weak reference to the controller
- * alone would be collected while the signal was still in an adapter's hands, and the
- * abort would never arrive.
- */
-const abortRelays = new WeakMap<AbortSignal, Set<WeakRef<AbortSignal>>>();
-const composedControllers = new WeakMap<AbortSignal, AbortController>();
-
-/**
- * Mirror one source signal's abort onto the composed one.
- *
- * An unreadable reason degrades to `undefined`, which is already correct: spec and
- * runtimes normalize that to a fresh `AbortError` DOMException, exactly what a bare
- * `abort()` produces.
- */
-function abortComposedSignal(
-  controller: AbortController,
-  source: AbortSignal,
-): void {
-  controller.abort(readObjectMember(source, 'reason'));
-}
-
-function relayAbort(source: AbortSignal, controller: AbortController): void {
-  composedControllers.set(controller.signal, controller);
-
-  let dependents = abortRelays.get(source);
-
-  if (dependents === undefined) {
-    const created = new Set<WeakRef<AbortSignal>>();
-
-    dependents = created;
-    abortRelays.set(source, created);
-
-    source.addEventListener(
-      'abort',
-      () => {
-        for (const ref of created) {
-          const composed = ref.deref();
-          const owner =
-            composed === undefined
-              ? undefined
-              : composedControllers.get(composed);
-
-          if (owner !== undefined && !owner.signal.aborted) {
-            abortComposedSignal(owner, source);
-          }
-        }
-
-        created.clear();
-      },
-      { once: true },
-    );
-  } else {
-    // Prune the dependents that have already been collected, so a source that is never
-    // aborted does not hold a dead reference per attempt it was ever composed into.
-    for (const ref of dependents) {
-      if (ref.deref() === undefined) {
-        dependents.delete(ref);
-      }
-    }
-  }
-
-  dependents.add(new WeakRef(controller.signal));
 }
 
 /**

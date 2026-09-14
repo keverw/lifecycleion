@@ -2247,12 +2247,12 @@ describe('HTTPClient — cancel reason via AbortError-throwing adapters', () => 
     }
   });
 
-  test('a caller signal reused across sends gets one abort listener when AbortSignal.any is unavailable', async () => {
+  test('a caller signal reused across sends is left with no abort listener when AbortSignal.any is unavailable', async () => {
     // The fallback composition used to add a `{ once: true }` listener to the caller's
     // signal per `send()`, and never remove it on success - so a signal reused for the
     // life of a page or a worker accumulated one listener per request until the
-    // runtime's listener-count warning fired. One relay per source signal now fans out
-    // to the composed signals still alive.
+    // runtime's listener-count warning fired. Every request now releases the listeners
+    // it added when it ends, so the count is measured net of removals.
     const adapter: HTTPAdapter = {
       getType: () => 'mock',
       send: async (request: AdapterRequest): Promise<AdapterResponse> => {
@@ -2278,9 +2278,17 @@ describe('HTTPClient — cancel reason via AbortError-throwing adapters', () => 
       'any',
     );
     const addEventListenerSpy = spyOn(controller.signal, 'addEventListener');
+    const removeEventListenerSpy = spyOn(
+      controller.signal,
+      'removeEventListener',
+    );
+    const countAbortCalls = (calls: unknown[][]): number =>
+      calls.filter((call) => call[0] === 'abort').length;
     const abortListenersAdded = (): number =>
-      addEventListenerSpy.mock.calls.filter((call) => call[0] === 'abort')
-        .length;
+      countAbortCalls(addEventListenerSpy.mock.calls);
+    const abortListenersOutstanding = (): number =>
+      abortListenersAdded() -
+      countAbortCalls(removeEventListenerSpy.mock.calls);
 
     Object.defineProperty(AbortSignal, 'any', {
       value: undefined,
@@ -2297,10 +2305,11 @@ describe('HTTPClient — cancel reason via AbortError-throwing adapters', () => 
         expect(res.status).toBe(200);
       }
 
-      expect(abortListenersAdded()).toBe(1);
+      // One per request while it ran, none left behind after.
+      expect(abortListenersAdded()).toBe(25);
+      expect(abortListenersOutstanding()).toBe(0);
 
-      // The relay still delivers: an abort after all those sends cancels the one in
-      // flight, with the caller's reason intact.
+      // And the next request still hears the abort, with the caller's reason intact.
       const builder = client
         .get('https://example.com/slow')
         .signal(controller.signal);
@@ -2310,9 +2319,10 @@ describe('HTTPClient — cancel reason via AbortError-throwing adapters', () => 
 
       expect(res.isCancelled).toBe(true);
       expect(builder.error?.cancelReason).toBe('user_navigated_away');
-      expect(abortListenersAdded()).toBe(1);
+      expect(abortListenersOutstanding()).toBe(0);
     } finally {
       addEventListenerSpy.mockRestore();
+      removeEventListenerSpy.mockRestore();
 
       if (originalAnyDescriptor) {
         Object.defineProperty(AbortSignal, 'any', originalAnyDescriptor);
@@ -2320,13 +2330,15 @@ describe('HTTPClient — cancel reason via AbortError-throwing adapters', () => 
     }
   });
 
-  test('a retry chain adds one abort listener per signal when AbortSignal.any is unavailable', async () => {
-    // The same relay covers the per-attempt composition: every attempt composes the
+  test('a retry chain leaves no abort listener on any signal when AbortSignal.any is unavailable', async () => {
+    // The same release covers the per-attempt composition: every attempt composes the
     // request's cancel signal - itself a composition, so the caller's signal never sees
-    // these - with its own timeout signal, and used to add one listener per attempt to
-    // that cancel signal. Counted per signal across the whole send, at the prototype,
-    // since the cancel signal is internal: the old code left fifteen on it. Net of
-    // removals, because the retry delay adds one to the same signal and takes it off.
+    // these - with its own timeout signal, and used to leave one listener per attempt
+    // on that cancel signal for as long as the signal lived. Counted per signal across
+    // the whole send, at the prototype, since the cancel signal is internal, and net of
+    // removals: the old code left fifteen on it, and the request now takes every one
+    // of them off when it ends. Within a request the count still grows by one per
+    // attempt, which is the bounded case this accepts.
     let attempts = 0;
     const adapter: HTTPAdapter = {
       getType: () => 'mock',
@@ -2418,9 +2430,9 @@ describe('HTTPClient — cancel reason via AbortError-throwing adapters', () => 
 
       expect(res.status).toBe(200);
       expect(attempts).toBe(15);
-      // Some signal was composed into every attempt, so the relay was exercised.
+      // Some signal was composed into every attempt, so the release was exercised.
       expect(abortListenersPerSignal.size).toBeGreaterThanOrEqual(15);
-      expect(Math.max(...abortListenersPerSignal.values())).toBe(1);
+      expect(Math.max(...abortListenersPerSignal.values())).toBe(0);
     } finally {
       Object.defineProperty(
         EventTarget.prototype,
@@ -2439,12 +2451,11 @@ describe('HTTPClient — cancel reason via AbortError-throwing adapters', () => 
     }
   });
 
-  test('the fallback relay survives collection of finished compositions', async () => {
-    // The composed signals are held weakly, so a source that outlives hundreds of
-    // finished requests may find most of its dependents collected by the time it
-    // aborts. A dead reference must be skipped, not thrown on, and the one request still
-    // in flight must still be cancelled. Bun exposes a synchronous full collection;
-    // elsewhere the test still runs, it just cannot force the point.
+  test('a caller signal that outlives hundreds of requests still delivers an abort', async () => {
+    // A source that outlives hundreds of finished requests, each of which released
+    // its listener, with a full collection forced in between where the runtime offers
+    // one: the request still in flight must still be cancelled, with the caller's
+    // reason, and nothing released earlier may interfere.
     const adapter: HTTPAdapter = {
       getType: () => 'mock',
       send: async (request: AdapterRequest): Promise<AdapterResponse> => {
