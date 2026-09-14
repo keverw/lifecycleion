@@ -175,7 +175,18 @@ export function snapshotList(value: unknown): unknown[] | null {
       return null;
     }
 
-    for (const key of Object.keys(value)) {
+    const ownKeys = Object.keys(value);
+
+    // `claimed` is already under the cap, and a real list has one own key per element
+    // plus the odd named property - so a key list past the cap is a `Proxy` whose
+    // `ownKeys` invented them, and the scan below would walk every one. The allocation
+    // has already happened by the time this can be asked; what is refused is the work
+    // after it, the same answer `describeContainer` gives an object with that many keys.
+    if (ownKeys.length > MAX_REDACT_LIST_ENTRIES) {
+      return null;
+    }
+
+    for (const key of ownKeys) {
       // Own index keys only. A named property on an array - `list.note = 'x'` - is not an
       // element and says nothing about the length.
       //

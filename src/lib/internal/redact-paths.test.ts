@@ -1065,6 +1065,25 @@ describe('snapshotList self-contradiction check', () => {
     expect(parseRedactPaths(list)).toEqual(paths('password'));
   });
 
+  test('refuses a list whose own keys outnumber the cap, whatever its length claims', () => {
+    // The length check bounds the element copy; this bounds the contradiction scan that
+    // runs before it. A `Proxy` over a short array whose `ownKeys` invents a hundred
+    // thousand named keys used to be scanned key by key, and passed.
+    const keys = Array.from(
+      { length: 100_001 },
+      (_, index) => `n${String(index)}`,
+    );
+    const liar = new Proxy(['password'], {
+      ownKeys: () => ['length', '0', ...keys],
+      getOwnPropertyDescriptor: (target, property) =>
+        property === 'length' || property === '0'
+          ? Reflect.getOwnPropertyDescriptor(target, property)
+          : { value: 1, enumerable: true, configurable: true, writable: true },
+    });
+
+    expect(parseRedactPaths(liar)).toBeNull();
+  });
+
   test('accepts a named property past the array index range', () => {
     const list = ['password'];
 

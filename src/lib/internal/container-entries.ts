@@ -153,5 +153,19 @@ export function isArrayIndexKey(key: string): boolean {
  * ordinary property read. That divergence is the whole reason this exists.
  */
 export function namedArrayKeys(source: object): string[] {
-  return Object.keys(source).filter((key) => !isArrayIndexKey(key));
+  const keys = Object.keys(source);
+
+  // The same bound `describeContainer` holds an object to, for the same reason: the
+  // list a Proxy's `ownKeys` hands over cannot be cut short, but the filter over it can
+  // be refused. Thrown rather than returned, because every caller already wraps this in
+  // the guard that treats a refused enumeration as "could not be read" - reported and
+  // marked - and that is the right answer for a list this long too. A real array does
+  // not carry this many named properties.
+  if (keys.length > MAX_REDACTION_ENTRIES) {
+    throw new Error(
+      `array has ${String(keys.length)} own keys, more than the ${String(MAX_REDACTION_ENTRIES)} any walk may visit; its named properties were not read`,
+    );
+  }
+
+  return keys.filter((key) => !isArrayIndexKey(key));
 }

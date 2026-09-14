@@ -243,4 +243,24 @@ describe('namedArrayKeys', () => {
   it('reports nothing for an ordinary array', () => {
     expect(namedArrayKeys(['a', 'b'])).toEqual([]);
   });
+
+  it('refuses an array claiming more own keys than any walk may visit', () => {
+    // The bound `describeContainer` holds an object to, on the filter that would
+    // otherwise run over every invented key. Thrown, because every caller treats a
+    // throwing enumeration as a failed read and marks it.
+    const keys = Array.from(
+      { length: MAX_REDACTION_ENTRIES + 1 },
+      (_, index) => `k${String(index)}`,
+    );
+    const liar = new Proxy([], {
+      // `length` is non-configurable on the target, so the trap must report it too.
+      ownKeys: () => ['length', ...keys],
+      getOwnPropertyDescriptor: (target, property) =>
+        property === 'length'
+          ? Reflect.getOwnPropertyDescriptor(target, property)
+          : { value: 1, enumerable: true, configurable: true, writable: true },
+    });
+
+    expect(() => namedArrayKeys(liar)).toThrow(String(MAX_REDACTION_ENTRIES));
+  });
 });
