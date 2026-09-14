@@ -287,7 +287,7 @@ interface HTTPResponse<T = unknown> {
 
 #### Uploads That Outlive the Response
 
-Most REST APIs read and process the whole upload before they answer, so by the time you have a response the body is long gone out. If that is your situation, ignore `requestBodySettled`: it is there on any request that had a body, and on that shape it has nothing to tell you. It resolves with `undefined`. It exists for the uncommon shapes where the answer can arrive first: early-ack, unbuffered, and duplex endpoints, and `NodeAdapter` only.
+Most REST APIs read and process the whole upload before they answer, so by the time you have a response the body is long gone out. If that is your situation, ignore `requestBodySettled`: it is there on any request that had a body, and on that shape it has nothing to tell you. It resolves with `undefined`. It exists for the uncommon shapes where the answer can arrive first: early-ack, unbuffered, and duplex endpoints, and `NodeAdapter` only. `FetchAdapter` never sets it - `fetch()` gives it nothing to settle from - and the redirect and retry waits described below are skipped on an adapter that does not set it; see [FetchAdapter](#fetchadapter-default).
 
 With request buffering disabled, as with nginx `proxy_request_buffering off` or any endpoint that acks a streaming upload as soon as it has what it needs, the answer arrives while the upload is still going. The response is real and is delivered immediately, and what happens to the rest of the body afterwards used to be invisible: it can fail on its own (a `File` that yields fewer bytes than its `Blob.size` puts a body on the wire short of its `Content-Length`), or be cut short by the adapter's stall watchdog seconds after you already read a clean `2xx`.
 
@@ -718,6 +718,10 @@ When a `CookieJar` is attached to the client:
 2. After every response the `set-cookie` headers are parsed and stored in the jar.
 3. Cookies are maintained across redirect hops.
 
+**Secure cookies and the request scheme.** The `Secure` attribute is enforced on both sides of the jar. On the way out, `getCookiesFor()` withholds a `Secure` cookie unless the request scheme is `https:` or `wss:`. On the way in, `parseSetCookieHeader()` and `processResponseHeaders()` follow RFC 6265bis: a `Secure` cookie from a response over `http:` (or any scheme other than `https:` / `wss:`) is refused, and a non-`Secure` cookie from such a response is refused when the jar already holds a `Secure` cookie of the same name whose path covers the new one and whose domain domain-matches the new one in either direction - including a `Max-Age=0` or past `Expires` that would evict it. So a plain-text hop, a mixed `http`/`https` session, or an attacker on the wire cannot plant, replace or delete the `https:` session cookie ("cookie forcing"). A response over `https:` may still replace or downgrade its own cookie, as browsers allow. The `__Secure-` prefix requires `Secure`, and `__Host-` requires `Secure`, no `Domain` attribute and `Path=/`, matched case-insensitively; a cookie that claims a prefix without meeting it is refused. `setCookie()` has no request URL to judge and is not scheme-gated: a cookie set programmatically or restored through `fromJSON()` is stored as given. `localhost` over `http:` is not treated as secure - the jar would never have sent a `Secure` cookie there either, so store-time and send-time agree.
+
+**SameSite is stored, not enforced.** The `SameSite` attribute is parsed and kept on the stored cookie for callers to read, but `getCookiesFor()` does not consult it. This jar serves a client, not a browser: there is no navigation, no top-level "site" to compare against, and no notion of a cross-site request, so every cookie whose domain, path, expiry and `Secure` rules match is sent, whatever its `SameSite` value.
+
 ### CookieJar API
 
 ```typescript
@@ -981,6 +985,8 @@ const client = new HTTPClient({ adapter: new FetchAdapter() });
 ```
 
 No configuration options. Adapter-level behavior is controlled through `HTTPClientConfig`.
+
+**Upload visibility.** `fetch()` exposes neither upload progress nor the moment the request body finished going out. `onUploadProgress` therefore fires `0` when the request is dispatched and `1` when `fetch()` resolves - which is when the _response headers_ arrive, not a confirmation that the body is on the wire. For the same reason the adapter never sets `requestBodySettled` (see [Uploads That Outlive the Response](#uploads-that-outlive-the-response)), so the client's wait before a followed `307`/`308` hop or a retry does not apply on this adapter: a server that answers a large `POST` before consuming it - an early `307`, a `503` during the upload - gets the next hop or attempt dispatched while the runtime may still be sending the first body. Every `AdapterRequest` body is in memory (a string, a `Uint8Array` or a `FormData`), so nothing is lost or corrupted by that; it is the double-send the wait exists to avoid that this adapter cannot rule out. On Node use `NodeAdapter`, which reports both, for uploads to early-ack endpoints.
 
 **Browser constraints (enforced at client construction):**
 

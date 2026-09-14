@@ -3,6 +3,7 @@ import crypto from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import * as http from 'node:http';
 import * as https from 'node:https';
+import type { Socket } from 'node:net';
 import { Writable } from 'node:stream';
 import { NodeAdapter } from './node-adapter';
 import type { NodeAdapterConfig } from './node-adapter';
@@ -5303,6 +5304,164 @@ describe('NodeAdapter via HTTPClient', () => {
 // Low-level adapter.send() tests — contract details the client layer would
 // obscure (StreamResponseInfo shape, abort timing, status pass-through, etc.)
 // ---------------------------------------------------------------------------
+
+describe('NodeAdapter via HTTPClient — early 307 with a cookie jar', () => {
+  test('waits for the upload to settle, then carries the hop-1 cookie onto hop 2', async () => {
+    // The combination the pieces were each tested for: a real server answers a large
+    // `POST` with `307` before reading the body, the client waits on the hop's
+    // `requestBodySettled` before dispatching hop 2, and the `Set-Cookie` from hop 1
+    // rides onto hop 2 through the jar. Ordering is asserted on the client's own clock:
+    // the hop-1 outcome settles before attempt 2 starts.
+    //
+    // A raw socket rather than `node:http`: the server must answer while the request
+    // body is still arriving, and still count every byte of it afterwards, which an
+    // `IncomingMessage` that has already been answered does not promise on every runtime.
+    const net = await import('node:net');
+    const bodySize = 8 * 1024 * 1024;
+    let uploadBytes = 0;
+    let uploadEndedAt: number | undefined;
+    let secondCookieHeader: string | undefined;
+    const openSockets = new Set<Socket>();
+
+    const server = net.createServer((socket) => {
+      openSockets.add(socket);
+      socket.on('close', () => openSockets.delete(socket));
+
+      let buffered = Buffer.alloc(0);
+      let headerLength = -1;
+      let contentLength = 0;
+      let bodyBytes = 0;
+      let isUpload = false;
+
+      socket.on('data', (chunk: Buffer) => {
+        if (headerLength === -1) {
+          buffered = Buffer.concat([buffered, chunk]);
+          const headerEnd = buffered.indexOf('\r\n\r\n');
+
+          if (headerEnd === -1) {
+            return;
+          }
+
+          headerLength = headerEnd + 4;
+          const head = buffered.subarray(0, headerEnd).toString('latin1');
+          const [requestLine = '', ...headerLines] = head.split('\r\n');
+          const headers = new Map(
+            headerLines.map((line) => {
+              const separator = line.indexOf(':');
+
+              return [
+                line.slice(0, separator).trim().toLowerCase(),
+                line.slice(separator + 1).trim(),
+              ];
+            }),
+          );
+
+          isUpload = requestLine.startsWith('POST /upload ');
+          contentLength = Number(headers.get('content-length') ?? '0');
+
+          // Both hops are answered at the headers, both keep-alive, and neither socket
+          // is ended from here. A `307` resends the `POST`, so hop 2 is an upload too,
+          // and it is hop 2's outcome the final response reports. On `Connection:
+          // close` Node's client finalizes the socket's writable side as soon as the
+          // response is consumed, and the writer reports the body cut short; ending
+          // the socket the instant the last byte lands races the writer's own finish
+          // the same way. The client closes them once its writer is finished.
+          if (isUpload) {
+            socket.write(
+              'HTTP/1.1 307 Temporary Redirect\r\nLocation: /second\r\nSet-Cookie: hop=1; Path=/\r\nConnection: keep-alive\r\nContent-Length: 0\r\n\r\n',
+            );
+          } else {
+            secondCookieHeader = headers.get('cookie');
+            socket.write(
+              'HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nConnection: keep-alive\r\nContent-Length: 2\r\n\r\nok',
+            );
+          }
+
+          chunk = buffered.subarray(headerLength);
+        }
+
+        bodyBytes += chunk.length;
+
+        if (isUpload) {
+          uploadBytes = bodyBytes;
+
+          if (bodyBytes >= contentLength) {
+            uploadEndedAt = Date.now();
+          }
+        }
+      });
+
+      socket.on('error', () => {
+        // The client may tear the socket down after the response; not this test's concern.
+      });
+    });
+
+    await new Promise<void>((done) => {
+      server.listen(0, '127.0.0.1', done);
+    });
+
+    const { port } = server.address() as { port: number };
+    const jar = new CookieJar();
+    const client = makeClient({}, `http://127.0.0.1:${port}`, {
+      cookieJar: jar,
+      followRedirects: true,
+    });
+    let hopOneSettledAt: number | undefined;
+    let attemptTwoStartedAt: number | undefined;
+
+    client.addResponseObserver(
+      async (res) => {
+        if (res.status === 307 && res.requestBodySettled !== undefined) {
+          await res.requestBodySettled;
+          hopOneSettledAt = Date.now();
+        }
+      },
+      { phases: ['redirect'] },
+    );
+
+    try {
+      const res = await client
+        .post('/upload')
+        .onAttemptStart((event) => {
+          if (event.attemptNumber === 2) {
+            attemptTwoStartedAt = Date.now();
+          }
+        })
+        .body('x'.repeat(bodySize))
+        .send();
+
+      expect(res.status).toBe(200);
+      expect(res.wasRedirectFollowed).toBe(true);
+      expect(await res.requestBodySettled).toBeUndefined();
+
+      expect(secondCookieHeader).toBe('hop=1');
+      expect(jar.getCookieFor('hop', `http://127.0.0.1:${port}/`)?.value).toBe(
+        '1',
+      );
+
+      if (hopOneSettledAt === undefined || attemptTwoStartedAt === undefined) {
+        throw new Error(
+          'expected both hop-1 settle and attempt-2 start to be seen',
+        );
+      }
+
+      expect(attemptTwoStartedAt).toBeGreaterThanOrEqual(hopOneSettledAt);
+
+      // And the server did receive the whole body: the settle was a real finish, not a
+      // teardown.
+      expect(uploadBytes).toBe(bodySize);
+      expect(uploadEndedAt).toBeDefined();
+    } finally {
+      for (const socket of openSockets) {
+        socket.destroy();
+      }
+
+      await new Promise<void>((resolve) => {
+        server.close(() => resolve());
+      });
+    }
+  }, 20000);
+});
 
 describe('NodeAdapter.send() — low-level contract', () => {
   let server: TestServer;

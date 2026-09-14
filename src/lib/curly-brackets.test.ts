@@ -556,6 +556,37 @@ describe('maxRenderLength and onTruncate', () => {
     expect(cuts[0]?.subject).toBe('a');
   });
 
+  it('charges substituted values only, never the literal template text', () => {
+    // Documented: the cap governs interpolation, not the length of the template. A
+    // template that is mostly literal renders in full under a tiny bound, and only the
+    // placeholder is measured against it. Pinned so the boundary does not move quietly.
+    const literal = 'L'.repeat(50_000);
+    const cuts: TruncationInfo[] = [];
+
+    const rendered = CurlyBrackets(
+      `${literal}{{v}}${literal}`,
+      { v: 'value' },
+      undefined,
+      { maxRenderLength: 10, onTruncate: (info) => cuts.push(info) },
+    );
+
+    expect(rendered).toBe(`${literal}value${literal}`);
+    expect(cuts).toEqual([]);
+
+    const cut = CurlyBrackets(
+      `${literal}{{v}}${literal}`,
+      { v: 'x'.repeat(100) },
+      undefined,
+      { maxRenderLength: 10, onTruncate: (info) => cuts.push(info) },
+    );
+
+    expect(cut.startsWith(literal)).toBe(true);
+    expect(cut.endsWith(literal)).toBe(true);
+    expect(cut.length).toBeLessThan(literal.length * 2 + 100);
+    expect(cuts).toHaveLength(1);
+    expect(cuts[0]?.subject).toBe('v');
+  });
+
   it('does not fire when nothing was cut', () => {
     const cuts: unknown[] = [];
 

@@ -4,6 +4,7 @@ import {
   beforeAll,
   describe,
   expect,
+  spyOn,
   test,
 } from 'bun:test';
 import { HTTPClient } from './http-client';
@@ -2246,6 +2247,265 @@ describe('HTTPClient — cancel reason via AbortError-throwing adapters', () => 
     }
   });
 
+  test('a caller signal reused across sends gets one abort listener when AbortSignal.any is unavailable', async () => {
+    // The fallback composition used to add a `{ once: true }` listener to the caller's
+    // signal per `send()`, and never remove it on success - so a signal reused for the
+    // life of a page or a worker accumulated one listener per request until the
+    // runtime's listener-count warning fired. One relay per source signal now fans out
+    // to the composed signals still alive.
+    const adapter: HTTPAdapter = {
+      getType: () => 'mock',
+      send: async (request: AdapterRequest): Promise<AdapterResponse> => {
+        if (request.requestURL.endsWith('/slow')) {
+          await new Promise<void>((resolve) => {
+            request.signal?.addEventListener('abort', () => resolve(), {
+              once: true,
+            });
+          });
+
+          const error = new Error('Aborted');
+          error.name = 'AbortError';
+          throw error;
+        }
+
+        return { status: 200, headers: {}, body: null };
+      },
+    };
+    const client = new HTTPClient({ adapter });
+    const controller = new AbortController();
+    const originalAnyDescriptor = Object.getOwnPropertyDescriptor(
+      AbortSignal,
+      'any',
+    );
+    const addEventListenerSpy = spyOn(controller.signal, 'addEventListener');
+    const abortListenersAdded = (): number =>
+      addEventListenerSpy.mock.calls.filter((call) => call[0] === 'abort')
+        .length;
+
+    Object.defineProperty(AbortSignal, 'any', {
+      value: undefined,
+      configurable: true,
+    });
+
+    try {
+      for (let i = 0; i < 25; i += 1) {
+        const res = await client
+          .get(`https://example.com/ok/${i}`)
+          .signal(controller.signal)
+          .send();
+
+        expect(res.status).toBe(200);
+      }
+
+      expect(abortListenersAdded()).toBe(1);
+
+      // The relay still delivers: an abort after all those sends cancels the one in
+      // flight, with the caller's reason intact.
+      const builder = client
+        .get('https://example.com/slow')
+        .signal(controller.signal);
+      const promise = builder.send();
+      setTimeout(() => controller.abort('user_navigated_away'), 10);
+      const res = await promise;
+
+      expect(res.isCancelled).toBe(true);
+      expect(builder.error?.cancelReason).toBe('user_navigated_away');
+      expect(abortListenersAdded()).toBe(1);
+    } finally {
+      addEventListenerSpy.mockRestore();
+
+      if (originalAnyDescriptor) {
+        Object.defineProperty(AbortSignal, 'any', originalAnyDescriptor);
+      }
+    }
+  });
+
+  test('a retry chain adds one abort listener per signal when AbortSignal.any is unavailable', async () => {
+    // The same relay covers the per-attempt composition: every attempt composes the
+    // request's cancel signal - itself a composition, so the caller's signal never sees
+    // these - with its own timeout signal, and used to add one listener per attempt to
+    // that cancel signal. Counted per signal across the whole send, at the prototype,
+    // since the cancel signal is internal: the old code left fifteen on it. Net of
+    // removals, because the retry delay adds one to the same signal and takes it off.
+    let attempts = 0;
+    const adapter: HTTPAdapter = {
+      getType: () => 'mock',
+      send: (): Promise<AdapterResponse> => {
+        attempts += 1;
+
+        return Promise.resolve({
+          status: attempts < 15 ? 503 : 200,
+          headers: {},
+          body: null,
+        });
+      },
+    };
+    const client = new HTTPClient({ adapter });
+    const controller = new AbortController();
+    const originalAnyDescriptor = Object.getOwnPropertyDescriptor(
+      AbortSignal,
+      'any',
+    );
+    const addDescriptor = Object.getOwnPropertyDescriptor(
+      EventTarget.prototype,
+      'addEventListener',
+    );
+    const removeDescriptor = Object.getOwnPropertyDescriptor(
+      EventTarget.prototype,
+      'removeEventListener',
+    );
+
+    if (addDescriptor === undefined || removeDescriptor === undefined) {
+      throw new Error('EventTarget.prototype listener methods are missing');
+    }
+
+    const abortListenersPerSignal = new Map<AbortSignal, number>();
+    const originalAdd = addDescriptor.value as (
+      this: EventTarget,
+      ...args: Parameters<EventTarget['addEventListener']>
+    ) => void;
+    const originalRemove = removeDescriptor.value as (
+      this: EventTarget,
+      ...args: Parameters<EventTarget['removeEventListener']>
+    ) => void;
+    const count = (signal: EventTarget, delta: number): void => {
+      if (signal instanceof AbortSignal) {
+        abortListenersPerSignal.set(
+          signal,
+          (abortListenersPerSignal.get(signal) ?? 0) + delta,
+        );
+      }
+    };
+
+    Object.defineProperty(EventTarget.prototype, 'addEventListener', {
+      ...addDescriptor,
+      value: function countingAddEventListener(
+        this: EventTarget,
+        ...args: Parameters<EventTarget['addEventListener']>
+      ): void {
+        if (args[0] === 'abort') {
+          count(this, 1);
+        }
+
+        Reflect.apply(originalAdd, this, args);
+      },
+    });
+    Object.defineProperty(EventTarget.prototype, 'removeEventListener', {
+      ...removeDescriptor,
+      value: function countingRemoveEventListener(
+        this: EventTarget,
+        ...args: Parameters<EventTarget['removeEventListener']>
+      ): void {
+        if (args[0] === 'abort') {
+          count(this, -1);
+        }
+
+        Reflect.apply(originalRemove, this, args);
+      },
+    });
+
+    Object.defineProperty(AbortSignal, 'any', {
+      value: undefined,
+      configurable: true,
+    });
+
+    try {
+      const res = await client
+        .get('https://example.com/flaky')
+        .signal(controller.signal)
+        .retryPolicy({ strategy: 'fixed', maxRetryAttempts: 20, delayMS: 0 })
+        .send();
+
+      expect(res.status).toBe(200);
+      expect(attempts).toBe(15);
+      // Some signal was composed into every attempt, so the relay was exercised.
+      expect(abortListenersPerSignal.size).toBeGreaterThanOrEqual(15);
+      expect(Math.max(...abortListenersPerSignal.values())).toBe(1);
+    } finally {
+      Object.defineProperty(
+        EventTarget.prototype,
+        'addEventListener',
+        addDescriptor,
+      );
+      Object.defineProperty(
+        EventTarget.prototype,
+        'removeEventListener',
+        removeDescriptor,
+      );
+
+      if (originalAnyDescriptor) {
+        Object.defineProperty(AbortSignal, 'any', originalAnyDescriptor);
+      }
+    }
+  });
+
+  test('the fallback relay survives collection of finished compositions', async () => {
+    // The composed signals are held weakly, so a source that outlives hundreds of
+    // finished requests may find most of its dependents collected by the time it
+    // aborts. A dead reference must be skipped, not thrown on, and the one request still
+    // in flight must still be cancelled. Bun exposes a synchronous full collection;
+    // elsewhere the test still runs, it just cannot force the point.
+    const adapter: HTTPAdapter = {
+      getType: () => 'mock',
+      send: async (request: AdapterRequest): Promise<AdapterResponse> => {
+        if (request.requestURL.endsWith('/slow')) {
+          await new Promise<void>((resolve) => {
+            request.signal?.addEventListener('abort', () => resolve(), {
+              once: true,
+            });
+          });
+
+          const error = new Error('Aborted');
+          error.name = 'AbortError';
+          throw error;
+        }
+
+        return { status: 200, headers: {}, body: null };
+      },
+    };
+    const client = new HTTPClient({ adapter });
+    const controller = new AbortController();
+    const originalAnyDescriptor = Object.getOwnPropertyDescriptor(
+      AbortSignal,
+      'any',
+    );
+
+    Object.defineProperty(AbortSignal, 'any', {
+      value: undefined,
+      configurable: true,
+    });
+
+    try {
+      for (let i = 0; i < 300; i += 1) {
+        await client
+          .get(`https://example.com/ok/${i}`)
+          .signal(controller.signal)
+          .send();
+      }
+
+      const bun = (globalThis as { Bun?: { gc?: (force: boolean) => void } })
+        .Bun;
+
+      bun?.gc?.(true);
+
+      const builder = client
+        .get('https://example.com/slow')
+        .signal(controller.signal);
+      const promise = builder.send();
+
+      setTimeout(() => controller.abort('after_gc'), 10);
+
+      const res = await promise;
+
+      expect(res.isCancelled).toBe(true);
+      expect(builder.error?.cancelReason).toBe('after_gc');
+    } finally {
+      if (originalAnyDescriptor) {
+        Object.defineProperty(AbortSignal, 'any', originalAnyDescriptor);
+      }
+    }
+  });
+
   test('no cancelReason when cancel called without reason via AbortError-throwing adapter', async () => {
     const { adapter } = makeAbortErrorAdapter();
     const client = new HTTPClient({ adapter });
@@ -3048,6 +3308,80 @@ describe('HTTPClient — cookies', () => {
     expect(
       jar.getCookieFor('session', 'https://example.com/api/r')?.value,
     ).toBe('from503');
+  });
+});
+
+describe('HTTPClient — cookies across a scheme-crossing redirect', () => {
+  test('an http hop in the chain cannot replace the Secure cookie the https hop set', async () => {
+    // The real-world shape of the jar's store-time rule, driven through the client's
+    // redirect loop rather than the jar alone: `https://` logs in and sets a Secure
+    // session, redirects to an `http://` page that tries to plant its own `session`,
+    // which redirects back to `https://`. MockAdapter matches routes by path, so one
+    // adapter serves both schemes.
+    const adapter = new MockAdapter();
+    const seenCookies: Array<{ path: string; cookie: string | undefined }> = [];
+    const record = (req: {
+      path: string;
+      headers: Record<string, string>;
+    }): void => {
+      seenCookies.push({ path: req.path, cookie: req.headers['cookie'] });
+    };
+
+    adapter.routes.get('/login', (req) => {
+      record(req);
+
+      return {
+        status: 302,
+        headers: {
+          location: 'http://api.test/plain',
+          'set-cookie': 'session=real; Secure; Path=/',
+        },
+      };
+    });
+    adapter.routes.get('/plain', (req) => {
+      record(req);
+
+      return {
+        status: 302,
+        headers: {
+          location: 'https://api.test/me',
+          'set-cookie': ['session=evil; Path=/', 'session=; Max-Age=0; Path=/'],
+        },
+      };
+    });
+    adapter.routes.get('/me', (req) => {
+      record(req);
+
+      return { status: 200, body: { ok: true } };
+    });
+
+    const jar = new CookieJar();
+    const client = new HTTPClient({
+      adapter,
+      baseURL: 'https://api.test',
+      cookieJar: jar,
+      followRedirects: true,
+    });
+
+    const res = await client.get('/login').send();
+
+    expect(res.status).toBe(200);
+    expect(res.redirectHistory).toEqual([
+      'http://api.test/plain',
+      'https://api.test/me',
+    ]);
+    expect(seenCookies.map((entry) => entry.path)).toEqual([
+      '/login',
+      '/plain',
+      '/me',
+    ]);
+    // Nothing went to the plain-text hop, and the https hop got the real session only.
+    expect(seenCookies[1]?.cookie).toBeUndefined();
+    expect(seenCookies[2]?.cookie).toBe('session=real');
+    expect(jar.getAllCookies()).toHaveLength(1);
+    expect(jar.getCookieFor('session', 'https://api.test/')?.value).toBe(
+      'real',
+    );
   });
 });
 

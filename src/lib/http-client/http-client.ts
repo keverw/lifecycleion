@@ -2970,23 +2970,13 @@ export class BaseHTTPClient {
 
     const controller = new AbortController();
 
-    /**
-     * Mirror one source signal's abort onto the composed one.
-     *
-     * An unreadable reason degrades to `undefined`, which is already correct:
-     * spec and runtimes normalize that to a fresh `AbortError` DOMException,
-     * exactly what a bare `abort()` produces.
-     */
-    const abort = (signal: AbortSignal) =>
-      controller.abort(readObjectMember(signal, 'reason'));
-
     if (a.aborted) {
-      abort(a);
+      abortComposedSignal(controller, a);
     } else if (b.aborted) {
-      abort(b);
+      abortComposedSignal(controller, b);
     } else {
-      a.addEventListener('abort', () => abort(a), { once: true });
-      b.addEventListener('abort', () => abort(b), { once: true });
+      relayAbort(a, controller);
+      relayAbort(b, controller);
     }
 
     return controller.signal;
@@ -3316,6 +3306,83 @@ type UploadSettleWait = 'settled' | 'cancelled' | 'deadline';
 /** When a request's upload last reported progress, as epoch ms. One per request. */
 interface UploadActivity {
   at: number;
+}
+
+/**
+ * Fallback composition for runtimes without `AbortSignal.any`.
+ *
+ * One listener per *source* signal, for the life of that signal, fanning out to every
+ * composed signal still alive - not one listener per composition. The cancel signal is
+ * composed once per attempt, and a caller's own signal once per `send()`, so the old
+ * `{ once: true }` listener per composition was never removed on the success path: a
+ * signal reused across requests, or a long redirect-plus-retry chain on one, accumulated
+ * a listener per attempt until the runtime's listener-count warning fired. The composed
+ * signals are held weakly, the way the spec has `AbortSignal.any` hold its sources'
+ * dependents, so a finished attempt's signal can be collected while the source lives on.
+ *
+ * `composedControllers` keeps each composed controller reachable from its own signal:
+ * a signal does not reference its controller, so a weak reference to the controller
+ * alone would be collected while the signal was still in an adapter's hands, and the
+ * abort would never arrive.
+ */
+const abortRelays = new WeakMap<AbortSignal, Set<WeakRef<AbortSignal>>>();
+const composedControllers = new WeakMap<AbortSignal, AbortController>();
+
+/**
+ * Mirror one source signal's abort onto the composed one.
+ *
+ * An unreadable reason degrades to `undefined`, which is already correct: spec and
+ * runtimes normalize that to a fresh `AbortError` DOMException, exactly what a bare
+ * `abort()` produces.
+ */
+function abortComposedSignal(
+  controller: AbortController,
+  source: AbortSignal,
+): void {
+  controller.abort(readObjectMember(source, 'reason'));
+}
+
+function relayAbort(source: AbortSignal, controller: AbortController): void {
+  composedControllers.set(controller.signal, controller);
+
+  let dependents = abortRelays.get(source);
+
+  if (dependents === undefined) {
+    const created = new Set<WeakRef<AbortSignal>>();
+
+    dependents = created;
+    abortRelays.set(source, created);
+
+    source.addEventListener(
+      'abort',
+      () => {
+        for (const ref of created) {
+          const composed = ref.deref();
+          const owner =
+            composed === undefined
+              ? undefined
+              : composedControllers.get(composed);
+
+          if (owner !== undefined && !owner.signal.aborted) {
+            abortComposedSignal(owner, source);
+          }
+        }
+
+        created.clear();
+      },
+      { once: true },
+    );
+  } else {
+    // Prune the dependents that have already been collected, so a source that is never
+    // aborted does not hold a dead reference per attempt it was ever composed into.
+    for (const ref of dependents) {
+      if (ref.deref() === undefined) {
+        dependents.delete(ref);
+      }
+    }
+  }
+
+  dependents.add(new WeakRef(controller.signal));
 }
 
 /**

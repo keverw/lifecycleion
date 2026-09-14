@@ -536,6 +536,41 @@ describe('FetchAdapter', () => {
       expect(body.data.name).toBe('Alice');
     });
 
+    test('does not report `requestBodySettled` on a bodied request', async () => {
+      // The documented contract: `fetch()` exposes neither upload progress nor the moment
+      // the body finished going out, so the adapter cannot say when an upload settled and
+      // leaves the field absent. The client therefore does not wait before a `307`/`308`
+      // hop or a retry on this adapter - see the FetchAdapter docs. Pinned so an
+      // adapter change that starts reporting it is a deliberate one, with the wait
+      // semantics that come with it.
+      const response = await adapter.send({
+        requestURL: `${server.url}/api/users`,
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ name: 'Alice' }),
+      });
+
+      expect(response.status).toBe(201);
+      expect('requestBodySettled' in response).toBe(false);
+    });
+
+    test('reports 100% upload progress once the response headers arrive', async () => {
+      // Also the documented contract, and the reason the previous test matters: the
+      // terminal upload event is fired when `fetch()` resolves - which is when the
+      // response headers arrive - not when the body was confirmed on the wire.
+      const uploads: number[] = [];
+
+      await adapter.send({
+        requestURL: `${server.url}/api/users`,
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ name: 'Alice' }),
+        onUploadProgress: (event) => uploads.push(event.progress),
+      });
+
+      expect(uploads).toEqual([0, 1]);
+    });
+
     test('returns headers as lowercase keys', async () => {
       const response = await adapter.send({
         requestURL: `${server.url}/api/test`,

@@ -72,6 +72,10 @@ interface StoredCookieScope {
  * - Rejects Domain= values that are recognized public suffixes (e.g. co.uk, com)
  * - Rejects Domain= values that are not a suffix of the request host
  * - Strips leading dots from Domain= per RFC 6265
+ * - Rejects a `Secure` cookie set over a non-secure scheme, and a non-`Secure` cookie
+ *   set over a non-secure scheme that would replace or evict a stored `Secure` cookie
+ *   (RFC 6265bis "Leave Secure Cookies Alone")
+ * - Enforces the `__Secure-` and `__Host-` name prefixes (RFC 6265bis)
  *
  * IPs and local hostnames like localhost are never treated as public suffixes.
  */
@@ -319,7 +323,7 @@ export class CookieJar {
       const parsed = new URL(url);
       hostname = parsed.hostname;
       pathname = parsed.pathname;
-      // RFC 6265 §5.4 — Secure cookies must not be sent on non-HTTPS requests.
+      // RFC 6265 §5.4 — Secure cookies must not be sent on non-secure requests.
       requestScheme = parsed.protocol;
     } catch {
       return [];
@@ -358,7 +362,7 @@ export class CookieJar {
           continue;
         }
 
-        if (cookie.secure === true && requestScheme !== 'https:') {
+        if (cookie.secure === true && !this.isSecureScheme(requestScheme)) {
           continue;
         }
 
@@ -768,6 +772,21 @@ export class CookieJar {
     }
 
     const requestHostname = address.hostname;
+    const isSecureScheme = this.isSecureScheme(address.protocol);
+
+    // RFC 6265bis §5.7: a Secure cookie is only accepted from a secure scheme. The send
+    // path already withholds Secure cookies on `http:`, but a cookie *stored* from an
+    // `http:` response could still replace the `https:` session under the same key -
+    // cookie forcing - and the replacement would then go out over `https:` as the
+    // real one. Refusing it here keeps a plain-text hop from writing into the secure
+    // half of the jar at all.
+    if (parsed.secure && !isSecureScheme) {
+      return;
+    }
+
+    if (!this.hasValidNamePrefix(parsed)) {
+      return;
+    }
 
     let domain: string;
 
@@ -796,6 +815,19 @@ export class CookieJar {
     }
 
     const path = this.resolvedCookiePath(parsed, address.pathname);
+
+    // RFC 6265bis §5.7 "Leave Secure Cookies Alone": a non-Secure cookie from a
+    // non-secure scheme cannot replace, shadow or evict a stored Secure cookie of the
+    // same name whose scope covers it. Checked before the expiry-driven deletions
+    // below on purpose - `Max-Age=0` over `http:` is otherwise a one-line eviction of
+    // the `https:` session, and a fresh one planted beside it would then be the only
+    // `session` cookie left to send.
+    if (
+      !isSecureScheme &&
+      this.wouldShadowSecureCookie(parsed.name, domain, path)
+    ) {
+      return;
+    }
 
     // Max-Age=0 or negative → delete the cookie
     if (parsed.maxAge !== undefined && parsed.maxAge <= 0) {
@@ -847,6 +879,82 @@ export class CookieJar {
     }
 
     this.setCookie(cookie);
+  }
+
+  /**
+   * Whether a request scheme counts as secure for cookie purposes. The same answer the
+   * send path gives: `getCookiesFor` withholds Secure cookies unless the scheme is
+   * `https:` or `wss:`, so a scheme that could never receive a Secure cookie may not
+   * set one either. `localhost` over `http:` is not secure on either side, so
+   * store-time and send-time never disagree about a cookie.
+   */
+  private isSecureScheme(protocol: string): boolean {
+    return protocol === 'https:' || protocol === 'wss:';
+  }
+
+  /**
+   * RFC 6265bis §4.1.3 cookie name prefixes, matched case-insensitively as browsers do.
+   *
+   * `__Secure-` requires the `Secure` attribute. `__Host-` requires `Secure`, no
+   * `Domain` attribute (so the cookie is host-only) and `Path=/`. A cookie that claims
+   * a prefix without meeting its conditions is refused outright rather than stored with
+   * the guarantees the prefix promises to a server reading it back. The secure-scheme
+   * half of both prefixes is enforced by the `Secure` check in `storeParsed`.
+   */
+  private hasValidNamePrefix(parsed: ParsedCookie): boolean {
+    const lowerName = parsed.name.toLowerCase();
+
+    if (lowerName.startsWith('__host-')) {
+      return parsed.secure === true && !parsed.domain && parsed.path === '/';
+    }
+
+    if (lowerName.startsWith('__secure-')) {
+      return parsed.secure === true;
+    }
+
+    return true;
+  }
+
+  /**
+   * Whether the jar already holds a Secure cookie named `name` whose scope meets a new
+   * cookie stored for `domain` / `path` - RFC 6265bis §5.7 step 21: the stored cookie's
+   * domain domain-matches the new cookie's domain *or vice versa*, and its path
+   * path-matches the new path. Both directions, and without regard to `hostOnly`: a
+   * host-only Secure cookie on `app.example.com` is shadowed by a `Domain=example.com`
+   * cookie planted from `http://example.com`, which the send path would deliver beside
+   * it, so the wider plant must be refused as much as the narrower one.
+   *
+   * The scope is read from the stored record, not the live object, as the send path
+   * reads it, so a `secure` cleared through `getAllCookies()` does not open the door.
+   */
+  private wouldShadowSecureCookie(
+    name: string,
+    domain: string,
+    path: string,
+  ): boolean {
+    const bucket = this.buckets.get(this.apexFor(domain));
+
+    if (!bucket) {
+      return false;
+    }
+
+    for (const stored of bucket.values()) {
+      const scope = this.storedScopes.get(stored);
+
+      if (scope === undefined || scope.secure !== true || scope.name !== name) {
+        continue;
+      }
+
+      const isDomainMatch =
+        this.domainMatches(domain, scope.domain) ||
+        this.domainMatches(scope.domain, domain);
+
+      if (isDomainMatch && this.pathMatches(path, scope.path)) {
+        return true;
+      }
+    }
+
+    return false;
   }
 
   /**

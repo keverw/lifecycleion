@@ -1132,6 +1132,302 @@ describe('CookieJar', () => {
     });
   });
 
+  describe('store-time scheme rules (RFC 6265bis)', () => {
+    test('refuses a Secure cookie set over http', () => {
+      jar.parseSetCookieHeader('session=evil; Secure', 'http://example.com/');
+
+      expect(jar.getAllCookies()).toHaveLength(0);
+    });
+
+    test('accepts a Secure cookie set over https and wss, and sends it to both', () => {
+      jar.parseSetCookieHeader('a=1; Secure', 'https://example.com/');
+      jar.parseSetCookieHeader('b=2; Secure', 'wss://example.com/');
+
+      expect(jar.getCookieFor('a', 'https://example.com/')?.value).toBe('1');
+      expect(jar.getCookieFor('b', 'https://example.com/')?.value).toBe('2');
+      expect(jar.getCookiesFor('wss://example.com/')).toHaveLength(2);
+      expect(jar.getCookiesFor('ws://example.com/')).toHaveLength(0);
+    });
+
+    test('a Secure cookie from http cannot replace the https session', () => {
+      jar.parseSetCookieHeader('session=real; Secure', 'https://example.com/');
+      jar.parseSetCookieHeader('session=evil; Secure', 'http://example.com/');
+
+      expect(jar.getCookieFor('session', 'https://example.com/')?.value).toBe(
+        'real',
+      );
+    });
+
+    test('a non-Secure cookie from http cannot replace a stored Secure cookie', () => {
+      // Cookie forcing: the plain-text hop plants `session` under the same key, and the
+      // replacement would then go out over https as the real session.
+      jar.parseSetCookieHeader('session=real; Secure', 'https://example.com/');
+      jar.parseSetCookieHeader('session=evil', 'http://example.com/');
+
+      expect(jar.getAllCookies()).toHaveLength(1);
+      expect(jar.getCookieFor('session', 'https://example.com/')?.value).toBe(
+        'real',
+      );
+      expect(jar.getCookiesFor('http://example.com/')).toHaveLength(0);
+    });
+
+    test('a Max-Age=0 from http cannot evict a stored Secure cookie', () => {
+      jar.parseSetCookieHeader('session=real; Secure', 'https://example.com/');
+      jar.parseSetCookieHeader('session=; Max-Age=0', 'http://example.com/');
+      jar.parseSetCookieHeader(
+        'session=; Expires=Thu, 01 Jan 1970 00:00:00 GMT',
+        'http://example.com/',
+      );
+
+      expect(jar.getCookieFor('session', 'https://example.com/')?.value).toBe(
+        'real',
+      );
+    });
+
+    test('a non-Secure cookie from http cannot shadow a Secure domain cookie from a subdomain', () => {
+      // The stored cookie's `Domain=example.com` covers `sub.example.com`, so a
+      // host-only `session` planted there would be sent beside the real one.
+      jar.parseSetCookieHeader(
+        'session=real; Secure; Domain=example.com',
+        'https://example.com/',
+      );
+      jar.parseSetCookieHeader('session=evil', 'http://sub.example.com/');
+
+      expect(jar.getAllCookies()).toHaveLength(1);
+      expect(
+        jar.getCookiesFor('https://sub.example.com/').map((c) => c.value),
+      ).toEqual(['real']);
+    });
+
+    test('a non-Secure cookie from http cannot shadow a Secure cookie under its path', () => {
+      jar.parseSetCookieHeader(
+        'session=real; Secure; Path=/',
+        'https://example.com/',
+      );
+      jar.parseSetCookieHeader(
+        'session=evil; Path=/admin',
+        'http://example.com/admin',
+      );
+
+      expect(jar.getAllCookies()).toHaveLength(1);
+      expect(
+        jar.getCookiesFor('https://example.com/admin').map((c) => c.value),
+      ).toEqual(['real']);
+    });
+
+    test('a wider Domain= cookie from http cannot shadow a host-only Secure cookie on a subdomain', () => {
+      // The other direction of RFC 6265bis's "or vice versa": the stored host-only
+      // cookie on `app.example.com` is under the planted `Domain=example.com`, and the
+      // send path would deliver both to `https://app.example.com`.
+      jar.parseSetCookieHeader(
+        'session=real; Secure',
+        'https://app.example.com/',
+      );
+      jar.parseSetCookieHeader(
+        'session=evil; Domain=example.com',
+        'http://example.com/',
+      );
+
+      expect(jar.getAllCookies()).toHaveLength(1);
+      expect(
+        jar.getCookiesFor('https://app.example.com/').map((c) => c.value),
+      ).toEqual(['real']);
+    });
+
+    test('the domain check ignores hostOnly in both directions, as the RFC does', () => {
+      // A host-only Secure cookie on the apex would not be *sent* to a subdomain, but
+      // RFC 6265bis §5.7 refuses on domain-match alone; the stricter reading costs
+      // nothing but a same-named plain-text cookie in the same tree.
+      jar.parseSetCookieHeader('host=real; Secure', 'https://example.com/');
+      jar.parseSetCookieHeader('host=other', 'http://sub.example.com/');
+
+      expect(jar.getAllCookies()).toHaveLength(1);
+      expect(jar.getCookiesFor('http://sub.example.com/')).toHaveLength(0);
+    });
+
+    test("a non-Secure cookie from http outside the Secure cookie's tree or path is stored", () => {
+      // A Secure cookie scoped to `/admin` does not cover `/`, and another registrable
+      // domain is another bucket entirely. Neither is a shadow.
+      jar.parseSetCookieHeader(
+        'scoped=real; Secure; Path=/admin',
+        'https://example.com/admin',
+      );
+      jar.parseSetCookieHeader('scoped=other; Path=/', 'http://example.com/');
+      jar.parseSetCookieHeader('session=real; Secure', 'https://example.com/');
+      jar.parseSetCookieHeader('session=elsewhere', 'http://example.org/');
+
+      expect(jar.getCookieFor('scoped', 'http://example.com/')?.value).toBe(
+        'other',
+      );
+      expect(jar.getCookieFor('session', 'http://example.org/')?.value).toBe(
+        'elsewhere',
+      );
+      // And the Secure originals are untouched.
+      expect(jar.getCookieFor('session', 'https://example.com/')?.value).toBe(
+        'real',
+      );
+      expect(
+        jar
+          .getCookiesFor('https://example.com/admin')
+          .filter((c) => c.name === 'scoped')
+          .map((c) => c.value),
+      ).toEqual(['real', 'other']);
+    });
+
+    test('the shadow check reads the stored scope, not a mutated live cookie', () => {
+      jar.parseSetCookieHeader('session=real; Secure', 'https://example.com/');
+
+      const [live] = jar.getAllCookies();
+
+      if (live === undefined) {
+        throw new Error('expected the Secure cookie to be stored');
+      }
+
+      delete live.secure;
+
+      jar.parseSetCookieHeader('session=evil', 'http://example.com/');
+
+      expect(jar.getAllCookies()).toHaveLength(1);
+      expect(jar.getAllCookies()[0]?.value).toBe('real');
+    });
+
+    test('a non-Secure cookie from https may replace a Secure cookie', () => {
+      // The rule guards the plain-text hop only; RFC 6265bis leaves a secure origin free
+      // to downgrade its own cookie.
+      jar.parseSetCookieHeader('session=real; Secure', 'https://example.com/');
+      jar.parseSetCookieHeader('session=plain', 'https://example.com/');
+
+      const stored = jar.getCookieFor('session', 'https://example.com/');
+      expect(stored?.value).toBe('plain');
+      expect(stored?.secure).toBeUndefined();
+    });
+
+    test('a non-Secure cookie from http still replaces a non-Secure cookie', () => {
+      jar.parseSetCookieHeader('pref=a', 'https://example.com/');
+      jar.parseSetCookieHeader('pref=b', 'http://example.com/');
+
+      expect(jar.getCookieFor('pref', 'http://example.com/')?.value).toBe('b');
+    });
+
+    test('a Secure cookie restored through fromJSON() is protected the same way', () => {
+      // `fromJSON` stores through `setCookie`, and the shadow check reads the scope
+      // `setCookie` recorded - so a persisted jar comes back with the same guard a live
+      // one has, not as a set of plain objects an http hop can overwrite.
+      const persisted = new CookieJar();
+      persisted.parseSetCookieHeader(
+        'session=real; Secure',
+        'https://example.com/',
+      );
+
+      expect(jar.fromJSON(JSON.parse(JSON.stringify(persisted.toJSON())))).toBe(
+        1,
+      );
+
+      jar.parseSetCookieHeader('session=evil', 'http://example.com/');
+      jar.parseSetCookieHeader('session=; Max-Age=0', 'http://example.com/');
+
+      expect(jar.getAllCookies()).toHaveLength(1);
+      expect(jar.getCookieFor('session', 'https://example.com/')?.value).toBe(
+        'real',
+      );
+    });
+
+    test('setCookie() is not scheme-gated', () => {
+      // The programmatic path has no request URL to judge; a caller restoring or
+      // seeding a jar stores what it says.
+      expect(
+        jar.setCookie({
+          name: 'session',
+          value: 'seeded',
+          domain: 'example.com',
+          path: '/',
+          secure: true,
+        }),
+      ).toBe(true);
+      expect(
+        jar.setCookie({
+          name: 'session',
+          value: 'replaced',
+          domain: 'example.com',
+          path: '/',
+        }),
+      ).toBe(true);
+
+      expect(jar.getCookieFor('session', 'http://example.com/')?.value).toBe(
+        'replaced',
+      );
+    });
+  });
+
+  describe('cookie name prefixes (RFC 6265bis)', () => {
+    test('__Secure- requires the Secure attribute', () => {
+      jar.parseSetCookieHeader('__Secure-id=1', 'https://example.com/');
+      expect(jar.getAllCookies()).toHaveLength(0);
+
+      jar.parseSetCookieHeader('__Secure-id=1; Secure', 'https://example.com/');
+      expect(
+        jar.getCookieFor('__Secure-id', 'https://example.com/')?.value,
+      ).toBe('1');
+    });
+
+    test('__Secure- over http is refused even with the Secure attribute', () => {
+      jar.parseSetCookieHeader('__Secure-id=1; Secure', 'http://example.com/');
+      expect(jar.getAllCookies()).toHaveLength(0);
+    });
+
+    test('__Host- requires Secure, no Domain, and Path=/', () => {
+      jar.parseSetCookieHeader('__Host-id=1; Path=/', 'https://example.com/');
+      jar.parseSetCookieHeader(
+        '__Host-id=2; Secure; Path=/; Domain=example.com',
+        'https://example.com/',
+      );
+      jar.parseSetCookieHeader(
+        '__Host-id=3; Secure; Path=/app',
+        'https://example.com/app',
+      );
+      jar.parseSetCookieHeader('__Host-id=4; Secure', 'https://example.com/');
+      expect(jar.getAllCookies()).toHaveLength(0);
+
+      jar.parseSetCookieHeader(
+        '__Host-id=5; Secure; Path=/',
+        'https://example.com/deep/path',
+      );
+      const stored = jar.getCookieFor('__Host-id', 'https://example.com/');
+      expect(stored?.value).toBe('5');
+      expect(stored?.hostOnly).toBe(true);
+      expect(stored?.path).toBe('/');
+      expect(jar.getCookiesFor('https://sub.example.com/')).toHaveLength(0);
+    });
+
+    test('__Host- treats an empty Domain= as absent, as the jar does', () => {
+      // `Domain=` and `Domain=.` parse to `''` and are stored host-only everywhere else
+      // in the jar; the prefix rule agrees rather than refusing what the store would
+      // have made host-only anyway.
+      jar.parseSetCookieHeader(
+        '__Host-id=1; Secure; Path=/; Domain=',
+        'https://example.com/',
+      );
+
+      const stored = jar.getCookieFor('__Host-id', 'https://example.com/');
+      expect(stored?.value).toBe('1');
+      expect(stored?.hostOnly).toBe(true);
+      expect(jar.getCookiesFor('https://sub.example.com/')).toHaveLength(0);
+    });
+
+    test('prefixes match case-insensitively', () => {
+      jar.parseSetCookieHeader('__host-id=1; Path=/', 'https://example.com/');
+      jar.parseSetCookieHeader('__SECURE-id=1', 'https://example.com/');
+      expect(jar.getAllCookies()).toHaveLength(0);
+    });
+
+    test('a name that merely contains a prefix is unaffected', () => {
+      jar.parseSetCookieHeader('x__Host-id=1', 'https://example.com/');
+      expect(
+        jar.getCookieFor('x__Host-id', 'https://example.com/')?.value,
+      ).toBe('1');
+    });
+  });
+
   describe('getCookieHeaderString', () => {
     test('returns cookie header string', () => {
       jar.setCookie({

@@ -571,7 +571,10 @@ export interface HTTPResponse<T = unknown> {
    * client is concerned - `isFailed`, `isNetworkError` and the status are
    * untouched - and a caller that ignores it sees exactly what it saw before. A
    * caller that needs to know its upload actually arrived awaits this and checks
-   * for an `Error`. Only `NodeAdapter` reports it today.
+   * for an `Error`. Only `NodeAdapter` reports it today: `FetchAdapter` cannot,
+   * since `fetch()` exposes neither upload progress nor the moment the body finished,
+   * and on an adapter that does not set it the client does not wait before a
+   * followed `307`/`308` hop or a retry.
    */
   requestBodySettled?: Promise<Error | undefined>;
 }
