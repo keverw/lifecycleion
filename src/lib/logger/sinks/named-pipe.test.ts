@@ -158,11 +158,10 @@ describe('NamedPipeSink', () => {
 
     sink.write(entry);
 
-    // Wait for write
-    await new Promise((resolve) => setTimeout(resolve, 100));
-
-    // Check if data was written
-    const allData = reader.data.join('');
+    // Waited for the line rather than a fixed delay; see `waitForReaderData`.
+    const allData = await waitForReaderData(reader, (text) =>
+      text.includes(testMessage),
+    );
     expect(allData).toContain(testMessage);
     expect(allData).toContain('TestService');
 
@@ -199,9 +198,9 @@ describe('NamedPipeSink', () => {
 
     sink.write(entry);
 
-    await new Promise((resolve) => setTimeout(resolve, 100));
-
-    const allData = reader.data.join('');
+    const allData = await waitForReaderData(reader, (text) =>
+      text.trimEnd().endsWith('}'),
+    );
     const jsonLog = JSON.parse(allData.trim());
 
     expect(jsonLog).toHaveProperty('timestamp', timestamp);
@@ -240,9 +239,9 @@ describe('NamedPipeSink', () => {
 
     sink.write(entry);
 
-    await new Promise((resolve) => setTimeout(resolve, 100));
-
-    const allData = reader.data.join('');
+    const allData = await waitForReaderData(reader, (text) =>
+      text.includes('CUSTOM: INFO - Custom formatted log'),
+    );
     expect(allData).toContain('CUSTOM: INFO - Custom formatted log');
 
     reader.stop();
@@ -378,10 +377,14 @@ describe('NamedPipeSink', () => {
     sink.write(entry1);
     sink.write(entry2);
 
-    // Wait for initialization and queue processing
-    await new Promise((resolve) => setTimeout(resolve, 200));
-
-    const allData = reader.data.join('');
+    // Waited for both lines rather than a fixed delay: under a full suite run the
+    // reader was still empty after 200 ms and the assertion failed on entries that
+    // arrived a moment later.
+    const allData = await waitForReaderData(
+      reader,
+      (text) =>
+        text.includes('Queued entry 1') && text.includes('Queued entry 2'),
+    );
     expect(allData).toContain('Queued entry 1');
     expect(allData).toContain('Queued entry 2');
 
@@ -456,10 +459,10 @@ describe('NamedPipeSink', () => {
       sink.write(entry);
     }
 
-    // Wait for writes
-    await new Promise((resolve) => setTimeout(resolve, 300));
-
-    const allData = reader.data.join('');
+    // Waited for the last entry rather than a fixed delay; the sink writes in order.
+    const allData = await waitForReaderData(reader, (text) =>
+      text.includes(`Entry ${numEntries - 1}`),
+    );
 
     // Check that all entries were written
     for (let i = 0; i < numEntries; i++) {

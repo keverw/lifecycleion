@@ -5310,8 +5310,13 @@ describe('NodeAdapter via HTTPClient — early 307 with a cookie jar', () => {
     // The combination the pieces were each tested for: a real server answers a large
     // `POST` with `307` before reading the body, the client waits on the hop's
     // `requestBodySettled` before dispatching hop 2, and the `Set-Cookie` from hop 1
-    // rides onto hop 2 through the jar. Ordering is asserted on the client's own clock:
-    // the hop-1 outcome settles before attempt 2 starts.
+    // rides onto hop 2 through the jar. Ordering is asserted on the client: hop 1's
+    // outcome settles before attempt 2 starts, observed without holding the client -
+    // the observer registers a `.then`, it does not `await`, since an awaited observer
+    // would hold hop 2 itself and pass with the client's wait deleted. The server's
+    // clock is not compared: the writer finishes when the last bytes reach the kernel,
+    // and the in-process server reads them a few milliseconds after that, so "hop 2
+    // started after the server had the body" is not a promise the client makes.
     //
     // A raw socket rather than `node:http`: the server must answer while the request
     // body is still arriving, and still count every byte of it afterwards, which an
@@ -5406,14 +5411,15 @@ describe('NodeAdapter via HTTPClient — early 307 with a cookie jar', () => {
       cookieJar: jar,
       followRedirects: true,
     });
-    let hopOneSettledAt: number | undefined;
-    let attemptTwoStartedAt: number | undefined;
+    const order: string[] = [];
 
     client.addResponseObserver(
-      async (res) => {
+      (res) => {
         if (res.status === 307 && res.requestBodySettled !== undefined) {
-          await res.requestBodySettled;
-          hopOneSettledAt = Date.now();
+          order.push('hop-1-seen');
+          void res.requestBodySettled.then(() => {
+            order.push('hop-1-settled');
+          });
         }
       },
       { phases: ['redirect'] },
@@ -5424,7 +5430,7 @@ describe('NodeAdapter via HTTPClient — early 307 with a cookie jar', () => {
         .post('/upload')
         .onAttemptStart((event) => {
           if (event.attemptNumber === 2) {
-            attemptTwoStartedAt = Date.now();
+            order.push('attempt-2-start');
           }
         })
         .body('x'.repeat(bodySize))
@@ -5439,13 +5445,7 @@ describe('NodeAdapter via HTTPClient — early 307 with a cookie jar', () => {
         '1',
       );
 
-      if (hopOneSettledAt === undefined || attemptTwoStartedAt === undefined) {
-        throw new Error(
-          'expected both hop-1 settle and attempt-2 start to be seen',
-        );
-      }
-
-      expect(attemptTwoStartedAt).toBeGreaterThanOrEqual(hopOneSettledAt);
+      expect(order).toEqual(['hop-1-seen', 'hop-1-settled', 'attempt-2-start']);
 
       // And the server did receive the whole body: the settle was a real finish, not a
       // teardown.
