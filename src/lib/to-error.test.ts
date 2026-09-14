@@ -188,6 +188,39 @@ describe('isErrorValue', () => {
     }
   });
 
+  test('should not be fooled by a borrowed prototype where the runtime can tell', () => {
+    // `Object.create(Error.prototype)` passes `instanceof` and the string brand while
+    // having no `[[ErrorData]]` slot. With `Error.isError` consulted first it is refused;
+    // without it, it is the documented bargain.
+    const impostor = Object.create(Error.prototype) as object;
+    const hasIsError =
+      typeof (Error as { isError?: unknown }).isError === 'function';
+
+    expect(impostor instanceof Error).toBe(true);
+    expect(isErrorValue(impostor)).toBe(!hasIsError);
+  });
+
+  test('should recognize a DOMException, which is what an AbortError is', () => {
+    // Bun's `Error.isError` answers `false` for one; Node's answers `true`. Either way
+    // the abort reason a signal hands out has to read as an error, or a cancellation
+    // is classified as a failure.
+    const controller = new AbortController();
+    controller.abort();
+
+    expect(isErrorValue(new DOMException('x', 'AbortError'))).toBe(true);
+    expect(isErrorValue(controller.signal.reason)).toBe(true);
+    expect(toError(controller.signal.reason)).toBe(controller.signal.reason);
+  });
+
+  test('should recognize what deserializeError builds and refuse what serializeError emits', async () => {
+    const { serializeError, deserializeError } =
+      await import('./serialize-error/lib/serialize-error');
+    const serialized = serializeError(new Error('boom'));
+
+    expect(isErrorValue(serialized)).toBe(false);
+    expect(isErrorValue(deserializeError(serialized))).toBe(true);
+  });
+
   test('should not throw on a value whose prototype cannot be walked', () => {
     // `instanceof` walks a prototype chain and `Object.prototype.toString` reads the
     // brand; a revoked `Proxy` refuses both. This is called from reporting paths that

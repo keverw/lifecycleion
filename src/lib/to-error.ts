@@ -6,13 +6,17 @@
  * respect the caller cares about. `Object.prototype.toString` reads the internal brand
  * instead, which crosses realms.
  *
- * On a runtime with `Error.isError` that is the whole answer. Without it, the internal
- * brand is read through `Object.prototype.toString`, which a hostile object can claim
- * with `Symbol.toStringTag`; one that does is returned as-is rather than wrapped. That is
- * the same bargain `instanceof` already offers - a `Proxy` can forge a prototype chain -
- * and it costs nothing here: every read off the result is guarded anyway, by
- * `describeError` or by `errorToString`. Code that wants its own error type to be
- * recognised everywhere should extend `Error`, not imitate it.
+ * On a runtime with `Error.isError` that is the answer, together with a `DOMException`
+ * instance (Bun's `isError` refuses one where Node's accepts it, and an `AbortError` is
+ * one), and `instanceof Error` is not consulted: it accepts
+ * `Object.create(Error.prototype)`, which the slot check rightly refuses. Without it, `instanceof` and then the internal brand through
+ * `Object.prototype.toString`, which a hostile object can claim with `Symbol.toStringTag`
+ * or a borrowed prototype; one that does is returned as-is rather than wrapped. That is
+ * the bargain those runtimes offer, and it costs nothing here: every read off the result
+ * is guarded anyway, by `describeError` or by `errorToString`. Code that wants its own
+ * error type to be recognised everywhere should extend `Error`, not imitate it - a
+ * subclass, or `deserializeError`'s `new Error(...)`, passes every check; a serialized
+ * error's plain object passes none, as it should.
  *
  * Exported so a caller that only needs the *question* answered - `Logger`'s global
  * `'error'` listener, deciding whether to pass a reported payload through or wrap it -
@@ -24,16 +28,27 @@
  */
 export function isErrorValue(value: unknown): value is Error {
   try {
-    if (value instanceof Error) {
-      return true;
+    // `Error.isError` reads the internal `[[ErrorData]]` slot, which crosses realms and
+    // cannot be claimed - not with `Symbol.toStringTag`, and not with a prototype:
+    // `Object.create(Error.prototype)` passes `instanceof` while being no error at all.
+    // So where the runtime has it, it is consulted before `instanceof` rather than
+    // after, and `instanceof Error` is not consulted at all. The two checks below are
+    // what remains for a runtime that does not, with the bargain the doc comment
+    // describes.
+    //
+    // A `DOMException` is accepted beside it, by its own constructor. The proposal has
+    // `Error.isError` answer `true` for one, and Node does, but Bun 1.4 answers `false`
+    // - and every `AbortError` a fetch or an `AbortSignal` produces is a `DOMException`,
+    // so without this the client stopped telling a cancellation from a failure. The
+    // constructor check is not the `instanceof Error` this replaces: `DOMException` has
+    // no public prototype trick that reaches it short of a `Proxy`, which the brand
+    // check on the other branch already accepts as the same bargain.
+    if (typeof errorIsError === 'function') {
+      return errorIsError(value) || isDOMExceptionInstance(value);
     }
 
-    // `Error.isError` reads the internal `[[ErrorData]]` slot, which crosses realms and
-    // cannot be claimed: a plain object wearing `Symbol.toStringTag: 'Error'` fails it.
-    // Preferred wherever the runtime has it; the brand check below is what remains for
-    // a runtime that does not, with the bargain the doc comment describes.
-    if (typeof errorIsError === 'function') {
-      return errorIsError(value);
+    if (value instanceof Error) {
+      return true;
     }
 
     return (
@@ -44,6 +59,12 @@ export function isErrorValue(value: unknown): value is Error {
   } catch {
     return false;
   }
+}
+
+function isDOMExceptionInstance(value: unknown): boolean {
+  const ctor = (globalThis as { DOMException?: unknown }).DOMException;
+
+  return typeof ctor === 'function' && value instanceof ctor;
 }
 
 /**

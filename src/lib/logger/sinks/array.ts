@@ -433,10 +433,20 @@ export class ArraySink implements LogSink {
       }
 
       if (isPromise(result)) {
-        // `finally` rather than `then`, so a rejection still travels on to the reporter.
-        return result.finally(() => {
-          this.formatReportsInFlight--;
-        });
+        // A side chain that lowers the guard either way, with the handler's own result
+        // handed back untouched so a rejection still travels on to the reporter. Through
+        // `Promise.resolve` rather than `result.finally`, as the logger does: `isPromise`
+        // accepts any thenable, and a `then`-only one has no `finally` to call.
+        void Promise.resolve(result).then(
+          () => {
+            this.formatReportsInFlight--;
+          },
+          () => {
+            this.formatReportsInFlight--;
+          },
+        );
+
+        return result;
       }
 
       this.formatReportsInFlight--;

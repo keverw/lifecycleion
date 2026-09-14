@@ -1127,8 +1127,8 @@ export class Logger extends EventEmitter {
     //
     // A list `snapshotList` refused counts as *requested*, not as absent: something was
     // supplied, so redaction was asked for and this cannot tell what for. Treating it as
-    // absent is what renders the params in the clear. It falls through to
-    // `applyRedaction`, which refuses it again and reports it as `<redactedKeys>`.
+    // absent is what renders the params in the clear. It is failed closed below, on this
+    // one read, and never handed to `applyRedaction` to be read a second time.
     //
     // Only a snapshot that came back genuinely empty means "nothing was asked for", and
     // that is now the one reading of an empty list this can reach: a lying `Proxy` no

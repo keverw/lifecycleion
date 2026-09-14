@@ -3499,6 +3499,71 @@ describe('HTTPClient — cookies across a scheme-crossing redirect', () => {
   });
 });
 
+describe('HTTPClient — redirect scheme downgrade', () => {
+  test('a 307 from https to http resends the body, with credentials stripped', async () => {
+    // Pinned as policy rather than found as a bug: curl and Node's clients follow a
+    // downgrade with the body intact, and this client matches them. What it must not do
+    // is carry credentials across: the hop is cross-origin, so `Authorization` and the
+    // jar's Secure cookie stay behind. See the redirect docs.
+    const adapter = new MockAdapter();
+    const seen: Array<{
+      path: string;
+      body: unknown;
+      authorization: string | undefined;
+      cookie: string | undefined;
+    }> = [];
+
+    adapter.routes.post('/upload', (req) => {
+      seen.push({
+        path: req.path,
+        body: req.body,
+        authorization: req.headers['authorization'],
+        cookie: req.headers['cookie'],
+      });
+
+      return {
+        status: 307,
+        headers: { location: 'http://api.test/upload-plain' },
+      };
+    });
+    adapter.routes.post('/upload-plain', (req) => {
+      seen.push({
+        path: req.path,
+        body: req.body,
+        authorization: req.headers['authorization'],
+        cookie: req.headers['cookie'],
+      });
+
+      return { status: 200, body: { ok: true } };
+    });
+
+    const jar = new CookieJar();
+    jar.parseSetCookieHeader('session=real; Secure', 'https://api.test/');
+
+    const res = await new HTTPClient({
+      adapter,
+      baseURL: 'https://api.test',
+      cookieJar: jar,
+      followRedirects: true,
+    })
+      .post('/upload')
+      .headers({ authorization: 'Bearer token' })
+      .json({ a: 1 })
+      .send();
+
+    expect(res.status).toBe(200);
+    expect(seen.map((entry) => entry.path)).toEqual([
+      '/upload',
+      '/upload-plain',
+    ]);
+    expect(seen[0]?.authorization).toBe('Bearer token');
+    expect(seen[0]?.cookie).toBe('session=real');
+    expect(seen[1]?.body).toEqual({ a: 1 });
+    expect(seen[1]?.authorization).toBeUndefined();
+    expect(seen[1]?.cookie).toBeUndefined();
+  });
+});
+
 describe('HTTPClient — interceptors', () => {
   test('request interceptor runs before request', async () => {
     const client = makeClient({ followRedirects: true });
