@@ -263,4 +263,16 @@ describe('namedArrayKeys', () => {
 
     expect(() => namedArrayKeys(liar)).toThrow(String(MAX_REDACTION_ENTRIES));
   });
+
+  it('does not refuse a dense array merely for being long', () => {
+    // The bound is on keys beyond the length. A real array past the walk cap has that
+    // many index keys and nothing named, and reads as exactly that.
+    const dense = new Array<number>(MAX_REDACTION_ENTRIES + 1).fill(0);
+
+    expect(namedArrayKeys(dense)).toEqual([]);
+
+    (dense as unknown as Record<string, unknown>)['note'] = 'x';
+
+    expect(namedArrayKeys(dense)).toEqual(['note']);
+  });
 });

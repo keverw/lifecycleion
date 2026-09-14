@@ -159,11 +159,22 @@ export function namedArrayKeys(source: object): string[] {
   // list a Proxy's `ownKeys` hands over cannot be cut short, but the filter over it can
   // be refused. Thrown rather than returned, because every caller already wraps this in
   // the guard that treats a refused enumeration as "could not be read" - reported and
-  // marked - and that is the right answer for a list this long too. A real array does
-  // not carry this many named properties.
-  if (keys.length > MAX_REDACTION_ENTRIES) {
+  // marked - and that is the right answer for a list this long too.
+  //
+  // Measured past the array's own `length`, not on the total: a dense array of a million
+  // and one elements has that many index keys and nothing named, and the walks that
+  // call this have already bounded what they read of the elements by their own budget.
+  // What no real array carries is this many keys *beyond* its length, which is what a
+  // trap inventing named properties produces. A trap that claims a large `length` to
+  // hide them behind only buys a filter over a list it already made the runtime
+  // allocate, which is the cost this cannot refuse either way.
+  const indexed = Array.isArray(source) ? (source as unknown[]).length : 0;
+  const beyondLength =
+    keys.length - (Number.isSafeInteger(indexed) && indexed >= 0 ? indexed : 0);
+
+  if (beyondLength > MAX_REDACTION_ENTRIES) {
     throw new Error(
-      `array has ${String(keys.length)} own keys, more than the ${String(MAX_REDACTION_ENTRIES)} any walk may visit; its named properties were not read`,
+      `array has ${String(beyondLength)} own keys beyond its length, more than the ${String(MAX_REDACTION_ENTRIES)} any walk may visit; its named properties were not read`,
     );
   }
 
