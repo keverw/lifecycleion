@@ -154,29 +154,32 @@ export function isArrayIndexKey(key: string): boolean {
  */
 export function namedArrayKeys(source: object): string[] {
   const keys = Object.keys(source);
+  const named: string[] = [];
 
-  // The same bound `describeContainer` holds an object to, for the same reason: the
-  // list a Proxy's `ownKeys` hands over cannot be cut short, but the filter over it can
-  // be refused. Thrown rather than returned, because every caller already wraps this in
-  // the guard that treats a refused enumeration as "could not be read" - reported and
-  // marked - and that is the right answer for a list this long too.
-  //
-  // Measured past the array's own `length`, not on the total: a dense array of a million
-  // and one elements has that many index keys and nothing named, and the walks that
-  // call this have already bounded what they read of the elements by their own budget.
-  // What no real array carries is this many keys *beyond* its length, which is what a
-  // trap inventing named properties produces. A trap that claims a large `length` to
-  // hide them behind only buys a filter over a list it already made the runtime
-  // allocate, which is the cost this cannot refuse either way.
-  const indexed = Array.isArray(source) ? (source as unknown[]).length : 0;
-  const beyondLength =
-    keys.length - (Number.isSafeInteger(indexed) && indexed >= 0 ? indexed : 0);
+  // Bounded on the named keys themselves, counted as the filter finds them, and not on
+  // the total or on the total past `length`. A dense array of a million and one
+  // elements has that many index keys and nothing named, so a bound on the total
+  // refused it for its elements alone; a bound on the keys past `length` trusted a
+  // `length` a `Proxy` can set to anything, so a trap claiming `Number.MAX_SAFE_INTEGER`
+  // hid any list behind it. Counting what would actually be returned answers both: the
+  // list a trap's `ownKeys` hands over cannot be cut short, but the walk over it stops
+  // the moment it has found more named keys than any caller may visit. Thrown rather
+  // than returned, because every caller already wraps this in the guard that treats a
+  // refused enumeration as "could not be read" - reported and marked - and that is the
+  // right answer for a list this long too.
+  for (const key of keys) {
+    if (isArrayIndexKey(key)) {
+      continue;
+    }
 
-  if (beyondLength > MAX_REDACTION_ENTRIES) {
-    throw new Error(
-      `array has ${String(beyondLength)} own keys beyond its length, more than the ${String(MAX_REDACTION_ENTRIES)} any walk may visit; its named properties were not read`,
-    );
+    if (named.length >= MAX_REDACTION_ENTRIES) {
+      throw new Error(
+        `array has more than ${String(MAX_REDACTION_ENTRIES)} named own keys, more than any walk may visit; its named properties were not read`,
+      );
+    }
+
+    named.push(key);
   }
 
-  return keys.filter((key) => !isArrayIndexKey(key));
+  return named;
 }

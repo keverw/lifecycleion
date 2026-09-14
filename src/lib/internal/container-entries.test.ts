@@ -262,6 +262,23 @@ describe('namedArrayKeys', () => {
     });
 
     expect(() => namedArrayKeys(liar)).toThrow(String(MAX_REDACTION_ENTRIES));
+
+    // A claimed `length` hides nothing: the bound is on the named keys found, not on
+    // the count past whatever `length` says.
+    const hiding = new Proxy([], {
+      ownKeys: () => ['length', ...keys],
+      get: (target, property, receiver) =>
+        property === 'length'
+          ? Number.MAX_SAFE_INTEGER
+          : (Reflect.get(target, property, receiver) as unknown),
+      getOwnPropertyDescriptor: (target, property) =>
+        property === 'length'
+          ? Reflect.getOwnPropertyDescriptor(target, property)
+          : { value: 1, enumerable: true, configurable: true, writable: true },
+    });
+
+    expect(hiding.length).toBe(Number.MAX_SAFE_INTEGER);
+    expect(() => namedArrayKeys(hiding)).toThrow(String(MAX_REDACTION_ENTRIES));
   });
 
   it('does not refuse a dense array merely for being long', () => {
