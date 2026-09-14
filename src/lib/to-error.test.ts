@@ -212,6 +212,21 @@ describe('isErrorValue', () => {
     expect(toError(controller.signal.reason)).toBe(controller.signal.reason);
   });
 
+  test('should not be fooled by a borrowed DOMException prototype where the runtime can tell', () => {
+    // The same trick as `Object.create(Error.prototype)`, aimed at the DOMException
+    // branch: passes `instanceof DOMException`, has no DOMException state behind it, and
+    // carries its own `name: 'AbortError'` to read as a cancellation. The branded `code`
+    // getter refuses it.
+    const impostor = Object.create(DOMException.prototype, {
+      name: { value: 'AbortError', enumerable: true },
+    }) as object;
+    const hasIsError =
+      typeof (Error as { isError?: unknown }).isError === 'function';
+
+    expect(impostor instanceof DOMException).toBe(true);
+    expect(isErrorValue(impostor)).toBe(!hasIsError);
+  });
+
   test('should recognize what deserializeError builds and refuse what serializeError emits', async () => {
     const { serializeError, deserializeError } =
       await import('./serialize-error/lib/serialize-error');

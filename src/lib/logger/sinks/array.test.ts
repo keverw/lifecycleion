@@ -2,6 +2,10 @@ import { describe, expect, test } from 'bun:test';
 import { ArraySink } from './array';
 import type { LogEntry } from '../types';
 import { MAX_RENDER_DEPTH, TRUNCATED } from '../../internal/render-budget';
+import {
+  muteConsoleError,
+  restoreConsoleError,
+} from '../../internal/console-test-utils';
 
 describe('ArraySink', () => {
   test('should store log entries', () => {
@@ -838,4 +842,53 @@ test('spends one allowance across the whole snapshot rather than one per contain
   // its own rather than looking like a params object that only ever had one entry.
   expect(second).toBeUndefined();
   expect(stored['[max entries exceeded]']).toBe('[max entries exceeded]');
+});
+
+describe('ArraySink - a then-only thenable from onFormatError', () => {
+  const makeEntry = (message: string): LogEntry => ({
+    timestamp: Date.now(),
+    type: 'info',
+    template: message,
+    message,
+  });
+
+  test('is settled for the reporter and lowers the guard', async () => {
+    // `isPromise` accepts anything with a `then`, and the reporter calls `catch` on what
+    // the guard returns. Handing the handler's own object back threw `catch is not a
+    // function` out of the report; wrapped in a real promise, it settles like any other.
+    const captured = muteConsoleError();
+    let calls = 0;
+    const sink = new ArraySink({
+      transformer: () => {
+        throw new Error('transformer boom');
+      },
+      onFormatError: () => {
+        calls++;
+
+        return {
+          then(onFulfilled: () => void) {
+            setTimeout(onFulfilled, 5);
+          },
+        } as unknown as void;
+      },
+    });
+
+    try {
+      sink.write(makeEntry('first'));
+      sink.write(makeEntry('second'));
+
+      await new Promise((resolve) => setTimeout(resolve, 30));
+
+      sink.write(makeEntry('third'));
+
+      // Reported once while the first was pending, and again once it had settled.
+      expect(calls).toBe(2);
+      expect(sink.logs).toHaveLength(3);
+      expect(captured.some((line) => line.includes('is not a function'))).toBe(
+        false,
+      );
+    } finally {
+      restoreConsoleError();
+    }
+  });
 });

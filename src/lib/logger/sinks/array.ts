@@ -433,11 +433,15 @@ export class ArraySink implements LogSink {
       }
 
       if (isPromise(result)) {
-        // A side chain that lowers the guard either way, with the handler's own result
-        // handed back untouched so a rejection still travels on to the reporter. Through
-        // `Promise.resolve` rather than `result.finally`, as the logger does: `isPromise`
-        // accepts any thenable, and a `then`-only one has no `finally` to call.
-        void Promise.resolve(result).then(
+        // Settled through `Promise.resolve` rather than `result.finally`, as the logger
+        // does: `isPromise` accepts any thenable, and a `then`-only one has no `finally`
+        // to call - nor the `catch` the reporter calls on what this returns, which is
+        // why the wrapped promise is what goes back rather than the handler's own
+        // object. A rejection still travels on to the reporter through it; the side
+        // chain here only lowers the guard either way.
+        const settled = Promise.resolve(result);
+
+        void settled.then(
           () => {
             this.formatReportsInFlight--;
           },
@@ -446,7 +450,7 @@ export class ArraySink implements LogSink {
           },
         );
 
-        return result;
+        return settled;
       }
 
       this.formatReportsInFlight--;

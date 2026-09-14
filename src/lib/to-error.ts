@@ -36,13 +36,14 @@ export function isErrorValue(value: unknown): value is Error {
     // what remains for a runtime that does not, with the bargain the doc comment
     // describes.
     //
-    // A `DOMException` is accepted beside it, by its own constructor. The proposal has
-    // `Error.isError` answer `true` for one, and Node does, but Bun 1.4 answers `false`
-    // - and every `AbortError` a fetch or an `AbortSignal` produces is a `DOMException`,
-    // so without this the client stopped telling a cancellation from a failure. The
-    // constructor check is not the `instanceof Error` this replaces: `DOMException` has
-    // no public prototype trick that reaches it short of a `Proxy`, which the brand
-    // check on the other branch already accepts as the same bargain.
+    // A `DOMException` is accepted beside it, by its own internal state. The proposal
+    // has `Error.isError` answer `true` for one, and Node does, but Bun 1.4 answers
+    // `false` - and every `AbortError` a fetch or an `AbortSignal` produces is a
+    // `DOMException`, so without this the client stopped telling a cancellation from a
+    // failure. Checked through a branded getter rather than `instanceof`, which
+    // `Object.create(DOMException.prototype)` would pass exactly as it passes
+    // `instanceof Error`: the `code` accessor throws for a receiver with no
+    // `DOMException` state behind it, on Bun and Node alike.
     if (typeof errorIsError === 'function') {
       return errorIsError(value) || isDOMExceptionInstance(value);
     }
@@ -61,10 +62,49 @@ export function isErrorValue(value: unknown): value is Error {
   }
 }
 
-function isDOMExceptionInstance(value: unknown): boolean {
-  const ctor = (globalThis as { DOMException?: unknown }).DOMException;
+/**
+ * The `code` getter off `DOMException.prototype`, read once. A branded accessor: it
+ * throws for any receiver that is not a real `DOMException`, borrowed prototype
+ * included, which is the check `instanceof` cannot make. `undefined` where the runtime
+ * has no `DOMException`, or one whose `code` is not an accessor.
+ */
+const domExceptionCodeGetter = (():
+  ((this: unknown) => unknown) | undefined => {
+  const ctor: unknown = (globalThis as { DOMException?: unknown }).DOMException;
 
-  return typeof ctor === 'function' && value instanceof ctor;
+  if (typeof ctor !== 'function') {
+    return undefined;
+  }
+
+  const prototype: unknown = (ctor as { prototype?: unknown }).prototype;
+
+  if (typeof prototype !== 'object' || prototype === null) {
+    return undefined;
+  }
+
+  // Read off a plain record rather than as a method, which is what it is: an accessor
+  // to be invoked with a receiver of this module's choosing.
+  const descriptor = Object.getOwnPropertyDescriptor(prototype, 'code') as
+    { get?: unknown } | undefined;
+  const getter = descriptor?.get;
+
+  return typeof getter === 'function'
+    ? (getter as (this: unknown) => unknown)
+    : undefined;
+})();
+
+function isDOMExceptionInstance(value: unknown): boolean {
+  if (domExceptionCodeGetter === undefined || typeof value !== 'object') {
+    return false;
+  }
+
+  try {
+    Reflect.apply(domExceptionCodeGetter, value, []);
+
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /**
