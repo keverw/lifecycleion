@@ -10,10 +10,10 @@
  * did. These count in code points, so a cut never lands inside a character. A value with
  * no astral characters masks exactly as it did before.
  *
- * Code points, not grapheme clusters: a combining mark or a variation selector is its
- * own character here, so `é` written as `e` + U+0301 can be split into a visible `e`
- * and a masked accent. That is a legible cut rather than a broken one, and the price of
- * not shipping a segmenter for the default mask.
+ * A character is a grapheme cluster where the runtime has `Intl.Segmenter` - so a
+ * family emoji, a flag, a skin-tone variant or `e` + combining accent is one character,
+ * hidden behind one mask character or shown whole - and a code point where it does not,
+ * which still never splits a surrogate pair. See {@link splitCharacters}.
  *
  * `maskChar.repeat(maskCount)` writes one mask character per hidden character, so a
  * `percent` past 100 or a multi-character `maskChar` lengthens the output. Neither is
@@ -21,6 +21,54 @@
  * input with untrusted settings bounds them first, as the logger's default redaction
  * does.
  */
+
+/**
+ * Split a string into the characters the masks count in.
+ *
+ * Grapheme clusters through `Intl.Segmenter` where the runtime has it, so what a reader
+ * sees as one character is one character here: a family emoji built from several code
+ * points and zero-width joiners, a flag, a skin-tone variant, a base letter with a
+ * combining accent. Code points otherwise, which never split a surrogate pair but can
+ * show the base of a cluster with its modifier masked. Either way a cut between two
+ * entries is a cut between whole characters, never inside one.
+ *
+ * Exported so a caller sizing a value before masking it - "too short to mask in part" -
+ * counts the same units the mask will.
+ */
+export function splitCharacters(value: string): string[] {
+  const segmenter = graphemeSegmenter();
+
+  if (segmenter === undefined) {
+    return Array.from(value);
+  }
+
+  const characters: string[] = [];
+
+  for (const { segment } of segmenter.segment(value)) {
+    characters.push(segment);
+  }
+
+  return characters;
+}
+
+/**
+ * One segmenter for the module, built on first use: constructing one is the expensive
+ * part, segmenting with it is not. `undefined` where the runtime has no `Intl.Segmenter`.
+ */
+let cachedSegmenter: Intl.Segmenter | undefined | null = null;
+
+function graphemeSegmenter(): Intl.Segmenter | undefined {
+  if (cachedSegmenter === null) {
+    const ctor = (Intl as { Segmenter?: typeof Intl.Segmenter }).Segmenter;
+
+    cachedSegmenter =
+      typeof ctor === 'function'
+        ? new ctor(undefined, { granularity: 'grapheme' })
+        : undefined;
+  }
+
+  return cachedSegmenter;
+}
 
 /** The mask character used when none is given. */
 export const DEFAULT_MASK_CHAR = '*';
@@ -33,8 +81,8 @@ export const DEFAULT_EMAIL_USER_PERCENT = 50;
  * Mask a proportion of `value`, keeping the ends readable.
  *
  * `percent` of the characters are hidden; the visible remainder is split as evenly as it
- * can be, the shorter half in front. Counted in code points, so the prefix and suffix
- * each end on a whole character.
+ * can be, the shorter half in front. Counted in characters - see
+ * {@link splitCharacters} - so the prefix and suffix each end on a whole one.
  *
  * @example
  * ```typescript
@@ -47,7 +95,8 @@ export function maskString(
   maskChar: string = DEFAULT_MASK_CHAR,
   percent: number = DEFAULT_MASK_PERCENT,
 ): string {
-  const characters = Array.from(value);
+  // In characters, so the prefix and suffix each end on a whole one.
+  const characters = splitCharacters(value);
   const length = characters.length;
 
   if (length === 0) {

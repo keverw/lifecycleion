@@ -1,6 +1,6 @@
 # datamask
 
-Mask emails, domains and plain strings: a proportion of each is hidden behind a mask character and the ends are left readable. The successor to the `datamask` npm package, with the same three functions, arguments and defaults, counting in characters rather than UTF-16 code units so a cut never lands inside an emoji.
+Mask emails, domains and plain strings: a proportion of each is hidden behind a mask character and the ends are left readable. The successor to the `datamask` npm package, with the same three functions, arguments and defaults, counting in characters as a reader sees them rather than UTF-16 code units, so a cut never lands inside an emoji and a multi-code-point emoji hides behind one mask character.
 
 <!-- toc -->
 
@@ -11,6 +11,7 @@ Mask emails, domains and plain strings: a proportion of each is hidden behind a 
   - [maskEmail](#maskemail)
   - [datamask](#datamask)
 - [Characters, not code units](#characters-not-code-units)
+  - [splitCharacters](#splitcharacters)
 - [Untrusted settings](#untrusted-settings)
 
 <!-- tocstop -->
@@ -67,7 +68,15 @@ datamask.email('test@example.com'); // 't**t@e****le.com'
 
 ## Characters, not code units
 
-The masks count in code points, so an emoji-heavy value comes back with every character whole: the `datamask` package indexed by UTF-16 code unit and could leave a lone surrogate at the seam. They do not segment grapheme clusters - a combining mark or a variation selector is its own character - so `é` written as `e` plus a combining accent can be split into a visible `e` and a masked accent. That is a legible cut rather than a broken one.
+The masks count in characters as a reader sees them, so an emoji-heavy value comes back with every character whole and each hidden one behind exactly one mask character: the `datamask` package indexed by UTF-16 code unit and could leave a lone surrogate at the seam. Where the runtime has `Intl.Segmenter` (Node, Bun, every current browser) a character is a grapheme cluster - a family emoji built from several code points and joiners, a flag, a skin-tone variant, or `e` plus a combining accent is one character. Without it, a character is a code point, which still never splits a surrogate pair but can show the base of a cluster with its modifier masked.
+
+### splitCharacters
+
+The splitter the masks use, exported so a caller sizing a value before masking it counts the same units the mask will.
+
+```typescript
+splitCharacters('👨‍👩‍👧🇺🇸ab'); // ['👨‍👩‍👧', '🇺🇸', 'a', 'b']
+```
 
 ## Untrusted settings
 

@@ -1,4 +1,9 @@
-import { maskDomain, maskEmail, maskString } from '../datamask';
+import {
+  maskDomain,
+  maskEmail,
+  maskString,
+  splitCharacters,
+} from '../datamask';
 import { isPlainContainer } from './is-plain-container';
 
 /**
@@ -32,9 +37,9 @@ export const DEFAULT_MASK_PERCENT = 90;
  * four-digit PIN rendered `1**4` and a two-character value rendered `*b`. Anything
  * shorter than this is replaced outright instead.
  *
- * A length in characters - code points - not UTF-16 units, since that is what the masking
- * below counts in. Measured in units, four emoji were "eight characters" and masked in
- * part, and the cut then landed inside one of them.
+ * A length in characters, not UTF-16 units, counted the way the masking below counts them
+ * (see `splitCharacters`). Measured in units, four emoji were "eight characters" and
+ * masked in part, and the cut then landed inside one of them.
  */
 const MINIMUM_PARTIAL_MASK_LENGTH = 8;
 
@@ -315,7 +320,7 @@ export function maskWithConfig(
     //
     // Counted in characters, as the masking is. `value.length` is UTF-16 units, and for
     // an astral-heavy value that is up to twice the character count - see the constant.
-    if (Array.from(value).length < MINIMUM_PARTIAL_MASK_LENGTH) {
+    if (splitCharacters(value).length < MINIMUM_PARTIAL_MASK_LENGTH) {
       return REDACTED_PLACEHOLDER;
     }
 

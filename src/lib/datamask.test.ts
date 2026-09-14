@@ -1,6 +1,12 @@
 import { describe, expect, test } from 'bun:test';
 
-import { datamask, maskDomain, maskEmail, maskString } from './datamask';
+import {
+  datamask,
+  maskDomain,
+  maskEmail,
+  maskString,
+  splitCharacters,
+} from './datamask';
 
 // The outputs the `datamask` npm package produced for the same calls, so a caller moving
 // off it sees nothing change for a value with no astral characters.
@@ -38,13 +44,24 @@ describe('maskString', () => {
     expect(maskString('abc', 'xy', 50)).toBe('axyc');
   });
 
-  test('counts code points, not grapheme clusters', () => {
-    // A combining accent is its own character: a legible cut, not a broken one.
+  test('counts grapheme clusters, so a combining accent stays with its letter', () => {
+    // Four characters as a reader sees them, not eight code points: two hidden, one
+    // shown whole on each side, accent and all.
     const decomposed = 'e\u0301'.repeat(4);
-    const masked = maskString(decomposed, '*', 50);
 
-    expect(masked).toBe('e\u0301****e\u0301');
-    expect(Array.from(masked)).toHaveLength(8);
+    expect(maskString(decomposed, '*', 50)).toBe('e\u0301**e\u0301');
+  });
+
+  test('hides a multi-code-point emoji behind one mask character', () => {
+    // A family, a flag and a skin-tone variant are one character each, so the mask
+    // never shows a base emoji with its modifier hidden.
+    const family = '👨\u200d👩\u200d👧';
+    const flag = '🇺🇸';
+    const thumbs = '👍🏽';
+    const value = `${family}${flag}${thumbs}abcd`;
+
+    expect(splitCharacters(value)).toHaveLength(7);
+    expect(maskString(value, '*', 50)).toBe(`${family}${flag}***cd`);
   });
 
   test('never cuts inside a character', () => {
