@@ -176,6 +176,23 @@ export class CookieJar {
 
     const normalizedDomain = this.normalizeStoredDomain(domain);
     const path = input.path ?? '/';
+
+    // The prefix rules need no request URL, so they hold here too: a persisted jar
+    // tampered into holding a `__Host-session` with `hostOnly` cleared used to be
+    // restored through `fromJSON` and sent to every subdomain, carrying a name that
+    // promises a server it was set host-only, over `https:`, at `/`.
+    if (
+      !this.hasValidNamePrefix({
+        name: input.name,
+        value: input.value,
+        secure: input.secure,
+        // `Domain` absent means host-only; on this path that is the `hostOnly` flag.
+        domain: input.hostOnly === true ? undefined : normalizedDomain,
+        path,
+      })
+    ) {
+      return false;
+    }
     const createdAt = input.createdAt ?? Date.now();
     const bucket = this.getOrCreateBucket(this.apexFor(normalizedDomain));
 
@@ -899,7 +916,8 @@ export class CookieJar {
    * `Domain` attribute (so the cookie is host-only) and `Path=/`. A cookie that claims
    * a prefix without meeting its conditions is refused outright rather than stored with
    * the guarantees the prefix promises to a server reading it back. The secure-scheme
-   * half of both prefixes is enforced by the `Secure` check in `storeParsed`.
+   * half of both prefixes is enforced by the `Secure` check in `storeParsed`; the
+   * attribute half is checked on `setCookie` as well, since it needs no URL.
    */
   private hasValidNamePrefix(parsed: ParsedCookie): boolean {
     const lowerName = parsed.name.toLowerCase();

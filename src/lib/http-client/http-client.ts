@@ -526,15 +526,18 @@ export class BaseHTTPClient {
     const signalReleasers: Array<() => void> = [];
     let cancelSignal: AbortSignal = abortController.signal;
 
-    if (options.signal) {
-      cancelSignal = this._composeSignals(
-        options.signal,
-        abortController.signal,
-        signalReleasers,
-      );
-    }
-
     try {
+      // Composed inside the `try`, so a caller's signal whose `addEventListener` throws
+      // still reaches the `finally` that releases whatever was attached before the
+      // throw. Composed before it, the release list was built and never run.
+      if (options.signal) {
+        cancelSignal = this._composeSignals(
+          options.signal,
+          abortController.signal,
+          signalReleasers,
+        );
+      }
+
       let finalRequest = interceptedRequest;
       let response: HTTPResponse<T>;
       let observerRequest = this._bestEffortAttemptRequestFromPending(
@@ -1711,6 +1714,10 @@ export class BaseHTTPClient {
           // itself.
           attemptNumber,
           requestID: requestID,
+          // The origin the caller addressed, so an adapter can tell a redirect hop to
+          // another host from the request it was configured for. See
+          // `AdapterRequest.initialURL`.
+          initialURL,
           // Always handed over for a bodied request, whether or not the caller asked for
           // progress: the stamp is what lets the wait on `requestBodySettled` tell an
           // upload that is still moving from one that has stalled. A bodiless request
@@ -3025,13 +3032,17 @@ export class BaseHTTPClient {
       const onAbortA = () => abort(a);
       const onAbortB = () => abort(b);
 
-      a.addEventListener('abort', onAbortA, { once: true });
-      b.addEventListener('abort', onAbortB, { once: true });
-
+      // Registered before either listener is attached, so a second `addEventListener`
+      // that throws - a caller's own `AbortSignal` subclass, a `Proxy` - does not leave
+      // the first listener attached with nothing recorded to remove it. Removing a
+      // listener that was never added is a no-op.
       releasers.push(() => {
         a.removeEventListener('abort', onAbortA);
         b.removeEventListener('abort', onAbortB);
       });
+
+      a.addEventListener('abort', onAbortA, { once: true });
+      b.addEventListener('abort', onAbortB, { once: true });
     }
 
     return controller.signal;

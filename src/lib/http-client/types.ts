@@ -43,6 +43,14 @@ export interface AdapterRequest {
   attemptNumber?: number;
   /** Passed by the client so NodeAdapter can populate StreamResponseInfo. */
   requestID?: string;
+  /**
+   * The resolved URL of the original request, before any redirect hop. Passed by the
+   * client so an adapter can tell a hop to another origin from the request the caller
+   * addressed - `NodeAdapter` withholds its configured client certificate and SNI
+   * override on such a hop rather than presenting them to a host the caller never named.
+   * Absent when an adapter is driven directly.
+   */
+  initialURL?: string;
 }
 
 export interface AdapterResponse {

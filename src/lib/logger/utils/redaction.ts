@@ -19,7 +19,7 @@ import {
 } from '../../internal/format-reporter';
 
 /**
- * Default redaction function using datamask
+ * Default redaction function: masks by code point, see `default-redact-function`
  * Masks sensitive values with asterisks
  */
 export const defaultRedactFunction: RedactFunction = defaultRedactValue;

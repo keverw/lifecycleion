@@ -10,9 +10,9 @@ Render any value as a display string, or return it with parts redacted. The rend
   - [Options](#options)
     - [Bounding and Observing the Render](#bounding-and-observing-the-render)
   - [redactValue](#redactvalue)
-- [How values render](#how-values-render)
-- [Redacting while rendering](#redacting-while-rendering)
-  - [What masking reaches](#what-masking-reaches)
+- [How Values Render](#how-values-render)
+- [Redacting While Rendering](#redacting-while-rendering)
+  - [What Masking Reaches](#what-masking-reaches)
 - [Notes](#notes)
 
 <!-- tocstop -->

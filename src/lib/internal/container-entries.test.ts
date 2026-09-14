@@ -6,6 +6,7 @@ import {
   isArrayIndexKey,
   namedArrayKeys,
 } from './container-entries';
+import { MAX_REDACTION_ENTRIES } from './redact-paths';
 
 describe('describeContainer', () => {
   it('reports an array by length', () => {
@@ -121,6 +122,48 @@ describe('describeContainer', () => {
     expect(() => describeContainer(hostile)).not.toThrow();
     expect(describeContainer(hostile).kind).toBe('unreadable');
   });
+
+  it('refuses an object with more keys than any walk may visit, rather than handing the list on', () => {
+    // An array's `length` is a number the walks compare against the cap before touching a
+    // single element, but an object's keys arrive as a list - and an `ownKeys` trap is as
+    // free to invent a million of them as a `length` trap is to invent a million elements.
+    // `Object.keys` cannot be stopped short, so that one allocation happens; what must not
+    // happen is a walk or a copy running over the list afterwards. Reported as the shape
+    // every caller already fails closed on, so an over-cap bag becomes a marker rather than
+    // a partial copy that quietly lost its tail.
+    const keys = Array.from(
+      { length: MAX_REDACTION_ENTRIES + 1 },
+      (_, index) => `k${String(index)}`,
+    );
+
+    const liar = new Proxy(
+      {},
+      {
+        ownKeys: () => keys,
+        // `Object.keys` asks after every key's enumerability, so the trap has to answer for
+        // each of them - a real descriptor per key would be the very cost under test.
+        getOwnPropertyDescriptor: () => ({
+          value: 1,
+          enumerable: true,
+          configurable: true,
+          writable: true,
+        }),
+      },
+    );
+
+    const startedAt = Date.now();
+    const shape = describeContainer(liar);
+
+    expect(shape.kind).toBe('unreadable');
+    expect((shape as { error: Error }).error).toBeInstanceOf(Error);
+    expect((shape as { error: Error }).error.message).toContain(
+      String(MAX_REDACTION_ENTRIES),
+    );
+    // Only the count travels, never the keys themselves: the error is what callers hand
+    // to their failure handler, and a key is caller data.
+    expect((shape as { error: Error }).error.message).not.toContain('k0');
+    expect(Date.now() - startedAt).toBeLessThan(10_000);
+  }, 15_000);
 });
 
 describe('defineEntry', () => {

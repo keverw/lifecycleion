@@ -1,5 +1,4 @@
-import datamask from 'datamask';
-
+import { maskDomain, maskEmail, maskString } from '../datamask';
 import { isPlainContainer } from './is-plain-container';
 
 /**
@@ -29,9 +28,13 @@ export const DEFAULT_MASK_PERCENT = 90;
 /**
  * Below this length, proportional masking hides too little to be worth doing.
  *
- * `datamask` masks a proportion of the string, so a short value keeps most of itself: a
+ * The masking hides a proportion of the string, so a short value keeps most of itself: a
  * four-digit PIN rendered `1**4` and a two-character value rendered `*b`. Anything
  * shorter than this is replaced outright instead.
+ *
+ * A length in characters - code points - not UTF-16 units, since that is what the masking
+ * below counts in. Measured in units, four emoji were "eight characters" and masked in
+ * part, and the cut then landed inside one of them.
  */
 const MINIMUM_PARTIAL_MASK_LENGTH = 8;
 
@@ -234,7 +237,7 @@ export function matchRedactMaskConfig(value: unknown): RedactMaskConfigMatch {
 /**
  * One mask character, whatever the caller supplied.
  *
- * `datamask` emits one `maskChar` per masked character, so the length of this string is a
+ * The masking emits one `maskChar` per masked character, so the length of this string is a
  * multiplier on everything written to every sink - the same output amplification the
  * `percent` ceiling below exists to stop, and the one this was missing: checked only for
  * being non-empty, a `redactFunction` answering `{ maskChar: 'X'.repeat(100_000) }` over
@@ -260,7 +263,7 @@ function normalizeMaskChar(value: unknown): string {
 /**
  * A usable masking percent, or `fallback` when the value does not name one.
  *
- * Clamped at the ceiling as well as the floor. `datamask` masks a *proportion*, emitting
+ * Clamped at the ceiling as well as the floor. The masking hides a *proportion*, emitting
  * `length * percent / 100` mask characters without stopping at the length of the value,
  * so an out-of-range percent lengthens the output rather than merely over-masking: at
  * 10000 a 200-character secret came back as a 20,000-character string, written to every
@@ -279,8 +282,10 @@ function normalizePercent(value: unknown, fallback: number): number {
  * Apply a masking request to an already-stringified value.
  *
  * Never returns the original: a strategy that hides nothing - too short a value, a
- * percent of zero, an address `datamask.email` cannot parse - falls through to the
- * opaque placeholder rather than handing back what it was asked to hide.
+ * percent of zero, an address with nothing to mask - falls through to the opaque
+ * placeholder rather than handing back what it was asked to hide.
+ *
+ * Always well-formed: every strategy cuts between characters, see {@link maskString}.
  *
  * Every setting is read inside the guard, none of them above it. `config` is whatever a
  * caller's `redactFunction` handed back, so each of these is an ordinary property that can
@@ -307,7 +312,10 @@ export function maskWithConfig(
     // the `else` it exempted exactly the requests a caller spells out: a four-digit PIN
     // under `strategy: 'domain'` came back `***4` and a two-character value under
     // `strategy: 'email'` came back `*b`, where the default path replaces both outright.
-    if (value.length < MINIMUM_PARTIAL_MASK_LENGTH) {
+    //
+    // Counted in characters, as the masking is. `value.length` is UTF-16 units, and for
+    // an astral-heavy value that is up to twice the character count - see the constant.
+    if (Array.from(value).length < MINIMUM_PARTIAL_MASK_LENGTH) {
       return REDACTED_PLACEHOLDER;
     }
 
@@ -316,16 +324,16 @@ export function maskWithConfig(
       // over as given: they are the same caller-supplied number by another name, and
       // reading one directly would leave the ceiling - and the finiteness check - applying
       // to `percent` alone.
-      masked = datamask.email(
+      masked = maskEmail(
         value,
         maskChar,
         normalizePercent(config.userPercent, percent),
         normalizePercent(config.domainPercent, percent),
       );
     } else if (config.strategy === 'domain') {
-      masked = datamask.domain(value, maskChar, percent);
+      masked = maskDomain(value, maskChar, percent);
     } else {
-      masked = datamask.string(value, maskChar, percent);
+      masked = maskString(value, maskChar, percent);
     }
   } catch {
     return REDACTED_PLACEHOLDER;

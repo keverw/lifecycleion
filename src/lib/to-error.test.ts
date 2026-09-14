@@ -167,6 +167,27 @@ describe('isErrorValue', () => {
     }
   });
 
+  test('should not be fooled by a claimed brand where the runtime can tell', () => {
+    // `Object.prototype.toString` consults `Symbol.toStringTag`, so a plain object can
+    // wear `'[object Error]'`. `Error.isError` reads the internal slot instead and is
+    // preferred wherever it exists; on a runtime without it the brand check is what
+    // remains, and the impostor is returned as-is, which the doc comment owns.
+    const impostor = { [Symbol.toStringTag]: 'Error', name: 'AbortError' };
+    const hasIsError =
+      typeof (Error as { isError?: unknown }).isError === 'function';
+
+    expect(Object.prototype.toString.call(impostor)).toBe('[object Error]');
+    expect(isErrorValue(impostor)).toBe(!hasIsError);
+
+    if (hasIsError) {
+      const wrapped = toError(impostor);
+
+      expect(wrapped).not.toBe(impostor);
+      expect(wrapped.message).toContain('Non-error value thrown');
+      expect(wrapped.cause).toBe(impostor);
+    }
+  });
+
   test('should not throw on a value whose prototype cannot be walked', () => {
     // `instanceof` walks a prototype chain and `Object.prototype.toString` reads the
     // brand; a revoked `Proxy` refuses both. This is called from reporting paths that

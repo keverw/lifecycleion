@@ -4,6 +4,7 @@ import {
   namedArrayKeys,
 } from '../../internal/container-entries';
 import { isPlainContainer } from '../../internal/is-plain-container';
+import { isPromise } from '../../is-promise';
 import { MAX_REDACTION_ENTRIES } from '../../internal/redact-paths';
 import { MAX_RENDER_DEPTH, TRUNCATED } from '../../internal/render-budget';
 import {
@@ -273,6 +274,31 @@ export class ArraySink implements LogSink {
 
   private onFormatError?: FormatErrorHandler;
 
+  /**
+   * How many format failures are being reported right now, so an `onFormatError` that
+   * logs through this same sink cannot feed the loop that reported it.
+   *
+   * The guard `FileSink` and `NamedPipeSink` hold over a `'format'` failure, which this
+   * sink lacked. A handler that logs the failure it was handed is the natural one - a test
+   * harness recording what went wrong into the very sink it is inspecting - and the
+   * `write()` it makes runs the same transformer, or snapshots the same hostile params,
+   * that just failed. Each write built a fresh reporter, so nothing remembered that a
+   * report was already being delivered: write reported, the handler wrote, that write
+   * reported, the handler wrote again, and the recursion ran until the stack gave out,
+   * storing thousands of entries on the way.
+   *
+   * While this is above zero, a nested write's report is dropped and its entry stored as
+   * it would be otherwise. Dropped rather than counted: this sink has no health surface
+   * to count it on, and the entry itself is not lost - only the second diagnosis of the
+   * same failure is, which the first one already gave.
+   *
+   * A count held until the handler *settles*, not a flag cleared on return, and for the
+   * same reason the file sink gives: an `async` handler returns at its first `await`, and
+   * a flag cleared there was down again by the time the handler resumed and logged - so
+   * the chain ran on, one report per turn of the event loop.
+   */
+  private formatReportsInFlight = 0;
+
   constructor(options?: {
     transformer?: ArrayLogTransformer;
     /**
@@ -308,15 +334,10 @@ export class ArraySink implements LogSink {
               // One reporter per entry: the bound that matters here is per snapshot, since
               // a sink writes many entries over its life and a budget shared across all of
               // them would report the first hostile param and stay silent thereafter.
-              // A handler is always supplied, never left to the reporter's own default.
-              // A sink runs *inside* a log call by definition, and that default
-              // broadcasts on the global `'error'` channel - which a listening logger
-              // would log, reaching this sink again. The console is the only rung that
-              // cannot re-enter what is already running.
-              createFormatReporter(
-                'render',
-                this.onFormatError ?? consoleFormatHandler(),
-              ),
+              // The handler beneath it is the guarded one - see `guardedFormatHandler`
+              // for why it is never the reporter's own default, and see
+              // `formatReportsInFlight` for what the guard stops.
+              createFormatReporter('render', this.guardedFormatHandler()),
             ),
           };
 
@@ -334,10 +355,10 @@ export class ArraySink implements LogSink {
         // recovery - a broken transformer must not cost you the log - but it was also
         // completely silent, so a transformer that threw on every entry looked exactly
         // like one that had chosen to pass every entry through untouched.
-        createFormatReporter(
-          'transform',
-          this.onFormatError ?? consoleFormatHandler(),
-        )(error, '<transformer>');
+        createFormatReporter('transform', this.guardedFormatHandler())(
+          error,
+          '<transformer>',
+        );
       }
     }
     // Store the original entry
@@ -363,5 +384,64 @@ export class ArraySink implements LogSink {
    */
   public close(): void {
     this.closed = true;
+  }
+
+  /**
+   * The handler every report from this sink goes through, wrapped in the re-entry guard.
+   *
+   * Built here rather than at each reporter, so the two places `write()` reports from -
+   * the snapshot and the transformer - share one guard, and a handler's write that fails
+   * the *other* way is stopped too. The reporters beneath stay per entry: the once-per-kind
+   * bound is theirs and is not what this is for.
+   *
+   * A handler is always supplied, never left to the reporter's own default. A sink runs
+   * *inside* a log call by definition, and that default broadcasts on the global `'error'`
+   * channel - which a listening logger would log, reaching this sink again. The console is
+   * the only rung that cannot re-enter what is already running.
+   *
+   * Returns the handler's result rather than discarding it, for the reason
+   * `createFormatReporter` gives: `reportThroughHandler` follows a promise so an `async`
+   * handler that rejects lands on the console rung instead of becoming an unhandled
+   * rejection. The count comes down on that same settlement, whichever way it goes.
+   */
+  private guardedFormatHandler(): FormatErrorHandler {
+    const handler = this.onFormatError ?? consoleFormatHandler();
+
+    // Typed as returning `unknown` rather than what `FormatErrorHandler` declares, so the
+    // promise an `async` handler hands back travels on to the reporter whatever that alias
+    // says about its return - the reporter follows it, and the guard comes down with it.
+    return (error, kind, path): unknown => {
+      // See `formatReportsInFlight`. The nested report is the one dropped; its entry is
+      // stored by `write()` exactly as if nothing had been reported.
+      if (this.formatReportsInFlight > 0) {
+        return undefined;
+      }
+
+      this.formatReportsInFlight++;
+
+      let result: unknown;
+
+      try {
+        result = handler(error, kind, path);
+      } catch (handlerError) {
+        // The throw is the reporter's to answer - it lands on the console rung there -
+        // but the guard must come down here, before it does, or a throwing handler would
+        // leave this sink silent about every later failure.
+        this.formatReportsInFlight--;
+
+        throw handlerError;
+      }
+
+      if (isPromise(result)) {
+        // `finally` rather than `then`, so a rejection still travels on to the reporter.
+        return result.finally(() => {
+          this.formatReportsInFlight--;
+        });
+      }
+
+      this.formatReportsInFlight--;
+
+      return result;
+    };
   }
 }

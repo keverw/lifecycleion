@@ -22,6 +22,13 @@
  * recursion, cycles, budgets and output shape stay with the caller that owns them.
  */
 
+// A cycle on paper - `redact-paths` imports this module - and harmless in practice: the
+// constant is read inside `describeContainer`, never while either module is evaluating, so
+// whichever of the two loads first sees it initialized by the time any walk runs. Imported
+// rather than copied so the cap the walks bill against and the one this enforces cannot
+// drift apart.
+import { MAX_REDACTION_ENTRIES } from './redact-paths';
+
 /**
  * What a container will admit to holding, or that asking threw.
  *
@@ -49,7 +56,22 @@ export type ContainerShape =
  * outside what these walks address - see `applyRedaction`'s `normalizeParamsBag` for the
  * one place that deliberately widens it, and why.
  *
- * @returns The container's shape, or `'unreadable'` when asking threw. Never throws.
+ * An object with more than {@link MAX_REDACTION_ENTRIES} keys is `'unreadable'` too, and
+ * that is a refusal rather than a read that threw. Every walk bills each entry it visits
+ * against that cap, and an array's `length` is only ever a number to compare against it -
+ * but an object's keys arrive as a list, and a `Proxy` whose `ownKeys` trap invents
+ * millions of them hands over the whole list before any per-entry budget has run.
+ * `Object.keys` itself cannot be stopped short (a trap returns the list whole, and there
+ * is no way to ask for the first `n`), so that allocation is the one cost this cannot
+ * refuse; what it does refuse is everything after it. Reported as the shape the callers
+ * already fail closed on rather than as an `'object'` with a truncated key list: a partial
+ * copy stands in for the original and silently loses every entry past the bound, where the
+ * marker every caller emits for `'unreadable'` says the container was not read - the same
+ * answer `redact-normalization` gives an array whose `length` is past the cap, and the one
+ * `applyRedaction` gives a root bag with that many keys.
+ *
+ * @returns The container's shape, or `'unreadable'` when asking threw or the answer was
+ *          too large to walk. Never throws.
  */
 export function describeContainer(value: object): ContainerShape {
   try {
@@ -57,7 +79,20 @@ export function describeContainer(value: object): ContainerShape {
       return { kind: 'array', length: (value as unknown[]).length };
     }
 
-    return { kind: 'object', keys: Object.keys(value) };
+    const keys = Object.keys(value);
+
+    if (keys.length > MAX_REDACTION_ENTRIES) {
+      // The list is dropped here rather than handed back, so nothing downstream can walk
+      // or copy it. The count alone is safe to say: it is a number, not a value.
+      return {
+        kind: 'unreadable',
+        error: new Error(
+          `container has ${String(keys.length)} keys, more than the ${String(MAX_REDACTION_ENTRIES)} any walk may visit; it was not read`,
+        ),
+      };
+    }
+
+    return { kind: 'object', keys };
   } catch (error) {
     return { kind: 'unreadable', error };
   }

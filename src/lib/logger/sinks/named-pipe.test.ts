@@ -2770,6 +2770,115 @@ describe('NamedPipeSink', () => {
     }
   }, 15000);
 
+  test('a blocked open returning at the cap resumes probing without a write()', async () => {
+    // At the cap `ensureConnection` returns before it can arm a timer, so the retry chain
+    // that keeps every other failure alive dies there. The `'close'` of a blocked open is
+    // the only event that says the cap has been left, and it used to do nothing but
+    // decrement - so a quiet process whose reader came back sat uninitialized until its
+    // next `write()`. The existing cap tests fire `'close'` and then call
+    // `releaseStalePendingOpen()` or `reconnect()` by hand, which is exactly the traffic
+    // this pins the sink not to need.
+    const pipePath = `${tmpDir.path}/cap-close-resume.pipe`;
+    await createNamedPipe(pipePath);
+
+    const failures: SinkFailure[] = [];
+    // No reader, so the constructor's probe finds nobody and keeps asking once a second.
+    const sink = new NamedPipeSink({
+      pipePath,
+      onError: (failure) => {
+        failures.push(failure);
+      },
+    });
+
+    const internals = sink as unknown as {
+      pendingStream: unknown;
+      pendingStreamSince: number | undefined;
+      abandonedOpens: number;
+      reopenTimer: unknown;
+      isOpening: boolean;
+      _isReconnecting: boolean;
+      releaseStalePendingOpen: () => void;
+    };
+
+    const closeHandlers: Array<() => void> = [];
+
+    const installStuckOpen = (): void => {
+      internals.pendingStream = {
+        once: (event: string, handler: () => void) => {
+          if (event === 'close') {
+            closeHandlers.push(handler);
+          }
+        },
+        destroy: () => {},
+      };
+      internals.pendingStreamSince = Date.now() - 60_000;
+    };
+
+    const capReports = (): SinkFailure[] =>
+      failures.filter((f) => f.error.message.includes('Gave up reopening'));
+
+    let readerFd: number | undefined;
+
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+
+      // Two stale opens abandoned through the real path, so the real `'close'` handlers
+      // are the ones registered.
+      installStuckOpen();
+      internals.releaseStalePendingOpen();
+      installStuckOpen();
+      internals.releaseStalePendingOpen();
+
+      expect(internals.abandonedOpens).toBe(2);
+      expect(closeHandlers).toHaveLength(2);
+
+      // The probe's timer fires into the cap and is not re-armed.
+      await new Promise((resolve) => setTimeout(resolve, 1300));
+
+      expect(capReports()).toHaveLength(1);
+      expect(internals.reopenTimer).toBeUndefined();
+      expect(sink.getHealth().isInitialized).toBe(false);
+
+      // A reader arrives. Nothing is written, and nothing notices.
+      readerFd = fs.openSync(
+        pipePath,
+        fs.constants.O_RDONLY | fs.constants.O_NONBLOCK,
+      );
+
+      await new Promise((resolve) => setTimeout(resolve, 1300));
+
+      expect(sink.getHealth().isInitialized).toBe(false);
+      expect(internals.isOpening).toBe(false);
+      expect(internals._isReconnecting).toBe(false);
+      expect(internals.reopenTimer).toBeUndefined();
+
+      // The kernel releases one blocked open. That alone has to start the next attempt.
+      closeHandlers[0]?.();
+
+      expect(internals.abandonedOpens).toBe(1);
+      expect(internals.reopenTimer).toBeDefined();
+      expect(await waitForOpenPipe(sink)).toBe(true);
+      expect(sink.getHealth().isReconnecting).toBe(false);
+      // Recovered, not re-refused: the cap was said once, before, and not again.
+      expect(capReports()).toHaveLength(1);
+
+      // The second release finds a sink already open and starts nothing beside it.
+      closeHandlers[1]?.();
+
+      expect(internals.abandonedOpens).toBe(0);
+      expect(internals.reopenTimer).toBeUndefined();
+      expect(internals.isOpening).toBe(false);
+    } finally {
+      internals.pendingStream = undefined;
+      internals.pendingStreamSince = undefined;
+      await sink.close();
+
+      if (readerFd !== undefined) {
+        fs.closeSync(readerFd);
+      }
+    }
+  }, 15000);
+
   test('a write that fails after close is reported, once', async () => {
     // The drain loop pushes the backlog into the stream's buffer and sets `closed` without
     // awaiting the write callbacks, so a callback that errors afterwards lands in

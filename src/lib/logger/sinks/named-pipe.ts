@@ -1894,10 +1894,11 @@ export class NamedPipeSink implements LogSink {
    * happened to resume, or never.
    *
    * One standing exception, and it is deliberate: an open still in flight. Past
-   * {@link MAX_ABANDONED_OPENS}, `ensureConnection` returns at its in-flight guard and
-   * nothing here re-arms, because the sink has said out loud that it has stopped trying
-   * rather than starve the process of I/O threads. Recovery there waits on one of those
-   * opens returning, or on the next `write()`.
+   * {@link MAX_ABANDONED_OPENS}, `ensureConnection` returns at its cap guard and nothing
+   * here re-arms, because the sink has said out loud that it has stopped trying rather
+   * than starve the process of I/O threads. Recovery there waits on one of those opens
+   * returning - and when one does, `abandonPendingOpen`'s `'close'` handler arms this
+   * again, so leaving the cap no more depends on traffic than any other failure does.
    *
    * Throttled rather than unthrottled, by two things at once: this holds a single timer, and
    * `ensureConnection` applies {@link REOPEN_COOLDOWN_MS} again when it fires. So a pipe
@@ -2009,6 +2010,25 @@ export class NamedPipeSink implements LogSink {
       // Armed again, because the sink is no longer at the cap: a later outage that reaches
       // it is a new fact and has to be reported as one.
       this.reportedAbandonedOpenCap = false;
+
+      // And asked again. At the cap, `ensureConnection` returns before it can arm a
+      // timer, so the one-per-second retry chain that every other failure keeps alive
+      // dies there - and this is the only event that says the cap has been left. Without
+      // it, a quiet process whose reader came back stayed uninitialized until its next
+      // `write()`, which is the traffic dependence `scheduleReopen` exists to remove.
+      // Deferred through the timer rather than opened inline, so the attempt runs on its
+      // own turn with every guard `ensureConnection` applies - including the cooldown -
+      // and never beside an open that is already in flight.
+      if (
+        !this.closed &&
+        !this.closing &&
+        !this.isInitialized &&
+        !this._isReconnecting &&
+        !this.isOpening &&
+        this.pendingStream === undefined
+      ) {
+        this.scheduleReopen(0);
+      }
     });
 
     try {

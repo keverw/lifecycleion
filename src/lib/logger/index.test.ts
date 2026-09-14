@@ -1995,6 +1995,140 @@ describe('Logger', () => {
       }
     });
 
+    test('a sync onFormatError that logs the failing value again runs once', () => {
+      // The loop `formatErrorHandler` documents: the handler logs, logging renders and
+      // redacts, the same unreadable value fails again, and the report re-enters the
+      // handler inside its own frame - measured at 1708 sink entries before the stack
+      // gave out. `_formatErrorDepth` sees the re-entry and sends it to the console.
+      const captured = muteConsoleError();
+      let reports = 0;
+      const sink = new ArraySink();
+
+      // A bag with a getter that throws, under a redaction request - the shape the
+      // unreadable-param test pins as reaching `onFormatError`.
+      const unreadableBag = (): Record<string, unknown> => {
+        const bag: Record<string, unknown> = { keep: 'visible' };
+
+        Object.defineProperty(bag, 'oops', {
+          get() {
+            throw new Error('cannot render');
+          },
+          enumerable: true,
+        });
+
+        return bag;
+      };
+
+      const recursiveLogger: Logger = new Logger({
+        sinks: [sink],
+        callProcessExit: false,
+        onFormatError: () => {
+          reports++;
+          recursiveLogger.error('format failed {{keep}}', {
+            params: unreadableBag(),
+            redactedKeys: ['keep'],
+          });
+        },
+      });
+
+      try {
+        expect(() =>
+          recursiveLogger.info('value {{keep}}', {
+            params: unreadableBag(),
+            redactedKeys: ['keep'],
+          }),
+        ).not.toThrow();
+
+        // The original line and the handler's own, and no third.
+        expect(reports).toBe(1);
+        expect(sink.logs).toHaveLength(2);
+        expect(captured.some((line) => line.includes('cannot render'))).toBe(
+          true,
+        );
+
+        // Returned, so the next unrelated failure reaches the handler again.
+        recursiveLogger.info('again {{keep}}', {
+          params: unreadableBag(),
+          redactedKeys: ['keep'],
+        });
+
+        expect(reports).toBe(2);
+      } finally {
+        restoreConsoleError();
+      }
+    });
+
+    test('an async onFormatError that logs after an await runs once per failure', async () => {
+      // The synchronous depth cannot see this loop: the handler awaits, the depth is
+      // back at zero, and its log fails and reports again on the next turn. The guard
+      // used to be a cap on reports still in flight, which this loop never reached -
+      // each call settles right after it logs, so at most two are ever pending - and it
+      // ran at one report per turn for as long as the test let it (36 in 200 ms). Held
+      // until the handler settles, the second report lands on the console, and a fresh
+      // failure after that reaches the handler again.
+      const captured = muteConsoleError();
+      let reports = 0;
+      const sink = new ArraySink();
+
+      const unreadableBag = (): Record<string, unknown> => {
+        const bag: Record<string, unknown> = { keep: 'visible' };
+
+        Object.defineProperty(bag, 'oops', {
+          get() {
+            throw new Error('cannot render');
+          },
+          enumerable: true,
+        });
+
+        return bag;
+      };
+
+      const recursiveLogger: Logger = new Logger({
+        sinks: [sink],
+        callProcessExit: false,
+        // Typed `void`, followed to settlement at runtime when it is a promise - the
+        // same way `createFormatReporter` keeps an async handler's rejection off the
+        // unhandled-rejection path. The lint rule cannot see that contract.
+        // eslint-disable-next-line @typescript-eslint/no-misused-promises
+        onFormatError: async () => {
+          reports++;
+          await new Promise((resolve) => setTimeout(resolve, 5));
+          recursiveLogger.error('format failed {{keep}}', {
+            params: unreadableBag(),
+            redactedKeys: ['keep'],
+          });
+        },
+      });
+
+      try {
+        recursiveLogger.info('value {{keep}}', {
+          params: unreadableBag(),
+          redactedKeys: ['keep'],
+        });
+
+        await new Promise((resolve) => setTimeout(resolve, 200));
+
+        // The original line and the handler's own, whose failure went to the console.
+        expect(reports).toBe(1);
+        expect(sink.logs).toHaveLength(2);
+        expect(captured.some((line) => line.includes('cannot render'))).toBe(
+          true,
+        );
+
+        // Settled, so the guard is down and the handler hears the next.
+        recursiveLogger.info('again {{keep}}', {
+          params: unreadableBag(),
+          redactedKeys: ['keep'],
+        });
+
+        await new Promise((resolve) => setTimeout(resolve, 60));
+
+        expect(reports).toBe(2);
+      } finally {
+        restoreConsoleError();
+      }
+    });
+
     test('survives a sink that throws a non-Error value', () => {
       // Sinks are user-supplied, so `write()` can throw anything. Reading `.message` off
       // it unguarded raised a `TypeError` that escaped out of the log call itself.
@@ -2621,6 +2755,64 @@ describe('Logger - a redactedKeys list that will not be read twice', () => {
     logger.info('login {{password}}', {
       params: { password: SECRET },
       redactedKeys: underReporting,
+    });
+
+    expect(failures.length).toBe(1);
+    expect(failures[0]?.[0]).toBe('<redactedKeys>');
+    expect(sink.logs[0]?.message).not.toContain(SECRET);
+    expect(JSON.stringify(sink.logs[0]?.redactedParams)).not.toContain(SECRET);
+  });
+
+  test('a list refused on the first read is not read again', () => {
+    // The stable lie above is refused by both reads. This one is not stable: it refuses
+    // the first read - an own index key past its `length` - and answers as a plain
+    // empty array from then on. `handleLog` used to pass the caller's own object on to
+    // `applyRedaction` whenever its snapshot came back `null`, and `applyRedaction`
+    // snapshotted it *again*, saw `[]`, and took its "nothing was asked for" exit: the
+    // params went to every sink in the clear, `redactedParams` still held the secret,
+    // and nothing was reported. Failed closed on the first read now, and the second
+    // never happens.
+    const failures: [string, string][] = [];
+    const sink = new ArraySink();
+    const logger = new Logger({
+      sinks: [sink],
+      callProcessExit: false,
+      onFormatError: (error, _kind, key) => failures.push([key, error.message]),
+    });
+
+    let reads = 0;
+    const refuseThenEmpty = new Proxy(['password'], {
+      get(target, property, receiver): unknown {
+        if (property === 'length') {
+          reads += 1;
+
+          // First read: `0`, contradicting the own index key `'0'` a real array of
+          // that length cannot have. Later reads: the truth, an empty-looking list.
+          return 0;
+        }
+
+        return Reflect.get(target, property, receiver) as unknown;
+      },
+      ownKeys(target): ArrayLike<string | symbol> {
+        // Own keys are what `snapshotList` compares against `length`: the index key is
+        // there for the first read and gone for every read after it.
+        return reads <= 1 ? Reflect.ownKeys(target) : ['length'];
+      },
+      getOwnPropertyDescriptor(
+        target,
+        property,
+      ): PropertyDescriptor | undefined {
+        if (reads > 1 && property !== 'length') {
+          return undefined;
+        }
+
+        return Reflect.getOwnPropertyDescriptor(target, property);
+      },
+    });
+
+    logger.info('login {{password}}', {
+      params: { password: SECRET },
+      redactedKeys: refuseThenEmpty,
     });
 
     expect(failures.length).toBe(1);

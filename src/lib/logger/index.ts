@@ -38,15 +38,6 @@ import { prepareErrorObjectLog } from './utils/error-object';
 import { LoggerService } from './logger-service';
 
 /**
- * How many `onFormatError` calls may be in flight before the rest go to the console.
- *
- * The bound on an `async` handler that logs: see {@link Logger.formatErrorHandler}. High
- * enough that an ordinary burst of unrelated failures is never diverted, low enough that a
- * recursing handler stops within a few turns.
- */
-const MAX_PENDING_FORMAT_REPORTS = 8;
-
-/**
  * Main Logger class with sink-based architecture and EventEmitter support
  */
 /**
@@ -1160,40 +1151,57 @@ export class Logger extends EventEmitter {
       params !== undefined &&
       redactedKeys !== undefined
     ) {
-      try {
-        redactedParams = applyRedaction(
-          params,
-          redactedKeys,
-          this.redactFunction,
-          // One budget per kind for the whole params pass, rather than one set here and
-          // another inside `applyRedaction`. Both are once-per-kind-per-pass, so nesting
-          // them keeps that bound: the several guards a single unreadable list trips
-          // report once between them, which is what `createFormatReporter` promises and
-          // what two independent budgets quietly broke.
-          //
-          // The `kind` is carried through rather than dropped. `applyRedaction` raises
-          // `'render'` as well as `'redaction'` - a leaf whose `toString` throws on its
-          // way to the mask is a render failure - and it keeps the two on separate
-          // reporters precisely so one cannot consume the other's report.
-          (error, kind, key) => {
-            reportBackstopOfKind(kind, error, key);
-          },
+      if (snapshot === null) {
+        // Failed closed here, on the one read already made, rather than handed to
+        // `applyRedaction` to be read again. Its own `snapshotList` is the same check,
+        // but a second read is a second answer: a `Proxy` that refused the first read -
+        // an own index key past its `length` - and answered as a plain empty array the
+        // second time took `applyRedaction`'s "nothing was asked for" exit, and the
+        // params went to every sink in the clear with nothing reported. The list was
+        // supplied, so redaction was asked for; what for, nobody can say, so nothing is
+        // returned rather than everything, exactly as `applyRedaction` answers the same
+        // refusal.
+        reportBackstop(
+          new Error('redactedKeys is not a usable list'),
+          '<redactedKeys>',
         );
-      } catch (error) {
-        // Belt and braces. `applyRedaction` guards every step it owns, its own head read
-        // included, so nothing is expected to arrive here - but a logger must not throw
-        // out of a `logger.info()`, and that guarantee should not rest on a promise made
-        // in another file.
-        reportBackstop(error, '<redactedKeys>');
+        redactedParams = {};
+      } else {
+        try {
+          redactedParams = applyRedaction(
+            params,
+            redactedKeys,
+            this.redactFunction,
+            // One budget per kind for the whole params pass, rather than one set here and
+            // another inside `applyRedaction`. Both are once-per-kind-per-pass, so nesting
+            // them keeps that bound: the several guards a single unreadable list trips
+            // report once between them, which is what `createFormatReporter` promises and
+            // what two independent budgets quietly broke.
+            //
+            // The `kind` is carried through rather than dropped. `applyRedaction` raises
+            // `'render'` as well as `'redaction'` - a leaf whose `toString` throws on its
+            // way to the mask is a render failure - and it keeps the two on separate
+            // reporters precisely so one cannot consume the other's report.
+            (error, kind, key) => {
+              reportBackstopOfKind(kind, error, key);
+            },
+          );
+        } catch (error) {
+          // Belt and braces. `applyRedaction` guards every step it owns, its own head read
+          // included, so nothing is expected to arrive here - but a logger must not throw
+          // out of a `logger.info()`, and that guarantee should not rest on a promise made
+          // in another file.
+          reportBackstop(error, '<redactedKeys>');
 
-        // Never fall through to the raw params below: rendering the message from those
-        // would print the very values redaction was asked to hide, to every sink.
-        //
-        // The same helper `applyRedaction` fails closed with, rather than a second copy
-        // of it here. Two spellings of "everything marked" meant a sink saw a different
-        // shape depending on which layer gave up, and the copy was written here only
-        // because this one is itself guarded - marking reads the unusable list again.
-        redactedParams = markAllRedactionFailed(redactedKeys);
+          // Never fall through to the raw params below: rendering the message from those
+          // would print the very values redaction was asked to hide, to every sink.
+          //
+          // The same helper `applyRedaction` fails closed with, rather than a second copy
+          // of it here. Two spellings of "everything marked" meant a sink saw a different
+          // shape depending on which layer gave up, and the copy was written here only
+          // because this one is itself guarded - marking reads the unusable list again.
+          redactedParams = markAllRedactionFailed(redactedKeys);
+        }
       }
     }
 
@@ -1376,28 +1384,26 @@ export class Logger extends EventEmitter {
     // rendered, threw again and re-entered this handler inside its own frame, measured at
     // 1708 spurious sink entries before the stack gave out.
     //
-    // Two counters rather than one flag, because the two loops this has to stop are not
-    // the same loop and one bound cannot answer both.
+    // Two counters, because the two loops this has to stop are not the same loop.
     //
     // `_formatErrorDepth` is the synchronous one, raised for the duration of the call and
     // lowered when it returns: a handler that logs re-enters this from inside its own
-    // frame, and a depth of one is enough to see that. It is deliberately *not* held
-    // across an `await`, so an unrelated format failure in another log call - which is
-    // not re-entry at all - still reaches the handler rather than the console. A flag held
-    // until an `async` handler settled diverted every one of those.
+    // frame, and a depth of one is enough to see that.
     //
-    // `_pendingFormatReports` is the asynchronous one. An `async onFormatError` that
-    // awaits and then logs finds the depth back at zero and would run again, once per
-    // turn, forever - the loop no synchronous guard can see. Capping the calls still in
-    // flight ends it: the cascade widens to the cap, the rest go to the console, and
-    // nothing there logs. The cap is generous because a legitimate burst of unrelated
-    // failures is the case that must not be starved; a handler that recurses reaches it
-    // in a handful of turns either way.
+    // `_pendingFormatReports` is the asynchronous one, held until the handler *settles*,
+    // as `onSinkError` and `onEventHandlerError` hold theirs. An `async onFormatError`
+    // that awaits and then logs finds the depth back at zero, and its log fails and
+    // reports again on the next turn - once per turn, forever, the loop no synchronous
+    // guard can see. This used to be a cap on the calls still in flight rather than a
+    // hold, on the theory that a recursing handler would pile up to the cap within a few
+    // turns; it does not. Each call settles right after it logs, so the pile never
+    // exceeds two, and the loop ran at one report per turn for as long as the process
+    // did. While one call is pending, every further report goes to the console rung -
+    // an unrelated failure in another log call included, which is the price the other
+    // two channels already pay, and a console line beside a handler that is still
+    // running is the better half of that trade.
     return (error: Error, kind: FormatFailureKind, path: string): void => {
-      if (
-        this._formatErrorDepth > 0 ||
-        this._pendingFormatReports >= MAX_PENDING_FORMAT_REPORTS
-      ) {
+      if (this._formatErrorDepth > 0 || this._pendingFormatReports > 0) {
         fallback(error, kind, path);
 
         return;

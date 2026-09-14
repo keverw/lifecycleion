@@ -361,21 +361,42 @@ export class NodeAdapter implements HTTPAdapter {
     if (isHTTPS) {
       const httpsOptions = options as https.RequestOptions;
 
+      // Whether this attempt is a redirect hop to an origin the caller never named. The
+      // configured *trust* (`ca`, `mtls.ca`, `crl`, `rejectUnauthorized`) still applies
+      // there - it says which servers to believe, and that is the caller's rule for every
+      // connection this adapter opens. The configured *identity* does not: see
+      // `isCrossOriginRedirectHop`.
+      const isCrossOriginHop = isCrossOriginRedirectHop(
+        request.initialURL,
+        parsedURL,
+      );
+
       // custom CA trust store
       if (this._config.ca) {
         httpsOptions.ca = this._config.ca;
       }
 
-      // SNI hostname — required when dialing by IP with a DNS-named cert
-      if (this._config.servername) {
+      // SNI hostname — required when dialing by IP with a DNS-named cert. Withheld on a
+      // cross-origin hop: it names the host the caller configured, and sending it to
+      // another host would both mislead that host's SNI routing and verify its
+      // certificate against a name it was never meant to carry.
+      if (this._config.servername && !isCrossOriginHop) {
         httpsOptions.servername = this._config.servername;
       }
 
       if (this._config.mtls) {
         // mTLS: present client cert. rejectUnauthorized stays true so the
         // server cert is still validated even though we're sending our own.
-        httpsOptions.cert = this._config.mtls.cert;
-        httpsOptions.key = this._config.mtls.key;
+        //
+        // The certificate and key are the caller's identity, presented only to the origin
+        // the caller addressed. A cross-origin hop gets the trust anchor and the
+        // verification rule but no client certificate - a `Location` header is the
+        // remote server's choice, not the caller's, and must not be able to make this
+        // adapter authenticate to a third party.
+        if (!isCrossOriginHop) {
+          httpsOptions.cert = this._config.mtls.cert;
+          httpsOptions.key = this._config.mtls.key;
+        }
 
         if (this._config.mtls.ca) {
           httpsOptions.ca = this._config.mtls.ca;
@@ -412,6 +433,59 @@ export class NodeAdapter implements HTTPAdapter {
     } = { outcome: null, settle: null };
 
     /**
+     * The `'abort'` listeners this request put on `request.signal`, as the means to take
+     * them off again.
+     *
+     * Attached with `{ once: true }`, so an abort removes them itself; nothing removed
+     * them when the request ended any other way. The signal is per attempt today, so that
+     * was one dead listener on a signal about to be collected rather than a growing pile -
+     * but `XHRAdapter` takes its listener off on `loadend` and `MockAdapter` on exit, and a
+     * caller driving this adapter directly with a long-lived signal was owed the same.
+     *
+     * Released by {@link releaseAbortListeners}, which runs on every terminal path and
+     * removes nothing until *both* the response promise and the upload have settled. Not
+     * at resolve alone: an early-ack `2xx` is delivered while the body is still going out,
+     * and the abort listener is then the one thing that can tear that upload down - the
+     * client's settle deadline fires the attempt signal for exactly that, see
+     * `abortAttempt` in `HTTPClient`. Not at the upload alone: a bodiless request has
+     * nothing to wait for there, and a response still streaming in needs its abort path.
+     * The later of the two is the first moment neither listener has any work left.
+     *
+     * Out here rather than in the executor because the sync-throw `catch` below is a
+     * terminal path too, reached after the listener is on: `req.setHeader` can throw
+     * after it was attached.
+     */
+    const abortListenerRemovers: Array<() => void> = [];
+    let didSettleRequest = false;
+
+    /**
+     * Take this request's `'abort'` listeners off `request.signal`, once both the
+     * response promise and the upload have settled. Idempotent: the removers are drained
+     * on the first call that finds both conditions met, and a call that finds them unmet
+     * leaves everything in place for the next terminal event.
+     *
+     * `upload.settle === null` reads as "no body write is outstanding": it is `null` for
+     * a bodiless request, which opens no outcome, and cleared the moment a bodied one
+     * settles. A writer that is still running after its outcome settled - a post-response
+     * write failure handed to the grace deadline - is already on a teardown path of its
+     * own, so no abort is needed to finish it.
+     */
+    const releaseAbortListeners = (): void => {
+      if (!didSettleRequest || upload.settle !== null) {
+        return;
+      }
+
+      for (const remove of abortListenerRemovers.splice(0)) {
+        try {
+          remove();
+        } catch {
+          // A signal whose `removeEventListener` refuses is not one this adapter can do
+          // anything more for; the listener it leaves behind is inert once settled.
+        }
+      }
+    };
+
+    /**
      * Settle the upload and tag the error with it, for a request that is rejecting.
      *
      * The request is being torn down, so this body is not going out - whether a writer was
@@ -426,6 +500,11 @@ export class NodeAdapter implements HTTPAdapter {
 
       upload.settle = null;
       settle?.(error);
+
+      // Every rejection passes through here, so this is where a rejecting request is
+      // marked settled; the upload was just settled above, so both conditions hold.
+      didSettleRequest = true;
+      releaseAbortListeners();
 
       if (upload.outcome) {
         try {
@@ -728,6 +807,9 @@ export class NodeAdapter implements HTTPAdapter {
 
         upload.settle = null;
         settle?.(failure === undefined ? undefined : normalizeError(failure));
+
+        // The upload side of the "both settled" condition; see `releaseAbortListeners`.
+        releaseAbortListeners();
       };
 
       /**
@@ -767,6 +849,12 @@ export class NodeAdapter implements HTTPAdapter {
             ...response,
           },
         );
+
+        // After the resolve, so nothing here can stand between the caller and its
+        // response. The response side of the "both settled" condition; see
+        // `releaseAbortListeners`.
+        didSettleRequest = true;
+        releaseAbortListeners();
       };
 
       /**
@@ -970,18 +1058,25 @@ export class NodeAdapter implements HTTPAdapter {
 
             // Propagate external cancellation (user abort, timeout) into the
             // factory's signal so cleanup listeners fire in all terminal cases.
+            // Tracked so it comes off once the request has settled; see
+            // `releaseAbortListeners`.
             if (request.signal) {
-              if (request.signal.aborted) {
+              const signal = request.signal;
+
+              if (signal.aborted) {
                 streamAbort.abort();
               }
 
-              request.signal.addEventListener(
-                'abort',
-                () => {
-                  streamAbort.abort();
-                },
-                { once: true },
-              );
+              const relayAbortToStream = (): void => {
+                streamAbort.abort();
+              };
+
+              signal.addEventListener('abort', relayAbortToStream, {
+                once: true,
+              });
+              abortListenerRemovers.push(() => {
+                signal.removeEventListener('abort', relayAbortToStream);
+              });
             }
 
             let writable: WritableLike | null | StreamResponseCancel;
@@ -1373,76 +1468,77 @@ export class NodeAdapter implements HTTPAdapter {
           return;
         }
 
-        request.signal.addEventListener(
-          'abort',
-          () => {
-            if (activeResponseStream) {
-              const { status, headers, writable } = activeResponseStream;
-              activeResponseStream = undefined;
-              destroyWritableQuietly(writable);
-              // Guarded, as its writable sibling one line up already is, and for the
-              // reason the stall watchdog's destroy is: this whole listener runs from an
-              // `AbortSignal` event, where a throw is an uncaught exception rather than a
-              // rejection into this request's promise - and a socket torn down by the same
-              // abort can answer `ERR_SOCKET_CLOSED` from `destroy()` on some runtimes.
-              destroyRequestQuietly(req);
+        const signal = request.signal;
 
-              const error = new Error(
-                'Request aborted during response streaming',
-              );
-              error.name = 'AbortError';
-              failRequest(
-                markResponseStreamAbortError(
-                  error,
-                  req,
-                  request.headers,
-                  status,
-                  headers,
-                ),
-              );
-              return;
-            }
-
-            if (activeBufferedResponse) {
-              const { status, headers } = activeBufferedResponse;
-              activeBufferedResponse = undefined;
-              destroyRequestQuietly(req);
-
-              const error = new Error(
-                'Request aborted during response streaming',
-              );
-              error.name = 'AbortError';
-              failRequest(
-                markResponseStreamAbortError(
-                  error,
-                  req,
-                  request.headers,
-                  status,
-                  headers,
-                ),
-              );
-              return;
-            }
-
-            if (isStreamFactoryPending) {
-              destroyRequestQuietly(req);
-              const abortErr = new Error(
-                'Request aborted during streamResponse setup',
-              );
-              abortErr.name = 'AbortError';
-              failRequest(
-                markStreamFactoryError(abortErr, req, request.headers),
-              );
-              return;
-            }
-
+        const onAbort = (): void => {
+          if (activeResponseStream) {
+            const { status, headers, writable } = activeResponseStream;
+            activeResponseStream = undefined;
+            destroyWritableQuietly(writable);
+            // Guarded, as its writable sibling one line up already is, and for the
+            // reason the stall watchdog's destroy is: this whole listener runs from an
+            // `AbortSignal` event, where a throw is an uncaught exception rather than a
+            // rejection into this request's promise - and a socket torn down by the same
+            // abort can answer `ERR_SOCKET_CLOSED` from `destroy()` on some runtimes.
             destroyRequestQuietly(req);
-            const abortErr = new Error('Request aborted');
+
+            const error = new Error(
+              'Request aborted during response streaming',
+            );
+            error.name = 'AbortError';
+            failRequest(
+              markResponseStreamAbortError(
+                error,
+                req,
+                request.headers,
+                status,
+                headers,
+              ),
+            );
+            return;
+          }
+
+          if (activeBufferedResponse) {
+            const { status, headers } = activeBufferedResponse;
+            activeBufferedResponse = undefined;
+            destroyRequestQuietly(req);
+
+            const error = new Error(
+              'Request aborted during response streaming',
+            );
+            error.name = 'AbortError';
+            failRequest(
+              markResponseStreamAbortError(
+                error,
+                req,
+                request.headers,
+                status,
+                headers,
+              ),
+            );
+            return;
+          }
+
+          if (isStreamFactoryPending) {
+            destroyRequestQuietly(req);
+            const abortErr = new Error(
+              'Request aborted during streamResponse setup',
+            );
             abortErr.name = 'AbortError';
-            failRequest(abortErr);
-          },
-          { once: true },
-        );
+            failRequest(markStreamFactoryError(abortErr, req, request.headers));
+            return;
+          }
+
+          destroyRequestQuietly(req);
+          const abortErr = new Error('Request aborted');
+          abortErr.name = 'AbortError';
+          failRequest(abortErr);
+        };
+
+        signal.addEventListener('abort', onAbort, { once: true });
+        abortListenerRemovers.push(() => {
+          signal.removeEventListener('abort', onAbort);
+        });
       }
 
       // Write request body
@@ -1626,6 +1722,43 @@ const UPLOAD_STALL_GRACE_MS = 5_000;
  * park the writer, the socket and `requestBodySettled` for the life of the process.
  */
 const UPLOAD_SOURCE_STALL_GRACE_MS = 60_000;
+
+// ---------------------------------------------------------------------------
+// TLS identity scoping
+// ---------------------------------------------------------------------------
+
+/**
+ * Whether an attempt is a redirect hop to an origin other than the one the caller
+ * addressed.
+ *
+ * `servername` and `mtls.cert` / `mtls.key` are the caller's TLS *identity*: the name it
+ * meant to talk to and the certificate it authenticates with. Applied to every `https:`
+ * request, they followed a `Location` header wherever it pointed - a cross-origin
+ * redirect had the adapter present the caller's client certificate to, and send the
+ * configured SNI to, a host the caller never named and the remote server chose. The
+ * client passes {@link AdapterRequest.initialURL} so a hop can be told from the request
+ * that started it; the identity is withheld when the origin (scheme, host and port)
+ * differs.
+ *
+ * Absent `initialURL` - the adapter driven directly - is the request itself, so the
+ * identity applies as it always did. An `initialURL` that cannot be parsed is treated as
+ * cross-origin: it cannot be shown to be the same origin, and failing closed withholds an
+ * identity rather than presenting one.
+ */
+function isCrossOriginRedirectHop(
+  initialURL: string | undefined,
+  requestURL: URL,
+): boolean {
+  if (initialURL === undefined) {
+    return false;
+  }
+
+  try {
+    return new URL(initialURL).origin !== requestURL.origin;
+  } catch {
+    return true;
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Streaming pipe helper

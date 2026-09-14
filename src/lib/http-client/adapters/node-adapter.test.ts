@@ -1,5 +1,9 @@
 import { describe, expect, test, beforeAll, afterAll, spyOn } from 'bun:test';
+import { execSync } from 'node:child_process';
 import crypto from 'node:crypto';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import { EventEmitter } from 'node:events';
 import * as http from 'node:http';
 import * as https from 'node:https';
@@ -6231,4 +6235,599 @@ describe('NodeAdapter — crl option (normalization)', () => {
 
     expect(captured).toBeUndefined();
   });
+});
+
+// ---------------------------------------------------------------------------
+// TLS identity on a redirect hop
+// ---------------------------------------------------------------------------
+
+interface IdentityCerts {
+  caCert: string;
+  /** Server leaf with DNS:localhost and IP:127.0.0.1 SANs. */
+  server: { cert: string; key: string };
+  /** Server leaf with only a DNS:localhost SAN, so dialing by IP needs `servername`. */
+  serverDnsOnly: { cert: string; key: string };
+  /** Client leaf issued by the same CA, so a server trusting `caCert` authorizes it. */
+  client: { cert: string; key: string };
+}
+
+let cachedIdentityCerts: IdentityCerts | null = null;
+
+/**
+ * The shared helper issues server leaves only. These tests need a *client* leaf from a CA
+ * the servers trust, so the servers can say whether the adapter presented it; generated
+ * once per process with the same openssl flow the helper uses.
+ */
+function getIdentityCerts(): IdentityCerts {
+  if (cachedIdentityCerts) {
+    return cachedIdentityCerts;
+  }
+
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tls-identity-'));
+
+  try {
+    const p = (name: string) => path.join(dir, name);
+    const run = (cmd: string) => execSync(cmd, { stdio: 'pipe' });
+    const read = (name: string) => fs.readFileSync(p(name), 'utf8');
+
+    fs.writeFileSync(
+      p('san-full.cnf'),
+      '[SAN]\nsubjectAltName=DNS:localhost,IP:127.0.0.1\n',
+    );
+    fs.writeFileSync(p('san-dns.cnf'), '[SAN]\nsubjectAltName=DNS:localhost\n');
+
+    run(
+      `openssl ecparam -genkey -name prime256v1 -noout -out "${p('ca.key')}"`,
+    );
+    run(
+      `openssl req -new -x509 -days 1 -key "${p('ca.key')}" -out "${p('ca.crt')}" -subj "/CN=Identity Test CA"`,
+    );
+
+    const issue = (name: string, subject: string, sanFile?: string) => {
+      run(
+        `openssl ecparam -genkey -name prime256v1 -noout -out "${p(`${name}.key`)}"`,
+      );
+      run(
+        `openssl req -new -key "${p(`${name}.key`)}" -out "${p(`${name}.csr`)}" -subj "/CN=${subject}"`,
+      );
+      run(
+        `openssl x509 -req -days 1 -in "${p(`${name}.csr`)}" -CA "${p('ca.crt')}" -CAkey "${p('ca.key')}" -CAcreateserial -out "${p(`${name}.crt`)}"${sanFile ? ` -extensions SAN -extfile "${p(sanFile)}"` : ''}`,
+      );
+
+      return { cert: read(`${name}.crt`), key: read(`${name}.key`) };
+    };
+
+    cachedIdentityCerts = {
+      caCert: read('ca.crt'),
+      server: issue('server', 'localhost', 'san-full.cnf'),
+      serverDnsOnly: issue('server-dns', 'localhost', 'san-dns.cnf'),
+      client: issue('client', 'identity-test-client'),
+    };
+
+    return cachedIdentityCerts;
+  } finally {
+    fs.rmSync(dir, { recursive: true });
+  }
+}
+
+/** What one TLS server observed on each request it answered. */
+interface ObservedTLSRequest {
+  path: string;
+  /** Whether a client certificate chaining to the server's `ca` was presented. */
+  authorized: boolean;
+  /** The SNI name the client sent, if any. */
+  servername: string | undefined;
+}
+
+interface IdentityTestServer {
+  url: string;
+  observed: ObservedTLSRequest[];
+  stop: () => Promise<void>;
+}
+
+/**
+ * An HTTPS server that asks for a client certificate without requiring one, records what
+ * each request presented, and answers with whatever `respond` decides.
+ */
+function startIdentityServer(
+  leaf: { cert: string; key: string },
+  respond: (
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+    self: () => IdentityTestServer,
+  ) => void,
+): Promise<IdentityTestServer> {
+  const { caCert } = getIdentityCerts();
+  const observed: ObservedTLSRequest[] = [];
+
+  return new Promise((resolve, reject) => {
+    let self: IdentityTestServer;
+
+    const server = https.createServer(
+      {
+        cert: leaf.cert,
+        key: leaf.key,
+        ca: caCert,
+        requestCert: true,
+        rejectUnauthorized: false,
+      },
+      (req, res) => {
+        const socket = req.socket as Socket & {
+          authorized?: boolean;
+          servername?: string;
+        };
+
+        observed.push({
+          path: req.url ?? '',
+          authorized: socket.authorized === true,
+          servername:
+            typeof socket.servername === 'string'
+              ? socket.servername
+              : undefined,
+        });
+
+        respond(req, res, () => self);
+      },
+    );
+
+    server.on('error', reject);
+
+    server.listen(0, '127.0.0.1', () => {
+      const { port } = server.address() as { port: number };
+
+      self = {
+        url: `https://127.0.0.1:${port}`,
+        observed,
+        stop: () =>
+          new Promise<void>((done, fail) => {
+            server.close((error) => (error ? fail(error) : done()));
+          }),
+      };
+
+      resolve(self);
+    });
+  });
+}
+
+describe('NodeAdapter — TLS identity is not presented on a cross-origin redirect hop', () => {
+  let certs: IdentityCerts;
+  // `target` answers 200 to anything. `origin` redirects `/hop` to `target` (a different
+  // port, so a different origin), `/same` to its own `/landed`, and answers 200 elsewhere.
+  let target: IdentityTestServer;
+  let origin: IdentityTestServer;
+
+  beforeAll(async () => {
+    certs = getIdentityCerts();
+
+    target = await startIdentityServer(certs.server, (_req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ landed: 'target' }));
+    });
+
+    origin = await startIdentityServer(certs.server, (req, res, self) => {
+      if (req.url === '/hop') {
+        res.writeHead(302, { location: `${target.url}/landed` });
+        res.end();
+
+        return;
+      }
+
+      if (req.url === '/same') {
+        res.writeHead(302, { location: `${self().url}/landed` });
+        res.end();
+
+        return;
+      }
+
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ landed: 'origin' }));
+    });
+  });
+
+  afterAll(async () => {
+    await origin.stop();
+    await target.stop();
+  });
+
+  test('the client certificate reaches the origin the caller addressed but not the hop', async () => {
+    const client = new HTTPClient({
+      adapter: new NodeAdapter({
+        mtls: {
+          cert: certs.client.cert,
+          key: certs.client.key,
+          ca: certs.caCert,
+        },
+      }),
+      baseURL: origin.url,
+      followRedirects: true,
+    });
+
+    const res = await client.get('/hop').send<{ landed: string }>();
+
+    // The hop itself went through: `target` presents a leaf from the same private CA, and
+    // that CA is configured only through `mtls.ca`, so the trust anchor still applied to
+    // the hop even though the identity did not.
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ landed: 'target' });
+    expect(res.redirectHistory).toEqual([`${target.url}/landed`]);
+
+    const first = origin.observed.find((entry) => entry.path === '/hop');
+    const second = target.observed.find((entry) => entry.path === '/landed');
+
+    expect(first?.authorized).toBe(true);
+    expect(second?.authorized).toBe(false);
+  });
+
+  test('a same-origin redirect keeps presenting the client certificate', async () => {
+    const client = new HTTPClient({
+      adapter: new NodeAdapter({
+        mtls: {
+          cert: certs.client.cert,
+          key: certs.client.key,
+          ca: certs.caCert,
+        },
+      }),
+      baseURL: origin.url,
+      followRedirects: true,
+    });
+
+    const res = await client.get('/same').send<{ landed: string }>();
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ landed: 'origin' });
+
+    const landed = origin.observed.filter((entry) => entry.path === '/landed');
+
+    expect(landed).toHaveLength(1);
+    expect(landed[0].authorized).toBe(true);
+  });
+
+  test('driven directly, initialURL decides: absent or same-origin presents it, cross-origin withholds it', async () => {
+    const adapter = new NodeAdapter({
+      mtls: {
+        cert: certs.client.cert,
+        key: certs.client.key,
+        ca: certs.caCert,
+      },
+    });
+
+    const countBefore = target.observed.length;
+
+    const direct = await adapter.send(
+      makeAdapterRequest(`${target.url}/direct`),
+    );
+    const sameOrigin = await adapter.send(
+      makeAdapterRequest(`${target.url}/same-origin`, {
+        initialURL: `${target.url}/somewhere-else`,
+      }),
+    );
+    const crossOrigin = await adapter.send(
+      makeAdapterRequest(`${target.url}/cross-origin`, {
+        initialURL: `${origin.url}/start`,
+      }),
+    );
+
+    expect(direct.status).toBe(200);
+    expect(sameOrigin.status).toBe(200);
+    expect(crossOrigin.status).toBe(200);
+
+    const seen = target.observed.slice(countBefore);
+
+    expect(seen.map((entry) => [entry.path, entry.authorized])).toEqual([
+      ['/direct', true],
+      ['/same-origin', true],
+      ['/cross-origin', false],
+    ]);
+  });
+
+  test('an unparseable initialURL fails closed and withholds the identity', async () => {
+    const adapter = new NodeAdapter({
+      mtls: {
+        cert: certs.client.cert,
+        key: certs.client.key,
+        ca: certs.caCert,
+      },
+    });
+
+    const countBefore = target.observed.length;
+
+    const res = await adapter.send(
+      makeAdapterRequest(`${target.url}/unparseable`, {
+        initialURL: 'not a url',
+      }),
+    );
+
+    expect(res.status).toBe(200);
+    expect(target.observed.slice(countBefore)).toEqual([
+      { path: '/unparseable', authorized: false, servername: undefined },
+    ]);
+  });
+});
+
+describe('NodeAdapter — servername is not sent on a cross-origin redirect hop', () => {
+  // Both servers present a DNS-only leaf and are dialed by IP, so a connection only
+  // verifies when `servername: 'localhost'` is sent. The hop must therefore fail: the
+  // configured name belongs to the origin the caller addressed, not to wherever a
+  // `Location` header points.
+  let certs: IdentityCerts;
+  let target: IdentityTestServer;
+  let origin: IdentityTestServer;
+
+  beforeAll(async () => {
+    certs = getIdentityCerts();
+
+    target = await startIdentityServer(certs.serverDnsOnly, (_req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ landed: 'target' }));
+    });
+
+    origin = await startIdentityServer(certs.serverDnsOnly, (_req, res) => {
+      res.writeHead(302, { location: `${target.url}/landed` });
+      res.end();
+    });
+  });
+
+  afterAll(async () => {
+    await origin.stop();
+    await target.stop();
+  });
+
+  test('the hop is verified against its own host, not the configured servername', async () => {
+    const client = new HTTPClient({
+      adapter: new NodeAdapter({ ca: certs.caCert, servername: 'localhost' }),
+      baseURL: origin.url,
+      followRedirects: true,
+    });
+
+    const targetCountBefore = target.observed.length;
+    const res = await client.get('/hop').send();
+
+    // The first hop verified through the configured name...
+    const first = origin.observed.find((entry) => entry.path === '/hop');
+
+    expect(first?.servername).toBe('localhost');
+
+    // ...and the cross-origin hop did not get it: dialed by IP against a DNS-only leaf
+    // with no SNI override, the handshake fails on the altname check, and the target
+    // never sees a request.
+    expect(res.isFailed).toBe(true);
+    expect(res.isNetworkError).toBe(true);
+    expect(res.redirectHistory).toEqual([`${target.url}/landed`]);
+    expect(target.observed.length).toBe(targetCountBefore);
+  });
+
+  test('driven directly, the same target verifies with servername unless initialURL is cross-origin', async () => {
+    const adapter = new NodeAdapter({
+      ca: certs.caCert,
+      servername: 'localhost',
+    });
+
+    const countBefore = target.observed.length;
+
+    const direct = await adapter.send(
+      makeAdapterRequest(`${target.url}/direct`),
+    );
+    const sameOrigin = await adapter.send(
+      makeAdapterRequest(`${target.url}/same-origin`, {
+        initialURL: `${target.url}/start`,
+      }),
+    );
+    const crossOrigin = await adapter.send(
+      makeAdapterRequest(`${target.url}/cross-origin`, {
+        initialURL: `${origin.url}/start`,
+      }),
+    );
+
+    expect(direct.status).toBe(200);
+    expect(sameOrigin.status).toBe(200);
+
+    // A TLS verification failure resolves as 495, the adapter's certificate-error status.
+    expect(crossOrigin.status).toBe(495);
+    expect(crossOrigin.isTransportError).toBe(true);
+
+    expect(
+      target.observed
+        .slice(countBefore)
+        .map((entry) => [entry.path, entry.servername]),
+    ).toEqual([
+      ['/direct', 'localhost'],
+      ['/same-origin', 'localhost'],
+    ]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Abort listeners come off the signal once the request has settled
+// ---------------------------------------------------------------------------
+
+describe('NodeAdapter — abort listeners are released when the request settles', () => {
+  let server: TestServer;
+
+  beforeAll(() => {
+    server = startTestServer();
+  });
+
+  afterAll(async () => {
+    await server.stop();
+  });
+
+  /**
+   * Counts the `'abort'` listeners the adapter adds to and removes from a signal.
+   * Net zero means every listener the request attached came off again.
+   */
+  function watchSignal() {
+    const controller = new AbortController();
+    const added = spyOn(controller.signal, 'addEventListener');
+    const removed = spyOn(controller.signal, 'removeEventListener');
+
+    return {
+      controller,
+      signal: controller.signal,
+      counts: () => ({
+        added: added.mock.calls.filter(([type]) => type === 'abort').length,
+        removed: removed.mock.calls.filter(([type]) => type === 'abort').length,
+      }),
+    };
+  }
+
+  test('a bodiless GET leaves no listener behind', async () => {
+    const watched = watchSignal();
+
+    const res = await new NodeAdapter().send(
+      makeAdapterRequest(`${server.url}/api/test`, { signal: watched.signal }),
+    );
+
+    expect(res.status).toBe(200);
+    expect(res.requestBodySettled).toBeUndefined();
+
+    const counts = watched.counts();
+
+    expect(counts.added).toBe(1);
+    expect(counts.removed).toBe(counts.added);
+  });
+
+  test('a bodied POST leaves no listener behind once the upload has settled too', async () => {
+    const watched = watchSignal();
+
+    const res = await new NodeAdapter().send(
+      makeAdapterRequest(`${server.url}/api/raw-upload-hash`, {
+        method: 'POST',
+        headers: { 'content-type': 'text/plain' },
+        body: 'x'.repeat(64 * 1024),
+        signal: watched.signal,
+      }),
+    );
+
+    expect(res.status).toBe(200);
+    expect(await res.requestBodySettled).toBeUndefined();
+
+    const counts = watched.counts();
+
+    expect(counts.added).toBe(1);
+    expect(counts.removed).toBe(counts.added);
+  });
+
+  test('a streamed response releases the stream relay listener as well', async () => {
+    const watched = watchSignal();
+    const { stream, getBytes } = makeMemoryWritable();
+
+    const res = await new NodeAdapter().send(
+      makeAdapterRequest(`${server.url}/api/binary`, {
+        signal: watched.signal,
+        streamResponse: () => stream,
+      }),
+    );
+
+    expect(res.status).toBe(200);
+    expect(res.isStreamed).toBe(true);
+    expect(getBytes().length).toBe(2048);
+
+    const counts = watched.counts();
+
+    // The main abort listener and the relay into the factory's stream signal.
+    expect(counts.added).toBe(2);
+    expect(counts.removed).toBe(counts.added);
+  });
+
+  test('a failed request releases its listeners too', async () => {
+    const watched = watchSignal();
+
+    const res = await new NodeAdapter().send(
+      makeAdapterRequest('http://127.0.0.1:1/unreachable', {
+        signal: watched.signal,
+      }),
+    );
+
+    expect(res.status).toBe(0);
+    expect(res.isTransportError).toBe(true);
+
+    const counts = watched.counts();
+
+    expect(counts.added).toBe(1);
+    expect(counts.removed).toBe(counts.added);
+  });
+
+  test('a rejected request releases its listeners too', async () => {
+    const watched = watchSignal();
+
+    let caught: Error | undefined;
+
+    try {
+      await new NodeAdapter().send(
+        makeAdapterRequest(`${server.url}/api/test`, {
+          signal: watched.signal,
+          streamResponse: () => {
+            throw new Error('factory refused');
+          },
+        }),
+      );
+    } catch (error) {
+      caught = error as Error;
+    }
+
+    expect(caught?.message).toBe('factory refused');
+
+    const counts = watched.counts();
+
+    expect(counts.added).toBe(2);
+    expect(counts.removed).toBe(counts.added);
+  });
+
+  test('the listener stays on while an early-answered upload is still going, so the attempt signal can still tear it down', async () => {
+    const net = await import('node:net');
+
+    // The same shape as "an early response with a stalled upload tears the request
+    // down": the server answers and stops reading, so the write parks for good. Here the
+    // teardown is asked for through the signal *after* `send()` has resolved - which is
+    // what the client's settle deadline does - and must land well inside the watchdog's
+    // five-second grace, which is the only other thing that would end the upload.
+    const socketServer = net.createServer((socket) => {
+      socket.on('error', () => {
+        // The teardown reaches this side as a reset.
+      });
+
+      socket.once('data', () => {
+        socket.write(
+          'HTTP/1.1 413 Payload Too Large\r\nConnection: keep-alive\r\nContent-Length: 3\r\n\r\nno!',
+        );
+        socket.pause();
+      });
+    });
+
+    await new Promise<void>((done) => {
+      socketServer.listen(0, '127.0.0.1', done);
+    });
+
+    const { port } = socketServer.address() as { port: number };
+    const watched = watchSignal();
+
+    try {
+      const res = await new NodeAdapter().send({
+        requestURL: `http://127.0.0.1:${port}/upload`,
+        method: 'POST',
+        headers: {},
+        body: 'x'.repeat(8 * 1024 * 1024),
+        signal: watched.signal,
+      });
+
+      expect(res.status).toBe(413);
+
+      // Resolved, but the upload is still outstanding: nothing has been released yet.
+      expect(watched.counts()).toEqual({ added: 1, removed: 0 });
+
+      const startedAt = Date.now();
+
+      watched.controller.abort();
+
+      const outcome = await res.requestBodySettled;
+
+      expect(outcome).toBeInstanceOf(Error);
+      expect(Date.now() - startedAt).toBeLessThan(2000);
+
+      // Both sides have settled now, so the listener has been taken off.
+      expect(watched.counts()).toEqual({ added: 1, removed: 1 });
+    } finally {
+      socketServer.close();
+    }
+  }, 20000);
 });

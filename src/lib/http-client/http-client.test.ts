@@ -2517,6 +2517,109 @@ describe('HTTPClient — cancel reason via AbortError-throwing adapters', () => 
     }
   });
 
+  test('a caller signal whose listener registration throws leaves nothing attached when AbortSignal.any is unavailable', async () => {
+    // Two gaps the release list had: the caller's signal was composed before the `try`
+    // whose `finally` runs the releasers, and the releaser was pushed only after both
+    // listeners were attached. A signal that accepts the first listener and throws on
+    // the second - here the internal controller's signal is the second - therefore left
+    // the first attached forever. The throw itself surfaces to the caller - a signal
+    // that refuses listeners is not something the client papers over - and the caller's
+    // signal is left exactly as it was found.
+    const adapter: HTTPAdapter = {
+      getType: () => 'mock',
+      send: (): Promise<AdapterResponse> =>
+        Promise.resolve({ status: 200, headers: {}, body: null }),
+    };
+    const client = new HTTPClient({ adapter });
+    const controller = new AbortController();
+    const originalAnyDescriptor = Object.getOwnPropertyDescriptor(
+      AbortSignal,
+      'any',
+    );
+    const addDescriptor = Object.getOwnPropertyDescriptor(
+      EventTarget.prototype,
+      'addEventListener',
+    );
+
+    if (addDescriptor === undefined) {
+      throw new Error('EventTarget.prototype.addEventListener is missing');
+    }
+
+    const originalAdd = addDescriptor.value as (
+      this: EventTarget,
+      ...args: Parameters<EventTarget['addEventListener']>
+    ) => void;
+    const addSpy = spyOn(controller.signal, 'addEventListener');
+    const removeSpy = spyOn(controller.signal, 'removeEventListener');
+    let abortListenersAttachedElsewhere = 0;
+
+    // Every signal other than the caller's refuses an abort listener, so the second
+    // attach inside `_composeSignals` throws after the first has landed on the caller's.
+    Object.defineProperty(EventTarget.prototype, 'addEventListener', {
+      ...addDescriptor,
+      value: function refusingAddEventListener(
+        this: EventTarget,
+        ...args: Parameters<EventTarget['addEventListener']>
+      ): void {
+        if (
+          args[0] === 'abort' &&
+          this instanceof AbortSignal &&
+          this !== controller.signal
+        ) {
+          abortListenersAttachedElsewhere += 1;
+          throw new Error('no listeners here');
+        }
+
+        Reflect.apply(originalAdd, this, args);
+      },
+    });
+
+    Object.defineProperty(AbortSignal, 'any', {
+      value: undefined,
+      configurable: true,
+    });
+
+    try {
+      let thrown: unknown;
+
+      try {
+        await client
+          .get('https://example.com/ok')
+          .signal(controller.signal)
+          .send();
+      } catch (error) {
+        thrown = error;
+      }
+
+      expect(thrown).toBeInstanceOf(Error);
+      expect((thrown as Error).message).toBe('no listeners here');
+
+      expect(abortListenersAttachedElsewhere).toBeGreaterThan(0);
+
+      const added = addSpy.mock.calls.filter((call) => call[0] === 'abort');
+      const removed = removeSpy.mock.calls.filter(
+        (call) => call[0] === 'abort',
+      );
+
+      expect(added.length).toBe(1);
+      expect(removed.length).toBe(added.length);
+      // The listener taken off is the one put on.
+      expect(removed[0]?.[1]).toBe(added[0]?.[1]);
+    } finally {
+      Object.defineProperty(
+        EventTarget.prototype,
+        'addEventListener',
+        addDescriptor,
+      );
+      addSpy.mockRestore();
+      removeSpy.mockRestore();
+
+      if (originalAnyDescriptor) {
+        Object.defineProperty(AbortSignal, 'any', originalAnyDescriptor);
+      }
+    }
+  });
+
   test('no cancelReason when cancel called without reason via AbortError-throwing adapter', async () => {
     const { adapter } = makeAbortErrorAdapter();
     const client = new HTTPClient({ adapter });

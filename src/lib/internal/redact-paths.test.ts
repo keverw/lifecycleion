@@ -712,10 +712,13 @@ describe('the parsed-path index', () => {
 });
 
 describe('redactMatchedPaths - the entry budget', () => {
-  test('stops a wide object at the cap rather than rebuilding all of it', () => {
+  test('refuses a wide object past the cap rather than rebuilding any of it', () => {
     // The object branch marked every remaining key and walked the whole list, so the cap
-    // bounded neither the time nor the size of the copy - which is what it is for. The
-    // array branch has always stopped.
+    // bounded neither the time nor the size of the copy - which is what it is for. It
+    // then stopped at the cap with a marker on the last key it reached, a partial copy
+    // standing in for the original. `describeContainer` now refuses a container with
+    // more keys than the cap outright, the answer an over-long array already got, so the
+    // whole container is the marker and nothing past the bound is silently dropped.
     const wide: Record<string, unknown> = {};
 
     for (let index = 0; index < 1_200_000; index++) {
@@ -726,12 +729,9 @@ describe('redactMatchedPaths - the entry budget', () => {
       { wide },
       paths('wide.k0'),
       undefined,
-    ) as { wide: Record<string, unknown> };
+    ) as { wide: unknown };
 
-    const keys = Object.keys(redacted.wide);
-
-    expect(keys.length).toBeLessThan(1_200_000);
-    expect(redacted.wide[keys[keys.length - 1]]).toBe(REDACTION_FAILED_MARKER);
+    expect(redacted.wide).toBe(REDACTION_FAILED_MARKER);
   });
 });
 

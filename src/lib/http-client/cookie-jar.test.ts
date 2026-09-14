@@ -1414,6 +1414,71 @@ describe('CookieJar', () => {
       expect(jar.getCookiesFor('https://sub.example.com/')).toHaveLength(0);
     });
 
+    test('setCookie() and fromJSON() enforce the prefix attributes too', () => {
+      // No request URL is needed to check the attributes a prefix promises, so the
+      // programmatic path holds them as well: a persisted jar tampered into a
+      // `__Host-` cookie with `hostOnly` cleared used to be restored and sent to every
+      // subdomain under a name that tells a server it was set host-only at `/`.
+      const base = { value: '1', domain: 'example.com', createdAt: Date.now() };
+
+      expect(jar.setCookie({ ...base, name: '__Secure-id', path: '/' })).toBe(
+        false,
+      );
+      expect(
+        jar.setCookie({ ...base, name: '__Host-id', path: '/', secure: true }),
+      ).toBe(false);
+      expect(
+        jar.setCookie({
+          ...base,
+          name: '__Host-id',
+          path: '/app',
+          secure: true,
+          hostOnly: true,
+        }),
+      ).toBe(false);
+      expect(jar.getAllCookies()).toHaveLength(0);
+
+      expect(
+        jar.setCookie({
+          ...base,
+          name: '__Secure-id',
+          path: '/',
+          secure: true,
+        }),
+      ).toBe(true);
+      expect(
+        jar.setCookie({
+          ...base,
+          name: '__Host-id',
+          path: '/',
+          secure: true,
+          hostOnly: true,
+        }),
+      ).toBe(true);
+
+      const tampered = new CookieJar();
+      const restoredCount = tampered.fromJSON({
+        cookies: [
+          { ...base, name: '__Host-session', path: '/', secure: true },
+          {
+            ...base,
+            name: '__Host-ok',
+            path: '/',
+            secure: true,
+            hostOnly: true,
+          },
+        ],
+      });
+
+      expect(restoredCount).toBe(1);
+      expect(tampered.getCookiesFor('https://sub.example.com/')).toHaveLength(
+        0,
+      );
+      expect(
+        tampered.getCookieFor('__Host-ok', 'https://example.com/')?.value,
+      ).toBe('1');
+    });
+
     test('prefixes match case-insensitively', () => {
       jar.parseSetCookieHeader('__host-id=1; Path=/', 'https://example.com/');
       jar.parseSetCookieHeader('__SECURE-id=1', 'https://example.com/');

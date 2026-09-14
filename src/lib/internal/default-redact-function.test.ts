@@ -1,12 +1,13 @@
 import { describe, expect, test } from 'bun:test';
 
 import {
+  defaultRedactValue,
   maskWithConfig,
   REDACTED_PLACEHOLDER,
 } from './default-redact-function';
 
 // `maskChar` and `percent` are both caller-supplied multipliers on the size of the output,
-// since `datamask` emits one mask character per masked character without stopping at the
+// since the masking emits one mask character per masked character without stopping at the
 // length of the value. The percent had a ceiling and the mask character had only a
 // non-empty check, which is the gap these cover.
 
@@ -58,6 +59,79 @@ describe('maskWithConfig - percent', () => {
 
     expect(maskWithConfig(value, { percent: 10_000 }).length).toBe(
       value.length,
+    );
+  });
+});
+
+describe('masking cuts between characters, never inside one', () => {
+  // The masking used to index the value by UTF-16 code unit, so an emoji-heavy value came
+  // back cut through a surrogate pair: a lone `\uD83D` at the seam, `isWellFormed()`
+  // false, and the same broken text written to every sink. The rule everywhere else in
+  // this library is that a cut never lands inside a character.
+  //
+  // `isWellFormed` would say it, but it is ES2024 and this project targets ES2022, so
+  // this asks the same question against the ES2022 lib.
+  const hasLoneSurrogate = (text: string): boolean =>
+    /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/u.test(
+      text,
+    );
+
+  test('the default mask of an emoji-heavy value is well-formed', () => {
+    const masked = defaultRedactValue('token', '😀'.repeat(10) + 'secretxx');
+
+    expect(typeof masked).toBe('string');
+    expect(hasLoneSurrogate(masked as string)).toBe(false);
+    expect(masked).not.toContain('secret');
+  });
+
+  test('the visible prefix and suffix are counted in characters, not code units', () => {
+    // Eighteen characters at 90%: sixteen hidden, one shown at each end - and the one at
+    // the front is a whole emoji, where a code-unit cut left half of one.
+    const masked = maskWithConfig('😀'.repeat(10) + 'secretxx', {});
+    const characters = Array.from(masked);
+
+    expect(characters).toHaveLength(18);
+    expect(characters[0]).toBe('😀');
+    expect(characters.slice(1, 17).every((c) => c === '*')).toBe(true);
+    expect(characters[17]).toBe('x');
+  });
+
+  test('email and domain strategies are well-formed too', () => {
+    const email = maskWithConfig('😀😀😀😀user@😀😀😀mail.example', {
+      strategy: 'email',
+    });
+    const domain = maskWithConfig('😀😀😀😀host.example', {
+      strategy: 'domain',
+    });
+
+    expect(hasLoneSurrogate(email)).toBe(false);
+    expect(hasLoneSurrogate(domain)).toBe(false);
+    expect(email).toContain('@');
+    expect(email.endsWith('.example')).toBe(true);
+    expect(domain.endsWith('.example')).toBe(true);
+  });
+
+  test('a value too short in characters is replaced outright, whatever its unit length', () => {
+    // Four emoji are eight code units. Measured in units they were masked in part, and the
+    // cut landed inside one of them.
+    expect(maskWithConfig('😀😀😀😀', {})).toBe(REDACTED_PLACEHOLDER);
+  });
+
+  test('a value with no astral characters masks exactly as it always did', () => {
+    // The arithmetic is unchanged; only the unit is. These are the outputs the previous
+    // implementation produced for the same inputs.
+    expect(maskWithConfig('hunter2secret', {})).toBe('h***********t');
+    expect(maskWithConfig('hunter2secret', { percent: 50 })).toBe(
+      'hun******cret',
+    );
+    expect(maskWithConfig('a'.repeat(200), {})).toBe(
+      'a'.repeat(10) + '*'.repeat(180) + 'a'.repeat(10),
+    );
+    expect(
+      maskWithConfig('someone@mail.example.com', { strategy: 'email' }),
+    ).toBe('******e@***l.******e.com');
+    expect(maskWithConfig('api.internal.example', { strategy: 'domain' })).toBe(
+      '**i.*******l.example',
     );
   });
 });

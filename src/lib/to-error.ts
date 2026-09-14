@@ -6,10 +6,13 @@
  * respect the caller cares about. `Object.prototype.toString` reads the internal brand
  * instead, which crosses realms.
  *
- * A hostile object can claim the brand with `Symbol.toStringTag`, and one that does is
- * returned as-is rather than wrapped. That is the same bargain `instanceof` already
- * offers - a `Proxy` can forge a prototype chain - and it costs nothing here: every read
- * off the result is guarded anyway, by `describeError` or by `errorToString`.
+ * On a runtime with `Error.isError` that is the whole answer. Without it, the internal
+ * brand is read through `Object.prototype.toString`, which a hostile object can claim
+ * with `Symbol.toStringTag`; one that does is returned as-is rather than wrapped. That is
+ * the same bargain `instanceof` already offers - a `Proxy` can forge a prototype chain -
+ * and it costs nothing here: every read off the result is guarded anyway, by
+ * `describeError` or by `errorToString`. Code that wants its own error type to be
+ * recognised everywhere should extend `Error`, not imitate it.
  *
  * Exported so a caller that only needs the *question* answered - `Logger`'s global
  * `'error'` listener, deciding whether to pass a reported payload through or wrap it -
@@ -25,6 +28,14 @@ export function isErrorValue(value: unknown): value is Error {
       return true;
     }
 
+    // `Error.isError` reads the internal `[[ErrorData]]` slot, which crosses realms and
+    // cannot be claimed: a plain object wearing `Symbol.toStringTag: 'Error'` fails it.
+    // Preferred wherever the runtime has it; the brand check below is what remains for
+    // a runtime that does not, with the bargain the doc comment describes.
+    if (typeof errorIsError === 'function') {
+      return errorIsError(value);
+    }
+
     return (
       typeof value === 'object' &&
       value !== null &&
@@ -34,6 +45,14 @@ export function isErrorValue(value: unknown): value is Error {
     return false;
   }
 }
+
+/**
+ * `Error.isError` where the runtime provides it (ES2026; Node 24+, recent Bun and
+ * browsers). Read once, typed here because the compiler's lib target predates it.
+ */
+const errorIsError = (
+  Error as unknown as { isError?: (value: unknown) => value is Error }
+).isError;
 
 /**
  * Coerce whatever was thrown or rejected with into an `Error`.

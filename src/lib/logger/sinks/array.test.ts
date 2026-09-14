@@ -569,6 +569,166 @@ test('should report a transformer that throws rather than silently ignoring it',
   expect(sink.logs[0]?.message).toBe('m');
 });
 
+describe('ArraySink - a self-logging onFormatError cannot recurse', () => {
+  // The guard `FileSink` and `NamedPipeSink` hold over a format failure, which this sink
+  // lacked. Each `write()` built a fresh reporter, so a handler that logged back into the
+  // sink ran the same throwing transformer, reported again, and logged again - a
+  // synchronous recursion that stored thousands of entries and ended in a stack overflow.
+
+  const entry = (message: string): LogEntry => ({
+    timestamp: Date.now(),
+    type: 'info',
+    template: message,
+    message,
+  });
+
+  test('through a throwing transformer', () => {
+    let calls = 0;
+    let depth = 0;
+    let maxDepth = 0;
+
+    const self: { sink?: ArraySink } = {};
+
+    const sink = new ArraySink({
+      transformer: () => {
+        throw new Error('transformer refused');
+      },
+      onFormatError: () => {
+        calls++;
+        depth++;
+        maxDepth = Math.max(maxDepth, depth);
+
+        self.sink?.write(entry('the sink failed'));
+
+        depth--;
+      },
+    });
+
+    self.sink = sink;
+
+    sink.write(entry('first'));
+
+    expect(maxDepth).toBe(1);
+    expect(calls).toBe(1);
+
+    // Not vacuous: the handler's own entry is still stored, alongside the one that
+    // started this. Only the second diagnosis of the same failure is dropped.
+    expect(sink.logs.map((log) => log.message)).toEqual([
+      'the sink failed',
+      'first',
+    ]);
+  });
+
+  test('through a param the snapshot cannot copy', () => {
+    // The other reporter in `write()`, guarded by the same count: a handler that logs the
+    // failure it was handed, with the hostile value still inside it.
+    let calls = 0;
+
+    const self: { sink?: ArraySink } = {};
+
+    const hostile: Record<string, unknown> = {};
+
+    Object.defineProperty(hostile, 'token', {
+      get() {
+        throw new Error('accessor refused');
+      },
+      enumerable: true,
+    });
+
+    const sink = new ArraySink({
+      onFormatError: () => {
+        calls++;
+
+        self.sink?.write({
+          ...entry('the sink failed'),
+          redactedParams: { again: hostile },
+        });
+      },
+    });
+
+    self.sink = sink;
+
+    sink.write({ ...entry('first'), redactedParams: { user: hostile } });
+
+    expect(calls).toBe(1);
+    expect(sink.logs).toHaveLength(2);
+    // Both entries were snapshotted with the marker; neither was lost.
+    expect(JSON.stringify(sink.logs[0]?.redactedParams)).toContain(
+      '<value could not be copied>',
+    );
+    expect(JSON.stringify(sink.logs[1]?.redactedParams)).toContain(
+      '<value could not be copied>',
+    );
+  });
+
+  test('holds until an async onFormatError settles, then reports the next real failure', async () => {
+    // A flag cleared when the handler returned was cleared at its first `await`, so an
+    // `async` handler that logged back after awaiting found no guard and reported again,
+    // once per turn of the event loop.
+    let calls = 0;
+
+    const self: { sink?: ArraySink } = {};
+
+    const sink = new ArraySink({
+      transformer: () => {
+        throw new Error('transformer refused');
+      },
+      // eslint-disable-next-line @typescript-eslint/no-misused-promises -- an async handler is the supported shape under test
+      onFormatError: async () => {
+        calls++;
+
+        await new Promise((resolve) => setTimeout(resolve, 5));
+
+        self.sink?.write(entry('the sink failed'));
+      },
+    });
+
+    self.sink = sink;
+
+    sink.write(entry('first'));
+
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    expect(calls).toBe(1);
+    expect(sink.logs.map((log) => log.message)).toEqual([
+      'first',
+      'the sink failed',
+    ]);
+
+    // The guard came down when the handler settled, not before and not never: a later
+    // failure that is not nested inside a report is reported on its own account.
+    sink.write(entry('second'));
+
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    expect(calls).toBe(2);
+    expect(sink.logs).toHaveLength(4);
+  });
+
+  test('a handler that throws releases the guard for the next failure', () => {
+    // The throw lands on the console rung, as every reporter promises; what must not
+    // happen is the count staying up behind it and the sink going silent thereafter.
+    let calls = 0;
+
+    const sink = new ArraySink({
+      transformer: () => {
+        throw new Error('transformer refused');
+      },
+      onFormatError: () => {
+        calls++;
+
+        throw new Error('handler refused');
+      },
+    });
+
+    sink.write(entry('first'));
+    sink.write(entry('second'));
+
+    expect(calls).toBe(2);
+    expect(sink.logs).toHaveLength(2);
+  });
+});
+
 test("an array's named properties survive the snapshot", () => {
   // The snapshot copied indexes only, so a redaction marker sitting on an array's *named*
   // property - which `maskValueDeep` and `redactPathsInner` both carry, and which the

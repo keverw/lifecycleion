@@ -13,6 +13,7 @@ A TypeScript HTTP client with a fluent request builder, request/response interce
   - [Body Types](#body-types)
   - [Query Parameters](#query-parameters)
 - [HTTPResponse](#httpresponse)
+  - [Uploads That Outlive the Response](#uploads-that-outlive-the-response)
   - [Content-Type Detection and Body Parsing](#content-type-detection-and-body-parsing)
 - [Error Handling](#error-handling)
   - [HTTPClientError](#httpclienterror)
@@ -52,8 +53,8 @@ A TypeScript HTTP client with a fluent request builder, request/response interce
   - [XHRAdapter](#xhradapter)
   - [MockAdapter (Testing)](#mockadapter-testing)
 - [Streaming Responses](#streaming-responses)
-  - [Writing your own `WritableLike`](#writing-your-own-writablelike)
-    - [How long that listener stays](#how-long-that-listener-stays)
+  - [Writing Your Own `WritableLike`](#writing-your-own-writablelike)
+    - [How Long That Listener Stays](#how-long-that-listener-stays)
   - [Stream Errors and Replay](#stream-errors-and-replay)
     - [Adapter Support](#adapter-support)
     - [Failures Before a Response](#failures-before-a-response)
@@ -1048,6 +1049,11 @@ const client = new HTTPClient({
 });
 
 // mTLS
+//
+// The client certificate is presented only to the origin you addressed. With
+// followRedirects on, a hop to another origin (scheme, host or port) gets your
+// trust settings (ca, mtls.ca, crl, rejectUnauthorized) but no client
+// certificate and no servername - see the note below the config.
 const client = new HTTPClient({
   adapter: new NodeAdapter({
     mtls: {
@@ -1072,11 +1078,12 @@ const client = new HTTPClient({
 interface NodeAdapterConfig {
   socketPath?: string; // Unix domain socket path
   ca?: string | Buffer | Array<string | Buffer>; // Trusted CA cert(s) for servers using a private CA. Array allows multiple CAs without bundling. No client cert required — use mtls for that.
-  servername?: string; // TLS SNI hostname. Required when dialing by IP but the cert SAN is a DNS name — without it, TLS verification fails because the IP does not match the DNS SAN.
+  servername?: string; // TLS SNI hostname. Required when dialing by IP but the cert SAN is a DNS name — without it, TLS verification fails because the IP does not match the DNS SAN. Sent only to the origin the request addressed, never on a cross-origin redirect hop.
   mtls?: {
+    // Your TLS identity. Presented only to the origin the request addressed, never on a cross-origin redirect hop.
     cert: string | Buffer;
     key: string | Buffer;
-    ca?: string | Buffer | Array<string | Buffer>;
+    ca?: string | Buffer | Array<string | Buffer>; // Trust anchor for the server. Applies on every hop, like `ca`.
   };
   crl?: string | Buffer | Array<string | Buffer>; // Certificate revocation list(s). A concatenated PEM bundle is split for you — see below.
   rejectUnauthorized?: boolean; // Default: true
@@ -1084,6 +1091,8 @@ interface NodeAdapterConfig {
 ```
 
 TLS certificate errors resolve as status `495` (transport error, not retryable) rather than throwing, so they flow through the normal error path. That includes every revocation failure, such as `CERT_REVOKED`, `UNABLE_TO_GET_CRL`, `CRL_HAS_EXPIRED` and friends.
+
+**TLS identity stays with the origin you addressed.** `servername` and `mtls.cert` / `mtls.key` describe _who you are talking to_ and _who you are_; a `Location` header is the remote server's choice, not yours. When the client follows a redirect to a different origin (scheme, host or port), `NodeAdapter` sends that hop without the SNI override and without the client certificate, so a redirect can never make the adapter authenticate to, or verify a certificate against a name meant for, a host you never named. Your _trust_ settings — `ca`, `mtls.ca`, `crl` and `rejectUnauthorized` — say which servers to believe, and apply to every connection the adapter opens, hops included. A hop that needs your identity to succeed fails with `495`, which is the correct answer: address it directly if you mean to authenticate there. Same-origin redirects are unaffected. The adapter tells a hop apart from the original request through `AdapterRequest.initialURL`, which the client sets on every attempt; driven directly without it, the adapter applies the identity as configured, and an `initialURL` it cannot parse is treated as cross-origin.
 
 #### Certificate Revocation (`crl`)
 
