@@ -165,7 +165,7 @@ describe('several registered listeners', () => {
 
 describe('reporting rungs survive a broken console', () => {
   describe("Logger's own 'logger' handler failures", () => {
-    test('a synchronously throwing handler does not escape the log call', () => {
+    test('a synchronously throwing handler does not escape the log call', async () => {
       const logger = new Logger({ sinks: [] });
 
       logger.on('logger', () => {
@@ -180,6 +180,7 @@ describe('reporting rungs survive a broken console', () => {
         logger.info('hello');
       }).not.toThrow();
 
+      await Promise.resolve();
       expect(calls.attempts).toBeGreaterThan(0);
     });
 
@@ -202,32 +203,10 @@ describe('reporting rungs survive a broken console', () => {
 
       expect(rejections.seen).toEqual([]);
     });
-
-    test('a throwing onEventHandlerError still falls through without escaping', () => {
-      const logger = new Logger({
-        sinks: [],
-        onEventHandlerError: () => {
-          throw new Error('handler-of-handlers boom');
-        },
-      });
-
-      logger.on('logger', () => {
-        throw new Error('handler boom');
-      });
-
-      const calls = breakConsoleError();
-
-      expect(() => {
-        logger.info('hello');
-      }).not.toThrow();
-
-      // The callback threw, so the console rung was reached.
-      expect(calls.attempts).toBeGreaterThan(0);
-    });
   });
 
   describe('sink failures', () => {
-    test('a synchronously throwing sink does not escape the log call', () => {
+    test('a synchronously throwing sink does not escape the log call', async () => {
       const sink: LogSink = {
         write: (): void => {
           throw new Error('sink boom');
@@ -241,6 +220,7 @@ describe('reporting rungs survive a broken console', () => {
         logger.info('hello');
       }).not.toThrow();
 
+      await Promise.resolve();
       expect(calls.attempts).toBeGreaterThan(0);
     });
 
@@ -293,33 +273,10 @@ describe('reporting rungs survive a broken console', () => {
 
       expect(closeFailure).toBeNull();
     });
-
-    test('a throwing onSinkError still falls through without escaping', () => {
-      const sink: LogSink = {
-        write: (): void => {
-          throw new Error('sink boom');
-        },
-      };
-
-      const logger = new Logger({
-        sinks: [sink],
-        onSinkError: () => {
-          throw new Error('handler-of-sinks boom');
-        },
-      });
-
-      const calls = breakConsoleError();
-
-      expect(() => {
-        logger.info('hello');
-      }).not.toThrow();
-
-      expect(calls.attempts).toBeGreaterThan(0);
-    });
   });
 
   describe("the global 'error' listener", () => {
-    test('still cancels the event when logging it fails and the console is broken', () => {
+    test('still cancels the event when logging it fails and the console is broken', async () => {
       installGlobalEventTarget();
 
       const sink: LogSink = {
@@ -347,6 +304,7 @@ describe('reporting rungs survive a broken console', () => {
 
       const wasNotCancelled = globalThis.dispatchEvent(event);
 
+      await Promise.resolve();
       restoreConsoleError();
 
       expect(calls.attempts).toBeGreaterThan(0);

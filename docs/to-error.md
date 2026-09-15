@@ -126,6 +126,6 @@ prototype chain, and it costs nothing: read anything off the result with `descri
 
 All four are safe to call on a reporting path. None of them throws.
 
-This matters most inside a callback the library hands a failure to and then asks not to
-throw, such as `logger`'s `onSinkError` and `onEventHandlerError`. Reach for
-`describeError` there rather than reading `.message` yourself.
+This matters most on a failure path, such as a sink's `onError`, a renderer's
+`onFormatError`, or a logger diagnostic listener. Reach for `describeError` there rather
+than reading `.message` yourself.

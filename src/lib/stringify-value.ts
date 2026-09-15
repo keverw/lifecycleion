@@ -79,11 +79,11 @@ export interface StringifyValueOptions {
    * `toString` or `redactFunction` and may carry the value it was hiding, so writing it
    * into the output would send it wherever that output goes. It comes here instead.
    *
-   * With no handler set, a standalone call reports on the standard global `'error'`
-   * channel - so a `logger.registerReportErrorListener()` records it - and falls back to
-   * `console.error` only when nothing claims the event. The `Logger` and its sinks always
-   * supply a handler for their own work, so this default is never reached from inside a
-   * log call.
+   * With no handler set, a standalone call uses the standard host path: a cancelable
+   * global `'error'` event first; `globalThis.reportError()` when event dispatch is
+   * unavailable; then guarded `console.error`. The logger and built-in sinks supply a
+   * handler for their own work. A custom sink that calls this function owns the same
+   * choice and should pass a handler that terminates locally.
    *
    * Fires at most once per kind per call - a failure is raised per leaf, so an
    * unconditional throw would otherwise report thousands of times for one broken
@@ -455,9 +455,9 @@ export function stringifyValue(
   // See `snapshotMembers`.
   const options = snapshotOptions(rawOptions);
 
-  // Defaults to the console, as every other failure channel in this library does. One
-  // small closure per call, which is what `applyRedaction` and `errorToString` already
-  // allocate for their own reporters.
+  // Uses the standard host reporting path when no handler is supplied. One small closure
+  // per call, which is what `applyRedaction` and `errorToString` already allocate for
+  // their own reporters.
   const report = createFormatReporter('render', options.onFormatError);
 
   // The allowance for this call, created here rather than inside the walk so it is the

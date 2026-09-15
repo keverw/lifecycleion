@@ -2249,9 +2249,8 @@ describe('a shared subtree costs one walk, not one per route', () => {
     });
 
     test('should fall back to the console without a handler, and never throw', () => {
-      // Handler, then console, then nothing - the same three rungs `onFormatError`,
-      // `onSinkError` and `onEventHandlerError` all use. The rung itself is
-      // `reportToConsole`, so a broken `console.error` costs the report and not the render.
+      // With no handler, this uses the standard host path and eventually its guarded
+      // console terminal. A broken `console.error` costs the report and not the render.
       const consoleError = console.error;
       const lines: string[] = [];
 

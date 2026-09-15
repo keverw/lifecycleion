@@ -11,8 +11,8 @@ import { reportToHost } from './report-to-host';
  * message strings, which is the duplication `report-to-console` argues against for its own
  * rung: *the guarantee is one rule*, and a copy of it that someone forgets to update is how
  * a channel comes to be subtly less safe than its twin. Those two are now one public
- * callback - see `format-reporter` - and this stays the shared floor beneath it and beneath
- * `onSinkError` and `onEventHandlerError`.
+ * callback - see `format-reporter` - and this stays the shared floor beneath standalone
+ * formatting and sink-owned error callbacks.
  *
  * `subject` is whatever the caller's channel names a failure by: a redaction entry, a
  * render path, a sink context.
@@ -25,17 +25,9 @@ export type ReportFailure = (error: unknown, subject: string) => void;
 /**
  * The handler rung, for a channel whose handler does not take `(error, subject)`.
  *
- * `onSinkError` is handed `(error, context, sink)` and `onEventHandlerError` `(error,
- * event)`, so neither fits {@link ReportFailure} - but the rung beneath them is the same
- * rule as everywhere else, and it was hand-written once per channel. `invoke` is a closure
- * the caller builds over its own arguments, so the shape stays theirs and only the
- * guarantee is shared.
- *
- * Those two channels never reach a broadcast rung, and that is structural rather than an
- * omission: a sink failure and a `'logger'` handler failure can only happen *during* a log
- * call, and reporting from there anywhere a logger might hear it is how one failure becomes
- * a cycle - the listener logs it, logging writes to sinks and emits events, and that is
- * what just failed.
+ * `invoke` is a closure the caller builds over its own arguments, so the callback shape
+ * stays theirs and only the failure-handling guarantee is shared. A supplied handler never
+ * reaches the broadcast rung: if it fails, guarded console output is the terminal.
  *
  * @param invoke The caller's handler, already bound to its own arguments, or `undefined`
  *               when none was set. A handler that returns a promise is followed: a
@@ -113,11 +105,11 @@ export function reportThroughHandler(
  * The three rungs every failure channel in this library uses. What varies between callers
  * is only the label in the console line and what `subject` names; the guarantees do not.
  *
- * With no handler, the report goes to the standard global `'error'` channel - the same
- * three rungs `safe-handle-callback` uses, so a `logger.registerReportErrorListener()`
- * picks it up and logs it properly, falling through to the console when nothing claims it.
- * That is what anyone with a logger actually wants, and a console line nobody reads is a
- * poor consolation prize.
+ * With no handler, the report uses the same three host rungs `safe-handle-callback` uses:
+ * a cancelable global `'error'` event; `globalThis.reportError()` when dispatch is
+ * unavailable; then guarded console output. A `logger.registerReportErrorListener()` can
+ * therefore pick it up and log it properly. That is what anyone with a logger actually
+ * wants, and a console line nobody reads is a poor consolation prize.
  *
  * **A caller that runs inside logging should not leave this to the default**, and the
  * reason is routing rather than danger. Broadcasting from there sends the report out to
@@ -161,7 +153,7 @@ export function reportThroughHandler(
  * @param label   Names the operation in the console line - `'Redaction'`, `'Render'`.
  * @param handler Called with the first failure. A handler that throws falls back to the
  *                console - not to the channel below, which a handler's own failure is no
- *                reason to reach for - as `onSinkError` does: a handler for failures must
+ *                reason to reach for: a handler for failures must
  *                not be able to turn one into two. With no handler at all, see the routing
  *                above.
  */
@@ -191,7 +183,7 @@ export function createFailureReporter(
 
     if (handler !== undefined) {
       // The shared rung, so a handler that throws is answered the same way here as it is
-      // for `onSinkError` and `onEventHandlerError`: the console, never the channel below.
+      // for every supplied failure handler: the console, never the channel below.
       // A handler that just threw is no argument for broadcasting, and the caller who set
       // it has already said where they wanted these to go.
       reportThroughHandler(

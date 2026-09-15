@@ -100,11 +100,11 @@ export interface ErrorToStringOptions {
    * `redactFunction` and may carry the value it was hiding, so putting it in the table
    * would send it to every sink past `sensitiveFieldNames`. It comes here instead.
    *
-   * With no handler set, a standalone call reports on the standard global `'error'`
-   * channel - so a `logger.registerReportErrorListener()` records it - and falls back to
-   * `console.error` only when nothing claims the event. The `Logger` and its sinks always
-   * supply a handler for their own work, so this default is never reached from inside a
-   * log call.
+   * With no handler set, a standalone call uses the standard host path: a cancelable
+   * global `'error'` event first; `globalThis.reportError()` when event dispatch is
+   * unavailable; then guarded `console.error`. The logger uses its separate diagnostic
+   * channel for logger-owned formatting. A custom sink that calls this function should
+   * pass a handler that terminates locally.
    *
    * Fires at most once per kind per call. Do not redact, render or log from inside it.
    */
@@ -785,8 +785,9 @@ export function errorToString(
 
   const report = createFormatReporter('redaction', options.onFormatError);
 
-  // Defaults to the console, exactly as the redaction reporter does. The two failures are
-  // equally exceptional: this fires only when a read actually *threw*, never for the
+  // Uses the same host reporting path as the redaction reporter when no handler is
+  // supplied. The two failures are equally exceptional: this fires only when a read
+  // actually *threw*, never for the
   // ordinary degradations - `[Function]`, `[circular]`, `[max depth exceeded]` - which
   // never reach a reporter at all. Silence by default would leave the swallow this channel
   // exists to end as the behaviour almost everyone gets.

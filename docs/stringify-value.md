@@ -47,9 +47,9 @@ interface StringifyValueOptions {
   /** Decides how a matched value is replaced. */
   redactFunction?: (key: string, value: string) => RedactFunctionResult;
   /**
-   * Notified when redaction or rendering fails. With no handler set, a standalone call
-   * reports on the global `'error'` channel - so `logger.registerReportErrorListener()`
-   * records it - and falls back to `console.error` only when nothing claims the event.
+   * Notified when redaction or rendering fails. Otherwise uses the standard host path:
+   * global `'error'`, then `globalThis.reportError()` if dispatch is unavailable, then
+   * guarded `console.error`.
    */
   onFormatError?: (
     error: Error,
@@ -249,5 +249,5 @@ Nothing reaches a log line, because the renderer cannot see it either. But it me
   - `kind: 'redaction'` means your `redactFunction` threw, or a value could not be read to mask it.
   - `kind: 'render'` means a value refused to be read or turned into text. Either call can raise it: `redactValue` hands back structure, but masking a leaf renders it first, so a `toString` that throws under a masked key reports here too. Render subjects are rooted at `<value>` in both, so the same leaf is named the same way whichever half reports it. It fires only when a read actually threw, never for the ordinary degradations.
   - Both come from the same walk over the same value and address it the same way, which is why they are one callback with a discriminator rather than two. Each kind carries its own once-per-call budget, so a value that fails both ways is reported both ways.
-  - With no handler it reports on the standard global `'error'` channel, so a `logger.registerReportErrorListener()` records it, falling back to `console.error` when nothing claims it. The `Logger` and its sinks never use that channel for their own work - they always supply a handler, defaulting to the console, because broadcasting from inside a log call would be logged by the listener, and logging renders. **Pass a handler when calling this from inside a sink or formatter** - that runs within a log call while looking standalone, and the default channel would be logged by your listener, whose logging reaches the same sink again.
+  - With no handler it first dispatches a cancelable global `'error'` event, so a `logger.registerReportErrorListener()` can record it. If event dispatch is unavailable it uses `globalThis.reportError()` when present; an unclaimed dispatch, unavailable reporting function, or reporting failure ends at guarded `console.error`. Logger-owned formatting uses the logger's separate diagnostic channel. **Pass a handler when calling this from inside a custom sink or formatter** and have that handler terminate locally; otherwise the standalone host path can reach a registered logger while it is already writing.
   - The cause is never written into the rendered string: it comes from your own getter or `redactFunction` and may carry the value it was hiding.

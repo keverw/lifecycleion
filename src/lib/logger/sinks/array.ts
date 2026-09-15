@@ -13,7 +13,13 @@ import {
   type FormatErrorHandler,
   type ReportFormatFailure,
 } from '../../internal/format-reporter';
-import type { ArrayLogTransformer, LogEntry, LogSink } from '../types';
+import type {
+  ArrayLogTransformer,
+  LogEntry,
+  LogSink,
+  LoggerDiagnostic,
+} from '../types';
+import { diagnosticEntry } from '../internal/diagnostic-entry';
 
 /**
  * Stands in for a value whose read threw, so the snapshot could not copy it.
@@ -363,6 +369,12 @@ export class ArraySink implements LogSink {
     }
     // Store the original entry
     this.logs.push(stored);
+  }
+
+  public writeDiagnostic(diagnostic: LoggerDiagnostic): void {
+    if (!this.closed) {
+      this.logs.push(diagnosticEntry(diagnostic));
+    }
   }
 
   /**

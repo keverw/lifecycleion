@@ -38,11 +38,11 @@ export interface CurlyBracketsOptions {
    * this existed they were indistinguishable: `{{error.message}}` on an error whose
    * `message` accessor throws rendered exactly like a typo. This is what tells them apart.
    *
-   * Fires at most once per render of the template - not once per placeholder - and
-   * reports on the standard global `'error'` channel when none is set, falling back to
-   * `console.error` when nothing claims it. Only
-   * a read that actually threw reaches it; a placeholder that simply is not there reports
-   * nothing, which is the distinction this exists to draw.
+   * Fires at most once per render of the template - not once per placeholder. With no
+   * handler it uses the standard host path: a cancelable global `'error'` event first;
+   * `globalThis.reportError()` when event dispatch is unavailable; then guarded
+   * `console.error`. Only a read that actually threw reaches it; a placeholder that simply
+   * is not there reports nothing, which is the distinction this exists to draw.
    */
   onFormatError?: FormatErrorHandler;
   /**

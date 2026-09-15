@@ -21,7 +21,10 @@ export interface SerializeErrorOptions {
    * Notified when a value could not be serialized, so an `<unserializable>` marker leaves
    * a diagnosis and not only a marker.
    *
-   * With no handler set, a standalone call reports on the standard global `'error'` channel - so a `logger.registerReportErrorListener()` records it - and falls back to `console.error` only when nothing claims the event. The `Logger` and its sinks always supply a handler for their own work, so this default is never reached from inside a log call.
+   * With no handler set, a standalone call uses the standard host path: a cancelable
+   * global `'error'` event first; `globalThis.reportError()` when event dispatch is
+   * unavailable; then guarded `console.error`. A custom sink that calls this function
+   * should pass a handler that terminates locally.
    *
    * This runs at an IPC or RPC boundary, usually while already reporting a failure, so the
    * marker keeps the payload intact and the cause comes here instead. The cause is
@@ -201,9 +204,9 @@ export function serializeError(
 ): SerializedError {
   const seen = new WeakSet<object>();
 
-  // Defaults to the console, as every other failure channel in this library does - and it
-  // matters more here than anywhere: this payload crosses a process boundary, and the
-  // receiving side has no callback of its own to learn anything from.
+  // Uses the standard host reporting path when no handler is supplied - and it matters
+  // more here than anywhere: this payload crosses a process boundary, and the receiving
+  // side has no callback of its own to learn anything from.
   const report = createFormatReporter('render', options?.onFormatError);
 
   // The root is tracked before the walk starts, not left for `deepSerialize` to add when

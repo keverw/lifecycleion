@@ -1,5 +1,4 @@
 import type { RedactValueFunction } from '../internal/default-redact-function';
-import type { FormatErrorHandler } from '../internal/format-reporter';
 
 // Re-exported, not merely imported: it is half of what a `redactFunction` may return, so
 // a caller cannot annotate one without it.
@@ -115,7 +114,32 @@ export interface LogEntry {
  */
 export interface LogSink {
   write(entry: LogEntry): void | Promise<void>;
+  /**
+   * Write a failure raised by the logging system itself.
+   *
+   * The logger calls this directly, outside its normal formatting and event path. A sink
+   * that does not implement it receives an already-rendered diagnostic through `write()`
+   * instead. A failure here falls straight to the guarded console rung; it never creates
+   * another diagnostic.
+   */
+  writeDiagnostic?(diagnostic: LoggerDiagnostic): void | Promise<void>;
   close?(): void | Promise<void>;
+}
+
+export type LoggerDiagnosticKind =
+  'sink' | 'event-handler' | 'redaction' | 'render';
+
+/** A failure raised while the logger itself was formatting, emitting, or writing. */
+export interface LoggerDiagnostic {
+  timestamp: number;
+  kind: LoggerDiagnosticKind;
+  error: Error;
+  /** Guardedly rendered text suitable for the fallback `LogEntry`. */
+  message: string;
+  context?: 'write' | 'close';
+  sink?: LogSink;
+  event?: string;
+  path?: string;
 }
 
 /**
@@ -169,6 +193,12 @@ export interface LoggerOptions {
   // Output destinations
   sinks?: LogSink[];
 
+  /**
+   * Optional destinations for logger diagnostics. When absent or empty, diagnostics are
+   * offered to the regular `sinks` instead.
+   */
+  diagnosticSinks?: LogSink[];
+
   // Security
   redactFunction?: RedactValueFunction;
 
@@ -178,61 +208,6 @@ export interface LoggerOptions {
     exitCode: number,
     isFirstExit: boolean,
   ) => BeforeExitResult | Promise<BeforeExitResult>;
-  onSinkError?: (
-    error: Error,
-    context: 'write' | 'close',
-    sink: LogSink,
-  ) => void | Promise<void>;
-
-  /**
-   * Handle a failure thrown or rejected by one of this logger's own `'logger'` event
-   * handlers. Defaults to `console.error`.
-   *
-   * These cannot be logged: logging emits a `'logger'` event, so reporting a handler's
-   * failure through the logger would emit again and cycle without end. They are kept off
-   * the global `'error'` channel for the same reason. If this callback itself throws, the
-   * failure falls back to `console.error`.
-   *
-   * Do not call this logger's own log methods from here.
-   */
-  onEventHandlerError?: (error: Error, event: string) => void | Promise<void>;
-
-  /**
-   * Notified when a value could not be formatted for a log line, so a
-   * `***REDACTION FAILED***`, `[unrenderable]` or `<unrenderable: ...>` marker leaves a
-   * diagnosis and not only a marker. Defaults to `console.error`.
-   *
-   * `kind` says which stage threw. `'redaction'` means your `redactFunction` failed, so a
-   * value fell back to the fail-closed marker rather than the mask you asked for.
-   * `'render'` means a value refused to be read or stringified, so the line still went out
-   * with a marker in its place - one bad param never costs you the entry. Both used to be
-   * their own callback, and both are handed the same structural `path` from the same walk
-   * over the same value, so they are one callback with a discriminator.
-   *
-   * Rendering being silent was the gap this closes: a `{{user.token}}` that rendered
-   * `(null)` because its accessor threw looked exactly like a typo, and an
-   * `additionalInfo` entry behind a revoked `Proxy` looked like a key that was never set.
-   *
-   * Deliberately not the global `'error'` channel, for the reason `onEventHandlerError` is
-   * not either: a listening logger would log the report, logging renders and redacts, and
-   * that is what just failed - a cycle no re-entrancy guard closes, since each pass is a
-   * fresh turn.
-   *
-   * The error may contain the value: it came from your own `redactFunction`, getter or
-   * `toString`, all of which were handed it. The `path` never does - it is structural,
-   * built from keys the walk already holds. That asymmetry is why the marker in the log
-   * line carries no cause at all; a cause written into the output would travel to every
-   * sink past `redactedKeys`.
-   *
-   * Fires at most once per kind per operation. A failure is raised per leaf, so an
-   * unconditionally throwing `redactFunction` would otherwise report once for every value
-   * inside a named container; the markers left in the output show the full extent, and
-   * this names the cause. `errorObject()` formats twice - the error, then the params - so
-   * it can report twice per kind, for genuinely different failures.
-   *
-   * Do not call this logger's own log methods from here.
-   */
-  onFormatError?: FormatErrorHandler;
 }
 
 /**

@@ -3,7 +3,7 @@ import { muteConsoleError, restoreConsoleError } from './console-test-utils';
 import { createFormatReporter } from './format-reporter';
 
 describe('createFormatReporter follows an async handler', () => {
-  // `onSinkError` and `onEventHandlerError` are both followed when they return a promise,
+  // Sink-owned failure callbacks are followed when they return a promise,
   // and `reportThroughHandler` exists to do exactly that. `createFormatReporter` wrapped
   // the caller's handler in a *block-bodied* arrow, which discards the return value - so a
   // rejecting `async onFormatError` sailed past every rung as an unhandled rejection.

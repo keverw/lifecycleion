@@ -209,7 +209,7 @@ nothing above it left to catch - and it must not assume `error` is an `Error`. U
 [`describeError`](./to-error.md#describeerror), which satisfies both.
 
 [`Logger`](./logger.md) overrides this exact hook for the loop described above, routing
-its own `'logger'` handler failures to the `onEventHandlerError` option instead.
+its own `'logger'` handler failures to its separate asynchronous diagnostic channel.
 
 ## Memory Management
 

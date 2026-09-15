@@ -1,5 +1,6 @@
 import { format } from 'date-fns';
-import type { LogEntry, LogSink } from '../types';
+import type { LogEntry, LogSink, LoggerDiagnostic } from '../types';
+import { reportToConsole } from '../../internal/report-to-console';
 import { LogLevel, getLogLevel } from '../types';
 import { colorize } from '../utils/color';
 
@@ -141,6 +142,10 @@ export class ConsoleSink implements LogSink {
           break;
       }
     }
+  }
+
+  public writeDiagnostic(diagnostic: LoggerDiagnostic): void {
+    reportToConsole(diagnostic.message);
   }
 
   /**

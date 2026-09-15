@@ -12,9 +12,7 @@ import { isPromise } from '../is-promise';
 import { describeError, isErrorValue, toError } from '../to-error';
 import { readMember } from '../internal/read-member';
 import { reportToConsole } from '../internal/report-to-console';
-import { reportThroughHandler } from '../internal/failure-reporter';
 import {
-  consoleFormatHandler,
   createFormatReporter,
   type FormatFailureKind,
   type FormatErrorHandler,
@@ -28,6 +26,7 @@ import type {
   LoggerOptions,
   LogOptions,
   BeforeExitResult,
+  LoggerDiagnostic,
 } from './types';
 import type { HandleLogOptions } from './internal-types';
 import { ArraySink } from './sinks/array';
@@ -36,6 +35,7 @@ import { applyRedaction, markAllRedactionFailed } from './utils/redaction';
 import { snapshotList } from '../internal/redact-paths';
 import { prepareErrorObjectLog } from './utils/error-object';
 import { LoggerService } from './logger-service';
+import { diagnosticEntry } from './internal/diagnostic-entry';
 
 /**
  * Main Logger class with sink-based architecture and EventEmitter support
@@ -220,28 +220,13 @@ export class Logger extends EventEmitter {
   public readonly isLoggerClass = true;
 
   private sinks: LogSink[];
+  private diagnosticSinks: LogSink[];
   private redactFunction?: RedactFunction;
   private callProcessExit: boolean;
   private beforeExitCallback?: (
     exitCode: number,
     isFirstExit: boolean,
   ) => BeforeExitResult | Promise<BeforeExitResult>;
-  // `void | Promise<void>`, matching the options they come from: these are invoked
-  // through `reportThroughHandler`, which follows a returned promise, so an `async`
-  // handler that rejects reaches the console rung instead of becoming an unhandled
-  // rejection. Narrowed to `void` here, storing the caller's own option was a
-  // `no-misused-promises` error.
-  private onSinkError?: (
-    error: Error,
-    context: 'write' | 'close',
-    sink: LogSink,
-  ) => void | Promise<void>;
-  private onEventHandlerError?: (
-    error: Error,
-    event: string,
-  ) => void | Promise<void>;
-  private onFormatError?: FormatErrorHandler;
-
   private _didExit = false;
   private _exitCode: number = 0;
   private _exitRequested = false;
@@ -250,26 +235,6 @@ export class Logger extends EventEmitter {
 
   private _reportErrorListenerRegistered = false;
   private _isHandlingReportedError = false;
-  /**
-   * See {@link handleSinkError}: the sinks whose failure handler has not settled.
-   *
-   * Per sink rather than one flag, because a flag cannot tell re-entry from a second
-   * independent failure. `handleLog` writes to every sink in a loop, so three failing
-   * sinks produce three unrelated reports in one pass - and with an `async onSinkError`
-   * the flag was still up for the second and third, which were diverted to the console
-   * the handler was installed to replace. The cycle this guards is a handler that logs
-   * back into the sink that just failed, which is the *same* sink; a set still bounds it
-   * at one report per sink and lets the unrelated ones through.
-   */
-  private readonly _sinksHandlingError = new WeakSet<LogSink>();
-  /** See {@link handleEventHandlerFailure}: held until `onEventHandlerError` settles. */
-  private _isHandlingEventHandlerError = false;
-  /** See {@link formatErrorHandler}: nesting depth of synchronous `onFormatError` calls. */
-  private _formatErrorDepth = 0;
-  /** See {@link formatErrorHandler}: `onFormatError` calls that have not settled. */
-  private _pendingFormatReports = 0;
-  /** See {@link handleSinkError}: nesting depth of synchronous `onSinkError` calls. */
-  private _sinkErrorDepth = 0;
   private _reportErrorListener: ((event: Event) => void) | null = null;
   private _reportErrorListenerCapture = false;
 
@@ -277,12 +242,10 @@ export class Logger extends EventEmitter {
     super();
 
     this.sinks = options.sinks || [];
+    this.diagnosticSinks = options.diagnosticSinks || [];
     this.redactFunction = options.redactFunction;
     this.callProcessExit = options.callProcessExit ?? true;
     this.beforeExitCallback = options.beforeExitCallback;
-    this.onSinkError = options.onSinkError;
-    this.onEventHandlerError = options.onEventHandlerError;
-    this.onFormatError = options.onFormatError;
   }
 
   public get didExit(): boolean {
@@ -848,6 +811,28 @@ export class Logger extends EventEmitter {
     return [...this.sinks];
   }
 
+  /** Add a sink used only for failures raised by the logging system itself. */
+  public addDiagnosticSink(sink: LogSink): void {
+    this.diagnosticSinks.push(sink);
+  }
+
+  /** Remove a diagnostic sink. */
+  public removeDiagnosticSink(sink: LogSink): boolean {
+    const index = this.diagnosticSinks.indexOf(sink);
+
+    if (index === -1) {
+      return false;
+    }
+
+    this.diagnosticSinks.splice(index, 1);
+    return true;
+  }
+
+  /** Get a readonly copy of the explicitly configured diagnostic sinks. */
+  public getDiagnosticSinks(): readonly LogSink[] {
+    return [...this.diagnosticSinks];
+  }
+
   /**
    * Close all sinks and cleanup resources
    * After closing, the logger is marked as closed and all sinks are removed
@@ -873,8 +858,10 @@ export class Logger extends EventEmitter {
     this.unregisterReportErrorListener();
 
     // Close all sinks
+    const sinksToClose = [...new Set([...this.sinks, ...this.diagnosticSinks])];
+
     await Promise.all(
-      this.sinks.map(async (sink) => {
+      sinksToClose.map(async (sink) => {
         try {
           // The property *read* is inside the guard too. A sink is caller-supplied, so
           // `close` can be an accessor that throws, and a read outside rejected
@@ -893,6 +880,7 @@ export class Logger extends EventEmitter {
 
     // Remove all sinks from the array after closing
     this.sinks = [];
+    this.diagnosticSinks = [];
 
     this.emit('logger', { eventType: 'close' });
   }
@@ -993,7 +981,7 @@ export class Logger extends EventEmitter {
     // `tags: [{ toString() { throw } }]` was copied and handed to every sink with the
     // caller's object and its traps intact - the retention the copy exists to remove. A
     // sink then does the ordinary thing with the field, `.join(',')`, and throws inside
-    // `sink.write`, turning one bad list into an `onSinkError` per registered sink.
+    // `sink.write`, turning one bad list into a sink diagnostic per registered sink.
     //
     // A list that is not all strings leaves this `null`, the same answer an unreadable
     // one already gets: `tags` is an optional label, so dropping it costs the entry a
@@ -1041,7 +1029,7 @@ export class Logger extends EventEmitter {
     // copy could not be made - a non-array, or an array whose spread threw. Handing that
     // object to a sink put the traps back exactly where this copy exists to remove them:
     // a sink reading `entry.redactedKeys.length` or `.join(',')` threw inside
-    // `sink.write`, and one unreadable list became an `onSinkError` for every registered
+    // `sink.write`, and one unreadable list became a sink diagnostic for every registered
     // sink on that call.
     let inertKeys: string[] | undefined;
 
@@ -1058,12 +1046,12 @@ export class Logger extends EventEmitter {
       // putting a number, and the caller's own object with its traps still attached,
       // exactly where the copy exists to remove them. A sink then does the ordinary
       // thing with the field this hands it, `.join(',')` or `.map(k => k.toUpperCase())`,
-      // and throws inside `sink.write`: one bad list becomes an `onSinkError` for every
+      // and throws inside `sink.write`: one bad list becomes a sink diagnostic for every
       // registered sink on that call.
       //
       // A list that is not all strings leaves this `undefined`, which is the same answer
       // an untrustworthy list already gets: `parseRedactPaths` refuses a non-string entry,
-      // so redaction has already failed closed and said so through `onFormatError`, and
+      // so redaction has already failed closed and emitted a diagnostic, and
       // `redactedParams` carries the marker. There is nothing this field could honestly
       // name.
       if (redactedKeys.every((key) => typeof key === 'string')) {
@@ -1074,7 +1062,7 @@ export class Logger extends EventEmitter {
     // The reporter for every fail-closed path below, built on first use so an ordinary
     // log call allocates nothing for it.
     //
-    // These paths were silent, which broke the promise `onFormatError` makes
+    // These paths were silent, which broke the diagnostic promise the formatter makes
     // everywhere else: a failure leaves a diagnosis and not only a marker. The other four
     // surfaces keep it - `applyRedaction` for params, `errorToString` for an error's
     // `sensitiveFieldNames`, `redactValue` and `stringifyValue` - because each builds a
@@ -1093,7 +1081,7 @@ export class Logger extends EventEmitter {
     // a `redactFunction` that throws is `'redaction'`, a leaf whose `toString` throws on
     // the way to the mask is `'render'` - and it splits its reporters for exactly that
     // reason. Funnelled into a single `'redaction'` reporter here, a params bag that
-    // failed both ways called `onFormatError` once, with the kind of whichever failed
+    // failed both ways emitted once, with the kind of whichever failure arrived first
     // first written over it, and the other failure was never mentioned to anyone.
     const backstopReporters = new Map<FormatFailureKind, ReportFormatFailure>();
 
@@ -1241,7 +1229,7 @@ export class Logger extends EventEmitter {
       // The decision made above, not a second read of `redactedKeys`, and the inert copy
       // rather than the caller's object. A list too hostile to copy leaves this
       // `undefined`: the redaction itself has already failed closed and said so through
-      // `onFormatError`, and `redactedParams` carries the marker, so there is nothing
+      // diagnostics, and `redactedParams` carries the marker, so there is nothing
       // this field could honestly name.
       redactedKeys: didRequestRedaction ? inertKeys : undefined,
       error: options?.error,
@@ -1284,11 +1272,9 @@ export class Logger extends EventEmitter {
    *
    * Deliberately does **not** use the standard `'error'` channel the base class uses.
    * Logging emits a `'logger'` event, so a handler failure reported on that channel is
-   * logged, which emits again, which fails again: with a handler that reliably fails
-   * (an async one that always rejects is the clearest case) that is an unbounded cycle
-   * rather than a stack overflow, so no re-entrancy guard can catch it. Reporting these to the
-   * console instead breaks the edge that closes the loop, and matches the fall-back a
-   * failing sink already gets.
+   * logged, which emits again, which fails again. The logger sends it through the separate
+   * diagnostic event and sink path instead. A failure in a diagnostic listener itself is
+   * already on the terminal path and goes directly to the guarded console rung.
    *
    * Failures from handlers on *other* Lifecycleion emitters are unaffected and still
    * reach this logger's sinks through `registerReportErrorListener()`.
@@ -1307,146 +1293,45 @@ export class Logger extends EventEmitter {
       { cause },
     );
 
-    // Not routed through `onSinkError`: that callback is handed the sink that failed, and
-    // no sink is involved here, so there would be nothing honest to pass.
-    // The shared rung, and it never broadcasts - which for this channel is the whole
-    // point. A `'logger'` event is emitted *by* logging, so reporting a handler's failure
-    // anywhere a logger might hear it is logged, which emits again, which fails again -
-    // an unbounded cycle. Keeping it off the global channel closes that edge; the guard
-    // below closes the one a logging `onEventHandlerError` reopens.
-    //
-    // `runCallbackSafely` states the requirement this satisfies outright - "`onError` must
-    // not throw: it runs on the failure path, and there is nothing above it left to catch"
-    // - and this override is what it calls: a throw here escaped `emit` and left the
-    // `logger.info()` that emitted the event, or, for a handler that rejected, became an
-    // unhandled rejection from `result.catch(onError)`.
-    //
-    // Re-entry goes to the console rung, not back to the handler, as `handleSinkError`
-    // does for `onSinkError` and for the same reason: logging from the handler is the
-    // obvious thing to write, and with a `'logger'` handler that reliably throws it is
-    // the cycle the comment above describes - a stack overflow when synchronous, one
-    // new turn per rejection when `async`. The docs say not to log from here; this is
-    // the brake for the handler that does anyway. Held until the handler settles, so an
-    // `async` one that awaits before logging is covered too.
-    if (this._isHandlingEventHandlerError) {
-      reportThroughHandler(undefined, () => failure.message);
-
+    // The diagnostic event is already the logger's failure channel. A failure in one of
+    // its listeners cannot be sent through it again, so it ends at the console rung.
+    if (event === 'diagnostic') {
+      reportToConsole(failure.message);
       return;
     }
 
-    this._isHandlingEventHandlerError = true;
-
-    try {
-      // `failure.message` is a plain string, built here rather than handed in.
-      reportThroughHandler(
-        this.onEventHandlerError === undefined
-          ? undefined
-          : // Returned, so an `async` handler that rejects reaches the console rung
-            // rather than becoming an unhandled rejection out of a log call.
-            () => this.onEventHandlerError?.(failure, event),
-        () => failure.message,
-        () => {
-          this._isHandlingEventHandlerError = false;
-        },
-      );
-    } catch {
-      // `reportThroughHandler` does not throw; the guard must not stay up if that changes.
-      this._isHandlingEventHandlerError = false;
-    }
+    this.reportDiagnostic({
+      timestamp: ms(),
+      kind: 'event-handler',
+      error: failure,
+      message: failure.message,
+      event,
+    });
   }
 
-  /**
-   * The handler this logger supplies when the caller set none.
-   *
-   * Every format this logger performs runs *inside* a log call, so it must
-   * never reach `createFailureReporter`'s default rung: that broadcasts on the global
-   * `'error'` channel, `registerReportErrorListener()` would log what it hears, logging
-   * renders and redacts, and rendering or redacting is what just failed. Supplying a
-   * handler unconditionally is what keeps this logger off that rung - the user's handler
-   * when they set one, this when they did not.
-   *
-   * The console, because it is the only rung that cannot re-enter what is already running.
-   * A caller who wants these somewhere else sets `onFormatError` and this is never used.
-   */
+  /** Adapt the formatter callback shape to the logger's diagnostic channel. */
   private formatErrorHandler(): FormatErrorHandler {
-    const handler = this.onFormatError;
-
-    if (handler === undefined) {
-      return consoleFormatHandler();
-    }
-
-    const fallback = consoleFormatHandler();
-
-    // Re-entry goes to the console rung, not back to the handler - the brake
-    // `handleSinkError` and `handleEventHandlerFailure` both have, and the one channel
-    // that had none. An `onFormatError` that logs is the obvious thing to write, and
-    // logging renders and redacts: a param whose `toString` throws reported, was logged,
-    // rendered, threw again and re-entered this handler inside its own frame, measured at
-    // 1708 spurious sink entries before the stack gave out.
-    //
-    // Two counters, because the two loops this has to stop are not the same loop.
-    //
-    // `_formatErrorDepth` is the synchronous one, raised for the duration of the call and
-    // lowered when it returns: a handler that logs re-enters this from inside its own
-    // frame, and a depth of one is enough to see that.
-    //
-    // `_pendingFormatReports` is the asynchronous one, held until the handler *settles*,
-    // as `onSinkError` and `onEventHandlerError` hold theirs. An `async onFormatError`
-    // that awaits and then logs finds the depth back at zero, and its log fails and
-    // reports again on the next turn - once per turn, forever, the loop no synchronous
-    // guard can see. This used to be a cap on the calls still in flight rather than a
-    // hold, on the theory that a recursing handler would pile up to the cap within a few
-    // turns; it does not. Each call settles right after it logs, so the pile never
-    // exceeds two, and the loop ran at one report per turn for as long as the process
-    // did. While one call is pending, every further report goes to the console rung -
-    // an unrelated failure in another log call included, which is the price the other
-    // two channels already pay, and a console line beside a handler that is still
-    // running is the better half of that trade.
     return (error: Error, kind: FormatFailureKind, path: string): void => {
-      if (this._formatErrorDepth > 0 || this._pendingFormatReports > 0) {
-        fallback(error, kind, path);
+      const failure = toError(error);
 
+      // `FormatErrorHandler` is shared with ArraySink, the only surface that can report a
+      // transformer failure. The logger itself only creates redaction and render
+      // reporters. Keep that distinction honest in the public diagnostic union even if a
+      // future internal caller accidentally hands this adapter the sink-owned kind.
+      if (kind === 'transform') {
+        reportToConsole(
+          `Unexpected logger transform failure for ${path}: ${describeError(failure)}`,
+        );
         return;
       }
 
-      this._formatErrorDepth++;
-      this._pendingFormatReports++;
-
-      let didDefer = false;
-      let didRelease = false;
-
-      // Once only: the deferred path and the `finally` below must not both spend it.
-      const release = (): void => {
-        if (didRelease) {
-          return;
-        }
-
-        didRelease = true;
-        this._pendingFormatReports--;
-      };
-
-      try {
-        const result: unknown = handler(error, kind, path);
-
-        if (isPromise(result)) {
-          didDefer = true;
-
-          // Lowered when the handler settles, and the promise itself is handed back
-          // below: `createFormatReporter` returns what this returns so a rejecting
-          // `async` handler lands on the console rung instead of becoming an unhandled
-          // rejection, and a `.then` here must not be the thing that swallows it.
-          void Promise.resolve(result).then(release, release);
-        }
-
-        // Returned for the reason `createFormatReporter`'s binding is expression-bodied.
-        return result as void;
-      } finally {
-        this._formatErrorDepth--;
-
-        if (!didDefer) {
-          release();
-        }
-      }
+      this.reportDiagnostic({
+        timestamp: ms(),
+        kind,
+        error: failure,
+        message: `${kind === 'redaction' ? 'Redaction' : 'Render'} failed for ${path}: ${describeError(failure)}`,
+        path,
+      });
     };
   }
 
@@ -1458,7 +1343,7 @@ export class Logger extends EventEmitter {
   private renderErrorObject(prefix: string, error: unknown): string {
     return prepareErrorObjectLog(prefix, error, {
       // The logger's own masking and its failure handler, so an error rendered here masks
-      // the way params do and a failure reaches `onFormatError` rather than the console.
+      // the way params do and a failure reaches diagnostics rather than the console.
       redactFunction: this.redactFunction,
       // Never left to the default: see `formatErrorHandler`.
       onFormatError: this.formatErrorHandler(),
@@ -1471,7 +1356,7 @@ export class Logger extends EventEmitter {
   }
 
   /**
-   * Handle sink errors by calling the onSinkError callback or falling back to the console.
+   * Handle a sink failure through the logger's diagnostic channel.
    *
    * Nothing here may throw. This is reached from `handleLog`'s synchronous `catch`, where
    * a throw leaves the caller's own `logger.info()`; from `result.catch(...)` on a sink
@@ -1488,68 +1373,70 @@ export class Logger extends EventEmitter {
     // Normalized rather than trusted, for the same reason as a failing event handler: a
     // sink is user-supplied and free to throw or reject with any value, and reading
     // `.message` off `null` would throw a `TypeError` out of the log call that wrote to
-    // it. Normalizing here also makes `onSinkError`'s declared `Error` parameter honest.
+    // it. Normalizing here also makes `LoggerDiagnostic.error` reliably an `Error`.
     const failure = toError(error);
 
     const line = (): string =>
       `Error ${context === 'write' ? 'writing to' : 'closing'} sink: ${describeError(failure)}`;
 
-    // Re-entry goes to the console rung, not back to the handler. An `onSinkError` that
-    // logs - the obvious thing to write - into a sink that throws on every `write()`
-    // reached `handleLog`, the sink, and this method again, inside its own frame, with
-    // nothing to stop it until the stack did. The format and event-handler channels both
-    // guard against the same loop; this one did neither.
-    //
-    // Held until the handler *settles*, not until it returns. Cleared in a synchronous
-    // `finally`, the guard covered a synchronous handler only: an `async onSinkError`
-    // that awaited and then logged into the failing sink found the flag already down,
-    // and ran itself again on the next turn, once per turn, for as long as the sink kept
-    // failing. The sinks hold their `formatReportsInFlight` guard the same way for the
-    // same reason, and `reportThroughHandler` follows a promise to say when it settled.
-    // Nesting is bounded alongside the per-sink entry, and the two answer different
-    // halves of the same loop. The set stops a handler that logs back into the sink that
-    // just failed; on its own it does not stop the *other* sinks from opening further
-    // nested reports, and with N sinks failing at once - a full disk, an EPIPE, the case
-    // this channel exists for - each nested `handleLog` writes to every sink not yet in
-    // the set, which is N! renders of one entry rather than the one the old boolean
-    // allowed. The depth counter caps that at a single nested level: the first report of a
-    // pass reaches the handler, anything raised from inside it goes to the console.
-    //
-    // Raised for the synchronous call only, not held until an `async` handler settles, so
-    // an unrelated sink failing later in the same loop is still a report the handler gets.
-    if (this._sinkErrorDepth > 0 || this._sinksHandlingError.has(sink)) {
-      reportThroughHandler(undefined, line);
+    this.reportDiagnostic({
+      timestamp: ms(),
+      kind: 'sink',
+      error: failure,
+      message: line(),
+      context,
+      sink,
+    });
+  }
 
-      return;
-    }
+  /**
+   * Schedule one logger diagnostic for its listeners and every selected sink.
+   *
+   * Diagnostic writes deliberately bypass `handleLog`. A sink failure here therefore
+   * reaches the guarded console directly instead of producing another diagnostic. This
+   * single boundary is the recursion guard for the whole channel.
+   */
+  private reportDiagnostic(diagnostic: LoggerDiagnostic): void {
+    const destinations = [
+      ...(this.diagnosticSinks.length > 0 ? this.diagnosticSinks : this.sinks),
+    ];
 
-    this._sinksHandlingError.add(sink);
-    this._sinkErrorDepth++;
+    void Promise.resolve().then(() => {
+      const hasListeners = this.hasListeners('diagnostic');
 
-    try {
-      // The shared rung, so this channel cannot drift from the other three. It never
-      // broadcasts, and that is structural: a sink can only fail *during* a log call, so
-      // reporting anywhere a logger might hear it would be logged, and logging writes to
-      // sinks - this one included.
-      reportThroughHandler(
-        this.onSinkError === undefined
-          ? undefined
-          : // Returned, for the reason `onEventHandlerError` above is.
-            () => this.onSinkError?.(failure, context, sink),
-        line,
-        () => {
-          this._sinksHandlingError.delete(sink);
-        },
-      );
-    } catch {
-      // `reportThroughHandler` does not throw, but the guard must not be left up if that
-      // ever changes: a stuck entry would route every later failure of this sink to the
-      // console.
-      this._sinksHandlingError.delete(sink);
-    } finally {
-      // The synchronous call is over either way; only the per-sink entry outlives it.
-      this._sinkErrorDepth--;
-    }
+      this.emit('diagnostic', diagnostic);
+
+      if (destinations.length === 0) {
+        if (!hasListeners) {
+          reportToConsole(diagnostic.message);
+        }
+        return;
+      }
+
+      const entry = diagnosticEntry(diagnostic);
+
+      for (const sink of destinations) {
+        try {
+          const writeDiagnostic = sink.writeDiagnostic?.bind(sink);
+          const result =
+            writeDiagnostic === undefined
+              ? sink.write(entry)
+              : writeDiagnostic(diagnostic);
+
+          if (isPromise(result)) {
+            void Promise.resolve(result).catch((deliveryError: unknown) => {
+              reportToConsole(
+                `${diagnostic.message} (diagnostic sink also rejected: ${describeError(deliveryError)})`,
+              );
+            });
+          }
+        } catch (deliveryError) {
+          reportToConsole(
+            `${diagnostic.message} (diagnostic sink also threw: ${describeError(deliveryError)})`,
+          );
+        }
+      }
+    });
   }
 
   /**

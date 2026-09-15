@@ -37,7 +37,7 @@ function errorToString(
 interface ErrorToStringOptions {
   /** Decides how a value named by `sensitiveFieldNames` is replaced. */
   redactFunction?: (key: string, value: string) => RedactFunctionResult;
-  /** Notified when redaction or rendering fails. Defaults to `console.error`. */
+  /** Notified when redaction or rendering fails. Otherwise uses host reporting. */
   onFormatError?: (
     error: Error,
     kind: 'redaction' | 'render',
@@ -179,7 +179,7 @@ An unquoted path segment is a run of name characters - letters, digits, combinin
 
 A wildcard segment addresses **every element of an array**, with `*` and `[*]` the same rule written two ways - so `users[*].password` and `users.*.password` both mask the password of every user. It stands in for an array index and only for one: against a plain object it is the key literally spelled `*`, and an array's named properties are not expanded over either. The quoted `["*"]` is the same segment rather than an escape hatch, for the reason quoting never changes a segment's meaning: `users[0]`, `users["0"]` and `users.0` are already one entry too. See [Wildcards Over Arrays](./logger.md#wildcards-over-arrays), which covers this surface too.
 
-Entries the grammar rejects mask **nothing** beyond a key spelled literally that way. A trailing dot or an unterminated bracket is reported through `onFormatError` under `kind: 'redaction'` with the entry as written, since it is a configuration error knowable without the payload; a partial wildcard such as `us*rs` has no path syntax and is simply a literal key name. The logger's `redactedKeys` behaves identically.
+Entries the grammar rejects mask **nothing** beyond a key spelled literally that way. A trailing dot or an unterminated bracket is reported through `onFormatError` under `kind: 'redaction'` with the entry as written, since it is a configuration error knowable without the payload; a partial wildcard such as `us*rs` has no path syntax and is simply a literal key name. The logger's `redactedKeys` behaves identically and reports the failure through its diagnostic channel.
 
 A dotted or bracketed entry is treated as ambiguous and both readings are covered, the same way the logger's `redactedKeys` does: `'user.password'` masks the nested `additionalInfo.user.password` _and_ a literal key spelled `'user.password'`, when either exists.
 
@@ -219,7 +219,16 @@ To render a literal null, return the string `'null'`. Returning **nothing** defe
 
 The function is handed the key exactly as you wrote it in `sensitiveFieldNames` (`user.password`, not the leaf `password`) and the value already stringified, which is what the logger passes for the same field - so the same function genuinely serves both, and a mutating function cannot reach into your error object.
 
-Pass `onFormatError` to find out why a value failed to redact - it receives the error, `kind: 'redaction'`, and the `sensitiveFieldNames` entry it happened on. The same callback also reports rendering failures under `kind: 'render'`. Both come from the same walk over the same value and address it the same way, which is why they are one callback with a discriminator rather than two. It fires at most once per kind per call, and with no handler reports on the standard global `'error'` channel so a `logger.registerReportErrorListener()` records it, falling back to `console.error` when nothing claims it. The same option is on the logger and on `stringifyValue`.
+Pass `onFormatError` to find out why a value failed to redact - it receives the error,
+`kind: 'redaction'`, and the `sensitiveFieldNames` entry it happened on. The same callback
+also reports rendering failures under `kind: 'render'`. Both come from the same walk over
+the same value and address it the same way, which is why they are one callback with a
+discriminator rather than two. It fires at most once per kind per call. With no handler it
+first dispatches a cancelable global `'error'` event; if dispatch is unavailable it uses
+`globalThis.reportError()` when present; an unclaimed dispatch or unavailable/failed
+reporting function ends at guarded `console.error`. The same option is on
+`stringifyValue`; logger-owned formatting failures instead become `LoggerDiagnostic`
+values on the logger's separate channel.
 
 If the `redactFunction` throws, or reading the value throws, the result is `***REDACTION FAILED***` - never the original value. That is the same marker the logger uses for the same condition, and it is deliberately distinct from a successful mask so a broken `redactFunction` cannot hide behind output that looks fine.
 
@@ -265,7 +274,13 @@ first is the worst possible outcome. It is written so it cannot:
   ```
 
   It fires **at most once per render** (a failure is raised per value, and one report per
-  value would be its own flood). With no handler it reports on the standard global `'error'` channel, so a `logger.registerReportErrorListener()` records it, falling back to `console.error` when nothing claims it. The `Logger` and its sinks never use that channel for their own work - they always supply a handler, defaulting to the console, because broadcasting from inside a log call would be logged by the listener, and logging renders. Paths keep going through a nested error's own table, so a failure inside a
+  value would be its own flood). With no handler it first dispatches a cancelable global
+  `'error'` event, so a `logger.registerReportErrorListener()` can record it. If event
+  dispatch is unavailable it uses `globalThis.reportError()` when present; an unclaimed
+  dispatch, unavailable reporting function, or reporting failure ends at guarded
+  `console.error`. Logger-owned formatting uses the logger's separate diagnostic channel.
+  A custom sink that calls this function should pass a handler that terminates locally.
+  Paths keep going through a nested error's own table, so a failure inside a
   `cause` still says `cause.additionalInfo.token`.
 
   Note that a `BigInt` inside `additionalInfo` renders normally, since that walk handles

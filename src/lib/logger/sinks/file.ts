@@ -17,8 +17,9 @@ import {
   type SinkFailureKind,
 } from './internal/sink-failure';
 
-import type { LogEntry, LogSink } from '../types';
+import type { LogEntry, LogSink, LoggerDiagnostic } from '../types';
 import { LogLevel, getLogLevel } from '../types';
+import { diagnosticEntry } from '../internal/diagnostic-entry';
 
 export type {
   SinkErrorHandler,
@@ -419,6 +420,10 @@ export class FileSink implements LogSink {
    */
   public setMinLevel(level: LogLevel): void {
     this.minLevel = level;
+  }
+
+  public writeDiagnostic(diagnostic: LoggerDiagnostic): void {
+    this.write(diagnosticEntry(diagnostic));
   }
 
   /**

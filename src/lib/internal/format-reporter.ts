@@ -85,8 +85,8 @@ const LABELS: Record<FormatFailureKind, string> = {
  * inside a log call would loop: `logger.registerReportErrorListener()` listens on that
  * channel and logs what it hears, logging redacts and renders, and redacting or rendering
  * is what just failed. Each pass is a fresh turn, so no re-entrancy guard closes it. A
- * dedicated callback that cannot re-enter the thing that failed is the same answer
- * `onEventHandlerError` reaches for.
+ * dedicated callback that cannot re-enter the thing that failed is the answer for
+ * standalone and sink-owned formatting.
  *
  * An operation, not a log call: `logger.errorObject()` formats twice - once for the error,
  * once for the params - so it can report twice per kind.
@@ -100,8 +100,7 @@ const LABELS: Record<FormatFailureKind, string> = {
  *
  * @param kind    Which stage this reporter speaks for.
  * @param handler Called with the first failure. A handler that throws falls back to the
- *                console, as `onSinkError` does: a handler for failures must not be able to
- *                turn one into two.
+ *                console: a handler for failures must not be able to turn one into two.
  */
 export function createFormatReporter(
   kind: FormatFailureKind,

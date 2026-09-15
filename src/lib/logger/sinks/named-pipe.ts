@@ -2,8 +2,9 @@ import * as fs from 'fs';
 import { promises as fsPromises } from 'fs';
 import type { FileHandle } from 'fs/promises';
 import * as os from 'os';
-import type { LogEntry, LogSink } from '../types';
+import type { LogEntry, LogSink, LoggerDiagnostic } from '../types';
 import { LogLevel, getLogLevel } from '../types';
+import { diagnosticEntry } from '../internal/diagnostic-entry';
 import { describeError, toError } from '../../to-error';
 import { renderOnce, type RenderedLine } from './internal/rendered-line';
 import { renderJSONLine } from './internal/render-json-line';
@@ -583,6 +584,10 @@ export class NamedPipeSink implements LogSink {
    */
   public setMinLevel(level: LogLevel): void {
     this.minLevel = level;
+  }
+
+  public writeDiagnostic(diagnostic: LoggerDiagnostic): void {
+    this.write(diagnosticEntry(diagnostic));
   }
 
   /**

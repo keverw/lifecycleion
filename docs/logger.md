@@ -67,7 +67,7 @@ A modern, flexible logging library with sink-based architecture, template string
 - [Capturing Reported Errors](#capturing-reported-errors)
 - [Where Failures Go](#where-failures-go)
   - [Why the Fall-Back Is the Console](#why-the-fall-back-is-the-console)
-  - [Never Seeing a Console Line](#never-seeing-a-console-line)
+  - [Routing Diagnostics Away From the Console](#routing-diagnostics-away-from-the-console)
   - [Standalone Renderers Are Different](#standalone-renderers-are-different)
 - [EventEmitter Integration](#eventemitter-integration)
   - [Exit Event Phases](#exit-event-phases)
@@ -524,7 +524,7 @@ This falls out of what a path means and is not an oversight to work around. Mask
 
 #### Path Grammar
 
-An unquoted path segment is a run of name characters - letters, digits, combining marks, `_`, `$`, `@` and `-` - so ordinary key names need no quoting: `user.password-hash` and `users[0].api-key` both work. A key that contains anything else, including a delimiter, whitespace, or any other punctuation, needs the quoted bracket form, which is the only way to disambiguate it: `user["a.b"]`, `user["my key"]`, `user["a+b"]`. An entry the grammar rejects, such as a trailing dot or an unterminated bracket, keeps only its literal reading - a key spelled exactly that way - and its nested reading is dropped. That drop is **reported** through `onFormatError` under `kind: 'redaction'` with the entry as written, because it is a configuration error you can act on without seeing the payload. A valid path that simply matches nothing is not reported.
+An unquoted path segment is a run of name characters - letters, digits, combining marks, `_`, `$`, `@` and `-` - so ordinary key names need no quoting: `user.password-hash` and `users[0].api-key` both work. A key that contains anything else, including a delimiter, whitespace, or any other punctuation, needs the quoted bracket form, which is the only way to disambiguate it: `user["a.b"]`, `user["my key"]`, `user["a+b"]`. An entry the grammar rejects, such as a trailing dot or an unterminated bracket, keeps only its literal reading - a key spelled exactly that way - and its nested reading is dropped. The logger reports that as a diagnostic with `kind: 'redaction'` and the entry as written in `path`, because it is a configuration error you can act on without seeing the payload. A valid path that simply matches nothing is not reported.
 
 `*` and `[*]` are segments of their own, and only as a whole segment: `users[*].password` and `users.*.password` parse, while a partial wildcard such as `us*rs` or `a.*b` does not and therefore redacts nothing. The quoted `["*"]` is the same segment rather than an escape hatch - see [Wildcards Over Arrays](#wildcards-over-arrays).
 
@@ -606,110 +606,58 @@ constant rather than hard-coding the literal.
 
 #### Finding Out _Why_ Redaction Failed
 
-The marker says that redaction failed, never why - the thrown error was discarded. Pass
-`onFormatError` to get the cause:
+The marker says that redaction failed, never why. Logger-owned formatting failures are
+reported as `LoggerDiagnostic` values:
 
 ```typescript
 const logger = new Logger({
-  redactFunction: myRedactor,
-  onFormatError: (error, kind, path) => {
-    if (kind !== 'redaction') return;
+  sinks: [applicationSink],
+  diagnosticSinks: [diagnosticSink],
+});
 
-    metrics.increment('redaction.failed', { path });
-    // `error.message` is the throw from `myRedactor`; the original is on `error.cause`.
-  },
+logger.on<LoggerDiagnostic>('diagnostic', (diagnostic) => {
+  if (diagnostic.kind !== 'redaction') return;
+
+  metrics.increment('redaction.failed', { path: diagnostic.path });
 });
 ```
 
-`kind` is `'redaction'` here and `'render'` when a value refused to be read - see below.
+A diagnostic has `kind: 'redaction'` when masking failed and `kind: 'render'` when a
+value refused to be read or converted to text. It carries the normalized cause in `error`
+and the structural location in `path`. Each kind is emitted at most once per formatting
+operation; ordinary bounds such as `[circular]` and `[max depth exceeded]` are not failures.
 
 ### When a Value Cannot Be Rendered
 
 Rendering degrades rather than failing: a param that refuses to be read becomes a marker
-(`[unrenderable]`, `<unrenderable: value>`) and the line still goes out, so one bad param
-never costs you the log entry. That is the right trade, and it used to be completely
-silent. A `{{user.token}}` that rendered `(null)` because its accessor threw looked
-exactly like a typo.
+(`[unrenderable]`, `<unrenderable: value>`) and the line still goes out. The accompanying
+render diagnostic explains why without routing another ordinary log entry through the
+logger.
 
-`onFormatError` is where the cause goes:
+A standalone `stringifyValue()`, `errorToString()`, `serializeError()`, or
+`CurlyBrackets()` call has no logger diagnostic channel. Those functions retain their
+per-call `onFormatError` option; without one, they use the standard global `'error'`
+reporting path.
 
-```ts
-const logger = new Logger({
-  onFormatError: (error, kind, path) => {
-    // kind:  'render' here, 'redaction' when a redactFunction is what threw
-    // path:  'user.token' — structural, built from keys the renderer already holds
-    // error: the getter's own throw
-  },
-});
-```
+> **If your own sink, formatter, or diagnostic writer calls a standalone renderer, pass it
+> an `onFormatError`.** The callback must terminate locally. Do not report that failure
+> through the same logger diagnostic channel, because the diagnostic delivery would invoke
+> the writer again. Throwing inside `onFormatError` does not escape because renderer
+> callbacks are guarded. To use the logger's terminal fallback, retain the failure in the
+> callback and then throw or reject from `writeDiagnostic()` itself.
 
-Both stages report through the one callback because both come from the same walk over the
-same value and address it with the same structural path. The `kind` is the only thing that ever
-differed between them.
+The cause is not put into the ordinary log line. It came from caller-owned code such as a
+getter, `toString`, or `redactFunction`, and may itself contain the value. It is available
+on `LoggerDiagnostic.error`; treat it like exception telemetry when forwarding it.
 
-It fires at most once per kind per operation, and only when a read actually threw, never for the
-ordinary degradations like `[circular]` or `[max depth exceeded]`, which never reach a
-reporter at all.
+`errorObject()` formats the error and its params separately, so each operation can emit
+one diagnostic per kind. A value that fails both redaction and rendering emits both kinds.
 
-With no handler set, **the logger and its sinks write these to `console.error`**, and that
-is deliberate rather than lazy: everything they render runs inside a log call, so reporting
-anywhere a logger might hear it would be logged, and logging renders. The console is the
-only rung that cannot re-enter what is already running.
-
-A **standalone** call to `stringifyValue()` or `errorToString()`, invoked directly by you
-with nothing logging, has no such risk, so with no handler it reports on the standard
-global `'error'` channel instead and a `registerReportErrorListener()` records it like any
-other reported failure.
-
-> **If your own sink, formatter or transformer calls `stringifyValue()`, pass it an
-> `onFormatError`.** It runs inside a log call while looking exactly like a standalone one,
-> so left to the default it broadcasts, your listener logs it, that logging reaches your
-> sink again, and it cycles.
-
-**The cause never reaches the log line.** It comes from your own getter or `toString`,
-which were handed the value and are free to put it in the message. A cause written into
-the output would travel to every sink past `redactedKeys`. The marker is
-library-authored text, the cause goes to one handler that asked for it. `path` is always
-structural and never a value.
-
-`errorObject()` formats twice, first the error and then the params, so it can report twice per
-kind, for genuinely different failures. Each kind carries its own budget: a value that
-fails to redact and a value that fails to render are different failures, and collapsing
-them would hide one.
-
-It is handed the failure normalized to an `Error`, the kind, and the path - the
-`redactedKeys` entry as you wrote it for a redaction failure (`user.password`, not the leaf
-`password`), the renderer's structural path for a render failure. With no handler set it
-**writes to `console.error`**, so a broken redactor is loud rather than silent.
-
-Two things about it are deliberate:
-
-- **The logger never reports its own failures on the global `'error'` channel.** Everything
-  it renders and redacts runs inside a log call, so reporting there would loop:
-  `registerReportErrorListener()` logs what it hears, logging renders a message, rendering
-  redacts, and redaction throws again. Each pass is a fresh turn, so no re-entrancy guard
-  closes it. The logger therefore always supplies a handler for its own work - yours if you
-  set one, a console-writing one if you did not - and `onSinkError` and
-  `onEventHandlerError` are console-only for exactly the same reason. A _standalone_
-  `stringifyValue()` or `errorToString()`, with nothing logging, has no such risk and does
-  use that channel. See the note above.
-- **It fires at most once per redaction pass.** A failure is raised per leaf, so a redactor
-  that throws unconditionally would otherwise report once for every value inside a named
-  container. The first failure names the cause. The markers left in the output show the
-  full extent. A pass, not a log call: `errorObject()` redacts twice - once rendering the
-  error, once over the params - so it can report twice, for two different failures.
-
-> The error you are handed **may contain the value**. It is your `redactFunction`'s own
-> error, and that function was given the value - `throw new Error('cannot mask ' + value)`
-> carries it verbatim, and so does a bare `throw value`. The library never puts a value in
-> one of these and the `key` is always the entry as you configured it, so this is only ever
-> as safe as your own message. Mind that before forwarding it somewhere the log line itself
-> would not go.
-
-Don't log from inside it, for the reason above. The same option is available on
-`stringifyValue`, `redactValue`, and `errorToString`.
-
-The guarantee is about redaction _failing_: a key that this attempts to redact never keeps its original value. It is not a guarantee that every sensitive value is found. A `redactedKeys` entry that does not resolve to anything in `params` redacts nothing and is skipped, exactly as it always was. A typo that the grammar cannot parse, such as `'password.'`, protects nothing either - but that one is reported through `onFormatError`, since it is knowable from the list alone; a valid entry that merely misses is not. A dotted entry is treated as ambiguous and both readings are covered: `'user.password'` redacts the nested `params.user.password` _and_ a literal key spelled `'user.password'`, when either exists.
+The guarantee is about redaction _failing_: a key that this attempts to redact never keeps
+its original value. It is not a guarantee that every sensitive value is found. A valid
+`redactedKeys` entry that matches nothing redacts nothing and is skipped. Invalid syntax is
+reported as a redaction diagnostic, and an ambiguous dotted entry covers both its nested
+and literal readings.
 
 #### Controlling How a Value Is Masked
 
@@ -913,6 +861,11 @@ logger.addSink(fileSink);
 // Get all current sinks
 const sinks = logger.getSinks(); // Returns readonly array
 
+// Diagnostics use these when any are configured; otherwise they use regular sinks
+logger.addDiagnosticSink(diagnosticFileSink);
+const diagnosticSinks = logger.getDiagnosticSinks(); // Returns readonly array
+logger.removeDiagnosticSink(diagnosticFileSink); // Also does not close it
+
 // Remove a sink (does NOT close it - you must close it yourself)
 const removed = logger.removeSink(fileSink);
 
@@ -929,13 +882,13 @@ console.log(logger.getSinks().length); // 0
 #### Important Notes
 
 - `removeSink()` does NOT close the sink - you are responsible for closing it if needed
-- `logger.close()` closes all sinks AND removes them from the logger
+- `logger.close()` closes all regular and diagnostic sinks, closing a shared instance only
+  once, and removes them from the logger
 - After `logger.close()`, the logger is marked as closed and will not accept new log messages
-- The logger is marked closed _before_ its sinks close. A sink `onError` handler that logs
-  the `'close'` failures a sink reports while closing (`disposition: 'lost'` / `'no_entry'`)
-  through the same logger is logging into a closed one: the line is dropped without a
-  further report. Send close-time failures to `console.error` or a sink that is not being
-  closed instead
+- The logger is marked closed _before_ its sinks close. Close failures still enter the
+  diagnostic path, but every logger-owned destination is also shutting down and may no
+  longer accept a write. For guaranteed close-failure reporting, use a diagnostic event
+  listener that writes to a destination the logger does not own
 - Adding a sink after `logger.close()` does not reopen the logger. Create a new `Logger`
   instance for a fresh start
 
@@ -1120,6 +1073,18 @@ new ConsoleSink({
   minLevel: LogLevel.INFO, // Minimum log level to show (default: INFO)
 });
 ```
+
+`ConsoleSink` maps each log type to the matching console method:
+
+| Log type                            | Console method  |
+| ----------------------------------- | --------------- |
+| `error`                             | `console.error` |
+| `warn`                              | `console.warn`  |
+| `info`                              | `console.info`  |
+| `success`, `notice`, `debug`, `raw` | `console.log`   |
+
+`debug` is filtered at the default `INFO` level. `raw` bypasses level filtering, but like
+every other type it is still suppressed while the sink is muted or closed.
 
 #### Log Level Control
 
@@ -1644,6 +1609,9 @@ service.entity(entityName: string): LoggerService  // Create entity logger
 logger.addSink(sink: LogSink): void
 logger.removeSink(sink: LogSink): boolean
 logger.getSinks(): readonly LogSink[]
+logger.addDiagnosticSink(sink: LogSink): void
+logger.removeDiagnosticSink(sink: LogSink): boolean
+logger.getDiagnosticSinks(): readonly LogSink[]
 
 // Lifecycle
 logger.exit(code: number)
@@ -1682,19 +1650,13 @@ interface LogOptions {
 ```typescript
 interface LoggerOptions {
   sinks?: LogSink[]; // Output destinations
+  diagnosticSinks?: LogSink[]; // Optional destinations for logger-internal failures
   redactFunction?: (keyName, value: string) => RedactFunctionResult; // Custom redaction (default: masks with asterisks using datamask)
-  onFormatError?: (error, kind: 'redaction' | 'render', path) => void; // Redaction or rendering failed (default: console.error)
   callProcessExit?: boolean; // Actually call process.exit() (default: true, disable for tests/browser)
   beforeExitCallback?: (
     code,
     isFirst,
   ) => BeforeExitResult | Promise<BeforeExitResult>; // Hook called before exit, returns { action: 'proceed' | 'wait' }
-  onSinkError?: (
-    error: Error,
-    context: 'write' | 'close',
-    sink: LogSink,
-  ) => void; // Handle sink errors (default: console.error)
-  onEventHandlerError?: (error: Error, event: string) => void; // Handle failures of this logger's own event handlers (default: console.error)
 }
 
 interface BeforeExitResult {
@@ -1704,86 +1666,48 @@ interface BeforeExitResult {
 
 #### Sink Error Handling
 
-By default, when a sink fails to write or close, the error is logged to `console.error`. You can provide a custom error handler to intercept these errors:
+A sink whose `write()` or `close()` throws or rejects produces a logger diagnostic with
+`kind: 'sink'`, the normalized failure in `error`, the failing `sink`, and `context` set
+to `'write'` or `'close'`. It follows the same diagnostic route as logger formatting and
+event-handler failures; there is no separate logger callback API.
 
 ```typescript
-const logger = new Logger({
-  sinks: [new FileSink({ logDir: './logs', basename: 'app' })],
-  onSinkError: (error, context, sink) => {
-    // error: The error that occurred
-    // context: Either 'write' or 'close'
-    // sink: The sink that failed
+logger.on<LoggerDiagnostic>('diagnostic', (diagnostic) => {
+  if (diagnostic.kind !== 'sink') return;
 
-    if (context === 'write') {
-      console.error('Failed to write to sink:', error.message);
-      // Optionally remove the failing sink
-      logger.removeSink(sink);
-    } else {
-      console.error('Failed to close sink:', error.message);
-    }
-  },
+  metrics.increment('logger.sink_failure', {
+    context: diagnostic.context,
+  });
 });
 ```
+
+This covers failures that escape the sink's method. Queueing sinks can also fail later,
+after `write()` has returned. Their own error API remains responsible for that asynchronous
+internal work: `FileSinkOptions.onError`, `NamedPipeSinkOptions.onError`, and
+`ArraySinkOptions.onFormatError` are sink-level callbacks, not logger callbacks.
 
 ##### Where Errors Go When the Logger Cannot Log Them
 
-Some failures cannot be written to the sinks because the sinks are either the thing that failed or the thing that would fail again. Those go to a callback you provide, or to `console.error` when you provide none. They never go back into the logger:
+Failures raised while logging never go through another normal log call. The logger
+schedules a `'diagnostic'` event and offers the diagnostic to every selected sink using
+`writeDiagnostic()` where available. A diagnostic write that fails goes directly to
+guarded `console.error` and is not reported again.
 
-| Failure                                                                                         | Goes to                                                              |
-| ----------------------------------------------------------------------------------------------- | -------------------------------------------------------------------- |
-| A sink throws on `write` or `close`                                                             | `onSinkError`, or `console.error` if you did not provide one         |
-| Your `onSinkError` itself throws                                                                | `console.error`                                                      |
-| A `'logger'` event handler of this logger throws or rejects                                     | `onEventHandlerError`, or `console.error` if you did not provide one |
-| Your `onEventHandlerError` itself throws                                                        | `console.error`                                                      |
-| Your `redactFunction` throws, or a value cannot be read to redact it                            | `onFormatError` with `kind: 'redaction'`, or `console.error`         |
-| A value refuses to be read or turned into text                                                  | `onFormatError` with `kind: 'render'`, or `console.error`            |
-| Your `onFormatError` itself throws                                                              | `console.error`                                                      |
-| A new error is reported while `registerReportErrorListener()` is still logging the previous one | `console.error`                                                      |
+| Failure                                                       | Diagnostic fields                 |
+| ------------------------------------------------------------- | --------------------------------- |
+| A sink throws or rejects from `write` or `close`              | `kind: 'sink'`, `context`, `sink` |
+| A handler on this logger's `'logger'` event throws or rejects | `kind: 'event-handler'`, `event`  |
+| Redaction fails                                               | `kind: 'redaction'`, `path`       |
+| Rendering fails                                               | `kind: 'render'`, `path`          |
 
-The third and fifth rows are the ones that would otherwise loop. Logging emits a `'logger'` event, so reporting that handler's failure through the logger would emit again. Logging also renders a message, which redacts, so reporting a redaction failure through the logger would redact again and throw again. Neither loop is a stack overflow that a re-entrancy guard could catch - each pass is a fresh turn - which is why both get a callback that cannot re-enter the logger. It gets its own callback rather than `onSinkError` because no sink was involved, and there would be nothing honest to pass as that callback's `sink` argument:
+Everything else, including errors reported by other Lifecycleion modules and by your own
+code using [the reporting pattern](./safe-handle-callback.md#the-reporting-pattern), reaches
+your sinks normally through `registerReportErrorListener()`.
 
-```typescript
-const logger = new Logger({
-  sinks: [new FileSink({ logDir: './logs', basename: 'app' })],
-  onEventHandlerError: (error, event) => {
-    // error: the wrapped failure, with the handler's original error on `error.cause`
-    // event: the event whose handler failed, e.g. 'logger'
-    metrics.increment('logger.handler_failure');
-  },
-});
-```
-
-Everything else, including errors reported by other Lifecycleion modules and by your own code using [the reporting pattern](./safe-handle-callback.md#the-reporting-pattern), reaches your sinks normally through `registerReportErrorListener()`.
-
-> Do not call this logger's own log methods from inside `onSinkError`, `onEventHandlerError`, or `onFormatError`. If the sink is what failed, logging from the handler asks the same sink to write again. Logging from `onEventHandlerError` re-emits the very event whose handler just failed. Logging from `onFormatError` runs the same redaction or rendering that just threw.
-
-> **Do not read `.message` directly inside these callbacks.** Both are handed a real `Error`, but the value a sink or handler threw is not yours, and `message` is an ordinary property that a subclass or a `Proxy` can turn into an accessor that throws. Reading it raises a second failure from inside the callback that was handling the first.
-
-Use [`describeError`](./to-error.md#describeerror) instead, which normalizes and reads in one guarded step and never throws:
-
-```typescript
-import { describeError } from 'lifecycleion/to-error';
-
-onSinkError: (error, context, sink) => {
-  metrics.increment('logger.sink_failure', { reason: describeError(error) });
-};
-```
-
-The callbacks are handed differently shaped errors, which matters if you log or group on them:
-
-| Callback              | Receives                                                                                                                                                                                                                                                                                       |
-| --------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `onSinkError`         | The sink's own error, unwrapped. `cause` is set only when the sink threw a non-`Error` value                                                                                                                                                                                                   |
-| `onEventHandlerError` | A **wrapped** error, `Error in a logger event handler for <event>: <message>`, with the handler's original failure on `cause`                                                                                                                                                                  |
-| `onFormatError`       | The `redactFunction`'s, getter's or `toString`'s own error, normalized. `cause` is set only when it threw a non-`Error` value. The second argument is the kind, the third the path - the `redactedKeys` entry as you wrote it for `'redaction'`, the renderer's structural path for `'render'` |
-
-This allows you to:
-
-- Log errors to a monitoring service
-- Remove failing sinks from the logger
-- Implement custom retry logic
-- Switch to backup sinks
-- Track failure statistics
+Do not call ordinary logger methods from a `'diagnostic'` listener or
+`writeDiagnostic()`. A diagnostic sink should write directly to its destination. If that
+write cannot be completed, throw or return a rejected promise; the logger will terminate
+it at guarded `console.error`.
 
 #### Exit Behavior
 
@@ -1793,7 +1717,7 @@ When a log includes an `exitCode`, the logger will:
    - Callback must return `{ action: 'proceed' }` to continue with exit
    - Or return `{ action: 'wait' }` to prevent exit (e.g., shutdown already in progress)
    - **IMPORTANT:** If the callback throws an error or rejects, the exit process proceeds automatically to prevent the application from hanging
-   - Errors from the callback are reported on the global `'error'` event channel when the required browser-style event primitives are available
+   - Errors from the callback use the standard host path: global `'error'`; `globalThis.reportError()` when event dispatch is unavailable; then guarded `console.error`
    - Design your callback to handle errors internally if you need guaranteed cleanup
 2. Set `logger.didExit = true` and `logger.exitCode = <code>`
 3. Close all sinks
@@ -1816,7 +1740,11 @@ This is useful for:
 
 ## Capturing Reported Errors
 
-Lifecycleion catches errors thrown by callbacks you hand it, including event handlers, `onChange`, and lifecycle hooks, so one bad callback cannot break an operation. Those errors are reported on the standard global `'error'` event channel rather than rethrown, which means that without a listener they are only written to the console.
+Lifecycleion catches errors thrown by callbacks you hand it, including event handlers,
+`onChange`, and lifecycle hooks, so one bad callback cannot break an operation. Those
+errors use the standard host path rather than being rethrown: a cancelable global
+`'error'` event; `globalThis.reportError()` when event dispatch is unavailable; then
+guarded `console.error`.
 
 `registerReportErrorListener()` attaches that listener and routes what it hears into this logger's sinks:
 
@@ -1882,7 +1810,11 @@ This does not affect an ordinary React, Vue, Angular, or Svelte application: tho
 
 **Closing:** `close()` unregisters the listener. A closed logger's log methods are no-ops, so a listener left registered would claim reports it cannot record and, by cancelling them, stop them from reaching the console either. A logger cannot be reopened, so registering after `close()` returns `'closed'` and attaches nothing rather than leaving an inert listener on `globalThis`.
 
-**Feedback loops:** logging emits a `'logger'` event, and a failing event handler is normally reported on this same channel, so a `'logger'` handler that fails would feed itself forever. `Logger` therefore reports failures of its own `'logger'` handlers to the `onEventHandlerError` option, or to `console.error` when there is none, rather than to the `'error'` channel. Handlers on other Lifecycleion emitters are unaffected and still reach your sinks. As a backstop, the listener also ignores any report that arrives while it is still logging the previous one, such as a sink that dispatches an error of its own mid-write, so that error goes to the console instead of back through the sinks.
+**Feedback loops:** logging emits a `'logger'` event, so failures of this logger's own
+handlers use its separate asynchronous diagnostic channel rather than the global `'error'`
+channel. Handlers on other Lifecycleion emitters are unaffected and still reach your
+sinks. As a backstop, the global listener also ignores a report that arrives while it is
+still logging the previous one.
 
 Teardown and inspection:
 
@@ -1896,76 +1828,108 @@ logger.isReportErrorAvailable(); // boolean — are the global event primitives 
 
 ## Where Failures Go
 
-The logger has three callbacks for things that go wrong while logging. All three behave
-identically: **your handler if you set one, `console.error` if you did not, and
-`console.error` again if yours throws.** Nothing ever escapes into your `logger.info()`
-call, and nothing is ever silently dropped.
+The logger has a separate asynchronous path for things that go wrong while logging:
 
-| Callback              | Fires when                                                        |
-| --------------------- | ----------------------------------------------------------------- |
-| `onSinkError`         | a sink's `write()` or `close()` throws or rejects                 |
-| `onEventHandlerError` | one of your `logger.on('logger', …)` handlers throws or rejects   |
-| `onFormatError`       | a value could not be formatted - see `kind` for which stage threw |
+1. Emit the logger's `'diagnostic'` event.
+2. Offer the diagnostic to every configured `diagnosticSinks` entry; when there are none, offer
+   it to every regular sink instead.
+3. If there is nowhere to send it, or a diagnostic delivery itself fails, use guarded
+   `console.error`.
 
-`onFormatError`'s `kind` is `'redaction'` when your `redactFunction` threw or
-`redactedKeys` was unusable, and `'render'` when a value refused to be read or turned into
-text. They are one callback rather than two because both come from the same walk over the
-same value and address it with the same structural path.
+The second step calls `writeDiagnostic()` when a sink supplies it. Otherwise it hands the
+sink an already-rendered `error` entry tagged `'lifecycleion-diagnostic'`. Neither path
+passes through logger formatting or emits another `'logger'` event. Delivery is scheduled
+asynchronously, so it also cannot grow the stack of the log call that failed.
 
-`FileSink` and `NamedPipeSink` have their own `onError` with the same three rungs, and
+`LoggerDiagnostic.error` is the normalized underlying failure and `message` is its
+guardedly rendered description. Either can contain data that caller-owned code put in the
+thrown error. A sink that persists diagnostics should apply the same access controls it
+uses for exception telemetry; the logger cannot safely run its normal redaction pipeline
+here because that pipeline may be what failed.
+
+The diagnostic `kind` identifies the source: `'sink'`, `'event-handler'`, `'redaction'`,
+or `'render'`. Formatting diagnostics include their structural `path`; sink diagnostics
+include `context` and the failing `sink`; event-handler diagnostics include `event`.
+
+`FileSink` and `NamedPipeSink` have their own `onError`, and
 `ArraySink` has `onFormatError` (which also reports a throwing `transformer`, under
 `kind: 'transform'`), while `ConsoleSink` has none, since it does not queue or
 transform anything. See [Built-In Sinks](#built-in-sinks).
 
 ### Why the Fall-Back Is the Console
 
-Because it is the only rung that cannot re-enter what just failed. Everything the logger
-renders, redacts and writes happens _inside_ a log call, so reporting a failure anywhere a
-logger might hear it would be logged, and logging renders, redacts and writes to sinks,
-which is what failed a moment ago. Each pass is a fresh turn, so no re-entrancy guard
-closes that loop.
+It is the terminal rung: if a diagnostic listener or diagnostic sink fails, that secondary
+failure is written there directly and is never dispatched again. The console call is also
+guarded, so a broken console cannot make `logger.info()` throw or create an unhandled
+rejection.
 
-### Never Seeing a Console Line
+### Routing Diagnostics Away From the Console
 
-Set all three. Once every channel has a handler, the library's console rung is unreachable
-from the logger:
+Listen directly, or configure a sink whose diagnostic write does not fail:
 
 ```ts
-const report = (what: string) => (error: Error, subject: string) =>
-  metrics.increment('lifecycleion_failure', {
-    what,
-    subject,
-    message: error.message,
-  });
-
 const logger = new Logger({
-  sinks: [/* … */],
-  onSinkError: (error, context, sink) => report('sink')(error, context),
-  onEventHandlerError: report('event-handler'),
-  onFormatError: (error, kind, path) => report(kind)(error, path),
+  sinks: [applicationSink],
+  diagnosticSinks: [diagnosticFile],
+});
+
+logger.on('diagnostic', (diagnostic) => {
+  metrics.increment('lifecycleion_failure', {
+    kind: diagnostic.kind,
+    context: diagnostic.context,
+  });
 });
 ```
 
-Two caveats worth knowing:
+Two caveats remain:
 
-- **A handler that throws still reaches the console**, reporting both the original failure
-  and your handler's own throw. That is deliberate: a handler that just failed is not a
-  reason to reach for a louder channel, and both facts matter. One says the channel you
-  chose is broken, the other is what you needed to know.
-- **`ConsoleSink` is unaffected.** It writes to the console because that is its job. These
-  callbacks are about failures, not output.
+- **A diagnostic listener or sink that throws or rejects reaches the console.** It does
+  not get another chance through the same channel.
+- **`ConsoleSink` is unaffected.** It writes to the console because that is its job. The
+  diagnostic channel is about failures, not ordinary output.
 
 ### Standalone Renderers Are Different
 
 `stringifyValue()`, `errorToString()`, `serializeError()` and `CurlyBrackets()` can be
-called with no logger involved at all. With no handler, those report on the standard global `'error'` channel
-instead, so `registerReportErrorListener()` picks them up and logs them properly, falling
-back to the console only when nothing claims the event. There is no loop to worry about
-when nothing is logging.
+called with no logger involved at all. With no handler, they first dispatch a cancelable
+global `'error'` event, so `registerReportErrorListener()` can record it. If event dispatch
+is unavailable they use `globalThis.reportError()` when present; an unclaimed dispatch,
+unavailable reporting function, or reporting failure ends at guarded `console.error`.
+There is no loop to worry about when nothing is logging.
 
-> **If your own sink, formatter or transformer calls one of them, pass it a handler.** It
-> runs inside a log call while looking exactly like a standalone one, so left to the default
-> it broadcasts, your listener logs it, and that logging reaches your sink again.
+> **If your own sink, formatter, transformer, or diagnostic writer calls one of them, pass
+> it a handler.** The handler must terminate locally. In particular, do not send a failure
+> raised inside `writeDiagnostic()` back through the same logger's diagnostic channel;
+> throwing from the handler itself is guarded by the renderer. Save the failure and throw
+> or reject from `writeDiagnostic()` to use the guarded console terminal instead.
+
+The safest diagnostic writer needs no renderer at all:
+
+```ts
+const diagnostics: LogSink = {
+  write: () => {},
+  writeDiagnostic: (diagnostic) => diagnosticTransport.send(diagnostic.message),
+};
+```
+
+If it needs a separately rendered structured payload, keep that renderer's report local:
+
+```ts
+const diagnostics: LogSink = {
+  write: () => {},
+  async writeDiagnostic(diagnostic) {
+    let renderFailure: Error | undefined;
+    const payload = stringifyValue(diagnostic, {
+      onFormatError: (error) => {
+        renderFailure ??= error;
+      },
+    });
+
+    if (renderFailure) throw renderFailure;
+    await diagnosticTransport.send(payload);
+  },
+};
+```
 
 ## EventEmitter Integration
 
