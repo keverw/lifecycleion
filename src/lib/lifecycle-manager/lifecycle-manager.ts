@@ -90,7 +90,8 @@ import {
   safeHandleCallback,
 } from '../safe-handle-callback';
 import { describeError, isErrorValue, toError } from '../to-error';
-import { finiteClampMin } from '../clamp';
+import { finiteClamp, finiteClampMin } from '../clamp';
+import { MAX_TIMER_MS } from '../internal/timer-limits';
 
 /**
  * LifecycleManager - Comprehensive lifecycle orchestration system
@@ -104,6 +105,36 @@ import { finiteClampMin } from '../clamp';
  * - Health checks and monitoring
  * - Event-driven architecture
  */
+/**
+ * A delay a timer can actually keep, from whatever a caller or component supplied.
+ *
+ * `setTimeout` holds its delay in a signed 32-bit integer and reads anything past
+ * `MAX_TIMER_MS` as `1` - and reads `Infinity` and `NaN` as `0`. Every failure is the same
+ * inversion: the longer the wait someone writes, the sooner it happens. Here that means a
+ * `startupTimeoutMS: Infinity` - the honest spelling of "let it take as long as it needs" -
+ * aborted a perfectly healthy startup on the next tick.
+ *
+ * Applied at the timer rather than only where the options are read, because these delays
+ * arrive from four places: the constructor's own fields, a per-call `timeoutMS` override, a
+ * shutdown policy, and `component.signalTimeoutMS`, which the component supplies. Bounding
+ * every one of them at its source is a list that has to stay complete; bounding them here
+ * is the same list, at the one point they all pass through.
+ *
+ * A non-finite delay becomes the longest wait a timer can keep rather than the shortest.
+ * These are safety timeouts, and the two ways to be wrong are not symmetric: waiting too
+ * long leaves a hung component hanging, which is the failure the operator is already
+ * watching for, while firing at once tears down a healthy one that was doing nothing
+ * wrong. The configured fields never reach this as `NaN` anyway - the constructor resolves
+ * those to their documented defaults.
+ */
+function toTimerDelayMS(requested: number): number {
+  if (!Number.isFinite(requested)) {
+    return MAX_TIMER_MS;
+  }
+
+  return Math.min(Math.max(requested, 0), MAX_TIMER_MS);
+}
+
 export class LifecycleManager
   extends EventEmitterProtected
   implements LifecycleCommon
@@ -215,9 +246,28 @@ export class LifecycleManager
     this.name = options.name ?? 'lifecycle-manager';
     this.rootLogger = options.logger;
     this.logger = this.rootLogger.service(this.name);
-    this.shutdownWarningTimeoutMS = options.shutdownWarningTimeoutMS ?? 500;
-    this.messageTimeoutMS = options.messageTimeoutMS ?? 5000;
-    this.startupTimeoutMS = options.startupTimeoutMS ?? 60000;
+    // Floored at `-1`, not at `0`: a negative value is the documented way to skip the
+    // warning phase entirely, so clamping it up to zero would silently turn the opt-out
+    // into a zero-length warning. Every negative means the same thing to the check that
+    // reads it, so they collapse to one.
+    this.shutdownWarningTimeoutMS = finiteClamp(
+      options.shutdownWarningTimeoutMS ?? 500,
+      -1,
+      MAX_TIMER_MS,
+      500,
+    );
+    this.messageTimeoutMS = finiteClamp(
+      options.messageTimeoutMS ?? 5000,
+      0,
+      MAX_TIMER_MS,
+      5000,
+    );
+    this.startupTimeoutMS = finiteClamp(
+      options.startupTimeoutMS ?? 60000,
+      0,
+      MAX_TIMER_MS,
+      60000,
+    );
     this.shutdownOptions = {
       timeoutMS: 30000,
       retryStalled: true,
@@ -1031,7 +1081,7 @@ export class LifecycleManager
             params: { timeoutMS: effectiveTimeout },
           },
         );
-      }, effectiveTimeout);
+      }, toTimerDelayMS(effectiveTimeout));
     }
 
     try {
@@ -1989,7 +2039,7 @@ export class LifecycleManager
       const timeoutPromise = new Promise<ComponentHealthResult>((resolve) => {
         timeoutHandle = setTimeout(() => {
           resolve(timeoutResult);
-        }, timeoutMS);
+        }, toTimerDelayMS(timeoutMS));
       });
 
       // Race health check against timeout
@@ -2290,7 +2340,7 @@ export class LifecycleManager
               new Promise<typeof timeoutResult>((resolve) => {
                 timeoutHandle = setTimeout(() => {
                   resolve(timeoutResult);
-                }, timeoutMS);
+                }, toTimerDelayMS(timeoutMS));
               }),
             ])
           : await handlerPromise;
@@ -3275,7 +3325,7 @@ export class LifecycleManager
                 );
 
                 resolve('timeout');
-              }, effectiveTimeout);
+              }, toTimerDelayMS(effectiveTimeout));
             })
           : null;
 
@@ -3747,7 +3797,7 @@ export class LifecycleManager
                 timeoutMS,
               }),
             );
-          }, timeoutMS);
+          }, toTimerDelayMS(timeoutMS));
         });
 
         await Promise.race([startPromise, timeoutPromise]);
@@ -4196,7 +4246,10 @@ export class LifecycleManager
     // Race overall completion vs global timeout.
     let timeoutHandle: NodeJS.Timeout | undefined;
     const timeoutPromise = new Promise<'timeout'>((resolve) => {
-      timeoutHandle = setTimeout(() => resolve('timeout'), timeoutMS);
+      timeoutHandle = setTimeout(
+        () => resolve('timeout'),
+        toTimerDelayMS(timeoutMS),
+      );
     });
 
     try {
@@ -4322,7 +4375,7 @@ export class LifecycleManager
                 timeoutMS,
               }),
             );
-          }, timeoutMS);
+          }, toTimerDelayMS(timeoutMS));
         });
 
         await Promise.race([stopPromise, timeoutPromise]);
@@ -4564,7 +4617,7 @@ export class LifecycleManager
             reject(
               new Error(LIFECYCLE_MANAGER_MESSAGE_FORCE_SHUTDOWN_TIMED_OUT),
             );
-          }, timeoutMS);
+          }, toTimerDelayMS(timeoutMS));
         });
 
         await Promise.race([
@@ -5950,7 +6003,7 @@ export class LifecycleManager
     this.repeatedShutdownRequestState.remainsArmedUntil = armedUntil;
     this.repeatedShutdownExpiryTimer = setTimeout(() => {
       this.expireRepeatedShutdownRequestState();
-    }, policy.armedAfterFailureMS);
+    }, toTimerDelayMS(policy.armedAfterFailureMS));
     // Expiry should not keep the process alive when nothing else is pending.
     this.repeatedShutdownExpiryTimer.unref();
   }
@@ -6158,7 +6211,7 @@ export class LifecycleManager
                 new Promise<typeof timeoutResult>((resolve) => {
                   timeoutHandle = setTimeout(() => {
                     resolve(timeoutResult);
-                  }, timeoutMS);
+                  }, toTimerDelayMS(timeoutMS));
                 }),
               ])
             : await handlerPromise;

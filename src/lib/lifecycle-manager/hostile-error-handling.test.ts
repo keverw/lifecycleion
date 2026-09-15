@@ -646,3 +646,92 @@ describe('LifecycleManager - hostile thrown values', () => {
     );
   });
 });
+
+describe('LifecycleManager timeouts that a timer cannot keep', () => {
+  // `setTimeout` reads `Infinity` and `NaN` as `0`, and anything past 2^31-1 ms as `1`, so
+  // every one of these inverts: the longer the wait someone configures, the sooner it
+  // happens. For a *timeout* that means the safety net fires on the next tick and tears
+  // down a component that was doing nothing wrong.
+  test('an Infinity startup timeout does not abort a healthy startup at once', async () => {
+    const logger = new Logger({
+      sinks: [new ArraySink()],
+      callProcessExit: false,
+    });
+    const lifecycle = new LifecycleManager({ logger });
+
+    class Slow extends BaseComponent {
+      constructor() {
+        super(logger, { name: 'slow', startupTimeoutMS: Infinity });
+      }
+      public async start(): Promise<void> {
+        await new Promise((resolve) => setTimeout(resolve, 60));
+      }
+      public stop(): void {}
+    }
+
+    await lifecycle.registerComponent(new Slow());
+
+    const result = await lifecycle.startComponent('slow');
+
+    // Before the clamp this was `component_startup_timeout`, fired immediately: the
+    // component asking to be given all the time it needed was given none.
+    expect(result.code).not.toBe('component_startup_timeout');
+
+    await lifecycle.stopAllComponents();
+  });
+
+  test('a startup timeout past the 32-bit timer ceiling does not fire on the next tick', async () => {
+    const logger = new Logger({
+      sinks: [new ArraySink()],
+      callProcessExit: false,
+    });
+    const lifecycle = new LifecycleManager({ logger });
+
+    class Slow extends BaseComponent {
+      constructor() {
+        // Reads as "about 34 days"; `setTimeout` reads it as 1ms.
+        super(logger, { name: 'slow', startupTimeoutMS: 3e9 });
+      }
+      public async start(): Promise<void> {
+        await new Promise((resolve) => setTimeout(resolve, 60));
+      }
+      public stop(): void {}
+    }
+
+    await lifecycle.registerComponent(new Slow());
+
+    const result = await lifecycle.startComponent('slow');
+
+    expect(result.code).not.toBe('component_startup_timeout');
+
+    await lifecycle.stopAllComponents();
+  });
+
+  test('an ordinary startup timeout still fires', async () => {
+    // The clamp must not turn the safety net off: a component that genuinely overruns is
+    // still stopped.
+    const logger = new Logger({
+      sinks: [new ArraySink()],
+      callProcessExit: false,
+    });
+    const lifecycle = new LifecycleManager({ logger });
+
+    class TooSlow extends BaseComponent {
+      constructor() {
+        super(logger, { name: 'too-slow', startupTimeoutMS: 20 });
+      }
+      public async start(): Promise<void> {
+        await new Promise((resolve) => setTimeout(resolve, 200));
+      }
+      public stop(): void {}
+    }
+
+    await lifecycle.registerComponent(new TooSlow());
+
+    const result = await lifecycle.startComponent('too-slow');
+
+    expect(result.code).toBe('component_startup_timeout');
+
+    await lifecycle.stopAllComponents();
+  });
+});
