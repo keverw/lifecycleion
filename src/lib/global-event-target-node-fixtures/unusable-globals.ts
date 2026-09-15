@@ -5,9 +5,14 @@
  * not be clobbered even though it is unusable — the "never overwrites" guarantee is about
  * what is present, not about what happens to be callable.
  */
+import { captureConsoleError } from './capture-console-error';
 
 // Only dynamic imports below (the globals must be set up first), so make this a module.
 export {};
+
+// `safe-handle-callback` writes an unclaimed report to `console.error`; the harness
+// treats any stderr output as a crash, so it is collected and reported instead.
+const consoleErrors = captureConsoleError();
 
 const globalRecord = globalThis as unknown as Record<string, unknown>;
 
@@ -39,6 +44,7 @@ const waitResult = await safeHandleCallbackAndWait(
 
 process.stdout.write(
   JSON.stringify({
+    consoleErrors,
     installResult,
     isPolyfilled: isGlobalEventTargetPolyfilled(),
     // The value the app put there must survive untouched.

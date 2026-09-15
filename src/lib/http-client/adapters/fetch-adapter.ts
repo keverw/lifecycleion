@@ -1,4 +1,9 @@
-import { extractFetchHeaders, resolveDetectedRedirectURL } from '../utils';
+import {
+  extractFetchHeaders,
+  resolveDetectedRedirectURL,
+  stripCrossOriginURLCredentials,
+} from '../utils';
+import { guardProgressCallback } from '../internal/progress';
 import { isTLSCertificateError } from '../internal/tls-error-utils';
 import { REDIRECT_STATUS_CODES, RESPONSE_STREAM_ABORT_FLAG } from '../consts';
 import type {
@@ -7,6 +12,21 @@ import type {
   AdapterResponse,
   AdapterType,
 } from '../types';
+// The shared coercion, not a fourth copy of it. Each adapter carried a near-identical
+// body, on the grounds that the HTTP client should not import across module boundaries -
+// which it already does for `sleep`, `deep-clone` and `retry-utils`. Aliased so the call
+// sites read unchanged.
+//
+// The *message* is not unchanged, and that is deliberate. The local copies produced
+// `new Error(String(value))`; `toError` produces
+// `new Error('Non-error value thrown: <description>', { cause: value })`. So a non-`Error`
+// rejection - `throw 'socket hang up'` - now reaches `AdapterResponse.errorCause` with the
+// prefix on `message` and the original value on `cause`, where before it carried only the
+// coerced text. See the 1.0.0 changelog entry: "HTTP adapters preserve non-`Error`
+// rejection values on `cause`."
+import { isErrorValue, toError as normalizeError } from '../../to-error';
+// Guard error members for the same reason adapter marker reads are guarded.
+import { readMember as readObjectMember } from '../../internal/read-member';
 
 export class FetchAdapter implements HTTPAdapter {
   public getType(): AdapterType {
@@ -14,15 +34,33 @@ export class FetchAdapter implements HTTPAdapter {
   }
 
   public async send(request: AdapterRequest): Promise<AdapterResponse> {
+    // Guarded once, at the boundary, so every call site below is covered - including the
+    // ones handed to `streamResponseBody`, `writeRequestBodyChunked` and
+    // `serializeMultipartFormData`. Progress reporting is advisory and must not be able to
+    // change whether a request succeeded; a throwing callback used to propagate out and be
+    // classified as a transport failure. See `guardProgressCallback`.
+    const guardedUploadProgress = guardProgressCallback(
+      request.onUploadProgress,
+      'onUploadProgress',
+    );
+    const guardedDownloadProgress = guardProgressCallback(
+      request.onDownloadProgress,
+      'onDownloadProgress',
+    );
+
     const { requestURL, method, headers, body, signal } = request;
+    const dispatchedURL = stripCrossOriginURLCredentials(
+      requestURL,
+      request.initialURL,
+    );
 
     // Fire 0% upload progress
-    request.onUploadProgress?.({ loaded: 0, total: 0, progress: 0 });
+    guardedUploadProgress?.({ loaded: 0, total: 0, progress: 0 });
 
     let response: Response;
 
     try {
-      response = await fetch(requestURL, {
+      response = await fetch(dispatchedURL, {
         method,
         headers: materializeFetchHeaders(headers),
         body: body as BodyInit | null,
@@ -73,8 +111,8 @@ export class FetchAdapter implements HTTPAdapter {
       // Even though the client will classify this as redirect_disabled, the
       // browser completed the fetch operation. Emit terminal progress so the
       // browser adapters match the server/mock adapters' completion semantics.
-      request.onUploadProgress?.({ loaded: 1, total: 1, progress: 1 });
-      request.onDownloadProgress?.({ loaded: 0, total: 0, progress: 1 });
+      guardedUploadProgress?.({ loaded: 1, total: 1, progress: 1 });
+      guardedDownloadProgress?.({ loaded: 0, total: 0, progress: 1 });
 
       return {
         status: 0,
@@ -85,7 +123,7 @@ export class FetchAdapter implements HTTPAdapter {
     }
 
     // Fire 100% upload + download progress (fetch has no real per-chunk progress)
-    request.onUploadProgress?.({ loaded: 1, total: 1, progress: 1 });
+    guardedUploadProgress?.({ loaded: 1, total: 1, progress: 1 });
 
     const responseHeadersForBody = extractFetchHeaders(response.headers);
 
@@ -116,7 +154,7 @@ export class FetchAdapter implements HTTPAdapter {
       // headers arrived, so a 3xx here still knows where it was pointing, and a
       // truncated body must not lose the target an intact one would report.
       const detectedRedirectURL = resolveDetectedRedirectURL(
-        requestURL,
+        dispatchedURL,
         response.status,
         responseHeadersForBody,
       );
@@ -138,7 +176,7 @@ export class FetchAdapter implements HTTPAdapter {
       };
     }
 
-    request.onDownloadProgress?.({
+    guardedDownloadProgress?.({
       loaded: rawBody?.length ?? 0,
       total: rawBody?.length ?? 0,
       progress: 1,
@@ -146,7 +184,7 @@ export class FetchAdapter implements HTTPAdapter {
 
     const responseHeaders = responseHeadersForBody;
     const detectedRedirectURL = resolveDetectedRedirectURL(
-      requestURL,
+      dispatchedURL,
       response.status,
       responseHeaders,
     );
@@ -186,36 +224,16 @@ function isAbortError(error: unknown): boolean {
   );
 }
 
-/** Return an Error value without letting a Proxy prototype trap escape. */
+/**
+ * Return an Error value without letting a Proxy prototype trap escape.
+ *
+ * The shared check, not a local `instanceof`, so this answers the same question
+ * `normalizeError` above already answers: an error built in another realm - a `vm`
+ * context, an iframe - fails `instanceof` while being an error in every respect. A
+ * cross-realm `AbortError` was therefore invisible to `isAbortError`.
+ */
 function asError(value: unknown): Error | undefined {
-  try {
-    return value instanceof Error ? value : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-function normalizeError(value: unknown): Error {
-  const existing = asError(value);
-
-  if (existing !== undefined) {
-    return existing;
-  }
-
-  try {
-    return new Error(String(value));
-  } catch {
-    return new Error('Unknown error');
-  }
-}
-
-/** Guard error members for the same reason adapter marker reads are guarded. */
-function readObjectMember(source: object, key: string): unknown {
-  try {
-    return (source as Record<string, unknown>)[key];
-  } catch {
-    return undefined;
-  }
+  return isErrorValue(value) ? value : undefined;
 }
 
 function materializeFetchHeaders(

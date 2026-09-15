@@ -93,6 +93,66 @@ describe('FetchAdapter', () => {
     expect(capturedInit?.redirect).toBe('manual');
   });
 
+  test('withholds URL userinfo on a cross-origin hop', async () => {
+    let capturedURL = '';
+
+    (globalThis as any).fetch = (url: string) => {
+      capturedURL = url;
+      return Promise.resolve(
+        new Response(null, {
+          status: 302,
+          headers: { location: '/next' },
+        }),
+      );
+    };
+
+    const response = await new FetchAdapter().send({
+      requestURL: 'https://user:hunter2@evil.test/collect',
+      initialURL: 'https://api.example.test/start',
+      method: 'GET',
+      headers: {},
+    });
+
+    expect(capturedURL).toBe('https://evil.test/collect');
+    expect(response.detectedRedirectURL).toBe('https://evil.test/next');
+  });
+
+  test('keeps URL userinfo when the initial and request origins match', async () => {
+    let capturedURL = '';
+
+    (globalThis as any).fetch = (url: string) => {
+      capturedURL = url;
+      return Promise.resolve(new Response(null, { status: 204 }));
+    };
+
+    await new FetchAdapter().send({
+      requestURL: 'https://user:hunter2@api.example.test/next',
+      initialURL: 'https://api.example.test/start',
+      method: 'GET',
+      headers: {},
+    });
+
+    expect(capturedURL).toBe('https://user:hunter2@api.example.test/next');
+  });
+
+  test('withholds userinfo from a protocol-relative cross-origin URL', async () => {
+    let capturedURL = '';
+
+    (globalThis as any).fetch = (url: string) => {
+      capturedURL = url;
+      return Promise.resolve(new Response(null, { status: 204 }));
+    };
+
+    await new FetchAdapter().send({
+      requestURL: '//user:hunter2@evil.test/collect',
+      initialURL: 'https://api.example.test/start',
+      method: 'GET',
+      headers: {},
+    });
+
+    expect(capturedURL).toBe('//evil.test/collect');
+  });
+
   test('materializes repeated request headers with Headers.append', async () => {
     let capturedInit: RequestInit | undefined;
 
@@ -536,6 +596,41 @@ describe('FetchAdapter', () => {
       expect(body.data.name).toBe('Alice');
     });
 
+    test('does not report `requestBodySettled` on a bodied request', async () => {
+      // The documented contract: `fetch()` exposes neither upload progress nor the moment
+      // the body finished going out, so the adapter cannot say when an upload settled and
+      // leaves the field absent. The client therefore does not wait before a `307`/`308`
+      // hop or a retry on this adapter - see the FetchAdapter docs. Pinned so an
+      // adapter change that starts reporting it is a deliberate one, with the wait
+      // semantics that come with it.
+      const response = await adapter.send({
+        requestURL: `${server.url}/api/users`,
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ name: 'Alice' }),
+      });
+
+      expect(response.status).toBe(201);
+      expect('requestBodySettled' in response).toBe(false);
+    });
+
+    test('reports 100% upload progress once the response headers arrive', async () => {
+      // Also the documented contract, and the reason the previous test matters: the
+      // terminal upload event is fired when `fetch()` resolves - which is when the
+      // response headers arrive - not when the body was confirmed on the wire.
+      const uploads: number[] = [];
+
+      await adapter.send({
+        requestURL: `${server.url}/api/users`,
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ name: 'Alice' }),
+        onUploadProgress: (event) => uploads.push(event.progress),
+      });
+
+      expect(uploads).toEqual([0, 1]);
+    });
+
     test('returns headers as lowercase keys', async () => {
       const response = await adapter.send({
         requestURL: `${server.url}/api/test`,
@@ -745,7 +840,11 @@ describe('FetchAdapter body-stream failures', () => {
 
     expect(response.isStreamError).toBe(true);
     expect(response.errorCause).toBeInstanceOf(Error);
-    expect(response.errorCause?.message).toBe('socket hang up');
+    // Same shape `toError` produces, and the raw value stays reachable on `cause`.
+    expect(response.errorCause?.message).toBe(
+      'Non-error value thrown: socket hang up',
+    );
+    expect(response.errorCause?.cause).toBe('socket hang up');
   });
 
   test('re-throws a caller abort rather than reporting a stream error', () => {

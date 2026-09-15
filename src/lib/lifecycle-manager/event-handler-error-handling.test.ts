@@ -34,11 +34,13 @@ describe('LifecycleManager - Event Handler Error Handling', () => {
 
     // Listen for ErrorEvent dispatches
     const errorListener = (event: Event) => {
+      event.preventDefault();
+
       if (event instanceof ErrorEvent) {
         errors.push(event);
       }
     };
-    globalThis.addEventListener('reportError', errorListener);
+    globalThis.addEventListener('error', errorListener);
 
     // Register error-throwing event handler
     lifecycle.on('component:registered', () => {
@@ -52,13 +54,15 @@ describe('LifecycleManager - Event Handler Error Handling', () => {
 
     // Check that error was dispatched as ErrorEvent
     expect(errors.length).toBe(1);
-    expect(errors[0].error.message).toContain('Event handler error');
+    expect((errors[0].error.cause as Error).message).toBe(
+      'Event handler error',
+    );
     expect(errors[0].error.message).toContain(
       'event handler for component:registered',
     );
 
     // Cleanup
-    globalThis.removeEventListener('reportError', errorListener);
+    globalThis.removeEventListener('error', errorListener);
   });
 
   test('should catch errors from component:started event handler and dispatch as ErrorEvent', async () => {
@@ -67,11 +71,13 @@ describe('LifecycleManager - Event Handler Error Handling', () => {
 
     const errors: ErrorEvent[] = [];
     const errorListener = (event: Event) => {
+      event.preventDefault();
+
       if (event instanceof ErrorEvent) {
         errors.push(event);
       }
     };
-    globalThis.addEventListener('reportError', errorListener);
+    globalThis.addEventListener('error', errorListener);
 
     // Register error-throwing event handler
     lifecycle.on('component:started', () => {
@@ -85,9 +91,11 @@ describe('LifecycleManager - Event Handler Error Handling', () => {
 
     // Check that error was dispatched as ErrorEvent
     expect(errors.length).toBe(1);
-    expect(errors[0].error.message).toContain('Started handler error');
+    expect((errors[0].error.cause as Error).message).toBe(
+      'Started handler error',
+    );
 
-    globalThis.removeEventListener('reportError', errorListener);
+    globalThis.removeEventListener('error', errorListener);
   });
 
   test('should catch errors from component:stopped event handler and dispatch as ErrorEvent', async () => {
@@ -97,11 +105,13 @@ describe('LifecycleManager - Event Handler Error Handling', () => {
 
     const errors: ErrorEvent[] = [];
     const errorListener = (event: Event) => {
+      event.preventDefault();
+
       if (event instanceof ErrorEvent) {
         errors.push(event);
       }
     };
-    globalThis.addEventListener('reportError', errorListener);
+    globalThis.addEventListener('error', errorListener);
 
     // Register error-throwing event handler
     lifecycle.on('component:stopped', () => {
@@ -115,9 +125,11 @@ describe('LifecycleManager - Event Handler Error Handling', () => {
 
     // Check that error was dispatched as ErrorEvent
     expect(errors.length).toBe(1);
-    expect(errors[0].error.message).toContain('Stopped handler error');
+    expect((errors[0].error.cause as Error).message).toBe(
+      'Stopped handler error',
+    );
 
-    globalThis.removeEventListener('reportError', errorListener);
+    globalThis.removeEventListener('error', errorListener);
   });
 
   test('should catch errors from lifecycle-manager:shutdown-initiated event handler and dispatch as ErrorEvent', async () => {
@@ -127,11 +139,13 @@ describe('LifecycleManager - Event Handler Error Handling', () => {
 
     const errors: ErrorEvent[] = [];
     const errorListener = (event: Event) => {
+      event.preventDefault();
+
       if (event instanceof ErrorEvent) {
         errors.push(event);
       }
     };
-    globalThis.addEventListener('reportError', errorListener);
+    globalThis.addEventListener('error', errorListener);
 
     // Register error-throwing event handler
     lifecycle.on('lifecycle-manager:shutdown-initiated', () => {
@@ -144,11 +158,11 @@ describe('LifecycleManager - Event Handler Error Handling', () => {
 
     // Check that error was dispatched as ErrorEvent
     expect(errors.length).toBe(1);
-    expect(errors[0].error.message).toContain(
+    expect((errors[0].error.cause as Error).message).toBe(
       'Shutdown initiated handler error',
     );
 
-    globalThis.removeEventListener('reportError', errorListener);
+    globalThis.removeEventListener('error', errorListener);
   });
 
   test('should handle multiple failing event handlers for same event', async () => {
@@ -156,11 +170,13 @@ describe('LifecycleManager - Event Handler Error Handling', () => {
 
     const errors: ErrorEvent[] = [];
     const errorListener = (event: Event) => {
+      event.preventDefault();
+
       if (event instanceof ErrorEvent) {
         errors.push(event);
       }
     };
-    globalThis.addEventListener('reportError', errorListener);
+    globalThis.addEventListener('error', errorListener);
 
     // Register multiple error-throwing event handlers
     lifecycle.on('component:registered', () => {
@@ -178,13 +194,17 @@ describe('LifecycleManager - Event Handler Error Handling', () => {
     // Check that both errors were dispatched as ErrorEvents
     expect(errors.length).toBe(2);
     expect(
-      errors.some((e) => e.error.message.includes('First handler error')),
+      errors.some(
+        (e) => (e.error.cause as Error).message === 'First handler error',
+      ),
     ).toBe(true);
     expect(
-      errors.some((e) => e.error.message.includes('Second handler error')),
+      errors.some(
+        (e) => (e.error.cause as Error).message === 'Second handler error',
+      ),
     ).toBe(true);
 
-    globalThis.removeEventListener('reportError', errorListener);
+    globalThis.removeEventListener('error', errorListener);
   }, 10000);
 
   test('should handle async event handler errors', async () => {
@@ -192,11 +212,13 @@ describe('LifecycleManager - Event Handler Error Handling', () => {
 
     const errors: ErrorEvent[] = [];
     const errorListener = (event: Event) => {
+      event.preventDefault();
+
       if (event instanceof ErrorEvent) {
         errors.push(event);
       }
     };
-    globalThis.addEventListener('reportError', errorListener);
+    globalThis.addEventListener('error', errorListener);
 
     // Register async error-throwing event handler
     lifecycle.on('component:registered', async () => {
@@ -213,9 +235,11 @@ describe('LifecycleManager - Event Handler Error Handling', () => {
 
     // Check that error was dispatched as ErrorEvent
     expect(errors.length).toBe(1);
-    expect(errors[0].error.message).toContain('Async handler error');
+    expect((errors[0].error.cause as Error).message).toBe(
+      'Async handler error',
+    );
 
-    globalThis.removeEventListener('reportError', errorListener);
+    globalThis.removeEventListener('error', errorListener);
   });
 
   test('should continue with other handlers even if one fails', async () => {

@@ -1,4 +1,5 @@
 import Router from 'find-my-way';
+import { guardProgressCallback } from '../internal/progress';
 import qs from 'qs';
 import { sleep } from '../../sleep';
 import { REDIRECT_STATUS_CODES } from '../consts';
@@ -16,6 +17,21 @@ import type {
   ContentType,
   QueryObject,
 } from '../types';
+// The shared coercion, not a fourth copy of it. Each adapter carried a near-identical
+// body, on the grounds that the HTTP client should not import across module boundaries -
+// which it already does for `sleep`, `deep-clone` and `retry-utils`. Aliased so the call
+// sites read unchanged.
+//
+// The *message* is not unchanged, and that is deliberate. The local copies produced
+// `new Error(String(value))`; `toError` produces
+// `new Error('Non-error value thrown: <description>', { cause: value })`. So a non-`Error`
+// rejection - `throw 'socket hang up'` - now reaches `AdapterResponse.errorCause` with the
+// prefix on `message` and the original value on `cause`, where before it carried only the
+// coerced text. See the 1.0.0 changelog entry: "HTTP adapters preserve non-`Error`
+// rejection values on `cause`."
+import { isErrorValue, toError as normalizeError } from '../../to-error';
+import { reportCallbackError } from '../../safe-handle-callback';
+import { readUnknownMember as readObjectMember } from '../../internal/read-member';
 
 export interface MockFormData {
   /** String fields from the multipart body */
@@ -153,8 +169,15 @@ export interface MockAdapterConfig {
    * the error response — similar to Fastify's `setErrorHandler`. Falls back to
    * the default `{ status: 500, body: { message: 'Internal Server Error' } }`
    * if this handler is not set or if it also throws.
+   *
+   * Named `onHandlerError` rather than `onError` because it is not a reporting
+   * callback, which is what `onError` means everywhere else in this library -
+   * `FileSink.onError` and `NamedPipeSink.onError` are handed a failure and
+   * return `void`. This one *produces the response*, so it decides the outcome
+   * rather than observing it, and the shared name invited exactly the wrong
+   * expectation. Its own failure is reported on the global `'error'` channel.
    */
-  onError?: (
+  onHandlerError?: (
     req: MockRequest,
     error: unknown,
   ) => MockResponse | Promise<MockResponse>;
@@ -219,6 +242,20 @@ export class MockAdapter implements HTTPAdapter {
   }
 
   public async send(request: AdapterRequest): Promise<AdapterResponse> {
+    // Guarded once, at the boundary, so every call site below is covered - including the
+    // ones handed to `streamResponseBody`, `writeRequestBodyChunked` and
+    // `serializeMultipartFormData`. Progress reporting is advisory and must not be able to
+    // change whether a request succeeded; a throwing callback used to propagate out and be
+    // classified as a transport failure. See `guardProgressCallback`.
+    const guardedUploadProgress = guardProgressCallback(
+      request.onUploadProgress,
+      'onUploadProgress',
+    );
+    const guardedDownloadProgress = guardProgressCallback(
+      request.onDownloadProgress,
+      'onDownloadProgress',
+    );
+
     const { requestURL, method, headers, body } = request;
     const materializedHeaders = materializeMockRequestHeaders(headers);
 
@@ -230,7 +267,7 @@ export class MockAdapter implements HTTPAdapter {
 
     // Signal 0% upload — upload is instant for mock, but we fire the event so
     // progress listeners see the same shape they would from FetchAdapter.
-    request.onUploadProgress?.({ loaded: 0, total: 0, progress: 0 });
+    guardedUploadProgress?.({ loaded: 0, total: 0, progress: 0 });
 
     // --- 2. Parse URL ---
     // Strip host so routes match on path only — same behavior regardless of
@@ -283,8 +320,8 @@ export class MockAdapter implements HTTPAdapter {
     // To customize the 404 body, register a wildcard route:
     //   adapter.routes.get('/*', (req) => ({ status: 404, body: { error: '...' } }))
     //
-    // While if a handler throws → onError (if set),
-    // then falls back to default 500 if onError is unset or also throws.
+    // While if a handler throws -> onHandlerError (if set),
+    // then falls back to default 500 if onHandlerError is unset or also throws.
 
     let mockResponse: MockResponse;
 
@@ -305,16 +342,23 @@ export class MockAdapter implements HTTPAdapter {
           throwAbortError();
         }
 
-        if (this.config.onError) {
+        if (this.config.onHandlerError) {
           try {
             mockResponse = await awaitAbortable(
-              this.config.onError(mockRequest, handlerError),
+              this.config.onHandlerError(mockRequest, handlerError),
               request.signal,
             );
           } catch (error) {
             if (isInternalAbortError(error)) {
               throwAbortError();
             }
+
+            // Said, not swallowed. The 500 is the right recovery - it mirrors what a real
+            // server does when its own error handler fails - but it is also exactly what a
+            // caller who configured no `onHandlerError` at all gets, so a broken `onHandlerError` was
+            // indistinguishable from an absent one. In a test suite, which is the only
+            // place this adapter runs, that is precisely the thing you want to be told.
+            reportCallbackError('MockAdapter onHandlerError', error);
 
             mockResponse = {
               status: 500,
@@ -396,13 +440,13 @@ export class MockAdapter implements HTTPAdapter {
     const responseBody = streamErrorCode !== undefined ? null : intendedBody;
 
     // Signal upload complete, then report download size based on serialised body.
-    request.onUploadProgress?.({ loaded: 1, total: 1, progress: 1 });
+    guardedUploadProgress?.({ loaded: 1, total: 1, progress: 1 });
 
     // A simulated stream error reports no terminal download progress: real
     // adapters fail the body read before that point, so `progress: 1` here would
     // signal a completed download for a body that never arrived.
     if (streamErrorCode === undefined) {
-      request.onDownloadProgress?.({
+      guardedDownloadProgress?.({
         loaded: responseBody?.length ?? 0,
         total: responseBody?.length ?? 0,
         progress: 1,
@@ -775,7 +819,7 @@ function awaitAbortable<T>(
 
   return new Promise<T>((resolve, reject) => {
     // Cancellation should reject immediately with AbortError, even if the
-    // wrapped handler/onError promise is still pending.
+    // wrapped handler/onHandlerError promise is still pending.
     const onAbort = () => {
       signal.removeEventListener('abort', onAbort);
       reject(new InternalMockAbortError());
@@ -796,41 +840,6 @@ function awaitAbortable<T>(
       },
     );
   });
-}
-
-function readObjectMember(source: unknown, key: string): unknown {
-  if (
-    source === null ||
-    (typeof source !== 'object' && typeof source !== 'function')
-  ) {
-    return undefined;
-  }
-
-  try {
-    return (source as Record<string, unknown>)[key];
-  } catch {
-    return undefined;
-  }
-}
-
-function isErrorValue(value: unknown): value is Error {
-  try {
-    return value instanceof Error;
-  } catch {
-    return false;
-  }
-}
-
-function normalizeError(value: unknown): Error {
-  if (isErrorValue(value)) {
-    return value;
-  }
-
-  try {
-    return new Error(String(value));
-  } catch {
-    return new Error('Unknown error');
-  }
 }
 
 /**

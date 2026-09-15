@@ -1,4 +1,7 @@
-import { safeHandleCallback } from './safe-handle-callback';
+import {
+  reportCallbackError,
+  safeHandleCallback,
+} from './safe-handle-callback';
 import { ulid } from 'ulid';
 import readline from 'readline';
 
@@ -860,8 +863,8 @@ export class ProcessSignalManager {
         // (either raw mode was disabled, or it was already off and doesn't need disabling)
         shared.rawModeOwner = null;
         shared.rawModeEnabledByManager = false;
-      } catch {
-        // If setRawMode(false) fails, ensure there's a non-null owner so future detaches can retry.
+      } catch (error) {
+        // Ensure there's a non-null owner so future detaches can retry.
         // This matters in the edge case where setRawMode(true) threw after enabling raw mode:
         // rawModeOwner would still be null, and without setting it here we'd never retry disabling.
         if (didAttemptRawModeEnable && shared.rawModeOwner === null) {
@@ -869,6 +872,21 @@ export class ProcessSignalManager {
         }
         // rawModeEnabledByManager stays true so future instances can adopt and retry.
         // Terminal will be restored on process exit anyway.
+
+        // Reported for the reason `restoreStdin`'s twin is: a terminal left in raw mode is
+        // the user's shell broken, and this said nothing about it.
+        //
+        // Reported *after* the ownership repair above, not before it. The report runs a
+        // global `'error'` listener synchronously, and a listener that calls `attach()`
+        // from there observed the shared state half-repaired - no attached instances,
+        // `rawModeEnabledByManager` still true, and no owner to adopt. The twin at
+        // `restoreStdin` does have work after its report - it pauses stdin - and answers
+        // the same hazard the other way, by re-reading `attachedInstances` rather than
+        // trusting the flag it computed before reporting.
+        reportCallbackError(
+          'ProcessSignalManager stdin raw mode restore',
+          error,
+        );
       }
     }
   }
@@ -940,14 +958,26 @@ export class ProcessSignalManager {
         }
         shared.rawModeOwner = null;
         shared.rawModeEnabledByManager = false;
-      } catch {
-        // If setRawMode fails, leave the owner set so future detaches can retry
-        // Terminal will be restored on process exit anyway
+      } catch (error) {
+        // The owner stays set so a future detach can retry - but this is reported now
+        // rather than left to the exit. "Restored on process exit anyway" is true of a
+        // script and false of the long-lived process this library exists for: `detach()`
+        // returns normally, `getStatus().isAttached` reads `false`, and the terminal is
+        // still in raw mode, so the user's shell is broken and nothing anywhere said so.
+        reportCallbackError(
+          'ProcessSignalManager stdin raw mode restore',
+          error,
+        );
       }
     }
 
-    // Pause stdin when last instance detaches
-    if (isLastInstance) {
+    // Pause stdin when last instance detaches - re-checked here rather than trusted from
+    // the `isLastInstance` read above. `reportCallbackError` dispatches a global `'error'`
+    // *synchronously*, so a listener that calls `attach()` from inside the restore report
+    // above returns here with an instance freshly attached, and the stale flag then paused
+    // stdin under it: the new instance's keypress handler was registered and silent. The
+    // set is the live answer.
+    if (isLastInstance && shared.attachedInstances.size === 0) {
       try {
         process.stdin.pause();
       } catch {

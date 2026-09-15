@@ -112,7 +112,7 @@ npm install lifecycleion
 bun add lifecycleion
 ```
 
-**Note on Logger:** The LifecycleManager requires a Logger instance from the lifecycleion logger. The Logger provides structured logging with sinks, service scoping, and lifecycle integration. The exact import path will be provided in a future release, but the Logger is part of the lifecycleion package.
+**Note on Logger:** The LifecycleManager requires a `Logger` from `lifecycleion/logger`. The logger provides sinks, service scoping, and lifecycle integration.
 
 ## Quick Start
 
@@ -1611,7 +1611,6 @@ The Logger class is part of the Lifecycleion package. Basic usage:
 ```typescript
 import { Logger } from 'lifecycleion/logger';
 
-// Create logger (exact constructor options to be documented with logger export)
 const logger = new Logger({
   // Logger configuration options
 });
@@ -1643,7 +1642,7 @@ async start() {
   try {
     await this.db.connect();
   } catch (error) {
-    const err = error instanceof Error ? error : new Error(String(error));
+    const err = toError(error);
 
     this.logger.error('Failed to connect: {{error.message}}', {
       params: { error: err },
@@ -1653,7 +1652,9 @@ async start() {
 }
 ```
 
-Normalizing the caught value (`error instanceof Error ? error : new Error(String(error))`) ensures `{{error.message}}` always resolves to a string - without it, a thrown string or plain object would produce `(null)` in the output. Libraries and native APIs occasionally throw non-`Error` values.
+Normalizing the caught value with [`toError`](./to-error.md) ensures `{{error.message}}` always resolves to a string - without it, a thrown string or plain object would produce `(null)` in the output. Libraries and native APIs occasionally throw non-`Error` values.
+
+Use `toError` rather than hand-rolling `error instanceof Error ? error : new Error(String(error))`: both halves of that idiom can throw. `instanceof` walks a prototype chain, which a revoked `Proxy` refuses, and `String()` invokes `toString`/`Symbol.toPrimitive` - on a value created with `Object.create(null)` it raises a `TypeError` of its own, from the line that was only trying to normalize an error. `toError` guards both and keeps the original on `cause`.
 
 The normalized `err` is also captured in `params` for structured sinks that need the full error object or stack trace. Because the pattern only wraps non-`Error` values, original `Error` stack traces are preserved when the thrown value was already an `Error`.
 
@@ -2282,19 +2283,24 @@ lifecycle.on('lifecycle-manager:shutdown-completed', (data) => {
 
 Event handlers are **fire-and-forget** - they do not block lifecycle operations.
 
-**Event Handler Error Handling:** The LifecycleManager automatically catches errors thrown by event handlers via `safeHandleCallback`, preventing them from breaking lifecycle operations. Errors are dispatched as `ErrorEvent` objects using the standard `reportError` event API:
+**Event Handler Error Handling:** The LifecycleManager automatically catches errors thrown by event handlers via `safeHandleCallback`, preventing them from breaking lifecycle operations. Errors are dispatched as `ErrorEvent` objects on the standard global `'error'` event channel:
 
 ```typescript
 // Listen for event handler errors
-globalThis.addEventListener('reportError', (event) => {
+globalThis.addEventListener('error', (event) => {
   if (event instanceof ErrorEvent) {
+    // Claim the report, so it is not written to the console as well
+    event.preventDefault();
+
     console.error('Event handler error:', event.error.message);
-    // error.message includes context: "Error in a callback event handler for component:started"
+    // error.message names the callback: "Error in a callback event handler for component:started"
+    // The error the handler actually threw is on `event.error.cause`, so you can render it
+    // with your own settings - or use `errorToString(event.error)`, which renders both.
   }
 });
 ```
 
-Available in Node.js 25+, Bun, Deno, and modern browsers. **Note:** Errors are NOT logged to the LifecycleManager's logger - use the `reportError` listener for custom logging/monitoring.
+Available in Node.js 25+, Bun, Deno, and modern browsers. **Note:** Errors are NOT logged to the LifecycleManager's logger - use an `'error'` listener, or `logger.registerReportErrorListener()`, for custom logging/monitoring.
 
 However, it's still best practice to handle errors explicitly in your handlers for better control over error logging and recovery.
 
@@ -3321,7 +3327,7 @@ export class DatabaseHelper {
       typeof error === 'object' && error !== null && 'code' in error
         ? String(error.code)
         : null;
-    const message = error instanceof Error ? error.message : String(error);
+    const message = describeError(error);
 
     return (
       (code !== null && retryableCodes.has(code)) ||
@@ -3470,7 +3476,7 @@ export class DatabaseHelper {
         value: result,
       };
     } catch (error) {
-      const err = error instanceof Error ? error : new Error(String(error));
+      const err = toError(error);
 
       // If not finalized yet, auto-rollback
       if (!tx.isCompleted()) {

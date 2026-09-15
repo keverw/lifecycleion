@@ -589,6 +589,10 @@ Detach signal handlers and stop listening for process signals and keyboard event
 - Pauses stdin
 - Calling multiple times is safe (idempotent)
 
+If restoring terminal mode fails, `detach()` still returns normally and reports the
+failure on the global `'error'` channel. The shared state remains marked so a future
+manager attachment can adopt ownership and retry restoration when it detaches.
+
 ### Trigger Methods
 
 All trigger methods share the same behavior pattern and are useful for programmatic triggering or testing.
@@ -784,7 +788,7 @@ All callbacks are wrapped with `safeHandleCallback()`, which:
 
 - Catches synchronous errors
 - Catches asynchronous promise rejections
-- Reports errors via the global `reportError` event (supported in Node.js 25+, Bun, Deno, and browsers)
+- Reports errors on the global `'error'` event channel (supported in Node.js 25+, Bun, Deno, and browsers)
 - Prevents uncaught exceptions from crashing the process
 
 ```typescript
@@ -795,8 +799,11 @@ const manager = new ProcessSignalManager({
   },
 });
 
-// Listen for errors globally using the standard reportError event
-globalThis.addEventListener('reportError', (event) => {
+// Listen for errors globally on the standard 'error' channel
+globalThis.addEventListener('error', (event) => {
+  // Claim the report, so it is not written to the console as well
+  event.preventDefault();
+
   console.error('Callback error:', event.error);
 });
 

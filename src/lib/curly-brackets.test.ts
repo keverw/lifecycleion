@@ -1,5 +1,5 @@
 import { describe, expect, it, test } from 'bun:test';
-import { CurlyBrackets } from './curly-brackets';
+import { CurlyBrackets, type TruncationInfo } from './curly-brackets';
 
 const html = `
 <html>
@@ -246,15 +246,67 @@ describe('CurlyBrackets', () => {
     );
   });
 
-  it('should leave unsupported placeholder path syntax unchanged', () => {
+  it('should resolve unquoted segments that are not plain identifiers', () => {
+    // Only `.`, `[` and `]` delimit a path segment, so an ordinary hyphenated or spaced
+    // key resolves without quoting. These used to render as the literal placeholder.
     expect(
       CurlyBrackets(
         '{{user.display-name}}',
         { user: { 'display-name': 'Alice' } },
         '(???)',
       ),
-    ).toEqual('{{user.display-name}}');
+    ).toEqual('Alice');
 
+    // A key containing a space needs the quoted form, so that ordinary prose inside a
+    // placeholder is not mistaken for a lookup.
+    expect(
+      CurlyBrackets("{{u['my key']}}", { u: { 'my key': 'Bob' } }, '(???)'),
+    ).toEqual('Bob');
+  });
+
+  it('should leave a placeholder holding prose exactly as written', () => {
+    // An unquoted segment holds name characters only, so this does not parse as a path
+    // and is left alone rather than being replaced by the fallback.
+    expect(CurlyBrackets('Note: {{Hello world}} done', {}, '(???)')).toEqual(
+      'Note: {{Hello world}} done',
+    );
+
+    // Punctuation counts as prose too. Excluding whitespace alone left these parsing as
+    // key names that resolve to nothing, so a phrase rendered as `(???)`.
+    expect(CurlyBrackets('Note: {{Hello,world}} done', {}, '(???)')).toEqual(
+      'Note: {{Hello,world}} done',
+    );
+
+    expect(CurlyBrackets('{{oops!}}', {}, '(???)')).toEqual('{{oops!}}');
+
+    expect(
+      CurlyBrackets('{{u.my key}}', { u: { 'my key': 'Bob' } }, '(???)'),
+    ).toEqual('{{u.my key}}');
+  });
+
+  it('renders the fallback for a placeholder holding a hyphenated or @-prefixed name', () => {
+    // The unquoted segment grammar admits `-`, `@` and `$` so that `{{user.password-hash}}`
+    // and `{{user.@id}}` resolve (and redact). The cost, accepted rather than avoided: a
+    // hyphenated phrase in braces parses as a path, resolves to nothing, and renders the
+    // fallback where it used to round-trip verbatim. Pinned here so the trade is visible.
+    for (const prose of ['Hello-world', 'opt-in', '2024-01-01', '@mention']) {
+      expect(CurlyBrackets(`Note: {{${prose}}} done`, {}, '(???)')).toEqual(
+        'Note: (???) done',
+      );
+    }
+
+    // Substituted text is not re-scanned, so a value that *contains* such a placeholder
+    // survives as written. This is what keeps a component's own error text intact when
+    // `LifecycleManager` logs `'...: {{error.message}}'` with the error as a param.
+    expect(
+      CurlyBrackets('Component failed: {{error.message}}', {
+        error: new Error('Cannot reach {{svc-a}} after {{opt-in}}'),
+      }),
+    ).toEqual('Component failed: Cannot reach {{svc-a}} after {{opt-in}}');
+  });
+
+  it('should leave unsupported placeholder path syntax unchanged', () => {
+    // Wildcards remain unsupported.
     expect(
       CurlyBrackets(
         '{{users[*].name}}',
@@ -262,6 +314,10 @@ describe('CurlyBrackets', () => {
         '(???)',
       ),
     ).toEqual('{{users[*].name}}');
+
+    expect(CurlyBrackets('{{user.}}', { user: { a: 1 } }, '(???)')).toEqual(
+      '{{user.}}',
+    );
   });
 
   it('should stringify Error values and allow access to Error properties', () => {
@@ -280,17 +336,17 @@ describe('CurlyBrackets', () => {
     );
   });
 
-  it('should stringify full arrays and objects using default JavaScript coercion', () => {
+  it('should stringify full arrays and plain objects as JSON', () => {
     expect(
       CurlyBrackets('{{users}}', { users: ['Alice', 'Bob'] }, '(???)'),
-    ).toEqual('Alice,Bob');
+    ).toEqual('["Alice","Bob"]');
     expect(CurlyBrackets('{{counts}}', { counts: [1, 2, 3] }, '(???)')).toEqual(
-      '1,2,3',
+      '[1,2,3]',
     );
 
     expect(
       CurlyBrackets('{{user}}', { user: { name: 'Alice', age: 42 } }, '(???)'),
-    ).toEqual('[object Object]');
+    ).toEqual('{"name":"Alice","age":42}');
   });
 
   test('compileTemplate and escaped brackets', () => {
@@ -323,7 +379,7 @@ describe('CurlyBrackets', () => {
         },
       }),
     ).toEqual(
-      'Hello Steve Jobs - [object Object] - {{name}} - {{name}} - {{name}}',
+      'Hello Steve Jobs - {"first":"Steve","last":"Jobs"} - {{name}} - {{name}} - {{name}}',
     );
   });
 });
@@ -341,5 +397,330 @@ describe('CurlyBrackets.escape', () => {
     const expected = 'Already \\{{escaped\\}} brackets';
 
     expect(CurlyBrackets.escape(input)).toEqual(expected);
+  });
+
+  describe('CurlyBrackets onFormatError', () => {
+    it('should tell an unreadable placeholder apart from an absent one', () => {
+      // Both render the fallback, and until this existed they were indistinguishable: a
+      // `{{user.token}}` whose accessor throws looked exactly like a typo. The path is
+      // rooted at the placeholder rather than at an anonymous value, so a template with
+      // many of them still says which one failed.
+      const seen: string[] = [];
+
+      const bag: Record<string, unknown> = {};
+
+      Object.defineProperty(bag, 'token', {
+        get() {
+          throw new Error('accessor refused: hunter2secret');
+        },
+        enumerable: true,
+      });
+
+      const rendered = CurlyBrackets(
+        '{{missing.key}} {{user.token}}',
+        { user: bag },
+        '(null)',
+        {
+          onFormatError: (error, _kind, path) =>
+            seen.push(`${path}|${error.message}`),
+        },
+      );
+
+      // The typo reports nothing - nothing failed, the path simply is not there.
+      expect(seen).toHaveLength(1);
+      expect(seen[0]).toContain('user.token');
+      expect(seen[0]).toContain('accessor refused');
+
+      expect(rendered).toBe('(null) (null)');
+      expect(rendered).not.toContain('hunter2secret');
+    });
+  });
+});
+
+describe('CurlyBrackets - one budget across the whole template', () => {
+  test('bounds the total output rather than each placeholder on its own', () => {
+    // Every placeholder opened a render budget of its own, so a template with four of them
+    // could emit four megabytes while each individual render looked perfectly in bounds.
+    const big = 'x'.repeat(900_000);
+
+    const rendered = CurlyBrackets('{{a}}{{b}}{{c}}{{d}}', {
+      a: big,
+      b: big,
+      c: big,
+      d: big,
+    });
+
+    expect(rendered).toContain('[max length exceeded]');
+    expect(rendered.length).toBeLessThan(2_000_000);
+  });
+
+  test('spends nothing extra on an ordinary template', () => {
+    // The cap is invisible to every render that is not running away.
+    expect(CurlyBrackets('{{a}}-{{b}}', { a: 'one', b: 'two' })).toBe(
+      'one-two',
+    );
+  });
+
+  test('gives each render of a compiled template its own allowance', () => {
+    // Per render, not per compile: a compiled template is reused, and a budget shared
+    // across calls would spend itself on the first one and truncate every call after it.
+    const compiled = CurlyBrackets.compileTemplate('{{a}}');
+    const big = 'x'.repeat(900_000);
+
+    expect(compiled({ a: big }).length).toBe(900_000);
+    expect(compiled({ a: big }).length).toBe(900_000);
+  });
+  test('stops rendering once the budget is gone rather than rendering and discarding', () => {
+    // `chargeText` bounds what is *emitted* and nothing about what is *produced*: the
+    // render was evaluated as its argument, so every placeholder after the budget ran out
+    // still walked its value in full - each under a fresh allowance of its own - only for
+    // the result to be cut to the marker and thrown away. The work is quadratic in the
+    // template's placeholder count against one large param.
+    const wide: Record<string, unknown> = {};
+
+    for (let index = 0; index < 20_000; index++) {
+      wide[`k${String(index)}`] = 'value';
+    }
+
+    const params = { big: 'x'.repeat(1_000_000), wide };
+    const template = `{{big}}${'{{wide}}'.repeat(200)}`;
+
+    const startedAt = Date.now();
+    const rendered = CurlyBrackets(template, params);
+    const elapsed = Date.now() - startedAt;
+
+    expect(rendered).toContain('[max length exceeded]');
+
+    // Measured at 1.7 seconds when the exhausted placeholders still rendered, against
+    // roughly fifty milliseconds when they stop at the check - the whole of which is the
+    // one placeholder that legitimately renders. The bound sits between the two with room
+    // for a slow machine; the point is that the renders do not happen, not how fast they
+    // are.
+    expect(elapsed).toBeLessThan(600);
+
+    // And the exhausted placeholders are not charged for a marker nobody budgeted, so the
+    // total stays at the cap rather than creeping past it once per placeholder.
+    expect(rendered.length).toBeLessThan(1_100_000);
+  });
+});
+
+describe('maxRenderLength and onTruncate', () => {
+  const body = 'x'.repeat(2_000_000);
+
+  it('caps the whole render, not each placeholder', () => {
+    // The shape the bound exists for: one payload substituted six times is six times the
+    // output, and where the template is user input the repeat count is theirs too.
+    const rendered = CurlyBrackets('{{body}}'.repeat(6), { body });
+
+    expect(rendered.length).toBeLessThan(1_100_000);
+  });
+
+  it('tells the caller what was cut', () => {
+    const cuts: TruncationInfo[] = [];
+
+    CurlyBrackets('{{ body }}', { body }, undefined, {
+      onTruncate: (info) => cuts.push(info),
+    });
+
+    expect(cuts).toEqual([
+      { reason: 'length', subject: 'body', dropped: 1_000_000 },
+    ]);
+  });
+
+  it('reports a cut made inside a container, not only a bare string', () => {
+    // The counter lives on the budget rather than being measured off the result, so a
+    // nested leaf cut by `quoteWithinBudget` is seen exactly as a top-level string is.
+    const cuts: TruncationInfo[] = [];
+
+    CurlyBrackets('{{o}}', { o: { k: body } }, undefined, {
+      onTruncate: (info) => cuts.push(info),
+    });
+
+    expect(cuts).toHaveLength(1);
+    expect(cuts[0]?.subject).toBe('o');
+    expect(cuts[0]?.dropped).toBeGreaterThan(0);
+  });
+
+  it('reports a placeholder the budget never reached with no count', () => {
+    // `dropped` is honest rather than zero: the guard exists so the value is never
+    // rendered, so nothing ever measured it.
+    const cuts: TruncationInfo[] = [];
+
+    CurlyBrackets('{{a}}{{b}}', { a: body, b: body }, undefined, {
+      maxRenderLength: 100,
+      onTruncate: (info) => cuts.push(info),
+    });
+
+    // Once per render, not once per placeholder - and the first is the informative one.
+    expect(cuts).toHaveLength(1);
+    expect(cuts[0]?.subject).toBe('a');
+  });
+
+  it('charges substituted values only, never the literal template text', () => {
+    // Documented: the cap governs interpolation, not the length of the template. A
+    // template that is mostly literal renders in full under a tiny bound, and only the
+    // placeholder is measured against it. Pinned so the boundary does not move quietly.
+    const literal = 'L'.repeat(50_000);
+    const cuts: TruncationInfo[] = [];
+
+    const rendered = CurlyBrackets(
+      `${literal}{{v}}${literal}`,
+      { v: 'value' },
+      undefined,
+      { maxRenderLength: 10, onTruncate: (info) => cuts.push(info) },
+    );
+
+    expect(rendered).toBe(`${literal}value${literal}`);
+    expect(cuts).toEqual([]);
+
+    const cut = CurlyBrackets(
+      `${literal}{{v}}${literal}`,
+      { v: 'x'.repeat(100) },
+      undefined,
+      { maxRenderLength: 10, onTruncate: (info) => cuts.push(info) },
+    );
+
+    expect(cut.startsWith(literal)).toBe(true);
+    expect(cut.endsWith(literal)).toBe(true);
+    expect(cut.length).toBeLessThan(literal.length * 2 + 100);
+    expect(cuts).toHaveLength(1);
+    expect(cuts[0]?.subject).toBe('v');
+  });
+
+  it('does not fire when nothing was cut', () => {
+    const cuts: unknown[] = [];
+
+    const rendered = CurlyBrackets('hi {{name}}', { name: 'bob' }, undefined, {
+      onTruncate: (info) => cuts.push(info),
+    });
+
+    expect(rendered).toBe('hi bob');
+    expect(cuts).toHaveLength(0);
+  });
+
+  it('honours a raised limit and Infinity', () => {
+    expect(
+      CurlyBrackets('{{body}}'.repeat(6), { body }, undefined, {
+        maxRenderLength: 20_000_000,
+      }).length,
+    ).toBe(12_000_000);
+
+    expect(
+      CurlyBrackets('{{body}}'.repeat(6), { body }, undefined, {
+        maxRenderLength: Number.POSITIVE_INFINITY,
+      }).length,
+    ).toBe(12_000_000);
+  });
+
+  it('falls back to the default for any unusable limit', () => {
+    // Fails closed, unlike `resolveMaxQueueSize`'s reading of the same shapes: this is the
+    // bound that makes a hostile template safe to render, so a typo in a config must not
+    // be what switches it off.
+    for (const bad of [-1, 0, Number.NaN, '5000', undefined]) {
+      const rendered = CurlyBrackets('{{body}}', { body }, undefined, {
+        maxRenderLength: bad as number | undefined,
+      });
+
+      expect(rendered.length).toBeLessThan(1_100_000);
+      expect(rendered).toContain('[max length exceeded]');
+    }
+  });
+
+  it('survives a handler that throws', () => {
+    // A notification about a degradation, not a step in producing the output.
+    const rendered = CurlyBrackets('{{body}}', { body }, undefined, {
+      onTruncate: () => {
+        throw new Error('boom');
+      },
+    });
+
+    expect(rendered.length).toBeLessThan(1_100_000);
+  });
+
+  it('does not route truncation through onFormatError', () => {
+    // Truncation is an ordinary degradation; `onFormatError` means something refused to
+    // render, and spending its one report here would hide a real failure.
+    const failures: unknown[] = [];
+
+    CurlyBrackets('{{body}}', { body }, undefined, {
+      onFormatError: (error) => failures.push(error),
+    });
+
+    expect(failures).toHaveLength(0);
+  });
+});
+
+describe('CurlyBrackets options are read once, at compile time', () => {
+  test('a throwing options getter does not escape the render', () => {
+    // The reads sat outside any `try`, so an options object with a throwing accessor threw
+    // straight out of a call documented not to - the same hole `errorToString`,
+    // `stringifyValue` and `serializeError` each closed by snapshotting their own bag.
+    const hostile = {
+      get onFormatError(): never {
+        throw new Error('options refused');
+      },
+      get maxRenderLength(): never {
+        throw new Error('options refused');
+      },
+      get onTruncate(): never {
+        throw new Error('options refused');
+      },
+    };
+
+    expect(() =>
+      CurlyBrackets('hello {{name}}', { name: 'world' }, '(null)', hostile),
+    ).not.toThrow();
+
+    expect(
+      CurlyBrackets('hello {{name}}', { name: 'world' }, '(null)', hostile),
+    ).toBe('hello world');
+  });
+
+  test('a compiled template does not re-read its options on every render', () => {
+    // A compiled template is reused, and each read used to happen again per call: a getter
+    // answering differently the second time changed the allowance or the handler for the
+    // rest of the template's life. Read once at compile time, the second render behaves
+    // like the first.
+    let reads = 0;
+
+    const counting = {
+      get maxRenderLength(): number {
+        reads++;
+
+        return 1_000;
+      },
+    };
+
+    const render = CurlyBrackets.compileTemplate(
+      '{{value}}',
+      '(null)',
+      counting,
+    );
+
+    render({ value: 'a' });
+    render({ value: 'b' });
+    render({ value: 'c' });
+
+    expect(reads).toBe(1);
+  });
+
+  test('the options still take effect', () => {
+    // Snapshotting must not quietly stop honouring them - the cut below comes from the
+    // supplied `maxRenderLength`, not from the default.
+    const truncations: TruncationInfo[] = [];
+
+    const rendered = CurlyBrackets(
+      '{{value}}',
+      { value: 'x'.repeat(5_000) },
+      '(null)',
+      {
+        maxRenderLength: 100,
+        onTruncate: (info) => truncations.push(info),
+      },
+    );
+
+    expect(rendered.length).toBeLessThan(200);
+    expect(truncations).toHaveLength(1);
+    expect(truncations[0]?.reason).toBe('length');
   });
 });

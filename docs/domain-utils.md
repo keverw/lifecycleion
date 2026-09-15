@@ -350,7 +350,7 @@ checkDNSLength('x.'.repeat(127) + 'com'); // false (128 labels > 127 limit)
 
 ### getDomain
 
-Returns the registrable domain (e.g. `example.com` from a subdomain). Re-exported from [`tldts`](https://github.com/remusao/tldts). No separate install is needed.
+Returns the registrable domain (e.g. `example.com` from a subdomain). Re-exported from [`tldts`](https://github.com/remusao/tldts), which is a required peer dependency - installed for you by npm, pnpm and Bun, and `yarn add tldts` on Yarn Berry.
 
 ```typescript
 getDomain('api.example.com'); // 'example.com'
@@ -361,7 +361,7 @@ getDomain('localhost'); // null
 
 ### getSubdomain
 
-Returns the subdomain portion of a hostname. Re-exported from [`tldts`](https://github.com/remusao/tldts). No separate install is needed.
+Returns the subdomain portion of a hostname. Re-exported from [`tldts`](https://github.com/remusao/tldts), which is a required peer dependency - installed for you by npm, pnpm and Bun, and `yarn add tldts` on Yarn Berry.
 
 ```typescript
 getSubdomain('api.example.com'); // 'api'

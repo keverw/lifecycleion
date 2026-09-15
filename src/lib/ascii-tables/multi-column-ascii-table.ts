@@ -1,4 +1,5 @@
 import { ASCIITableUtils } from './ascii-table-utils';
+import { padRight } from '../padding-utils';
 import stringWidth from 'string-width';
 
 interface MultiColumnASCIITableOptions {
@@ -51,18 +52,25 @@ export class MultiColumnASCIITable {
     if (this.rows.length === 0) {
       const emptyTableWidth = Math.min(tableWidth, 40);
 
-      const separator = '+' + '-'.repeat(emptyTableWidth - 2) + '+';
+      // `padEnd`, not `repeat`, for the reason the row padding below uses it: these counts
+      // are derived from a caller-supplied `tableWidth` and the width of a caller-supplied
+      // message, and a negative one throws a `RangeError` out of a renderer whose caller
+      // turns any throw into `<error could not be rendered>`. A narrow table or one wide
+      // grapheme - `emptyMessage: '漢字'` at `tableWidth: 5` - reaches it.
+      const separator = '+' + padRight('', emptyTableWidth - 2, '-') + '+';
       const emptyMessageLines = ASCIITableUtils.wrapText(
         emptyMessage,
         emptyTableWidth - 4,
       );
 
       const emptyRows = emptyMessageLines.map((line) => {
-        const paddingLeft = ' '.repeat(
+        const paddingLeft = padRight(
+          '',
           Math.floor((emptyTableWidth - stringWidth(line) - 4) / 2),
         );
 
-        const paddingRight = ' '.repeat(
+        const paddingRight = padRight(
+          '',
           Math.ceil((emptyTableWidth - stringWidth(line) - 4) / 2),
         );
 
@@ -70,10 +78,21 @@ export class MultiColumnASCIITable {
       });
 
       if (emptyRows.length === 0) {
-        emptyRows.push(`| ${' '.repeat(emptyTableWidth - 4)} |`);
+        emptyRows.push(`| ${padRight('', emptyTableWidth - 4)} |`);
       }
 
-      return [separator, ...emptyRows, separator].join('\n');
+      // Pushed rather than spread, as every other line list in this module is built: a
+      // spread passes each element as an argument, and an `emptyMessage` with enough
+      // lines exceeds the argument limit.
+      const lines: string[] = [separator];
+
+      for (const row of emptyRows) {
+        lines.push(row);
+      }
+
+      lines.push(separator);
+
+      return lines.join('\n');
     }
 
     const columnWidths = this.calculateColumnWidths(options);
@@ -146,9 +165,13 @@ export class MultiColumnASCIITable {
     const wrappedCells = row.map((value, index) => {
       const wrappedLines = ASCIITableUtils.wrapText(value, columnWidths[index]);
 
-      return wrappedLines
-        .map((line) => line.padEnd(columnWidths[index]))
-        .join('\n');
+      // Joined as wrapped, not padded here. `padEnd` counts UTF-16 code units while the
+      // column width - and the padding below - is measured in display columns, so a cell
+      // holding wide characters was padded past its own width by the difference and the
+      // clamped pad below could not take it back: the row rendered wider than its column
+      // and the `|` borders stopped lining up. One notion of width, the same one
+      // `KeyValueASCIITable` uses.
+      return wrappedLines.join('\n');
     });
 
     const maxLines = Math.max(
@@ -161,7 +184,14 @@ export class MultiColumnASCIITable {
       const rowLine = wrappedCells.map((cell, index) => {
         const cellLines = cell.split('\n');
         const cellLine = cellLines[i] || '';
-        const padding = ' '.repeat(columnWidths[index] - stringWidth(cellLine));
+        // Clamped, for the reason `KeyValueASCIITable`'s padding is: a wrapped chunk can
+        // overhang a column narrower than one of its graphemes, and `repeat(-1)` throws
+        // out of a renderer whose caller turns any throw into `<error could not be
+        // rendered>`.
+        const padding = padRight(
+          '',
+          columnWidths[index] - stringWidth(cellLine),
+        );
 
         return ' ' + cellLine + padding + ' ';
       });

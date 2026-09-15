@@ -2,7 +2,7 @@
 
 A lightweight, type-safe observer for a single event payload type.
 
-Subscriber errors are safely handled through `safeHandleCallback` and reported via the standard `reportError` event API.
+Subscriber errors are safely handled through `safeHandleCallback` and reported on the standard global `'error'` event channel.
 
 <!-- toc -->
 
@@ -36,7 +36,7 @@ import {
 - `notify` is fire-and-forget:
   - Sync subscribers run immediately.
   - Async subscribers are started, but `notify` does not wait for completion.
-- Errors thrown (or promise rejections) in subscribers are reported via the global `'reportError'` event instead of breaking other subscribers.
+- Errors thrown (or promise rejections) in subscribers are reported on the global `'error'` event channel instead of breaking other subscribers.
 
 ## API
 

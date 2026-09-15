@@ -1,0 +1,193 @@
+/**
+ * Is this value an error, including one built in another realm?
+ *
+ * `instanceof` compares against *this* realm's `Error.prototype`, so an error thrown out
+ * of a `vm` context, an iframe, or a jsdom window fails it while being an error in every
+ * respect the caller cares about. `Object.prototype.toString` reads the internal brand
+ * instead, which crosses realms.
+ *
+ * On a runtime with `Error.isError` that is the answer, together with a `DOMException`
+ * instance (Bun's `isError` refuses one where Node's accepts it, and an `AbortError` is
+ * one), and `instanceof Error` is not consulted: it accepts
+ * `Object.create(Error.prototype)`, which the slot check rightly refuses. Without it, `instanceof` and then the internal brand through
+ * `Object.prototype.toString`, which a hostile object can claim with `Symbol.toStringTag`
+ * or a borrowed prototype; one that does is returned as-is rather than wrapped. That is
+ * the bargain those runtimes offer, and it costs nothing here: every read off the result
+ * is guarded anyway, by `describeError` or by `errorToString`. Code that wants its own
+ * error type to be recognised everywhere should extend `Error`, not imitate it - a
+ * subclass, or `deserializeError`'s `new Error(...)`, passes every check; a serialized
+ * error's plain object passes none, as it should.
+ *
+ * Exported so a caller that only needs the *question* answered - `Logger`'s global
+ * `'error'` listener, deciding whether to pass a reported payload through or wrap it -
+ * asks it the same way `toError` does. A private copy is how that listener came to use a
+ * bare `instanceof` and replace a genuine iframe or `vm` error with a wrapper.
+ *
+ * Never throws: `instanceof` walks a prototype chain, which a revoked `Proxy` refuses,
+ * and this is called from reporting paths that must not raise an error of their own.
+ */
+export function isErrorValue(value: unknown): value is Error {
+  try {
+    // `Error.isError` reads the internal `[[ErrorData]]` slot, which crosses realms and
+    // cannot be claimed - not with `Symbol.toStringTag`, and not with a prototype:
+    // `Object.create(Error.prototype)` passes `instanceof` while being no error at all.
+    // So where the runtime has it, it is consulted before `instanceof` rather than
+    // after, and `instanceof Error` is not consulted at all. The two checks below are
+    // what remains for a runtime that does not, with the bargain the doc comment
+    // describes.
+    //
+    // A `DOMException` is accepted beside it, by its own internal state. The proposal
+    // has `Error.isError` answer `true` for one, and Node does, but Bun 1.4 answers
+    // `false` - and every `AbortError` a fetch or an `AbortSignal` produces is a
+    // `DOMException`, so without this the client stopped telling a cancellation from a
+    // failure. Checked through a branded getter rather than `instanceof`, which
+    // `Object.create(DOMException.prototype)` would pass exactly as it passes
+    // `instanceof Error`: the `code` accessor throws for a receiver with no
+    // `DOMException` state behind it, on Bun and Node alike.
+    if (typeof errorIsError === 'function') {
+      return errorIsError(value) || isDOMExceptionInstance(value);
+    }
+
+    if (value instanceof Error) {
+      return true;
+    }
+
+    return (
+      typeof value === 'object' &&
+      value !== null &&
+      Object.prototype.toString.call(value) === '[object Error]'
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The `code` getter off `DOMException.prototype`, read once. A branded accessor: it
+ * throws for any receiver that is not a real `DOMException`, borrowed prototype
+ * included, which is the check `instanceof` cannot make. `undefined` where the runtime
+ * has no `DOMException`, or one whose `code` is not an accessor.
+ */
+const domExceptionCodeGetter = (():
+  ((this: unknown) => unknown) | undefined => {
+  const ctor: unknown = (globalThis as { DOMException?: unknown }).DOMException;
+
+  if (typeof ctor !== 'function') {
+    return undefined;
+  }
+
+  const prototype: unknown = (ctor as { prototype?: unknown }).prototype;
+
+  if (typeof prototype !== 'object' || prototype === null) {
+    return undefined;
+  }
+
+  // Read off a plain record rather than as a method, which is what it is: an accessor
+  // to be invoked with a receiver of this module's choosing.
+  const descriptor = Object.getOwnPropertyDescriptor(prototype, 'code') as
+    { get?: unknown } | undefined;
+  const getter = descriptor?.get;
+
+  return typeof getter === 'function'
+    ? (getter as (this: unknown) => unknown)
+    : undefined;
+})();
+
+function isDOMExceptionInstance(value: unknown): boolean {
+  if (domExceptionCodeGetter === undefined || typeof value !== 'object') {
+    return false;
+  }
+
+  try {
+    Reflect.apply(domExceptionCodeGetter, value, []);
+
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * `Error.isError` where the runtime provides it (ES2026; Node 24+, recent Bun and
+ * browsers). Read once, typed here because the compiler's lib target predates it.
+ */
+const errorIsError = (
+  Error as unknown as { isError?: (value: unknown) => value is Error }
+).isError;
+
+/**
+ * Coerce whatever was thrown or rejected with into an `Error`.
+ *
+ * `throw` accepts any value and a promise can reject with any value, so a failure path
+ * must not assume it was handed an `Error`. Reading `.message` off `null` raises a
+ * `TypeError` of its own, and on a reporting path that one escapes into the caller that
+ * was only trying to report a failure.
+ *
+ * Shared rather than per-module: `safe-handle-callback`, `Logger` sinks, `Logger` event
+ * handlers, `LifecycleManager`, and the HTTP client's adapters all need the same
+ * guarantee, and a second copy would drift.
+ *
+ * **An `Error` is returned unchanged** - same identity, `stack`, `message`, and `cause` -
+ * so a caller that only ever throws `Error`s sees nothing new. "An `Error`" is not only
+ * `instanceof Error`: an error built in another realm - a `vm` context, an iframe, a
+ * jsdom window - has a different `Error` constructor and fails `instanceof` while being
+ * an error in every way the caller cares about, so its internal brand is checked too.
+ *
+ * **Anything else becomes `Non-error value thrown: <description>`**, with the original
+ * value kept on `cause`. The prefix is the point: it says the failure path was handed
+ * something that was never an `Error`, which a bare `String(value)` would have disguised.
+ * Read `cause`, not the message, to recover the thrown value.
+ */
+export function toError(value: unknown): Error {
+  let description: string;
+
+  try {
+    if (isErrorValue(value)) {
+      return value;
+    }
+
+    description = typeof value === 'string' ? value : String(value);
+  } catch {
+    // `String()` is what reaches here: it invokes `toString`/`Symbol.toPrimitive`, which
+    // are ordinary properties this module does not own. `isErrorValue` guards itself, so
+    // the check above cannot throw - but the guard stays, because the value that makes
+    // that check need one (a revoked `Proxy`) is the same value that makes `String()`
+    // throw a line later.
+    description = 'unknown value';
+  }
+
+  // The value itself is kept as the cause: the description is lossy, and for a value
+  // whose `toString` threw it carries nothing at all.
+  return new Error(`Non-error value thrown: ${description}`, { cause: value });
+}
+
+/**
+ * Describe any thrown or rejected value as a single-line string, without ever throwing.
+ *
+ * `toError` guarantees an `Error` *object*, not a readable one: it returns an `Error`
+ * instance unchanged — deliberately, so the original identity, `stack`, and `cause`
+ * survive for a caller that needs them — and `message` is an ordinary property that a
+ * subclass or a `Proxy` can turn into an accessor that throws. So `toError(value).message`
+ * is still an unguarded read, and on a reporting path that throw escapes into the caller
+ * that was only trying to report a failure.
+ *
+ * This is the pairing for the common case: normalize, then read, both guarded. Reach for
+ * it anywhere a failure has to become text — a `console.error`, a template literal, a log
+ * line — and for `toError` only when the `Error` object itself is what you need.
+ *
+ * For the full multi-line rendering of an error's `name`, `code`, `additionalInfo`, and
+ * `stack`, see `errorToString` in `error-to-string`, which is guarded the same way.
+ *
+ * @returns The value's message, or a placeholder when it cannot be read. Never throws.
+ */
+export function describeError(value: unknown): string {
+  try {
+    const message: unknown = toError(value).message;
+
+    return typeof message === 'string' ? message : String(message);
+  } catch {
+    // `message` may be an accessor that throws, and a non-string `message` may be an
+    // object whose `toString` throws in turn.
+    return '<error message could not be read>';
+  }
+}

@@ -6,9 +6,14 @@
  * everything that depends on it. Importing must stay safe, and nothing may be left
  * half-installed.
  */
+import { captureConsoleError } from './capture-console-error';
 
 // Only dynamic imports below (the global must be sealed first), so make this a module.
 export {};
+
+// `safe-handle-callback` writes an unclaimed report to `console.error`; the harness
+// treats any stderr output as a crash, so it is collected and reported instead.
+const consoleErrors = captureConsoleError();
 
 const globalRecord = globalThis as unknown as Record<string, unknown>;
 
@@ -55,6 +60,7 @@ try {
 
 process.stdout.write(
   JSON.stringify({
+    consoleErrors,
     didImportThrow,
     installResult,
     isPolyfilled,

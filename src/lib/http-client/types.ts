@@ -43,6 +43,15 @@ export interface AdapterRequest {
   attemptNumber?: number;
   /** Passed by the client so NodeAdapter can populate StreamResponseInfo. */
   requestID?: string;
+  /**
+   * The resolved URL of the original request, before any redirect hop. Passed by the
+   * client so an adapter can tell a hop to another origin from the request the caller
+   * addressed. Every network adapter withholds URL userinfo on such a hop, and
+   * `NodeAdapter` also withholds its configured client certificate and SNI override
+   * rather than presenting them to a host the caller never named.
+   * Absent when an adapter is driven directly.
+   */
+  initialURL?: string;
 }
 
 export interface AdapterResponse {
@@ -156,6 +165,61 @@ export interface AdapterResponse {
    * failures carried via `isStreamError`.
    */
   errorCause?: Error;
+  /**
+   * Settles when the request **body** finishes going out, for a response that
+   * arrived while it was still being written. Advisory: it never makes a response
+   * a failure, and it never rejects.
+   *
+   * Absent for an ordinary REST endpoint, which reads and processes the whole
+   * upload before answering - by then the body is already out. This is for the
+   * uncommon shapes where the answer can come first: early-ack, unbuffered and
+   * duplex endpoints.
+   *
+   * An endpoint with request buffering disabled answers while the upload is still
+   * going, and what happens to the body afterwards was invisible to the caller.
+   * It can fail - `serializeMultipartFormData` rejects when a `File` yields fewer
+   * bytes than its `Blob.size`, putting a body on the wire short of its own
+   * `Content-Length` with no transport failure anywhere - or be cut short by the
+   * adapter's own stall watchdog, seconds after the caller already read a clean
+   * `2xx`. Resolves with that failure, or with `undefined` when the body went out
+   * in full.
+   *
+   * A promise rather than a plain error field because the answer usually does not
+   * exist yet: the response is complete and is delivered immediately, and the
+   * upload settles later. Waiting for it before resolving is what this must not
+   * do - it turned a `413` that stopped reading into a network error with the
+   * server's explanation dropped, and let an abort during the wait discard a
+   * response that had already arrived in full.
+   *
+   * Present on every bodied request, from the moment the request has a body
+   * rather than from the first byte written - so an abort before the writer
+   * starts is reported here too, instead of leaving the field absent and
+   * `await` answering `undefined`. Not only the requests whose writer was still
+   * running when the response resolved, so presence does not mean the upload
+   * outlived the answer. On the
+   * ordinary shape, where the body went out long before the response came back,
+   * it resolves with `undefined`. A writer that failed just before the response
+   * arrived is still reported through it, which is why it is not gated on the
+   * writer still being live.
+   *
+   * Nothing here affects `isFailed`, `isNetworkError`, retries, or the status,
+   * and every such failure is still reported on the global `'error'` channel
+   * whether or not anyone awaits this.
+   *
+   * An adapter that sets this must settle it in bounded time. `HTTPClient` waits on
+   * it before the next redirect hop and before a retry, so that one body is not
+   * written twice at once. The wait is bounded by the request's `timeout` as a
+   * stall bound: an upload that reports no progress through `onUploadProgress` for
+   * that long without settling fails the request as a timeout rather than
+   * dispatching a second upload beside one that may still be going out, and the
+   * broken contract is reported on the global `'error'` channel. An upload that
+   * keeps reporting progress is never cut, however long it takes. `NodeAdapter`
+   * reports progress as it writes and settles through its own stall watchdog; a
+   * custom adapter that reports no progress gets the bound flat, and one that never
+   * settles the field turns every followed `307`/`308` and every retry into a
+   * timeout.
+   */
+  requestBodySettled?: Promise<Error | undefined>;
 }
 
 // --- Response streaming ---
@@ -164,14 +228,57 @@ export interface AdapterResponse {
  * Minimal write-capable stream interface. Structurally matches Node.js Writable
  * without importing from 'node:stream', keeping this file isomorphic.
  */
+/**
+ * The subset of a Node `Writable` the adapter drives.
+ *
+ * **Reporting a failure.** A write that fails is expected to surface either through the
+ * callback given to `write`/`end` or as an `'error'` event - which is what a Node stream
+ * does. The event often arrives after the request has already settled and its own
+ * listeners are gone, so the adapter keeps a listener attached across that gap to stop it
+ * becoming an uncaught exception. The listener is released when the error or `'close'`
+ * arrives, after roughly one second with neither, or after roughly five seconds total.
+ * A later request can install a fresh listener; see the HTTP client documentation for
+ * the exact lifetime rules.
+ *
+ * **Emit `'close'` when finished.** That is how the adapter learns nothing further is
+ * coming and releases the listener. An implementation that emits neither an `'error'` nor
+ * a `'close'` keeps the listener only until the bounded timers above expire.
+ */
 export interface WritableLike {
   write(chunk: Uint8Array | string, cb?: (err?: Error | null) => void): boolean;
-  end(cb?: () => void): void;
+  /**
+   * The callback receives an error when the stream could not be finished - a write that
+   * failed destroys it, so `end` reports here rather than succeeding. Ignoring the
+   * argument settles a broken write as a success.
+   */
+  end(cb?: (err?: Error | null) => void): void;
   on(event: 'error', listener: (err: Error) => void): this;
   on(event: 'close', listener: () => void): this;
   on(event: 'drain', listener: () => void): this;
   once(event: 'drain', listener: () => void): this;
   destroy(error?: Error): void;
+  /**
+   * Listener removal. Optional so an existing implementation still satisfies this type,
+   * but define one: the adapter attaches listeners for the life of a request and takes
+   * them off again afterwards, and with neither method it has no way to. It then attaches
+   * one permanent listener per event to the writable and registers each request behind
+   * that, rather than adding one per request to a writable reused across many of them.
+   * Behaviour is the same either way; the listener is what defining one saves. Either
+   * name works - both are `EventEmitter`'s, and a Node stream has both.
+   */
+  off?(
+    event: 'drain' | 'error' | 'close',
+    listener: (() => void) | ((err: Error) => void),
+  ): unknown;
+  removeListener?(
+    event: 'drain' | 'error' | 'close',
+    listener: (() => void) | ((err: Error) => void),
+  ): unknown;
+  /**
+   * Set by Node-style streams once the stream has errored. Read as a second signal, for
+   * a runtime that destroys the stream without passing the error to `end`'s callback.
+   */
+  errored?: Error | null;
 }
 
 /**
@@ -462,6 +569,23 @@ export interface HTTPResponse<T = unknown> {
    * `isStreamError`.
    */
   isStreamError: boolean;
+  /**
+   * Settles when the request body finishes going out. Present on every bodied
+   * request, not only the ones whose upload was still running when the response
+   * arrived - so presence says nothing about which of the two came first, and on
+   * the ordinary shape it resolves with `undefined`. See
+   * {@link AdapterResponse.requestBodySettled}.
+   *
+   * Advisory only, and it never rejects: this response succeeded as far as the
+   * client is concerned - `isFailed`, `isNetworkError` and the status are
+   * untouched - and a caller that ignores it sees exactly what it saw before. A
+   * caller that needs to know its upload actually arrived awaits this and checks
+   * for an `Error`. Only `NodeAdapter` reports it today: `FetchAdapter` cannot,
+   * since `fetch()` exposes neither upload progress nor the moment the body finished,
+   * and on an adapter that does not set it the client does not wait before a
+   * followed `307`/`308` hop or a retry.
+   */
+  requestBodySettled?: Promise<Error | undefined>;
 }
 
 // --- Error ---
@@ -596,7 +720,9 @@ export type RequestPhase =
   | { type: 'initial' }
   | {
       type: 'retry';
+      /** Global adapter-attempt number, including redirect hops. */
       attempt: number;
+      /** Highest global adapter-attempt number available to this retry loop. */
       maxAttempts: number;
       /**
        * When set, this policy retry applies after this redirect hop (same fields as

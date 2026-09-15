@@ -5,6 +5,7 @@ import {
   ErrTmpDirCleanupFailedNotEmpty,
   ErrTmpDirConfigErrorBaseDirectory,
   ErrTmpDirConfigErrorMaxTries,
+  ErrTmpDirConfigErrorNamePart,
   ErrTmpDirInitializeMaxTriesExceeded,
   ErrTmpDirNotInitialized,
   ErrTmpDirWasCleanedUp,
@@ -39,6 +40,30 @@ describe('TmpDir', () => {
     expect(parts[0]).toBe('tmp');
     expect(parts[1]).toBe(process.pid.toString());
     expect(parts[2].length).toBe(12);
+  });
+
+  test('refuses a prefix or postfix that could leave baseDirectory', () => {
+    // `path.join(baseDirectory, '../escape-<pid>-<random>')` normalizes to a sibling of
+    // `baseDirectory`, and `initialize()` created it there - with `unsafeCleanup`, the
+    // later cleanup was a recursive delete outside the one directory this class promises
+    // to stay in. Refused at construction, as `baseDirectory` is.
+    for (const part of ['../escape', 'a/b', 'a\\b', 'a\0b', 'a\nb']) {
+      expect(() => new TmpDir({ prefix: part })).toThrow(
+        ErrTmpDirConfigErrorNamePart,
+      );
+      expect(() => new TmpDir({ postfix: part })).toThrow(
+        ErrTmpDirConfigErrorNamePart,
+      );
+    }
+
+    // `..` alone is only ever joined with `-` and the pid, never a segment of its own.
+    expect(() => new TmpDir({ prefix: '..', postfix: '..' })).not.toThrow();
+
+    try {
+      new TmpDir({ postfix: 'a/b' });
+    } catch (error) {
+      expect((error as ErrTmpDirConfigErrorNamePart).option).toBe('postfix');
+    }
   });
 
   test('should create a temporary directory with the specified prefix and postfix', async () => {
@@ -86,6 +111,67 @@ describe('TmpDir', () => {
     expect(err).toBeInstanceOf(ErrTmpDirCleanupFailedNotEmpty);
   });
 
+  test('safe cleanup removes an empty directory', async () => {
+    // `fs.rm` without `recursive` refuses a directory outright with `ERR_FS_EISDIR`, empty
+    // or not, so the safe path could never complete: every `cleanup()` on the default
+    // configuration reported an unexpected error for a directory with nothing in it.
+    const anotherTempDir = await createTempDir({
+      baseDirectory: tempDir.path,
+    });
+
+    const dirPath = anotherTempDir.path;
+
+    expect((await fs.stat(dirPath)).isDirectory()).toBe(true);
+
+    await anotherTempDir.cleanup();
+
+    let doesDirExist = true;
+
+    try {
+      await fs.stat(dirPath);
+    } catch {
+      doesDirExist = false;
+    }
+
+    expect(doesDirExist).toBe(false);
+    expect(() => anotherTempDir.path).toThrow(ErrTmpDirWasCleanedUp);
+  });
+
+  test('cleanup of a directory already gone counts as done', async () => {
+    // Gone already is the state cleanup was asked to reach. Reported as an unexpected
+    // error, it also never marked the object cleaned up, so every later `cleanup()` threw
+    // again and it could not reach a terminal state.
+    const anotherTempDir = await createTempDir({
+      baseDirectory: tempDir.path,
+    });
+
+    const dirPath = anotherTempDir.path;
+
+    await fs.rm(dirPath, { recursive: true, force: true });
+
+    await anotherTempDir.cleanup();
+
+    expect(() => anotherTempDir.path).toThrow(ErrTmpDirWasCleanedUp);
+
+    // Terminal: a second cleanup has nothing to do and nothing to complain about.
+    await anotherTempDir.cleanup();
+  });
+
+  test('unsafe cleanup of a directory already gone counts as done too', async () => {
+    const anotherTempDir = await createTempDir({
+      unsafeCleanup: true,
+      baseDirectory: tempDir.path,
+    });
+
+    const dirPath = anotherTempDir.path;
+
+    await fs.rm(dirPath, { recursive: true, force: true });
+
+    await anotherTempDir.cleanup();
+
+    expect(() => anotherTempDir.path).toThrow(ErrTmpDirWasCleanedUp);
+  });
+
   test('unsafeCleanup with a non-empty directory with unsafeCleanup set true', async () => {
     const anotherTempDir = await createTempDir({
       unsafeCleanup: true,
@@ -111,6 +197,123 @@ describe('TmpDir', () => {
       doesFileExist = false;
     }
     expect(doesFileExist).toBe(false);
+  });
+
+  test('a name that already exists is skipped rather than adopted', async () => {
+    // Stat-then-mkdir with `recursive: true` adopted a directory another process created
+    // between the two calls. An exclusive create refuses it and tries the next name.
+    const first = await createTempDir({ baseDirectory: tempDir.path });
+
+    const firstName = path.basename(first.path);
+    let calls = 0;
+
+    const second = new TmpDir({ baseDirectory: tempDir.path });
+    const tampered = second as unknown as { generateTempDirName: () => string };
+    const original = tampered.generateTempDirName.bind(second);
+
+    tampered.generateTempDirName = (): string => {
+      calls++;
+
+      return calls === 1 ? firstName : original();
+    };
+
+    await second.initialize();
+
+    expect(calls).toBe(2);
+    expect(second.path).not.toBe(first.path);
+    expect((await fs.stat(second.path)).isDirectory()).toBe(true);
+
+    await second.cleanup();
+    await first.cleanup();
+  });
+
+  test('two initialize() calls on one instance create one directory', async () => {
+    // The exclusive create closes the race between processes; two calls on one instance
+    // raced each other instead, each creating a leaf, with the loser's path overwritten
+    // and orphaned. The second call now joins the first.
+    const dir = new TmpDir({ baseDirectory: tempDir.path });
+    const spied = dir as unknown as { generateTempDirName: () => string };
+    const original = spied.generateTempDirName.bind(dir);
+    let names = 0;
+
+    spied.generateTempDirName = (): string => {
+      names++;
+
+      return original();
+    };
+
+    await Promise.all([dir.initialize(), dir.initialize(), dir.initialize()]);
+
+    expect(names).toBe(1);
+    expect((await fs.stat(dir.path)).isDirectory()).toBe(true);
+
+    await dir.cleanup();
+  });
+
+  test('cleanup() during an in-flight initialize() removes the directory', async () => {
+    // `isInitialized` is set at the *end* of `createTempDir`, so for the whole of that
+    // call `cleanup()` saw both flags false and removed nothing - and then the directory
+    // appeared with nothing left to remove it. `cleanup()` now joins the create first.
+    // Its own base, so what is counted afterwards is only this test's leaf.
+    const base = path.join(tempDir.path, 'cleanup-during-initialize');
+    const dir = new TmpDir({ baseDirectory: base });
+
+    const [, cleanupResult] = await Promise.allSettled([
+      dir.initialize(),
+      dir.cleanup(),
+    ]);
+
+    expect(cleanupResult.status).toBe('fulfilled');
+    // Nothing orphaned: the leaf `initialize()` created was removed, not left behind for
+    // an OS reaper to find.
+    expect(await fs.readdir(base)).toEqual([]);
+  });
+
+  test('cleanup() joins an initialize() retried after a failed one', async () => {
+    // The in-flight slot is cleared by `initialize()`'s own `.finally` before `cleanup()`
+    // resumes, so a create that fails and is immediately retried left `cleanup()` looking
+    // at `null` with nothing initialized - it no-opped, the retry then succeeded, and the
+    // directory it made was never removed. Waiting for the *last* create, not the first,
+    // is what closes that.
+    const base = path.join(tempDir.path, 'cleanup-during-retry');
+    const dir = new TmpDir({ baseDirectory: base });
+
+    const original = (dir as unknown as { createTempDir: () => Promise<void> })
+      .createTempDir;
+    let calls = 0;
+
+    (dir as unknown as { createTempDir: () => Promise<void> }).createTempDir =
+      function patched(this: unknown): Promise<void> {
+        calls++;
+
+        if (calls === 1) {
+          return Promise.reject(new Error('create failed'));
+        }
+
+        return original.call(this);
+      };
+
+    const [retry] = await Promise.allSettled([
+      dir.initialize().catch(() => dir.initialize()),
+      dir.cleanup(),
+    ]);
+
+    // The retry is refused rather than left to create a directory after the only call
+    // that would have removed it has already returned.
+    expect(retry.status).toBe('rejected');
+    expect(calls).toBe(1);
+    // Nothing under the base either way: the failed create made nothing, and the refused
+    // retry never ran to make anything.
+    expect(await fs.readdir(base).catch(() => [])).toEqual([]);
+  });
+
+  test('creates a base directory that is not there yet', async () => {
+    const base = path.join(tempDir.path, 'nested', 'base');
+    const dir = await createTempDir({ baseDirectory: base });
+
+    expect(dir.path.startsWith(base)).toBe(true);
+
+    await dir.cleanup();
   });
 
   test('maxTries should error when exceeded', async () => {

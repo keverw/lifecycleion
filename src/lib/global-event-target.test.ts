@@ -48,13 +48,15 @@ describe('installGlobalEventTarget under Bun', () => {
       );
     };
 
-    globalThis.addEventListener('reportError', listener);
+    globalThis.addEventListener('lifecycleion-test-event', listener);
 
     globalThis.dispatchEvent(
-      new ErrorEvent('reportError', { error: new Error('native dispatch') }),
+      new ErrorEvent('lifecycleion-test-event', {
+        error: new Error('native dispatch'),
+      }),
     );
 
-    globalThis.removeEventListener('reportError', listener);
+    globalThis.removeEventListener('lifecycleion-test-event', listener);
 
     expect(received).toEqual(['native dispatch']);
   });

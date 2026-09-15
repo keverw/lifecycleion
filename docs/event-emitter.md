@@ -19,6 +19,7 @@ A lightweight, type-safe event emitter implementation that works in both browser
   - [`listenerCount(event: string): number`](#listenercountevent-string-number)
   - [`clear(event?: string): void`](#clearevent-string-void)
 - [Error Handling](#error-handling)
+  - [Overriding Where Handler Failures Go](#overriding-where-handler-failures-go)
 - [Memory Management](#memory-management)
 
 <!-- tocstop -->
@@ -122,6 +123,10 @@ Emits an event with optional data.
 
 - Handles both synchronous and asynchronous event handlers
 - Catches and logs errors from handlers
+- Snapshots the listeners present when each emission starts. Removing or clearing a
+  listener during a callback does not skip it in the current emission, and a listener
+  added during dispatch waits until a later emission. A nested `emit()` is a new emission
+  and takes its own current snapshot.
 
 ### `hasListener(event: string, callback: Function): boolean`
 
@@ -146,26 +151,76 @@ Removes event listeners.
 
 ## Error Handling
 
-The emitter automatically catches and reports errors from both synchronous and asynchronous event handlers using the global `'reportError'` event mechanism:
+The emitter automatically catches and reports errors from both synchronous and asynchronous event handlers on the global `'error'` event channel:
 
 ```typescript
 // Listen for errors
-globalThis.addEventListener('reportError', (event) => {
+globalThis.addEventListener('error', (event) => {
+  // Claim the report, so it is not written to the console as well
+  event.preventDefault();
+
   console.error('Event handler error:', event.error);
 });
 
 // Sync error handling
 emitter.on('test', () => {
   throw new Error('Something went wrong');
-}); // Error will be caught and reported via reportError event
+}); // Error will be caught and reported on the 'error' channel
 
 // Async error handling
 emitter.on('test', async () => {
   throw new Error('Async error');
-}); // Promise rejection will be caught and reported via reportError event
+}); // Promise rejection will be caught and reported on the 'error' channel
 ```
 
 The error messages include the event name and detailed error information, making debugging easier.
+
+### Overriding Where Handler Failures Go
+
+The global `'error'` channel is not always the right destination. An emitter whose own
+events are logged can feed its handler failures straight back into itself: a failing
+`'logger'` handler would be reported, which logs, which emits again, which fails again.
+
+`EventEmitterProtected` therefore exposes the reporting step as a `protected` hook that a
+subclass can override:
+
+```typescript
+protected handleEventHandlerFailure(
+  event: string,
+  error: unknown,
+  data?: unknown,
+): void;
+```
+
+The default calls `reportCallbackError(...)` from
+[safe-handle-callback](./safe-handle-callback.md), which is what puts the failure on the
+global `'error'` channel. Override it to send failures somewhere that cannot loop back:
+
+```typescript
+class MyEmitter extends EventEmitterProtected {
+  protected override handleEventHandlerFailure(
+    event: string,
+    error: unknown,
+    data?: unknown,
+  ): void {
+    // `error` is `unknown` on purpose: `throw` and promise rejection both accept any
+    // value, so an override must not assume it was handed an `Error`.
+    metrics.increment('handler_failure', {
+      event,
+      reason: describeError(error),
+      payload: data,
+    });
+  }
+}
+```
+
+The optional `data` is the value emitted to the failing handler, including for an async
+rejection. Two rules for an override: it must not throw - it runs on the failure path and
+there is nothing above it left to catch - and it must not assume `error` is an `Error`. Use
+[`describeError`](./to-error.md#describeerror), which satisfies both.
+
+[`Logger`](./logger.md) overrides this exact hook for the loop described above, routing
+its own `'logger'` handler failures to its separate asynchronous diagnostic channel.
 
 ## Memory Management
 

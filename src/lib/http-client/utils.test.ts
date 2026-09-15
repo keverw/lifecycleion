@@ -17,6 +17,7 @@ import {
   resolveAbsoluteURLForRuntime,
   scalarHeader,
   serializeBody,
+  stripCrossOriginURLCredentials,
 } from './utils';
 
 const originalXMLHttpRequest = (globalThis as Record<string, unknown>)
@@ -248,6 +249,23 @@ describe('resolveAbsoluteURL', () => {
 
   test('leaves path-only url unchanged when baseURL is missing', () => {
     expect(resolveAbsoluteURL('/only')).toBe('/only');
+  });
+});
+
+describe('stripCrossOriginURLCredentials', () => {
+  test('strips a protocol-relative target when the initial URL is unparseable', () => {
+    expect(
+      stripCrossOriginURLCredentials(
+        '//user:secret@evil.test/collect',
+        'not a URL',
+      ),
+    ).toBe('//evil.test/collect');
+  });
+
+  test('does not rewrite a credential-free protocol-relative target', () => {
+    expect(
+      stripCrossOriginURLCredentials('//cdn.test/a/../asset', 'not a URL'),
+    ).toBe('//cdn.test/a/../asset');
   });
 });
 

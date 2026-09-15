@@ -1,6 +1,6 @@
 {
   "name": "lifecycleion",
-  "version": "0.0.21",
+  "version": "1.0.0",
   "type": "module",
   "description": "A collection of foundational TypeScript utilities for managing application lifecycle, logging, retries, events, and common programming patterns",
   "exports": {
@@ -33,6 +33,11 @@
       "types": "./dist/lib/curly-brackets.d.ts",
       "import": "./dist/lib/curly-brackets.js",
       "require": "./dist/lib/curly-brackets.cjs"
+    },
+    "./datamask": {
+      "types": "./dist/lib/datamask.d.ts",
+      "import": "./dist/lib/datamask.js",
+      "require": "./dist/lib/datamask.cjs"
     },
     "./deep-clone": {
       "types": "./dist/lib/deep-clone.d.ts",
@@ -159,6 +164,16 @@
       "import": "./dist/lib/tmp-dir.js",
       "require": "./dist/lib/tmp-dir.cjs"
     },
+    "./stringify-value": {
+      "types": "./dist/lib/stringify-value.d.ts",
+      "import": "./dist/lib/stringify-value.js",
+      "require": "./dist/lib/stringify-value.cjs"
+    },
+    "./to-error": {
+      "types": "./dist/lib/to-error.d.ts",
+      "import": "./dist/lib/to-error.js",
+      "require": "./dist/lib/to-error.cjs"
+    },
     "./serialize-error": {
       "types": "./dist/lib/serialize-error/index.d.ts",
       "import": "./dist/lib/serialize-error/index.js",
@@ -270,6 +285,7 @@
     "eslint-plugin-unicorn": "^62.0.0",
     "markdown-toc-gen": "^1.2.0",
     "prettier": "^3.9.6",
+    "tldts": "^7.4.10",
     "tsup": "^8.5.1",
     "typescript": "^5.9.3",
     "typescript-eslint": "^8.67.0"
@@ -277,14 +293,20 @@
   "dependencies": {
     "bson-objectid": "^2.0.4",
     "chalk": "^5.6.2",
-    "datamask": "^1.0.0",
     "date-fns": "^4.4.0",
     "find-my-way": "^9.8.0",
     "qs": "^6.15.3",
     "string-width": "^8.2.2",
-    "tldts": "^7.4.10",
     "tr46": "^6.0.0",
     "ulid": "^3.0.2",
     "uuid": "^14.0.2"
+  },
+  "peerDependencies": {
+    "tldts": "^7.4.10"
+  },
+  "peerDependenciesMeta": {
+    "tldts": {
+      "optional": false
+    }
   }
 }

@@ -1,7 +1,35 @@
-import { describe, expect, test, beforeEach, spyOn } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test';
+import {
+  muteConsoleError,
+  restoreConsoleError,
+} from '../internal/console-test-utils';
 import { Logger } from './index';
 import { ArraySink } from './sinks/array';
+import { ConsoleSink } from './sinks/console';
 import { sleep } from '../sleep';
+import { safeHandleCallback } from '../safe-handle-callback';
+import { stringifyValue } from '../stringify-value';
+import type { LogEntry, LoggerDiagnostic, LogSink } from './types';
+
+function collectDiagnostics(seen: LoggerDiagnostic[]): LogSink {
+  return {
+    write: () => {},
+    writeDiagnostic: (diagnostic) => {
+      seen.push(diagnostic);
+    },
+  };
+}
+
+// These suites deliberately drive the paths that fall through to `console.error` when
+// nothing claims the report. Captured rather than printed so a real failure in the run
+// output still stands out; flip `DEBUG` in the helper to see them.
+beforeEach(() => {
+  muteConsoleError();
+});
+
+afterEach(() => {
+  restoreConsoleError();
+});
 
 describe('Logger', () => {
   let arraySink: ArraySink;
@@ -16,6 +44,18 @@ describe('Logger', () => {
   });
 
   describe('Basic Logging', () => {
+    test('a service or entity name cannot carry a line break into the sinks', () => {
+      // The text sinks frame these as `[service] [entity]` with nothing escaped, so a
+      // name holding a newline ended the line and started a second, forged, entry.
+      logger.service('svc\nfake').info('one');
+      logger.service('svc').entity('ent\r\n[error] forged').info('two');
+      logger.service('\t\u0000  ').info('three');
+
+      expect(arraySink.logs[0].serviceName).toBe('svc fake');
+      expect(arraySink.logs[1].entityName).toBe('ent [error] forged');
+      expect(arraySink.logs[2].serviceName).toBeUndefined();
+    });
+
     test('should log info message', () => {
       logger.info('Test info message');
 
@@ -173,6 +213,101 @@ describe('Logger', () => {
   });
 
   describe('Redaction', () => {
+    test('should fail closed when redactedKeys is not an array', async () => {
+      // The gate used to ask a caller-supplied list how long it was before asking what it
+      // was. A `Set`, or anything else without a numeric `length`, answered `undefined`,
+      // and `undefined > 0` read as "no redaction requested" - so the params went to every
+      // sink in the clear and `applyRedaction`'s own `Array.isArray` guard never ran,
+      // because nothing called it.
+      const diagnostics: LoggerDiagnostic[] = [];
+      const strictLogger = new Logger({
+        sinks: [arraySink],
+        diagnosticSinks: [collectDiagnostics(diagnostics)],
+      });
+
+      strictLogger.info('pw={{password}}', {
+        params: { password: 'hunter2' },
+        redactedKeys: new Set(['password']) as unknown as string[],
+      });
+      await Promise.resolve();
+
+      const log = arraySink.logs[0];
+
+      expect(log.message).not.toContain('hunter2');
+      expect(log.redactedParams?.password).not.toBe('hunter2');
+      expect(diagnostics.length).toBeGreaterThan(0);
+    });
+
+    test('should not hand a sink a redactedKeys it cannot read', () => {
+      // The copy is what makes `entry.redactedKeys` inert. When the copy itself fails,
+      // the caller's object used to be put on the entry with its traps still attached, so
+      // a sink reading `.length` or `.join(',')` threw inside `sink.write`.
+      const hostile = new Proxy(['password'], {
+        get(target, key, receiver) {
+          if (key === 'length') {
+            throw new Error('no length');
+          }
+
+          return Reflect.get(target, key, receiver);
+        },
+      });
+
+      const strictLogger = new Logger({
+        sinks: [arraySink],
+      });
+
+      strictLogger.info('pw={{password}}', {
+        params: { password: 'hunter2' },
+        redactedKeys: hostile,
+      });
+
+      const log = arraySink.logs[0];
+
+      expect(log.message).not.toContain('hunter2');
+      expect(log.redactedKeys).toBeUndefined();
+    });
+
+    test('should fail closed on a falsy redactedKeys that is not an array', async () => {
+      // `undefined` is the caller saying nothing about redaction. `null`, `0`, `''` and
+      // `false` are a supplied list that cannot name a key, which has to fail closed and
+      // say so - not hand the params back untouched under a name claiming they were masked.
+      for (const bogus of [null, 0, '', false]) {
+        const sink = new ArraySink();
+        const diagnostics: LoggerDiagnostic[] = [];
+        const strictLogger = new Logger({
+          sinks: [sink],
+          diagnosticSinks: [collectDiagnostics(diagnostics)],
+        });
+
+        strictLogger.info('pw={{password}}', {
+          params: { password: 'hunter2' },
+          redactedKeys: bogus as unknown as string[],
+        });
+        await Promise.resolve();
+
+        const log = sink.logs[0];
+
+        expect(log.message).not.toContain('hunter2');
+        expect(log.redactedParams?.password).toBeUndefined();
+        expect(diagnostics.length).toBeGreaterThan(0);
+      }
+    });
+
+    test('should treat an absent or empty redactedKeys as no redaction', () => {
+      for (const empty of [undefined, []]) {
+        const sink = new ArraySink();
+        const plainLogger = new Logger({ sinks: [sink] });
+
+        plainLogger.info('pw={{password}}', {
+          params: { password: 'hunter2' },
+          redactedKeys: empty,
+        });
+
+        expect(sink.logs[0].message).toBe('pw=hunter2');
+        expect(sink.logs[0].redactedParams).toBeUndefined();
+      }
+    });
+
     test('should redact specified keys', () => {
       logger.info('Login attempt', {
         params: {
@@ -199,14 +334,43 @@ describe('Logger', () => {
 
       const log = arraySink.logs[0];
 
-      expect(log.message).toBe('Login attempt for john with se*****23');
+      expect(log.message).toBe('Login attempt for john with ********3');
       expect(log.params?.password).toBe('secret123');
       expect(log.redactedParams?.password).not.toBe('secret123');
-      expect(log.redactedParams?.password).toBe('se*****23');
+      expect(log.redactedParams?.password).toBe('********3');
       expect(log.redactedParams?.username).toBe('john');
     });
 
-    test('should stringify non-string redacted values before rendering the message', () => {
+    test('a nested key hidden from enumeration is still masked in the template', () => {
+      // `redactValue()` leaves a non-enumerable key on an unchanged subtree, and
+      // `CurlyBrackets` resolves `{{user.password}}` by property read, so the two composed
+      // naively would print the secret. The logger normalizes along every redaction path
+      // before rendering, so the template sees the masked copy.
+      const user: Record<string, unknown> = { name: 'john' };
+
+      Object.defineProperty(user, 'password', {
+        value: 'secret123',
+        enumerable: false,
+        configurable: true,
+        writable: true,
+      });
+
+      logger.info('Login for {{user.name}} with {{user.password}}', {
+        params: { user },
+        redactedKeys: ['user.password'],
+      });
+
+      const log = arraySink.logs[0];
+
+      expect(log.message).not.toContain('secret123');
+      expect(log.message).toContain('john');
+      expect(
+        (log.redactedParams?.user as Record<string, unknown> | undefined)
+          ?.password,
+      ).not.toBe('secret123');
+    });
+
+    test('should keep the shape of a redacted container', () => {
       logger.info('Failure {{error}} / {{users}} / {{metadata}}', {
         params: {
           error: new Error('boom'),
@@ -218,10 +382,26 @@ describe('Logger', () => {
 
       const log = arraySink.logs[0];
 
-      expect(log.message).toBe('Failure Er******oom / a*b / [ob*********ct]');
-      expect(log.redactedParams?.error).toBe('Er******oom');
-      expect(log.redactedParams?.users).toBe('a*b');
-      expect(log.redactedParams?.metadata).toBe('[ob*********ct]');
+      // An `Error` has no shape worth rebuilding, so it is replaced outright rather than
+      // stringified and partially masked - a proportional mask of a rendered object
+      // keeps its ends, which is where a secret in a URL or a custom `toString` sits.
+      expect(log.redactedParams?.error).toBe('***REDACTED***');
+
+      // A plain object and an array keep their shape, with each leaf masked. Previously
+      // the array was joined to 'a,b' and masked as one string, so the edges of both
+      // elements survived into a single value.
+      expect(log.redactedParams?.users).toEqual([
+        '***REDACTED***',
+        '***REDACTED***',
+      ]);
+      expect(log.redactedParams?.metadata).toEqual({ key: '***REDACTED***' });
+
+      // The rendered message interpolates a container the same way it does an
+      // unredacted one - as JSON - so the masked leaves are visible in the message
+      // text rather than hidden behind '[object Object]'.
+      expect(log.message).toBe(
+        'Failure ***REDACTED*** / ["***REDACTED***","***REDACTED***"] / {"key":"***REDACTED***"}',
+      );
     });
 
     test('should use custom redaction function', () => {
@@ -298,7 +478,81 @@ describe('Logger', () => {
       expect(log.message).toBe('User Alice authenticated');
       expect(redacted.users[0].name).toBe('Alice');
       expect(redacted.users[0].password).not.toBe('secret123');
-      expect(redacted.users[0].password).toBe('se*****23');
+      expect(redacted.users[0].password).toBe('********3');
+    });
+
+    test('should redact every array element named by a wildcard', () => {
+      for (const entry of ['users[*].password', 'users.*.password']) {
+        arraySink.logs.length = 0;
+
+        logger.info('User {{users[1].name}} authenticated', {
+          params: {
+            users: [
+              { name: 'Alice', password: 'secret123' },
+              { name: 'Bob', password: 'secret456' },
+            ],
+          },
+          redactedKeys: [entry],
+        });
+
+        const redacted = arraySink.logs[0].redactedParams as any;
+
+        expect(arraySink.logs[0].message).toBe('User Bob authenticated');
+        expect(redacted.users[0].name).toBe('Alice');
+        expect(redacted.users[1].name).toBe('Bob');
+        expect(redacted.users[0].password).toBe('********3');
+        expect(redacted.users[1].password).toBe('********6');
+      }
+    });
+
+    test('should widen a wildcard element the way a concrete index does', () => {
+      // Every container a path descends through is normalized before the walk, so the
+      // walk and the template renderer are handed one set of keys rather than two - a key
+      // only property lookup can reach is dropped instead of being printed unmasked. That
+      // normalization follows the parsed path, so a wildcard has to reach the same
+      // containers a concrete index does, or it would cover strictly less than the path it
+      // generalizes.
+      for (const entry of ['users[*].password', 'users[0].password']) {
+        arraySink.logs.length = 0;
+
+        const hidden = new Proxy(
+          { name: 'Alice', password: 'secret123' },
+          { ownKeys: () => ['name'] },
+        );
+
+        logger.info('User {{users[0].name}} authenticated', {
+          params: { users: [hidden] },
+          redactedKeys: [entry],
+        });
+
+        const redacted = arraySink.logs[0].redactedParams as any;
+
+        expect(redacted.users[0].name).toBe('Alice');
+        // The element is replaced by a copy carrying exactly the keys enumeration can
+        // see, so the hidden one is neither masked nor printed. Left un-normalized, the
+        // original is handed back by reference and a sink reads `'secret123'` off it.
+        expect(redacted.users[0].password).toBeUndefined();
+        expect(arraySink.logs[0].message).not.toContain('secret123');
+      }
+    });
+
+    test('should read a wildcard over a plain object as the key spelled *', () => {
+      logger.info('Bag', {
+        params: {
+          users: {
+            '*': { password: 'secret123' },
+            alice: { password: 'secret456' },
+          },
+        },
+        redactedKeys: ['users.*.password'],
+      });
+
+      const redacted = arraySink.logs[0].redactedParams as any;
+
+      expect(redacted.users['*'].password).toBe('********3');
+      // Never widened across an object's keys: naming one field must not quietly mask
+      // the bag it sits in.
+      expect(redacted.users.alice.password).toBe('secret456');
     });
 
     test('should redact quoted bracket-key paths', () => {
@@ -319,7 +573,7 @@ describe('Logger', () => {
 
       expect(log.message).toBe('User Alice authenticated');
       expect(redacted.users[0]['display-name']).toBe('Alice');
-      expect(redacted.users[0]['password-hash']).toBe('se*****23');
+      expect(redacted.users[0]['password-hash']).toBe('********3');
     });
 
     test('should handle deeply nested redaction', () => {
@@ -515,7 +769,7 @@ describe('Logger', () => {
       expect(sink2.logs[0].message).toBe('Test message');
     });
 
-    test('should handle sink errors gracefully', () => {
+    test('should handle sink errors gracefully', async () => {
       // Spy on console.error to suppress error output during test
       const consoleErrorSpy = spyOn(console, 'error').mockImplementation(
         () => {},
@@ -537,8 +791,52 @@ describe('Logger', () => {
 
       expect(arraySink.logs.length).toBe(1);
 
-      // Verify error was logged
+      await Promise.resolve();
+
+      // The regular sinks are the diagnostic sinks when no separate set was supplied.
+      expect(arraySink.logs.at(-1)?.tags).toContain('lifecycleion-diagnostic');
+
+      // The failing sink also refused its diagnostic, so delivery ended at the console.
       expect(consoleErrorSpy).toHaveBeenCalled();
+
+      consoleErrorSpy.mockRestore();
+    });
+
+    test('adopts a rejection from a then-only sink write', async () => {
+      const consoleErrorSpy = spyOn(console, 'error').mockImplementation(
+        () => {},
+      );
+
+      // A thenable, not a `Promise`: `isPromise` is a then-check, and a thenable is not
+      // required to carry `.catch`. Calling `.catch` on this threw a `TypeError` that was
+      // then reported as the *sink's* failure, while the real rejection went unhandled.
+      const thenOnlySink = {
+        write: () => ({
+          then: (
+            _resolve: (value: void) => void,
+            reject: (reason: unknown) => void,
+          ) => {
+            reject(new Error('async sink failure'));
+          },
+        }),
+      };
+
+      const errorLogger = new Logger({
+        sinks: [thenOnlySink as never, arraySink],
+        callProcessExit: false,
+      });
+
+      errorLogger.info('Test message');
+
+      await new Promise((resolve) => setTimeout(resolve, 5));
+
+      const diagnostic = arraySink.logs.find((entry) =>
+        entry.tags?.includes('lifecycleion-diagnostic'),
+      );
+
+      expect(diagnostic).toBeDefined();
+      // The rejection the sink actually reported, not a `TypeError` about `.catch`.
+      expect(diagnostic?.message).toContain('async sink failure');
 
       consoleErrorSpy.mockRestore();
     });
@@ -777,6 +1075,530 @@ describe('Logger', () => {
       }
     });
 
+    test('describes an error event that carries neither an error nor a message', () => {
+      // `ErrorEvent.message` defaults to `''`, not `undefined`, so a `??` chain would
+      // accept the empty string and log an `Error` with no message at all.
+      const sink = new ArraySink();
+      const emptyLogger = new Logger({ sinks: [sink], callProcessExit: false });
+
+      emptyLogger.registerReportErrorListener();
+
+      try {
+        globalThis.dispatchEvent(new ErrorEvent('error', { cancelable: true }));
+      } finally {
+        emptyLogger.unregisterReportErrorListener();
+      }
+
+      expect(sink.logs.length).toBe(1);
+      expect(sink.logs[0].error).toBeInstanceOf(Error);
+      expect((sink.logs[0].error as Error).message).toBe(
+        'Unknown error reported by an error event',
+      );
+    });
+
+    test('survives an error event whose payload cannot be inspected', () => {
+      // The payload belongs to whoever dispatched the event. `instanceof` walks a
+      // prototype chain, which a revoked `Proxy` refuses, and rendering reads `stack`,
+      // which can be a throwing accessor. An escaping throw here would skip the
+      // cancellation below and, outside a browser, take the process down from inside the
+      // error-reporting path.
+      const { proxy, revoke } = Proxy.revocable({}, {});
+
+      revoke();
+
+      const hostileStack = new Error('hostile stack');
+
+      Object.defineProperty(hostileStack, 'stack', {
+        get(): never {
+          throw new Error('stack getter boom');
+        },
+      });
+
+      for (const payload of [proxy, hostileStack]) {
+        const sink = new ArraySink();
+        const hostileLogger = new Logger({
+          sinks: [sink],
+          callProcessExit: false,
+        });
+
+        hostileLogger.registerReportErrorListener();
+
+        const originalConsoleError = console.error;
+        console.error = (): void => {};
+
+        let wasNotCancelled = true;
+
+        try {
+          expect(() => {
+            wasNotCancelled = globalThis.dispatchEvent(
+              new ErrorEvent('error', { error: payload, cancelable: true }),
+            );
+          }).not.toThrow();
+        } finally {
+          console.error = originalConsoleError;
+          hostileLogger.unregisterReportErrorListener();
+        }
+
+        // Claimed, so the report is not written twice.
+        expect(wasNotCancelled).toBe(false);
+      }
+    });
+
+    test('keeps a non-Error payload reachable as a non-enumerable cause', () => {
+      const sink = new ArraySink();
+      const payloadLogger = new Logger({
+        sinks: [sink],
+        callProcessExit: false,
+      });
+
+      payloadLogger.registerReportErrorListener();
+
+      const payload = { code: 'E42' };
+
+      globalThis.dispatchEvent(
+        new ErrorEvent('error', {
+          error: payload,
+          message: 'Uncaught [object Object]',
+          cancelable: true,
+        }),
+      );
+
+      payloadLogger.unregisterReportErrorListener();
+
+      const logged = sink.logs[0].error as Error;
+
+      expect(logged.cause).toBe(payload);
+
+      // Non-enumerable, as the constructor form gives: an arbitrary payload must not
+      // start appearing in a JSON-serialized log entry.
+      expect(Object.keys(logged).includes('cause')).toBe(false);
+    });
+
+    test('cancels the event by default so the error is not also consoled', () => {
+      logger.registerReportErrorListener();
+
+      // Dispatched against the real global EventTarget: a stubbed dispatchEvent would
+      // return whatever the stub chose and would pass even without `cancelable: true`.
+      const wasNotCancelled = globalThis.dispatchEvent(
+        new ErrorEvent('error', {
+          error: new Error('Cancelled by the logger'),
+          cancelable: true,
+        }),
+      );
+
+      logger.unregisterReportErrorListener();
+
+      expect(wasNotCancelled).toBe(false);
+    });
+
+    test('leaves the event uncancelled when preventDefault is opted out', () => {
+      logger.registerReportErrorListener('Uncaught exception', {
+        preventDefault: false,
+      });
+
+      const wasNotCancelled = globalThis.dispatchEvent(
+        new ErrorEvent('error', {
+          error: new Error('Left for the console'),
+          cancelable: true,
+        }),
+      );
+
+      logger.unregisterReportErrorListener();
+
+      expect(wasNotCancelled).toBe(true);
+    });
+
+    test('logs an error event that carries only a message', () => {
+      const sink = new ArraySink();
+      const messageOnlyLogger = new Logger({
+        sinks: [sink],
+        callProcessExit: false,
+      });
+
+      messageOnlyLogger.registerReportErrorListener();
+
+      // Resource-load failures and some uncaught browser errors arrive with no `error`
+      // object at all, which must not log as `undefined`.
+      globalThis.dispatchEvent(
+        new ErrorEvent('error', {
+          message: 'Script error.',
+          cancelable: true,
+        }),
+      );
+
+      messageOnlyLogger.unregisterReportErrorListener();
+
+      expect(sink.logs.length).toBe(1);
+      expect(sink.logs[0].message).toContain('Script error.');
+    });
+
+    test('stops claiming reports once the logger is closed', async () => {
+      const sink = new ArraySink();
+      const closingLogger = new Logger({
+        sinks: [sink],
+        callProcessExit: false,
+      });
+
+      closingLogger.registerReportErrorListener();
+
+      await closingLogger.close();
+
+      expect(closingLogger.isReportErrorListenerRegistered()).toBe(false);
+
+      // A closed logger's handleLog is a no-op, so cancelling would leave the error with
+      // nowhere to go: not a sink, and not the console either.
+      const consoled: unknown[] = [];
+      const originalConsoleError = console.error;
+      console.error = (...args: unknown[]): void => {
+        consoled.push(args[0]);
+      };
+
+      try {
+        safeHandleCallback('afterCloseCallback', () => {
+          throw new Error('After close boom');
+        });
+      } finally {
+        console.error = originalConsoleError;
+      }
+
+      expect(sink.logs.length).toBe(0);
+      expect(consoled.length).toBe(1);
+      // `reportCallbackError` renders at the console rung, so the fall-through carries
+      // the rendered text rather than the wrapper error.
+      expect(String(consoled[0])).toContain('After close boom');
+    });
+
+    test('routes logger handler failures to diagnostics', async () => {
+      const seen: LoggerDiagnostic[] = [];
+      const handlerLogger = new Logger({
+        sinks: [new ArraySink()],
+        diagnosticSinks: [
+          {
+            write: () => {},
+            writeDiagnostic: (diagnostic) => {
+              seen.push(diagnostic);
+            },
+          },
+        ],
+        callProcessExit: false,
+      });
+
+      handlerLogger.on('logger', () => {
+        throw new Error('handler boom');
+      });
+
+      handlerLogger.info('kick it off');
+      await Promise.resolve();
+
+      expect(seen).toHaveLength(1);
+      expect(seen[0]?.event).toBe('logger');
+      expect(seen[0]?.error.message).toContain('handler boom');
+    });
+
+    test('survives a logger handler that throws a non-Error value', async () => {
+      const thrown: unknown[] = [
+        null,
+        undefined,
+        'boom',
+        42,
+        {
+          toString(): string {
+            throw new Error('hostile toString');
+          },
+        },
+      ];
+      const methods = [
+        'info',
+        'error',
+        'warn',
+        'success',
+        'notice',
+        'debug',
+        'raw',
+      ] as const;
+
+      for (const value of thrown) {
+        for (const method of methods) {
+          const seen: LoggerDiagnostic[] = [];
+          const nonErrorLogger = new Logger({
+            diagnosticSinks: [
+              {
+                write: () => {},
+                writeDiagnostic: (diagnostic) => {
+                  seen.push(diagnostic);
+                },
+              },
+            ],
+            callProcessExit: false,
+          });
+
+          nonErrorLogger.on('logger', () => {
+            throw value;
+          });
+
+          expect(() => {
+            nonErrorLogger[method]('kick it off');
+          }).not.toThrow();
+          await Promise.resolve();
+
+          expect(seen).toHaveLength(1);
+          expect(seen[0]?.error.message).toContain('Non-error value thrown');
+          expect((seen[0]?.error.cause as Error).cause).toBe(value);
+        }
+      }
+    });
+
+    test('survives a thrown value whose prototype chain cannot be walked', async () => {
+      const { proxy, revoke } = Proxy.revocable({}, {});
+      const seen: LoggerDiagnostic[] = [];
+
+      revoke();
+
+      const proxyLogger = new Logger({
+        diagnosticSinks: [
+          {
+            write: () => {},
+            writeDiagnostic: (diagnostic) => {
+              seen.push(diagnostic);
+            },
+          },
+        ],
+        callProcessExit: false,
+      });
+
+      proxyLogger.on('logger', () => {
+        // eslint-disable-next-line @typescript-eslint/only-throw-error -- the point of the test
+        throw proxy;
+      });
+
+      expect(() => {
+        proxyLogger.info('kick it off');
+      }).not.toThrow();
+      await Promise.resolve();
+
+      expect(seen).toHaveLength(1);
+      expect(seen[0]?.error.message).toContain(
+        'Non-error value thrown: unknown value',
+      );
+    });
+
+    test('survives a logger handler that rejects with a non-Error value', async () => {
+      const seen: LoggerDiagnostic[] = [];
+      const rejectingLogger = new Logger({
+        diagnosticSinks: [
+          {
+            write: () => {},
+            writeDiagnostic: (diagnostic) => {
+              seen.push(diagnostic);
+            },
+          },
+        ],
+        callProcessExit: false,
+      });
+
+      rejectingLogger.on('logger', async () => {
+        await Promise.resolve();
+
+        // eslint-disable-next-line @typescript-eslint/only-throw-error -- the point of the test
+        throw null;
+      });
+
+      rejectingLogger.info('kick it off');
+      await sleep(10);
+
+      expect(seen).toHaveLength(1);
+      expect(seen[0]?.error.message).toContain('Non-error value thrown: null');
+    });
+    test('does not cycle when an async logger event handler rejects', async () => {
+      const sink = new ArraySink();
+      const cyclingLogger = new Logger({
+        sinks: [sink],
+        callProcessExit: false,
+      });
+
+      cyclingLogger.registerReportErrorListener();
+
+      let handlerCalls = 0;
+
+      // An async rejection is reported in a later microtask, so it is not re-entrant and
+      // the listener's guard cannot see it. Before the failure of a logger handler was
+      // kept off the global channel, this cycled without bound: log, emit, reject,
+      // report, log again.
+      cyclingLogger.on('logger', async () => {
+        handlerCalls++;
+
+        await Promise.resolve();
+
+        throw new Error('async handler boom');
+      });
+
+      const originalConsoleError = console.error;
+      console.error = (): void => {};
+
+      try {
+        cyclingLogger.info('kick it off');
+
+        await sleep(50);
+      } finally {
+        console.error = originalConsoleError;
+        cyclingLogger.unregisterReportErrorListener();
+      }
+
+      expect(handlerCalls).toBe(1);
+    });
+
+    test('does not recurse when a logger event handler throws', () => {
+      const sink = new ArraySink();
+      const recursiveLogger = new Logger({
+        sinks: [sink],
+        callProcessExit: false,
+      });
+
+      recursiveLogger.registerReportErrorListener();
+
+      let handlerCalls = 0;
+
+      // Logging emits a 'logger' event. The failure of a 'logger' handler is kept off
+      // the global 'error' channel by handleEventHandlerFailure, so it never re-enters
+      // this listener: the handler runs exactly once per log call, not once more for a
+      // report of its own failure.
+      recursiveLogger.on('logger', () => {
+        handlerCalls++;
+
+        throw new Error('handler boom');
+      });
+
+      const originalConsoleError = console.error;
+      console.error = (): void => {};
+
+      try {
+        recursiveLogger.info('kick it off');
+      } finally {
+        console.error = originalConsoleError;
+        recursiveLogger.unregisterReportErrorListener();
+      }
+
+      // Exactly the one emit the log itself performed.
+      expect(handlerCalls).toBe(1);
+    });
+
+    test('re-entrancy guard turns away a report raised by a failing sink', () => {
+      // What the guard actually protects: a sink is user code, and one that drives
+      // safeHandleCallback with a failing callback reports on the same 'error' channel
+      // synchronously, while this listener is still logging. The nested report is left
+      // uncancelled and unlogged, so safe-handle-callback's console fall-through takes
+      // it once instead of feeding it back into the sink that is already failing.
+      const sink = new ArraySink();
+      const reentrantSink = {
+        write: (entry: unknown): void => {
+          sink.write(entry as Parameters<typeof sink.write>[0]);
+
+          safeHandleCallback('innerSinkCallback', () => {
+            throw new Error('inner boom');
+          });
+        },
+      };
+
+      const reentrantLogger = new Logger({
+        sinks: [reentrantSink],
+        callProcessExit: false,
+      });
+
+      reentrantLogger.registerReportErrorListener();
+
+      const consoled: unknown[] = [];
+      const originalConsoleError = console.error;
+      console.error = (...args: unknown[]): void => {
+        consoled.push(args[0]);
+      };
+
+      try {
+        safeHandleCallback('outerCallback', () => {
+          throw new Error('outer boom');
+        });
+      } finally {
+        console.error = originalConsoleError;
+        reentrantLogger.unregisterReportErrorListener();
+      }
+
+      // The outer report reached the sinks once, and did not loop.
+      expect(sink.logs.length).toBe(1);
+      expect(sink.logs[0].message).toContain('outer boom');
+
+      // The nested one went to the console instead, without this logger's formatting.
+      expect(consoled.length).toBe(1);
+      expect(String(consoled[0])).toContain('inner boom');
+    });
+
+    test('re-entrancy guard is shared when multiple loggers trigger render failures', () => {
+      const hostileValue = (): Record<string, unknown> => {
+        const value: Record<string, unknown> = {};
+
+        Object.defineProperty(value, 'token', {
+          get() {
+            throw new Error('accessor refused');
+          },
+          enumerable: true,
+        });
+
+        return value;
+      };
+      const capturedSinks = [new ArraySink(), new ArraySink()];
+      const listeners = capturedSinks.map((capturedSink) => {
+        const listener = new Logger({
+          sinks: [
+            {
+              write: (entry): void => {
+                capturedSink.write(entry);
+                stringifyValue({ user: hostileValue() });
+              },
+            },
+          ],
+          callProcessExit: false,
+        });
+
+        listener.registerReportErrorListener();
+        return listener;
+      });
+
+      const consoled: unknown[] = [];
+      const originalConsoleError = console.error;
+      console.error = (...args: unknown[]): void => {
+        consoled.push(args[0]);
+      };
+
+      try {
+        for (const message of ['outer boom one', 'outer boom two']) {
+          safeHandleCallback('outerCallback', () => {
+            throw new Error(message);
+          });
+        }
+      } finally {
+        console.error = originalConsoleError;
+
+        for (const listener of listeners) {
+          listener.unregisterReportErrorListener();
+        }
+      }
+
+      // Both top-level reports reach both listeners exactly once. Without a shared
+      // cross-logger guard, each sink's nested report re-enters the other logger too.
+      for (const capturedSink of capturedSinks) {
+        expect(capturedSink.logs.map((entry) => entry.message)).toEqual([
+          expect.stringContaining('outer boom one'),
+          expect.stringContaining('outer boom two'),
+        ]);
+      }
+
+      // Each listener's standalone render raises one nested report per top-level report.
+      // They terminate at the console, and the second top-level report proves the lease
+      // was released.
+      expect(consoled).toHaveLength(4);
+      expect(
+        consoled.every((entry) => String(entry).includes('Render failed')),
+      ).toBe(true);
+    });
+
     test('should register reportError listener', () => {
       const result = logger.registerReportErrorListener();
 
@@ -796,6 +1618,18 @@ describe('Logger', () => {
       const result = logger.unregisterReportErrorListener();
 
       expect(result).toBe('success');
+      expect(logger.isReportErrorListenerRegistered()).toBe(false);
+    });
+
+    test('should return closed and attach nothing after close()', async () => {
+      await logger.close();
+
+      const result = logger.registerReportErrorListener();
+
+      // A logger is never reopened, so a listener registered here could never log or
+      // cancel anything — it would just sit on globalThis keeping the logger and its
+      // sinks alive while reporting 'success' to a caller capturing nothing.
+      expect(result).toBe('closed');
       expect(logger.isReportErrorListenerRegistered()).toBe(false);
     });
 
@@ -926,6 +1760,78 @@ describe('Logger', () => {
       expect(wasCloseCalled).toBe(true);
     });
 
+    test('closes the sinks even when removeEventListener is gone', async () => {
+      // `close()` gives up the global listener before it closes the sinks. That call was
+      // unguarded, so a global that was usable at register time and is not at close time
+      // rejected `close()` before any sink saw it, leaving a file or pipe sink holding
+      // its handle for the life of the process.
+      let wasCloseCalled = false;
+
+      const customSink = {
+        write: () => {},
+        close: () => {
+          wasCloseCalled = true;
+        },
+      };
+
+      const closeLogger = new Logger({
+        sinks: [customSink],
+        callProcessExit: false,
+      });
+
+      closeLogger.registerReportErrorListener();
+
+      const original = globalThis.removeEventListener;
+
+      globalThis.removeEventListener = () => {
+        throw new Error('removeEventListener gone');
+      };
+
+      try {
+        await closeLogger.close();
+      } finally {
+        globalThis.removeEventListener = original;
+      }
+
+      expect(wasCloseCalled).toBe(true);
+      expect(closeLogger.isReportErrorListenerRegistered()).toBe(false);
+    });
+
+    test('keeps the registration when a live unregister could not take it off', async () => {
+      // Clearing the state unconditionally was right only on the `close()` path, where the
+      // listener is inert because `_closed` is set first. On a live logger it left the
+      // closure attached and still cancelling events while
+      // `isReportErrorListenerRegistered()` answered `false`, so the next `register` put a
+      // *second* one on and every reported error was logged twice.
+      const liveLogger = new Logger({ sinks: [], callProcessExit: false });
+
+      liveLogger.registerReportErrorListener();
+
+      const original = globalThis.removeEventListener;
+
+      globalThis.removeEventListener = () => {
+        throw new Error('removeEventListener gone');
+      };
+
+      let result: string;
+
+      try {
+        result = liveLogger.unregisterReportErrorListener();
+      } finally {
+        globalThis.removeEventListener = original;
+      }
+
+      // And said so. `'success'` claimed the listener was off while the closure went on
+      // receiving every global `'error'` and cancelling it, and it contradicted
+      // `isReportErrorListenerRegistered()` below - so a caller had no way to tell a
+      // removal that happened from one that did not. `'not_available'` is what the
+      // matching `register` answers for the same refusal.
+      expect(result).toBe('not_available');
+      expect(liveLogger.isReportErrorListenerRegistered()).toBe(true);
+
+      await liveLogger.close();
+    });
+
     test('should emit close event', async () => {
       const events: any[] = [];
 
@@ -938,121 +1844,6 @@ describe('Logger', () => {
       await logger.close();
 
       expect(events.length).toBe(1);
-    });
-  });
-
-  describe('Sink Error Handling', () => {
-    test('should handle synchronous errors from sinks', () => {
-      const errors: any[] = [];
-      const syncErrorSink = {
-        write: () => {
-          throw new Error('Sync write error');
-        },
-      };
-
-      const loggerWithErrorHandler = new Logger({
-        sinks: [syncErrorSink],
-        callProcessExit: false,
-        onSinkError: (error, context, sink) => {
-          errors.push({ error, context, sink });
-        },
-      });
-
-      loggerWithErrorHandler.info('Test message');
-
-      expect(errors.length).toBe(1);
-      expect(errors[0].error.message).toBe('Sync write error');
-      expect(errors[0].context).toBe('write');
-    });
-
-    test('should handle asynchronous errors from sinks via rejected promises', async () => {
-      const errors: any[] = [];
-      const asyncErrorSink = {
-        write: async () => {
-          await sleep(1);
-          throw new Error('Async write error');
-        },
-      };
-
-      const loggerWithErrorHandler = new Logger({
-        sinks: [asyncErrorSink],
-        callProcessExit: false,
-        onSinkError: (error, context, sink) => {
-          errors.push({ error, context, sink });
-        },
-      });
-
-      loggerWithErrorHandler.info('Test message');
-
-      // Wait for promise rejection to be handled
-      await sleep(10);
-
-      expect(errors.length).toBe(1);
-      expect(errors[0].error.message).toBe('Async write error');
-      expect(errors[0].context).toBe('write');
-    });
-
-    test('should handle mixed sync and async sinks with errors', async () => {
-      const errors: any[] = [];
-      const syncErrorSink = {
-        write: () => {
-          throw new Error('Sync error');
-        },
-      };
-      const asyncErrorSink = {
-        write: async () => {
-          await sleep(1);
-          throw new Error('Async error');
-        },
-      };
-      const workingSink = new ArraySink();
-
-      const loggerWithErrorHandler = new Logger({
-        sinks: [syncErrorSink, asyncErrorSink, workingSink],
-        callProcessExit: false,
-        onSinkError: (error, context, sink) => {
-          errors.push({ error, context, sink });
-        },
-      });
-
-      loggerWithErrorHandler.info('Test message');
-
-      // Wait for async promise rejection to be handled
-      await sleep(10);
-
-      // Should have caught both errors
-      expect(errors.length).toBe(2);
-      expect(errors[0].error.message).toBe('Sync error');
-      expect(errors[1].error.message).toBe('Async error');
-
-      // Working sink should still have logged the message
-      expect(workingSink.logs.length).toBe(1);
-      expect(workingSink.logs[0].message).toBe('Test message');
-    });
-
-    test('should fallback to console.error when no onSinkError is provided', async () => {
-      const consoleErrorSpy = spyOn(console, 'error');
-      const asyncErrorSink = {
-        write: async () => {
-          await sleep(1);
-          throw new Error('Unhandled async error');
-        },
-      };
-
-      const loggerWithoutErrorHandler = new Logger({
-        sinks: [asyncErrorSink],
-        callProcessExit: false,
-      });
-
-      loggerWithoutErrorHandler.info('Test message');
-
-      // Wait for promise rejection to be handled
-      await sleep(10);
-
-      expect(consoleErrorSpy).toHaveBeenCalled();
-      expect(consoleErrorSpy.mock.calls[0][0]).toContain(
-        'Unhandled async error',
-      );
     });
   });
 
@@ -1284,5 +2075,1267 @@ describe('Logger', () => {
       expect(arraySink.logs[1].serviceName).toBe('test-service');
       expect(arraySink.logs[1].entityName).toBeUndefined();
     });
+  });
+});
+
+describe('Logger - redaction and non-plain params', () => {
+  test('renders a Date and an Error param beside a redacted one', () => {
+    // The message is rendered from the redacted params, so a param flattened by
+    // redaction is a param the template cannot read. `{{error.message}}` going blank the
+    // moment any key is redacted is the case that matters most.
+    const sink = new ArraySink();
+    const logger = new Logger({ sinks: [sink], callProcessExit: false });
+
+    logger.info('{{when}} / {{failure.message}} / {{password}}', {
+      params: {
+        password: 'hunter2secret',
+        when: new Date('2020-01-01T00:00:00Z'),
+        failure: new Error('boom'),
+      },
+      redactedKeys: ['password'],
+    });
+
+    const entry = sink.logs[0];
+
+    expect(entry?.message).toContain('2020');
+    expect(entry?.message).toContain('boom');
+    expect(entry?.message).not.toContain('hunter2secret');
+
+    // The structured view a sink reads agrees with the rendered text.
+    expect(
+      (entry?.redactedParams?.['failure'] as Error | undefined)?.message,
+    ).toBe('boom');
+  });
+});
+
+describe('Logger - errorObject redaction reaches diagnostics, not the console', () => {
+  // `prepareErrorObjectLog` rendered the error with the library defaults, so the logger's
+  // own `redactFunction` did not apply and a redaction failure went to `console.error`
+  // even when the caller had supplied a handler - and did so *alongside* the params
+  // report, twice for one call, one of them uninterceptable.
+  test('a redaction failure while rendering the error reaches diagnostics', async () => {
+    const diagnostics: LoggerDiagnostic[] = [];
+    const consoleLines: string[] = [];
+    const realError = console.error;
+
+    console.error = (...args: unknown[]): void => {
+      consoleLines.push(String(args[0]));
+    };
+
+    try {
+      const error = new Error('boom') as Error & {
+        additionalInfo: unknown;
+        sensitiveFieldNames: unknown;
+      };
+
+      error.additionalInfo = { token: 'x' };
+      error.sensitiveFieldNames = 'not-a-list';
+
+      const logger = new Logger({
+        sinks: [new ArraySink()],
+        diagnosticSinks: [collectDiagnostics(diagnostics)],
+      });
+
+      logger.errorObject('prefix', error);
+      await Promise.resolve();
+
+      expect(diagnostics.map(({ path }) => path)).toEqual([
+        '<sensitiveFieldNames>',
+      ]);
+      expect(consoleLines).toEqual([]);
+    } finally {
+      console.error = realError;
+    }
+  });
+
+  test('the logger redactFunction applies to a rendered error too', () => {
+    // Otherwise the same value masks one way as a param and another way inside an error.
+    const sink = new ArraySink();
+    const logger = new Logger({
+      sinks: [sink],
+      redactFunction: () => '[CUSTOM]',
+    });
+
+    const error = new Error('boom') as Error & {
+      additionalInfo: unknown;
+      sensitiveFieldNames: unknown;
+    };
+
+    error.additionalInfo = { token: 'hunter2secret' };
+    error.sensitiveFieldNames = ['token'];
+
+    logger.errorObject('prefix', error);
+
+    expect(sink.logs[0]?.message).toContain('[CUSTOM]');
+    expect(sink.logs[0]?.message).not.toContain('hunter2secret');
+  });
+
+  test('a service or entity logger renders an error the same way', async () => {
+    // `LoggerService.errorObject` called the shared helper directly, which left it the
+    // one surface rendering with the library defaults: the same value masked one way
+    // through `logger.errorObject` and another through `logger.service(...).errorObject`,
+    // and a failure there went to the console the caller had replaced.
+    const diagnostics: LoggerDiagnostic[] = [];
+    const sink = new ArraySink();
+    const logger = new Logger({
+      sinks: [sink],
+      redactFunction: () => '[CUSTOM]',
+      diagnosticSinks: [collectDiagnostics(diagnostics)],
+    });
+
+    const makeError = (): Error => {
+      const error = new Error('boom') as Error & {
+        additionalInfo: unknown;
+        sensitiveFieldNames: unknown;
+      };
+
+      error.additionalInfo = { token: 'hunter2secret' };
+      error.sensitiveFieldNames = ['token'];
+
+      return error;
+    };
+
+    logger.service('api').errorObject('prefix', makeError());
+    logger.service('api').entity('users').errorObject('prefix', makeError());
+
+    for (const entry of sink.logs) {
+      expect(entry.message).toContain('[CUSTOM]');
+      expect(entry.message).not.toContain('hunter2secret');
+    }
+
+    const broken = new Error('boom') as Error & {
+      additionalInfo: unknown;
+      sensitiveFieldNames: unknown;
+    };
+
+    broken.additionalInfo = { token: 'x' };
+    broken.sensitiveFieldNames = 'not-a-list';
+
+    logger.service('api').errorObject('prefix', broken);
+    await Promise.resolve();
+
+    expect(diagnostics.map(({ path }) => path)).toEqual([
+      '<sensitiveFieldNames>',
+    ]);
+  });
+});
+
+describe('Logger - an options bag that will not be read', () => {
+  const SECRET = 'hunter2secret';
+
+  test('a throwing redactedKeys getter does not throw out of logger.info()', () => {
+    // `logger.info()` promises never to throw. Every option was read above the guards, so
+    // one getter threw straight out of the call and nothing was written at all.
+    const sink = new ArraySink();
+    const logger = new Logger({ sinks: [sink], callProcessExit: false });
+
+    expect(() => {
+      logger.info('login {{password}}', {
+        params: { password: SECRET },
+        get redactedKeys(): string[] {
+          throw new Error('option read refused');
+        },
+      });
+    }).not.toThrow();
+
+    expect(sink.logs).toHaveLength(1);
+  });
+
+  test('a throwing redactedKeys getter fails closed rather than logging in the clear', () => {
+    // Absent `redactedKeys` means "no redaction requested" and renders the params in the
+    // clear, so a refused read must not be read as absent. It is the same answer an
+    // unusable list already gets.
+    const sink = new ArraySink();
+    const logger = new Logger({ sinks: [sink], callProcessExit: false });
+
+    logger.info('login {{password}}', {
+      params: { password: SECRET },
+      get redactedKeys(): string[] {
+        throw new Error('option read refused');
+      },
+    });
+
+    const entry = sink.logs[0];
+
+    expect(entry?.message).not.toContain(SECRET);
+    expect(JSON.stringify(entry?.redactedParams)).not.toContain(SECRET);
+  });
+
+  test('a throwing tags or exitCode getter still writes the entry', () => {
+    const sink = new ArraySink();
+    const logger = new Logger({ sinks: [sink], callProcessExit: false });
+
+    expect(() => {
+      logger.info('hello', {
+        get tags(): string[] {
+          throw new Error('no tags for you');
+        },
+        get exitCode(): number {
+          throw new Error('no exitCode for you');
+        },
+      });
+    }).not.toThrow();
+
+    expect(sink.logs[0]?.message).toBe('hello');
+    expect(sink.logs[0]?.tags).toBeUndefined();
+  });
+
+  test('a service logger tolerates the same bag', () => {
+    // `LoggerService` spread the caller's options one frame *above* `handleLog`, so it
+    // threw before the snapshot could be taken.
+    const sink = new ArraySink();
+    const logger = new Logger({ sinks: [sink], callProcessExit: false });
+    const service = logger.service('svc');
+
+    expect(() => {
+      service.info('hello', {
+        get tags(): string[] {
+          throw new Error('no tags for you');
+        },
+      });
+    }).not.toThrow();
+
+    expect(sink.logs[0]?.serviceName).toBe('svc');
+  });
+});
+
+describe('Logger - a diagnostic must not carry what the line above it masked', () => {
+  const SECRET = 'hunter2secret';
+
+  test('a redaction failure message names the path but not the thrown text', async () => {
+    // With no `diagnosticSinks`, a diagnostic falls back to the ordinary log sinks - the
+    // same files and pipes the masked line went to. A redaction failure's cause is derived
+    // from the value being masked, so a message carrying it routed around the masking.
+    const sink = new ArraySink();
+    const logger = new Logger({ sinks: [sink], callProcessExit: false });
+    const seen: LoggerDiagnostic[] = [];
+
+    logger.on('diagnostic', (diagnostic) => {
+      seen.push(diagnostic as LoggerDiagnostic);
+    });
+
+    logger.info('pw={{password}}', {
+      params: {
+        get password(): string {
+          throw new Error(`cannot read ${SECRET}`);
+        },
+      },
+      redactedKeys: ['password'],
+    });
+
+    await sleep(20);
+
+    expect(seen).toHaveLength(1);
+    expect(seen[0]?.message).toBe('Redaction failed for password');
+    expect(seen[0]?.message).not.toContain(SECRET);
+    // The cause is still there in full for a listener that asked for it.
+    expect(seen[0]?.error.message).toContain(SECRET);
+
+    // And nothing written to the log sinks carries it either.
+    expect(JSON.stringify(sink.logs.map((log) => log.message))).not.toContain(
+      SECRET,
+    );
+  });
+});
+
+describe('Logger - a redactedKeys list that will not be read twice', () => {
+  const SECRET = 'hunter2secret';
+
+  /**
+   * A `redactedKeys` whose `length` answers differently each time it is read.
+   *
+   * `redactedKeys` is caller-supplied, so `length` need not be a data property: a `Proxy`
+   * answers it from a trap, which is free to throw or to lie. It was read at four points
+   * across one log call, and each of them believing something different is what the
+   * copy taken in `handleLog` exists to stop.
+   */
+  const lyingLength = (answers: (number | 'throw')[]): string[] => {
+    let read = 0;
+
+    return new Proxy(['password'], {
+      get(target, property, receiver): unknown {
+        if (property === 'length') {
+          const answer = answers[Math.min(read++, answers.length - 1)];
+
+          if (answer === 'throw') {
+            throw new Error('length is not for you');
+          }
+
+          return answer;
+        }
+
+        return Reflect.get(target, property, receiver) as unknown;
+      },
+    });
+  };
+
+  test('a list that later reads as empty does not hand back the params in the clear', () => {
+    // The leak this closes: `handleLog` saw one key and asked for redaction,
+    // `applyRedaction` read the same list as empty and returned `params` untouched - so
+    // the value redaction was asked to hide was rendered into the message and written to
+    // every sink.
+    const sink = new ArraySink();
+    const logger = new Logger({ sinks: [sink], callProcessExit: false });
+
+    logger.info('login {{password}}', {
+      params: { password: SECRET },
+      redactedKeys: lyingLength([1, 0]),
+    });
+
+    const entry = sink.logs[0];
+
+    expect(entry?.message).not.toContain(SECRET);
+    expect(entry?.redactedParams?.['password']).not.toBe(SECRET);
+    expect(entry?.redactedKeys).toEqual(['password']);
+  });
+
+  test('a list that refuses a later read fails closed instead of throwing', () => {
+    // The second read was outside every guard, so a list that answered once and then
+    // refused threw straight out of `logger.info()` - after redaction had already
+    // succeeded. An unreadable list counts as *requested*: it was supplied, and this
+    // cannot tell what for, so nothing of the params is rendered.
+    const sink = new ArraySink();
+    const logger = new Logger({
+      sinks: [sink],
+      callProcessExit: false,
+    });
+
+    expect(() => {
+      logger.info('login {{password}}', {
+        params: { password: SECRET },
+        redactedKeys: lyingLength([1, 'throw']),
+      });
+    }).not.toThrow();
+
+    const entry = sink.logs[0];
+
+    expect(entry?.message).not.toContain(SECRET);
+    expect(entry?.redactedParams?.['password']).not.toBe(SECRET);
+    // The params themselves are still the caller's own object, by reference, as they are
+    // on every other log call.
+    expect(entry?.params?.['password']).toBe(SECRET);
+  });
+
+  test('an under-reporting list is refused rather than read as empty', async () => {
+    // The lie every guard here used to miss, because every guard was built for a list that
+    // *throws*. A `Proxy` over a real array whose `length` reads `0` passes
+    // `Array.isArray`, spreads to `[]`, and reports a count of zero - so the gate concluded
+    // no redaction was requested, `applyRedaction` was never called, and the secret went to
+    // every sink in clear text with `redactedKeys` reading `undefined` and nothing
+    // reported. Not one exception was raised anywhere in that path.
+    //
+    // It is caught by the one invariant a real array cannot break: an own index key at or
+    // beyond its own `length`.
+    const diagnostics: LoggerDiagnostic[] = [];
+    const sink = new ArraySink();
+    const logger = new Logger({
+      sinks: [sink],
+      callProcessExit: false,
+      diagnosticSinks: [collectDiagnostics(diagnostics)],
+    });
+
+    const underReporting = new Proxy(['password'], {
+      get(target, property, receiver): unknown {
+        if (property === 'length') {
+          return 0;
+        }
+
+        return Reflect.get(target, property, receiver) as unknown;
+      },
+    });
+
+    logger.info('login {{password}}', {
+      params: { password: SECRET },
+      redactedKeys: underReporting,
+    });
+    await Promise.resolve();
+
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0]?.path).toBe('<redactedKeys>');
+    expect(sink.logs[0]?.message).not.toContain(SECRET);
+    expect(JSON.stringify(sink.logs[0]?.redactedParams)).not.toContain(SECRET);
+  });
+
+  test('a list refused on the first read is not read again', async () => {
+    // The stable lie above is refused by both reads. This one is not stable: it refuses
+    // the first read - an own index key past its `length` - and answers as a plain
+    // empty array from then on. `handleLog` used to pass the caller's own object on to
+    // `applyRedaction` whenever its snapshot came back `null`, and `applyRedaction`
+    // snapshotted it *again*, saw `[]`, and took its "nothing was asked for" exit: the
+    // params went to every sink in the clear, `redactedParams` still held the secret,
+    // and nothing was reported. Failed closed on the first read now, and the second
+    // never happens.
+    const diagnostics: LoggerDiagnostic[] = [];
+    const sink = new ArraySink();
+    const logger = new Logger({
+      sinks: [sink],
+      callProcessExit: false,
+      diagnosticSinks: [collectDiagnostics(diagnostics)],
+    });
+
+    let reads = 0;
+    const refuseThenEmpty = new Proxy(['password'], {
+      get(target, property, receiver): unknown {
+        if (property === 'length') {
+          reads += 1;
+
+          // First read: `0`, contradicting the own index key `'0'` a real array of
+          // that length cannot have. Later reads: the truth, an empty-looking list.
+          return 0;
+        }
+
+        return Reflect.get(target, property, receiver) as unknown;
+      },
+      ownKeys(target): ArrayLike<string | symbol> {
+        // Own keys are what `snapshotList` compares against `length`: the index key is
+        // there for the first read and gone for every read after it.
+        return reads <= 1 ? Reflect.ownKeys(target) : ['length'];
+      },
+      getOwnPropertyDescriptor(
+        target,
+        property,
+      ): PropertyDescriptor | undefined {
+        if (reads > 1 && property !== 'length') {
+          return undefined;
+        }
+
+        return Reflect.getOwnPropertyDescriptor(target, property);
+      },
+    });
+
+    logger.info('login {{password}}', {
+      params: { password: SECRET },
+      redactedKeys: refuseThenEmpty,
+    });
+    await Promise.resolve();
+
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0]?.path).toBe('<redactedKeys>');
+    expect(sink.logs[0]?.message).not.toContain(SECRET);
+    expect(JSON.stringify(sink.logs[0]?.redactedParams)).not.toContain(SECRET);
+  });
+
+  test('a params pass that fails both ways reports both, not one of them', async () => {
+    // `applyRedaction` keeps two reporters on purpose - a container that refuses to
+    // enumerate is `'redaction'`, a leaf whose `toString` throws on its way to the mask is
+    // `'render'` - because each fires once per operation and sharing one let an
+    // unrenderable value consume the report a genuinely broken redaction still needed.
+    const diagnostics: LoggerDiagnostic[] = [];
+    const sink = new ArraySink();
+    const logger = new Logger({
+      sinks: [sink],
+      callProcessExit: false,
+      diagnosticSinks: [collectDiagnostics(diagnostics)],
+    });
+
+    class Token {
+      public toString(): string {
+        throw new Error('toString refused');
+      }
+    }
+
+    const unreadable = new Proxy(
+      { a: 1 },
+      {
+        ownKeys() {
+          throw new Error('ownKeys refused');
+        },
+      },
+    );
+
+    logger.info('login {{token}}', {
+      params: { token: new Token(), bag: unreadable },
+      redactedKeys: ['token', 'bag.a'],
+    });
+    await Promise.resolve();
+
+    const kinds = diagnostics.map(({ kind }) => kind);
+
+    expect(kinds).toContain('redaction');
+    expect(kinds).toContain('render');
+
+    // Still once per kind, never once per value.
+    expect(kinds.filter((kind) => kind === 'redaction').length).toBe(1);
+    expect(kinds.filter((kind) => kind === 'render').length).toBe(1);
+  });
+
+  test('a genuinely empty list is still read as "nothing was asked for"', async () => {
+    // The counterpart the check above must not break: an empty array has no index keys at
+    // all, so it passes cleanly and means what it says. A sparse array passes too - its
+    // keys are always below its length - and its holes are refused further down as
+    // non-strings, which is unchanged.
+    const diagnostics: LoggerDiagnostic[] = [];
+    const sink = new ArraySink();
+    const logger = new Logger({
+      sinks: [sink],
+      callProcessExit: false,
+      diagnosticSinks: [collectDiagnostics(diagnostics)],
+    });
+
+    logger.info('login {{password}}', {
+      params: { password: SECRET },
+      redactedKeys: [],
+    });
+    await Promise.resolve();
+
+    expect(diagnostics).toHaveLength(0);
+    expect(sink.logs[0]?.message).toContain(SECRET);
+    expect(sink.logs[0]?.redactedKeys).toBeUndefined();
+  });
+
+  test('a list holding a non-string never reaches a sink as one', () => {
+    // `snapshotList` reports what the list *holds*, not what its elements are, so the
+    // snapshot was cast straight to `string[]` and stored - putting a number, and the
+    // caller's own object with its traps still attached, exactly where the copy exists to
+    // remove them. A sink then does the ordinary thing with the field it is handed,
+    // `.join(',')` or `.map(k => k.toUpperCase())`, and throws inside `sink.write`: one
+    // bad list became a sink diagnostic for every registered sink on that call.
+    const caller = { a: 1 };
+    const sink = new ArraySink();
+    const logger = new Logger({
+      sinks: [sink],
+      callProcessExit: false,
+    });
+
+    logger.info('login {{password}}', {
+      params: { password: SECRET },
+      redactedKeys: [123, caller] as unknown as string[],
+    });
+
+    const entry = sink.logs[0];
+
+    // Nothing this field could honestly name: redaction has already failed closed, and
+    // the caller's object must not travel to a sink on it either way.
+    expect(entry?.redactedKeys).toBeUndefined();
+    expect(entry?.message).not.toContain(SECRET);
+    expect(JSON.stringify(entry?.redactedParams)).not.toContain(SECRET);
+  });
+
+  test('a hostile tags list neither throws nor reaches a sink', () => {
+    // `tags && tags.length > 0` was an unguarded read of a caller-supplied list, in the
+    // same object literal where `redactedKeys` is snapshotted for exactly this reason: a
+    // `length` that throws threw straight out of the log call, and the caller's own array
+    // travelled to every sink by reference with its traps still attached.
+    const sink = new ArraySink();
+    const logger = new Logger({
+      sinks: [sink],
+      callProcessExit: false,
+    });
+
+    const hostile = new Proxy([] as string[], {
+      get: (target, property, receiver) => {
+        if (property === 'length') {
+          throw new Error('length blew up');
+        }
+
+        return Reflect.get(target, property, receiver);
+      },
+    });
+
+    expect(() => {
+      logger.info('hello', { tags: hostile });
+    }).not.toThrow();
+
+    expect(sink.logs[0]?.tags).toBeUndefined();
+
+    const caller = ['live'];
+
+    logger.info('hello again', { tags: caller });
+
+    caller[0] = 'rewritten';
+
+    expect(sink.logs[1]?.tags).toEqual(['live']);
+  });
+
+  test('a sink whose close is a throwing accessor does not reject close()', async () => {
+    // The `if (sink.close)` property *read* sat outside the `try`, so a throwing accessor
+    // rejected `Promise.all` - and `processExit` calls `close()` as
+    // `void this.close().finally(...)` with no `catch`, which is an unhandled rejection
+    // from the shutdown path, fatal under Node's default `--unhandled-rejections=throw`.
+    // `this.sinks = []` and the `'close'` event were both skipped behind it too.
+    const sink = new ArraySink();
+    const hostileSink = {
+      write: () => {
+        // Nothing to record; this sink exists for its `close`.
+      },
+      get close(): () => Promise<void> {
+        throw new Error('close getter blew up');
+      },
+    };
+
+    const logger = new Logger({
+      sinks: [hostileSink, sink],
+      callProcessExit: false,
+    });
+
+    await logger.close();
+
+    // Reached despite the throwing getter: `close()` resolved, so the sinks were cleared.
+    logger.info('after close');
+
+    expect(sink.logs).toHaveLength(0);
+  });
+
+  test('a list of strings is still handed to the sink as an inert copy', () => {
+    // The counterpart the check above must not break. The copy is also what keeps the
+    // caller's own array off the entry, so a later mutation of it cannot rewrite what a
+    // sink already recorded.
+    const requested = ['password'];
+    const sink = new ArraySink();
+    const logger = new Logger({ sinks: [sink], callProcessExit: false });
+
+    logger.info('login {{password}}', {
+      params: { password: SECRET },
+      redactedKeys: requested,
+    });
+
+    requested[0] = 'rewritten';
+
+    expect(sink.logs[0]?.redactedKeys).toEqual(['password']);
+  });
+
+  test('a list that cannot be read at all reaches diagnostics', async () => {
+    // The fail-closed guards used to swallow the cause, which broke the promise
+    // the failure reporting used by every other surface that redacts - `applyRedaction` for
+    // params, `errorToString` for an error's `sensitiveFieldNames`, `redactValue` and
+    // `stringifyValue`. All of those hand a failure to the handler; these guards, which
+    // exist precisely for input nothing below them can read, left an operator with a
+    // blanked message and nothing to trace it with.
+    const diagnostics: LoggerDiagnostic[] = [];
+    const sink = new ArraySink();
+    const logger = new Logger({
+      sinks: [sink],
+      callProcessExit: false,
+      diagnosticSinks: [collectDiagnostics(diagnostics)],
+    });
+
+    logger.info('login {{password}}', {
+      params: { password: SECRET },
+      // Refuses the very first read, so there is no snapshot to be had. A list that
+      // answers once and refuses later is a different case and now succeeds, since it is
+      // only ever asked once - see the sibling test above.
+      redactedKeys: lyingLength(['throw']),
+    });
+    await Promise.resolve();
+
+    // Once, not once per guard the one unreadable list trips.
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0]?.path).toBe('<redactedKeys>');
+    expect(sink.logs[0]?.message).not.toContain(SECRET);
+  });
+
+  test('a list that reads cleanly reports no failure', async () => {
+    const diagnostics: LoggerDiagnostic[] = [];
+    const sink = new ArraySink();
+    const logger = new Logger({
+      sinks: [sink],
+      callProcessExit: false,
+      diagnosticSinks: [collectDiagnostics(diagnostics)],
+    });
+
+    logger.info('login {{password}}', {
+      params: { password: SECRET },
+      redactedKeys: ['password'],
+    });
+    await Promise.resolve();
+
+    expect(diagnostics).toEqual([]);
+    expect(sink.logs[0]?.message).not.toContain(SECRET);
+  });
+
+  test('an ordinary list is still reported as the caller wrote it', () => {
+    const sink = new ArraySink();
+    const logger = new Logger({ sinks: [sink], callProcessExit: false });
+    const keys = ['password'];
+
+    logger.info('login {{password}}', {
+      params: { password: SECRET },
+      redactedKeys: keys,
+    });
+
+    expect(sink.logs[0]?.redactedKeys).toEqual(keys);
+  });
+});
+
+describe('Logger - what the global error listener does with the payload', () => {
+  test('passes a cross-realm Error through rather than wrapping it', async () => {
+    const vm = await import('node:vm');
+    const sink = new ArraySink();
+    const logger = new Logger({ sinks: [sink] });
+
+    expect(logger.registerReportErrorListener()).toBe('success');
+
+    try {
+      // An error from a `vm` context has a different `Error` constructor, so it fails
+      // this realm's `instanceof` while being an error in every way a consumer cares
+      // about. A bare `instanceof` replaced it with a wrapper, discarding its identity
+      // and stack in both the sink entry and the `'logger'` event - the case `toError`
+      // documents itself as handling and this listener had opted out of.
+      const foreign = vm.default.runInNewContext(
+        'new Error("from another realm")',
+      ) as Error;
+
+      expect(foreign instanceof Error).toBe(false);
+
+      const seen: unknown[] = [];
+
+      logger.on('logger', (data: unknown) => {
+        // Logging emits a `'logger'` event of its own, so filter to the report.
+        const payload = data as { eventType?: string; error: unknown };
+
+        if (payload.eventType === 'uncaughtException') {
+          seen.push(payload.error);
+        }
+      });
+
+      globalThis.dispatchEvent(
+        new ErrorEvent('error', {
+          error: foreign,
+          message: 'from another realm',
+          cancelable: true,
+        }),
+      );
+
+      expect(seen).toHaveLength(1);
+      expect(seen[0]).toBe(foreign);
+      expect(sink.logs[sink.logs.length - 1]?.error).toBe(foreign);
+    } finally {
+      logger.unregisterReportErrorListener();
+      await logger.close();
+    }
+  });
+
+  test('treats a reported null as no payload, not as a thrown null', async () => {
+    const sink = new ArraySink();
+    const logger = new Logger({ sinks: [sink] });
+
+    expect(logger.registerReportErrorListener()).toBe('success');
+
+    try {
+      // `ErrorEventInit.error` is declared `any error = null` by WHATWG, so `null` is
+      // what the platform supplies when no error was given - Bun and browsers both
+      // answer `null` for `new ErrorEvent('error', { message })`. A genuine `throw null`
+      // is therefore indistinguishable from a payload-less event, so keeping it would
+      // only put a meaningless `cause: null` on every one of them.
+      expect(new ErrorEvent('error', { message: 'x' }).error).toBeNull();
+
+      globalThis.dispatchEvent(
+        new ErrorEvent('error', {
+          error: null,
+          message: 'Uncaught null',
+          cancelable: true,
+        }),
+      );
+
+      const reported = sink.logs[sink.logs.length - 1]?.error as Error;
+
+      expect('cause' in reported).toBe(false);
+      expect(reported.message).toContain('Uncaught null');
+    } finally {
+      logger.unregisterReportErrorListener();
+      await logger.close();
+    }
+  });
+
+  test('keeps a non-null non-Error payload on cause', async () => {
+    const sink = new ArraySink();
+    const logger = new Logger({ sinks: [sink] });
+
+    expect(logger.registerReportErrorListener()).toBe('success');
+
+    try {
+      const thrown = { code: 'E42' };
+
+      globalThis.dispatchEvent(
+        new ErrorEvent('error', {
+          error: thrown,
+          message: 'Uncaught [object Object]',
+          cancelable: true,
+        }),
+      );
+
+      const reported = sink.logs[sink.logs.length - 1]?.error as Error;
+
+      expect(reported.cause).toBe(thrown);
+    } finally {
+      logger.unregisterReportErrorListener();
+      await logger.close();
+    }
+  });
+});
+describe('Logger - where an unhandled render failure goes', () => {
+  const hostile = (): Record<string, unknown> => {
+    const bag: Record<string, unknown> = { safe: 'kept' };
+
+    Object.defineProperty(bag, 'token', {
+      get() {
+        throw new Error('accessor refused');
+      },
+      enumerable: true,
+    });
+
+    return bag;
+  };
+
+  test('a bare render with no handler reaches a listening logger', () => {
+    // The point of the arrangement. `stringifyValue()` called on its own has no handler
+    // and no logger of its own, and a console line nobody reads is a poor consolation
+    // prize. Nothing is logging, so there is no loop to worry about: it takes the standard
+    // global `'error'` channel and a registered listener records it properly.
+    const sink = new ArraySink();
+    const logger = new Logger({ sinks: [sink], callProcessExit: false });
+
+    expect(logger.registerReportErrorListener('Reported')).toBe('success');
+
+    try {
+      stringifyValue({ user: hostile() });
+    } finally {
+      logger.unregisterReportErrorListener();
+    }
+
+    expect(sink.logs.length).toBe(1);
+    expect(sink.logs[0]?.message).toContain('Render failed');
+    expect(sink.logs[0]?.message).toContain('<value>.user.token');
+  });
+
+  test("the logger's own render failures take the separate diagnostic channel", async () => {
+    // The other half, and the one that would loop. Everything the logger renders runs
+    // inside a log call, so it uses a separate diagnostic channel and never reaches the
+    // global broadcast rung. Left there, the listener would log what it hears, that
+    // logging would render, and round it goes.
+    const sink = new ArraySink();
+    const logger = new Logger({ sinks: [sink], callProcessExit: false });
+
+    expect(logger.registerReportErrorListener('Reported')).toBe('success');
+
+    const consoleError = console.error;
+    const lines: string[] = [];
+
+    console.error = (...args: unknown[]): void => {
+      lines.push(args.map((arg) => String(arg)).join(' '));
+    };
+
+    try {
+      logger.info('{{u}}', { params: { u: hostile() } });
+      await Promise.resolve();
+    } finally {
+      console.error = consoleError;
+      logger.unregisterReportErrorListener();
+    }
+
+    // The log entry and its asynchronously delivered diagnostic both reach the sink.
+    expect(sink.logs.length).toBe(2);
+    expect(sink.logs[0]?.message).not.toContain('Render failed');
+    expect(sink.logs[1]?.message).toContain('Render failed');
+    expect(sink.logs[1]?.tags).toContain('lifecycleion-diagnostic');
+    expect(lines).toEqual([]);
+  });
+});
+describe('Logger - a param that cannot be read is reported, not only marked', () => {
+  test('an unreadable param reaches diagnostics', async () => {
+    // The one redaction failure that reached no channel at all. `normalizeParamsBag`
+    // carried the key out so the marker could be put back, and dropped the thrown value on
+    // the floor - so the output said `***REDACTION FAILED***` and the handler documented
+    // to explain exactly that never fired.
+    const diagnostics: LoggerDiagnostic[] = [];
+    const sink = new ArraySink();
+    const logger = new Logger({
+      sinks: [sink],
+      callProcessExit: false,
+      diagnosticSinks: [collectDiagnostics(diagnostics)],
+    });
+
+    const bag: Record<string, unknown> = { keep: 'visible' };
+
+    Object.defineProperty(bag, 'oops', {
+      get() {
+        throw new Error('accessor refused');
+      },
+      enumerable: true,
+    });
+
+    logger.info('x {{keep}}', { params: bag, redactedKeys: ['keep'] });
+    await Promise.resolve();
+
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0]?.path).toBe('oops');
+    expect(diagnostics[0]?.error.message).toContain('accessor refused');
+
+    // Unchanged: the marker still stands, and the readable siblings still redact.
+    const stored = JSON.stringify(sink.logs[0]?.redactedParams);
+
+    expect(stored).toContain('***REDACTION FAILED***');
+    expect(stored).toContain('***REDACTED***');
+  });
+});
+
+describe('Logger diagnostic channel', () => {
+  test('a write failure queued immediately before close reaches the terminal fallback', async () => {
+    const consoleInfo = spyOn(console, 'info').mockImplementation(() => {
+      throw new Error('console transport failed');
+    });
+    const consoleError = spyOn(console, 'error').mockImplementation(() => {});
+    const logger = new Logger({
+      sinks: [new ConsoleSink()],
+      callProcessExit: false,
+    });
+
+    try {
+      logger.info('fatal');
+      await logger.close();
+      await Promise.resolve();
+
+      expect(consoleError).toHaveBeenCalledTimes(1);
+      expect(String(consoleError.mock.calls[0]?.[0])).toContain(
+        'Error writing to sink: console transport failed',
+      );
+    } finally {
+      consoleInfo.mockRestore();
+      consoleError.mockRestore();
+    }
+  });
+
+  test('a muted sole ConsoleSink suppresses its diagnostics without a console fallback', async () => {
+    // Muting the configured console destination is an explicit request to silence it.
+    // Its no-op diagnostic write is therefore considered delivery, rather than causing
+    // Logger to bypass the mute through the terminal console fallback.
+    const consoleErrors = muteConsoleError();
+    const logger = new Logger({
+      sinks: [new ConsoleSink({ muted: true })],
+      callProcessExit: false,
+    });
+
+    logger.on('logger', () => {
+      throw new Error('event handler failed');
+    });
+
+    logger.info('trigger');
+    await Promise.resolve();
+
+    expect(consoleErrors).toEqual([]);
+  });
+
+  test('asynchronously tells every regular sink when no diagnostic sinks are set', async () => {
+    const seen: LoggerDiagnostic[][] = [[], []];
+    const makeSink = (diagnostics: LoggerDiagnostic[]): LogSink => ({
+      write: () => {
+        throw new Error('ordinary write failed');
+      },
+      writeDiagnostic: (diagnostic) => {
+        diagnostics.push(diagnostic);
+      },
+    });
+    const logger = new Logger({
+      sinks: [makeSink(seen[0]), makeSink(seen[1])],
+      callProcessExit: false,
+    });
+
+    logger.info('trigger');
+    expect(seen).toEqual([[], []]);
+
+    await Promise.resolve();
+
+    expect(seen[0]).toHaveLength(2);
+    expect(seen[1]).toHaveLength(2);
+    expect(seen[0].every(({ kind }) => kind === 'sink')).toBe(true);
+  });
+
+  test('gives a sink without writeDiagnostic an exact pre-rendered error entry', async () => {
+    const diagnostics: LoggerDiagnostic[] = [];
+    const entries: LogEntry[] = [];
+    const logger = new Logger({
+      sinks: [
+        {
+          write: () => {
+            throw new Error('ordinary write failed');
+          },
+        },
+      ],
+      diagnosticSinks: [
+        {
+          write: (entry) => {
+            entries.push(entry);
+          },
+        },
+      ],
+      callProcessExit: false,
+    });
+
+    logger.on<LoggerDiagnostic>('diagnostic', (diagnostic) => {
+      diagnostics.push(diagnostic);
+    });
+
+    logger.info('trigger');
+    await Promise.resolve();
+
+    expect(diagnostics).toHaveLength(1);
+    expect(entries).toEqual([
+      {
+        timestamp: diagnostics[0]?.timestamp,
+        type: 'error',
+        template: diagnostics[0]?.message,
+        message: diagnostics[0]?.message,
+        tags: ['lifecycleion-diagnostic'],
+      },
+    ]);
+  });
+
+  test('uses explicit diagnostic sinks instead of the regular sinks', async () => {
+    const regular = new ArraySink();
+    const diagnostics = new ArraySink();
+    const failing: LogSink = {
+      write: () => {
+        throw new Error('ordinary write failed');
+      },
+    };
+    const logger = new Logger({
+      sinks: [failing, regular],
+      diagnosticSinks: [diagnostics],
+      callProcessExit: false,
+    });
+
+    logger.info('trigger');
+    await Promise.resolve();
+
+    expect(regular.logs).toHaveLength(1);
+    expect(diagnostics.logs).toHaveLength(1);
+    expect(diagnostics.logs[0]?.tags).toContain('lifecycleion-diagnostic');
+  });
+
+  test('emits diagnostics on their own event without emitting another log event', async () => {
+    const logger = new Logger({ sinks: [], callProcessExit: false });
+    const diagnostics: LoggerDiagnostic[] = [];
+    let logEvents = 0;
+
+    logger.on<LoggerDiagnostic>('diagnostic', (diagnostic) => {
+      diagnostics.push(diagnostic);
+    });
+    logger.on('logger', () => {
+      logEvents++;
+      throw new Error('event handler failed');
+    });
+
+    logger.info('trigger');
+    await Promise.resolve();
+
+    expect(logEvents).toBe(1);
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0]?.kind).toBe('event-handler');
+  });
+
+  test('preserves the original diagnostic when its only listener throws', async () => {
+    const consoleError = spyOn(console, 'error').mockImplementation(() => {});
+    const logger = new Logger({ sinks: [], callProcessExit: false });
+
+    logger.on('logger', () => {
+      throw new Error('original logger failure');
+    });
+    logger.on('diagnostic', () => {
+      throw new Error('diagnostic listener failure');
+    });
+
+    try {
+      logger.info('trigger');
+      await Promise.resolve();
+
+      expect(consoleError).toHaveBeenCalledTimes(1);
+      const line = String(consoleError.mock.calls[0]?.[0]);
+      expect(line).toContain('original logger failure');
+      expect(line).toContain('diagnostic listener also failed');
+      expect(line).toContain('diagnostic listener failure');
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
+  test('guards a malformed diagnostic payload when its listener throws', () => {
+    const consoleError = spyOn(console, 'error').mockImplementation(() => {});
+    const logger = new Logger({ sinks: [], callProcessExit: false });
+    const hostile = Object.defineProperty({}, 'message', {
+      get() {
+        throw new Error('message getter failure');
+      },
+    });
+
+    logger.on('diagnostic', () => {
+      throw new Error('diagnostic listener failure');
+    });
+
+    try {
+      for (const payload of [null, 42, hostile]) {
+        expect(() => {
+          logger.emit('diagnostic', payload);
+        }).not.toThrow();
+      }
+
+      expect(consoleError).toHaveBeenCalledTimes(3);
+      for (const call of consoleError.mock.calls) {
+        expect(String(call[0])).toContain('diagnostic listener failure');
+      }
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
+  test('preserves the original diagnostic when its only listener rejects', async () => {
+    const consoleError = spyOn(console, 'error').mockImplementation(() => {});
+    const logger = new Logger({ sinks: [], callProcessExit: false });
+
+    logger.on('logger', () => {
+      throw new Error('original async logger failure');
+    });
+    logger.on('diagnostic', () =>
+      Promise.reject(new Error('async diagnostic listener failure')),
+    );
+
+    try {
+      logger.info('trigger');
+      await sleep(0);
+
+      expect(consoleError).toHaveBeenCalledTimes(1);
+      const line = String(consoleError.mock.calls[0]?.[0]);
+      expect(line).toContain('original async logger failure');
+      expect(line).toContain('diagnostic listener also failed');
+      expect(line).toContain('async diagnostic listener failure');
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
+  test('preserves a public diagnostic payload message when its listener rejects', async () => {
+    const consoleErrors = muteConsoleError();
+    const logger = new Logger({ sinks: [], callProcessExit: false });
+
+    logger.on('diagnostic', () =>
+      Promise.reject(new Error('async diagnostic listener failure')),
+    );
+
+    logger.emit('diagnostic', { message: 'public diagnostic message' });
+    await sleep(0);
+
+    expect(consoleErrors).toHaveLength(1);
+    expect(consoleErrors[0]).toContain('public diagnostic message');
+    expect(consoleErrors[0]).toContain('diagnostic listener also failed');
+    expect(consoleErrors[0]).toContain('async diagnostic listener failure');
+  });
+
+  test('does not send close failures through sinks being closed', async () => {
+    let diagnosticWrites = 0;
+    const consoleError = spyOn(console, 'error').mockImplementation(() => {});
+    const sink: LogSink = {
+      write: () => {},
+      writeDiagnostic: () => {
+        diagnosticWrites++;
+      },
+      close: () => {
+        throw new Error('close transport failure');
+      },
+    };
+    const logger = new Logger({
+      diagnosticSinks: [sink],
+      callProcessExit: false,
+    });
+
+    try {
+      await logger.close();
+      await Promise.resolve();
+
+      expect(diagnosticWrites).toBe(0);
+      expect(consoleError).toHaveBeenCalledTimes(1);
+      expect(String(consoleError.mock.calls[0]?.[0])).toContain(
+        'close transport failure',
+      );
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
+  test('ends a rejected diagnostic write at the guarded console', async () => {
+    let diagnosticWrites = 0;
+    const consoleError = spyOn(console, 'error').mockImplementation(() => {});
+    const logger = new Logger({
+      sinks: [
+        {
+          write: () => {
+            throw new Error('ordinary write failed');
+          },
+        },
+      ],
+      diagnosticSinks: [
+        {
+          write: () => {},
+          writeDiagnostic: () => {
+            diagnosticWrites++;
+            return Promise.reject(new Error('diagnostic transport failed'));
+          },
+        },
+      ],
+      callProcessExit: false,
+    });
+
+    try {
+      logger.info('trigger');
+      await sleep(0);
+
+      expect(diagnosticWrites).toBe(1);
+      expect(consoleError).toHaveBeenCalledTimes(1);
+      expect(String(consoleError.mock.calls[0]?.[0])).toContain(
+        'diagnostic sink also rejected',
+      );
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
+  test('keeps a diagnostic writer renderer failure in its local callback', async () => {
+    let ordinaryWrites = 0;
+    let diagnosticWrites = 0;
+    const localFailures: Error[] = [];
+    const logger = new Logger({
+      sinks: [
+        {
+          write: () => {
+            ordinaryWrites++;
+            throw new Error('ordinary write failed');
+          },
+        },
+      ],
+      diagnosticSinks: [
+        {
+          write: () => {},
+          writeDiagnostic: () => {
+            diagnosticWrites++;
+            const payload: Record<string, unknown> = {};
+            Object.defineProperty(payload, 'broken', {
+              enumerable: true,
+              get() {
+                throw new Error('diagnostic payload refused');
+              },
+            });
+
+            stringifyValue(payload, {
+              onFormatError: (error) => {
+                localFailures.push(error);
+              },
+            });
+          },
+        },
+      ],
+      callProcessExit: false,
+    });
+
+    expect(logger.registerReportErrorListener()).toBe('success');
+
+    try {
+      logger.info('trigger');
+      await Promise.resolve();
+
+      expect(ordinaryWrites).toBe(1);
+      expect(diagnosticWrites).toBe(1);
+      expect(localFailures).toHaveLength(1);
+      expect(localFailures[0]?.message).toContain('diagnostic payload refused');
+    } finally {
+      logger.unregisterReportErrorListener();
+    }
   });
 });

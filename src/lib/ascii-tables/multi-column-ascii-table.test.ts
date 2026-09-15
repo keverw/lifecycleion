@@ -147,6 +147,22 @@ describe('MultiColumnASCIITable', () => {
     expect(EOL + table.toString()).toMatchSnapshot();
   });
 
+  it('renders an empty table narrower than its message without throwing', () => {
+    // The empty-table path still padded with `repeat()`, so a width the message overhangs
+    // - one wide grapheme is enough - raised `RangeError: repeat argument must be greater
+    // than or equal to 0` out of a renderer whose caller turns any throw into
+    // `<error could not be rendered>`, losing everything it was describing.
+    const table = new MultiColumnASCIITable(['a'], {
+      tableWidth: 5,
+      emptyMessage: '漢字',
+    });
+
+    expect(() => table.toString()).not.toThrow();
+    // Wrapped rather than dropped: each grapheme is wider than the column allows.
+    expect(table.toString()).toContain('漢');
+    expect(table.toString()).toContain('字');
+  });
+
   it('should distribute remaining width across columns in flex mode', () => {
     const table = new MultiColumnASCIITable(['A', 'B', 'C', 'D'], {
       tableWidth: 20,

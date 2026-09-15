@@ -2330,6 +2330,128 @@ describe('LifecycleManager - Registration & Individual Lifecycle', () => {
       expect(stoppedEvents[0].status?.state).toBe('stopped');
     });
 
+    test('a successful restart clears lastError from the previous run', async () => {
+      // `lastError` on a component that is running again described a run that is over.
+      // A reader taking it for the current one - a health dashboard, a restart policy -
+      // was told the restart had not worked.
+      const lifecycle = new LifecycleManager({ logger });
+
+      let reportFn!: (err?: Error) => boolean;
+
+      class SelfStoppingComponent extends BaseComponent {
+        public start(): void {
+          reportFn = (err?: Error) => this.reportUnexpectedStop(err);
+        }
+        public stop(): void {}
+      }
+
+      await lifecycle.registerComponent(
+        new SelfStoppingComponent(logger, { name: 'again' }),
+      );
+      await lifecycle.startComponent('again');
+
+      expect(reportFn(new Error('first run crash'))).toBe(true);
+      expect(lifecycle.getComponentStatus('again')?.lastError?.message).toBe(
+        'first run crash',
+      );
+
+      const result = await lifecycle.startComponent('again');
+
+      expect(result.success).toBe(true);
+      expect(lifecycle.getComponentStatus('again')?.state).toBe('running');
+      expect(lifecycle.getComponentStatus('again')?.lastError).toBeNull();
+    });
+
+    test('lastError from the previous run stays readable while the restart is starting', async () => {
+      // Documented on `ComponentStatus.lastError`: it is cleared when the new run reaches
+      // `running`, not when it begins. A reader that wants "is this component failed"
+      // reads it together with `state`.
+      const lifecycle = new LifecycleManager({ logger });
+
+      let reportFn!: (err?: Error) => boolean;
+      let starts = 0;
+
+      class SlowRestartComponent extends BaseComponent {
+        public async start(): Promise<void> {
+          starts++;
+          reportFn = (err?: Error) => this.reportUnexpectedStop(err);
+
+          if (starts === 2) {
+            await sleep(30);
+          }
+        }
+        public stop(): void {}
+      }
+
+      await lifecycle.registerComponent(
+        new SlowRestartComponent(logger, { name: 'slow' }),
+      );
+      await lifecycle.startComponent('slow');
+
+      expect(reportFn(new Error('first run crash'))).toBe(true);
+
+      const restarting = lifecycle.startComponent('slow');
+      await sleep(5);
+
+      expect(lifecycle.getComponentStatus('slow')?.state).toBe('starting');
+      expect(lifecycle.getComponentStatus('slow')?.lastError?.message).toBe(
+        'first run crash',
+      );
+
+      expect((await restarting).success).toBe(true);
+      expect(lifecycle.getComponentStatus('slow')?.lastError).toBeNull();
+    });
+
+    test("a new start clears the record of the previous run's unexpected stop", async () => {
+      // The flag describes a stop that already happened, and `startComponent`'s
+      // overlapping-failure rule reads it to decide whose error the caller is told about.
+      // Left set across a restart it is an old crash answering for a new run, so it is
+      // cleared with the state - the same reset the register, unregister and forced-stop
+      // paths already do. Asserted on the map directly: no public reading of it survives
+      // the restart, which is exactly the point. The rejection below is the shape that
+      // would consult it, and it must come back as its own failure.
+      const lifecycle = new LifecycleManager({ logger });
+
+      let reportFn!: (err?: Error) => boolean;
+      let starts = 0;
+
+      class CrashThenRejectComponent extends BaseComponent {
+        public async start(): Promise<void> {
+          starts++;
+          reportFn = (err?: Error) => this.reportUnexpectedStop(err);
+
+          if (starts === 2) {
+            await sleep(10);
+            throw new Error('start rejected on restart');
+          }
+        }
+        public stop(): void {}
+      }
+
+      await lifecycle.registerComponent(
+        new CrashThenRejectComponent(logger, { name: 'restart' }),
+      );
+      await lifecycle.startComponent('restart');
+
+      expect(reportFn(new Error('crashed the first time'))).toBe(true);
+      expect(lifecycle.getComponentStatus('restart')?.state).toBe('stopped');
+
+      const flags = (
+        lifecycle as unknown as {
+          componentUnexpectedStopHadError: Map<string, boolean>;
+        }
+      ).componentUnexpectedStopHadError;
+
+      expect(flags.get('restart')).toBe(true);
+
+      const result = await lifecycle.startComponent('restart');
+
+      expect(flags.has('restart')).toBe(false);
+      expect(result.success).toBe(false);
+      expect(result.code).toBe('unknown_error');
+      expect(result.reason).toBe('start rejected on restart');
+    });
+
     test('startComponent fails if component stops unexpectedly before start() completes', async () => {
       const lifecycle = new LifecycleManager({ logger });
 
@@ -2435,6 +2557,56 @@ describe('LifecycleManager - Registration & Individual Lifecycle', () => {
       expect(
         lifecycle.getComponentStatus('self-stop')?.lastError?.message,
       ).toBe('start rejected after stop signal');
+    });
+
+    test('startComponent keeps the descriptive reason when a timed-out component signalled a stop without an error', async () => {
+      // `reportUnexpectedStop()` with no argument records `null`, not `undefined`, so a
+      // guard that screens only for `undefined` hands `null` to `describeError` - which
+      // answers `Non-error value thrown: null`, a non-empty string that then defeats the
+      // `||` fallback below it. The component said nothing about why it stopped, so the
+      // sentence naming it is the whole of what this can honestly report.
+      const lifecycle = new LifecycleManager({ logger });
+
+      class SignalOnlyThenHangingComponent extends BaseComponent {
+        public async start(): Promise<void> {
+          const reportUnexpectedStop = this.getUnexpectedStopReporter();
+
+          setTimeout(() => {
+            reportUnexpectedStop();
+          }, 10);
+
+          // Outlives `startupTimeoutMS`, so the start rejects with
+          // `ComponentStartTimeoutError` after the signal-only stop is recorded.
+          await sleep(200);
+        }
+
+        public stop(): void {}
+      }
+
+      await lifecycle.registerComponent(
+        new SignalOnlyThenHangingComponent(logger, {
+          name: 'signal-only-timeout',
+          startupTimeoutMS: 50,
+        }),
+      );
+
+      const result = await lifecycle.startComponent('signal-only-timeout');
+
+      expect(result.success).toBe(false);
+      expect(result.code).toBe('component_unexpected_stop');
+      expect(result.reason).toBe(
+        'Component "signal-only-timeout" stopped unexpectedly during startup',
+      );
+      expect(result.reason).not.toContain('Non-error value thrown');
+      // `reason` and `error` are built from the same absent value, so they have to tell
+      // the same story - the bug was that only `error` treated `null` as absent.
+      expect(result.error?.message).toBe(
+        'Component "signal-only-timeout" stopped unexpectedly during startup',
+      );
+      expect(lifecycle.isComponentRunning('signal-only-timeout')).toBe(false);
+      expect(lifecycle.getComponentStatus('signal-only-timeout')?.state).toBe(
+        'stopped',
+      );
     });
 
     test('error is preserved in component status after unexpected stop', async () => {
@@ -8062,7 +8234,10 @@ describe('LifecycleManager - Signal Integration', () => {
         logger,
         repeatedShutdownRequestPolicy: {
           forceAfterCount: 3,
-          withinMS: 20,
+          // Scaled well above the sleeps below rather than sitting just outside them:
+          // these race a real wall-clock window, and at the previous 20ms a 5ms sleep
+          // had only 15ms of slack, which the full suite under load regularly overshot.
+          withinMS: 200,
           onForceShutdown: (context) => {
             forceShutdownCalls.push({
               requestCount: context.requestCount,
@@ -8074,7 +8249,7 @@ describe('LifecycleManager - Signal Integration', () => {
       });
 
       await lifecycle.registerComponent(
-        new SlowStopComponent(logger, 'slow-stop', 120),
+        new SlowStopComponent(logger, 'slow-stop', 1200),
       );
       await lifecycle.startAllComponents();
 
@@ -8085,13 +8260,13 @@ describe('LifecycleManager - Signal Integration', () => {
       });
 
       (lifecycle as any).handleShutdownRequest('SIGINT');
-      await sleep(40);
+      await sleep(400);
       (lifecycle as any).handleShutdownRequest('SIGTERM');
-      await sleep(40);
+      await sleep(400);
       (lifecycle as any).handleShutdownRequest('SIGTERM');
-      await sleep(5);
+      await sleep(50);
       (lifecycle as any).handleShutdownRequest('SIGTERM');
-      await sleep(5);
+      await sleep(50);
       (lifecycle as any).handleShutdownRequest('SIGTERM');
 
       await shutdownCompleted;
