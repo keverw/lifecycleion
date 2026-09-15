@@ -143,5 +143,12 @@ export interface SinkFailure {
  * the return type as `void | Promise<void>` is part of that: typed `void`, an `async`
  * handler was a `no-misused-promises` error in the caller's own lint run, for a shape the
  * sink docs demonstrate and the reporter supports.
+ *
+ * A handler that logs a close-time `'lost'` / `'no_entry'` through the `Logger` that owns
+ * this sink is dropped: `Logger.close()` marks the logger closed first so shutdown cannot
+ * re-enter logging, and a successful handler is not a diagnostic delivery failure, so
+ * nothing falls through to `console.error`. Report those with `console.error` or a
+ * destination that logger is not closing. With no handler, the sink already writes the
+ * failure to guarded `console.error`.
  */
 export type SinkErrorHandler = (failure: SinkFailure) => void | Promise<void>;

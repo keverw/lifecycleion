@@ -885,10 +885,11 @@ console.log(logger.getSinks().length); // 0
 - `logger.close()` closes all regular and diagnostic sinks, closing a shared instance only
   once, and removes them from the logger
 - After `logger.close()`, the logger is marked as closed and will not accept new log messages
-- The logger is marked closed _before_ its sinks close. Close failures still enter the
-  diagnostic path, but every logger-owned destination is also shutting down and may no
-  longer accept a write. For guaranteed close-failure reporting, use a diagnostic event
-  listener that writes to a destination the logger does not own
+- The logger is marked closed _before_ its sinks close, so shutdown cannot start new writes
+  or recurse. Close-time `onError` still fires; it is the sink's callback, not a
+  diagnostic, so logging those reports back through _this_ logger is dropped with no
+  console fallback. Use `console.error` or a destination this logger does not own — see
+  [Where Failures Go](#where-failures-go)
 - Adding a sink after `logger.close()` does not reopen the logger. Create a new `Logger`
   instance for a fresh start
 
@@ -1313,6 +1314,8 @@ const fileSink = new FileSink({
 
 Two things to know about `failure.entry`. It is the full `LogEntry`, so it carries `params` as well as `redactedParams`: a handler that serializes the whole failure for paging or a backup sink is serializing the raw values, including any the log line masked. Forward `redactedParams ?? params`, or only `message`, rather than the entry itself. And a handler that logs the failure back through this sink is safe: the sink refuses, and counts in `droppedEntries`, a line from inside a `'format'` report that cannot render either, which is what stops a failure carrying an unrenderable `entry` from reporting itself forever. A `'write'` failure is reported on every attempt, so a handler that logs each one through a sink that is also failing multiplies the queue by `maxRetries + 1` per line; the queue cap bounds it, but log elsewhere.
 
+A close-time `'lost'` or `'no_entry'` is this callback, not the logger's diagnostic channel. With no `onError` the sink already writes it to `console.error`. With one, a `logger.error(...)` inside the handler during `Logger.close()` is dropped (`handleLog` is already a no-op) and does not fall through to that console line, because the handler succeeded. The example uses `console.error` for that reason.
+
 In text mode (`jsonFormat: false`) the message is written as given, so a message that contains a newline spans two lines in the file, and one built from untrusted input can forge a line. Use `jsonFormat: true` where that matters: every field is escaped there, and one entry is always one line.
 
 #### Health Monitoring
@@ -1494,6 +1497,10 @@ as `'close'` / `'lost'` before `close()` resolves, with each entry counted as it
 callback fails. Neither report carries an `entry` -
 the bytes in the stream's buffer are no longer lines the sink can name - so a fallback
 handler learns that lines were lost, and how many from `getHealth().droppedEntries`.
+Those reports still reach `onError`. That is the sink's callback, not `writeDiagnostic`.
+If this sink is owned by a `Logger` that is itself closing, do not log them through that
+logger — `handleLog` is already a no-op and there is no diagnostic fallback. The examples
+use `console.error`.
 
 #### Error Handling & Reconnection
 
@@ -1709,6 +1716,15 @@ Do not call ordinary logger methods from a `'diagnostic'` listener or
 write cannot be completed, throw or return a rejected promise; the logger will terminate
 it at guarded `console.error`.
 
+That console fallback is the diagnostic _delivery_ failing. It is not the same path as
+`FileSink` / `NamedPipeSink` `onError`. Those callbacks are the sink's own report for a
+lost or abandoned line; the logger never turns them into a diagnostic. With no `onError`,
+the sink already writes the failure to guarded `console.error`. With one, that handler is
+the destination: if it logs through _this_ logger during `Logger.close()`, `handleLog` is
+already a no-op and nothing else runs, because the handler returned successfully. Use
+`console.error` (or a destination this logger is not closing) inside `onError` for
+close-time `'lost'` / `'no_entry'`. See [Where Failures Go](#where-failures-go).
+
 #### Exit Behavior
 
 When a log includes an `exitCode`, the logger will:
@@ -1843,7 +1859,9 @@ asynchronously, so it also cannot grow the stack of the log call that failed.
 
 A failure raised while `Logger.close()` is closing its sinks skips that second step: none
 of those sinks can honestly accept another write. It is emitted to external diagnostic
-listeners and otherwise ends at guarded `console.error`.
+listeners and otherwise ends at guarded `console.error`. That covers a `close()` that
+_throws_. A sink's own close-time `'lost'` / `'no_entry'` report goes to `onError` (or to
+`console.error` when none is set), not through this diagnostic channel.
 
 `LoggerDiagnostic.error` is the normalized underlying failure and `message` is its
 guardedly rendered description. Either can contain data that caller-owned code put in the
