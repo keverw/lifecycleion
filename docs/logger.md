@@ -1863,11 +1863,18 @@ listeners and otherwise ends at guarded `console.error`. That covers a `close()`
 _throws_. A sink's own close-time `'lost'` / `'no_entry'` report goes to `onError` (or to
 `console.error` when none is set), not through this diagnostic channel.
 
-`LoggerDiagnostic.error` is the normalized underlying failure and `message` is its
-guardedly rendered description. Either can contain data that caller-owned code put in the
-thrown error. A sink that persists diagnostics should apply the same access controls it
-uses for exception telemetry; the logger cannot safely run its normal redaction pipeline
-here because that pipeline may be what failed.
+`LoggerDiagnostic.error` is the normalized underlying failure and `message` is a
+guardedly rendered description safe to persist. For `'redaction'` and `'render'` kinds the
+message names what failed and where but never interpolates the thrown text: with no
+`diagnosticSinks` configured a diagnostic falls back to the ordinary log sinks, and a
+redaction failure's cause is derived from the value being masked — a getter throwing
+`cannot read <secret>` would otherwise route around the masking on the line above it.
+
+`LoggerDiagnostic.error` still carries that cause in full, and every `'diagnostic'`
+listener and `writeDiagnostic()` sink receives it. It can contain data that caller-owned
+code put in the thrown error. A sink that persists diagnostics should apply the same access
+controls it uses for exception telemetry; the logger cannot safely run its normal redaction
+pipeline here because that pipeline may be what failed.
 
 The diagnostic `kind` identifies the source: `'sink'`, `'event-handler'`, `'redaction'`,
 or `'render'`. Formatting diagnostics include their structural `path`; sink diagnostics

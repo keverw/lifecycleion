@@ -88,16 +88,29 @@ function forwardingContainerCopy(
       const elements = source as unknown[];
       const length = elements.length;
 
-      // Bounded exactly as the walk is, and for the same reason. This runs *before* the
-      // walk that `MAX_REDACTION_ENTRIES` bounds, one `defineProperty` per element, so any
-      // entry descending into a large array paid the cost the cap exists to refuse: a
-      // three-million-element array cost 4 seconds and about a gigabyte synchronously
+      // Both checks below bound this copy exactly as the walk that follows is bounded, and
+      // for the same reason: this runs one `defineProperty` per element, *before* the walk
+      // `MAX_REDACTION_ENTRIES` bounds, so any entry descending into a large array paid the
+      // cost the cap exists to refuse. A three-million-element array cost 4 seconds and about a gigabyte synchronously
       // inside `logger.info()`, and `Array.isArray` being true for a `Proxy` whose `length`
       // trap answers `2 ** 32 - 1` made it a permanent hang on the main thread - the same
       // lie the walk already defends against. Refusing the copy rather than truncating it:
       // a partial copy would be installed in place of the original and silently drop every
       // element past the bound, where `null` leaves the caller's container alone and the
       // walk's own guards fail it closed.
+      //
+      // `length` is the caller's, and a `Proxy` trap need not answer with an integer at
+      // all. `NaN > MAX_REDACTION_ENTRIES` is `false`, so a `NaN` walked straight past the
+      // bound below, then seeded `definedNamed` with `NaN` so the named-key cap
+      // (`definedNamed >= MAX_REDACTION_ENTRIES`) was false forever too - one lie about
+      // `length` disabling both caps at once - while the index loop ran zero times and
+      // silently dropped every element from a line that still looked successful. The same
+      // check `stepKeys` already makes, asked before the bound so the bound can be a plain
+      // comparison.
+      if (!Number.isSafeInteger(length) || length < 0) {
+        return null;
+      }
+
       if (length > MAX_REDACTION_ENTRIES) {
         return null;
       }

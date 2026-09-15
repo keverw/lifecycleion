@@ -28,7 +28,10 @@ import type {
   BeforeExitResult,
   LoggerDiagnostic,
 } from './types';
-import type { HandleLogOptions } from './internal-types';
+import {
+  snapshotLogOptions,
+  type SnapshotLogOptions,
+} from './internal/log-options';
 import { ArraySink } from './sinks/array';
 import { ConsoleSink } from './sinks/console';
 import { applyRedaction, markAllRedactionFailed } from './utils/redaction';
@@ -375,7 +378,7 @@ export class Logger extends EventEmitter {
   ): void {
     const message = this.renderErrorObject(prefix, error);
 
-    this.handleLog('error', message, { ...(options ?? {}), error });
+    this.handleLog('error', message, { ...snapshotLogOptions(options), error });
   }
 
   /**
@@ -950,12 +953,19 @@ export class Logger extends EventEmitter {
   protected handleLog(
     type: LogType,
     template: string,
-    options?: HandleLogOptions,
+    rawOptions?: SnapshotLogOptions,
   ): void {
     // Don't log if logger is closed
     if (this._closed) {
       return;
     }
+
+    // Read once, into an object this method owns, before anything below asks the bag a
+    // question. See `snapshotLogOptions`: every read below used to go straight at the
+    // caller's object, above the guards, so one throwing getter threw out of
+    // `logger.info()` itself - and a getter that answered twice could tell the gate one
+    // thing and the walk another.
+    const options = snapshotLogOptions(rawOptions);
 
     const timestamp = ms();
 
@@ -1158,7 +1168,10 @@ export class Logger extends EventEmitter {
         try {
           redactedParams = applyRedaction(
             params,
-            redactedKeys,
+            // Never `null` here - that is the branch above - but the snapshot's type says
+            // it can be, which is the point of that type: the fail-closed case has to be
+            // ruled out in code rather than assumed.
+            redactedKeys ?? undefined,
             this.redactFunction,
             // One budget per kind for the whole params pass, rather than one set here and
             // another inside `applyRedaction`. Both are once-per-kind-per-pass, so nesting
@@ -1335,11 +1348,27 @@ export class Logger extends EventEmitter {
         return;
       }
 
+      // The thrown text is deliberately *not* interpolated into `message`.
+      //
+      // `message` is what `diagnosticEntry` writes, and with no `diagnosticSinks`
+      // configured a diagnostic falls back to the ordinary log sinks - the same files and
+      // pipes the redacted line went to. A redaction failure's cause is derived from the
+      // very value redaction was masking: a getter or a `redactFunction` that throws
+      // `new Error('cannot read ' + secret)` is the shape `format-reporter` itself warns
+      // about, and it produced a correctly masked `pw=***REDACTION FAILED***` line
+      // followed by an `error` line carrying `hunter2` in the clear. Markers are kept free
+      // of causes for exactly this reason; the message that accompanies them has to follow
+      // the same rule or the channel is a way around it.
+      //
+      // The cause is not lost: it rides on `diagnostic.error`, which every `'diagnostic'`
+      // listener and every `writeDiagnostic` sink is handed in full. An operator who wants
+      // causes on disk asks for them by configuring a diagnostic sink, which is a decision
+      // about where secrets may land rather than a default.
       this.reportDiagnostic({
         timestamp: ms(),
         kind,
         error: failure,
-        message: `${kind === 'redaction' ? 'Redaction' : 'Render'} failed for ${path}: ${describeError(failure)}`,
+        message: `${kind === 'redaction' ? 'Redaction' : 'Render'} failed for ${path}`,
         path,
       });
     };

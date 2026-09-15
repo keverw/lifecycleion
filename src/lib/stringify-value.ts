@@ -180,16 +180,37 @@ export function redactValue(
 }
 
 /** Every option the two entry points read, each read once and guarded. */
+type SnapshotOptions = Omit<StringifyValueOptions, 'redactedKeys'> & {
+  /**
+   * `null` when the caller's `redactedKeys` getter refused to be read: supplied, but
+   * unusable. Distinct from `undefined`, which means no redaction was requested and hands
+   * the value back in the clear.
+   */
+  redactedKeys?: string[] | null;
+};
+
 function snapshotOptions(
-  options: StringifyValueOptions | undefined,
-): StringifyValueOptions {
-  return snapshotMembers(options, [
-    'onFormatError',
-    'maxRenderLength',
-    'onTruncate',
-    'redactFunction',
-    'redactedKeys',
-  ]);
+  options: SnapshotOptions | undefined,
+): SnapshotOptions {
+  return snapshotMembers(
+    options,
+    [
+      'onFormatError',
+      'maxRenderLength',
+      'onTruncate',
+      'redactFunction',
+      'redactedKeys',
+    ],
+    // `redactedKeys` is the one member here whose absence means *do less*: `redactValue`
+    // takes the "nothing was asked for" exit on `undefined` and hands the value back in
+    // the clear. So an options bag whose `redactedKeys` getter throws - the same hostile
+    // shape this snapshot was added for - asked for masking and got none, silently, with
+    // no `onFormatError` fired. `null` is what every list check here already reads as
+    // "supplied but unusable": `parseRedactPaths` refuses it, and the caller gets the
+    // `<redactedKeys>` report and the `***REDACTION FAILED***` marker, exactly as a
+    // `{ length: 0 }` or a lying `Proxy` already does.
+    { redactedKeys: null },
+  );
 }
 
 /** Whether a report's subject is one of the bracketed names for a whole input. */
@@ -232,7 +253,7 @@ function rootedRenderReport(report: ReportFormatFailure): ReportFormatFailure {
  */
 function redactValueWith(
   value: unknown,
-  options: StringifyValueOptions | undefined,
+  options: SnapshotOptions | undefined,
   renderReport: ReportFormatFailure | null,
   budget: RenderBudget,
 ): unknown {

@@ -60,28 +60,69 @@ export function readUnknownMember(source: unknown, key: PropertyKey): unknown {
 }
 
 /**
- * The named members of an options object, each read once through {@link readMember}.
+ * The named members of an options object, each read exactly once.
  *
  * An entry point that promises never to throw reads its options before it reaches the
  * `try` that keeps that promise, so an options object with a throwing accessor - a
  * `Proxy`, a getter - escaped it. Reading each member here, once, into a plain object
  * turns a refused read into the member being absent, which is the documented fallback
- * for every option this is used on: the console reporter, the default cap, no truncation
- * hook, the default mask. The object handed back is this function's own, so a getter
- * that answers differently on a second read is never asked again either.
+ * for most options this is used on: the console reporter, the default cap, no truncation
+ * hook, the default mask. Where absent is the *wrong* answer, name a stand-in in
+ * {@link unreadableAs}. The object handed back is this function's own, so a getter that
+ * answers differently on a second read is never asked again either.
+ *
+ * The read is inlined rather than delegated to {@link readMember}, which answers
+ * `undefined` for both a refused read and an absent member: telling those apart through
+ * it would mean asking the getter a second time, and a getter need not answer the same
+ * way twice. One read, one answer, and the `catch` knows which case it is in.
  */
-export function snapshotMembers<T extends object, K extends keyof T>(
+export function snapshotMembers<
+  T extends object,
+  K extends keyof T,
+  U extends Partial<Record<K, T[K] | null>> = Record<never, never>,
+>(
   source: T | undefined,
   keys: readonly K[],
-): { [P in K]?: T[P] } {
-  const snapshot: { [P in K]?: T[P] } = {};
+  /**
+   * What a member is worth when reading it *threw*, for the keys where "absent" is the
+   * wrong answer.
+   *
+   * `readMember` cannot tell a refused read from a missing member, and for most options
+   * that is fine - the documented fallback and the refusal mean the same thing. It is not
+   * fine for a member whose absence means *do less work*: `redactedKeys` is the case, and
+   * there absent means "nothing was asked for", so an options bag whose getter throws
+   * asked for masking and got a value rendered in the clear. Naming a stand-in here -
+   * `null`, which every list check in this codebase already reads as "supplied but
+   * unusable" - makes that member fail closed instead.
+   */
+  unreadableAs?: U,
+): { [P in K]?: P extends keyof U ? T[P] | U[P] : T[P] } {
+  // The return type widens only the keys that were actually given a stand-in, which is
+  // what makes the fail-closed contract visible instead of hidden behind a cast: a caller
+  // passing `{ redactedKeys: null }` gets `string[] | null` there and the declared type
+  // everywhere else, so a later `options.redactedKeys?.length` stops compiling rather than
+  // throwing at run time. A caller that names no stand-ins sees no change at all.
+  type Snapshot = { [P in K]?: P extends keyof U ? T[P] | U[P] : T[P] };
+
+  const snapshot: Snapshot = {};
 
   if (source === null || typeof source !== 'object') {
     return snapshot;
   }
 
   for (const key of keys) {
-    snapshot[key] = readMember(source, key) as T[K] | undefined;
+    let value: unknown;
+
+    try {
+      value = (source as Record<PropertyKey, unknown>)[key];
+    } catch {
+      value =
+        unreadableAs !== undefined && key in unreadableAs
+          ? unreadableAs[key]
+          : undefined;
+    }
+
+    snapshot[key] = value as Snapshot[K];
   }
 
   return snapshot;

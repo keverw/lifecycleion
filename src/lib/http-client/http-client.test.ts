@@ -4279,6 +4279,173 @@ describe('HTTPClient — redirect', () => {
     expect(h[DEFAULT_REQUEST_ID_HEADER]).toBe(res.requestID);
   });
 
+  test('cross-origin redirect strips userinfo from the Location URL', async () => {
+    // `user:pass@` in a URL is `Authorization: Basic` by another name - `NodeAdapter`
+    // copies it onto `options.auth` and `fetch` sends it. A hop that has the caller's
+    // `Authorization` stripped for crossing origins must not get credentials handed back
+    // by the very response that redirected it.
+    const followUps: string[] = [];
+
+    const adapter: HTTPAdapter = {
+      getType: () => 'mock',
+      send: (request: AdapterRequest): Promise<AdapterResponse> => {
+        if (request.requestURL === 'https://api.example/start') {
+          return Promise.resolve({
+            status: 302,
+            headers: { location: 'https://admin:secret@internal.other/admin' },
+            body: null,
+          });
+        }
+
+        followUps.push(request.requestURL);
+        return Promise.resolve({
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+          body: new TextEncoder().encode('{}'),
+        });
+      },
+    };
+
+    const client = new HTTPClient({ adapter, followRedirects: true });
+
+    const res = await client
+      .get('https://api.example/start', {
+        headers: { authorization: 'Bearer caller-token' },
+      })
+      .send();
+
+    expect(followUps).toEqual(['https://internal.other/admin']);
+    // The hop is recorded without the credentials too: observers and errors read this.
+    expect(res.redirectHistory).toEqual(['https://internal.other/admin']);
+    expect(JSON.stringify(res.redirectHistory)).not.toContain('secret');
+  });
+
+  test('same-origin redirect keeps userinfo in the Location URL', async () => {
+    // Same origin is the one the caller addressed, and may already have been carrying
+    // credentials; only a *cross-origin* hop has them taken away.
+    const followUps: string[] = [];
+
+    const adapter: HTTPAdapter = {
+      getType: () => 'mock',
+      send: (request: AdapterRequest): Promise<AdapterResponse> => {
+        if (request.requestURL === 'https://api.example/start') {
+          return Promise.resolve({
+            status: 302,
+            headers: { location: 'https://admin:secret@api.example/next' },
+            body: null,
+          });
+        }
+
+        followUps.push(request.requestURL);
+        return Promise.resolve({
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+          body: new TextEncoder().encode('{}'),
+        });
+      },
+    };
+
+    const client = new HTTPClient({ adapter, followRedirects: true });
+
+    await client.get('https://api.example/start').send();
+
+    expect(followUps).toEqual(['https://admin:secret@api.example/next']);
+  });
+
+  test('a non-http(s) Location is a request_setup_error, not an interceptor_error', async () => {
+    // No interceptor ran, so a message saying one rewrote the URL - and a code monitors
+    // key on for *their own* interceptors - named the wrong thing entirely.
+    const adapter: HTTPAdapter = {
+      getType: () => 'mock',
+      send: (): Promise<AdapterResponse> =>
+        Promise.resolve({
+          status: 302,
+          headers: { location: 'file:///etc/passwd' },
+          body: null,
+        }),
+    };
+
+    const client = new HTTPClient({ adapter, followRedirects: true });
+
+    const builder = client.get('https://api.example/start');
+    const res = await builder.send();
+
+    expect(res.isFailed).toBe(true);
+    expect(builder.error?.code).toBe('request_setup_error');
+    expect(builder.error?.cause?.message).toContain('file:///etc/passwd');
+  });
+
+  test('a redirect interceptor still sees a non-http(s) Location and can rescue it', async () => {
+    // Refusing the scheme *before* the interceptors would take the hop away from them
+    // entirely - and rewriting `requestURL` in the redirect phase is the documented way
+    // to steer or reject a hop. The refusal happens after they run, so an interceptor
+    // that fixes the target still gets to.
+    const seen: string[] = [];
+    const followUps: string[] = [];
+
+    const adapter: HTTPAdapter = {
+      getType: () => 'mock',
+      send: (request: AdapterRequest): Promise<AdapterResponse> => {
+        if (request.requestURL === 'https://api.example/start') {
+          return Promise.resolve({
+            status: 302,
+            headers: { location: 'ftp://files.example/dump' },
+            body: null,
+          });
+        }
+
+        followUps.push(request.requestURL);
+        return Promise.resolve({
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+          body: new TextEncoder().encode('{}'),
+        });
+      },
+    };
+
+    const client = new HTTPClient({ adapter, followRedirects: true });
+
+    client.addRequestInterceptor(
+      (req) => {
+        seen.push(req.requestURL);
+
+        return { ...req, requestURL: 'https://api.example/rescued' };
+      },
+      { phases: ['redirect'] },
+    );
+
+    const res = await client.get('https://api.example/start').send();
+
+    expect(seen).toEqual(['ftp://files.example/dump']);
+    expect(followUps).toEqual(['https://api.example/rescued']);
+    expect(res.status).toBe(200);
+  });
+
+  test('a redirect interceptor can cancel a non-http(s) Location as a cancel', async () => {
+    const adapter: HTTPAdapter = {
+      getType: () => 'mock',
+      send: (): Promise<AdapterResponse> =>
+        Promise.resolve({
+          status: 302,
+          headers: { location: 'file:///etc/passwd' },
+          body: null,
+        }),
+    };
+
+    const client = new HTTPClient({ adapter, followRedirects: true });
+
+    client.addRequestInterceptor(
+      () => ({ cancel: true, reason: 'bad scheme' }),
+      {
+        phases: ['redirect'],
+      },
+    );
+
+    const res = await client.get('https://api.example/start').send();
+
+    expect(res.isCancelled).toBe(true);
+  });
+
   test('same-origin redirect preserves caller-supplied Cookie header without a jar', async () => {
     const followUpHeaders: Array<Record<string, string | string[]>> = [];
 

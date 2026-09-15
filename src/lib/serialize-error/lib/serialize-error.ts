@@ -3,6 +3,7 @@ import {
   describeContainer,
 } from '../../internal/container-entries';
 import { MAX_RENDER_DEPTH, TRUNCATED } from '../../internal/render-budget';
+import { readUnknownMember } from '../../internal/read-member';
 import { isErrorValue } from '../../to-error';
 import {
   createFormatReporter,
@@ -56,6 +57,27 @@ export interface SerializedError {
  * about to be sent somewhere. It goes to `onFormatError` instead.
  */
 const UNSERIALIZABLE_KEYS = '<unserializable: keys>';
+
+/**
+ * A one-line stand-in for a `Buffer`, `TypedArray` or `DataView`.
+ *
+ * Names the kind and the size, which is what a reader of a failure payload wants to know
+ * about attached binary data, and costs one node rather than one per byte. `errorToString`
+ * collapses the same shapes to a single leaf for the same reason, though to its own
+ * generic marker rather than to this text. See the `ArrayBuffer.isView` branch in
+ * `deepSerialize`.
+ */
+function describeBinaryView(value: ArrayBufferView): string {
+  // Guarded reads, as everything else on this path is: `constructor`, `name` and even
+  // `byteLength` are accessors on a subclass or `Proxy`'s prototype and can throw.
+  const name = readUnknownMember(
+    readUnknownMember(value, 'constructor'),
+    'name',
+  );
+  const byteLength = readUnknownMember(value, 'byteLength');
+
+  return `<binary: ${typeof name === 'string' && name.length > 0 ? name : 'ArrayBufferView'}, ${typeof byteLength === 'number' ? String(byteLength) : 'unknown'} bytes>`;
+}
 
 /** A single value refused to be read - a throwing accessor, a revoked `Proxy`. */
 const UNSERIALIZABLE_VALUE = '<unserializable: value>';
@@ -576,6 +598,18 @@ function deepSerialize(
   try {
     if (isErrorLike(value)) {
       return serializeErrorInner(value, seen, depth + 1, path, report, budget);
+    }
+
+    // A view over binary data is one leaf, not one entry per byte - one leaf for the same
+    // reason `errorToString` gives one, though spelled with the kind and size rather than
+    // with its generic marker. `Array.isArray` is false for a
+    // `Buffer`, so it fell through to the object branch and `Object.keys` enumerated its
+    // indexes: an ordinary `Buffer` attached to an error became a JSON object with one key
+    // per byte, exhausting the node budget on a 100 KB buffer and spending hundreds of
+    // milliseconds in `Object.keys` on a 2 MB one - inside the walk that exists to
+    // describe a failure cheaply on the IPC path.
+    if (ArrayBuffer.isView(value)) {
+      return describeBinaryView(value);
     }
 
     const shape = describeContainer(value);

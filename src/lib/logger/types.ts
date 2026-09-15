@@ -134,7 +134,18 @@ export interface LoggerDiagnostic {
   timestamp: number;
   kind: LoggerDiagnosticKind;
   error: Error;
-  /** Guardedly rendered text suitable for the fallback `LogEntry`. */
+  /**
+   * Guardedly rendered text suitable for the fallback `LogEntry`.
+   *
+   * Safe to persist. With no `diagnosticSinks` configured this string is written to the
+   * ordinary log sinks, so it names *what* failed and *where* but never interpolates the
+   * thrown value: a `redaction` failure's cause is derived from the secret being masked,
+   * and a message carrying it would route around the masking on the line above it.
+   *
+   * Read {@link LoggerDiagnostic.error} for the cause. It is handed to every
+   * `'diagnostic'` listener and every sink implementing `writeDiagnostic`, which is where
+   * a caller decides for itself whether that text may be written down.
+   */
   message: string;
   context?: 'write' | 'close';
   sink?: LogSink;

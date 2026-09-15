@@ -284,6 +284,33 @@ describe('runCallbackSafely', () => {
     expect(failures).toEqual([]);
   });
 
+  it('routes a then-only thenable rejection to onError', async () => {
+    // `isPromise` accepts any thenable, and a `then`-only one has no `catch`. Calling
+    // `result.catch` threw a `TypeError` that was reported *instead of* the real failure,
+    // and because `then` was never called the actual rejection went nowhere. Every
+    // untrusted-callback surface funnels through here.
+    const failures: unknown[] = [];
+    const thrown = new Error('async');
+
+    runCallbackSafely(
+      'cb',
+      () => ({
+        then: (
+          _onFulfilled: (value: unknown) => void,
+          onRejected: (reason: unknown) => void,
+        ): void => {
+          queueMicrotask(() => onRejected(thrown));
+        },
+      }),
+      [],
+      (error) => failures.push(error),
+    );
+
+    await sleep(10);
+
+    expect(failures).toEqual([thrown]);
+  });
+
   it('routes a synchronous throw to onError', () => {
     const failures: unknown[] = [];
     const thrown = new Error('sync');

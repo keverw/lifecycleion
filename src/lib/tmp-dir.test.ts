@@ -250,6 +250,25 @@ describe('TmpDir', () => {
     await dir.cleanup();
   });
 
+  test('cleanup() during an in-flight initialize() removes the directory', async () => {
+    // `isInitialized` is set at the *end* of `createTempDir`, so for the whole of that
+    // call `cleanup()` saw both flags false and removed nothing - and then the directory
+    // appeared with nothing left to remove it. `cleanup()` now joins the create first.
+    // Its own base, so what is counted afterwards is only this test's leaf.
+    const base = path.join(tempDir.path, 'cleanup-during-initialize');
+    const dir = new TmpDir({ baseDirectory: base });
+
+    const [, cleanupResult] = await Promise.allSettled([
+      dir.initialize(),
+      dir.cleanup(),
+    ]);
+
+    expect(cleanupResult.status).toBe('fulfilled');
+    // Nothing orphaned: the leaf `initialize()` created was removed, not left behind for
+    // an OS reaper to find.
+    expect(await fs.readdir(base)).toEqual([]);
+  });
+
   test('creates a base directory that is not there yet', async () => {
     const base = path.join(tempDir.path, 'nested', 'base');
     const dir = await createTempDir({ baseDirectory: base });

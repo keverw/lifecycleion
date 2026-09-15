@@ -2181,6 +2181,124 @@ describe('Logger - errorObject redaction reaches diagnostics, not the console', 
   });
 });
 
+describe('Logger - an options bag that will not be read', () => {
+  const SECRET = 'hunter2secret';
+
+  test('a throwing redactedKeys getter does not throw out of logger.info()', () => {
+    // `logger.info()` promises never to throw. Every option was read above the guards, so
+    // one getter threw straight out of the call and nothing was written at all.
+    const sink = new ArraySink();
+    const logger = new Logger({ sinks: [sink], callProcessExit: false });
+
+    expect(() => {
+      logger.info('login {{password}}', {
+        params: { password: SECRET },
+        get redactedKeys(): string[] {
+          throw new Error('option read refused');
+        },
+      });
+    }).not.toThrow();
+
+    expect(sink.logs).toHaveLength(1);
+  });
+
+  test('a throwing redactedKeys getter fails closed rather than logging in the clear', () => {
+    // Absent `redactedKeys` means "no redaction requested" and renders the params in the
+    // clear, so a refused read must not be read as absent. It is the same answer an
+    // unusable list already gets.
+    const sink = new ArraySink();
+    const logger = new Logger({ sinks: [sink], callProcessExit: false });
+
+    logger.info('login {{password}}', {
+      params: { password: SECRET },
+      get redactedKeys(): string[] {
+        throw new Error('option read refused');
+      },
+    });
+
+    const entry = sink.logs[0];
+
+    expect(entry?.message).not.toContain(SECRET);
+    expect(JSON.stringify(entry?.redactedParams)).not.toContain(SECRET);
+  });
+
+  test('a throwing tags or exitCode getter still writes the entry', () => {
+    const sink = new ArraySink();
+    const logger = new Logger({ sinks: [sink], callProcessExit: false });
+
+    expect(() => {
+      logger.info('hello', {
+        get tags(): string[] {
+          throw new Error('no tags for you');
+        },
+        get exitCode(): number {
+          throw new Error('no exitCode for you');
+        },
+      });
+    }).not.toThrow();
+
+    expect(sink.logs[0]?.message).toBe('hello');
+    expect(sink.logs[0]?.tags).toBeUndefined();
+  });
+
+  test('a service logger tolerates the same bag', () => {
+    // `LoggerService` spread the caller's options one frame *above* `handleLog`, so it
+    // threw before the snapshot could be taken.
+    const sink = new ArraySink();
+    const logger = new Logger({ sinks: [sink], callProcessExit: false });
+    const service = logger.service('svc');
+
+    expect(() => {
+      service.info('hello', {
+        get tags(): string[] {
+          throw new Error('no tags for you');
+        },
+      });
+    }).not.toThrow();
+
+    expect(sink.logs[0]?.serviceName).toBe('svc');
+  });
+});
+
+describe('Logger - a diagnostic must not carry what the line above it masked', () => {
+  const SECRET = 'hunter2secret';
+
+  test('a redaction failure message names the path but not the thrown text', async () => {
+    // With no `diagnosticSinks`, a diagnostic falls back to the ordinary log sinks - the
+    // same files and pipes the masked line went to. A redaction failure's cause is derived
+    // from the value being masked, so a message carrying it routed around the masking.
+    const sink = new ArraySink();
+    const logger = new Logger({ sinks: [sink], callProcessExit: false });
+    const seen: LoggerDiagnostic[] = [];
+
+    logger.on('diagnostic', (diagnostic) => {
+      seen.push(diagnostic as LoggerDiagnostic);
+    });
+
+    logger.info('pw={{password}}', {
+      params: {
+        get password(): string {
+          throw new Error(`cannot read ${SECRET}`);
+        },
+      },
+      redactedKeys: ['password'],
+    });
+
+    await sleep(20);
+
+    expect(seen).toHaveLength(1);
+    expect(seen[0]?.message).toBe('Redaction failed for password');
+    expect(seen[0]?.message).not.toContain(SECRET);
+    // The cause is still there in full for a listener that asked for it.
+    expect(seen[0]?.error.message).toContain(SECRET);
+
+    // And nothing written to the log sinks carries it either.
+    expect(JSON.stringify(sink.logs.map((log) => log.message))).not.toContain(
+      SECRET,
+    );
+  });
+});
+
 describe('Logger - a redactedKeys list that will not be read twice', () => {
   const SECRET = 'hunter2secret';
 

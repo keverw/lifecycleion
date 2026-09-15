@@ -417,6 +417,44 @@ describe('deserializeError - untrusted input', () => {
   });
 });
 
+describe('serializeError on binary data attached to an error', () => {
+  // `Array.isArray` is false for a `Buffer`, so it fell through to the object branch and
+  // `Object.keys` enumerated its bytes: an ordinary buffer became a JSON object with one
+  // key per byte, exhausting the node budget and spending the walk that is supposed to
+  // describe a failure cheaply. `errorToString` already collapses the same shapes to a single leaf.
+  test('a Buffer is one leaf, not one key per byte', () => {
+    const error = new Error('boom') as Error & { data?: unknown };
+
+    error.data = Buffer.from('hello world');
+
+    const serialized = serializeError(error) as { data?: unknown };
+
+    expect(serialized.data).toBe('<binary: Buffer, 11 bytes>');
+  });
+
+  test('a large typed array costs one node', () => {
+    const error = new Error('boom') as Error & { data?: unknown };
+
+    error.data = new Uint8Array(500_000);
+
+    const started = Date.now();
+    const serialized = serializeError(error) as { data?: unknown };
+
+    expect(serialized.data).toBe('<binary: Uint8Array, 500000 bytes>');
+    expect(Date.now() - started).toBeLessThan(1000);
+  });
+
+  test('a DataView is described the same way', () => {
+    const error = new Error('boom') as Error & { data?: unknown };
+
+    error.data = new DataView(new ArrayBuffer(8));
+
+    const serialized = serializeError(error) as { data?: unknown };
+
+    expect(serialized.data).toBe('<binary: DataView, 8 bytes>');
+  });
+});
+
 describe('serializeError terminates on payloads nothing else bounds', () => {
   // The depth cap bounds how deep the walk goes, the cycle cut bounds loops, and neither
   // bounds how much the walk *emits*. `seen` is released as the walk leaves a node -

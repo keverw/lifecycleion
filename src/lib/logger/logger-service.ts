@@ -1,5 +1,8 @@
 import type { LogType, LogOptions } from './types';
-import type { HandleLogOptions } from './internal-types';
+import {
+  snapshotLogOptions,
+  type SnapshotLogOptions,
+} from './internal/log-options';
 
 /**
  * LoggerService for scoped logging with service names
@@ -8,7 +11,7 @@ export class LoggerService {
   private handleLog: (
     type: LogType,
     template: string,
-    options?: HandleLogOptions,
+    options?: SnapshotLogOptions,
   ) => void;
   /**
    * Renders an error for `errorObject`, supplied by the `Logger` that made this.
@@ -27,7 +30,7 @@ export class LoggerService {
     handleLog: (
       type: LogType,
       template: string,
-      options?: HandleLogOptions,
+      options?: SnapshotLogOptions,
     ) => void,
     renderErrorObject: (prefix: string, error: unknown) => string,
     serviceName: string,
@@ -56,7 +59,7 @@ export class LoggerService {
    */
   public error(message: string, options?: LogOptions): void {
     this.handleLog('error', message, {
-      ...(options ?? {}),
+      ...snapshotLogOptions(options),
       serviceName: this.serviceName,
       entityName: this.entityName,
     });
@@ -73,7 +76,7 @@ export class LoggerService {
     const message = this.renderErrorObject(prefix, error);
 
     this.handleLog('error', message, {
-      ...(options ?? {}),
+      ...snapshotLogOptions(options),
       serviceName: this.serviceName,
       entityName: this.entityName,
       error,
@@ -85,7 +88,7 @@ export class LoggerService {
    */
   public info(message: string, options?: LogOptions): void {
     this.handleLog('info', message, {
-      ...(options ?? {}),
+      ...snapshotLogOptions(options),
       serviceName: this.serviceName,
       entityName: this.entityName,
     });
@@ -96,7 +99,7 @@ export class LoggerService {
    */
   public warn(message: string, options?: LogOptions): void {
     this.handleLog('warn', message, {
-      ...(options ?? {}),
+      ...snapshotLogOptions(options),
       serviceName: this.serviceName,
       entityName: this.entityName,
     });
@@ -107,7 +110,7 @@ export class LoggerService {
    */
   public success(message: string, options?: LogOptions): void {
     this.handleLog('success', message, {
-      ...(options ?? {}),
+      ...snapshotLogOptions(options),
       serviceName: this.serviceName,
       entityName: this.entityName,
     });
@@ -118,7 +121,7 @@ export class LoggerService {
    */
   public notice(message: string, options?: LogOptions): void {
     this.handleLog('notice', message, {
-      ...(options ?? {}),
+      ...snapshotLogOptions(options),
       serviceName: this.serviceName,
       entityName: this.entityName,
     });
@@ -129,7 +132,7 @@ export class LoggerService {
    */
   public debug(message: string, options?: LogOptions): void {
     this.handleLog('debug', message, {
-      ...(options ?? {}),
+      ...snapshotLogOptions(options),
       serviceName: this.serviceName,
       entityName: this.entityName,
     });
@@ -140,7 +143,7 @@ export class LoggerService {
    */
   public raw(message: string, options?: LogOptions): void {
     this.handleLog('raw', message, {
-      ...(options ?? {}),
+      ...snapshotLogOptions(options),
       serviceName: this.serviceName,
       entityName: this.entityName,
     });

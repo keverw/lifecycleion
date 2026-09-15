@@ -5,7 +5,7 @@ import type {
   RetryPolicyValidated,
   RetryQueryResult,
 } from './types';
-import { clamp } from '../../clamp';
+import { clamp, finiteClamp } from '../../clamp';
 import { calculateExponentialDelay, getMostCommonError } from './utils';
 
 interface CurrentState {
@@ -159,28 +159,51 @@ export class RetryPolicy {
     const DEFAULT_MAX_TIMEOUT_MS = 30000;
     const DEFAULT_DISPERSION = 0.1;
 
+    // Every *duration* below goes through `finiteClamp`, not `clamp`.
+    //
+    // `clamp` is `Math.max`/`Math.min`, and both pass `NaN` through: `maxTimeoutMS: NaN`
+    // survived validation, made every computed delay `NaN`, and `RetryRunner` reads
+    // `delayMS > 0` as false and retries on the same stack - so a config that asked for a
+    // longer wait removed the wait altogether and busy-retried until the stack overflowed.
+    // `Infinity` is refused from the other end for the same reason: `setTimeout(Infinity)`
+    // fires on the next tick, so "wait forever" is really "wait not at all".
+    //
+    // `maxRetryAttempts` is deliberately not one of them. It is a count rather than a
+    // duration, nothing turns it into a timer, and `Infinity` is a meaningful and
+    // supported answer there - retry until told to stop. Only `NaN` is refused, which
+    // `finiteClamp` cannot express without also refusing `Infinity`.
+    const attempts = (value: number): number =>
+      Math.floor(
+        Number.isNaN(value)
+          ? DEFAULT_MAX_RETRY_ATTEMPTS
+          : clamp(value, 1, Infinity),
+      );
+
     if (policy.strategy === 'fixed') {
       this.policy = {
         strategy: 'fixed',
-        maxRetryAttempts: Math.floor(
-          clamp(
-            policy.maxRetryAttempts ?? DEFAULT_MAX_RETRY_ATTEMPTS,
-            1,
-            Infinity,
-          ),
+        maxRetryAttempts: attempts(
+          policy.maxRetryAttempts ?? DEFAULT_MAX_RETRY_ATTEMPTS,
         ),
-        delayMS: clamp(policy.delayMS ?? DEFAULT_MIN_TIMEOUT_MS, 1, Infinity),
+        delayMS: finiteClamp(
+          policy.delayMS ?? DEFAULT_MIN_TIMEOUT_MS,
+          1,
+          Number.MAX_SAFE_INTEGER,
+          DEFAULT_MIN_TIMEOUT_MS,
+        ),
       };
     } else if (policy.strategy === 'exponential') {
-      const minTimeoutMS = clamp(
+      const minTimeoutMS = finiteClamp(
         policy.minTimeoutMS ?? DEFAULT_MIN_TIMEOUT_MS,
         1,
-        Infinity,
+        Number.MAX_SAFE_INTEGER,
+        DEFAULT_MIN_TIMEOUT_MS,
       );
-      const maxTimeoutMS = clamp(
+      const maxTimeoutMS = finiteClamp(
         policy.maxTimeoutMS ?? DEFAULT_MAX_TIMEOUT_MS,
         1,
-        Infinity,
+        Number.MAX_SAFE_INTEGER,
+        DEFAULT_MAX_TIMEOUT_MS,
       );
 
       // Ensure maxTimeoutMS >= minTimeoutMS by swapping if needed
@@ -189,17 +212,24 @@ export class RetryPolicy {
 
       this.policy = {
         strategy: 'exponential',
-        maxRetryAttempts: Math.floor(
-          clamp(
-            policy.maxRetryAttempts ?? DEFAULT_MAX_RETRY_ATTEMPTS,
-            1,
-            Infinity,
-          ),
+        maxRetryAttempts: attempts(
+          policy.maxRetryAttempts ?? DEFAULT_MAX_RETRY_ATTEMPTS,
         ),
-        factor: clamp(policy.factor ?? DEFAULT_FACTOR, 1, Infinity),
+        // `factor` is not a duration either, but it multiplies into one, so a `NaN` here
+        // reaches the same place a `NaN` timeout did. `Infinity` stays legal: the delay it
+        // produces is capped at `maxTimeoutMS` before jitter, which is what the caller
+        // asking for it means - jump straight to the ceiling.
+        factor: Number.isNaN(policy.factor ?? DEFAULT_FACTOR)
+          ? DEFAULT_FACTOR
+          : clamp(policy.factor ?? DEFAULT_FACTOR, 1, Infinity),
         minTimeoutMS: finalMin,
         maxTimeoutMS: finalMax,
-        dispersion: clamp(policy.dispersion ?? DEFAULT_DISPERSION, 0, 1),
+        dispersion: finiteClamp(
+          policy.dispersion ?? DEFAULT_DISPERSION,
+          0,
+          1,
+          DEFAULT_DISPERSION,
+        ),
       };
     } else {
       throw new RetryUtilsErrPolicyConfigInvalidStrategy(

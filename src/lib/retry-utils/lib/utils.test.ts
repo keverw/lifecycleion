@@ -52,6 +52,38 @@ describe('calculateExponentialDelay', () => {
     expect(calculateExponentialDelay(params)).toBe(params.maxTimeoutMS);
   });
 
+  // A delay that overflows to `Infinity` used to make jitter `Infinity - Infinity`, which
+  // is `NaN`, which `clamp` (`Math.max`/`Math.min`) passes straight through. The runner
+  // asks `delayMS > 0`, `NaN > 0` is false, and the retry then ran synchronously on the
+  // same stack until it overflowed.
+  test('an overflowing delay is capped rather than turning into NaN', () => {
+    const delay = calculateExponentialDelay({
+      retryCount: 2,
+      minTimeoutMS: 100,
+      maxTimeoutMS: 10000,
+      factor: Infinity,
+      dispersion: 0.1,
+      randomFn: (): number => 0.5,
+    });
+
+    expect(Number.isFinite(delay)).toBe(true);
+    expect(delay).toBe(10000);
+  });
+
+  test('enough attempts at an ordinary factor also stay finite', () => {
+    const delay = calculateExponentialDelay({
+      retryCount: 5000,
+      minTimeoutMS: 100,
+      maxTimeoutMS: 10000,
+      factor: 2,
+      dispersion: 0.1,
+      randomFn: (): number => 0.5,
+    });
+
+    expect(Number.isFinite(delay)).toBe(true);
+    expect(delay).toBe(10000);
+  });
+
   // Test clamping to minTimeoutMS
   test('ensures delay does not fall below minTimeoutMS', () => {
     const params = {

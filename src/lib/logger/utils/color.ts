@@ -39,7 +39,15 @@ export function colorize(
 
   if (isBrowser) {
     return {
-      coloredText: `%c${text}`,
+      // Percent signs in the message are escaped, because this is the one branch that
+      // hands the console a *format string* plus an argument. `console.error('%c' + text,
+      // style)` makes every later `%s`, `%d`, `%o` and `%c` in `text` a specifier the
+      // console fills: a message containing `%s` spliced the CSS string into the visible
+      // text, and a second `%c` let message content restyle the rest of the line. The same
+      // class of forgery `sanitizeScopeName` closed for newlines in names, for the one
+      // runtime where messages are format strings - Node's branch below passes no second
+      // argument, so nothing is interpolated there.
+      coloredText: `%c${text.replaceAll('%', '%%')}`,
       style: browserColors[type],
     };
   } else {

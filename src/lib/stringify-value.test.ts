@@ -2881,6 +2881,42 @@ describe('cutAt - a cut inside a character steps back to a boundary', () => {
   });
 });
 
+describe('redactValue - an array whose length is not an integer', () => {
+  test('is refused rather than walked past both caps', () => {
+    // `length > MAX_REDACTION_ENTRIES` was the only guard, and `NaN > 1_000_000` is
+    // `false`: a `NaN` length walked straight past it, then seeded the named-key counter
+    // with `NaN` so `definedNamed >= MAX_REDACTION_ENTRIES` was false forever too. One lie
+    // about `length` disabled both caps at once - and the index loop copied nothing, so
+    // the array silently lost every element while the line still looked successful.
+    const lyingLength = (target: unknown[]): unknown[] =>
+      new Proxy(target, {
+        get(t, property, receiver): unknown {
+          if (property === 'length') {
+            return NaN;
+          }
+
+          return Reflect.get(t, property, receiver) as unknown;
+        },
+      });
+
+    const reports: Array<{ kind: string; path: string }> = [];
+
+    const rendered = stringifyValue(
+      { items: lyingLength(['hunter2secret', 'other']) },
+      {
+        redactedKeys: ['items[0]'],
+        onFormatError: (_error, kind, path) => {
+          reports.push({ kind, path });
+        },
+      },
+    );
+
+    expect(rendered).not.toContain('hunter2secret');
+    expect(rendered).toBe('{"items":"***REDACTION FAILED***"}');
+    expect(reports).toEqual([{ kind: 'redaction', path: 'items' }]);
+  });
+});
+
 /** An options object whose every member read throws. */
 const hostileOptions = <T extends object>(): T =>
   new Proxy({} as T, {
@@ -2891,11 +2927,43 @@ const hostileOptions = <T extends object>(): T =>
 
 describe('stringifyValue / redactValue - an options object that refuses to be read', () => {
   test('falls back to the defaults rather than throwing', () => {
+    // Every option here is refused, `redactedKeys` included, so the fail-closed marker is
+    // the whole answer: the defaults cover the rest, and nothing throws out of either
+    // entry point.
     expect(
       stringifyValue({ a: 1 }, hostileOptions<StringifyValueOptions>()),
-    ).toBe('{"a":1}');
-    expect(
-      redactValue({ a: 1 }, hostileOptions<StringifyValueOptions>()),
-    ).toEqual({ a: 1 });
+    ).toBe('***REDACTION FAILED***');
+    expect(redactValue({ a: 1 }, hostileOptions<StringifyValueOptions>())).toBe(
+      '***REDACTION FAILED***',
+    );
+  });
+
+  test('an unreadable redactedKeys fails closed rather than rendering in the clear', () => {
+    // The distinction the snapshot has to keep: absent `redactedKeys` means "nothing was
+    // asked for" and hands the value back, so a getter that throws must not be read as
+    // absent. It is the same answer an unusable list already gets.
+    const reports: Array<{ kind: string; path: string }> = [];
+
+    const rendered = stringifyValue(
+      { password: 'hunter2secret' },
+      {
+        onFormatError: (_error, kind, path) => {
+          reports.push({ kind, path });
+        },
+        get redactedKeys(): string[] {
+          throw new Error('option read refused');
+        },
+      },
+    );
+
+    expect(rendered).not.toContain('hunter2secret');
+    expect(rendered).toBe('***REDACTION FAILED***');
+    expect(reports).toEqual([{ kind: 'redaction', path: '<redactedKeys>' }]);
+  });
+
+  test('an absent redactedKeys still renders in the clear', () => {
+    expect(stringifyValue({ password: 'hunter2secret' }, {})).toBe(
+      '{"password":"hunter2secret"}',
+    );
   });
 });

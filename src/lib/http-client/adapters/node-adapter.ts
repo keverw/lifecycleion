@@ -339,15 +339,33 @@ export class NodeAdapter implements HTTPAdapter {
       // not impose its own timeout so the client retains full control.
     };
 
+    // Whether this attempt is a redirect hop to an origin the caller never named. Asked
+    // here rather than only inside the `https:` branch below, because `socketPath` is the
+    // other piece of caller-configured *reach* a `Location` header must not be able to
+    // retarget - and unlike TLS identity it applies to plain `http:` too.
+    const isCrossOriginHop = isCrossOriginRedirectHop(
+      request.initialURL,
+      parsedURL,
+    );
+
     if (urlOptions.auth) {
       options.auth = urlOptions.auth;
     }
 
-    if (this._config.socketPath) {
+    if (this._config.socketPath && !isCrossOriginHop) {
       // Unix socket: the TCP connection goes to the socket path, not the host.
       // We still need options.path so the HTTP request line has the right path.
       // Preserve the URL host/port too so Node generates the correct Host
       // header for virtual-hosted services behind the socket.
+      //
+      // Withheld on a cross-origin hop, on the same rule as `mtls.cert` and `servername`
+      // below: the socket is the caller's chosen endpoint, often a privileged one
+      // (`/var/run/docker.sock`), and a `Location` is the remote server's choice. Applied
+      // unconditionally, a redirect to another host never left the socket - the bytes
+      // stayed on that privileged endpoint and only the request line and `Host` header
+      // changed, turning a redirect into a request the caller never made against the very
+      // socket it configured. The hop still happens, over TCP to the host the `Location`
+      // actually names, which is where that redirect would have gone without a socket.
       options.socketPath = this._config.socketPath;
       options.hostname = urlOptions.hostname;
       options.port = urlOptions.port;
@@ -364,12 +382,8 @@ export class NodeAdapter implements HTTPAdapter {
       // Whether this attempt is a redirect hop to an origin the caller never named. The
       // configured *trust* (`ca`, `mtls.ca`, `crl`, `rejectUnauthorized`) still applies
       // there - it says which servers to believe, and that is the caller's rule for every
-      // connection this adapter opens. The configured *identity* does not: see
-      // `isCrossOriginRedirectHop`.
-      const isCrossOriginHop = isCrossOriginRedirectHop(
-        request.initialURL,
-        parsedURL,
-      );
+      // connection this adapter opens. The configured *identity* does not, and neither
+      // does `socketPath` above: see `isCrossOriginRedirectHop`.
 
       // custom CA trust store
       if (this._config.ca) {

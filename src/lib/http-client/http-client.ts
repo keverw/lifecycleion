@@ -24,6 +24,7 @@ import {
   resolveDetectedRedirectURL,
   scalarHeader,
   serializeBody,
+  stripURLCredentials,
 } from './utils';
 import {
   resolveRequestTimeoutMS,
@@ -900,6 +901,20 @@ export class BaseHTTPClient {
 
             redirectURL = resolveAbsoluteURL(redirectURL, this._config.baseURL);
 
+            // Stripped here, before the hop is recorded, rather than only on the request:
+            // `hopInfo`, `redirectHistory` and every observer and error built from them
+            // carry this string, so a `Location` password left on it long enough to reach
+            // `_sanitizeRedirectRequest` had already been handed to the caller's observers
+            // and written into the redirect history. See `stripURLCredentials`.
+            if (
+              this._isCrossOriginRedirect(
+                attemptResult.sentRequest.requestURL,
+                redirectURL,
+              )
+            ) {
+              redirectURL = stripURLCredentials(redirectURL);
+            }
+
             // Method rewriting per HTTP spec (matches browser/fetch behavior):
             //  - 303 (See Other) always becomes GET
             //  - 301 (Moved Permanently) / 302 (Found) rewrite POST to GET
@@ -947,6 +962,27 @@ export class BaseHTTPClient {
             // are re-attached below as needed.
             const nextRedirectHistory = [...redirectHistory, redirectURL];
 
+            // Whether the *server's* `Location` was already unusable, remembered before
+            // the interceptors run and answered after them.
+            //
+            // Both this and `_assertInterceptorResolvedURL` refuse the hop, so
+            // `Location: file:///etc/passwd` never reached an adapter either way - but it
+            // was reported as `interceptor_error`, with a message saying an interceptor
+            // rewrote the URL, on requests with no redirect interceptors registered at
+            // all. A caller alerting on `interceptor_error` paged for the remote server's
+            // `Location`, and the code that names what actually happened was already in
+            // use for the same failure on the initial URL: `request_setup_error`.
+            //
+            // Asked here but acted on below the interceptor run, because *refusing early*
+            // would take the hop away from the redirect-phase interceptors entirely - and
+            // rewriting `requestURL` there is the documented way to steer or reject a hop,
+            // which the scheme-downgrade guidance in the HTTP client docs points at by
+            // name. An interceptor that rescues a bad `Location` still gets to; one that
+            // only observes still sees the hop; a `cancel` still reports as a cancel. Only
+            // a `Location` nobody fixed fails, and it fails as the server's fault.
+            const wasLocationUnsupported =
+              !this._isSupportedRequestURL(redirectURL);
+
             const redirectRequest = this._sanitizeRedirectRequest(
               {
                 ...currentInterceptedRequest,
@@ -984,9 +1020,20 @@ export class BaseHTTPClient {
               if (!('cancel' in redirectIntercept)) {
                 failedRedirectRequest = redirectIntercept;
                 this._assertRequestIsSupported(redirectIntercept);
-                this._assertInterceptorResolvedURL(
-                  redirectIntercept.requestURL,
-                );
+
+                // Skipped when the `Location` arrived unusable and is still unusable: the
+                // assertion's message and its `interceptor_error` code both name an
+                // interceptor, which is the wrong story for a URL no interceptor touched.
+                // That case is answered below instead. An interceptor that rewrote a good
+                // URL into a bad one is still this assertion's, and still its own fault.
+                if (
+                  !wasLocationUnsupported ||
+                  redirectIntercept.requestURL !== redirectURL
+                ) {
+                  this._assertInterceptorResolvedURL(
+                    redirectIntercept.requestURL,
+                  );
+                }
               }
             } catch (error) {
               observerRequest = this._bestEffortAttemptRequestFromPending(
@@ -1035,6 +1082,37 @@ export class BaseHTTPClient {
                 redirectHistory: [...redirectHistory, cancelledRequestURL],
                 ...(uploadOutcome ? { requestBodySettled: uploadOutcome } : {}),
               });
+
+              break;
+            }
+
+            // The `Location` was unusable and no interceptor fixed it, so the hop fails
+            // as the server's doing: `request_setup_error`, not `interceptor_error`. See
+            // `wasLocationUnsupported` above. Nothing has been dispatched - the adapter
+            // never sees a `file:` or `data:` URL either way.
+            if (!this._isSupportedRequestURL(redirectIntercept.requestURL)) {
+              observerRequest = this._bestEffortAttemptRequestFromPending(
+                redirectIntercept,
+                timeout,
+                requestID,
+              );
+              response = this._buildResponse<T>({
+                adapterResponse: null,
+                requestID,
+                wasCancelled: false,
+                wasTimeout: false,
+                adapterType: this._adapter.getType(),
+                initialURL: finalRequest.requestURL,
+                requestURL: redirectIntercept.requestURL,
+                redirectHistory: nextRedirectHistory,
+                isNetworkErrorOverride: false,
+                ...(uploadOutcome ? { requestBodySettled: uploadOutcome } : {}),
+              });
+
+              errorCode = 'request_setup_error';
+              adapterCause = new Error(
+                `[HTTPClient] Redirect Location could not be resolved to an absolute http(s) URL: "${redirectIntercept.requestURL}".`,
+              );
 
               break;
             }
@@ -1269,6 +1347,24 @@ export class BaseHTTPClient {
       request.requestURL,
     );
 
+    // Credentials in the target URL itself, stripped on the same rule `Authorization` is.
+    //
+    // `Location: https://admin:secret@other.host/` is the remote server's choice, not the
+    // caller's, and `user:pass@` in a URL *is* an `Authorization: Basic` header by another
+    // name - `NodeAdapter` copies it onto `options.auth` and `fetch` sends it for us. So a
+    // hop that has the caller's `Authorization` header stripped for crossing origins used
+    // to get credentials back, from the very response that redirected it, and authenticate
+    // to a host the caller never named. Fetch treats the same shape as fatal (a
+    // cross-origin `locationURL` that includes credentials is a network error); stripping
+    // rather than failing the hop keeps the redirect followable and is the same answer this
+    // method already gives every other credential on a cross-origin hop.
+    //
+    // Same-origin userinfo is left alone: it is the origin the caller addressed, which is
+    // also the one that may already have been carrying it.
+    const requestURL = isCrossOrigin
+      ? stripURLCredentials(request.requestURL)
+      : request.requestURL;
+
     let headers: Record<string, string | string[]>;
 
     if (isCrossOrigin) {
@@ -1311,7 +1407,7 @@ export class BaseHTTPClient {
     if (cookieJar) {
       // Cookie for the new URL before the next hop is dispatched; each send on
       // this hop still refreshes from the jar inside _dispatchRequestAttempts.
-      const cookieStr = cookieJar.getCookieHeaderString(request.requestURL);
+      const cookieStr = cookieJar.getCookieHeaderString(requestURL);
 
       if (cookieStr) {
         headers.cookie = cookieStr;
@@ -1326,6 +1422,7 @@ export class BaseHTTPClient {
 
     return {
       ...request,
+      requestURL,
       headers,
     };
   }

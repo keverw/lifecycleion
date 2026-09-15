@@ -943,6 +943,67 @@ describe('NodeAdapter.send() — unit branches without server', () => {
     }
   });
 
+  test('a cross-origin redirect hop does not stay on the unix socket', async () => {
+    // The socket is the caller's chosen endpoint, often a privileged one. A `Location`
+    // to another host used to keep `socketPath` and change only the request line, so the
+    // redirect became a second request against that same socket - the same class of
+    // retargeting `mtls.cert` and `servername` are already withheld for.
+    const req = new MockClientRequest();
+    let capturedOptions: http.RequestOptions | undefined;
+    const requestSpy = spyOn(http, 'request').mockImplementation(
+      (options, _callback) => {
+        capturedOptions = options as http.RequestOptions;
+        queueMicrotask(() => {
+          req.emit('error', new Error('stop after options capture'));
+        });
+        return req as unknown as http.ClientRequest;
+      },
+    );
+
+    try {
+      await new NodeAdapter({ socketPath: '/tmp/test.sock' }).send({
+        requestURL: 'http://evil.test/privileged',
+        initialURL: 'http://localhost/v1.41/info',
+        method: 'GET',
+        headers: {},
+      });
+
+      expect(capturedOptions?.socketPath).toBeUndefined();
+      expect(capturedOptions?.hostname).toBe('evil.test');
+      expect(capturedOptions?.port).toBe(80);
+      expect(capturedOptions?.path).toBe('/privileged');
+    } finally {
+      requestSpy.mockRestore();
+    }
+  });
+
+  test('a same-origin redirect hop keeps the unix socket', async () => {
+    const req = new MockClientRequest();
+    let capturedOptions: http.RequestOptions | undefined;
+    const requestSpy = spyOn(http, 'request').mockImplementation(
+      (options, _callback) => {
+        capturedOptions = options as http.RequestOptions;
+        queueMicrotask(() => {
+          req.emit('error', new Error('stop after options capture'));
+        });
+        return req as unknown as http.ClientRequest;
+      },
+    );
+
+    try {
+      await new NodeAdapter({ socketPath: '/tmp/test.sock' }).send({
+        requestURL: 'http://localhost/v1.41/containers',
+        initialURL: 'http://localhost/v1.41/info',
+        method: 'GET',
+        headers: {},
+      });
+
+      expect(capturedOptions?.socketPath).toBe('/tmp/test.sock');
+    } finally {
+      requestSpy.mockRestore();
+    }
+  });
+
   test('literal IPv6 URLs strip brackets before reaching http.request', async () => {
     const req = new MockClientRequest();
     let capturedOptions: http.RequestOptions | undefined;

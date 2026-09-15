@@ -131,6 +131,37 @@ export function resolveAbsoluteURL(url: string, baseURL?: string): string {
 }
 
 /**
+ * The same URL with any `user:pass@` userinfo removed.
+ *
+ * Userinfo in a URL is `Authorization: Basic` by another name: `NodeAdapter` copies it
+ * onto `options.auth` and `fetch` sends it for us. A redirect target is chosen by the
+ * remote server, so a `Location` carrying credentials must not be able to authenticate
+ * this client to a host the caller never named - see `_sanitizeRedirectRequest`.
+ *
+ * A string that does not parse is returned unchanged: there is no userinfo to find in it,
+ * and this is on the redirect path, which already tolerates a `Location` it cannot parse.
+ *
+ * @param url - The URL to strip.
+ * @returns The URL without userinfo, or `url` unchanged when it cannot be parsed.
+ */
+export function stripURLCredentials(url: string): string {
+  try {
+    const parsed = new URL(url);
+
+    if (!parsed.username && !parsed.password) {
+      return url;
+    }
+
+    parsed.username = '';
+    parsed.password = '';
+
+    return parsed.href;
+  } catch {
+    return url;
+  }
+}
+
+/**
  * Browser-aware absolute URL resolution used by HTTPClient before interceptors
  * and adapter dispatch. Starts with normal baseURL resolution, then falls back
  * to the current page/worker location when running in a browser-like runtime.

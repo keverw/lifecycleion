@@ -218,6 +218,26 @@ export class TmpDir {
   }
 
   public async cleanup(): Promise<void> {
+    // An `initialize()` still in flight is waited for first, and its failure ignored.
+    //
+    // `isInitialized` is set at the *end* of `createTempDir`, so for the whole of that
+    // call both flags below are false and `cleanup()` was a no-op that removed nothing -
+    // and then the directory appeared, with nothing left to remove it. `cleanup()` before
+    // `await initialize()`, or `Promise.all([initialize(), cleanup()])`, leaked a temp
+    // directory every time; with `unsafeCleanup` that is a recursive-delete target the
+    // object believes it has already dealt with.
+    //
+    // The failure is swallowed rather than rethrown because it is `initialize()`'s to
+    // report to whoever called it: a create that failed leaves nothing to clean up, which
+    // is the state `cleanup()` was asked to reach.
+    if (this.initializing !== null) {
+      try {
+        await this.initializing;
+      } catch {
+        // Nothing was created, so there is nothing to remove.
+      }
+    }
+
     if (this.isInitialized && !this.wasCleanedUp) {
       try {
         if (this.allowUnsafeCleanup) {

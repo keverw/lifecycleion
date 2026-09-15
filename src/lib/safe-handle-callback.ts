@@ -133,7 +133,16 @@ export function runCallbackSafely(
 
     if (isPromise(result)) {
       // Fire-and-forget: a rejection is reported, never awaited.
-      result.catch(onError);
+      //
+      // Adopted through `Promise.resolve` rather than calling `result.catch` directly, as
+      // `ArraySink` does and for the same reason: `isPromise` accepts any thenable, and a
+      // `then`-only one has no `catch`. Calling it threw a `TypeError` that the
+      // surrounding `catch` reported *in place of* the real failure - and because `then`
+      // was never called, the callback's actual rejection was dropped and went nowhere.
+      // Every untrusted-callback surface funnels through here: `safeHandleCallback`,
+      // `EventEmitter`, `ProcessSignalManager`, `LRUCache.onChange`,
+      // `PromiseProtectedResolver`.
+      void Promise.resolve(result).catch(onError);
     }
   } catch (error) {
     onError(error);
