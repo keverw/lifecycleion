@@ -649,3 +649,78 @@ describe('maxRenderLength and onTruncate', () => {
     expect(failures).toHaveLength(0);
   });
 });
+
+describe('CurlyBrackets options are read once, at compile time', () => {
+  test('a throwing options getter does not escape the render', () => {
+    // The reads sat outside any `try`, so an options object with a throwing accessor threw
+    // straight out of a call documented not to - the same hole `errorToString`,
+    // `stringifyValue` and `serializeError` each closed by snapshotting their own bag.
+    const hostile = {
+      get onFormatError(): never {
+        throw new Error('options refused');
+      },
+      get maxRenderLength(): never {
+        throw new Error('options refused');
+      },
+      get onTruncate(): never {
+        throw new Error('options refused');
+      },
+    };
+
+    expect(() =>
+      CurlyBrackets('hello {{name}}', { name: 'world' }, '(null)', hostile),
+    ).not.toThrow();
+
+    expect(
+      CurlyBrackets('hello {{name}}', { name: 'world' }, '(null)', hostile),
+    ).toBe('hello world');
+  });
+
+  test('a compiled template does not re-read its options on every render', () => {
+    // A compiled template is reused, and each read used to happen again per call: a getter
+    // answering differently the second time changed the allowance or the handler for the
+    // rest of the template's life. Read once at compile time, the second render behaves
+    // like the first.
+    let reads = 0;
+
+    const counting = {
+      get maxRenderLength(): number {
+        reads++;
+
+        return 1_000;
+      },
+    };
+
+    const render = CurlyBrackets.compileTemplate(
+      '{{value}}',
+      '(null)',
+      counting,
+    );
+
+    render({ value: 'a' });
+    render({ value: 'b' });
+    render({ value: 'c' });
+
+    expect(reads).toBe(1);
+  });
+
+  test('the options still take effect', () => {
+    // Snapshotting must not quietly stop honouring them - the cut below comes from the
+    // supplied `maxRenderLength`, not from the default.
+    const truncations: TruncationInfo[] = [];
+
+    const rendered = CurlyBrackets(
+      '{{value}}',
+      { value: 'x'.repeat(5_000) },
+      '(null)',
+      {
+        maxRenderLength: 100,
+        onTruncate: (info) => truncations.push(info),
+      },
+    );
+
+    expect(rendered.length).toBeLessThan(200);
+    expect(truncations).toHaveLength(1);
+    expect(truncations[0]?.reason).toBe('length');
+  });
+});

@@ -1,4 +1,5 @@
 import { getPathParts } from './internal/path-utils';
+import { snapshotMembers } from './internal/read-member';
 import {
   TRUNCATED_LENGTH,
   createRenderBudget,
@@ -143,13 +144,31 @@ const CurlyBrackets: CurlyBracketsFunction = function (
 CurlyBrackets.compileTemplate = function (
   str: string,
   fallback: string = '(null)',
-  options?: CurlyBracketsOptions,
+  callerOptions?: CurlyBracketsOptions,
 ): TemplateFunction {
+  // Read once, here, guarded - the way `errorToString`, `stringifyValue`, `serializeError`
+  // and the logger read theirs.
+  //
+  // Twice over for this one. The reads below sit outside any `try`, so an options object
+  // with a throwing accessor escaped a render that promises not to throw; and a compiled
+  // template is *reused*, so each read happened again on every call - a getter answering
+  // differently on the second render silently changed the allowance or the handler for
+  // the rest of the template's life, and a bag mutated between renders changed behaviour
+  // nobody had asked to be dynamic. One read at compile time settles both: a refused read
+  // is the option being absent, which is its documented default.
+  //
+  // `CurlyBrackets()` compiles and renders in one call, so it gets the same guarantee.
+  const options = snapshotMembers(callerOptions, [
+    'onFormatError',
+    'maxRenderLength',
+    'onTruncate',
+  ]);
+
   return (locals: Record<string, unknown>): string => {
     // One reporter per render of the compiled template, not per compile: a compiled
     // template is reused across calls, and a budget shared between them would report the
     // first render's failure and stay silent for every render after it.
-    const report = createFormatReporter('render', options?.onFormatError);
+    const report = createFormatReporter('render', options.onFormatError);
 
     // One allowance for the whole template, not one per placeholder. A render left to
     // open a budget of its own puts every individual placeholder in bounds while a
@@ -162,14 +181,14 @@ CurlyBrackets.compileTemplate = function (
     // compiled template is reused, and a budget shared across calls would spend itself on
     // the first one.
     const budget = createRenderBudget(
-      resolveMaxRenderLength(options?.maxRenderLength),
+      resolveMaxRenderLength(options.maxRenderLength),
     );
 
     // One notification per render, matching `report`. See
     // `CurlyBracketsOptions.onTruncate`.
     const reportTruncation = createTruncationReporter(
       budget,
-      options?.onTruncate,
+      options.onTruncate,
     );
 
     // Forwarded into the shared reporter rather than handed over directly, and rooted at
@@ -203,7 +222,7 @@ CurlyBrackets.compileTemplate = function (
         let forKind = byKind.get(kind);
 
         if (forKind === undefined) {
-          forKind = createFormatReporter(kind, options?.onFormatError);
+          forKind = createFormatReporter(kind, options.onFormatError);
           byKind.set(kind, forKind);
         }
 

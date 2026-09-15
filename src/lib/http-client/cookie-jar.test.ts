@@ -1156,6 +1156,46 @@ describe('CookieJar', () => {
     });
   });
 
+  describe('an IP request host matches its own literal only', () => {
+    // RFC 6265 5.1.3 has no subdomain reading for an address, but the suffix test is a DNS
+    // rule applied to text: `127.0.0.1` ends with `.0.1`, so `Domain=0.1` passed it. The
+    // cookie was never *sent*, because an address buckets as itself and no lookup reaches
+    // the `0.1` bucket - but that is a property of the bucketing rather than of the domain
+    // check, so it stops protecting anything the next time bucketing changes.
+    test.each([['0.1'], ['0.0.1'], ['1']])(
+      'refuses Domain=%s from an IPv4 request host',
+      (domain) => {
+        jar.parseSetCookieHeader(
+          `session=x; Domain=${domain}; Path=/`,
+          'http://127.0.0.1/',
+        );
+
+        expect(jar.getAllCookies()).toHaveLength(0);
+      },
+    );
+
+    test('accepts Domain= that is the address itself', () => {
+      jar.parseSetCookieHeader(
+        'session=x; Domain=127.0.0.1; Path=/',
+        'http://127.0.0.1/',
+      );
+
+      expect(jar.getCookieFor('session', 'http://127.0.0.1/')?.value).toBe('x');
+    });
+
+    test('a host-only cookie on an IP is unaffected', () => {
+      jar.parseSetCookieHeader('session=x; Path=/', 'http://127.0.0.1/');
+
+      expect(jar.getCookieFor('session', 'http://127.0.0.1/')?.value).toBe('x');
+    });
+
+    test('an IPv6 literal keeps matching itself', () => {
+      jar.parseSetCookieHeader('session=x; Path=/', 'http://[::1]/');
+
+      expect(jar.getCookieFor('session', 'http://[::1]/')?.value).toBe('x');
+    });
+  });
+
   describe('bare hostnames as public suffixes (RFC 6265bis 5.5)', () => {
     test('a sibling host cannot claim Domain=localhost', () => {
       jar.parseSetCookieHeader(
