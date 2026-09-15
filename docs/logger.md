@@ -1881,6 +1881,29 @@ code put in the thrown error. A sink that persists diagnostics should apply the 
 controls it uses for exception telemetry; the logger cannot safely run its normal redaction
 pipeline here because that pipeline may be what failed.
 
+**The built-in sinks deliberately do not persist that cause.** `ConsoleSink`, `FileSink`,
+`NamedPipeSink` and `ArraySink` all implement `writeDiagnostic()`, but each converts the
+diagnostic to an entry carrying only its timestamp, the rendered `message` and the
+`'lifecycleion-diagnostic'` tag. So configuring `diagnosticSinks: [new FileSink(...)]`
+gets you the diagnostic on disk, not the cause behind it - the same reasoning as the
+message above, one step further on: a redaction cause is derived from the value being
+masked, and writing it to a file would route around the masking that failed.
+
+To get causes, take them from a channel you control - a `'diagnostic'` listener, or a
+custom sink whose `writeDiagnostic()` reads `diagnostic.error` itself:
+
+```ts
+class DiagnosticSink implements LogSink {
+  write(): void {}
+
+  writeDiagnostic(diagnostic: LoggerDiagnostic): void {
+    // `diagnostic.error` is the cause the built-in sinks drop. Treat it as exception
+    // telemetry: it may carry whatever the thrown value held.
+    telemetry.captureException(diagnostic.error, { kind: diagnostic.kind });
+  }
+}
+```
+
 The diagnostic `kind` identifies the source: `'sink'`, `'event-handler'`, `'redaction'`,
 or `'render'`. Formatting diagnostics include their structural `path`; sink diagnostics
 include `context` and the failing `sink`; event-handler diagnostics include `event`.
