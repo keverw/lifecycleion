@@ -6,6 +6,7 @@ import type {
   RetryQueryResult,
 } from './types';
 import { clamp, finiteClamp } from '../../clamp';
+import { MAX_TIMER_MS } from '../../internal/timer-limits';
 import { calculateExponentialDelay, getMostCommonError } from './utils';
 
 interface CurrentState {
@@ -172,6 +173,13 @@ export class RetryPolicy {
     // duration, nothing turns it into a timer, and `Infinity` is a meaningful and
     // supported answer there - retry until told to stop. Only `NaN` is refused, which
     // `finiteClamp` cannot express without also refusing `Infinity`.
+    //
+    // Their ceiling is `MAX_TIMER_MS`, not `Number.MAX_SAFE_INTEGER`. `setTimeout` holds
+    // its delay in a signed 32-bit int and coerces anything past 2^31-1 ms to 1 ms, so a
+    // ceiling above that is the `Infinity` bug in slower clothing: `delayMS: 3e9` reads as
+    // "wait 34 days", survives the finite check, and then retries every millisecond. Since
+    // the exponential delay is clamped to `maxTimeoutMS` on the way out, bounding the
+    // three durations here bounds every delay this policy can produce.
     const attempts = (value: number): number =>
       Math.floor(
         Number.isNaN(value)
@@ -188,7 +196,7 @@ export class RetryPolicy {
         delayMS: finiteClamp(
           policy.delayMS ?? DEFAULT_MIN_TIMEOUT_MS,
           1,
-          Number.MAX_SAFE_INTEGER,
+          MAX_TIMER_MS,
           DEFAULT_MIN_TIMEOUT_MS,
         ),
       };
@@ -196,13 +204,13 @@ export class RetryPolicy {
       const minTimeoutMS = finiteClamp(
         policy.minTimeoutMS ?? DEFAULT_MIN_TIMEOUT_MS,
         1,
-        Number.MAX_SAFE_INTEGER,
+        MAX_TIMER_MS,
         DEFAULT_MIN_TIMEOUT_MS,
       );
       const maxTimeoutMS = finiteClamp(
         policy.maxTimeoutMS ?? DEFAULT_MAX_TIMEOUT_MS,
         1,
-        Number.MAX_SAFE_INTEGER,
+        MAX_TIMER_MS,
         DEFAULT_MAX_TIMEOUT_MS,
       );
 

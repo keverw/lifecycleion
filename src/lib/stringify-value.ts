@@ -158,10 +158,10 @@ export interface StringifyValueOptions {
  */
 export function redactValue(
   value: unknown,
-  rawOptions?: StringifyValueOptions,
+  callerOptions?: StringifyValueOptions,
 ): unknown {
   // Read once, guarded: see `errorToString`, and `snapshotMembers`.
-  const options = snapshotOptions(rawOptions);
+  const options = snapshotOptions(callerOptions);
 
   const budget = createRenderBudget(
     resolveMaxRenderLength(options.maxRenderLength),
@@ -469,12 +469,12 @@ function redactValueWith(
  */
 export function stringifyValue(
   value: unknown,
-  rawOptions?: StringifyValueOptions,
+  callerOptions?: StringifyValueOptions,
 ): string {
   // Read once, guarded: the reads below sit outside the `try` that keeps the
   // never-throws promise, and an options object with a throwing accessor escaped it.
   // See `snapshotMembers`.
-  const options = snapshotOptions(rawOptions);
+  const options = snapshotOptions(callerOptions);
 
   // Uses the standard host reporting path when no handler is supplied. One small closure
   // per call, which is what `applyRedaction` and `errorToString` already allocate for

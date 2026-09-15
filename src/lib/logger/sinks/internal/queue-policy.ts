@@ -1,3 +1,4 @@
+import { MAX_TIMER_MS } from '../../../internal/timer-limits';
 /**
  * What a queueing sink does when it cannot write, in one place.
  *
@@ -52,7 +53,7 @@ export const DEFAULT_CLOSE_TIMEOUT_MS = 30_000;
  * honest spelling of "wait as long as it takes" - fired the deadline *at once* and a
  * `close()` given it gave up on its init before the init could possibly finish.
  */
-export const MAX_TIMER_MS = 2_147_483_647;
+export { MAX_TIMER_MS } from '../../../internal/timer-limits';
 
 /**
  * A wait bound a sink can actually enforce, from whatever the caller asked for.

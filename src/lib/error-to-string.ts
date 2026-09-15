@@ -770,13 +770,13 @@ function stringifyPrimitive(
 export function errorToString(
   error: unknown,
   maxRowLength = 80,
-  rawOptions?: ErrorToStringOptions,
+  callerOptions?: ErrorToStringOptions,
 ): string {
   // Read once, guarded, before anything else: the reads below sit outside the `try` that
   // keeps the never-throws promise, and an options object with a throwing accessor
   // escaped it. A refused read is the option being absent, which is its documented
   // default. See `snapshotMembers`.
-  const options = snapshotMembers(rawOptions, [
+  const options = snapshotMembers(callerOptions, [
     'onFormatError',
     'maxRenderLength',
     'onTruncate',

@@ -953,7 +953,7 @@ export class Logger extends EventEmitter {
   protected handleLog(
     type: LogType,
     template: string,
-    rawOptions?: SnapshotLogOptions,
+    callerOptions?: SnapshotLogOptions,
   ): void {
     // Don't log if logger is closed
     if (this._closed) {
@@ -965,7 +965,7 @@ export class Logger extends EventEmitter {
     // caller's object, above the guards, so one throwing getter threw out of
     // `logger.info()` itself - and a getter that answered twice could tell the gate one
     // thing and the walk another.
-    const options = snapshotLogOptions(rawOptions);
+    const options = snapshotLogOptions(callerOptions);
 
     const timestamp = ms();
 
@@ -1256,7 +1256,13 @@ export class Logger extends EventEmitter {
         const result = sink.write(entry);
         // Handle async errors from sinks that return promises
         if (isPromise(result)) {
-          result.catch((error: unknown) => {
+          // Adopted through `Promise.resolve` rather than called on directly. `isPromise`
+          // is a then-check, which is the right check - a sink may return any thenable -
+          // but a thenable is not required to have `.catch`. Calling it on one that does
+          // not threw a `TypeError` here, which the outer `catch` then reported as *the
+          // sink's* failure while the real rejection went unhandled: a write error
+          // replaced by a wrong error, and a process-level unhandled rejection beside it.
+          Promise.resolve(result).catch((error: unknown) => {
             this.handleSinkError(error, 'write', sink);
           });
         }

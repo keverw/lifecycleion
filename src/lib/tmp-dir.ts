@@ -129,6 +129,19 @@ export class TmpDir {
    */
   private initializing: Promise<void> | null = null;
 
+  /**
+   * Set the moment `cleanup()` is entered, and never cleared.
+   *
+   * `wasCleanedUp` cannot do this job: it is only set once a directory has actually been
+   * removed, so a `cleanup()` that found nothing to remove left the object looking
+   * untouched. That is precisely the window a failed-then-retried create lands in -
+   * `initialize().catch(() => initialize())` racing a `cleanup()` - and the retry's
+   * directory was then created *after* the only call that would ever have removed it had
+   * returned. Waiting for the in-flight create cannot close that on its own, because the
+   * retry has not started yet when the wait ends; refusing the retry can.
+   */
+  private cleanupRequested = false;
+
   // configuration properties
   private allowUnsafeCleanup = false;
   private baseDirectory = '';
@@ -208,6 +221,13 @@ export class TmpDir {
       return;
     }
 
+    // `cleanup()` is terminal for the instance - `path` already throws after one - so a
+    // create started afterwards could only ever produce a directory nothing can name and
+    // nothing will remove. Refused loudly rather than leaked quietly.
+    if (this.cleanupRequested) {
+      throw new ErrTmpDirWasCleanedUp();
+    }
+
     if (this.initializing === null) {
       this.initializing = this.createTempDir().finally(() => {
         this.initializing = null;
@@ -218,6 +238,8 @@ export class TmpDir {
   }
 
   public async cleanup(): Promise<void> {
+    this.cleanupRequested = true;
+
     // An `initialize()` still in flight is waited for first, and its failure ignored.
     //
     // `isInitialized` is set at the *end* of `createTempDir`, so for the whole of that
@@ -230,7 +252,15 @@ export class TmpDir {
     // The failure is swallowed rather than rethrown because it is `initialize()`'s to
     // report to whoever called it: a create that failed leaves nothing to clean up, which
     // is the state `cleanup()` was asked to reach.
-    if (this.initializing !== null) {
+    // A loop rather than a single `await`, because the slot is cleared by `initialize()`'s
+    // own `.finally` *before* control returns here. A create that fails and is retried -
+    // `initialize().catch(() => initialize())` racing a `cleanup()` - resolved this await
+    // with `initializing` back to `null` and `isInitialized` still `false`, so the check
+    // below saw a fresh jar in flight as nothing to do and no-opped; the retry then
+    // succeeded and left a directory behind that this object believed it had handled.
+    // Re-reading the slot each time round is what makes "wait for initialization" mean the
+    // last one rather than the first.
+    while (this.initializing !== null) {
       try {
         await this.initializing;
       } catch {

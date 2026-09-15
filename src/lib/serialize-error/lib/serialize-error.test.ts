@@ -382,6 +382,22 @@ describe('deserializeError - untrusted input', () => {
   });
 
   describe('serializeError onFormatError', () => {
+    test('survives an options bag whose handler getter throws', () => {
+      // The options are read before any `try`, so a `Proxy` or a getter on the bag escaped
+      // the one function whose contract is "never throws, always terminates" - and it
+      // escaped while describing somebody else's failure at an IPC boundary.
+      const hostileOptions = {
+        get onFormatError(): never {
+          throw new Error('options refused');
+        },
+      };
+
+      const result = serializeError(new Error('boom'), hostileOptions);
+
+      expect(result.message).toBe('boom');
+      expect(result.name).toBe('Error');
+    });
+
     test('should report an unserializable value with its path', () => {
       // This runs at an IPC boundary, usually while already reporting a failure, so the
       // marker keeps the payload intact and sendable. The cause has nowhere to go but a

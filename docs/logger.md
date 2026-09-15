@@ -1678,6 +1678,11 @@ A sink whose `write()` or `close()` throws or rejects produces a logger diagnost
 to `'write'` or `'close'`. It follows the same diagnostic route as logger formatting and
 event-handler failures; there is no separate logger callback API.
 
+`write()` may return any thenable, not only a `Promise`. The returned value is adopted
+rather than called on directly, so a `then`-only thenable reports the rejection it actually
+carried instead of a `TypeError` about the missing `.catch` - and the real rejection never
+escapes as an unhandled one.
+
 ```typescript
 logger.on<LoggerDiagnostic>('diagnostic', (diagnostic) => {
   if (diagnostic.kind !== 'sink') return;

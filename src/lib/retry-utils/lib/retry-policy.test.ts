@@ -47,6 +47,45 @@ describe('RetryPolicy - durations that are not finite', () => {
     }
   });
 
+  test('a delay past the 32-bit timer ceiling is clamped, not left to fire at once', () => {
+    // `setTimeout` keeps its delay in a signed 32-bit int and reads anything past
+    // 2^31-1 ms as 1 ms, so `delayMS: 3e9` is the `Infinity` bug in slower clothing: it
+    // passes every finite check, reads as "wait 34 days", and retries every millisecond.
+    const MAX_TIMER_MS = 2_147_483_647;
+
+    const fixed = new RetryPolicy({ strategy: 'fixed', delayMS: 3e9 });
+
+    fixed.shouldDoFirstTry();
+
+    const fixedQuery = fixed.shouldRetry(new Error('boom'));
+
+    expect(fixedQuery.delayMS).toBeLessThanOrEqual(MAX_TIMER_MS);
+    expect(fixedQuery.delayMS).toBeGreaterThan(0);
+
+    const exponential = new RetryPolicy({
+      strategy: 'exponential',
+      minTimeoutMS: 3e9,
+      maxTimeoutMS: 9e9,
+      maxRetryAttempts: 5,
+    });
+
+    const info = exponential.policyInfo;
+
+    if (info.strategy === 'exponential') {
+      expect(info.minTimeoutMS).toBeLessThanOrEqual(MAX_TIMER_MS);
+      expect(info.maxTimeoutMS).toBeLessThanOrEqual(MAX_TIMER_MS);
+    }
+
+    exponential.shouldDoFirstTry();
+
+    for (let attempt = 0; attempt < 4; attempt++) {
+      const query = exponential.shouldRetry(new Error('boom'));
+
+      expect(query.delayMS).toBeLessThanOrEqual(MAX_TIMER_MS);
+      expect(query.delayMS).toBeGreaterThan(0);
+    }
+  });
+
   test('a NaN fixed delay falls back to the default', () => {
     const policy = new RetryPolicy({ strategy: 'fixed', delayMS: NaN });
 

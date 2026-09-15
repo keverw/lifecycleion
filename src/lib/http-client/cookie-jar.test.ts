@@ -1098,6 +1098,161 @@ describe('CookieJar', () => {
     });
   });
 
+  describe('PSL private section (cookie tossing between tenants)', () => {
+    // The ICANN half of the list alone reads `github.io` as an ordinary registrable
+    // domain, so one tenant could set a cookie every other tenant on the platform would
+    // send. Browsers consult the private half for exactly this; so does the jar.
+    test.each([
+      ['github.io', 'https://evil.github.io', 'https://victim.github.io'],
+      [
+        'herokuapp.com',
+        'https://evil.herokuapp.com',
+        'https://victim.herokuapp.com',
+      ],
+      [
+        's3.amazonaws.com',
+        'https://evil.s3.amazonaws.com',
+        'https://victim.s3.amazonaws.com',
+      ],
+    ])(
+      'refuses Domain=%s and cannot toss a cookie between tenants',
+      (suffix, attacker, victim) => {
+        jar.parseSetCookieHeader(
+          `session=tossed; Domain=${suffix}; Path=/`,
+          attacker,
+        );
+
+        expect(jar.getAllCookies()).toHaveLength(0);
+        expect(jar.getCookieFor('session', victim)).toBeUndefined();
+      },
+    );
+
+    test('tenants under a private suffix get separate buckets', () => {
+      jar.parseSetCookieHeader(
+        'session=mine; Path=/',
+        'https://evil.github.io',
+      );
+
+      expect(jar.getCookieFor('session', 'https://evil.github.io')?.value).toBe(
+        'mine',
+      );
+      expect(
+        jar.getCookieFor('session', 'https://victim.github.io'),
+      ).toBeUndefined();
+    });
+
+    test('a registrable domain under a private suffix still scopes its own subdomains', () => {
+      jar.parseSetCookieHeader(
+        'session=ok; Domain=mine.github.io; Path=/',
+        'https://api.mine.github.io',
+      );
+
+      expect(
+        jar.getCookieFor('session', 'https://api.mine.github.io')?.value,
+      ).toBe('ok');
+      expect(
+        jar.getCookieFor('session', 'https://other.github.io'),
+      ).toBeUndefined();
+    });
+  });
+
+  describe('publicSuffixes overrides', () => {
+    test('add treats an internal suffix as public', () => {
+      const scoped = new CookieJar({
+        publicSuffixes: { add: ['corp.internal'] },
+      });
+
+      scoped.parseSetCookieHeader(
+        'session=tossed; Domain=corp.internal; Path=/',
+        'https://evil.corp.internal',
+      );
+
+      expect(scoped.getAllCookies()).toHaveLength(0);
+
+      scoped.parseSetCookieHeader(
+        'session=mine; Path=/',
+        'https://evil.corp.internal',
+      );
+
+      expect(
+        scoped.getCookieFor('session', 'https://victim.corp.internal'),
+      ).toBeUndefined();
+    });
+
+    test('add accepts a leading dot, as Set-Cookie writes it', () => {
+      const scoped = new CookieJar({
+        publicSuffixes: { add: ['.corp.internal'] },
+      });
+
+      scoped.parseSetCookieHeader(
+        'session=tossed; Domain=corp.internal; Path=/',
+        'https://evil.corp.internal',
+      );
+
+      expect(scoped.getAllCookies()).toHaveLength(0);
+    });
+
+    test('add does not match a partial label', () => {
+      const scoped = new CookieJar({
+        publicSuffixes: { add: ['corp.internal'] },
+      });
+
+      scoped.parseSetCookieHeader(
+        'session=ok; Domain=notcorp.internal; Path=/',
+        'https://host.notcorp.internal',
+      );
+
+      expect(
+        scoped.getCookieFor('session', 'https://host.notcorp.internal')?.value,
+      ).toBe('ok');
+    });
+
+    test('remove opts a private suffix back out', () => {
+      const scoped = new CookieJar({
+        publicSuffixes: { remove: ['herokuapp.com'] },
+      });
+
+      scoped.parseSetCookieHeader(
+        'session=shared; Domain=herokuapp.com; Path=/',
+        'https://mine.herokuapp.com',
+      );
+
+      expect(
+        scoped.getCookieFor('session', 'https://other.herokuapp.com')?.value,
+      ).toBe('shared');
+    });
+
+    test('an override on one jar does not reach another', () => {
+      const scoped = new CookieJar({
+        publicSuffixes: { remove: ['herokuapp.com'] },
+      });
+
+      scoped.parseSetCookieHeader(
+        'session=shared; Domain=herokuapp.com; Path=/',
+        'https://mine.herokuapp.com',
+      );
+      jar.parseSetCookieHeader(
+        'session=shared; Domain=herokuapp.com; Path=/',
+        'https://mine.herokuapp.com',
+      );
+
+      expect(scoped.getAllCookies()).toHaveLength(1);
+      expect(jar.getAllCookies()).toHaveLength(0);
+    });
+
+    test.each([
+      [{ add: [''] }, 'empty suffix'],
+      [{ add: ['*.example.com'] }, 'wildcard'],
+      [{ add: ['a..b'] }, 'empty label'],
+      [{ add: [42 as unknown as string] }, 'non-string'],
+      [{ add: ['corp.internal'], remove: ['corp.internal'] }, 'contradiction'],
+    ])('throws on a %o config (%s)', (publicSuffixes) => {
+      expect(() => new CookieJar({ publicSuffixes: publicSuffixes })).toThrow(
+        TypeError,
+      );
+    });
+  });
+
   describe('PSL validation (parseSetCookieHeader)', () => {
     test('rejects Domain= that is a public suffix', () => {
       jar.parseSetCookieHeader(

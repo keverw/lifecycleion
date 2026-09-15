@@ -725,11 +725,49 @@ When a `CookieJar` is attached to the client:
 
 **Secure cookies and the request scheme.** The `Secure` attribute is enforced on both sides of the jar. On the way out, `getCookiesFor()` withholds a `Secure` cookie unless the request scheme is `https:` or `wss:`. On the way in, `parseSetCookieHeader()` and `processResponseHeaders()` follow RFC 6265bis: a `Secure` cookie from a response over `http:` (or any scheme other than `https:` / `wss:`) is refused, and a non-`Secure` cookie from such a response is refused when the jar already holds a `Secure` cookie of the same name whose path covers the new one and whose domain domain-matches the new one in either direction - including a `Max-Age=0` or past `Expires` that would evict it. So a plain-text hop, a mixed `http`/`https` session, or an attacker on the wire cannot plant, replace or delete the `https:` session cookie ("cookie forcing"). A response over `https:` may still replace or downgrade its own cookie, as browsers allow. The `__Secure-` prefix requires `Secure`, and `__Host-` requires `Secure`, no `Domain` attribute and `Path=/`, matched case-insensitively; a cookie that claims a prefix without meeting it is refused. `setCookie()` has no request URL to judge and is not scheme-gated: a cookie set programmatically or restored through `fromJSON()` is stored as given. `localhost` over `http:` is not treated as secure - the jar would never have sent a `Secure` cookie there either, so store-time and send-time agree.
 
+**Cookie scoping uses the full Public Suffix List.** The jar refuses a `Domain=` that is a
+public suffix, and both halves of the list count: the ICANN half (`com`, `co.uk`) and the
+private half (`github.io`, `herokuapp.com`, `s3.amazonaws.com`). The private half is what
+keeps one tenant of a shared platform from setting a cookie every other tenant on it would
+send - browsers consult it for exactly that reason. Hosts under a public suffix are also
+bucketed separately, so `evil.github.io` and `victim.github.io` never share cookie storage.
+IP literals and bare hostnames the list does not carry (`localhost`, `myapp`) are not
+public suffixes, so a development jar on `http://localhost` is unaffected.
+
+The list ships compiled into `tldts` and is looked up offline - nothing is downloaded at
+runtime - which also means it is a snapshot frozen at the installed `tldts` version. Since
+`tldts` is a peer dependency, you can refresh the list by upgrading it within its supported
+range without waiting on a Lifecycleion release.
+
+**Extending or trimming the list.** Pass `publicSuffixes` when the public list does not
+describe your deployment. Both lists take plain suffixes - no leading dot required (one is
+accepted and dropped), no wildcards - and are matched whole-label, so `corp.internal`
+covers `a.corp.internal` and not `notcorp.internal`:
+
+```typescript
+const jar = new CookieJar({
+  publicSuffixes: {
+    // Stricter: no cookie may span these, and each host under them gets its own bucket.
+    add: ['corp.internal', 'apps.acme-cloud.net'],
+    // Wider, and the only option here that opens a scope: hosts under a removed suffix
+    // share one bucket again and may set cookies spanning it.
+    remove: ['herokuapp.com'],
+  },
+});
+```
+
+The overrides belong to that jar alone; another `CookieJar` in the same process is
+unaffected. They are validated once in the constructor and a bad entry throws a `TypeError`
+rather than being ignored - an empty suffix, a wildcard, an empty label, a non-string, or a
+suffix named in both lists. A typo that silently did nothing would be a scoping hole you
+would only discover as a cookie going somewhere it should not.
+
 **SameSite is stored, not enforced.** The `SameSite` attribute is parsed and kept on the stored cookie for callers to read, but `getCookiesFor()` does not consult it. This jar serves a client, not a browser: there is no navigation, no top-level "site" to compare against, and no notion of a cross-site request, so every cookie whose domain, path, expiry and `Secure` rules match is sent, whatever its `SameSite` value.
 
 ### CookieJar API
 
 ```typescript
+// Options are optional; `publicSuffixes` is described above.
 const jar = new CookieJar();
 
 // Manually set a cookie (createdAt is optional — injected automatically if omitted)
@@ -1687,7 +1725,7 @@ RedirectHopInfo;
   StreamResponseFactory);
 
 // Cookies
-(Cookie, CookieInput, CookieJarJSON);
+(Cookie, CookieInput, CookieJarJSON, CookieJarOptions, PublicSuffixOverrides);
 ```
 
 From `lifecycleion/http-client-node`:

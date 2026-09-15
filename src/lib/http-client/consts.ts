@@ -1,3 +1,4 @@
+import { MAX_TIMER_MS } from '../internal/timer-limits';
 import type { HTTPMethod } from './types';
 
 /**
@@ -62,8 +63,11 @@ export const DEFAULT_TIMEOUT_MS = 30_000;
 /**
  * The longest wait a `setTimeout` can keep: 2^31 - 1 ms, about 24.8 days. A duration past
  * it is coerced to 1 ms by the timer. See {@link resolveRequestTimeoutMS}.
+ *
+ * Re-exported from the shared definition so the client, the retry policy and the logger
+ * sinks cannot disagree about where the timer stops being able to count.
  */
-export const MAX_TIMER_MS = 2_147_483_647;
+export { MAX_TIMER_MS } from '../internal/timer-limits';
 
 /**
  * The per-attempt timeout a request will actually run under.

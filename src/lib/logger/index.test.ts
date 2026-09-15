@@ -801,6 +801,45 @@ describe('Logger', () => {
 
       consoleErrorSpy.mockRestore();
     });
+
+    test('adopts a rejection from a then-only sink write', async () => {
+      const consoleErrorSpy = spyOn(console, 'error').mockImplementation(
+        () => {},
+      );
+
+      // A thenable, not a `Promise`: `isPromise` is a then-check, and a thenable is not
+      // required to carry `.catch`. Calling `.catch` on this threw a `TypeError` that was
+      // then reported as the *sink's* failure, while the real rejection went unhandled.
+      const thenOnlySink = {
+        write: () => ({
+          then: (
+            _resolve: (value: void) => void,
+            reject: (reason: unknown) => void,
+          ) => {
+            reject(new Error('async sink failure'));
+          },
+        }),
+      };
+
+      const errorLogger = new Logger({
+        sinks: [thenOnlySink as never, arraySink],
+        callProcessExit: false,
+      });
+
+      errorLogger.info('Test message');
+
+      await new Promise((resolve) => setTimeout(resolve, 5));
+
+      const diagnostic = arraySink.logs.find((entry) =>
+        entry.tags?.includes('lifecycleion-diagnostic'),
+      );
+
+      expect(diagnostic).toBeDefined();
+      // The rejection the sink actually reported, not a `TypeError` about `.catch`.
+      expect(diagnostic?.message).toContain('async sink failure');
+
+      consoleErrorSpy.mockRestore();
+    });
   });
 
   describe('EventEmitter', () => {

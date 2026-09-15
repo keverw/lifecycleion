@@ -43,6 +43,22 @@ yarn add lifecycleion
 bun add lifecycleion
 ```
 
+### Peer dependency: `tldts`
+
+Lifecycleion declares [`tldts`](https://github.com/remusao/tldts) as a required peer
+dependency. It carries the compiled Public Suffix List that `http-client`'s `CookieJar`
+scopes cookies with and that `domain-utils` re-exports, and it is a peer rather than a
+direct dependency for two reasons: a single copy in the tree means one PSL snapshot rather
+than two disagreeing ones, and you can refresh the list by upgrading `tldts` within its
+supported range without waiting on a Lifecycleion release.
+
+npm 7+, pnpm 8+ and Bun install peer dependencies automatically, so most projects need do
+nothing. Yarn Berry does not - install it explicitly there:
+
+```bash
+yarn add tldts
+```
+
 For Node.js runtimes, Lifecycleion currently targets `Node >=25`. Some libraries, including `safe-handle-callback`, `logger`'s error listener, and `lru-cache`'s `onChange`, report errors on the standard global `'error'` event channel: an `ErrorEvent` dispatched through the global `EventTarget` methods. Those are web-standard primitives, and browsers, Bun, and Deno expose them on `globalThis` natively.
 
 Standalone rendering and redaction failures use that same channel when you have not set a handler, so a `logger.registerReportErrorListener()` records them like any other reported failure. Failures raised by the logger itself use a separate asynchronous diagnostic channel: its `'diagnostic'` event, then `diagnosticSinks` (or the regular sinks when none were configured), then guarded `console.error`. Diagnostic writes do not run through the logger again. See [Where Failures Go](./docs/logger.md#where-failures-go).

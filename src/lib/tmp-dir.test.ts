@@ -269,6 +269,44 @@ describe('TmpDir', () => {
     expect(await fs.readdir(base)).toEqual([]);
   });
 
+  test('cleanup() joins an initialize() retried after a failed one', async () => {
+    // The in-flight slot is cleared by `initialize()`'s own `.finally` before `cleanup()`
+    // resumes, so a create that fails and is immediately retried left `cleanup()` looking
+    // at `null` with nothing initialized - it no-opped, the retry then succeeded, and the
+    // directory it made was never removed. Waiting for the *last* create, not the first,
+    // is what closes that.
+    const base = path.join(tempDir.path, 'cleanup-during-retry');
+    const dir = new TmpDir({ baseDirectory: base });
+
+    const original = (dir as unknown as { createTempDir: () => Promise<void> })
+      .createTempDir;
+    let calls = 0;
+
+    (dir as unknown as { createTempDir: () => Promise<void> }).createTempDir =
+      function patched(this: unknown): Promise<void> {
+        calls++;
+
+        if (calls === 1) {
+          return Promise.reject(new Error('create failed'));
+        }
+
+        return original.call(this);
+      };
+
+    const [retry] = await Promise.allSettled([
+      dir.initialize().catch(() => dir.initialize()),
+      dir.cleanup(),
+    ]);
+
+    // The retry is refused rather than left to create a directory after the only call
+    // that would have removed it has already returned.
+    expect(retry.status).toBe('rejected');
+    expect(calls).toBe(1);
+    // Nothing under the base either way: the failed create made nothing, and the refused
+    // retry never ran to make anything.
+    expect(await fs.readdir(base).catch(() => [])).toEqual([]);
+  });
+
   test('creates a base directory that is not there yet', async () => {
     const base = path.join(tempDir.path, 'nested', 'base');
     const dir = await createTempDir({ baseDirectory: base });

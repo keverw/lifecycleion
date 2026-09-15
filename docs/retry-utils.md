@@ -107,6 +107,8 @@ finalDelay = clamp(delay + randomOffset, minTimeoutMS, maxTimeoutMS);
 
 > All numeric options are clamped to their documented ranges. Values outside the allowed range are silently adjusted. `maxRetryAttempts` is additionally floored to an integer after clamping. Additionally, if `maxTimeoutMS < minTimeoutMS`, the values are automatically swapped to ensure `maxTimeoutMS >= minTimeoutMS`.
 
+> **Delays are capped at 2,147,483,647 ms (about 24.8 days).** `delayMS`, `minTimeoutMS` and `maxTimeoutMS` are each bounded there, and so is every delay computed from them. `setTimeout` keeps its delay in a signed 32-bit integer and reads anything larger as `1` ms, so an uncapped `delayMS: 3e9` would read as "wait 34 days" and retry roughly every millisecond instead. `NaN` falls back to the documented default and `Infinity` is refused for the same reason. `maxRetryAttempts` is not a duration and `Infinity` remains a supported value there.
+
 ## RetryPolicy
 
 The `RetryPolicy` class provides low-level control over retry behavior. It tracks retry attempts, calculates delays, and decides whether to retry - but doesn't execute anything itself.

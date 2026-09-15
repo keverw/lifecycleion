@@ -6,6 +6,7 @@ import { isString } from '../../strings';
 import { isPlainObject } from '../../is-plain-object';
 import { isFunction } from '../../is-function';
 import { RetryPolicy } from './retry-policy';
+import { MAX_TIMER_MS } from '../../internal/timer-limits';
 import type {
   RetryPolicyOptions,
   RetryPolicyValidated,
@@ -1115,14 +1116,22 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
       } else {
         if (shouldRetryQuery.shouldRetry) {
           if (shouldRetryQuery.delayMS > 0) {
+            // Bounded again here, not only in `RetryPolicy`. The delay can also arrive
+            // from a caller-built policy object or an exported delay calculator given its
+            // own bounds, and a `setTimeout` past `MAX_TIMER_MS` fires on the next tick -
+            // so an unbounded number reaching this line turns "wait a month" into a busy
+            // retry loop. The same clamped value is recorded, so the remaining-time
+            // bookkeeping describes the timer that actually exists.
+            const delayMS = Math.min(shouldRetryQuery.delayMS, MAX_TIMER_MS);
+
             this.currentState.retryTimeoutStartTime = Date.now();
-            this.currentState.retryTimeoutDelayMS = shouldRetryQuery.delayMS;
+            this.currentState.retryTimeoutDelayMS = delayMS;
             this.currentState.retryTimeoutHandle = setTimeout(() => {
               this.currentState.retryTimeoutHandle = null;
               this.currentState.retryTimeoutStartTime = null;
               this.currentState.retryTimeoutDelayMS = null;
               void this.attemptOperation(false);
-            }, shouldRetryQuery.delayMS);
+            }, delayMS);
           } else {
             void this.attemptOperation(false);
           }

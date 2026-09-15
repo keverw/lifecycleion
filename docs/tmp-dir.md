@@ -94,7 +94,15 @@ Throws `ErrTmpDirInitializeMaxTriesExceeded` if a unique directory cannot be cre
 Removes the temporary directory.
 
 - Safe to call more than once. Calls after successful cleanup are no-ops.
-- If called before `initialize()`, it is also a no-op.
+- **`cleanup()` is terminal for the instance, even when it removes nothing.** Calling it
+  before `initialize()` touches no filesystem - there is nothing to remove - but the
+  instance is finished either way: a later `initialize()` throws `ErrTmpDirWasCleanedUp`
+  rather than creating a directory. Construct a new `TmpDir` instead of reusing one past
+  its `cleanup()`.
+- It first waits for any `initialize()` still in flight, ignoring that create's failure
+  (a create that failed left nothing to remove). Refusing a _later_ `initialize()` is what
+  closes the rest of the race: a failed create retried alongside a `cleanup()` used to
+  begin after cleanup had already returned, and its directory was orphaned.
 - With `unsafeCleanup: true`, cleanup uses recursive removal and can delete non-empty directories.
 - With `unsafeCleanup: false` (default), cleanup of non-empty directories throws.
 
@@ -131,7 +139,7 @@ Notes:
 | Class                                 | When it is thrown                                                                                 |
 | ------------------------------------- | ------------------------------------------------------------------------------------------------- |
 | `ErrTmpDirNotInitialized`             | Reading `.path` before `initialize()`                                                             |
-| `ErrTmpDirWasCleanedUp`               | Reading `.path` after successful `cleanup()`                                                      |
+| `ErrTmpDirWasCleanedUp`               | Reading `.path` after successful `cleanup()`, or calling `initialize()` after any `cleanup()`     |
 | `ErrTmpDirConfigErrorBaseDirectory`   | `baseDirectory` is not an absolute path                                                           |
 | `ErrTmpDirConfigErrorMaxTries`        | `maxTries` floors to a value that is not a positive integer (e.g. `0`, negative, `Infinity`)      |
 | `ErrTmpDirConfigErrorNamePart`        | `prefix` or `postfix` contains a path separator or control character. `option` names which one    |

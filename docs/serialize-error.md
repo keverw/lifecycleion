@@ -63,6 +63,10 @@ const serialized = serializeError(error, {
 });
 ```
 
+The options object itself is read once, up front, and a member whose getter throws counts
+as absent - so passing a hostile or exotic bag cannot make the one function documented never
+to throw throw while describing somebody else's failure.
+
 It fires at most once per call. With no handler it first dispatches a cancelable global
 `'error'` event, so a `logger.registerReportErrorListener()` can record it. If event
 dispatch is unavailable it uses `globalThis.reportError()` when present; an unclaimed

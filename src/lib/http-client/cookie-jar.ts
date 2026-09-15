@@ -1,4 +1,6 @@
 import { parse } from 'tldts';
+import { PublicSuffixResolver } from './public-suffix';
+import type { PublicSuffixOverrides } from './public-suffix';
 import { normalizeAdapterResponseHeaders } from './utils';
 
 // Matches bare hostnames like 'localhost', 'myapp', 'my-app' that tldts
@@ -69,7 +71,10 @@ interface StoredCookieScope {
  * URL lookup — only the relevant bucket is scanned instead of all stored cookies.
  *
  * Validation applied when storing from Set-Cookie headers:
- * - Rejects Domain= values that are recognized public suffixes (e.g. co.uk, com)
+ * - Rejects Domain= values that are recognized public suffixes. Both halves of the
+ *   Public Suffix List count: ICANN (co.uk, com) and private (github.io, herokuapp.com,
+ *   s3.amazonaws.com). Callers with internal or multi-tenant domains the public list
+ *   does not carry can extend or trim the list per jar - see {@link CookieJarOptions}.
  * - Rejects Domain= values that are not a suffix of the request host
  * - Strips leading dots from Domain= per RFC 6265
  * - Rejects a `Secure` cookie set over a non-secure scheme, and a non-`Secure` cookie
@@ -113,16 +118,41 @@ const MAX_AGE_PATTERN = /^-?\d+$/;
  */
 const MAX_COOKIE_MAX_AGE_SECONDS = Math.floor(Number.MAX_SAFE_INTEGER / 1000);
 
+/** Construction options for {@link CookieJar}. */
+export interface CookieJarOptions {
+  /**
+   * Adjustments to the Public Suffix List this jar scopes cookies with.
+   *
+   * The bundled list (from `tldts`, including its private section) is used as-is when
+   * this is omitted, which is the right answer for public hosts. Supply `add` for
+   * internal or multi-tenant domains the public list does not carry, and `remove` to
+   * opt a suffix back out. Invalid entries throw from the constructor rather than being
+   * ignored - see {@link PublicSuffixOverrides}.
+   */
+  publicSuffixes?: PublicSuffixOverrides;
+}
+
 export class CookieJar {
   // Outer key: apex domain from tldts (e.g. 'example.co.uk'), or the hostname
   //            itself for IPs and localhost
   // Inner key: composite 'name@domain/path' for deduplication
   private buckets: Map<string, Map<string, Cookie>> = new Map();
 
+  /**
+   * The list this jar scopes with. Held per-jar rather than reached for as a module
+   * singleton so two jars in one process can disagree about a suffix, and so the
+   * override lists are validated once at construction instead of on every store.
+   */
+  private readonly publicSuffixes: PublicSuffixResolver;
+
   // The scope each stored cookie was accepted with. Keyed by the stored object and held
   // off it, because the object itself is handed out by `getAllCookies()` and is writable
   // from there; dropped with the cookie when the bucket entry goes.
   private storedScopes: WeakMap<Cookie, StoredCookieScope> = new WeakMap();
+
+  constructor(options?: CookieJarOptions) {
+    this.publicSuffixes = new PublicSuffixResolver(options?.publicSuffixes);
+  }
 
   /**
    * Stores or updates a cookie. Returns false if the domain is missing or
@@ -779,8 +809,7 @@ export class CookieJar {
       return ip;
     }
 
-    const result = parse(hostname);
-    return result.domain ?? hostname;
+    return this.publicSuffixes.apexFor(hostname);
   }
 
   private getOrCreateBucket(apex: string): Map<string, Cookie> {
@@ -1070,15 +1099,24 @@ export class CookieJar {
     }
   }
 
-  /** Returns true if the domain is a recognized public suffix (e.g. co.uk, com).
-   *  IPs and local hostnames like localhost are not rejected. */
+  /**
+   * Returns true if the domain is a recognized public suffix and so may never be the
+   * `Domain=` of a cookie.
+   *
+   * Covers both sections of the Public Suffix List: the ICANN one (`com`, `co.uk`) and
+   * the private one (`github.io`, `herokuapp.com`, `s3.amazonaws.com`). The private
+   * section is the half that stops one tenant of a shared platform from setting a cookie
+   * every other tenant on it would send - browsers honour it for exactly that reason.
+   * A jar constructed with `publicSuffixes` overrides answers under those.
+   *
+   * IPs and local hostnames like localhost are not rejected.
+   */
   private isPublicSuffix(domain: string): boolean {
     if (this.tryCanonicalIPLiteral(domain) !== null) {
       return false;
     }
 
-    const result = parse(domain);
-    return !result.isIp && result.domain === null && result.isIcann === true;
+    return this.publicSuffixes.isPublicSuffix(domain);
   }
 
   /**

@@ -41,6 +41,7 @@ import {
   NON_IDEMPOTENT_METHODS,
   REDIRECT_STATUS_CODES,
   DEFAULT_MAX_REDIRECTS,
+  MAX_TIMER_MS,
 } from './consts';
 import type {
   AttemptEndEvent,
@@ -2582,10 +2583,15 @@ export class BaseHTTPClient {
         resolve();
       };
 
-      const id = setTimeout(() => {
-        signal.removeEventListener('abort', onAbort);
-        resolve();
-      }, ms);
+      // `MAX_TIMER_MS` or the timer would read a longer wait as 1ms and resolve at once,
+      // which on the retry path is a retry storm rather than a long pause.
+      const id = setTimeout(
+        () => {
+          signal.removeEventListener('abort', onAbort);
+          resolve();
+        },
+        Math.min(ms, MAX_TIMER_MS),
+      );
 
       signal.addEventListener('abort', onAbort, { once: true });
     });

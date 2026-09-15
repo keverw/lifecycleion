@@ -2917,6 +2917,127 @@ describe('redactValue - an array whose length is not an integer', () => {
   });
 });
 
+describe('redactValue - an array whose length under-reports its contents', () => {
+  // A `Proxy` answering a *smaller* `length` than it holds is not the same lie as `NaN`:
+  // it stays a safe integer, so it passes the bounds check above and the index loop simply
+  // copies fewer slots. The copy is still a real array, and the `Object.keys` pass that
+  // follows installs the own index keys the loop skipped - `defineProperty('0', ...)`
+  // updates `length` on the way - so the wildcard walk sees every slot after all. These
+  // cover that self-correction, which is easy to lose while simplifying the copy: without
+  // it, `items[*].token` would expand over nothing while the documented concrete path
+  // `items[0].token` still masked.
+  const understating = (target: unknown[], length: number): unknown[] =>
+    new Proxy(target, {
+      get(t, property, receiver): unknown {
+        if (property === 'length') {
+          return length;
+        }
+
+        return Reflect.get(t, property, receiver) as unknown;
+      },
+      getOwnPropertyDescriptor(t, property): PropertyDescriptor | undefined {
+        if (property === 'length') {
+          return {
+            value: length,
+            writable: true,
+            enumerable: false,
+            configurable: false,
+          };
+        }
+
+        return Reflect.getOwnPropertyDescriptor(t, property);
+      },
+    });
+
+  test('a wildcard still masks every slot of a length-0 array holding two', () => {
+    const rendered = stringifyValue(
+      {
+        items: understating(
+          [{ token: 'hunter2secret' }, { token: 'othersecret' }],
+          0,
+        ),
+      },
+      { redactedKeys: ['items[*].token'] },
+    );
+
+    expect(rendered).not.toContain('hunter2secret');
+    expect(rendered).not.toContain('othersecret');
+  });
+
+  test('a concrete index masks the slot the length denies', () => {
+    const rendered = stringifyValue(
+      { items: understating([{ token: 'hunter2secret' }], 0) },
+      { redactedKeys: ['items[0].token'] },
+    );
+
+    expect(rendered).not.toContain('hunter2secret');
+  });
+
+  test('a named property beside the denied slots is still carried and masked', () => {
+    const withNamed = Object.assign([{ token: 'hunter2secret' }], {
+      meta: { token: 'metasecret' },
+    });
+
+    const rendered = stringifyValue(
+      { items: understating(withNamed, 0) },
+      { redactedKeys: ['items[*].token', 'items.meta.token'] },
+    );
+
+    expect(rendered).not.toContain('hunter2secret');
+    expect(rendered).not.toContain('metasecret');
+  });
+
+  test('a back-edge parked at [0] does not leave a sibling in the clear', () => {
+    const slots: unknown[] = [];
+    const parent: Record<string, unknown> = {
+      password: 'hunter2secret',
+      items: null,
+    };
+
+    slots.push(parent);
+    parent['items'] = understating(slots, 0);
+
+    const rendered = stringifyValue(parent, { redactedKeys: ['password'] });
+
+    expect(rendered).not.toContain('hunter2secret');
+  });
+
+  test('a negative length is refused outright, as a NaN one is', () => {
+    const rendered = stringifyValue(
+      { items: understating([{ token: 'hunter2secret' }], -1) },
+      { redactedKeys: ['items[*].token'] },
+    );
+
+    expect(rendered).not.toContain('hunter2secret');
+    expect(rendered).toBe('{"items":"***REDACTION FAILED***"}');
+  });
+
+  test('a slot hidden from ownKeys as well is dropped, never rendered', () => {
+    // Both traps deny the slot, so nothing can see the value - the element is simply gone
+    // from the copy. Data loss rather than a leak, which is the right side to fail on.
+    const hidden = new Proxy([{ token: 'hunter2secret' }] as unknown[], {
+      get(t, property, receiver): unknown {
+        if (property === 'length') {
+          return 0;
+        }
+
+        return Reflect.get(t, property, receiver) as unknown;
+      },
+      ownKeys(): ArrayLike<string | symbol> {
+        return ['length'];
+      },
+    });
+
+    const rendered = stringifyValue(
+      { items: hidden },
+      { redactedKeys: ['items[*].token'] },
+    );
+
+    expect(rendered).not.toContain('hunter2secret');
+    expect(rendered).toBe('{"items":[]}');
+  });
+});
+
 /** An options object whose every member read throws. */
 const hostileOptions = <T extends object>(): T =>
   new Proxy({} as T, {

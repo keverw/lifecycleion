@@ -3,7 +3,7 @@ import {
   describeContainer,
 } from '../../internal/container-entries';
 import { MAX_RENDER_DEPTH, TRUNCATED } from '../../internal/render-budget';
-import { readUnknownMember } from '../../internal/read-member';
+import { readUnknownMember, snapshotMembers } from '../../internal/read-member';
 import { isErrorValue } from '../../to-error';
 import {
   createFormatReporter,
@@ -222,14 +222,22 @@ function describeValue(value: unknown): string {
  */
 export function serializeError(
   error: unknown,
-  options?: SerializeErrorOptions,
+  callerOptions?: SerializeErrorOptions,
 ): SerializedError {
   const seen = new WeakSet<object>();
+
+  // Read once, guarded, the way `errorToString` and `stringifyValue` read theirs. The
+  // options bag is an ordinary object to a caller and a `Proxy` with a throwing
+  // `onFormatError` getter to a hostile one, and this read happens before any `try` -
+  // so the one function whose contract is "never throws, always terminates" threw while
+  // describing somebody else's failure. A refused read means no handler, which is the
+  // documented default. See `snapshotMembers`.
+  const options = snapshotMembers(callerOptions, ['onFormatError']);
 
   // Uses the standard host reporting path when no handler is supplied - and it matters
   // more here than anywhere: this payload crosses a process boundary, and the receiving
   // side has no callback of its own to learn anything from.
-  const report = createFormatReporter('render', options?.onFormatError);
+  const report = createFormatReporter('render', options.onFormatError);
 
   // The root is tracked before the walk starts, not left for `deepSerialize` to add when
   // it reaches it. A nested error arrives here already in `seen`, because the walk added
