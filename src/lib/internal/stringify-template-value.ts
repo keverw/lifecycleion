@@ -3,6 +3,7 @@
  */
 
 import { describeContainer } from './container-entries';
+import { describeBinaryView, readBinaryByteLength } from './binary-view';
 import { isPlainContainer } from './is-plain-container';
 import {
   NOOP_FORMAT_REPORTER,
@@ -18,6 +19,7 @@ import {
   chargeUnits,
   createRenderBudget,
   MAX_RENDER_DEPTH,
+  MAX_RENDER_LENGTH,
   noteTruncation,
   TRUNCATED,
   TRUNCATED_LENGTH,
@@ -749,6 +751,72 @@ export function stringifyTemplateValue(
 
   if (date !== null) {
     return emit(date);
+  }
+
+  // A view over binary data whose decoded form could not survive the budget anyway.
+  //
+  // `String(buffer)` decodes every byte before anything can cut the result, so a 40 MB
+  // `Buffer` attached to an error spent about a second and 40 MB building a string that
+  // was then shortened to a couple of hundred characters. `errorToString` already refuses
+  // to enumerate a view's bytes as rows, but that only skipped the per-byte rows - the
+  // decode still happened one line further on.
+  //
+  // Conditional on the allowance rather than unconditional, which is where this parts
+  // company with `serializeError`. That function marks every view because an IPC payload
+  // has no business carrying a key per byte; this is the human-readable path behind logger
+  // templates, and `String(Buffer.from('hello'))` is `hello`. Marking a five-byte buffer
+  // would break an ordinary log line to fix a problem that only exists at megabytes.
+  //
+  // `byteLength` is the test because it bounds the *work*, not because it predicts the
+  // text. For a `Buffer` it is also an upper bound on the output - UTF-8 decoding yields at
+  // most one character per byte, so a view that fits the allowance cannot overrun it - but
+  // every other view renders through the element join, and `String(new Int8Array(n))` is
+  // `-128,-128,...`, measured at four to five characters per byte. What holds in both cases
+  // is that a view under the allowance costs a small constant multiple of an allowance the
+  // caller chose, and `chargeText` cuts whatever comes back; over it, nothing was dropped
+  // that could have been kept.
+  //
+  // Nested, the allowance is the shadow budget's, so a large view inside an almost-full
+  // table markers rather than decoding 200 KB to keep eighty characters.
+  //
+  // The size comes from the intrinsic `%TypedArray%.prototype.byteLength` getter, never
+  // from the value: `byteLength` is an accessor a subclass may override, and a size the
+  // value supplies is worth nothing to the one check that decides whether that value is too
+  // big - `class Lying extends Uint8Array { get byteLength() { return 0 } }` would have
+  // been handed the slow path it had just claimed not to need. A subclass whose *own*
+  // accessor throws is therefore not a refusal at all; it is measured like any other and
+  // decodes if it fits. `null` is the genuinely unmeasurable view - a detached buffer, a
+  // realm neither intrinsic recognizes - and fails closed to the marker, since the one
+  // thing that cannot be done is measure it.
+  if (ArrayBuffer.isView(value)) {
+    const allowance = budget?.remaining ?? MAX_RENDER_LENGTH;
+    const byteLength = readBinaryByteLength(value);
+
+    if (byteLength === null || byteLength > allowance) {
+      // Counted like every other cut this bound makes, because that is what it is: the
+      // marker stands in for content the *length* budget refused, exactly as
+      // `[max length exceeded]` does for a string too long to keep. Left uncounted, a
+      // render that replaced a four-megabyte `Buffer` reported `truncations === 0` and
+      // never called `onTruncate`, while the identical render of a four-megabyte *string*
+      // reported a `'length'` cut - so a caller rendering something other than a log line
+      // was told its output was intact precisely when the most content had been dropped.
+      // The unmeasurable case is counted too: "could not be measured" is resolved here as
+      // "assume it does not fit", and the value is dropped on that reading either way.
+      //
+      // No `dropped` count, for the reason `renderNested` omits one on a cycle and a depth
+      // cap: nothing rendered the decoded text, so its length was never established, and
+      // `droppedChars` is documented as a lower bound on what a cut *measured*. The
+      // byte count is not that number - it is the input, not the output that was lost.
+      //
+      // Only when there is a budget to record it on. Without one, `emit` falls back to
+      // `capToMaxRenderLength`, which notes nothing either - a render with no budget has
+      // no counters and no handler watching them.
+      if (budget !== undefined) {
+        noteTruncation(budget, 'length');
+      }
+
+      return emit(describeBinaryView(value));
+    }
   }
 
   if (value !== null && typeof value === 'object') {

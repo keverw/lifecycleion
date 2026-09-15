@@ -2407,6 +2407,63 @@ describe('maxRenderLength and onTruncate', () => {
     expect(cycleCuts[0]?.dropped).toBeUndefined();
   });
 
+  it('reports a binary view replaced by its marker as a length cut', () => {
+    // The `<binary: ...>` marker is emitted *because of this bound*: a view is rendered as
+    // its decoded text when it fits the allowance and summarized only when it does not, so
+    // the summary is a length cut in every sense that matters to a reader - content the
+    // render could not represent. Uncounted, it was the one cut this channel could not see:
+    // a four-megabyte `Buffer` dropped more content than any other case here and reported
+    // `truncations === 0`, while the identical four-megabyte *string* one line above
+    // reported `'length'`. A caller rendering something other than a log line - an email
+    // body, a stored document - was told its output was intact precisely when the most had
+    // been lost, and cannot find out by scanning the text, since a payload is free to
+    // contain the marker itself.
+    const cuts: TruncationInfo[] = [];
+
+    const rendered = stringifyValue(Buffer.alloc(4_000_000, 0x41), {
+      onTruncate: (info) => cuts.push(info),
+    });
+
+    expect(rendered).toBe('<binary: Buffer, 4000000 bytes>');
+    expect(cuts).toHaveLength(1);
+    expect(cuts[0]?.reason).toBe('length');
+    // No count: the decoded text was never built, so nothing measured what was dropped -
+    // the same `undefined` a cycle and a depth cap report, and for the same reason. The
+    // byte count is the input, not the output that was lost.
+    expect(cuts[0]?.dropped).toBeUndefined();
+  });
+
+  it('reports a marker for a view nested inside a container too', () => {
+    // Nested, the leaf renders against a *shadow* budget and its cut is folded back by
+    // `noteLeafCut`, which is a second path to the same handler and the one that carries
+    // every rendered error's `AdditionalInfo`. Counted only at the root, the case that
+    // actually turns up in a log line would still have reported nothing.
+    const cuts: TruncationInfo[] = [];
+
+    const rendered = stringifyValue(
+      { payload: Buffer.alloc(4_000_000, 0x41) },
+      { onTruncate: (info) => cuts.push(info) },
+    );
+
+    expect(rendered).toBe('{"payload":"<binary: Buffer, 4000000 bytes>"}');
+    expect(cuts).toHaveLength(1);
+    expect(cuts[0]?.reason).toBe('length');
+  });
+
+  it('does not report a view small enough to render', () => {
+    // The other half of the rule: a view that fits is rendered exactly as before, so there
+    // is nothing to report. A truncation fired here would make every ordinary log line
+    // carrying a small buffer look like a shortened render.
+    const cuts: TruncationInfo[] = [];
+
+    const rendered = stringifyValue(Buffer.from('hello'), {
+      onTruncate: (info) => cuts.push(info),
+    });
+
+    expect(rendered).toBe('hello');
+    expect(cuts).toHaveLength(0);
+  });
+
   it('shares one allowance between masking and the render', () => {
     // Without the shared budget a `redactFunction` answering oversized replacements got a
     // fresh cap of its own, so `maxRenderLength` bounded only half the operation.

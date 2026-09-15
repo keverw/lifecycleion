@@ -3,7 +3,8 @@ import {
   describeContainer,
 } from '../../internal/container-entries';
 import { MAX_RENDER_DEPTH, TRUNCATED } from '../../internal/render-budget';
-import { readUnknownMember, snapshotMembers } from '../../internal/read-member';
+import { snapshotMembers } from '../../internal/read-member';
+import { describeBinaryView } from '../../internal/binary-view';
 import { isErrorValue } from '../../to-error';
 import {
   createFormatReporter,
@@ -57,27 +58,6 @@ export interface SerializedError {
  * about to be sent somewhere. It goes to `onFormatError` instead.
  */
 const UNSERIALIZABLE_KEYS = '<unserializable: keys>';
-
-/**
- * A one-line stand-in for a `Buffer`, `TypedArray` or `DataView`.
- *
- * Names the kind and the size, which is what a reader of a failure payload wants to know
- * about attached binary data, and costs one node rather than one per byte. `errorToString`
- * collapses the same shapes to a single leaf for the same reason, though to its own
- * generic marker rather than to this text. See the `ArrayBuffer.isView` branch in
- * `deepSerialize`.
- */
-function describeBinaryView(value: ArrayBufferView): string {
-  // Guarded reads, as everything else on this path is: `constructor`, `name` and even
-  // `byteLength` are accessors on a subclass or `Proxy`'s prototype and can throw.
-  const name = readUnknownMember(
-    readUnknownMember(value, 'constructor'),
-    'name',
-  );
-  const byteLength = readUnknownMember(value, 'byteLength');
-
-  return `<binary: ${typeof name === 'string' && name.length > 0 ? name : 'ArrayBufferView'}, ${typeof byteLength === 'number' ? String(byteLength) : 'unknown'} bytes>`;
-}
 
 /** A single value refused to be read - a throwing accessor, a revoked `Proxy`. */
 const UNSERIALIZABLE_VALUE = '<unserializable: value>';

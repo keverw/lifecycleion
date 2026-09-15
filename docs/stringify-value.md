@@ -9,6 +9,7 @@ Render any value as a display string, or return it with parts redacted. The rend
   - [stringifyValue](#stringifyvalue)
   - [Options](#options)
     - [Bounding and Observing the Render](#bounding-and-observing-the-render)
+      - [Binary Data](#binary-data)
   - [redactValue](#redactvalue)
 - [How Values Render](#how-values-render)
 - [Redacting While Rendering](#redacting-while-rendering)
@@ -126,6 +127,36 @@ It fires at most once per call, carrying the first cut - the one that explains t
 was never rendered, so its size was never established.
 
 `curlyBrackets` and `errorToString` take the same two options and report the same shape.
+
+##### Binary Data
+
+A `Buffer`, `TypedArray` or `DataView` is rendered as its ordinary text when it is small
+enough to keep, and replaced by a `<binary: Kind, N bytes>` marker when it is not:
+
+```typescript
+stringifyValue({ body: Buffer.from('hello') }); // {"body":"hello"}
+stringifyValue({ body: Buffer.alloc(8_000_000) }); // {"body":"<binary: Buffer, 8000000 bytes>"}
+```
+
+The test is the view's size against what is left of the allowance, so the decision is
+about whether decoding could have produced anything you keep - not about the value being
+binary. A view nested in a nearly-full container is judged against what that container has
+left, so the same buffer can render at the top of a value and be summarized deeper in.
+
+This exists because the decoded form has to be built in full before it can be measured:
+`String(buffer)` on forty megabytes costs about a second and forty megabytes to produce a
+couple of hundred characters of surviving output. A view too large for the allowance skips
+that work entirely.
+
+The substitution is a `'length'` truncation like any other, so `onTruncate` fires for it.
+`dropped` is absent: the text was never built, so nothing ever measured what was lost.
+
+`maxRenderLength: Infinity` has no allowance to exceed, so every view decodes - which is
+what asking for an unbounded render means.
+
+`serializeError` marks every view unconditionally rather than following this rule. Its
+output is a JSON payload crossing a process boundary, where a `Buffer` would otherwise
+arrive as one key per byte, and there is no allowance in that shape to test against.
 
 ### redactValue
 

@@ -45,6 +45,10 @@ import {
 } from './internal/render-budget';
 import { createTruncationReporter } from './internal/truncation-reporter';
 import {
+  describeBinaryView,
+  readBinaryByteLength,
+} from './internal/binary-view';
+import {
   createFormatReporter,
   type FormatErrorHandler,
   type ReportFormatFailure,
@@ -708,7 +712,48 @@ function safeStringify(
   value: unknown,
   path: string,
   reportRender: ReportFormatFailure,
+  budget?: RenderBudget,
 ): string {
+  // A view over binary data whose rendering could not survive the budget anyway.
+  //
+  // This path reaches `JSON.stringify`, and a `Buffer` has a JSON form: it expands to
+  // `{"type":"Buffer","data":[65,65,...]}`, four or five characters per byte, built whole
+  // before anything can cut it. A 40 MB buffer attached to an error cost about a second
+  // and well over a hundred megabytes to produce a couple of hundred characters of table
+  // cell. The `ArrayBuffer.isView` check in `describeAddressableInfo` already stops such a
+  // value being *enumerated* as one row per byte; it does not stop this, one step later.
+  //
+  // Conditional on the allowance, matching `stringifyTemplateValue` rather than
+  // `serializeError`: a small buffer renders as it always has. `byteLength` is the
+  // comparison even though the JSON form is several times larger, because the point is to
+  // bound the work against the budget rather than to predict the encoding - under it, the
+  // work is a small multiple of an allowance the caller chose; over it, nothing is
+  // rendered that could have been kept. The size is measured through the intrinsic getter
+  // rather than read off the value - see `readBinaryByteLength` - so a subclass cannot
+  // under-report its way onto the slow path; a view that genuinely cannot be measured,
+  // such as a detached one, fails closed to the marker.
+  if (
+    value !== null &&
+    typeof value === 'object' &&
+    ArrayBuffer.isView(value)
+  ) {
+    const allowance = budget?.remaining ?? MAX_RENDER_LENGTH;
+    const byteLength = readBinaryByteLength(value);
+
+    if (byteLength === null || byteLength > allowance) {
+      // Counted, for the reason the same branch in `stringifyTemplateValue` is: the marker
+      // stands in for content the length bound refused, and a bound that drops content
+      // without moving `truncations` reports an intact render to the `onTruncate` handler
+      // a caller set to watch for exactly this. No `dropped` count - the JSON form was
+      // never built, so nothing measured what it would have been.
+      if (budget !== undefined) {
+        noteTruncation(budget, 'length');
+      }
+
+      return describeBinaryView(value);
+    }
+  }
+
   try {
     return stringifyPrimitive(value, path, reportRender);
   } catch (error) {
@@ -978,7 +1023,7 @@ function errorToASCIITable(
           // the 1 MB cap.
           chargeNestedText(
             budget,
-            safeStringify(value, joinPath(path, key), reportRender),
+            safeStringify(value, joinPath(path, key), reportRender, budget),
             rowTextLevels(maxRowLength, depth, label.length),
           ),
         );
@@ -1142,6 +1187,7 @@ function errorToASCIITable(
                 masked,
                 joinPath(path, 'additionalInfo'),
                 reportRender,
+                budget,
               ),
               rowTextLevels(maxRowLength, depth, 'AdditionalInfo'.length),
             ),
@@ -1386,6 +1432,7 @@ function addErrorTail(
       stack,
       joinPath(path, 'stack'),
       reportRender,
+      budget,
     );
 
     table.addValueOnSeparateRow(
@@ -2046,6 +2093,6 @@ function stringifyValueInner(
       return entries;
     }
   } else {
-    return chargeText(budget, safeStringify(value, path, reportRender));
+    return chargeText(budget, safeStringify(value, path, reportRender, budget));
   }
 }

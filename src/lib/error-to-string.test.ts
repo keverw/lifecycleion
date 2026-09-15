@@ -2033,6 +2033,37 @@ describe('errorToString - bounds that hold at the entry point', () => {
     expect(rendered).not.toContain('AdditionalInfo.1000');
   });
 
+  it('does not build the JSON form of a view too large to render', () => {
+    // Skipping the per-byte *rows* was only half of it. The value still reached
+    // `JSON.stringify`, and a `Buffer` has a JSON form: `{"type":"Buffer","data":[65,...]}`,
+    // four or five characters per byte, built whole before the budget could cut it. Forty
+    // megabytes cost about a second and well over a hundred to produce a table cell of a
+    // couple of hundred characters.
+    const error = new Error('boom') as Error & { code?: unknown };
+
+    error.code = Buffer.alloc(8_000_000, 0x41);
+
+    const started = Date.now();
+    const rendered = errorToString(error);
+
+    expect(Date.now() - started).toBeLessThan(500);
+    expect(rendered).toContain('<binary: Buffer, 8000000 bytes>');
+    expect(rendered).not.toContain('"type":"Buffer"');
+  });
+
+  it('still renders a small view the way it always did', () => {
+    // Conditional on the allowance, so nothing changes for the ordinary case - a view that
+    // could never overrun the budget is rendered, not summarized.
+    const error = new Error('boom') as Error & { code?: unknown };
+
+    error.code = Buffer.from('hello');
+
+    const rendered = errorToString(error);
+
+    expect(rendered).toContain('"type":"Buffer"');
+    expect(rendered).not.toContain('<binary:');
+  });
+
   it('renders a wide grapheme that overhangs its column instead of throwing', () => {
     // `splitWord` splits by grapheme, so a column too narrow for a two-column character
     // emits a chunk wider than the column and the padding count goes negative.
@@ -2087,6 +2118,43 @@ describe('maxRenderLength and onTruncate', () => {
     );
 
     expect(reasons).toEqual(['length', 'depth', 'circular']);
+  });
+
+  it('reports a binary view replaced by its marker as a length cut', () => {
+    // The table path reaches the marker through its own guard in `safeStringify`, not
+    // through the template renderer, so it needs its own counting: the `<binary: ...>` cell
+    // is emitted because the value would not fit the allowance, which makes it a length cut
+    // exactly as a shortened `AdditionalInfo` string is. Left uncounted, `errorToString`
+    // dropped eight megabytes of attached data and told `onTruncate` nothing - the same
+    // silence the nested-row charge was fixed for.
+    const cuts: TruncationInfo[] = [];
+
+    const rendered = errorToString(
+      errorWith(Buffer.alloc(4_000_000, 0x41)),
+      80,
+      {
+        onTruncate: (cut) => cuts.push(cut),
+      },
+    );
+
+    expect(rendered).toContain('<binary: Buffer, 4000000 bytes>');
+    expect(cuts).toHaveLength(1);
+    expect(cuts[0]?.reason).toBe('length');
+    // Never built, never measured: `dropped` is a lower bound on what a cut *counted*, and
+    // the JSON form this branch refused to produce was never a string anyone sized.
+    expect(cuts[0]?.dropped).toBeUndefined();
+  });
+
+  it('does not fire for a view small enough to render', () => {
+    // The conditional half of the rule, held at the reporting channel too: a small buffer
+    // renders as it always has, so nothing was cut and nothing is reported.
+    const cuts: TruncationInfo[] = [];
+
+    errorToString(errorWith(Buffer.from('hello')), 80, {
+      onTruncate: (cut) => cuts.push(cut),
+    });
+
+    expect(cuts).toHaveLength(0);
   });
 
   it('does not fire for an error that rendered in full', () => {

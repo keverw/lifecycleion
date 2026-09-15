@@ -9,6 +9,7 @@ A collection of foundational TypeScript utilities for managing application lifec
 - [Why Lifecycleion?](#why-lifecycleion)
   - [Key Features](#key-features)
 - [Installation](#installation)
+  - [Peer dependency: `tldts`](#peer-dependency-tldts)
 - [Quick Example](#quick-example)
 - [Available Libraries](#available-libraries)
 - [Change Log](#change-log)

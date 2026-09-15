@@ -239,3 +239,78 @@ describe('stringifyTemplateValue - values that resist rendering', () => {
     expect(() => stringifyTemplateValue({ p: proxy })).not.toThrow();
   });
 });
+
+describe('stringifyTemplateValue on binary views', () => {
+  // The rule here is deliberately not `serializeError`'s. That function marks every view,
+  // because an IPC payload has no business carrying one JSON key per byte. This is the
+  // human-readable path behind logger templates, where `String(Buffer.from('hello'))` is
+  // `hello` and a reader wants to see it. What is closed is only the case where decoding
+  // could not have helped: `String(buffer)` materializes every byte before anything can cut
+  // the result, so a large view cost a second and its own size in memory to produce a
+  // couple of hundred characters.
+  test('a small view still renders as its decoded text', () => {
+    expect(stringifyTemplateValue(Buffer.from('hello'))).toBe('hello');
+  });
+
+  test('a view larger than the allowance renders as a marker instead of decoding', () => {
+    const big = Buffer.alloc(8_000_000, 0x41);
+
+    const started = Date.now();
+    const rendered = stringifyTemplateValue(big);
+    const elapsed = Date.now() - started;
+
+    expect(rendered).toBe('<binary: Buffer, 8000000 bytes>');
+    // The point is the work avoided, not only the text: decoding this took about 200ms and
+    // eight megabytes before the marker, and the result was cut to nothing anyway.
+    expect(elapsed).toBeLessThan(200);
+  });
+
+  test('a view that fits the allowance is decoded as before', () => {
+    const small = Buffer.alloc(2_000, 0x41);
+
+    expect(stringifyTemplateValue(small)).toBe('A'.repeat(2_000));
+  });
+
+  test('a subclass that under-reports its size is measured honestly', () => {
+    // `byteLength` is an accessor, so the value can claim any size it likes - and a size
+    // the value supplies is worth nothing to a check that exists to decide whether that
+    // value is too big. Read through the intrinsic `%TypedArray%.prototype.byteLength`
+    // getter, which reads the internal slot and cannot be overridden, a subclass claiming
+    // `0` over twenty megabytes still takes the marker.
+    class Lying extends Uint8Array {
+      public override get byteLength(): number {
+        return 0;
+      }
+    }
+
+    const lying = new Lying(20_000_000);
+
+    const started = Date.now();
+    const rendered = stringifyTemplateValue(lying);
+
+    expect(Date.now() - started).toBeLessThan(200);
+    expect(rendered).toBe('<binary: Lying, 20000000 bytes>');
+  });
+
+  test('a subclass whose size accessor throws is still measured, not refused', () => {
+    // The intrinsic getter never consults the overridden one, so a throwing accessor is
+    // not a refusal here: the view is small, and it decodes like any other.
+    class Throwing extends Uint8Array {
+      public override get byteLength(): number {
+        throw new Error('byteLength refused');
+      }
+    }
+
+    const view = new Throwing(3);
+
+    expect(stringifyTemplateValue(view)).toBe('0,0,0');
+  });
+
+  test('a DataView is measured through its own intrinsic getter', () => {
+    const view = new DataView(new ArrayBuffer(4_000_000));
+
+    expect(stringifyTemplateValue(view)).toBe(
+      '<binary: DataView, 4000000 bytes>',
+    );
+  });
+});

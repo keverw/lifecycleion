@@ -68,6 +68,16 @@ Truncation does not reach `onFormatError` - that channel means a value _refused_
 and hands you an error, and there is none here. `onTruncate` fires at most once per call
 with the first cut, and takes the same shape `curlyBrackets` and `stringifyValue` use.
 
+Binary data attached to an error - a `Buffer` on `code`, a `TypedArray` on
+`additionalInfo` - is never expanded byte by byte. It is not enumerated as one row per
+byte, and a view larger than what is left of the allowance is rendered as a
+`<binary: Kind, N bytes>` marker rather than being serialized first: a `Buffer`'s JSON
+form is `{"type":"Buffer","data":[65,...]}`, several characters per byte, and building
+forty megabytes of it to keep a couple of hundred characters is the opposite of what a
+failure-reporting path should cost. A view small enough to keep renders as it always has.
+The marker counts as a `'length'` truncation, so `onTruncate` sees it. See
+[stringify-value](./stringify-value.md#binary-data), which applies the same rule.
+
 | Parameter      | Type                   | Default | Description                                                              |
 | -------------- | ---------------------- | ------- | ------------------------------------------------------------------------ |
 | `error`        | `unknown`              | -       | The error or thrown value to format                                      |
