@@ -434,6 +434,17 @@ describe('deserializeError - untrusted input', () => {
 });
 
 describe('serializeError on binary data attached to an error', () => {
+  test('describes a bare ArrayBuffer rather than sending an empty object', () => {
+    // `ArrayBuffer.isView` is false for the backing store, so it fell through to the object
+    // branch - and `Object.keys(new ArrayBuffer(n))` is empty, so a buffer crossed the wire
+    // as `{}`: indistinguishable from an empty object and silent about its size.
+    const serialized = serializeError(
+      Object.assign(new Error('boom'), { data: new ArrayBuffer(99) }),
+    );
+
+    expect(serialized.data).toBe('<binary: ArrayBuffer, 99 bytes>');
+  });
+
   // `Array.isArray` is false for a `Buffer`, so it fell through to the object branch and
   // `Object.keys` enumerated its bytes: an ordinary buffer became a JSON object with one
   // key per byte, exhausting the node budget and spending the walk that is supposed to

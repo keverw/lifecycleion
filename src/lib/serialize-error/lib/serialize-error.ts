@@ -4,7 +4,10 @@ import {
 } from '../../internal/container-entries';
 import { MAX_RENDER_DEPTH, TRUNCATED } from '../../internal/render-budget';
 import { snapshotMembers } from '../../internal/read-member';
-import { describeBinaryView } from '../../internal/binary-view';
+import {
+  describeBinaryView,
+  isArrayBufferLike,
+} from '../../internal/binary-view';
 import { isErrorValue } from '../../to-error';
 import {
   createFormatReporter,
@@ -596,7 +599,10 @@ function deepSerialize(
     // per byte, exhausting the node budget on a 100 KB buffer and spending hundreds of
     // milliseconds in `Object.keys` on a 2 MB one - inside the walk that exists to
     // describe a failure cheaply on the IPC path.
-    if (ArrayBuffer.isView(value)) {
+    // The backing store as well as a view over one. `Object.keys(new ArrayBuffer(n))` is
+    // empty, so a buffer crossed the wire as `{}` - indistinguishable from an empty object
+    // and silent about its size.
+    if (ArrayBuffer.isView(value) || isArrayBufferLike(value)) {
       return describeBinaryView(value);
     }
 

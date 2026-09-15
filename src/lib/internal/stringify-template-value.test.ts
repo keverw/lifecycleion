@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test';
+import { runInNewContext } from 'node:vm';
 import { stringifyTemplateValue } from './stringify-template-value';
 
 describe('stringifyTemplateValue', () => {
@@ -304,6 +305,41 @@ describe('stringifyTemplateValue on binary views', () => {
     const view = new Throwing(3);
 
     expect(stringifyTemplateValue(view)).toBe('0,0,0');
+  });
+
+  test('a bare ArrayBuffer names itself and its size', () => {
+    // `ArrayBuffer.isView` is deliberately false for the backing store, so it used to fall
+    // through to the generic constructor naming and render `[ArrayBuffer]` - correct and
+    // cheap, and silent about the one thing worth knowing. There is no decode to avoid, so
+    // no allowance is consulted: this is only about two bytes and forty megabytes not
+    // reading the same.
+    expect(stringifyTemplateValue(new ArrayBuffer(2))).toBe(
+      '<binary: ArrayBuffer, 2 bytes>',
+    );
+    expect(stringifyTemplateValue(new ArrayBuffer(40_000_000))).toBe(
+      '<binary: ArrayBuffer, 40000000 bytes>',
+    );
+  });
+
+  test('a buffer from another realm is recognized, where instanceof is not', () => {
+    // The brand check is the intrinsic getter throwing or not, never `instanceof`, which is
+    // realm-bound: a buffer from an iframe or a `vm` context fails that operator while
+    // being exactly the thing worth naming.
+    const foreign = runInNewContext('new ArrayBuffer(77)') as object;
+
+    expect(foreign instanceof ArrayBuffer).toBe(false);
+    expect(stringifyTemplateValue(foreign)).toBe(
+      '<binary: ArrayBuffer, 77 bytes>',
+    );
+  });
+
+  test('an ordinary object is not mistaken for a buffer', () => {
+    // The getters throw on a receiver without the internal slot, so nothing that merely
+    // looks buffer-shaped is claimed - including one that reports a `byteLength`.
+    expect(stringifyTemplateValue({ byteLength: 40_000_000 })).toBe(
+      '{"byteLength":40000000}',
+    );
+    expect(stringifyTemplateValue({})).toBe('{}');
   });
 
   test('a DataView is measured through its own intrinsic getter', () => {

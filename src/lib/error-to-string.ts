@@ -46,6 +46,7 @@ import {
 import { createTruncationReporter } from './internal/truncation-reporter';
 import {
   describeBinaryView,
+  isArrayBufferLike,
   readBinaryByteLength,
 } from './internal/binary-view';
 import {
@@ -732,6 +733,14 @@ function safeStringify(
   // rather than read off the value - see `readBinaryByteLength` - so a subclass cannot
   // under-report its way onto the slow path; a view that genuinely cannot be measured,
   // such as a detached one, fails closed to the marker.
+  // The backing store itself, which `ArrayBuffer.isView` deliberately excludes. Not counted
+  // as a truncation and not weighed against the allowance: `JSON.stringify` renders one as
+  // `{}` whatever its size, so nothing is being dropped here - the marker only says what
+  // the empty object never did, that this is binary and how much of it there is.
+  if (value !== null && typeof value === 'object' && isArrayBufferLike(value)) {
+    return describeBinaryView(value);
+  }
+
   if (
     value !== null &&
     typeof value === 'object' &&

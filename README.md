@@ -54,11 +54,16 @@ than two disagreeing ones, and you can refresh the list by upgrading `tldts` wit
 supported range without waiting on a Lifecycleion release.
 
 npm 7+, pnpm 8+ and Bun install peer dependencies automatically, so most projects need do
-nothing. Yarn Berry does not - install it explicitly there:
+nothing. **Yarn does not**, in either Yarn 1 or Berry, and neither does pnpm 7 or older or
+npm 6 - install it explicitly there:
 
 ```bash
 yarn add tldts
 ```
+
+`tldts` is imported at module load by `lifecycleion/http-client` and
+`lifecycleion/domain-utils`, so on those managers a missing install is a module-resolution
+error the first time either entry point is loaded, not a deferred or partial failure.
 
 For Node.js runtimes, Lifecycleion currently targets `Node >=25`. Some libraries, including `safe-handle-callback`, `logger`'s error listener, and `lru-cache`'s `onChange`, report errors on the standard global `'error'` event channel: an `ErrorEvent` dispatched through the global `EventTarget` methods. Those are web-standard primitives, and browsers, Bun, and Deno expose them on `globalThis` natively.
 

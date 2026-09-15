@@ -3,7 +3,11 @@
  */
 
 import { describeContainer } from './container-entries';
-import { describeBinaryView, readBinaryByteLength } from './binary-view';
+import {
+  describeBinaryView,
+  isArrayBufferLike,
+  readBinaryByteLength,
+} from './binary-view';
 import { isPlainContainer } from './is-plain-container';
 import {
   NOOP_FORMAT_REPORTER,
@@ -788,6 +792,15 @@ export function stringifyTemplateValue(
   // decodes if it fits. `null` is the genuinely unmeasurable view - a detached buffer, a
   // realm neither intrinsic recognizes - and fails closed to the marker, since the one
   // thing that cannot be done is measure it.
+  // The backing store itself, which `ArrayBuffer.isView` deliberately excludes. No budget
+  // test, because there is nothing to decode: an `ArrayBuffer` has no useful string form at
+  // any size, and without this it fell through to the generic naming and rendered
+  // `[ArrayBuffer]` - correct and cheap, and silent about the one thing worth knowing. Two
+  // bytes and forty megabytes should not read the same.
+  if (value !== null && typeof value === 'object' && isArrayBufferLike(value)) {
+    return emit(describeBinaryView(value));
+  }
+
   if (ArrayBuffer.isView(value)) {
     const allowance = budget?.remaining ?? MAX_RENDER_LENGTH;
     const byteLength = readBinaryByteLength(value);
