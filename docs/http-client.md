@@ -1162,12 +1162,12 @@ interface NodeAdapterConfig {
 TLS certificate errors resolve as status `495` (transport error, not retryable) rather than throwing, so they flow through the normal error path. That includes every revocation failure, such as `CERT_REVOKED`, `UNABLE_TO_GET_CRL`, `CRL_HAS_EXPIRED` and friends.
 
 **URL credentials stay with the origin you addressed.** `user:pass@` on a request URL is
-`Authorization: Basic` by another name, and `NodeAdapter` copies it onto `options.auth`.
-On a cross-origin hop it is withheld, the same way `socketPath` and the TLS identity are.
-`HTTPClient` already strips userinfo from a `Location` before dispatch, so a client-driven
-redirect never reaches this; the guard covers `NodeAdapter.send()` called directly with an
-`initialURL` on one origin and a `requestURL` still carrying userinfo for another. Without
-`initialURL`, or on a same-origin hop, the credentials are sent as before.
+`Authorization: Basic` by another name. Every network adapter withholds it on a
+cross-origin hop; `NodeAdapter` additionally copies same-origin userinfo onto
+`options.auth`. `HTTPClient` already strips userinfo from a `Location` before dispatch,
+so a client-driven redirect never reaches this; the adapter guards cover `send()` called
+directly with an `initialURL` on one origin and a `requestURL` still carrying userinfo for
+another. Without `initialURL`, or on a same-origin hop, the credentials are sent as before.
 
 **TLS identity stays with the origin you addressed.** `servername` and `mtls.cert` / `mtls.key` describe _who you are talking to_ and _who you are_; a `Location` header is the remote server's choice, not yours. When the client follows a redirect to a different origin (scheme, host or port), `NodeAdapter` sends that hop without the SNI override and without the client certificate, so a redirect can never make the adapter authenticate to, or verify a certificate against a name meant for, a host you never named. Your _trust_ settings — `ca`, `mtls.ca`, `crl` and `rejectUnauthorized` — say which servers to believe, and apply to every connection the adapter opens, hops included. A hop that needs your identity to succeed fails with `495`, which is the correct answer: address it directly if you mean to authenticate there. Same-origin redirects are unaffected. The adapter tells a hop apart from the original request through `AdapterRequest.initialURL`, which the client sets on every attempt; driven directly without it, the adapter applies the identity as configured, and an `initialURL` it cannot parse is treated as cross-origin.
 

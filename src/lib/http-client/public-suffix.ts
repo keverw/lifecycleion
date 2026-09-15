@@ -198,6 +198,11 @@ export class PublicSuffixResolver {
     );
   }
 
+  /** Whether the caller explicitly removed this exact suffix from the bundled list. */
+  public isRemovedSuffix(hostname: string): boolean {
+    return this.removed.has(toLabels(hostname).join('.'));
+  }
+
   /**
    * The registrable domain `hostname` belongs to - the bucket key cookies are filed under.
    *
@@ -209,11 +214,26 @@ export class PublicSuffixResolver {
     const normalized = labels.join('.');
 
     if (this.hasOverrides) {
+      // A removed ancestor is the widest domain a cookie may claim, so it must also be
+      // the bucket for every host below it. Check from the shortest candidate upward:
+      // with `com` removed, a `Domain=com` cookie must still be reachable from a host
+      // below a more-specific bundled suffix such as `app.blogspot.com`. Stopping at
+      // `blogspot.com` first would admit the cookie but file the request elsewhere.
+      for (let i = labels.length - 1; i >= 0; i--) {
+        const candidate = labels.slice(i).join('.');
+
+        if (this.removed.has(candidate)) {
+          return candidate;
+        }
+      }
+
       // Longest matching public suffix wins, so the walk starts at the whole hostname and
       // shortens from the left: for `a.b.corp.internal` with `corp.internal` added, the
       // first hit is `corp.internal` and the apex is the one label in front of it.
       for (let i = 0; i < labels.length; i++) {
-        if (this.isPublicSuffix(labels.slice(i).join('.'))) {
+        const candidate = labels.slice(i).join('.');
+
+        if (this.isPublicSuffix(candidate)) {
           return i === 0 ? normalized : labels.slice(i - 1).join('.');
         }
       }

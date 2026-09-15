@@ -8,13 +8,14 @@
  * failure raised while reporting the first is fatal rather than merely noisy.
  */
 
-import { describe, expect, test, beforeEach } from 'bun:test';
+import { describe, expect, test, beforeEach, spyOn } from 'bun:test';
 import { Logger } from '../logger';
 import type { LoggerService } from '../logger/logger-service';
 import { ArraySink } from '../logger/sinks/array';
 import type { LogEntry } from '../logger/types';
 import { BaseComponent } from './base-component';
 import { LifecycleManager } from './lifecycle-manager';
+import { MAX_TIMER_MS } from '../internal/timer-limits';
 
 /** An `Error` whose `message` accessor throws, as a subclass or a `Proxy` can produce. */
 function unreadableError(): Error {
@@ -678,6 +679,106 @@ describe('LifecycleManager timeouts that a timer cannot keep', () => {
     expect(result.code).not.toBe('component_startup_timeout');
 
     await lifecycle.stopAllComponents();
+  });
+
+  test('a NaN startup timeout still arms the bounded safety timer', async () => {
+    const logger = new Logger({
+      sinks: [new ArraySink()],
+      callProcessExit: false,
+    });
+    const lifecycle = new LifecycleManager({ logger });
+
+    class Immediate extends BaseComponent {
+      constructor() {
+        super(logger, { name: 'immediate', startupTimeoutMS: Number.NaN });
+      }
+      public start(): void {}
+      public stop(): void {}
+    }
+
+    await lifecycle.registerComponent(new Immediate());
+    const timeoutSpy = spyOn(globalThis, 'setTimeout');
+
+    try {
+      const result = await lifecycle.startComponent('immediate');
+
+      expect(result.success).toBe(true);
+      expect(
+        timeoutSpy.mock.calls.some((call) => call[1] === MAX_TIMER_MS),
+      ).toBe(true);
+    } finally {
+      timeoutSpy.mockRestore();
+      await lifecycle.stopAllComponents();
+    }
+  });
+
+  test('a NaN start-all timeout still arms the bounded safety timer', async () => {
+    const logger = new Logger({
+      sinks: [new ArraySink()],
+      callProcessExit: false,
+    });
+    const lifecycle = new LifecycleManager({ logger });
+
+    class Immediate extends BaseComponent {
+      public start(): void {}
+      public stop(): void {}
+    }
+
+    await lifecycle.registerComponent(
+      new Immediate(logger, { name: 'immediate' }),
+    );
+    const timeoutSpy = spyOn(globalThis, 'setTimeout');
+
+    try {
+      const result = await lifecycle.startAllComponents({
+        timeoutMS: Number.NaN,
+      });
+
+      expect(result.success).toBe(true);
+      expect(
+        timeoutSpy.mock.calls.some((call) => call[1] === MAX_TIMER_MS),
+      ).toBe(true);
+    } finally {
+      timeoutSpy.mockRestore();
+      await lifecycle.stopAllComponents();
+    }
+  });
+
+  test('a NaN signal timeout still arms the bounded safety timer', async () => {
+    const logger = new Logger({
+      sinks: [new ArraySink()],
+      callProcessExit: false,
+    });
+    const lifecycle = new LifecycleManager({ logger });
+
+    class Reloadable extends BaseComponent {
+      public start(): void {}
+      public stop(): void {}
+      public onReload(): void {}
+    }
+
+    await lifecycle.registerComponent(
+      new Reloadable(logger, {
+        name: 'reloadable',
+        signalTimeoutMS: Number.NaN,
+      }),
+    );
+    await lifecycle.startAllComponents();
+    const timeoutSpy = spyOn(globalThis, 'setTimeout');
+
+    try {
+      const result = await lifecycle.triggerReload();
+
+      expect(result.results).toHaveLength(1);
+      expect(result.results[0]?.called).toBe(true);
+      expect(result.results[0]?.timedOut).toBe(false);
+      expect(
+        timeoutSpy.mock.calls.some((call) => call[1] === MAX_TIMER_MS),
+      ).toBe(true);
+    } finally {
+      timeoutSpy.mockRestore();
+      await lifecycle.stopAllComponents();
+    }
   });
 
   test('a startup timeout past the 32-bit timer ceiling does not fire on the next tick', async () => {

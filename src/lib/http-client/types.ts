@@ -46,8 +46,9 @@ export interface AdapterRequest {
   /**
    * The resolved URL of the original request, before any redirect hop. Passed by the
    * client so an adapter can tell a hop to another origin from the request the caller
-   * addressed - `NodeAdapter` withholds its configured client certificate and SNI
-   * override on such a hop rather than presenting them to a host the caller never named.
+   * addressed. Every network adapter withholds URL userinfo on such a hop, and
+   * `NodeAdapter` also withholds its configured client certificate and SNI override
+   * rather than presenting them to a host the caller never named.
    * Absent when an adapter is driven directly.
    */
   initialURL?: string;

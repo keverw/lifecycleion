@@ -651,7 +651,10 @@ export class CookieJar {
    *  canonical IP literals. RFC 6265 treats a leading dot as ignored, and persisted jars
    *  from browser-oriented implementations commonly retain it. */
   private normalizeStoredDomain(domain: string): string {
-    const raw = domain.startsWith('.') ? domain.slice(1) : domain;
+    const withoutLeadingDot = domain.startsWith('.') ? domain.slice(1) : domain;
+    const raw = withoutLeadingDot.endsWith('.')
+      ? withoutLeadingDot.slice(0, -1)
+      : withoutLeadingDot;
     const ip = this.tryCanonicalIPLiteral(raw);
 
     if (ip !== null) {
@@ -1118,7 +1121,11 @@ export class CookieJar {
       return true;
     } else {
       // Bare hostnames like 'localhost' — tldts domain is null but valid
-      return result.isIcann !== true && HOSTNAME_PATTERN.test(domain);
+      return (
+        (result.isIcann !== true ||
+          this.publicSuffixes.isRemovedSuffix(domain)) &&
+        HOSTNAME_PATTERN.test(domain)
+      );
     }
   }
 
@@ -1338,8 +1345,8 @@ export class CookieJar {
       return false;
     }
 
-    const req = this.unbracketHost(requestHost).toLowerCase();
-    const cook = this.unbracketHost(cookieDomain).toLowerCase();
+    const req = this.normalizeStoredDomain(requestHost);
+    const cook = this.normalizeStoredDomain(cookieDomain);
 
     if (req === cook) {
       return true;
@@ -1365,8 +1372,8 @@ export class CookieJar {
     }
 
     return (
-      this.unbracketHost(requestHost).toLowerCase() ===
-      this.unbracketHost(cookieDomain).toLowerCase()
+      this.normalizeStoredDomain(requestHost) ===
+      this.normalizeStoredDomain(cookieDomain)
     );
   }
 

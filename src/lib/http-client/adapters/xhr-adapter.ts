@@ -6,7 +6,10 @@ import type {
   AdapterResponse,
   AdapterType,
 } from '../types';
-import { resolveAbsoluteURLForRuntime } from '../utils';
+import {
+  resolveAbsoluteURLForRuntime,
+  stripCrossOriginURLCredentials,
+} from '../utils';
 
 /**
  * XHR-based adapter for environments that expose `XMLHttpRequest`. Primary
@@ -41,13 +44,17 @@ export class XHRAdapter implements HTTPAdapter {
       request.onDownloadProgress,
       'onDownloadProgress',
     );
+    const dispatchedURL = stripCrossOriginURLCredentials(
+      request.requestURL,
+      request.initialURL,
+    );
 
     return new Promise((resolve, reject) => {
       const xhr = new XMLHttpRequest();
 
       // responseType 'arraybuffer' gives us a raw ArrayBuffer on load,
       // consistent with how FetchAdapter and NodeAdapter deliver body bytes.
-      xhr.open(request.method, request.requestURL);
+      xhr.open(request.method, dispatchedURL);
       xhr.responseType = 'arraybuffer';
 
       // Timeout is managed by the client via the abort signal — the client's
@@ -216,7 +223,7 @@ export class XHRAdapter implements HTTPAdapter {
         // response regardless of adapter.
         if (
           xhr.responseURL &&
-          didBrowserFollowRedirect(xhr.responseURL, request.requestURL)
+          didBrowserFollowRedirect(xhr.responseURL, dispatchedURL)
         ) {
           // The browser completed the transport and surfaced the final URL even
           // though the client will treat the result as redirect_disabled, so

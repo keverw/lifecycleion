@@ -1,4 +1,8 @@
-import { extractFetchHeaders, resolveDetectedRedirectURL } from '../utils';
+import {
+  extractFetchHeaders,
+  resolveDetectedRedirectURL,
+  stripCrossOriginURLCredentials,
+} from '../utils';
 import { guardProgressCallback } from '../internal/progress';
 import { isTLSCertificateError } from '../internal/tls-error-utils';
 import { REDIRECT_STATUS_CODES, RESPONSE_STREAM_ABORT_FLAG } from '../consts';
@@ -45,6 +49,10 @@ export class FetchAdapter implements HTTPAdapter {
     );
 
     const { requestURL, method, headers, body, signal } = request;
+    const dispatchedURL = stripCrossOriginURLCredentials(
+      requestURL,
+      request.initialURL,
+    );
 
     // Fire 0% upload progress
     guardedUploadProgress?.({ loaded: 0, total: 0, progress: 0 });
@@ -52,7 +60,7 @@ export class FetchAdapter implements HTTPAdapter {
     let response: Response;
 
     try {
-      response = await fetch(requestURL, {
+      response = await fetch(dispatchedURL, {
         method,
         headers: materializeFetchHeaders(headers),
         body: body as BodyInit | null,
@@ -146,7 +154,7 @@ export class FetchAdapter implements HTTPAdapter {
       // headers arrived, so a 3xx here still knows where it was pointing, and a
       // truncated body must not lose the target an intact one would report.
       const detectedRedirectURL = resolveDetectedRedirectURL(
-        requestURL,
+        dispatchedURL,
         response.status,
         responseHeadersForBody,
       );
@@ -176,7 +184,7 @@ export class FetchAdapter implements HTTPAdapter {
 
     const responseHeaders = responseHeadersForBody;
     const detectedRedirectURL = resolveDetectedRedirectURL(
-      requestURL,
+      dispatchedURL,
       response.status,
       responseHeaders,
     );

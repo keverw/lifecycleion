@@ -1311,16 +1311,14 @@ describe('CookieJar', () => {
         'https://app.localhost/',
       );
 
-      // Exactly the pre-1.0 reach, which is the promise the option makes - no more. The
-      // cookie is filed under the `localhost` bucket and `http://localhost/` picks it up;
-      // it does not come back to `app.localhost`, because bucketing by apex never put
-      // those two together and `remove` does not change apexes, only suffix answers.
+      // Removing a suffix changes both admission and bucketing: every host below the
+      // removed boundary can see a cookie scoped to it.
       expect(scoped.getCookieFor('session', 'http://localhost/')?.value).toBe(
         'shared',
       );
       expect(
-        scoped.getCookieFor('session', 'http://app.localhost/')?.value,
-      ).toBe(undefined);
+        scoped.getCookieFor('session', 'http://other.localhost/')?.value,
+      ).toBe('shared');
     });
 
     test('the host-only flag survives a persist/restore round trip', () => {
@@ -1409,6 +1407,48 @@ describe('CookieJar', () => {
       expect(
         scoped.getCookieFor('session', 'https://other.herokuapp.com')?.value,
       ).toBe('shared');
+    });
+
+    test('remove can opt a one-label suffix back into spanning', () => {
+      const scoped = new CookieJar({
+        publicSuffixes: { remove: ['com'] },
+      });
+
+      scoped.parseSetCookieHeader(
+        'session=shared; Domain=com; Path=/',
+        'https://mine.com',
+      );
+
+      expect(scoped.getCookieFor('session', 'https://other.com')?.value).toBe(
+        'shared',
+      );
+      expect(
+        scoped.getCookieFor('session', 'https://tenant.blogspot.com')?.value,
+      ).toBe('shared');
+    });
+
+    test('canonicalizes a trailing root dot for domain and host-only cookies', () => {
+      const domainCookie = new CookieJar();
+
+      domainCookie.parseSetCookieHeader(
+        'session=domain; Domain=localhost; Path=/',
+        'http://localhost./',
+      );
+
+      expect(
+        domainCookie.getCookieFor('session', 'http://localhost/')?.value,
+      ).toBe('domain');
+
+      const hostOnlyCookie = new CookieJar();
+
+      hostOnlyCookie.parseSetCookieHeader(
+        'session=host; Path=/',
+        'https://example.com./',
+      );
+
+      expect(
+        hostOnlyCookie.getCookieFor('session', 'https://example.com/')?.value,
+      ).toBe('host');
     });
 
     test('an override on one jar does not reach another', () => {

@@ -162,6 +162,79 @@ export function stripURLCredentials(url: string): string {
 }
 
 /**
+ * Withhold URL userinfo when an adapter is dispatching a hop to an origin other than
+ * the one the caller addressed.
+ *
+ * HTTPClient sanitizes its own redirect requests, but adapters are public and can be
+ * driven directly. `initialURL` is the adapter-level trust boundary for that path. An
+ * unparseable initial URL fails closed: it cannot prove that the credentials belong to
+ * the target origin, so they are stripped.
+ */
+export function stripCrossOriginURLCredentials(
+  requestURL: string,
+  initialURL: string | undefined,
+): string {
+  if (initialURL === undefined) {
+    return requestURL;
+  }
+
+  let initial: URL;
+
+  try {
+    initial = new URL(initialURL);
+  } catch {
+    // The initial origin cannot be trusted. An absolute URL can be handled by the
+    // ordinary helper; a network-path reference needs a base merely to expose its
+    // authority to URL parsing.
+    if (requestURL.startsWith('//')) {
+      try {
+        const target = new URL(
+          requestURL,
+          'http://credential-sanitizer.invalid',
+        );
+
+        if (!target.username && !target.password) {
+          return requestURL;
+        }
+
+        target.username = '';
+        target.password = '';
+
+        return target.href.slice(target.protocol.length);
+      } catch {
+        return requestURL;
+      }
+    }
+
+    return stripURLCredentials(requestURL);
+  }
+
+  try {
+    const target = new URL(requestURL, initial);
+
+    if (initial.origin === target.origin) {
+      return requestURL;
+    }
+
+    if (!target.username && !target.password) {
+      return requestURL;
+    }
+
+    target.username = '';
+    target.password = '';
+
+    // Keep the caller's network-path form; both browser adapters support relative URLs.
+    return requestURL.startsWith('//')
+      ? target.href.slice(target.protocol.length)
+      : target.href;
+  } catch {
+    // The origins cannot be shown to match, so fail closed below.
+  }
+
+  return stripURLCredentials(requestURL);
+}
+
+/**
  * Browser-aware absolute URL resolution used by HTTPClient before interceptors
  * and adapter dispatch. Starts with normal baseURL resolution, then falls back
  * to the current page/worker location when running in a browser-like runtime.

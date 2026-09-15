@@ -124,8 +124,8 @@ import { MAX_TIMER_MS } from '../internal/timer-limits';
  * These are safety timeouts, and the two ways to be wrong are not symmetric: waiting too
  * long leaves a hung component hanging, which is the failure the operator is already
  * watching for, while firing at once tears down a healthy one that was doing nothing
- * wrong. The configured fields never reach this as `NaN` anyway - the constructor resolves
- * those to their documented defaults.
+ * wrong. Constructor-owned fields resolve `NaN` to their documented defaults; component
+ * fields and per-call overrides still reach this boundary directly.
  */
 function toTimerDelayMS(requested: number): number {
   if (!Number.isFinite(requested)) {
@@ -1071,7 +1071,7 @@ export class LifecycleManager
     let timeoutHandle: NodeJS.Timeout | undefined;
 
     // Race startup against timeout if specified
-    if (effectiveTimeout > 0) {
+    if (toTimerDelayMS(effectiveTimeout) > 0) {
       timeoutHandle = setTimeout(() => {
         hasTimedOut = true;
 
@@ -2334,7 +2334,7 @@ export class LifecycleManager
         : Promise.resolve(result);
 
       const outcome =
-        timeoutMS > 0
+        toTimerDelayMS(timeoutMS) > 0
           ? await Promise.race([
               handlerPromise,
               new Promise<typeof timeoutResult>((resolve) => {
@@ -3312,7 +3312,7 @@ export class LifecycleManager
     try {
       // Start global timeout clock (halts further stop attempts after it fires)
       const timeoutPromise =
-        effectiveTimeout > 0
+        toTimerDelayMS(effectiveTimeout) > 0
           ? new Promise<'timeout'>((resolve) => {
               timeoutHandle = setTimeout(() => {
                 hasTimedOut = true;
@@ -3740,7 +3740,7 @@ export class LifecycleManager
       // Race against timeout
       const startPromise = component.start();
 
-      if (timeoutMS > 0) {
+      if (toTimerDelayMS(timeoutMS) > 0) {
         const timeoutPromise = new Promise<never>((_, reject) => {
           timeoutHandle = setTimeout(() => {
             // Call abort callback if implemented
@@ -4318,7 +4318,7 @@ export class LifecycleManager
       // Race against graceful timeout
       const stopPromise = component.stop();
 
-      if (timeoutMS > 0) {
+      if (toTimerDelayMS(timeoutMS) > 0) {
         const timeoutPromise = new Promise<never>((_, reject) => {
           timeoutHandle = setTimeout(() => {
             // Call abort callback if implemented
@@ -4561,7 +4561,7 @@ export class LifecycleManager
     try {
       const forcePromise = component.onShutdownForce();
 
-      if (timeoutMS > 0) {
+      if (toTimerDelayMS(timeoutMS) > 0) {
         const timeoutPromise = new Promise<never>((_, reject) => {
           timeoutHandle = setTimeout(() => {
             // Call abort callback if implemented
@@ -6205,7 +6205,7 @@ export class LifecycleManager
           : Promise.resolve(handlerResult as unknown);
 
         const outcome: unknown =
-          timeoutMS > 0
+          toTimerDelayMS(timeoutMS) > 0
             ? await Promise.race([
                 handlerPromise,
                 new Promise<typeof timeoutResult>((resolve) => {

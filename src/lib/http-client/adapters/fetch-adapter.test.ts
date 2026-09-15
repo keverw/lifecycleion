@@ -93,6 +93,66 @@ describe('FetchAdapter', () => {
     expect(capturedInit?.redirect).toBe('manual');
   });
 
+  test('withholds URL userinfo on a cross-origin hop', async () => {
+    let capturedURL = '';
+
+    (globalThis as any).fetch = (url: string) => {
+      capturedURL = url;
+      return Promise.resolve(
+        new Response(null, {
+          status: 302,
+          headers: { location: '/next' },
+        }),
+      );
+    };
+
+    const response = await new FetchAdapter().send({
+      requestURL: 'https://user:hunter2@evil.test/collect',
+      initialURL: 'https://api.example.test/start',
+      method: 'GET',
+      headers: {},
+    });
+
+    expect(capturedURL).toBe('https://evil.test/collect');
+    expect(response.detectedRedirectURL).toBe('https://evil.test/next');
+  });
+
+  test('keeps URL userinfo when the initial and request origins match', async () => {
+    let capturedURL = '';
+
+    (globalThis as any).fetch = (url: string) => {
+      capturedURL = url;
+      return Promise.resolve(new Response(null, { status: 204 }));
+    };
+
+    await new FetchAdapter().send({
+      requestURL: 'https://user:hunter2@api.example.test/next',
+      initialURL: 'https://api.example.test/start',
+      method: 'GET',
+      headers: {},
+    });
+
+    expect(capturedURL).toBe('https://user:hunter2@api.example.test/next');
+  });
+
+  test('withholds userinfo from a protocol-relative cross-origin URL', async () => {
+    let capturedURL = '';
+
+    (globalThis as any).fetch = (url: string) => {
+      capturedURL = url;
+      return Promise.resolve(new Response(null, { status: 204 }));
+    };
+
+    await new FetchAdapter().send({
+      requestURL: '//user:hunter2@evil.test/collect',
+      initialURL: 'https://api.example.test/start',
+      method: 'GET',
+      headers: {},
+    });
+
+    expect(capturedURL).toBe('//evil.test/collect');
+  });
+
   test('materializes repeated request headers with Headers.append', async () => {
     let capturedInit: RequestInit | undefined;
 
