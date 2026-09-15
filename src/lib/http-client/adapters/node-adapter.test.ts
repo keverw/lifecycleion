@@ -1004,6 +1004,92 @@ describe('NodeAdapter.send() — unit branches without server', () => {
     }
   });
 
+  test('URL userinfo is presented as Basic auth on a same-origin request', async () => {
+    const req = new MockClientRequest();
+    let capturedOptions: http.RequestOptions | undefined;
+    const requestSpy = spyOn(http, 'request').mockImplementation(
+      (options, _callback) => {
+        capturedOptions = options as http.RequestOptions;
+        queueMicrotask(() => {
+          req.emit('error', new Error('stop after options capture'));
+        });
+        return req as unknown as http.ClientRequest;
+      },
+    );
+
+    try {
+      await new NodeAdapter().send({
+        requestURL: 'http://user:hunter2@example.test/data',
+        method: 'GET',
+        headers: {},
+      });
+
+      expect(capturedOptions?.auth).toBe('user:hunter2');
+    } finally {
+      requestSpy.mockRestore();
+    }
+  });
+
+  test('a cross-origin redirect hop does not carry URL userinfo as Basic auth', async () => {
+    // The credential is addressed to an origin the caller named, and a `Location` is the
+    // remote server's choice - the same retargeting `socketPath` and `mtls.cert` are
+    // withheld for, except the secret rides in the request itself rather than in the
+    // handshake. `HTTPClient` strips userinfo from a `Location` before dispatch, so this
+    // is the adapter being driven directly.
+    const req = new MockClientRequest();
+    let capturedOptions: http.RequestOptions | undefined;
+    const requestSpy = spyOn(http, 'request').mockImplementation(
+      (options, _callback) => {
+        capturedOptions = options as http.RequestOptions;
+        queueMicrotask(() => {
+          req.emit('error', new Error('stop after options capture'));
+        });
+        return req as unknown as http.ClientRequest;
+      },
+    );
+
+    try {
+      await new NodeAdapter().send({
+        requestURL: 'http://user:hunter2@evil.test/collect',
+        initialURL: 'http://api.example.test/start',
+        method: 'GET',
+        headers: {},
+      });
+
+      expect(capturedOptions?.auth).toBeUndefined();
+      expect(capturedOptions?.hostname).toBe('evil.test');
+    } finally {
+      requestSpy.mockRestore();
+    }
+  });
+
+  test('a same-origin redirect hop keeps URL userinfo', async () => {
+    const req = new MockClientRequest();
+    let capturedOptions: http.RequestOptions | undefined;
+    const requestSpy = spyOn(http, 'request').mockImplementation(
+      (options, _callback) => {
+        capturedOptions = options as http.RequestOptions;
+        queueMicrotask(() => {
+          req.emit('error', new Error('stop after options capture'));
+        });
+        return req as unknown as http.ClientRequest;
+      },
+    );
+
+    try {
+      await new NodeAdapter().send({
+        requestURL: 'http://user:hunter2@api.example.test/next',
+        initialURL: 'http://api.example.test/start',
+        method: 'GET',
+        headers: {},
+      });
+
+      expect(capturedOptions?.auth).toBe('user:hunter2');
+    } finally {
+      requestSpy.mockRestore();
+    }
+  });
+
   test('literal IPv6 URLs strip brackets before reaching http.request', async () => {
     const req = new MockClientRequest();
     let capturedOptions: http.RequestOptions | undefined;

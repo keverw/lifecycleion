@@ -1142,6 +1142,14 @@ interface NodeAdapterConfig {
 
 TLS certificate errors resolve as status `495` (transport error, not retryable) rather than throwing, so they flow through the normal error path. That includes every revocation failure, such as `CERT_REVOKED`, `UNABLE_TO_GET_CRL`, `CRL_HAS_EXPIRED` and friends.
 
+**URL credentials stay with the origin you addressed.** `user:pass@` on a request URL is
+`Authorization: Basic` by another name, and `NodeAdapter` copies it onto `options.auth`.
+On a cross-origin hop it is withheld, the same way `socketPath` and the TLS identity are.
+`HTTPClient` already strips userinfo from a `Location` before dispatch, so a client-driven
+redirect never reaches this; the guard covers `NodeAdapter.send()` called directly with an
+`initialURL` on one origin and a `requestURL` still carrying userinfo for another. Without
+`initialURL`, or on a same-origin hop, the credentials are sent as before.
+
 **TLS identity stays with the origin you addressed.** `servername` and `mtls.cert` / `mtls.key` describe _who you are talking to_ and _who you are_; a `Location` header is the remote server's choice, not yours. When the client follows a redirect to a different origin (scheme, host or port), `NodeAdapter` sends that hop without the SNI override and without the client certificate, so a redirect can never make the adapter authenticate to, or verify a certificate against a name meant for, a host you never named. Your _trust_ settings — `ca`, `mtls.ca`, `crl` and `rejectUnauthorized` — say which servers to believe, and apply to every connection the adapter opens, hops included. A hop that needs your identity to succeed fails with `495`, which is the correct answer: address it directly if you mean to authenticate there. Same-origin redirects are unaffected. The adapter tells a hop apart from the original request through `AdapterRequest.initialURL`, which the client sets on every attempt; driven directly without it, the adapter applies the identity as configured, and an `initialURL` it cannot parse is treated as cross-origin.
 
 **The socket you configured stays with the origin you addressed, too.** `socketPath` is your chosen endpoint, and often a privileged one — `/var/run/docker.sock` is the usual example. A redirect to a different origin is sent over TCP to the host the `Location` actually names, not over your socket with only the request line and `Host` header changed; otherwise a remote server's `Location` would become a request you never made against that socket. Same-origin redirects keep the socket, and the adapter driven directly (no `initialURL`) uses it as configured.

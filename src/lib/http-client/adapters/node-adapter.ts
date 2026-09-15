@@ -348,7 +348,17 @@ export class NodeAdapter implements HTTPAdapter {
       parsedURL,
     );
 
-    if (urlOptions.auth) {
+    // `user:pass@` from the request URL, as Basic credentials on the wire.
+    //
+    // Withheld on a cross-origin hop, on the same rule as `socketPath` and the TLS
+    // identity below: it is a credential, and the origin it goes to must be one the
+    // caller named. `HTTPClient` strips userinfo from a `Location` before dispatch, so
+    // the client path never reaches this - but the adapter is public, and driven directly
+    // with an `initialURL` on one origin and a `requestURL` still carrying userinfo for
+    // another, it presented Basic auth to a host the caller never addressed. That is the
+    // same retargeting the socket and certificate guards exist for, with the secret going
+    // out in the request itself rather than in the handshake.
+    if (urlOptions.auth && !isCrossOriginHop) {
       options.auth = urlOptions.auth;
     }
 
@@ -1738,12 +1748,17 @@ const UPLOAD_STALL_GRACE_MS = 5_000;
 const UPLOAD_SOURCE_STALL_GRACE_MS = 60_000;
 
 // ---------------------------------------------------------------------------
-// TLS identity scoping
+// Identity and credential scoping
 // ---------------------------------------------------------------------------
 
 /**
  * Whether an attempt is a redirect hop to an origin other than the one the caller
  * addressed.
+ *
+ * Three things are scoped by it: the TLS identity (`servername`, `mtls.cert` / `mtls.key`),
+ * the configured `socketPath`, and Basic credentials taken from a request URL's
+ * `user:pass@`. All three are addressed to an origin the caller chose, and a `Location`
+ * header is the remote server's choice.
  *
  * `servername` and `mtls.cert` / `mtls.key` are the caller's TLS *identity*: the name it
  * meant to talk to and the certificate it authenticates with. Applied to every `https:`
