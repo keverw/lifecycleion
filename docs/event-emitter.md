@@ -123,6 +123,10 @@ Emits an event with optional data.
 
 - Handles both synchronous and asynchronous event handlers
 - Catches and logs errors from handlers
+- Snapshots the listeners present when each emission starts. Removing or clearing a
+  listener during a callback does not skip it in the current emission, and a listener
+  added during dispatch waits until a later emission. A nested `emit()` is a new emission
+  and takes its own current snapshot.
 
 ### `hasListener(event: string, callback: Function): boolean`
 

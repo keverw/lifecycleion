@@ -56,6 +56,72 @@ describe('EventEmitter', () => {
     expect(callback2).toHaveBeenCalledWith('hello');
   });
 
+  test('unsubscribing a sibling does not skip it during the current emission', () => {
+    const emitter = new EventEmitter();
+    const calls: string[] = [];
+    let unsubscribeSecond = (): void => {};
+
+    emitter.on('test', () => {
+      calls.push('first');
+      unsubscribeSecond();
+    });
+    unsubscribeSecond = emitter.on('test', () => {
+      calls.push('second');
+    });
+
+    emitter.emit('test');
+    emitter.emit('test');
+
+    expect(calls).toEqual(['first', 'second', 'first']);
+  });
+
+  test('clearing listeners does not stop the current emission', () => {
+    const emitter = new EventEmitter();
+    const calls: string[] = [];
+
+    emitter.on('test', () => {
+      calls.push('first');
+      emitter.clear('test');
+    });
+    emitter.on('test', () => {
+      calls.push('second');
+    });
+
+    emitter.emit('test');
+    emitter.emit('test');
+
+    expect(calls).toEqual(['first', 'second']);
+  });
+
+  test('a nested emission snapshots the listeners present when it starts', () => {
+    const emitter = new EventEmitter();
+    const calls: string[] = [];
+
+    emitter.on<string>('test', (value) => {
+      calls.push(`first:${value}`);
+
+      if (value === 'outer') {
+        emitter.on<string>('test', (nestedValue) => {
+          calls.push(`added:${nestedValue}`);
+        });
+        emitter.emit('test', 'inner');
+      }
+    });
+    emitter.on<string>('test', (value) => {
+      calls.push(`second:${value}`);
+    });
+
+    emitter.emit('test', 'outer');
+
+    expect(calls).toEqual([
+      'first:outer',
+      'first:inner',
+      'second:inner',
+      'added:inner',
+      'second:outer',
+    ]);
+  });
+
   test('hasListeners and listenerCount', () => {
     const emitter = new EventEmitter();
     const callback = mock(() => {});

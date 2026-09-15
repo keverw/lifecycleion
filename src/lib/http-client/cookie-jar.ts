@@ -601,15 +601,18 @@ export class CookieJar {
     return `${name}@${domain}${path}`;
   }
 
-  /** Canonical form for stored cookie domains: lowercase DNS names; canonical IP literals. */
+  /** Canonical form for stored cookie domains: no leading dot, lowercase DNS names;
+   *  canonical IP literals. RFC 6265 treats a leading dot as ignored, and persisted jars
+   *  from browser-oriented implementations commonly retain it. */
   private normalizeStoredDomain(domain: string): string {
-    const ip = this.tryCanonicalIPLiteral(domain);
+    const raw = domain.startsWith('.') ? domain.slice(1) : domain;
+    const ip = this.tryCanonicalIPLiteral(raw);
 
     if (ip !== null) {
       return ip;
     }
 
-    return this.unbracketHost(domain).toLowerCase();
+    return this.unbracketHost(raw).toLowerCase();
   }
 
   private parseCookieString(header: string): ParsedCookie | null {
@@ -808,13 +811,9 @@ export class CookieJar {
     let domain: string;
 
     if (parsed.domain) {
-      // RFC 6265 §5.2.3: strip leading dot
-      const raw = parsed.domain.startsWith('.')
-        ? parsed.domain.slice(1)
-        : parsed.domain;
-
-      // RFC 6265 5.1.3: domain matching is case-insensitive; URL.host is lowercased but Domain= is not.
-      const normalizedDomain = this.normalizeStoredDomain(raw);
+      // RFC 6265 §5.2.3 / §5.1.3: ignore a leading dot and match domains
+      // case-insensitively. URL.host is lowercased but Domain= is not.
+      const normalizedDomain = this.normalizeStoredDomain(parsed.domain);
 
       // Reject public suffixes — prevents Domain=co.uk style attacks
       if (this.isPublicSuffix(normalizedDomain)) {

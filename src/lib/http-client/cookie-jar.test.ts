@@ -495,6 +495,26 @@ describe('CookieJar', () => {
         'example.com',
       );
     });
+
+    test('ignores a leading dot in a programmatically stored domain', () => {
+      expect(
+        jar.setCookie({
+          name: 'session',
+          value: 'abc',
+          domain: '.Example.Com',
+          path: '/',
+          createdAt: Date.now(),
+        }),
+      ).toBe(true);
+
+      expect(jar.getAllCookies()[0]?.domain).toBe('example.com');
+      expect(jar.getCookieFor('session', 'https://example.com')?.value).toBe(
+        'abc',
+      );
+      expect(
+        jar.getCookieFor('session', 'https://www.example.com')?.value,
+      ).toBe('abc');
+    });
   });
 
   describe('parseSetCookieHeader', () => {
@@ -1801,6 +1821,29 @@ describe('CookieJar', () => {
       expect(jar2.getCookieFor('session', 'https://example.com')?.value).toBe(
         'abc',
       );
+    });
+
+    test('normalizes a leading-dot domain restored from another jar', () => {
+      const restored = jar.fromJSON({
+        cookies: [
+          {
+            name: 'session',
+            value: 'abc',
+            domain: '.example.com',
+            path: '/',
+            createdAt: Date.now(),
+          },
+        ],
+      });
+
+      expect(restored).toBe(1);
+      expect(jar.getAllCookies()[0]?.domain).toBe('example.com');
+      expect(jar.getCookieFor('session', 'https://example.com')?.value).toBe(
+        'abc',
+      );
+      expect(
+        jar.getCookieFor('session', 'https://api.example.com')?.value,
+      ).toBe('abc');
     });
 
     test('returns how many cookies were restored, so a short restore is visible', () => {

@@ -5,6 +5,7 @@ import {
 } from '../internal/console-test-utils';
 import { Logger } from './index';
 import { ArraySink } from './sinks/array';
+import { ConsoleSink } from './sinks/console';
 import { sleep } from '../sleep';
 import { safeHandleCallback } from '../safe-handle-callback';
 import { stringifyValue } from '../stringify-value';
@@ -2812,6 +2813,26 @@ describe('Logger - a param that cannot be read is reported, not only marked', ()
 });
 
 describe('Logger diagnostic channel', () => {
+  test('a muted sole ConsoleSink suppresses its diagnostics without a console fallback', async () => {
+    // Muting the configured console destination is an explicit request to silence it.
+    // Its no-op diagnostic write is therefore considered delivery, rather than causing
+    // Logger to bypass the mute through the terminal console fallback.
+    const consoleErrors = muteConsoleError();
+    const logger = new Logger({
+      sinks: [new ConsoleSink({ muted: true })],
+      callProcessExit: false,
+    });
+
+    logger.on('logger', () => {
+      throw new Error('event handler failed');
+    });
+
+    logger.info('trigger');
+    await Promise.resolve();
+
+    expect(consoleErrors).toEqual([]);
+  });
+
   test('asynchronously tells every regular sink when no diagnostic sinks are set', async () => {
     const seen: LoggerDiagnostic[][] = [[], []];
     const makeSink = (diagnostics: LoggerDiagnostic[]): LogSink => ({
@@ -2997,6 +3018,23 @@ describe('Logger diagnostic channel', () => {
     } finally {
       consoleError.mockRestore();
     }
+  });
+
+  test('preserves a public diagnostic payload message when its listener rejects', async () => {
+    const consoleErrors = muteConsoleError();
+    const logger = new Logger({ sinks: [], callProcessExit: false });
+
+    logger.on('diagnostic', () =>
+      Promise.reject(new Error('async diagnostic listener failure')),
+    );
+
+    logger.emit('diagnostic', { message: 'public diagnostic message' });
+    await sleep(0);
+
+    expect(consoleErrors).toHaveLength(1);
+    expect(consoleErrors[0]).toContain('public diagnostic message');
+    expect(consoleErrors[0]).toContain('diagnostic listener also failed');
+    expect(consoleErrors[0]).toContain('async diagnostic listener failure');
   });
 
   test('does not send close failures through sinks being closed', async () => {

@@ -134,7 +134,11 @@ export class EventEmitterProtected {
       this.handleEventHandlerFailure(event, error, data);
     };
 
-    for (const callback of callbacks) {
+    // Snapshot at the start of this emission. Listener changes affect later (including
+    // nested) emissions, but cannot skip a sibling or add another callback midway
+    // through this one. This matches the dispatch semantics consumers expect from
+    // Node's EventEmitter.
+    for (const callback of [...callbacks]) {
       // The same invocation helper `safeHandleCallback` uses, with this emitter's
       // overridable reporter in place of the global `'error'` channel. The callback name
       // matches what `safeHandleCallback` produced before, so the "is not a function"
