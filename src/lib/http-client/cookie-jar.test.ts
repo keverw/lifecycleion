@@ -177,6 +177,19 @@ describe('CookieJar', () => {
       expect(jar.getAllCookies()).toHaveLength(0);
     });
 
+    test('returns false instead of throwing for a non-string domain', () => {
+      expect(
+        jar.setCookie({
+          name: 'a',
+          value: '1',
+          domain: 123,
+          path: '/',
+          createdAt: Date.now(),
+        } as unknown as Parameters<CookieJar['setCookie']>[0]),
+      ).toBe(false);
+      expect(jar.getAllCookies()).toHaveLength(0);
+    });
+
     test('returns false for an expiry that cannot be read', () => {
       // The programmatic path to the same immortal cookie `fromJSON` refuses: an
       // `Invalid Date` stored as `expires` compares `now` against `NaN` forever, and a
@@ -514,6 +527,49 @@ describe('CookieJar', () => {
       expect(
         jar.getCookieFor('session', 'https://www.example.com')?.value,
       ).toBe('abc');
+    });
+
+    test('normalizes leading dots before validating local and IP domains', () => {
+      for (const [domain, url, storedDomain] of [
+        ['.localhost', 'http://localhost', 'localhost'],
+        ['.[::1]', 'http://[::1]', '::1'],
+        ['.local', 'http://local', 'local'],
+      ] as const) {
+        const localJar = new CookieJar();
+
+        expect(
+          localJar.setCookie({
+            name: 'session',
+            value: 'abc',
+            domain,
+            path: '/',
+            createdAt: Date.now(),
+          }),
+        ).toBe(true);
+        expect(localJar.getAllCookies()[0]?.domain).toBe(storedDomain);
+        expect(localJar.getCookieFor('session', url)?.value).toBe('abc');
+      }
+    });
+
+    test('canonicalizes empty and relative programmatic paths to root', () => {
+      for (const path of ['', 'api']) {
+        const localJar = new CookieJar();
+
+        expect(
+          localJar.setCookie({
+            name: 'session',
+            value: 'abc',
+            domain: 'example.com',
+            path,
+            createdAt: Date.now(),
+          }),
+        ).toBe(true);
+        expect(localJar.getAllCookies()[0]?.path).toBe('/');
+        expect(
+          localJar.getCookieFor('session', 'https://example.com/anything')
+            ?.value,
+        ).toBe('abc');
+      }
     });
   });
 
@@ -1844,6 +1900,31 @@ describe('CookieJar', () => {
       expect(
         jar.getCookieFor('session', 'https://api.example.com')?.value,
       ).toBe('abc');
+    });
+
+    test('restores leading-dot local and IPv6 domains in canonical form', () => {
+      const restored = jar.fromJSON({
+        cookies: [
+          {
+            name: 'local',
+            value: 'one',
+            domain: '.localhost',
+            path: '/',
+            createdAt: Date.now(),
+          },
+          {
+            name: 'ip',
+            value: 'two',
+            domain: '.[::1]',
+            path: '/',
+            createdAt: Date.now(),
+          },
+        ],
+      });
+
+      expect(restored).toBe(2);
+      expect(jar.getCookieFor('local', 'http://localhost')?.value).toBe('one');
+      expect(jar.getCookieFor('ip', 'http://[::1]')?.value).toBe('two');
     });
 
     test('returns how many cookies were restored, so a short restore is visible', () => {

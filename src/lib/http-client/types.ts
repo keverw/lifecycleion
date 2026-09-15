@@ -719,7 +719,9 @@ export type RequestPhase =
   | { type: 'initial' }
   | {
       type: 'retry';
+      /** Global adapter-attempt number, including redirect hops. */
       attempt: number;
+      /** Highest global adapter-attempt number available to this retry loop. */
       maxAttempts: number;
       /**
        * When set, this policy retry applies after this redirect hop (same fields as

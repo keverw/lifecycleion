@@ -1418,6 +1418,14 @@ export class BaseHTTPClient {
       hopContext,
     } = params;
     const startAttempt = params.startAttemptNumber ?? 1;
+    // Attempt numbers count every adapter dispatch, including redirect hops. Keep the
+    // retry ceiling in that same global numbering space: on a hop beginning at attempt
+    // 2 with one retry, the retry phase is attempt 2/3 followed by attempt 3/3, never
+    // attempt 3/2.
+    const retriesRemaining = policy
+      ? Math.max(policy.maxRetryAttempts - policy.errors.length, 0)
+      : 0;
+    const maxAttemptNumber = startAttempt + retriesRemaining;
     const redirectHistory = params.redirectHistory ?? [];
     const cookieJar = params.cookieJar ?? null;
     /**
@@ -1587,7 +1595,7 @@ export class BaseHTTPClient {
         const retryPhase: InterceptorPhase = {
           type: 'retry',
           attempt: attemptNumber,
-          maxAttempts: policy ? policy.maxRetryAttempts + 1 : attemptNumber,
+          maxAttempts: maxAttemptNumber,
           ...(hopContext?.redirect ? { redirect: hopContext.redirect } : {}),
         };
         let retryIntercept: InterceptedRequest | InterceptorCancel;
@@ -1881,7 +1889,7 @@ export class BaseHTTPClient {
               retryHTTPResponse,
               observedSentRequest,
               this._retryOutcomePhase(
-                policy,
+                maxAttemptNumber,
                 attemptNumber,
                 hopContext?.redirect,
               ),
@@ -2367,7 +2375,7 @@ export class BaseHTTPClient {
               retryError,
               sentRequest,
               this._retryOutcomePhase(
-                policy,
+                maxAttemptNumber,
                 attemptNumber,
                 hopContext?.redirect,
               ),
@@ -2833,14 +2841,10 @@ export class BaseHTTPClient {
    * `attempt` matches `onAttemptEnd.attemptNumber` for that outcome.
    */
   private _retryOutcomePhase(
-    policy: RetryPolicy | null,
+    maxAttempts: number,
     completedAttemptNumber: number,
     redirect?: RedirectHopInfo,
   ): Extract<ResponseObserverPhase, { type: 'retry' }> {
-    const maxAttempts = policy
-      ? policy.maxRetryAttempts + 1
-      : completedAttemptNumber;
-
     return redirect !== undefined
       ? {
           type: 'retry',

@@ -135,7 +135,17 @@ export function maskValueDeep(
     // `maxRenderLength: 10_000` was handed a megabyte-long masked leaf while its
     // `onTruncate` never fired, the same escape the replacement path below closed.
     // `chargeText` inside bills and cuts in one step, so nothing is charged twice.
+    const truncationsBefore = budget.truncations;
     const text = stringifyTemplateValue(value, key, reportRender, budget);
+
+    // Proportional masking intentionally preserves the ends of a string. If rendering
+    // had to cut a matched leaf first, applying that mask to the retained prefix would
+    // expose a visible amount proportional to the entire render allowance (about 100 KB
+    // at the default settings). Once the original cannot be rendered in full, answer
+    // opaquely instead; the budget has still recorded and charged the truncation.
+    if (budget.truncations > truncationsBefore) {
+      return REDACTED_PLACEHOLDER;
+    }
 
     const masked = mask(key, text, isDerived);
 

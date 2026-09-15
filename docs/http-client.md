@@ -627,7 +627,11 @@ Phases describe where in the request lifecycle a callback fires. Interceptors, r
 | `redirect` | Yes           | Yes                | No              |
 | `final`    | No            | Yes (default)      | Yes (default)   |
 
-**`retry` phase** carries `{ type: 'retry', attempt, maxAttempts, redirect? }`. The optional `redirect` field is set when the retry is occurring on a post-redirect URL.
+**`retry` phase** carries `{ type: 'retry', attempt, maxAttempts, redirect? }`.
+`attempt` and `maxAttempts` use the same global adapter-attempt numbering, including
+redirect hops; `maxAttempts` is the highest attempt number available to the current retry
+loop after retries spent on earlier hops. The optional `redirect` field is set when the
+retry is occurring on a post-redirect URL.
 
 **`redirect` phase** carries `{ type: 'redirect', hop, from, to, statusCode }`.
 

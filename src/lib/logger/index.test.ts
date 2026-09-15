@@ -2813,6 +2813,31 @@ describe('Logger - a param that cannot be read is reported, not only marked', ()
 });
 
 describe('Logger diagnostic channel', () => {
+  test('a write failure queued immediately before close reaches the terminal fallback', async () => {
+    const consoleInfo = spyOn(console, 'info').mockImplementation(() => {
+      throw new Error('console transport failed');
+    });
+    const consoleError = spyOn(console, 'error').mockImplementation(() => {});
+    const logger = new Logger({
+      sinks: [new ConsoleSink()],
+      callProcessExit: false,
+    });
+
+    try {
+      logger.info('fatal');
+      await logger.close();
+      await Promise.resolve();
+
+      expect(consoleError).toHaveBeenCalledTimes(1);
+      expect(String(consoleError.mock.calls[0]?.[0])).toContain(
+        'Error writing to sink: console transport failed',
+      );
+    } finally {
+      consoleInfo.mockRestore();
+      consoleError.mockRestore();
+    }
+  });
+
   test('a muted sole ConsoleSink suppresses its diagnostics without a console fallback', async () => {
     // Muting the configured console destination is an explicit request to silence it.
     // Its no-op diagnostic write is therefore considered delivery, rather than causing

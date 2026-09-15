@@ -1430,7 +1430,14 @@ export class Logger extends EventEmitter {
 
       this.emit('diagnostic', diagnostic);
 
-      if (destinations.length === 0) {
+      // A diagnostic queued by a failing write can run after close() has marked the
+      // logger closed but before (or after) its sinks finish closing. Built-in sinks
+      // refuse diagnostic writes in that state, and their void return cannot tell us
+      // that nothing was delivered. Treat a closed logger like one with no destination
+      // so a terminal write failure is not silently lost. This deliberately does not
+      // apply to an open, muted ConsoleSink: muting remains an explicit request for
+      // silence.
+      if (destinations.length === 0 || this._closed) {
         if (!hasListeners) {
           reportToConsole(diagnostic.message);
         }

@@ -12,6 +12,22 @@ const maskLeaf = (_key: string, text: string): string =>
   '*'.repeat(text.length);
 
 describe('maskValueDeep budget', () => {
+  test('replaces a matched leaf opaquely when rendering it truncates', () => {
+    const budget = createRenderBudget(10);
+    const masked = maskValueDeep(
+      'password',
+      'A'.repeat(100),
+      (_key, text) => `${text.slice(0, 5)}*****`,
+      undefined,
+      undefined,
+      undefined,
+      budget,
+    );
+
+    expect(masked).toBe(REDACTED_PLACEHOLDER);
+    expect(budget.truncations).toBe(1);
+  });
+
   test('a leaf reached with the budget spent is not rendered at all', () => {
     // The non-container path returns *above* the guard at the top of the walk, so a leaf
     // whose budget was already gone still ran its own `toString` and charged a budget

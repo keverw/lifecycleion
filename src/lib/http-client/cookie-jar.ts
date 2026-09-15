@@ -160,7 +160,13 @@ export class CookieJar {
       return false;
     }
 
-    const domain = input.domain ?? '';
+    const rawDomain = input.domain ?? '';
+
+    if (typeof rawDomain !== 'string') {
+      return false;
+    }
+
+    const domain = this.normalizeStoredDomain(rawDomain);
 
     if (!this.isSyntaxValidDomain(domain)) {
       return false;
@@ -174,8 +180,14 @@ export class CookieJar {
       return false;
     }
 
-    const normalizedDomain = this.normalizeStoredDomain(domain);
-    const path = input.path ?? '/';
+    const normalizedDomain = domain;
+    // Match the Set-Cookie path parser: an absent, empty, or non-absolute path uses the
+    // default root path. Besides keeping persisted/programmatic cookies canonical, this
+    // avoids retaining a path representation the send-side matcher never produces.
+    const path =
+      typeof input.path === 'string' && input.path.startsWith('/')
+        ? input.path
+        : '/';
 
     // The prefix rules need no request URL, so they hold here too: a persisted jar
     // tampered into holding a `__Host-session` with `hostOnly` cleared used to be

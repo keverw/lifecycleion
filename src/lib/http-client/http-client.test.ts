@@ -6736,7 +6736,7 @@ describe('HTTPClient — phase-aware interceptors', () => {
         }
 
         phaseLog.push(
-          `request:${phase.type}:${req.requestURL}:attempt:${phase.attempt}`,
+          `request:${phase.type}:${req.requestURL}:attempt:${phase.attempt}/${phase.maxAttempts}`,
         );
         return {
           ...req,
@@ -6764,7 +6764,7 @@ describe('HTTPClient — phase-aware interceptors', () => {
         }
 
         phaseLog.push(
-          `response:${phase.type}:${res.status}:attempt:${phase.attempt}`,
+          `response:${phase.type}:${res.status}:attempt:${phase.attempt}/${phase.maxAttempts}`,
         );
       },
       { phases: ['retry'] },
@@ -6790,8 +6790,8 @@ describe('HTTPClient — phase-aware interceptors', () => {
       `request:initial:${start}`,
       'response:redirect:302:hop:1',
       `request:redirect:${target}`,
-      'response:retry:503:attempt:2',
-      `request:retry:${target}:attempt:3`,
+      'response:retry:503:attempt:2/3',
+      `request:retry:${target}:attempt:3/3`,
       `response:final:200:${target}`,
     ]);
 
@@ -6817,6 +6817,75 @@ describe('HTTPClient — phase-aware interceptors', () => {
           'x-retry-phase': '3',
         }),
       },
+    ]);
+  });
+
+  test('retry phase numbering accounts for retries spent before a redirect', async () => {
+    const start = 'https://example.com/start';
+    const target = 'https://example.com/target';
+    let startCalls = 0;
+    let targetCalls = 0;
+    const phases: string[] = [];
+
+    const adapter: HTTPAdapter = {
+      getType: () => 'mock',
+      send: (request: AdapterRequest): Promise<AdapterResponse> => {
+        if (request.requestURL === start) {
+          startCalls++;
+
+          if (startCalls === 1) {
+            return Promise.resolve({ status: 503, headers: {}, body: null });
+          }
+
+          return Promise.resolve({
+            status: 302,
+            headers: { location: target },
+            body: null,
+          });
+        }
+
+        targetCalls++;
+
+        if (targetCalls === 1) {
+          return Promise.resolve({ status: 503, headers: {}, body: null });
+        }
+
+        return Promise.resolve({ status: 200, headers: {}, body: null });
+      },
+    };
+
+    const client = new HTTPClient({ adapter, followRedirects: true });
+
+    client.addRequestInterceptor(
+      (request, phase) => {
+        if (phase.type === 'retry') {
+          phases.push(`request:${phase.attempt}/${phase.maxAttempts}`);
+        }
+
+        return request;
+      },
+      { phases: ['retry'] },
+    );
+    client.addResponseObserver(
+      (_response, _request, phase) => {
+        if (phase.type === 'retry') {
+          phases.push(`response:${phase.attempt}/${phase.maxAttempts}`);
+        }
+      },
+      { phases: ['retry'] },
+    );
+
+    const response = await client
+      .get(start)
+      .retryPolicy({ strategy: 'fixed', maxRetryAttempts: 2, delayMS: 1 })
+      .send();
+
+    expect(response.status).toBe(200);
+    expect(phases).toEqual([
+      'response:1/3',
+      'request:2/3',
+      'response:3/4',
+      'request:4/4',
     ]);
   });
 
