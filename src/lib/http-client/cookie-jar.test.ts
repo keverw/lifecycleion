@@ -1156,6 +1156,155 @@ describe('CookieJar', () => {
     });
   });
 
+  describe('bare hostnames as public suffixes (RFC 6265bis 5.5)', () => {
+    test('a sibling host cannot claim Domain=localhost', () => {
+      jar.parseSetCookieHeader(
+        'session=tossed; Domain=localhost; Path=/',
+        'https://evil.localhost/',
+      );
+
+      expect(jar.getAllCookies()).toHaveLength(0);
+      expect(jar.getCookieFor('session', 'http://localhost/')).toBeUndefined();
+    });
+
+    test('the host itself may set Domain=localhost, host-only', () => {
+      jar.parseSetCookieHeader(
+        'session=mine; Domain=localhost; Path=/',
+        'http://localhost/',
+      );
+
+      const stored = jar.getCookieFor('session', 'http://localhost/');
+
+      expect(stored?.value).toBe('mine');
+      // Kept, but stripped of reach: the attribute cannot widen it past the host that
+      // sent it. Asserted on the flag rather than on a request to `sub.localhost`,
+      // because that request proves nothing here - hosts under a bare name are bucketed
+      // separately (`apexFor('sub.localhost')` is `'sub.localhost'`, not `'localhost'`),
+      // so it came back empty before this change too. The flag is what actually changed,
+      // and `hostOnlyDomainMatches` is what it drives on the send path.
+      expect(stored?.hostOnly).toBe(true);
+    });
+
+    test('a sibling cannot evict the cookie the host set for itself', () => {
+      // The store-side half of the toss, and the one with teeth. `Max-Age=0` runs through
+      // `deleteCookieByIdentity`, which keys on the *cookie's* domain, not the request
+      // host - so before this change `evil.localhost` naming `Domain=localhost` landed on
+      // exactly the identity `http://localhost/` had stored under and deleted it. Cheaper
+      // than planting a cookie and just as damaging: log the victim out, or clear the
+      // anti-CSRF token, from a sibling name anyone can take on a shared dev host. The
+      // refusal now happens in the `Domain=` branch, above the expiry-driven deletions,
+      // so the eviction never gets to run.
+      jar.parseSetCookieHeader('session=victim; Path=/', 'http://localhost/');
+
+      jar.parseSetCookieHeader(
+        'session=x; Domain=localhost; Path=/; Max-Age=0',
+        'https://evil.localhost/',
+      );
+
+      expect(jar.getCookieFor('session', 'http://localhost/')?.value).toBe(
+        'victim',
+      );
+    });
+
+    test('a host-only cookie on localhost is unaffected', () => {
+      jar.parseSetCookieHeader('session=mine; Path=/', 'http://localhost/');
+
+      expect(jar.getCookieFor('session', 'http://localhost/')?.value).toBe(
+        'mine',
+      );
+    });
+
+    test('a subdomain of a bare name still scopes itself', () => {
+      jar.parseSetCookieHeader(
+        'session=mine; Domain=app.localhost; Path=/',
+        'https://api.app.localhost/',
+      );
+
+      // `app.localhost` is a registrable name *under* the `localhost` suffix, so it is not
+      // itself a public suffix and the cookie stays domain-scoped: this is the ordinary
+      // `Domain=example.com` from `api.example.com` case, one suffix down. Making bare
+      // names suffixes must not collapse that - a dev setup running several services under
+      // one `app.localhost` still shares a session across them.
+      const stored = jar.getCookieFor('session', 'https://api.app.localhost/');
+
+      expect(stored?.value).toBe('mine');
+      expect(stored?.hostOnly).toBe(false);
+      // The spanning is real, not just bucket co-residency: the apex itself receives it.
+      expect(jar.getCookieFor('session', 'https://app.localhost/')?.value).toBe(
+        'mine',
+      );
+    });
+
+    test('the same rule keeps a public-suffix cookie the host itself sets', () => {
+      // `github.io` used to be refused outright even from `https://github.io/`. RFC
+      // 6265bis keeps it host-only rather than dropping it.
+      jar.parseSetCookieHeader(
+        'session=mine; Domain=github.io; Path=/',
+        'https://github.io/',
+      );
+
+      const stored = jar.getCookieFor('session', 'https://github.io/');
+
+      expect(stored?.value).toBe('mine');
+      expect(stored?.hostOnly).toBe(true);
+      // A request to `victim.github.io` would prove nothing - tenants of a public suffix
+      // get one bucket each, so it never saw this cookie. The live assertion is the other
+      // direction: a tenant still may not claim the suffix, which is the property the
+      // §5.5 relaxation must not have loosened.
+      const tenant = new CookieJar();
+
+      tenant.parseSetCookieHeader(
+        'session=tossed; Domain=github.io; Path=/',
+        'https://evil.github.io/',
+      );
+
+      expect(tenant.getAllCookies()).toHaveLength(0);
+    });
+
+    test('remove opts a bare name back into spanning', () => {
+      const scoped = new CookieJar({
+        publicSuffixes: { remove: ['localhost'] },
+      });
+
+      scoped.parseSetCookieHeader(
+        'session=shared; Domain=localhost; Path=/',
+        'https://app.localhost/',
+      );
+
+      // Exactly the pre-1.0 reach, which is the promise the option makes - no more. The
+      // cookie is filed under the `localhost` bucket and `http://localhost/` picks it up;
+      // it does not come back to `app.localhost`, because bucketing by apex never put
+      // those two together and `remove` does not change apexes, only suffix answers.
+      expect(scoped.getCookieFor('session', 'http://localhost/')?.value).toBe(
+        'shared',
+      );
+      expect(
+        scoped.getCookieFor('session', 'http://app.localhost/')?.value,
+      ).toBe(undefined);
+    });
+
+    test('the host-only flag survives a persist/restore round trip', () => {
+      // `hostOnly` is the *whole* of the §5.5 restriction - `domain` still reads
+      // `localhost`, indistinguishable from a spanning cookie. `toJSON` writes the flag
+      // and `setCookie` (which `fromJSON` replays through) has to honour it, or a jar
+      // persisted and reloaded comes back with the attribute widened again and the toss
+      // reopens across a restart.
+      jar.parseSetCookieHeader(
+        'session=mine; Domain=localhost; Path=/',
+        'http://localhost/',
+      );
+
+      const restored = new CookieJar();
+
+      expect(restored.fromJSON(JSON.parse(JSON.stringify(jar.toJSON())))).toBe(
+        1,
+      );
+      expect(
+        restored.getCookieFor('session', 'http://localhost/')?.hostOnly,
+      ).toBe(true);
+    });
+  });
+
   describe('publicSuffixes overrides', () => {
     test('add treats an internal suffix as public', () => {
       const scoped = new CookieJar({

@@ -725,14 +725,33 @@ When a `CookieJar` is attached to the client:
 
 **Secure cookies and the request scheme.** The `Secure` attribute is enforced on both sides of the jar. On the way out, `getCookiesFor()` withholds a `Secure` cookie unless the request scheme is `https:` or `wss:`. On the way in, `parseSetCookieHeader()` and `processResponseHeaders()` follow RFC 6265bis: a `Secure` cookie from a response over `http:` (or any scheme other than `https:` / `wss:`) is refused, and a non-`Secure` cookie from such a response is refused when the jar already holds a `Secure` cookie of the same name whose path covers the new one and whose domain domain-matches the new one in either direction - including a `Max-Age=0` or past `Expires` that would evict it. So a plain-text hop, a mixed `http`/`https` session, or an attacker on the wire cannot plant, replace or delete the `https:` session cookie ("cookie forcing"). A response over `https:` may still replace or downgrade its own cookie, as browsers allow. The `__Secure-` prefix requires `Secure`, and `__Host-` requires `Secure`, no `Domain` attribute and `Path=/`, matched case-insensitively; a cookie that claims a prefix without meeting it is refused. `setCookie()` has no request URL to judge and is not scheme-gated: a cookie set programmatically or restored through `fromJSON()` is stored as given. `localhost` over `http:` is not treated as secure - the jar would never have sent a `Secure` cookie there either, so store-time and send-time agree.
 
-**Cookie scoping uses the full Public Suffix List.** The jar refuses a `Domain=` that is a
-public suffix, and both halves of the list count: the ICANN half (`com`, `co.uk`) and the
-private half (`github.io`, `herokuapp.com`, `s3.amazonaws.com`). The private half is what
+**Cookie scoping uses the full Public Suffix List.** The jar refuses a `Domain=` that
+spans a public suffix, and both halves of the list count: the ICANN half (`com`,
+`co.uk`) and the private half (`github.io`, `herokuapp.com`,
+`s3.amazonaws.com`). The private half is what
 keeps one tenant of a shared platform from setting a cookie every other tenant on it would
 send - browsers consult it for exactly that reason. Hosts under a public suffix are also
 bucketed separately, so `evil.github.io` and `victim.github.io` never share cookie storage.
-IP literals and bare hostnames the list does not carry (`localhost`, `myapp`) are not
-public suffixes, so a development jar on `http://localhost` is unaffected.
+IP literals are not public suffixes. Bare single-label hostnames - `localhost`, `myapp`,
+an unqualified machine name - are, because the list carries no registrable name beneath
+them: without that, `Domain=localhost` from `https://evil.localhost/` was a suffix of the
+request host and landed in the `localhost` bucket, where an ordinary `http://localhost/`
+request then sent it.
+
+Naming your own host is not spanning anything, so RFC 6265bis §5.5 applies: a `Domain=`
+that is a public suffix is refused only when it differs from the request host, and kept
+**host-only** when it matches. A server on `http://localhost/` setting `Domain=localhost`
+for itself keeps working, and keeps reaching itself; what it loses is the reach it never
+had a use for, and `evil.localhost` loses the reach it did. The same now holds one label
+up: `Domain=github.io` from `https://github.io/` is kept host-only rather than dropped.
+
+The door this closes is the _store_ side, not the send side: a sibling could file a cookie
+under a name it did not own and let the owner's own requests pick it up. `sub.localhost`
+was never reachable from a `Domain=localhost` cookie - hosts under a bare name are bucketed
+separately, exactly as `evil.github.io` and `victim.github.io` are - so the toss ran the
+other way round. It also covers deletion: `Max-Age=0; Domain=localhost` from
+`https://evil.localhost/` used to evict the cookie `http://localhost/` had set for itself,
+and is now refused before it can.
 
 The list ships compiled into `tldts` and is looked up offline - nothing is downloaded at
 runtime - which also means it is a snapshot frozen at the installed `tldts` version. Since

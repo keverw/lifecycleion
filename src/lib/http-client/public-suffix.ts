@@ -19,8 +19,11 @@ export interface PublicSuffixOverrides {
   /**
    * Extra suffixes to treat as public, on top of the bundled list.
    *
-   * Strictly narrowing: a cookie may never be set with `Domain=` one of these, and hosts
-   * under them get one bucket each rather than a shared one. Use for internal or
+   * Strictly narrowing: a host *under* one of these may never claim it with `Domain=`, and
+   * hosts under them get one bucket each rather than a shared one. The suffix may still
+   * name itself, host-only, per RFC 6265bis §5.5 - so with `corp.internal` added,
+   * `evil.corp.internal` cannot claim `Domain=corp.internal`, while a server on
+   * `https://corp.internal/` may still set it for itself alone. Use for internal or
    * multi-tenant domains the public list does not know about - `corp.internal`,
    * `apps.acme-cloud.net`.
    */
@@ -146,15 +149,26 @@ export class PublicSuffixResolver {
   }
 
   /**
-   * Whether `hostname` is a public suffix, and so may never be the `Domain=` of a cookie.
+   * Whether `hostname` is a public suffix, and so may only be the `Domain=` of a cookie
+   * when it is the request host itself - RFC 6265bis §5.5, which the caller applies.
    *
    * IP literals are not: they are compared whole by the caller and have no suffix
-   * structure. Bare hostnames the list does not know - `localhost`, `myapp`, an
-   * unqualified machine name - are not either, so a development jar on `http://localhost`
-   * keeps working; browsers treat them the same way.
+   * structure.
+   *
+   * A bare single-label hostname is - `localhost`, `myapp`, an unqualified machine name.
+   * The list carries none of them, so without this `Domain=localhost` from
+   * `https://evil.localhost/` was a suffix of the request host, passed every check, and
+   * was filed under `localhost` - where an ordinary `http://localhost/` request then sent
+   * it, and where a `Max-Age=0` from the same sibling deleted it. That is the same tossing
+   * the private section closes for `github.io`, one label shorter. A single label has no
+   * registrable name beneath it by definition, which is exactly what makes it a suffix
+   * rather than a domain. Local development is unaffected: a cookie with no `Domain=` is
+   * host-only already, and one naming the host it came from is accepted host-only by the
+   * rule above. `publicSuffixes.remove` opts a name back out.
    */
   public isPublicSuffix(hostname: string): boolean {
-    const normalized = toLabels(hostname).join('.');
+    const labels = toLabels(hostname);
+    const normalized = labels.join('.');
 
     if (this.added.has(normalized)) {
       return true;
@@ -168,6 +182,10 @@ export class PublicSuffixResolver {
 
     if (result.isIp) {
       return false;
+    }
+
+    if (labels.length === 1) {
+      return true;
     }
 
     // `domain === null` says no registrable name sits under this hostname, which is true

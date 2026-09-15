@@ -82,7 +82,11 @@ interface StoredCookieScope {
  *   (RFC 6265bis "Leave Secure Cookies Alone")
  * - Enforces the `__Secure-` and `__Host-` name prefixes (RFC 6265bis)
  *
- * IPs and local hostnames like localhost are never treated as public suffixes.
+ * IPs are never treated as public suffixes. A bare single-label hostname - `localhost`,
+ * `myapp` - is, so a cookie may not span one; per RFC 6265bis §5.5 a `Domain=` naming the
+ * request host itself is still accepted, host-only, so a server on `http://localhost/`
+ * setting `Domain=localhost` keeps working while `https://evil.localhost/` cannot claim
+ * the shared name.
  */
 /**
  * Whether every character of `text` can be written into a `Cookie` header as part of
@@ -133,8 +137,8 @@ export interface CookieJarOptions {
 }
 
 export class CookieJar {
-  // Outer key: apex domain from tldts (e.g. 'example.co.uk'), or the hostname
-  //            itself for IPs and localhost
+  // Outer key: apex domain from the Public Suffix List (e.g. 'example.co.uk'), or the
+  //            hostname itself for IPs and bare names like localhost
   // Inner key: composite 'name@domain/path' for deduplication
   private buckets: Map<string, Map<string, Cookie>> = new Map();
 
@@ -851,14 +855,31 @@ export class CookieJar {
 
     let domain: string;
 
+    // Set when `Domain=` names a public suffix that is also the request host. RFC 6265bis
+    // §5.5 keeps that cookie but strips its reach: it becomes host-only, as though no
+    // `Domain=` had been sent. Tracked separately from `parsed.domain` because the
+    // attribute *was* sent - the flag below cannot be derived from its absence.
+    let isPublicSuffixHostOnly = false;
+
     if (parsed.domain) {
       // RFC 6265 §5.2.3 / §5.1.3: ignore a leading dot and match domains
       // case-insensitively. URL.host is lowercased but Domain= is not.
       const normalizedDomain = this.normalizeStoredDomain(parsed.domain);
 
-      // Reject public suffixes — prevents Domain=co.uk style attacks
+      // A public suffix - `co.uk`, `github.io`, `localhost` - may not be spanned, but
+      // naming your own host is not spanning anything. RFC 6265bis §5.5 refuses the
+      // attribute only when it differs from the request host, and keeps the cookie
+      // host-only when it matches; refusing both alike dropped a cookie a server on
+      // `http://localhost/` set for itself with `Domain=localhost`, which is ordinary in
+      // local development. What stays refused is the case that made this a hole:
+      // `Domain=localhost` from `https://evil.localhost/`, which is a *different* host
+      // claiming the shared name, exactly as `Domain=github.io` from `evil.github.io` is.
       if (this.isPublicSuffix(normalizedDomain)) {
-        return;
+        if (normalizedDomain !== this.normalizeStoredDomain(requestHostname)) {
+          return;
+        }
+
+        isPublicSuffixHostOnly = true;
       }
 
       // Reject cross-domain — server can only set cookies for its own domain
@@ -909,8 +930,10 @@ export class CookieJar {
       value: parsed.value,
       domain,
       // Align with `if (parsed.domain)` above: empty `Domain=` / `Domain=.` parses to
-      // `''` and must be host-only like a missing Domain attribute.
-      hostOnly: !parsed.domain,
+      // `''` and must be host-only like a missing Domain attribute. A `Domain=` naming a
+      // public suffix that is the request host is host-only too, per RFC 6265bis §5.5:
+      // the cookie is kept, but only for the host that set it.
+      hostOnly: !parsed.domain || isPublicSuffixHostOnly,
       path,
       createdAt: Date.now(),
     };
@@ -1100,8 +1123,9 @@ export class CookieJar {
   }
 
   /**
-   * Returns true if the domain is a recognized public suffix and so may never be the
-   * `Domain=` of a cookie.
+   * Returns true if the domain is a recognized public suffix, and so may only be the
+   * `Domain=` of a cookie the request host itself sets - `storeParsed` refuses it from any
+   * other host and keeps it host-only when it matches, per RFC 6265bis §5.5.
    *
    * Covers both sections of the Public Suffix List: the ICANN one (`com`, `co.uk`) and
    * the private one (`github.io`, `herokuapp.com`, `s3.amazonaws.com`). The private
@@ -1109,7 +1133,9 @@ export class CookieJar {
    * every other tenant on it would send - browsers honour it for exactly that reason.
    * A jar constructed with `publicSuffixes` overrides answers under those.
    *
-   * IPs and local hostnames like localhost are not rejected.
+   * IP literals are never public suffixes - they are compared whole and have no suffix
+   * structure. Bare single-label hostnames (`localhost`, `myapp`) are, so a sibling cannot
+   * claim the shared name; see {@link PublicSuffixResolver.isPublicSuffix}.
    */
   private isPublicSuffix(domain: string): boolean {
     if (this.tryCanonicalIPLiteral(domain) !== null) {
