@@ -2920,6 +2920,87 @@ describe('Logger diagnostic channel', () => {
     expect(diagnostics[0]?.kind).toBe('event-handler');
   });
 
+  test('preserves the original diagnostic when its only listener throws', async () => {
+    const consoleError = spyOn(console, 'error').mockImplementation(() => {});
+    const logger = new Logger({ sinks: [], callProcessExit: false });
+
+    logger.on('logger', () => {
+      throw new Error('original logger failure');
+    });
+    logger.on('diagnostic', () => {
+      throw new Error('diagnostic listener failure');
+    });
+
+    try {
+      logger.info('trigger');
+      await Promise.resolve();
+
+      expect(consoleError).toHaveBeenCalledTimes(1);
+      const line = String(consoleError.mock.calls[0]?.[0]);
+      expect(line).toContain('original logger failure');
+      expect(line).toContain('diagnostic listener also failed');
+      expect(line).toContain('diagnostic listener failure');
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
+  test('preserves the original diagnostic when its only listener rejects', async () => {
+    const consoleError = spyOn(console, 'error').mockImplementation(() => {});
+    const logger = new Logger({ sinks: [], callProcessExit: false });
+
+    logger.on('logger', () => {
+      throw new Error('original async logger failure');
+    });
+    logger.on('diagnostic', () =>
+      Promise.reject(new Error('async diagnostic listener failure')),
+    );
+
+    try {
+      logger.info('trigger');
+      await sleep(0);
+
+      expect(consoleError).toHaveBeenCalledTimes(1);
+      const line = String(consoleError.mock.calls[0]?.[0]);
+      expect(line).toContain('original async logger failure');
+      expect(line).toContain('diagnostic listener also failed');
+      expect(line).toContain('async diagnostic listener failure');
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
+  test('does not send close failures through sinks being closed', async () => {
+    let diagnosticWrites = 0;
+    const consoleError = spyOn(console, 'error').mockImplementation(() => {});
+    const sink: LogSink = {
+      write: () => {},
+      writeDiagnostic: () => {
+        diagnosticWrites++;
+      },
+      close: () => {
+        throw new Error('close transport failure');
+      },
+    };
+    const logger = new Logger({
+      diagnosticSinks: [sink],
+      callProcessExit: false,
+    });
+
+    try {
+      await logger.close();
+      await Promise.resolve();
+
+      expect(diagnosticWrites).toBe(0);
+      expect(consoleError).toHaveBeenCalledTimes(1);
+      expect(String(consoleError.mock.calls[0]?.[0])).toContain(
+        'close transport failure',
+      );
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
   test('ends a rejected diagnostic write at the guarded console', async () => {
     let diagnosticWrites = 0;
     const consoleError = spyOn(console, 'error').mockImplementation(() => {});

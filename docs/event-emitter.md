@@ -181,7 +181,11 @@ events are logged can feed its handler failures straight back into itself: a fai
 subclass can override:
 
 ```typescript
-protected handleEventHandlerFailure(event: string, error: unknown): void;
+protected handleEventHandlerFailure(
+  event: string,
+  error: unknown,
+  data?: unknown,
+): void;
 ```
 
 The default calls `reportCallbackError(...)` from
@@ -193,19 +197,22 @@ class MyEmitter extends EventEmitterProtected {
   protected override handleEventHandlerFailure(
     event: string,
     error: unknown,
+    data?: unknown,
   ): void {
     // `error` is `unknown` on purpose: `throw` and promise rejection both accept any
     // value, so an override must not assume it was handed an `Error`.
     metrics.increment('handler_failure', {
       event,
       reason: describeError(error),
+      payload: data,
     });
   }
 }
 ```
 
-Two rules for an override: it must not throw - it runs on the failure path and there is
-nothing above it left to catch - and it must not assume `error` is an `Error`. Use
+The optional `data` is the value emitted to the failing handler, including for an async
+rejection. Two rules for an override: it must not throw - it runs on the failure path and
+there is nothing above it left to catch - and it must not assume `error` is an `Error`. Use
 [`describeError`](./to-error.md#describeerror), which satisfies both.
 
 [`Logger`](./logger.md) overrides this exact hook for the loop described above, routing

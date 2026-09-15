@@ -1841,6 +1841,10 @@ sink an already-rendered `error` entry tagged `'lifecycleion-diagnostic'`. Neith
 passes through logger formatting or emits another `'logger'` event. Delivery is scheduled
 asynchronously, so it also cannot grow the stack of the log call that failed.
 
+A failure raised while `Logger.close()` is closing its sinks skips that second step: none
+of those sinks can honestly accept another write. It is emitted to external diagnostic
+listeners and otherwise ends at guarded `console.error`.
+
 `LoggerDiagnostic.error` is the normalized underlying failure and `message` is its
 guardedly rendered description. Either can contain data that caller-owned code put in the
 thrown error. A sink that persists diagnostics should apply the same access controls it
@@ -1858,10 +1862,10 @@ transform anything. See [Built-In Sinks](#built-in-sinks).
 
 ### Why the Fall-Back Is the Console
 
-It is the terminal rung: if a diagnostic listener or diagnostic sink fails, that secondary
-failure is written there directly and is never dispatched again. The console call is also
-guarded, so a broken console cannot make `logger.info()` throw or create an unhandled
-rejection.
+It is the terminal rung: if a diagnostic listener or diagnostic sink fails, the original
+diagnostic and that secondary failure are written there directly and never dispatched
+again. The console call is also guarded, so a broken console cannot make `logger.info()`
+throw or create an unhandled rejection.
 
 ### Routing Diagnostics Away From the Console
 
@@ -1885,8 +1889,9 @@ Two caveats remain:
 
 - **A diagnostic listener or sink that throws or rejects reaches the console.** It does
   not get another chance through the same channel.
-- **`ConsoleSink` is unaffected.** It writes to the console because that is its job. The
-  diagnostic channel is about failures, not ordinary output.
+- **`ConsoleSink` still honors its lifecycle.** It writes diagnostics to `console.error`
+  while active, but a muted or closed instance remains silent just as it does for ordinary
+  entries.
 
 ### Standalone Renderers Are Different
 

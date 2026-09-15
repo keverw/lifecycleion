@@ -145,6 +145,10 @@ export class ConsoleSink implements LogSink {
   }
 
   public writeDiagnostic(diagnostic: LoggerDiagnostic): void {
+    if (this.closed || this.muted) {
+      return;
+    }
+
     reportToConsole(diagnostic.message);
   }
 

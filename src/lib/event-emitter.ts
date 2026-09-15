@@ -131,7 +131,7 @@ export class EventEmitterProtected {
 
     // Loop-invariant: the reporter depends on the event, not on which handler failed.
     const handleFailure = (error: unknown): void => {
-      this.handleEventHandlerFailure(event, error);
+      this.handleEventHandlerFailure(event, error, data);
     };
 
     for (const callback of callbacks) {
@@ -160,8 +160,14 @@ export class EventEmitterProtected {
    * @param error The error thrown or the rejection reason. Typed `unknown` because
    *              `throw` and promise rejection both accept any value, so an override
    *              must not assume an `Error`.
+   * @param data  The value emitted to the failing handler. Optional so existing overrides
+   *              that only need the event and error remain valid.
    */
-  protected handleEventHandlerFailure(event: string, error: unknown): void {
+  protected handleEventHandlerFailure(
+    event: string,
+    error: unknown,
+    _data?: unknown,
+  ): void {
     reportCallbackError(`event handler for ${event}`, error);
   }
 }

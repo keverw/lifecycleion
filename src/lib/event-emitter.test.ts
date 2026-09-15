@@ -235,7 +235,7 @@ describe('EventEmitterProtected', () => {
     // failures out of the global `'error'` channel. An override must see every failure -
     // a sync throw and a rejection alike - the handlers after a failing one must still
     // run, and nothing may reach the global listener.
-    const seen: Array<{ event: string; error: unknown }> = [];
+    const seen: Array<{ event: string; error: unknown; data: unknown }> = [];
 
     class QuietEmitter extends EventEmitterProtected {
       public triggerEvent(): void {
@@ -245,8 +245,9 @@ describe('EventEmitterProtected', () => {
       protected override handleEventHandlerFailure(
         event: string,
         error: unknown,
+        data?: unknown,
       ): void {
-        seen.push({ event, error });
+        seen.push({ event, error, data });
       }
     }
 
@@ -277,6 +278,11 @@ describe('EventEmitterProtected', () => {
         'test',
         'test',
         'test',
+      ]);
+      expect(seen.map((entry) => entry.data)).toEqual([
+        'payload',
+        'payload',
+        'payload',
       ]);
       expect(seen[0]?.error).toBe(syncFailure);
       expect((seen[1]?.error as Error).message).toContain('is not a function');

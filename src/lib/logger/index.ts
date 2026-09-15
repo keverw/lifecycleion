@@ -1282,6 +1282,7 @@ export class Logger extends EventEmitter {
   protected override handleEventHandlerFailure(
     event: string,
     error: unknown,
+    data?: unknown,
   ): void {
     // Normalized rather than trusted: a handler is free to `throw null` or reject with a
     // string, and reading `.message` off that directly would throw a `TypeError` out of
@@ -1294,9 +1295,16 @@ export class Logger extends EventEmitter {
     );
 
     // The diagnostic event is already the logger's failure channel. A failure in one of
-    // its listeners cannot be sent through it again, so it ends at the console rung.
+    // its listeners cannot be sent through it again, so it ends at the console rung. Keep
+    // the original diagnostic in that terminal line too: when this listener is the only
+    // destination, reporting only its secondary failure would discard the first one.
     if (event === 'diagnostic') {
-      reportToConsole(failure.message);
+      const diagnostic = data as LoggerDiagnostic | undefined;
+      reportToConsole(
+        diagnostic === undefined
+          ? failure.message
+          : `${diagnostic.message} (diagnostic listener also failed: ${describeError(cause)})`,
+      );
       return;
     }
 
@@ -1379,14 +1387,21 @@ export class Logger extends EventEmitter {
     const line = (): string =>
       `Error ${context === 'write' ? 'writing to' : 'closing'} sink: ${describeError(failure)}`;
 
-    this.reportDiagnostic({
-      timestamp: ms(),
-      kind: 'sink',
-      error: failure,
-      message: line(),
-      context,
-      sink,
-    });
+    this.reportDiagnostic(
+      {
+        timestamp: ms(),
+        kind: 'sink',
+        error: failure,
+        message: line(),
+        context,
+        sink,
+      },
+      // Every configured destination is being closed by `Logger.close()`. Sending a
+      // close failure through one would either violate its closed contract or silently
+      // lose the diagnostic. The event remains available to an external observer; with
+      // none, the guarded console is the terminal destination.
+      context !== 'close',
+    );
   }
 
   /**
@@ -1396,10 +1411,17 @@ export class Logger extends EventEmitter {
    * reaches the guarded console directly instead of producing another diagnostic. This
    * single boundary is the recursion guard for the whole channel.
    */
-  private reportDiagnostic(diagnostic: LoggerDiagnostic): void {
-    const destinations = [
-      ...(this.diagnosticSinks.length > 0 ? this.diagnosticSinks : this.sinks),
-    ];
+  private reportDiagnostic(
+    diagnostic: LoggerDiagnostic,
+    shouldDeliverToSinks = true,
+  ): void {
+    const destinations = shouldDeliverToSinks
+      ? [
+          ...(this.diagnosticSinks.length > 0
+            ? this.diagnosticSinks
+            : this.sinks),
+        ]
+      : [];
 
     void Promise.resolve().then(() => {
       const hasListeners = this.hasListeners('diagnostic');
