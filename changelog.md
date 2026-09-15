@@ -180,6 +180,7 @@
 
 ## 1.0.0 (Unreleased)
 
+- Hardened remaining failure-path edge cases: then-only reporting callbacks are adopted safely; `TmpDir.initialize()` rejects after or during terminal cleanup; retry cancellation grace periods are capped at the runtime timer ceiling; `FileSink` cannot resume an oversized write after close; late graceful/force shutdown rejections are logged; a broken `Intl.Segmenter` is probed once; and `serializeError()` preserves dates while bounding aggregate string output.
 - Logger write-failure diagnostics queued immediately before `close()` or an `exitCode` shutdown now reach the guarded console fallback instead of being silently refused by already-closed sinks. An open muted `ConsoleSink` remains intentionally silent.
 - `CookieJar.setCookie()` and `fromJSON()` now remove a legacy leading domain dot before syntax validation, so imported `.localhost`, `.[::1]`, and local-development domains are accepted and stored canonically. Programmatic empty or relative paths are canonicalized to `/`, matching the Set-Cookie parser's effective scope.
 - A redacted leaf that exceeds its render budget is now replaced opaquely instead of proportionally masking a truncated prefix, which could leave roughly 100,000 original characters visible at the default one-million-character allowance.

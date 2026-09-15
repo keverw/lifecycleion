@@ -1336,6 +1336,13 @@ export class FileSink implements LogSink {
       await this.rotateFile();
     }
 
+    // `close()` may finish while the oversized-line rotation above is suspended. A
+    // rotation that notices the close returns without changing the stream, so do not let
+    // this older write continue into a sink that has already reported itself closed.
+    if (this.closed) {
+      throw new FileSinkError('Cannot write to closed sink');
+    }
+
     // Write to file
     return new Promise<void>((resolve, reject) => {
       // Rejected, not resolved. The stream can disappear *after* the check above: its

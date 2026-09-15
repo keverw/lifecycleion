@@ -543,6 +543,30 @@ describe('serializeError terminates on payloads nothing else bounds', () => {
       meta: { ok: true },
     });
   });
+
+  test('serializes Date fields as ISO timestamps', () => {
+    const error = Object.assign(new Error('boom'), {
+      occurredAt: new Date('2020-01-01T00:00:00.000Z'),
+    });
+
+    expect(serializeError(error).occurredAt).toBe('2020-01-01T00:00:00.000Z');
+  });
+
+  test('serializes Date fields created in another realm', () => {
+    const occurredAt: unknown = vm.runInNewContext(
+      "new Date('2020-01-01T00:00:00.000Z')",
+    );
+    const error = Object.assign(new Error('boom'), { occurredAt });
+
+    expect(serializeError(error).occurredAt).toBe('2020-01-01T00:00:00.000Z');
+  });
+
+  test('bounds an enormous string passed as the error value', () => {
+    const serialized = serializeError('x'.repeat(2_000_000));
+
+    expect(serialized.message).toEndWith('[max length exceeded]');
+    expect(JSON.stringify(serialized).length).toBeLessThan(1_100_000);
+  });
 });
 
 describe('serializeError on values that are error-shaped without being errors', () => {
@@ -793,16 +817,10 @@ describe('error-shaped objects with inherited members', () => {
     });
   });
 
-  test('passes a long string field through instead of capping it', () => {
-    // Deliberate, and the one bound this function does *not* take from the renderers. The
-    // node and depth caps are what make "never throws, always terminates" true - without
-    // them a cycle or a deep graph raised a `RangeError` out of the function whose whole
-    // job is describing a failure. A length cap buys none of that: it only shortens the
-    // output, and the thing it would shorten is a `message` the receiving side *parses*.
-    // `errorToString` renders for a human, so a marker in place of the tail costs nothing
-    // there; here it would hand an IPC consumer a wrong message with no way to tell, and
-    // the payload carries no channel to say it was cut. A transport with a frame limit
-    // enforces its own, where it can fail loudly.
+  test('bounds long string fields across the serialized payload', () => {
+    // The depth and node caps do not bound one string. Error payloads cross process
+    // boundaries, so one hostile message must not allocate an arbitrarily large frame.
+    // The visible marker makes the lossy result explicit to the receiver.
     const long = 'x'.repeat(2_000_000);
     const error = new Error(long);
 
@@ -810,9 +828,24 @@ describe('error-shaped objects with inherited members', () => {
 
     const serialized = serializeError(error);
 
-    expect(serialized.message).toBe(long);
-    expect(serialized.detail).toBe(long);
-    expect(serialized.message).not.toContain('max length exceeded');
+    expect(serialized.message).toEndWith('[max length exceeded]');
+    expect(serialized['[max length exceeded]']).toBe('[max length exceeded]');
+    expect(JSON.stringify(serialized).length).toBeLessThan(1_100_000);
+  });
+
+  test('bounds a single enormous property name too', () => {
+    const error = new Error('boom');
+    const longKey = 'k'.repeat(2_000_000);
+
+    withExtras(error)[longKey] = 'value';
+
+    const serialized = serializeError(error);
+    const outputKey = Object.keys(serialized).find((key) =>
+      key.startsWith('k'),
+    );
+
+    expect(outputKey).toEndWith('[max length exceeded]');
+    expect(JSON.stringify(serialized).length).toBeLessThan(1_100_000);
   });
 
   test('bounds an error-*like* bag carrying more own keys than the node budget', () => {

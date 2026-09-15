@@ -8,6 +8,41 @@ import {
   splitCharacters,
 } from './datamask';
 
+test('a broken Intl.Segmenter is probed only once', async () => {
+  // A fresh process gives the module a fresh lazy cache without exposing a test-only
+  // reset hook in the public API.
+  const moduleURL = new URL('./datamask.ts', import.meta.url).href;
+  const script = `
+    let attempts = 0;
+    Object.defineProperty(Intl, 'Segmenter', {
+      configurable: true,
+      value: class BrokenSegmenter {
+        constructor() {
+          attempts++;
+          throw new Error('unavailable');
+        }
+      },
+    });
+    const { splitCharacters } = await import(${JSON.stringify(moduleURL)});
+    splitCharacters('first');
+    splitCharacters('second');
+    process.stdout.write(String(attempts));
+  `;
+  const child = Bun.spawn([process.execPath, '-e', script], {
+    stdout: 'pipe',
+    stderr: 'pipe',
+  });
+  const [exitCode, stdout, stderr] = await Promise.all([
+    child.exited,
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+  ]);
+
+  expect(stderr).toBe('');
+  expect(exitCode).toBe(0);
+  expect(stdout).toBe('1');
+});
+
 // The outputs the `datamask` npm package produced for the same calls, so a caller moving
 // off it sees nothing change for a value with no astral characters.
 describe('maskString', () => {

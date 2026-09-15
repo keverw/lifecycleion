@@ -61,10 +61,17 @@ function graphemeSegmenter(): Intl.Segmenter | undefined {
   if (cachedSegmenter === null) {
     const ctor = (Intl as { Segmenter?: typeof Intl.Segmenter }).Segmenter;
 
-    cachedSegmenter =
-      typeof ctor === 'function'
-        ? new ctor(undefined, { granularity: 'grapheme' })
-        : undefined;
+    // Mark the probe complete before invoking host code. A broken implementation should
+    // cost one failed construction, not one throw/catch for every redacted leaf forever.
+    cachedSegmenter = undefined;
+
+    if (typeof ctor === 'function') {
+      try {
+        cachedSegmenter = new ctor(undefined, { granularity: 'grapheme' });
+      } catch {
+        // Code-point splitting is the documented fallback when Segmenter is unavailable.
+      }
+    }
   }
 
   return cachedSegmenter;

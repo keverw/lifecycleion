@@ -68,4 +68,27 @@ describe('createFormatReporter follows an async handler', () => {
     expect(seen).toEqual(['redaction:<params>:boom']);
     expect(captured).toEqual([]);
   });
+
+  test('adopts a rejection from a then-only handler', async () => {
+    let thenCalls = 0;
+    const thenOnly = {
+      then(_resolve: (value: unknown) => void, reject: (error: Error) => void) {
+        thenCalls++;
+        reject(new Error('then-only rejection'));
+      },
+    };
+    const report = createFormatReporter(
+      'render',
+      // eslint-disable-next-line @typescript-eslint/no-misused-promises -- a then-only return is the supported runtime shape under test
+      () => thenOnly,
+    );
+
+    report(new Error('original failure'), 'items.0');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(thenCalls).toBe(1);
+    expect(captured).toHaveLength(1);
+    expect(captured[0]).toContain('the failure handler also rejected');
+    expect(captured[0]).toContain('then-only rejection');
+  });
 });

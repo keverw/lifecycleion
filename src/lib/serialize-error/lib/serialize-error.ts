@@ -2,7 +2,13 @@ import {
   defineEntry,
   describeContainer,
 } from '../../internal/container-entries';
-import { MAX_RENDER_DEPTH, TRUNCATED } from '../../internal/render-budget';
+import {
+  MAX_RENDER_DEPTH,
+  MAX_RENDER_LENGTH,
+  TRUNCATED,
+  TRUNCATED_LENGTH,
+  cutAt,
+} from '../../internal/render-budget';
 import { snapshotMembers } from '../../internal/read-member';
 import {
   describeBinaryView,
@@ -123,6 +129,7 @@ function readText(
   key: string,
   path: string,
   report: ReportFormatFailure,
+  budget: NodeBudget,
 ): string | undefined {
   let value: unknown;
 
@@ -131,11 +138,14 @@ function readText(
   } catch (error) {
     report(error, `${path}.${key}`);
 
-    return UNSERIALIZABLE_TEXT;
+    return boundedText(UNSERIALIZABLE_TEXT, budget);
   }
 
   if (typeof value === 'string') {
-    return value;
+    // Bound at the read boundary rather than first storing the caller's complete string
+    // in an intermediate record. `message` and `stack` are precisely the fields most
+    // likely to be large on this failure-reporting path.
+    return boundedText(value, budget);
   }
 
   // Absent stays absent, and `null` counts as absent: `stack` is optional on
@@ -145,7 +155,7 @@ function readText(
   // one round trip in disagreement.
   return value === undefined || value === null
     ? undefined
-    : describeValue(value);
+    : boundedText(describeValue(value), budget);
 }
 
 /**
@@ -188,7 +198,8 @@ function describeValue(value: unknown): string {
  *
  * **Never throws, and always terminates.** This is what is handed to `JSON.stringify` at
  * an IPC or RPC boundary, usually while already reporting a failure, so a second failure
- * raised here replaces the one being reported. Four things it survives that it did not:
+ * raised here replaces the one being reported. The walk is bounded by depth, node count,
+ * and aggregate string length. Things it survives that it did not include:
  *
  * - **A cycle.** `error.self = error`, or a request object attached to an error that
  *   points back at it, is ordinary rather than pathological, and it raised a `RangeError`
@@ -198,6 +209,10 @@ function describeValue(value: unknown): string {
  * - **A read that throws.** `message`, `stack` and every own property are ordinary
  *   properties a subclass or a `Proxy` can turn into a throwing accessor.
  * - **A revoked `Proxy`**, which `instanceof` alone refuses to walk.
+ * - **An enormous string or property name**, which could otherwise make one serialized
+ *   error consume an arbitrary amount of memory despite the graph bounds.
+ * - **A `Date` field**, which now keeps the ISO timestamp JSON would have produced instead
+ *   of becoming an empty object.
  *
  * An error built in another realm - a `vm` context, an iframe, a jsdom window - is
  * recognized as an error rather than falling through to the error-like branch, which
@@ -232,6 +247,7 @@ export function serializeError(
 
   return serializeErrorInner(error, seen, 0, '<error>', report, {
     remaining: MAX_SERIALIZED_NODES,
+    remainingCharacters: MAX_RENDER_LENGTH,
   });
 }
 
@@ -246,10 +262,21 @@ function serializeErrorInner(
   // The shared brand check, so a cross-realm error keeps the error branch - and guarded,
   // which a bare `instanceof` is not.
   if (isErrorValue(error)) {
+    const name =
+      readText(error, 'name', path, report, budget) ??
+      boundedText('Error', budget);
+    const message =
+      readText(error, 'message', path, report, budget) ??
+      boundedText('', budget);
+    const stack = readText(error, 'stack', path, report, budget);
     const result: SerializedError = {
-      name: readText(error, 'name', path, report) ?? 'Error',
-      message: readText(error, 'message', path, report) ?? '',
-      stack: readText(error, 'stack', path, report),
+      // Bound these immediately after the guarded read. Keeping the caller's complete
+      // string in this intermediate record until `deepSerializeRecord` reaches it made
+      // the final output bounded but still let a huge message/stack flow through the
+      // first copy on the failure path.
+      name,
+      message,
+      stack,
     };
 
     // Own property *names*, including the non-enumerable ones an `Error` hides - which is
@@ -263,7 +290,15 @@ function serializeErrorInner(
       // Nothing further can be enumerated; what was read above still stands.
       report(enumerationError, path);
 
-      return deepSerializeRecord(result, seen, depth, path, report, budget);
+      return deepSerializeRecord(
+        result,
+        seen,
+        depth,
+        path,
+        report,
+        budget,
+        true,
+      );
     }
 
     for (const key of keys) {
@@ -297,7 +332,7 @@ function serializeErrorInner(
       defineEntry(result, key, readOwnMember(error, key, path, report));
     }
 
-    return deepSerializeRecord(result, seen, depth, path, report, budget);
+    return deepSerializeRecord(result, seen, depth, path, report, budget, true);
   }
 
   if (isErrorLike(error)) {
@@ -345,15 +380,19 @@ function serializeErrorInner(
       // `{ field: 'email' }`, no `name`, no `message` - which is not a valid
       // `SerializedError`, and `deserializeError` rebuilt a nameless `Error('')` from it.
       if (!Object.prototype.hasOwnProperty.call(copy, 'name')) {
-        copy.name = readText(source, 'name', path, report) ?? 'Error';
+        copy.name =
+          readText(source, 'name', path, report, budget) ??
+          boundedText('Error', budget);
       }
 
       if (!Object.prototype.hasOwnProperty.call(copy, 'message')) {
-        copy.message = readText(source, 'message', path, report) ?? '';
+        copy.message =
+          readText(source, 'message', path, report, budget) ??
+          boundedText('', budget);
       }
 
       if (!Object.prototype.hasOwnProperty.call(copy, 'stack')) {
-        const inheritedStack = readText(source, 'stack', path, report);
+        const inheritedStack = readText(source, 'stack', path, report, budget);
 
         if (inheritedStack !== undefined) {
           copy.stack = inheritedStack;
@@ -381,15 +420,24 @@ function serializeErrorInner(
       // against `budget`, which is a synchronous stall inside a function documented never
       // to throw and always to terminate. The elements are not carried: this is a value
       // claiming to be an error, and what makes it one is these three.
-      copy.name = readText(source, 'name', path, report) ?? 'Error';
-      copy.message = readText(source, 'message', path, report) ?? '';
-      copy.stack = readText(source, 'stack', path, report);
+      copy.name =
+        readText(source, 'name', path, report, budget) ??
+        boundedText('Error', budget);
+      copy.message =
+        readText(source, 'message', path, report, budget) ??
+        boundedText('', budget);
+      copy.stack = readText(source, 'stack', path, report, budget);
     }
 
-    return deepSerializeRecord(copy, seen, depth, path, report, budget);
+    return deepSerializeRecord(copy, seen, depth, path, report, budget, true);
   }
 
-  return { name: 'Error', message: describeValue(error) };
+  const result: SerializedError = {
+    name: boundedText('Error', budget),
+    message: boundedText(describeValue(error), budget),
+  };
+
+  return deepSerializeRecord(result, seen, depth, path, report, budget, true);
 }
 
 /**
@@ -477,6 +525,42 @@ const MAX_SERIALIZED_NODES = 100_000;
 /** Values left to visit in one serialization. See {@link MAX_SERIALIZED_NODES}. */
 interface NodeBudget {
   remaining: number;
+  remainingCharacters: number;
+}
+
+/** Copy text into the shared serialization allowance, marking where it was cut. */
+function boundedText(value: string, budget: NodeBudget): string {
+  if (value.length <= budget.remainingCharacters) {
+    budget.remainingCharacters -= value.length;
+
+    return value;
+  }
+
+  const keptLength = Math.max(
+    0,
+    budget.remainingCharacters - TRUNCATED_LENGTH.length,
+  );
+  const kept = cutAt(value, keptLength);
+
+  budget.remainingCharacters = 0;
+
+  return `${kept}${TRUNCATED_LENGTH}`;
+}
+
+/** A Date's JSON representation, guarded and branded across realms. */
+function serializeDate(value: object): string | null | undefined {
+  try {
+    // Date.prototype methods validate the receiver's internal [[DateValue]] slot. Unlike
+    // `instanceof`, that brand check works for Dates created in a vm or iframe and cannot
+    // be forged with Symbol.toStringTag or a borrowed prototype.
+    const time = Date.prototype.getTime.call(value);
+
+    return Number.isFinite(time)
+      ? Date.prototype.toISOString.call(value)
+      : null;
+  } catch {
+    return undefined;
+  }
 }
 
 function deepSerializeRecord(
@@ -486,14 +570,37 @@ function deepSerializeRecord(
   path: string,
   report: ReportFormatFailure,
   budget: NodeBudget,
+  useBoundedTextValues = false,
 ): SerializedError {
   const result: SerializedError = {} as SerializedError;
 
   for (const key of Object.keys(record)) {
+    const value = record[key];
+
+    // These fixed, trusted keys have already had their values charged. Copying them
+    // directly both avoids charging the same text twice and ensures a message that uses
+    // the final allowance is still emitted instead of being replaced by a truncated key.
+    if (
+      useBoundedTextValues &&
+      (key === 'name' || key === 'message' || key === 'stack')
+    ) {
+      defineEntry(result, key, value);
+
+      continue;
+    }
+
+    const outputKey = boundedText(key, budget);
+
+    if (outputKey !== key) {
+      defineEntry(result, outputKey, TRUNCATED_LENGTH);
+
+      break;
+    }
+
     defineEntry(
       result,
-      key,
-      deepSerialize(record[key], seen, depth, `${path}.${key}`, report, budget),
+      outputKey,
+      deepSerialize(value, seen, depth, `${path}.${key}`, report, budget),
     );
   }
 
@@ -556,6 +663,10 @@ function deepSerialize(
   report: ReportFormatFailure,
   budget: NodeBudget,
 ): unknown {
+  if (typeof value === 'string') {
+    return boundedText(value, budget);
+  }
+
   if (value === null || typeof value !== 'object') {
     return coerceUnJSONableLeaf(value);
   }
@@ -587,6 +698,14 @@ function deepSerialize(
   seen.add(value);
 
   try {
+    const serializedDate = serializeDate(value);
+
+    if (serializedDate !== undefined) {
+      return serializedDate === null
+        ? null
+        : boundedText(serializedDate, budget);
+    }
+
     if (isErrorLike(value)) {
       return serializeErrorInner(value, seen, depth + 1, path, report, budget);
     }
@@ -680,6 +799,14 @@ function deepSerialize(
         break;
       }
 
+      const outputKey = boundedText(key, budget);
+
+      if (outputKey !== key) {
+        defineEntry(result, outputKey, TRUNCATED_LENGTH);
+
+        break;
+      }
+
       // Per key, for the reason the array branch charges per slot: an object of a hundred
       // thousand primitive values costs nothing on the way in and is exactly the size this
       // is meant to bound.
@@ -703,7 +830,7 @@ function deepSerialize(
         entry = UNSERIALIZABLE_VALUE;
       }
 
-      defineEntry(result, key, entry);
+      defineEntry(result, outputKey, entry);
     }
 
     return result;

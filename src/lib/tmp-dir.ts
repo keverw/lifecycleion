@@ -217,15 +217,15 @@ export class TmpDir {
   }
 
   public async initialize(): Promise<void> {
-    if (this.isInitialized) {
-      return;
-    }
-
     // `cleanup()` is terminal for the instance - `path` already throws after one - so a
     // create started afterwards could only ever produce a directory nothing can name and
     // nothing will remove. Refused loudly rather than leaked quietly.
     if (this.cleanupRequested) {
       throw new ErrTmpDirWasCleanedUp();
+    }
+
+    if (this.isInitialized) {
+      return;
     }
 
     if (this.initializing === null) {
@@ -235,6 +235,13 @@ export class TmpDir {
     }
 
     await this.initializing;
+
+    // `cleanup()` may have joined the create while it was in flight. The directory is
+    // removed by that cleanup, so the initializer must not report that it successfully
+    // produced a usable path after the instance became terminal.
+    if (this.cleanupRequested) {
+      throw new ErrTmpDirWasCleanedUp();
+    }
   }
 
   public async cleanup(): Promise<void> {

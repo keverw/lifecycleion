@@ -19,6 +19,7 @@ import {
   RetryUtilsErrRunnerNotPaused,
   RetryUtilsErrRunnerNotRunning,
 } from './retry-utils-errors';
+import { MAX_TIMER_MS } from '../../internal/timer-limits';
 
 interface CustomResult {
   message: string;
@@ -75,6 +76,9 @@ describe('RetryRunner', () => {
 
     runner.overrideGraceCancelPeriodMS(-1);
     expect(runner.graceCancelPeriodMS).toBe(1000);
+
+    runner.overrideGraceCancelPeriodMS(3e9);
+    expect(runner.graceCancelPeriodMS).toBe(MAX_TIMER_MS);
   });
 
   describe('run', () => {

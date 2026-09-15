@@ -2942,6 +2942,66 @@ describe('FileSink - entries written during close', () => {
     expect(sink.getHealth().droppedEntries).toBe(0);
   });
 
+  test('an oversized-line rotation cannot resume writing after close completes', async () => {
+    const sink = new FileSink({
+      logDir: tmpDir.path,
+      basename: 'rotate-close-race',
+    });
+
+    await sink.flush();
+
+    const internals = sink as unknown as {
+      closed: boolean;
+      currentLogSize: number;
+      maxSizeMB: number;
+      rotateFile: () => Promise<void>;
+      writeEntry: (queued: {
+        entry: LogEntry;
+        attempts: number;
+        formatted: string;
+        formatError: undefined;
+      }) => Promise<void>;
+    };
+
+    internals.currentLogSize = 1;
+    internals.maxSizeMB = 0;
+    internals.rotateFile = () => {
+      // The state visible when a real close wins while rotateFile() is suspended.
+      internals.closed = true;
+
+      return Promise.resolve();
+    };
+
+    const entry: LogEntry = {
+      timestamp: Date.now(),
+      type: 'info',
+      template: 'late line',
+      message: 'late line',
+    };
+
+    let writeError: unknown;
+
+    try {
+      await internals.writeEntry({
+        entry,
+        attempts: 0,
+        formatted: 'late line\n',
+        formatError: undefined,
+      });
+    } catch (error) {
+      writeError = error;
+    }
+
+    expect(writeError).toBeInstanceOf(Error);
+    expect((writeError as Error).message).toContain(
+      'Cannot write to closed sink',
+    );
+
+    // Let the ordinary close path release the real stream used by this focused probe.
+    internals.closed = false;
+    await sink.close();
+  });
+
   test('a UTC date change during close() does not rotate behind the shutdown', async () => {
     // The date branch of `rotateIfNeeded` was the one rotation with no close guard, and it
     // awaits `endStreamWithin(closeTimeoutMS)` - a fresh full-length wait begun inside a

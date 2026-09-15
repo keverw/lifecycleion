@@ -60,7 +60,7 @@ export function reportThroughHandler(
       // never raise one. Followed, it lands on the console rung like any other broken
       // handler.
       if (isPromise(result)) {
-        result
+        Promise.resolve(result)
           .catch((handlerError: unknown) => {
             reportToConsole(
               `${line()} (the failure handler also rejected: ${describeError(handlerError)})`,

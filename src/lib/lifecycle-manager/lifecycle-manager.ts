@@ -4349,7 +4349,13 @@ export class LifecycleManager
                     stopAttemptToken,
                     'graceful',
                   ),
-                () => {}, // Intentionally ignore errors after timeout
+                (error: unknown) => {
+                  this.logger
+                    .entity(name)
+                    .warn('Component stop failed after timeout', {
+                      params: { error: toError(error) },
+                    });
+                },
               )
               // Suppressed so it cannot become an unhandled rejection, and logged because
               // `handleLateStopResolution` mutates state in sequence: a throw partway
@@ -4594,7 +4600,13 @@ export class LifecycleManager
                     forceAttemptToken,
                     'force',
                   ),
-                () => {}, // Intentionally ignore errors after timeout
+                (error: unknown) => {
+                  this.logger
+                    .entity(name)
+                    .warn('Force shutdown failed after timeout', {
+                      params: { error: toError(error) },
+                    });
+                },
               )
               // Suppressed so it cannot become an unhandled rejection, and logged because
               // `handleLateStopResolution` mutates state in sequence: a throw partway

@@ -367,14 +367,15 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
    * Set the grace period for cancellation in milliseconds
    *
    * Overrides the default grace period of 1000ms
-   * Non-finite or negative values default to 1000ms. Use 0 for immediate force-cancel.
+   * Non-finite or negative values default to 1000ms. Finite values are capped at the
+   * runtime timer ceiling. Use 0 for immediate force-cancel.
    */
 
   public overrideGraceCancelPeriodMS(value: number): void {
     if (!isFinite(value) || value < 0) {
       this._gracePeriodMS = 1000;
     } else {
-      this._gracePeriodMS = value;
+      this._gracePeriodMS = Math.min(value, MAX_TIMER_MS);
     }
   }
 

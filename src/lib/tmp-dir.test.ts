@@ -258,15 +258,31 @@ describe('TmpDir', () => {
     const base = path.join(tempDir.path, 'cleanup-during-initialize');
     const dir = new TmpDir({ baseDirectory: base });
 
-    const [, cleanupResult] = await Promise.allSettled([
+    const [initializeResult, cleanupResult] = await Promise.allSettled([
       dir.initialize(),
       dir.cleanup(),
     ]);
 
+    expect(initializeResult.status).toBe('rejected');
+    if (initializeResult.status === 'rejected') {
+      expect(initializeResult.reason).toBeInstanceOf(ErrTmpDirWasCleanedUp);
+    }
     expect(cleanupResult.status).toBe('fulfilled');
     // Nothing orphaned: the leaf `initialize()` created was removed, not left behind for
     // an OS reaper to find.
     expect(await fs.readdir(base)).toEqual([]);
+  });
+
+  test('initialize() after cleanup rejects instead of silently succeeding', async () => {
+    const dir = await createTempDir({ baseDirectory: tempDir.path });
+
+    await dir.cleanup();
+
+    // Bun's matcher is awaitable at runtime, though its current type omits Thenable.
+    // eslint-disable-next-line @typescript-eslint/await-thenable
+    await expect(dir.initialize()).rejects.toBeInstanceOf(
+      ErrTmpDirWasCleanedUp,
+    );
   });
 
   test('cleanup() joins an initialize() retried after a failed one', async () => {

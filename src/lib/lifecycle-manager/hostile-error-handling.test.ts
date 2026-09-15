@@ -435,6 +435,88 @@ describe('LifecycleManager - hostile thrown values', () => {
     }
   }, 5000);
 
+  test('a stop rejection after its timeout is logged', async () => {
+    const lifecycle = new LifecycleManager({ logger });
+
+    class LateRejectingStop extends BaseComponent {
+      constructor() {
+        super(logger, {
+          name: 'late-stop-rejection',
+          shutdownGracefulTimeoutMS: 10,
+        });
+      }
+      public start(): void {}
+      public async stop(): Promise<void> {
+        await new Promise((resolve) => setTimeout(resolve, 30));
+        throw new Error('late graceful failure');
+      }
+    }
+
+    const component = new LateRejectingStop();
+
+    // Keep the regression fast while exercising the same post-timeout branch. The
+    // public constructor intentionally clamps this setting to at least one second.
+    (
+      component as unknown as { shutdownGracefulTimeoutMS: number }
+    ).shutdownGracefulTimeoutMS = 10;
+
+    await lifecycle.registerComponent(component);
+    await lifecycle.startComponent('late-stop-rejection');
+    await lifecycle.stopComponent('late-stop-rejection');
+
+    const report = await untilLogged(
+      arraySink,
+      'Component stop failed after timeout',
+      1000,
+    );
+
+    expect((report?.params?.['error'] as Error).message).toBe(
+      'late graceful failure',
+    );
+  });
+
+  test('a force-stop rejection after its timeout is logged', async () => {
+    const lifecycle = new LifecycleManager({ logger });
+
+    class LateRejectingForceStop extends BaseComponent {
+      constructor() {
+        super(logger, {
+          name: 'late-force-rejection',
+          shutdownForceTimeoutMS: 10,
+        });
+      }
+      public start(): void {}
+      public stop(): void {
+        throw new Error('enter force phase');
+      }
+      public async onShutdownForce(): Promise<void> {
+        await new Promise((resolve) => setTimeout(resolve, 30));
+        throw new Error('late force failure');
+      }
+    }
+
+    const component = new LateRejectingForceStop();
+
+    // As above, bypass only the public minimum so the test need not sleep for 500ms.
+    (
+      component as unknown as { shutdownForceTimeoutMS: number }
+    ).shutdownForceTimeoutMS = 10;
+
+    await lifecycle.registerComponent(component);
+    await lifecycle.startComponent('late-force-rejection');
+    await lifecycle.stopComponent('late-force-rejection');
+
+    const report = await untilLogged(
+      arraySink,
+      'Force shutdown failed after timeout',
+      1000,
+    );
+
+    expect((report?.params?.['error'] as Error).message).toBe(
+      'late force failure',
+    );
+  });
+
   test('a late startup completion whose handling fails is logged as such, not dropped or fatal', async () => {
     // The recovery body stops a component that finished starting after the manager gave
     // up on it. A failure there means that stop silently did not happen, which is what
