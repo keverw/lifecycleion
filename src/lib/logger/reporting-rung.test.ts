@@ -205,6 +205,28 @@ describe('reporting rungs survive a broken console', () => {
     });
   });
 
+  describe("Logger's public diagnostic event", () => {
+    test('a hostile payload and rejecting listener do not create an unhandled rejection', async () => {
+      const rejections = trackUnhandledRejections();
+      const logger = new Logger({ sinks: [] });
+      const hostile = Object.defineProperty({}, 'message', {
+        get() {
+          throw new Error('message getter failure');
+        },
+      });
+
+      logger.on('diagnostic', () =>
+        Promise.reject(new Error('diagnostic listener failure')),
+      );
+
+      breakConsoleError();
+      logger.emit('diagnostic', hostile);
+      await sleep(20);
+
+      expect(rejections.seen).toEqual([]);
+    });
+  });
+
   describe('sink failures', () => {
     test('a synchronously throwing sink does not escape the log call', async () => {
       const sink: LogSink = {

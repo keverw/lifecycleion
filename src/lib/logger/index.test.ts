@@ -2945,6 +2945,35 @@ describe('Logger diagnostic channel', () => {
     }
   });
 
+  test('guards a malformed diagnostic payload when its listener throws', () => {
+    const consoleError = spyOn(console, 'error').mockImplementation(() => {});
+    const logger = new Logger({ sinks: [], callProcessExit: false });
+    const hostile = Object.defineProperty({}, 'message', {
+      get() {
+        throw new Error('message getter failure');
+      },
+    });
+
+    logger.on('diagnostic', () => {
+      throw new Error('diagnostic listener failure');
+    });
+
+    try {
+      for (const payload of [null, 42, hostile]) {
+        expect(() => {
+          logger.emit('diagnostic', payload);
+        }).not.toThrow();
+      }
+
+      expect(consoleError).toHaveBeenCalledTimes(3);
+      for (const call of consoleError.mock.calls) {
+        expect(String(call[0])).toContain('diagnostic listener failure');
+      }
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
   test('preserves the original diagnostic when its only listener rejects', async () => {
     const consoleError = spyOn(console, 'error').mockImplementation(() => {});
     const logger = new Logger({ sinks: [], callProcessExit: false });

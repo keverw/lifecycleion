@@ -10,7 +10,7 @@ import { MAX_RENDER_LENGTH } from '../internal/render-budget';
 import { isNumber } from '../is-number';
 import { isPromise } from '../is-promise';
 import { describeError, isErrorValue, toError } from '../to-error';
-import { readMember } from '../internal/read-member';
+import { readMember, readUnknownMember } from '../internal/read-member';
 import { reportToConsole } from '../internal/report-to-console';
 import {
   createFormatReporter,
@@ -1297,13 +1297,15 @@ export class Logger extends EventEmitter {
     // The diagnostic event is already the logger's failure channel. A failure in one of
     // its listeners cannot be sent through it again, so it ends at the console rung. Keep
     // the original diagnostic in that terminal line too: when this listener is the only
-    // destination, reporting only its secondary failure would discard the first one.
+    // destination, reporting only its secondary failure would discard the first one. The
+    // payload is still untrusted because `Logger` inherits public `emit()`; a caller can
+    // emit this event with a primitive or a throwing `message` accessor.
     if (event === 'diagnostic') {
-      const diagnostic = data as LoggerDiagnostic | undefined;
+      const message = readUnknownMember(data, 'message');
       reportToConsole(
-        diagnostic === undefined
+        typeof message !== 'string'
           ? failure.message
-          : `${diagnostic.message} (diagnostic listener also failed: ${describeError(cause)})`,
+          : `${message} (diagnostic listener also failed: ${describeError(cause)})`,
       );
       return;
     }

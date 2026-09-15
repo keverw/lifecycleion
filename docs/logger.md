@@ -1865,7 +1865,10 @@ transform anything. See [Built-In Sinks](#built-in-sinks).
 It is the terminal rung: if a diagnostic listener or diagnostic sink fails, the original
 diagnostic and that secondary failure are written there directly and never dispatched
 again. The console call is also guarded, so a broken console cannot make `logger.info()`
-throw or create an unhandled rejection.
+throw or create an unhandled rejection. Because `Logger` also exposes the inherited public
+`emit()`, a malformed manually emitted `'diagnostic'` payload is treated as untrusted; if
+its listener fails, an unreadable or non-string `message` is omitted rather than escaping
+the terminal guard.
 
 ### Routing Diagnostics Away From the Console
 
