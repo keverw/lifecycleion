@@ -121,8 +121,6 @@ console.log(created.status); // 201
 
 ## HTTPClient Configuration
 
-The default `FetchAdapter` cannot confirm upload completion before a redirect or retry. For Node uploads that require attempts to finish sending before the next dispatch, select `NodeAdapter`; see [Uploads That Outlive the Response](#uploads-that-outlive-the-response).
-
 ```typescript
 interface HTTPClientConfig {
   adapter?: HTTPAdapter; // Default: FetchAdapter
@@ -290,7 +288,11 @@ interface HTTPResponse<T = unknown> {
 
 #### Uploads That Outlive the Response
 
-Most REST APIs read and process the whole upload before they answer, so by the time you have a response the body is long gone out. If that is your situation, ignore `requestBodySettled`: it is there on any request that had a body, and on that shape it has nothing to tell you. It resolves with `undefined`. It exists for the uncommon shapes where the answer can arrive first: early-ack, unbuffered, and duplex endpoints, and `NodeAdapter` only. `FetchAdapter` never sets it - `fetch()` gives it nothing to settle from - and the redirect and retry waits described below are skipped on an adapter that does not set it; see [FetchAdapter](#fetchadapter-default).
+For ordinary requests, the server receives the body and then responds. No separate upload tracking is needed. This section covers the less common case where a server responds early, while the client may still be sending the body. Receiving a response confirms that the server answered; it does not necessarily confirm that the entire upload was sent.
+
+`NodeAdapter` exposes `requestBodySettled` on bodied requests to track that separate upload outcome. The client uses it to wait before following a redirect or dispatching a retry. `FetchAdapter` exposes the response status and body, but no separate upload-completion signal, so it cannot provide that wait.
+
+In browsers, `XHRAdapter` adds upload progress but currently does not expose `requestBodySettled` either. Progress reporting does not provide the same client-managed wait. XHR also follows redirects automatically before this adapter can detect them; browser `FetchAdapter` blocks redirects instead. Neither browser adapter supports client-managed redirect following.
 
 With request buffering disabled, as with nginx `proxy_request_buffering off` or any endpoint that acks a streaming upload as soon as it has what it needs, the answer arrives while the upload is still going. The response is real and is delivered immediately, and what happens to the rest of the body afterwards used to be invisible: it can fail on its own (a `File` that yields fewer bytes than its `Blob.size` puts a body on the wire short of its `Content-Length`), or be cut short by the adapter's stall watchdog seconds after you already read a clean `2xx`.
 
@@ -1058,7 +1060,7 @@ const client = new HTTPClient({ adapter: new FetchAdapter() });
 
 No configuration options. Adapter-level behavior is controlled through `HTTPClientConfig`.
 
-**Upload visibility.** `fetch()` exposes neither upload progress nor the moment the request body finished going out. `onUploadProgress` therefore fires `0` when the request is dispatched and `1` when `fetch()` resolves - which is when the _response headers_ arrive, not a confirmation that the body is on the wire. For the same reason the adapter never sets `requestBodySettled` (see [Uploads That Outlive the Response](#uploads-that-outlive-the-response)), so the client's wait before a followed `307`/`308` hop or a retry does not apply on this adapter: a server that answers a large `POST` before consuming it - an early `307`, a `503` during the upload - gets the next hop or attempt dispatched while the runtime may still be sending the first body. Every `AdapterRequest` body is in memory (a string, a `Uint8Array` or a `FormData`), so nothing is lost or corrupted by that; it is the double-send the wait exists to avoid that this adapter cannot rule out. On Node use `NodeAdapter`, which reports both, for uploads to early-ack endpoints.
+**Upload visibility.** The adapter returns the HTTP status and reads the response body as usual. Fetch does not expose separate upload progress or completion, so `onUploadProgress` fires `0` at dispatch and `1` when response headers arrive. The adapter does not set `requestBodySettled`. This matters for servers that respond before an upload finishes: a retry or, on server runtimes, a followed redirect may overlap the earlier upload. See [Uploads That Outlive the Response](#uploads-that-outlive-the-response) for the Node and browser distinctions.
 
 **Browser constraints (enforced at client construction):**
 
