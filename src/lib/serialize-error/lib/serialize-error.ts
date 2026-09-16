@@ -85,7 +85,7 @@ const UNSERIALIZABLE_FUNCTION = '<function>';
 const UNSERIALIZABLE_TEXT = '<unserializable: text>';
 
 /**
- * Check if a value looks like an Error (has name, message, and stack).
+ * Check if a value looks like an Error (has name and message; stack is optional).
  *
  * Guarded: `in` is a trappable operation, so a `Proxy` with a hostile `has` threw out of
  * what is only a shape test. This runs on the receiving end of IPC and on error paths, so
@@ -93,14 +93,13 @@ const UNSERIALIZABLE_TEXT = '<unserializable: text>';
  */
 export function isErrorLike(
   value: unknown,
-): value is { name: string; message: string; stack: string } {
+): value is { name: string; message: string; stack?: string } {
   try {
     return (
       typeof value === 'object' &&
       value !== null &&
       'name' in value &&
-      'message' in value &&
-      'stack' in value
+      'message' in value
     );
   } catch {
     return false;
@@ -474,7 +473,8 @@ function serializeErrorInner(
 
 /**
  * Turn a serialized error object back into a throwable Error.
- * At most 100,000 extra properties are copied; surplus extras are omitted.
+ * Reconstructs error-shaped causes and aggregate members with a shared 100,000
+ * property/entry budget and a depth cap. Surplus extras are omitted.
  * Useful on the receiving end of IPC / RPC when you need to re-throw.
  *
  * The extras are installed with {@link defineEntry} rather than `Object.assign`. Assign
@@ -486,56 +486,104 @@ function serializeErrorInner(
  * wire and is not obliged to match {@link SerializedError}.
  */
 export function deserializeError(obj: SerializedError): Error {
-  // Checked despite the declared type: this runs on data that arrived over IPC, where the
-  // annotation is a claim rather than a guarantee.
-  const source: Record<string, unknown> =
-    obj !== null && typeof obj === 'object' ? obj : {};
-
-  const rawMessage = source['message'];
-  const rawName = source['name'];
-  const rawStack = source['stack'];
-
-  // An absent message stays absent. A payload that carries none is the ordinary shape of
-  // a partial IPC message, and `describeValue` turned that into the literal text
-  // `undefined` or `null` - a fabricated message, logged and re-thrown as though the
-  // sender had written it. Only a message that is genuinely *there* but not a string is
-  // described, which is what the defensive read was for.
-  const error = new Error(
-    typeof rawMessage === 'string'
-      ? rawMessage
-      : rawMessage === undefined || rawMessage === null
-        ? ''
-        : describeValue(rawMessage),
-  );
-
-  if (typeof rawName === 'string') {
-    error.name = rawName;
-  }
-
-  // Empty is absent, as it is for `message` above: a payload carrying `stack: ''` is a
-  // sender that had none, and assigning it overwrote the real stack this `new Error` was
-  // just constructed with - leaving a re-thrown error with no trace at either end.
-  if (typeof rawStack === 'string' && rawStack !== '') {
-    error.stack = rawStack;
-  }
-
+  const seen = new WeakMap<object, Error>();
   let extrasLeft = MAX_SERIALIZED_NODES;
-
-  // Enumeration itself still allocates all keys, but no surplus getter is read
-  // and no surplus property is allocated on the reconstructed error.
-  for (const key of Object.keys(source)) {
-    if (key === 'name' || key === 'message' || key === 'stack') {
-      continue;
+  const read = (source: Record<string, unknown>, key: string): unknown => {
+    try {
+      return source[key];
+    } catch {
+      return UNSERIALIZABLE_VALUE;
     }
-
-    if (extrasLeft-- <= 0) {
-      break;
+  };
+  const isArray = (value: unknown): value is unknown[] => {
+    try {
+      return Array.isArray(value);
+    } catch {
+      return false;
     }
-
-    defineEntry(error as unknown as Record<string, unknown>, key, source[key]);
-  }
-
-  return error;
+  };
+  const restoreNested = (value: unknown, depth: number): unknown => {
+    if (!isErrorLike(value)) {
+      return value; // Error causes may be arbitrary values, not just errors.
+    }
+    if (depth >= MAX_RENDER_DEPTH || extrasLeft <= 0) {
+      return TRUNCATED;
+    }
+    return restore(value, depth);
+  };
+  const restore = (value: unknown, depth: number): Error => {
+    const source: Record<string, unknown> =
+      value !== null && typeof value === 'object'
+        ? (value as Record<string, unknown>)
+        : {};
+    const cached = seen.get(source);
+    if (cached) {
+      return cached;
+    }
+    const rawMessage = read(source, 'message');
+    const rawName = read(source, 'name');
+    const rawStack = read(source, 'stack');
+    const error = new Error(
+      typeof rawMessage === 'string'
+        ? rawMessage
+        : rawMessage === undefined || rawMessage === null
+          ? ''
+          : describeValue(rawMessage),
+    );
+    seen.set(source, error);
+    if (typeof rawName === 'string') {
+      error.name = rawName;
+    }
+    if (typeof rawStack === 'string' && rawStack !== '') {
+      error.stack = rawStack;
+    }
+    let keys: string[];
+    try {
+      keys = Object.keys(source);
+    } catch {
+      return error;
+    }
+    for (const key of keys) {
+      if (key === 'name' || key === 'message' || key === 'stack') {
+        continue;
+      }
+      if (extrasLeft-- <= 0) {
+        break;
+      }
+      let extra = read(source, key);
+      if (key === 'cause') {
+        extra = restoreNested(extra, depth + 1);
+      } else if (key === 'errors' && isArray(extra)) {
+        const entries = extra;
+        const restored: unknown[] = [];
+        const length = read(
+          entries as unknown as Record<string, unknown>,
+          'length',
+        );
+        if (typeof length === 'number') {
+          for (let index = 0; index < length; index++) {
+            if (extrasLeft-- <= 0) {
+              restored.push(TRUNCATED);
+              break;
+            }
+            restored.push(
+              restoreNested(
+                read(
+                  entries as unknown as Record<string, unknown>,
+                  String(index),
+                ),
+                depth + 1,
+              ),
+            );
+          }
+        }
+        extra = restored;
+      }
+      defineEntry(error as unknown as Record<string, unknown>, key, extra);
+    }
+    return error;
+  };
+  return restore(obj, 0);
 }
 
 // ── internal helpers ────────────────────────────────────────────────

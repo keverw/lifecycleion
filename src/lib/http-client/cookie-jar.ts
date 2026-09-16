@@ -1046,6 +1046,7 @@ export class CookieJar {
       return false;
     }
 
+    const now = Date.now();
     for (const stored of bucket.values()) {
       const scope = this.storedScopes.get(stored);
 
@@ -1062,6 +1063,12 @@ export class CookieJar {
         (this.pathMatches(path, scope.path) ||
           this.pathMatches(scope.path, path))
       ) {
+        // Unreadable live cookie fields must not throw or authorize an insecure
+        // replacement. Only a trusted expired snapshot releases the secure scope.
+        const cookie = this.snapshotForSend(stored);
+        if (cookie !== null && this.isExpired(cookie, now)) {
+          continue;
+        }
         return true;
       }
     }
@@ -1090,8 +1097,7 @@ export class CookieJar {
       }
 
       try {
-        new URL(`http://[${inner}]/`);
-        return inner.toLowerCase();
+        return this.unbracketHost(new URL(`http://[${inner}]/`).hostname);
       } catch {
         return null;
       }
@@ -1099,8 +1105,7 @@ export class CookieJar {
 
     if (host.includes(':')) {
       try {
-        new URL(`http://[${host}]/`);
-        return host.toLowerCase();
+        return this.unbracketHost(new URL(`http://[${host}]/`).hostname);
       } catch {
         return null;
       }
@@ -1337,13 +1342,13 @@ export class CookieJar {
     if (cookie.maxAge !== undefined) {
       const expiresAt = cookie.createdAt + cookie.maxAge * 1000;
 
-      return !Number.isFinite(expiresAt) || now > expiresAt;
+      return !Number.isFinite(expiresAt) || now >= expiresAt;
     }
 
     if (cookie.expires) {
       const expiresAt = cookie.expires.getTime();
 
-      return Number.isNaN(expiresAt) || now > expiresAt;
+      return Number.isNaN(expiresAt) || now >= expiresAt;
     }
 
     return false;

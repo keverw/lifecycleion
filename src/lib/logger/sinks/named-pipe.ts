@@ -227,10 +227,17 @@ class NonBlockingPipeStream extends Writable {
   public readonly fd: number;
   private retryTimer?: NodeJS.Timeout;
   private cancelWrite?: () => void;
+  private partialWriteFailures = new WeakSet<Error>();
 
   constructor(descriptor: number) {
     super({ highWaterMark: 16 * 1024, autoDestroy: true, emitClose: true });
     this.fd = descriptor;
+  }
+
+  public consumePartialWriteFailure(error: Error): boolean {
+    // Writable also passes the same error to buffered, never-started writes.
+    // Only the first callback belongs to the partially delivered record.
+    return this.partialWriteFailures.delete(error);
   }
 
   public override _write(
@@ -257,7 +264,20 @@ class NonBlockingPipeStream extends Writable {
         this.retryTimer = undefined;
       }
 
-      callback(error);
+      if (error && offset > 0) {
+        const partialError = new Error(
+          'Named pipe record was only partially written',
+          { cause: error },
+        );
+        Object.defineProperty(partialError, 'bytesWritten', {
+          value: offset,
+          enumerable: true,
+        });
+        this.partialWriteFailures.add(partialError);
+        callback(partialError);
+      } else {
+        callback(error);
+      }
     };
 
     const writeRemaining = (): void => {
@@ -2381,10 +2401,15 @@ export class NamedPipeSink implements LogSink {
             this.suppressedWriteErrors.add(error);
           }
 
+          const wasPartiallyWritten =
+            stream instanceof NonBlockingPipeStream &&
+            stream.consumePartialWriteFailure(error);
           this.handleError('write', error, {
             attempt: queued.attempts + 1,
             disposition:
-              queued.attempts < this.maxRetries ? 'retrying' : 'lost',
+              !wasPartiallyWritten && queued.attempts < this.maxRetries
+                ? 'retrying'
+                : 'lost',
             entry: queued.entry,
             // Only the stream still in hand may be marked unhealthy by this. The callback
             // runs later than the write that started it, and `reconnect()` may have put a
@@ -2394,8 +2419,12 @@ export class NamedPipeSink implements LogSink {
             countsAgainstHealth: this.pipeStream === stream,
           });
 
-          // Already reported just above, cap or no cap.
-          this.requeue(queued, true);
+          // Never replay a record whose prefix may already have been consumed.
+          if (wasPartiallyWritten) {
+            this.countDropped('write');
+          } else {
+            this.requeue(queued, true);
+          }
 
           return;
         }

@@ -29,7 +29,7 @@ export class RetryPolicy {
    */
 
   public get policyInfo(): RetryPolicyValidated {
-    return this.policy;
+    return { ...this.policy };
   }
 
   /**

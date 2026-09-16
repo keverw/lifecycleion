@@ -295,6 +295,7 @@ export class ProcessSignalManager {
   private debugSignalListener?: () => void;
   private keypressHandler?: (str: string, key: unknown) => void;
   private _isAttached = false;
+  private didResumeStdin = false;
 
   // Throttle state for keyboard events (default 200ms, 0 disables)
   // Track throttle separately per action type so different keys don't interfere with each other
@@ -792,9 +793,15 @@ export class ProcessSignalManager {
 
     // Resume stdin only when first instance attaches
     if (isFirstInstance) {
+      const wasFlowing = process.stdin.readableFlowing;
       try {
         process.stdin.resume();
+        this.didResumeStdin = true;
       } catch (error) {
+        // A custom resume can throw after changing flow. Only undo a change
+        // we made; a failure before resuming does not confer stdin ownership.
+        this.didResumeStdin =
+          wasFlowing !== true && process.stdin.readableFlowing === true;
         // resume() failed - clean up everything
         this.cleanupKeypressHandler(shared);
         throw error;
@@ -918,6 +925,8 @@ export class ProcessSignalManager {
    */
   private restoreStdin(): void {
     const shared = getSharedState();
+    const didResume = this.didResumeStdin;
+    this.didResumeStdin = false;
 
     // Remove handler if it exists
     if (this.keypressHandler) {
@@ -932,7 +941,7 @@ export class ProcessSignalManager {
 
     // Remove this instance from shared state even if we never registered a handler.
     // (Set.delete is a safe no-op if we weren't attached.)
-    shared.attachedInstances.delete(this.instanceID);
+    const wasAttachedToStdin = shared.attachedInstances.delete(this.instanceID);
 
     // Re-check ownership AFTER deletion to get accurate state
     // (avoids race where ownership is transferred to us between capture and deletion)
@@ -992,7 +1001,11 @@ export class ProcessSignalManager {
     // above returns here with an instance freshly attached, and the stale flag then paused
     // stdin under it: the new instance's keypress handler was registered and silent. The
     // set is the live answer.
-    if (isLastInstance && shared.attachedInstances.size === 0) {
+    if (
+      (wasAttachedToStdin || didResume) &&
+      isLastInstance &&
+      shared.attachedInstances.size === 0
+    ) {
       try {
         process.stdin.pause();
       } catch {

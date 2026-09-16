@@ -587,7 +587,7 @@ Detach signal handlers and stop listening for process signals and keyboard event
 
 - Unregisters all signal handlers
 - Restores stdin to normal mode
-- Pauses stdin
+- Pauses stdin when releasing the last keyboard attachment. Non-TTY attach/detach and registration failure before keyboard setup leave stdin flow unchanged.
 - Calling multiple times is safe (idempotent)
 
 If restoring terminal mode fails, `detach()` still returns normally and reports the

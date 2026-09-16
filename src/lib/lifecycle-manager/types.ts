@@ -581,7 +581,7 @@ export interface ComponentSignalResult {
   timedOut: boolean;
 
   /** Machine-readable outcome code */
-  code: 'called' | 'no_handler' | 'timeout' | 'error';
+  code: 'called' | 'no_handler' | 'unavailable' | 'timeout' | 'error';
 }
 
 /**

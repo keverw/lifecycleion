@@ -1782,3 +1782,132 @@ describe('ProcessSignalManager', () => {
     });
   });
 });
+
+describe('ProcessSignalManager - piped stdin ownership', () => {
+  test.each([false, true])(
+    'leaves non-TTY input isFlowing (attach failure=%p)',
+    (shouldFailAttach) => {
+      const descriptor = Object.getOwnPropertyDescriptor(
+        process.stdin,
+        'isTTY',
+      );
+      const resume = spyOn(process.stdin, 'resume').mockImplementation(
+        () => process.stdin,
+      );
+      const pause = spyOn(process.stdin, 'pause').mockImplementation(
+        () => process.stdin,
+      );
+      const manager = new ProcessSignalManager({ onReloadRequested() {} });
+      const on = process.on.bind(process);
+      const registration = spyOn(process, 'on').mockImplementation(((
+        event: string,
+        listener: (...args: unknown[]) => void,
+      ) => {
+        if (shouldFailAttach && event === 'SIGHUP') {
+          throw new Error('registration refused');
+        }
+        return on(event, listener);
+      }) as typeof process.on);
+      Object.defineProperty(process.stdin, 'isTTY', {
+        configurable: true,
+        value: false,
+      });
+      try {
+        if (shouldFailAttach) {
+          expect(() => manager.attach()).toThrow('registration refused');
+        } else {
+          manager.attach();
+          manager.detach();
+        }
+        expect(resume).not.toHaveBeenCalled();
+        expect(pause).not.toHaveBeenCalled();
+      } finally {
+        manager.detach();
+        registration.mockRestore();
+        resume.mockRestore();
+        pause.mockRestore();
+        if (descriptor) {
+          Object.defineProperty(process.stdin, 'isTTY', descriptor);
+        } else {
+          delete (process.stdin as { isTTY?: boolean }).isTTY;
+        }
+      }
+    },
+  );
+});
+
+test.each([
+  [false, false],
+  [true, false],
+  [false, true],
+])(
+  'throwing resume preserves prior flow (isFlowing=%p, doesChangeBeforeThrow=%p)',
+  (wasFlowing, doesChangeBeforeThrow) => {
+    const keys = ['isTTY', 'isRaw', 'readableFlowing', 'setRawMode'] as const;
+    const descriptors = keys.map(
+      (key) =>
+        [key, Object.getOwnPropertyDescriptor(process.stdin, key)] as const,
+    );
+    let isFlowing = wasFlowing;
+    Object.defineProperty(process.stdin, 'isTTY', {
+      configurable: true,
+      value: true,
+    });
+    Object.defineProperty(process.stdin, 'isRaw', {
+      configurable: true,
+      writable: true,
+      value: false,
+    });
+    Object.defineProperty(process.stdin, 'readableFlowing', {
+      configurable: true,
+      get: () => isFlowing,
+    });
+    Object.defineProperty(process.stdin, 'setRawMode', {
+      configurable: true,
+      writable: true,
+      value: (isRaw: boolean) => {
+        process.stdin.isRaw = isRaw;
+        return process.stdin;
+      },
+    });
+    const on = process.stdin.on.bind(process.stdin);
+    const register = spyOn(process.stdin, 'on').mockImplementation(((
+      event: string,
+      listener: (...args: unknown[]) => void,
+    ) =>
+      event === 'keypress'
+        ? process.stdin
+        : on(event, listener)) as typeof process.stdin.on);
+    const resume = spyOn(process.stdin, 'resume').mockImplementation(() => {
+      if (doesChangeBeforeThrow) {
+        isFlowing = true;
+      }
+      throw new Error('resume refused');
+    });
+    const pause = spyOn(process.stdin, 'pause').mockImplementation(() => {
+      isFlowing = false;
+      return process.stdin;
+    });
+    const manager = new ProcessSignalManager({ onReloadRequested() {} });
+    try {
+      expect(() => manager.attach()).toThrow('resume refused');
+      expect(pause).toHaveBeenCalledTimes(
+        doesChangeBeforeThrow && !wasFlowing ? 1 : 0,
+      );
+      expect(isFlowing).toBe(wasFlowing);
+      expect(manager.isAttached).toBe(false);
+    } finally {
+      manager.detach();
+      register.mockRestore();
+      resume.mockRestore();
+      pause.mockRestore();
+      for (const [key, descriptor] of descriptors) {
+        if (descriptor) {
+          Object.defineProperty(process.stdin, key, descriptor);
+        } else {
+          Reflect.deleteProperty(process.stdin, key);
+        }
+      }
+    }
+  },
+);

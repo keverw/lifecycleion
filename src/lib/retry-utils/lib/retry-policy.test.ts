@@ -291,3 +291,12 @@ describe('RetryPolicy', () => {
     expect(policy.lastError).toBe(null);
   });
 });
+
+test('policyInfo is a snapshot that cannot bypass delay validation', () => {
+  const policy = new RetryPolicy({ strategy: 'fixed', delayMS: 100 });
+  const info = policy.policyInfo;
+  if (info.strategy === 'fixed') {
+    info.delayMS = NaN;
+  }
+  expect(policy.shouldRetry(new Error('retry')).delayMS).toBe(100);
+});

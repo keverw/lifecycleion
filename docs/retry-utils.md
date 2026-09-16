@@ -172,7 +172,7 @@ Resets the policy to its initial state, clearing all errors and attempt tracking
 
 | Property                 | Type                   | Description                                                                                                  |
 | ------------------------ | ---------------------- | ------------------------------------------------------------------------------------------------------------ |
-| `policyInfo`             | `RetryPolicyValidated` | The validated policy settings                                                                                |
+| `policyInfo`             | `RetryPolicyValidated` | A fresh snapshot of the validated policy settings                                                            |
 | `attempts`               | `number`               | Total attempts made (initial + retries)                                                                      |
 | `retryCount`             | `number`               | Number of retries (excluding initial attempt)                                                                |
 | `maxRetryAttempts`       | `number`               | Maximum retry attempts allowed                                                                               |
@@ -314,7 +314,7 @@ const operation = async (reportResult, signal) => {
 | `retryTimeRemaining`     | `number`               | MS until next retry, or `-1` if none pending                                                                                                                                                                                                          |
 | `timeTakenMS`            | `number`               | Total operation time (includes all retries and delays). Resets when calling `run()`, `resume()`, or `forceTry()` from terminal states. Does NOT reset when `forceTry()` accelerates a pending retry. Freezes when operation ends. `-1` if not started |
 | `attemptTimeTakenMS`     | `number`               | Current attempt duration in MS. While an attempt is running, shows elapsed time. When no attempt is running, shows the duration of the last completed attempt. `-1` if no attempt has run yet                                                         |
-| `policyInfo`             | `RetryPolicyValidated` | The validated policy settings (all options resolved to their defaults)                                                                                                                                                                                |
+| `policyInfo`             | `RetryPolicyValidated` | A fresh snapshot of the validated policy settings (all options resolved to their defaults)                                                                                                                                                            |
 | `graceCancelPeriodMS`    | `number`               | How long `cancel()` waits for the operation to respond before force-stopping (default: 1000ms)                                                                                                                                                        |
 
 ### Methods

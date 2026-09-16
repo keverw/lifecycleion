@@ -180,6 +180,13 @@
 
 ## 1.0.0 (Unreleased)
 
+- Bound bulk startup deadlines even with a hung start or rollback, prevent overlapping retries during late startup cleanup, and block signal/message/value handlers during unsafe component transitions. Shutdown notification logger failures no longer prevent signal-driven shutdown.
+- Preserve piped stdin flow when detaching or rolling back an attachment that never acquired stdin.
+- Default temporary directories to private `0o700` permissions, with a validated `mode` option for callers needing other permission bits; existing parent permissions are unchanged.
+- Avoid automatic replay of partially written FIFO records, reporting partial loss with byte counts. Omit caller-controlled property paths from default diagnostic messages.
+- Restore nested error causes and aggregate members with bounded reconstruction, preserve stackless error-like payloads, and return retry policy snapshots to prevent validation bypass.
+- Preserve HEAD on 303 redirects, canonicalize IPv6 cookie domains, and ignore expired Secure cookies when evaluating insecure replacements.
+
 - Report messages refused during a component's own teardown as `stopped` with no handler error; preserve `not_found` for missing targets. During bulk shutdown, running siblings remain messageable until their own teardown begins. Add coverage for both individual stop phases and messaging/broadcasts to running siblings during bulk shutdown.
 - Forward `includeStopped` and `includeStalled` through component-scoped `getValue()` calls, matching the manager-level API; cover both options with integration tests.
 - Fail closed on invalid payload-array lengths and hidden indexes beyond the advertised length during redaction. Preserve entry-budget limits, including at the exact budget boundary, without enumerating exhausted arrays.

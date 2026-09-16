@@ -2417,7 +2417,7 @@ describe('Logger - an options bag that will not be read', () => {
 describe('Logger - a diagnostic must not carry what the line above it masked', () => {
   const SECRET = 'hunter2secret';
 
-  test('a redaction failure message names the path but not the thrown text', async () => {
+  test('a redaction failure message omits the path and thrown text', async () => {
     // With no `diagnosticSinks`, a diagnostic falls back to the ordinary log sinks - the
     // same files and pipes the masked line went to. A redaction failure's cause is derived
     // from the value being masked, so a message carrying it routed around the masking.
@@ -2441,7 +2441,7 @@ describe('Logger - a diagnostic must not carry what the line above it masked', (
     await sleep(20);
 
     expect(seen).toHaveLength(1);
-    expect(seen[0]?.message).toBe('Redaction failed for password');
+    expect(seen[0]?.message).toBe('Redaction failed');
     expect(seen[0]?.message).not.toContain(SECRET);
     // The cause is still there in full for a listener that asked for it.
     expect(seen[0]?.error.message).toContain(SECRET);
@@ -3453,4 +3453,27 @@ describe('Logger diagnostic channel', () => {
       logger.unregisterReportErrorListener();
     }
   });
+});
+
+test('default diagnostic messages omit caller-controlled key names', async () => {
+  const secret = 'secret-used-as-property-name';
+  const sink = new ArraySink();
+  const diagnostics: LoggerDiagnostic[] = [];
+  const logger = new Logger({ sinks: [sink], callProcessExit: false });
+  logger.on('diagnostic', (diagnostic) => {
+    diagnostics.push(diagnostic as LoggerDiagnostic);
+  });
+  const params = {};
+  Object.defineProperty(params, secret, {
+    enumerable: true,
+    get() {
+      throw new Error('read refused');
+    },
+  });
+  logger.info('value={{' + secret + '}}', { params, redactedKeys: [secret] });
+  await sleep(10);
+  expect(diagnostics).toHaveLength(1);
+  expect(diagnostics[0]?.message).toBe('Redaction failed');
+  expect(diagnostics[0]?.path).toContain(secret);
+  expect(sink.logs.every((log) => !log.message.includes(secret))).toBe(true);
 });

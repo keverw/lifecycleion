@@ -969,3 +969,80 @@ test('deserializeError bounds extra-property reads while preserving error identi
   expect(Object.hasOwn(error, 'surplus')).toBe(false);
   expect(didReadSurplus).toBe(false);
 });
+
+test('restores nested causes and aggregate members while preserving non-error causes', () => {
+  const original = new AggregateError(
+    [new Error('member', { cause: new Error('inner') }), 'plain'],
+    'outer',
+    { cause: new Error('cause') },
+  );
+  const restored = deserializeError(
+    JSON.parse(JSON.stringify(serializeError(original))),
+  ) as AggregateError;
+  expect(restored.cause).toBeInstanceOf(Error);
+  expect(restored.errors[0]).toBeInstanceOf(Error);
+  expect(restored.errors[0].cause).toBeInstanceOf(Error);
+  expect(restored.errors[1]).toBe('plain');
+  const cause = { status: 404 };
+  expect(
+    deserializeError({ name: 'Error', message: 'outer', cause }).cause,
+  ).toBe(cause);
+});
+
+test('preserves stackless error payloads when serialized again', () => {
+  const value = {
+    name: 'CustomError',
+    message: 'outer',
+    cause: { name: 'Error', message: 'inner' },
+  };
+  expect(isErrorLike(value)).toBe(true);
+  expect(
+    serializeError(JSON.parse(JSON.stringify(serializeError(value)))),
+  ).toMatchObject(value);
+});
+
+test('nested deserialization handles cycles, depth limits, and prototype keys', () => {
+  const cyclic: any = { name: 'Error', message: 'cycle' };
+  cyclic.cause = cyclic;
+  const restored = deserializeError(cyclic);
+  expect(restored.cause).toBe(restored);
+  let deep: any = { name: 'Error', message: 'leaf' };
+  for (let i = 0; i < 150; i++) {
+    deep = { name: 'Error', message: 'outer', cause: deep };
+  }
+  let cursor: any = deserializeError(deep);
+  for (let i = 0; i < 100; i++) {
+    cursor = cursor.cause;
+  }
+  expect(typeof cursor).toBe('string');
+  const malicious = deserializeError(
+    JSON.parse(
+      '{"name":"Error","message":"outer","cause":{"name":"Error","message":"inner","__proto__":{"polluted":true}}}',
+    ),
+  );
+  expect(malicious.cause).toBeInstanceOf(Error);
+  expect((malicious.cause as any).polluted).toBeUndefined();
+  expect(Object.hasOwn(malicious.cause as object, '__proto__')).toBe(true);
+});
+
+test('deserialization does not probe through a revoked aggregate member container', () => {
+  const { proxy, revoke } = Proxy.revocable([], {});
+  revoke();
+  const restored = deserializeError({
+    name: 'AggregateError',
+    message: 'outer',
+    errors: proxy,
+  });
+  expect((restored as AggregateError).errors).toBe(proxy);
+});
+
+test('nested data bags with name and message retain their own fields', () => {
+  const bag = { name: 'User', message: 'hello', role: 'member' };
+  const payload = serializeError(
+    Object.assign(new Error('outer'), { context: bag }),
+  );
+  expect(payload.context).toEqual(bag);
+  expect(
+    (deserializeError(payload) as Error & { context: unknown }).context,
+  ).toEqual(bag);
+});

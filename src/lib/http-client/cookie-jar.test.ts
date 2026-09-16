@@ -2752,3 +2752,68 @@ describe('CookieJar', () => {
     });
   });
 });
+
+test('expired secure cookies do not block insecure replacement', () => {
+  const jar = new CookieJar();
+  jar.parseSetCookieHeader(
+    'session=secure; Secure; Max-Age=1; Path=/',
+    'https://example.com/',
+  );
+  const clock = Date.now;
+  Date.now = () => clock() + 2000;
+  try {
+    jar.parseSetCookieHeader('session=http; Path=/', 'http://example.com/');
+    expect(jar.getCookieHeaderString('http://example.com/')).toBe(
+      'session=http',
+    );
+  } finally {
+    Date.now = clock;
+  }
+});
+
+test('IPv6 domains use a shared canonical form for programmatic, header and restored cookies', () => {
+  const jar = new CookieJar();
+  expect(
+    jar.setCookie({ name: 'a', value: '1', domain: '0:0:0:0:0:0:0:1' }),
+  ).toBe(true);
+  jar.parseSetCookieHeader(
+    'b=2; Domain=0:0:0:0:0:0:0:1; Path=/',
+    'http://[::1]/',
+  );
+  expect(jar.getCookieHeaderString('http://[::1]/')).toBe('a=1; b=2');
+  jar.fromJSON({
+    cookies: [
+      {
+        name: 'c',
+        value: '3',
+        domain: '[0:0:0:0:0:0:0:1]',
+        createdAt: Date.now(),
+      },
+    ],
+  });
+  expect(jar.getAllCookies().map((cookie) => cookie.domain)).toEqual(['::1']);
+  expect(jar.getCookieHeaderString('http://[::1]/')).toBe('c=3');
+});
+
+test('unreadable secure cookie expiry blocks replacement without aborting header processing', () => {
+  const jar = new CookieJar();
+  jar.parseSetCookieHeader(
+    'session=secure; Secure; Path=/',
+    'https://example.com/',
+  );
+  Object.defineProperty(jar.getAllCookies()[0], 'expires', {
+    get() {
+      throw new Error('expiry refused');
+    },
+  });
+  expect(() =>
+    jar.processResponseHeaders(
+      { 'set-cookie': ['session=insecure; Path=/', 'other=ok; Path=/'] },
+      'http://example.com/',
+    ),
+  ).not.toThrow();
+  expect(
+    jar.getAllCookies().find((cookie) => cookie.name === 'session')?.value,
+  ).toBe('secure');
+  expect(jar.getCookieHeaderString('http://example.com/')).toBe('other=ok');
+});

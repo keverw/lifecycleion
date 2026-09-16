@@ -44,6 +44,7 @@ With options:
 
 ```typescript
 const tmpDir = await createTempDir({
+  mode: 0o750, // optional: allow group read/traverse; private 0o700 by default
   prefix: 'myapp',
   postfix: 'test',
   unsafeCleanup: true,
@@ -121,6 +122,7 @@ Options object accepted by `new TmpDir(options)` and `createTempDir(options)`.
 | --------------- | --------- | ------------- | ---------------------------------------------------------------------------------------------------------- |
 | `unsafeCleanup` | `boolean` | `false`       | Allow deleting a non-empty directory during cleanup                                                        |
 | `baseDirectory` | `string`  | `os.tmpdir()` | Absolute path in which to create the temp dir                                                              |
+| `mode`          | `number`  | `0o700`       | Integer permission bits from `0o000` through `0o777` for newly created directories                         |
 | `maxTries`      | `number`  | `3`           | Maximum attempts to find a unique directory name. Values are floored to an integer and must be at least 1. |
 | `prefix`        | `string`  | `'tmp'`       | Prepended to the directory name (separator `-` is added automatically). No `/`, `\`, or control characters |
 | `postfix`       | `string`  | `''`          | Appended to the directory name (separator `-` is added automatically). No `/`, `\`, or control characters  |
@@ -131,7 +133,8 @@ Notes:
 
 - `baseDirectory` is trimmed before validation and must be an absolute path.
 - `random12chars` uses upper/lowercase letters and digits.
-- Unknown option keys and invalid option value types are ignored. Invalid `baseDirectory`, `maxTries`, `prefix`, or `postfix` values throw a configuration error.
+- Unknown option keys are ignored. `mode` is strictly validated when supplied; other options ignore values of the wrong type. Invalid `baseDirectory`, `maxTries`, `prefix`, or `postfix` values of the expected type throw a configuration error.
+- `mode` is applied to the leaf and any newly created parent directories, subject to the process umask. Existing directories are not chmodded. Permission-bit behavior is platform-dependent on Windows; this option does not configure Windows ACLs.
 - `prefix` and `postfix` are refused if they carry a path separator or a control character, so the directory always sits directly inside `baseDirectory`. A `prefix` of `'../escape'` used to create, and with `unsafeCleanup` delete, a directory outside it.
 
 ### Error Classes
@@ -141,6 +144,7 @@ Notes:
 | `ErrTmpDirNotInitialized`             | Reading `.path` before `initialize()`                                                             |
 | `ErrTmpDirWasCleanedUp`               | Reading `.path` after successful `cleanup()`, or calling `initialize()` after any `cleanup()`     |
 | `ErrTmpDirConfigErrorBaseDirectory`   | `baseDirectory` is not an absolute path                                                           |
+| `ErrTmpDirConfigErrorMode`            | `mode` is not an integer from `0o000` through `0o777`                                             |
 | `ErrTmpDirConfigErrorMaxTries`        | `maxTries` floors to a value that is not a positive integer (e.g. `0`, negative, `Infinity`)      |
 | `ErrTmpDirConfigErrorNamePart`        | `prefix` or `postfix` contains a path separator or control character. `option` names which one    |
 | `ErrTmpDirInitializeMaxTriesExceeded` | A unique directory could not be created within `maxTries` attempts                                |

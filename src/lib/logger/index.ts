@@ -1374,7 +1374,7 @@ export class Logger extends EventEmitter {
         timestamp: ms(),
         kind,
         error: failure,
-        message: `${kind === 'redaction' ? 'Redaction' : 'Render'} failed for ${path}`,
+        message: `${kind === 'redaction' ? 'Redaction' : 'Render'} failed`,
         path,
       });
     };

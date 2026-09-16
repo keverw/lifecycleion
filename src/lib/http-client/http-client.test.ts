@@ -8388,3 +8388,27 @@ describe('observational callbacks never change the outcome', () => {
     }
   }
 });
+
+test('303 redirect preserves HEAD', async () => {
+  const methods: string[] = [];
+  const adapter: HTTPAdapter = {
+    getType: () => 'node',
+    send: (request): Promise<AdapterResponse> => {
+      methods.push(request.method);
+      return Promise.resolve<AdapterResponse>(
+        methods.length === 1
+          ? { status: 303, headers: { location: '/done' }, body: null }
+          : { status: 200, headers: {}, body: null },
+      );
+    },
+  };
+  const response = await new HTTPClient({
+    adapter,
+    baseURL: 'http://example.test',
+    followRedirects: true,
+  })
+    .head('/start')
+    .send();
+  expect(response.status).toBe(200);
+  expect(methods).toEqual(['HEAD', 'HEAD']);
+});

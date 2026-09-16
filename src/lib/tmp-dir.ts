@@ -49,6 +49,13 @@ export class ErrTmpDirConfigErrorBaseDirectory extends Error {
   }
 }
 
+export class ErrTmpDirConfigErrorMode extends Error {
+  constructor() {
+    super('`mode` must be an integer permission mask between 0o000 and 0o777.');
+    this.name = 'ErrTmpDirConfigErrorMode';
+  }
+}
+
 export class ErrTmpDirConfigErrorMaxTries extends Error {
   constructor() {
     super(
@@ -93,7 +100,9 @@ export class ErrTmpDirCleanupUnexpectedError extends Error {
   }
 }
 
-interface TmpDirOptions {
+export interface TmpDirOptions {
+  /** Permission bits for new directories, before process.umask(); default 0o700. Existing parents are unchanged. */
+  mode?: number;
   unsafeCleanup?: boolean; // allow cleaning up a directory that is not empty, default: false
   baseDirectory?: string; // the directory in which the temporary directory should be created, default: os.tmpdir()
   maxTries?: number; // max number of attempts to create a unique directory, default: 3
@@ -146,6 +155,7 @@ export class TmpDir {
   private allowUnsafeCleanup = false;
   private baseDirectory = '';
   private maxTries = 3;
+  private mode = 0o700;
   private prefix = 'tmp';
   private postfix = '';
 
@@ -161,6 +171,17 @@ export class TmpDir {
 
   constructor(options?: TmpDirOptions) {
     if (isPlainObject(options)) {
+      if (options.mode !== undefined) {
+        if (
+          typeof options.mode !== 'number' ||
+          !Number.isInteger(options.mode) ||
+          options.mode < 0 ||
+          options.mode > 0o777
+        ) {
+          throw new ErrTmpDirConfigErrorMode();
+        }
+        this.mode = options.mode;
+      }
       if (isBoolean(options.unsafeCleanup)) {
         this.allowUnsafeCleanup = options.unsafeCleanup;
       }
@@ -334,7 +355,7 @@ export class TmpDir {
       // The parent once, so each attempt below can be an *exclusive* create of the leaf.
       // `mkdir` with `recursive: true` succeeds on a directory that already exists, which
       // is why the old stat-then-mkdir could not be made exclusive by itself.
-      await fs.mkdir(this.baseDirectory, { recursive: true });
+      await fs.mkdir(this.baseDirectory, { recursive: true, mode: this.mode });
 
       let attemptsMade = 0;
 
@@ -353,7 +374,7 @@ export class TmpDir {
         // fails with `EEXIST` on a path that is already there, which is the answer the
         // check was trying to get, only without the window.
         try {
-          await fs.mkdir(fullPath);
+          await fs.mkdir(fullPath, { mode: this.mode });
         } catch (error) {
           if (
             error instanceof Error &&

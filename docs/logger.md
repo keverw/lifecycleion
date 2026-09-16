@@ -1375,6 +1375,8 @@ if (result.timedOut) {
 
 ### NamedPipeSink
 
+A named-pipe record that fails after a partial low-level write is reported through `onError` with `disposition: 'lost'`, counted in `droppedEntries`, and not automatically retried. Its error carries `bytesWritten` and the underlying failure as `cause`. Never-started buffered records retain the normal retry policy. A FIFO cannot retract bytes already consumed or guarantee exactly-once records across reader failures; consumers must tolerate truncated records and resynchronize their framing. A fallback for a partial record should use a separate destination.
+
 Writes logs to a named pipe (FIFO) for log aggregation. Linux/macOS only.
 
 Both queueing sinks, `FileSink` and `NamedPipeSink`, answer a failed write the same way:
@@ -1939,6 +1941,8 @@ its listener fails, an unreadable or non-string `message` is omitted rather than
 the terminal guard.
 
 ### Routing Diagnostics Away From the Console
+
+Default redaction/render diagnostic messages omit property paths as well as thrown text, because either may contain secrets. Opt-in diagnostic listeners and sinks still receive `path` and `error` for investigation. Ordinary object key names are not generally redacted.
 
 Listen directly, or configure a sink whose diagnostic write does not fail:
 

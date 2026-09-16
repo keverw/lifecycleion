@@ -730,7 +730,10 @@ Timeouts operate at **two independent levels** - they don't compete, they're lay
 **1. Global Timeout (Bulk Operation)**
 
 - `startAllComponents({ timeoutMS })` sets a total time budget for the entire operation
-- If exceeded: manager stops initiating new components and returns partial results with `timedOut: true`
+- If exceeded: manager stops initiating new components and promptly returns a snapshot of partial results with `timedOut: true` and `code: 'startup_timeout'`.
+- The remaining bulk budget also bounds the current component start, even when its own timeout is disabled. Previously started components remain running unless rollback had already begun for a separate failure.
+- A start still in flight receives `onStartupAborted()` when implemented; if it later resolves, the manager stops it automatically. Restarting or unregistering that component is blocked until its start and late cleanup settle. A rollback already in progress continues in the background and blocks another bulk startup until it finishes.
+- Timeouts cannot preempt synchronous JavaScript that blocks the event loop.
 - Constructor option sets the default: `new LifecycleManager({ startupTimeoutMS: 60000 })`
 - Method parameter overrides: `await lifecycle.startAllComponents({ timeoutMS: 30000 })`
 
@@ -969,10 +972,12 @@ interface ComponentOperationResult {
 
 ### Component Messaging
 
+Message, health, and value result code `stopped` means unavailable and not stalled; it does not identify the exact lifecycle state. Use `getComponentStatus(name).state` to distinguish registered, starting, failed, and stopped components. `includeStopped` permits handlers on inactive components, but never during active startup, a timed-out startup, or teardown.
+
 #### `sendMessageToComponent(componentName, payload, options?)`
 
 Send a message to a specific component.
-By default, only running components receive messages, so use `includeStopped`/`includeStalled` to override. During bulk shutdown, components still running can receive messages until their own teardown begins. Messages remain blocked during `stopping` and `force-stopping`, even with these overrides or after the bulk shutdown timeout. Messages refused during teardown return `code: 'stopped'` and `error: null`; missing targets return `not_found`.
+By default, only running components receive messages, so use `includeStopped`/`includeStalled` to override. During bulk shutdown, components still running can receive messages until their own teardown begins. Messages remain blocked during `starting`, `starting-timed-out`, `stopping`, and `force-stopping`, even with these overrides or after the bulk shutdown timeout. Messages refused during teardown return `code: 'stopped'` and `error: null`; missing targets return `not_found`.
 
 ```typescript
 sendMessageToComponent<T = unknown>(
@@ -1063,7 +1068,7 @@ if (result.sent) {
 #### `broadcastMessage(payload, options?)`
 
 Broadcast a message to multiple components.
-By default, only running components receive messages, so use `includeStopped`/`includeStalled` to override. During bulk shutdown, components still running can receive messages until their own teardown begins. Messages remain blocked during `stopping` and `force-stopping`, even with these overrides or after the bulk shutdown timeout. Messages refused during teardown return `code: 'stopped'` and `error: null`.
+By default, only running components receive messages, so use `includeStopped`/`includeStalled` to override. During bulk shutdown, components still running can receive messages until their own teardown begins. Messages remain blocked during `starting`, `starting-timed-out`, `stopping`, and `force-stopping`, even with these overrides or after the bulk shutdown timeout. Messages refused during teardown return `code: 'stopped'` and `error: null`.
 When `componentNames` is provided, only those targets are considered, and stopped/stalled targets are reported but not sent unless explicitly included.
 
 ```typescript
@@ -1162,7 +1167,7 @@ interface HealthReport {
 
 ### Value Sharing
 
-Components can share values with each other. **By default, only running components can provide values.** Use the `includeStopped` or `includeStalled` options to retrieve values from components in other states. Value requests remain blocked during `stopping` and `force-stopping`, even with these overrides or after the bulk shutdown timeout.
+Components can share values with each other. **By default, only running components can provide values.** Use the `includeStopped` or `includeStalled` options to retrieve values from components in other states. Value requests remain blocked during `starting`, `starting-timed-out`, `stopping`, and `force-stopping`, even with these overrides or after the bulk shutdown timeout.
 
 ```typescript
 class ConfigComponent extends BaseComponent {
@@ -1340,6 +1345,8 @@ if (escalation.configured && escalation.isArmed) {
 ```
 
 #### Manual Signal Triggers
+
+Reload/info/debug broadcasts check that each component is still running immediately before invoking its handler. Components that begin teardown during an earlier callback are skipped; a synchronous signal-started event that makes its target unavailable produces a per-component `unavailable` result. An already-running signal handler is not cancelled by teardown.
 
 ```typescript
 triggerReload(): Promise<SignalBroadcastResult>
@@ -3509,7 +3516,7 @@ When `start()` or `stop()` times out:
 - The manager calls `onStartupAborted()` or `onGracefulStopTimeout()` (if implemented)
 - The manager proceeds with next steps (rollback for startup, force phase for shutdown)
 - **Non-cooperative code continues running in the background** until completion or process exit
-- If `start()` times out and there is no `onStartupAborted()`, the manager will stop the component automatically if that delayed startup eventually completes
+- If `start()` times out and there is no `onStartupAborted()`, the manager will stop the component automatically if that delayed startup eventually completes. Bulk startup deadlines perform this late cleanup even when an abort hook is implemented.
 - If shutdown begins while `start()` is still in flight, the manager waits for that startup attempt to settle and then stops the component automatically if it finishes starting
 
 How to avoid surprises:

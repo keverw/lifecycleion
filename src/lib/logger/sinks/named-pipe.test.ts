@@ -105,6 +105,102 @@ async function waitForReaderData(
 }
 
 describe('NamedPipeSink', () => {
+  test('a partial low-level write is reported lost without replaying the original record', async () => {
+    const pipePath = `${tmpDir.path}/partial-write.pipe`;
+    await createNamedPipe(pipePath);
+    const reader = fs.openSync(
+      pipePath,
+      fs.constants.O_RDONLY | fs.constants.O_NONBLOCK,
+    );
+    const failures: SinkFailure[] = [];
+    const sink = new NamedPipeSink({
+      pipePath,
+      maxRetries: 3,
+      closeTimeoutMS: 100,
+      onError: (failure) => {
+        failures.push(failure);
+      },
+    });
+    let writeSpy: { mockRestore(): void } | undefined;
+    let drainSpy: { mockRestore(): void } | undefined;
+    try {
+      expect(await waitForOpenPipe(sink)).toBe(true);
+      const internals = sink as unknown as {
+        pipeStream: { fd: number };
+        processQueue: () => void;
+        writeQueue: Array<{ entry: LogEntry }>;
+      };
+      const descriptor = internals.pipeStream.fd;
+      const write = fs.write;
+      let calls = 0;
+      writeSpy = spyOn(fs, 'write').mockImplementation(((
+        fd: number,
+        buffer: Buffer,
+        offset: number,
+        length: number,
+        position: null,
+        callback: (
+          error: NodeJS.ErrnoException | null,
+          written: number,
+          buffer: Buffer,
+        ) => void,
+      ) => {
+        if (fd !== descriptor) {
+          return write(fd, buffer, offset, length, position, callback);
+        }
+        calls++;
+        if (calls === 1) {
+          return write(fd, buffer, offset, 8, position, callback);
+        }
+        queueMicrotask(() =>
+          callback(
+            Object.assign(new Error('broken pipe'), { code: 'EPIPE' }),
+            0,
+            buffer,
+          ),
+        );
+      }) as typeof fs.write);
+      sink.write({
+        timestamp: Date.now(),
+        type: 'info',
+        template: 'partial-record',
+        message: 'partial-record',
+      });
+      sink.write({
+        timestamp: Date.now(),
+        type: 'info',
+        template: 'buffered-record',
+        message: 'buffered-record',
+      });
+      drainSpy = spyOn(internals, 'processQueue').mockImplementation(() => {});
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      const partial = failures.find(
+        (failure) => failure.entry?.message === 'partial-record',
+      );
+      expect(partial?.disposition).toBe('lost');
+      expect(
+        (partial?.error as Error & { bytesWritten: number }).bytesWritten,
+      ).toBe(8);
+      expect(sink.getHealth().droppedEntries).toBe(1);
+      expect(
+        internals.writeQueue.some(
+          (queued) => queued.entry.message === 'partial-record',
+        ),
+      ).toBe(false);
+      expect(
+        failures.find((failure) => failure.entry?.message === 'buffered-record')
+          ?.disposition,
+      ).toBe('retrying');
+      const received = Buffer.alloc(100);
+      expect(fs.readSync(reader, received, 0, received.length, null)).toBe(8);
+    } finally {
+      writeSpy?.mockRestore();
+      drainSpy?.mockRestore();
+      await sink.close();
+      fs.closeSync(reader);
+    }
+  });
+
   // Only run these tests on supported platforms
   const platform = os.platform();
   const isSupported = platform === 'linux' || platform === 'darwin';

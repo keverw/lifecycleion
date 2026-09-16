@@ -877,7 +877,8 @@ const client = new HTTPClient({
 | -------- | ----------------------------- | --------------- |
 | 301, 302 | POST                          | GET             |
 | 301, 302 | GET, HEAD, PUT, PATCH, DELETE | Unchanged       |
-| 303      | Any                           | GET             |
+| 303      | GET, HEAD                     | Unchanged       |
+| 303      | Other methods                 | GET             |
 | 307, 308 | Any                           | Unchanged       |
 
 Cross-origin redirects strip unsafe headers (Authorization, Cookie, etc.) from the forwarded request.

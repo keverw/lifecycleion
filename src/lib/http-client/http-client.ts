@@ -917,13 +917,15 @@ export class BaseHTTPClient {
             }
 
             // Method rewriting per HTTP spec (matches browser/fetch behavior):
-            //  - 303 (See Other) always becomes GET
+            //  - 303 (See Other) becomes GET except for GET and HEAD
             //  - 301 (Moved Permanently) / 302 (Found) rewrite POST to GET
             //  - 307 (Temporary Redirect) / 308 (Permanent Redirect) preserve method/body
             let redirectMethod: HTTPMethod = currentInterceptedRequest.method;
 
             if (
-              adapterResponse.status === 303 ||
+              (adapterResponse.status === 303 &&
+                currentInterceptedRequest.method !== 'GET' &&
+                currentInterceptedRequest.method !== 'HEAD') ||
               ((adapterResponse.status === 301 ||
                 adapterResponse.status === 302) &&
                 currentInterceptedRequest.method === 'POST')

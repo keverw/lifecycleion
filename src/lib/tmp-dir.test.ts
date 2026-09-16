@@ -5,6 +5,7 @@ import {
   ErrTmpDirCleanupFailedNotEmpty,
   ErrTmpDirConfigErrorBaseDirectory,
   ErrTmpDirConfigErrorMaxTries,
+  ErrTmpDirConfigErrorMode,
   ErrTmpDirConfigErrorNamePart,
   ErrTmpDirInitializeMaxTriesExceeded,
   ErrTmpDirNotInitialized,
@@ -436,3 +437,55 @@ describe('TmpDir', () => {
     expect(err).toBeInstanceOf(ErrTmpDirConfigErrorMaxTries);
   });
 });
+
+test('temporary directories are private, including newly created parents', async () => {
+  const parent = await createTempDir({ unsafeCleanup: true });
+  const child = await createTempDir({
+    baseDirectory: `${parent.path}/new-parent`,
+  });
+  try {
+    if (process.platform !== 'win32') {
+      expect((await fs.stat(child.path)).mode & 0o777).toBe(
+        0o700 & ~process.umask(),
+      );
+      expect((await fs.stat(`${parent.path}/new-parent`)).mode & 0o777).toBe(
+        0o700 & ~process.umask(),
+      );
+    }
+  } finally {
+    await child.cleanup();
+    await parent.cleanup();
+  }
+});
+
+test('mode configures new directories without changing existing parents', async () => {
+  const parent = await createTempDir({ unsafeCleanup: true });
+  const before = (await fs.stat(parent.path)).mode;
+  const child = await createTempDir({
+    baseDirectory: `${parent.path}/shared`,
+    mode: 0o750,
+  });
+  try {
+    if (process.platform !== 'win32') {
+      expect((await fs.stat(child.path)).mode & 0o777).toBe(
+        0o750 & ~process.umask(),
+      );
+      expect((await fs.stat(`${parent.path}/shared`)).mode & 0o777).toBe(
+        0o750 & ~process.umask(),
+      );
+      expect((await fs.stat(parent.path)).mode).toBe(before);
+    }
+  } finally {
+    await child.cleanup();
+    await parent.cleanup();
+  }
+});
+
+test.each([NaN, Infinity, -1, 0o1000, 1.5, '750', null])(
+  'refuses invalid directory mode %p',
+  (mode) => {
+    expect(() => new TmpDir({ mode: mode as number })).toThrow(
+      ErrTmpDirConfigErrorMode,
+    );
+  },
+);
