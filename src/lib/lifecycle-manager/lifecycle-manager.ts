@@ -1094,27 +1094,11 @@ export class LifecycleManager
 
     const bulkDelay = toTimerDelayMS(effectiveTimeout);
     const deadline = bulkDelay > 0 ? Date.now() + bulkDelay : undefined;
-    let resolveDeadline!: (result: StartupResult) => void;
-    const deadlinePromise = new Promise<StartupResult>((resolve) => {
-      resolveDeadline = resolve;
-    });
-    const timeoutResult = (): StartupResult => ({
-      success: false,
-      startedComponents: [...startedComponents],
-      failedOptionalComponents: [...failedOptionalComponents],
-      skippedDueToDependency: [...skippedDueToDependency],
-      durationMS: Date.now() - startTime,
-      timedOut: true,
-      reason: `Startup timeout exceeded (${effectiveTimeout}ms)`,
-      code: 'startup_timeout',
-    });
-
     const expireStartup = (): void => {
       if (hasTimedOut) {
         return;
       }
       hasTimedOut = true;
-      resolveDeadline(timeoutResult());
       try {
         this.logger.warn(
           'Startup timeout exceeded, returning partial results',
@@ -1562,9 +1546,8 @@ export class LifecycleManager
           timedOut: hasTimedOut,
         };
       } finally {
-        // Clearing the timer releases the unused deadline closure. Its pending
-        // promise is collectible; resolving it here with a dummy result could win
-        // the race before operation() has returned its real result.
+        // Release the deadline callback when startup settles so it cannot report
+        // a timeout after this operation has completed.
         if (timeoutHandle) {
           clearTimeout(timeoutHandle);
         }
@@ -1582,7 +1565,9 @@ export class LifecycleManager
         this.unexpectedStopsDuringStartup.clear();
       }
     };
-    return Promise.race([operation(), deadlinePromise]);
+    // Component starts already race against the bulk deadline. Await their bookkeeping
+    // and our finally block before exposing the result to a caller that may retry.
+    return operation();
   }
 
   /**

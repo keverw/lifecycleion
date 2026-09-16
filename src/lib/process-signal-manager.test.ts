@@ -1994,3 +1994,35 @@ test.each([
     }
   },
 );
+
+test('one Ctrl+C is forwarded once when its leader detaches during SIGINT', () => {
+  const wasTTY = process.stdin.isTTY;
+  // eslint-disable-next-line @typescript-eslint/unbound-method
+  const raw = process.stdin.setRawMode;
+  (process.stdin as any).isTTY = true;
+  process.stdin.setRawMode = mock(() => process.stdin);
+  const callback = mock(() => {});
+  const first: ProcessSignalManager = new ProcessSignalManager({
+    onShutdownRequested: () => {
+      first.detach();
+    },
+    keypressThrottleMS: 0,
+  });
+  const second = new ProcessSignalManager({
+    onShutdownRequested: callback,
+    keypressThrottleMS: 0,
+  });
+  try {
+    first.attach();
+    second.attach();
+    process.stdin.emit('keypress', '\u0003', { name: 'c', ctrl: true });
+    expect(callback).toHaveBeenCalledTimes(1);
+    process.stdin.emit('keypress', '\u0003', { name: 'c', ctrl: true });
+    expect(callback).toHaveBeenCalledTimes(2);
+  } finally {
+    first.detach();
+    second.detach();
+    (process.stdin as any).isTTY = wasTTY;
+    process.stdin.setRawMode = raw;
+  }
+});

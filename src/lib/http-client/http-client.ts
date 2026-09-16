@@ -1405,8 +1405,11 @@ export class BaseHTTPClient {
 
     if (request.method === 'GET') {
       // Drop body-related headers when method was rewritten to GET.
-      delete headers['content-type'];
-      delete headers['content-length'];
+      for (const key of Object.keys(headers)) {
+        if (['content-type', 'content-length'].includes(key.toLowerCase())) {
+          delete headers[key];
+        }
+      }
     }
 
     if (cookieJar) {

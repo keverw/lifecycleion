@@ -1546,6 +1546,8 @@ if (pipeSink.getHealth().isReconnecting) {
 }
 ```
 
+A reconnect also refuses while the current stream has buffered writes. It leaves that connection intact and reports an error; retry after the reader drains it. This prevents concurrent writers from interleaving log records.
+
 **Important:** If `reconnect()` fails, the `onError` handler will be called again with the failure details. When implementing retry logic, consider adding delays and retry limits to avoid rapid repeated failures.
 
 Writes that occur while disconnected are queued and flushed upon successful reconnection.

@@ -32,6 +32,12 @@ interface ProcessSignalManagerSharedState {
   /** Instances using shared SIGINT forwarding; absent in older package copies. */
   sigintForwardingInstances?: Set<string>;
 
+  /** Recipients remaining in a keypress dispatch, even if its leader detaches. */
+  ctrlCDispatches?: WeakMap<
+    object,
+    { leader: string | undefined; remaining: Set<string> }
+  >;
+
   /**
    * The instance ID that enabled raw mode, or null if raw mode wasn't enabled by us.
    * Only this instance (or the last remaining instance) should disable raw mode.
@@ -73,6 +79,7 @@ function getSharedState(): ProcessSignalManagerSharedState {
   }
   const shared = g[SHARED_STATE_KEY];
   shared.sigintForwardingInstances ??= new Set();
+  shared.ctrlCDispatches ??= new WeakMap();
   return shared;
 }
 
@@ -710,7 +717,19 @@ export class ProcessSignalManager {
           }
           return;
         }
-        const leader = shared.attachedInstances.values().next().value;
+        let dispatch = shared.ctrlCDispatches?.get(keyObj);
+        if (!dispatch || !dispatch.remaining.has(this.instanceID)) {
+          dispatch = {
+            leader: shared.attachedInstances.values().next().value,
+            remaining: new Set(shared.sigintForwardingInstances),
+          };
+          shared.ctrlCDispatches?.set(keyObj, dispatch);
+        }
+        dispatch.remaining.delete(this.instanceID);
+        if (dispatch.remaining.size === 0) {
+          shared.ctrlCDispatches?.delete(keyObj);
+        }
+        const leader = dispatch.leader;
 
         if (leader !== this.instanceID) {
           return;

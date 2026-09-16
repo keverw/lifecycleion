@@ -820,7 +820,9 @@ function stringifyPrimitive(
       return String(value);
     case 'object':
       return (
-        JSON.stringify(value) ??
+        JSON.stringify(value, (_key, entry: unknown) =>
+          typeof entry === 'bigint' ? String(entry) : entry,
+        ) ??
         reportUnrenderableText(
           'Value has no JSON representation',
           path,

@@ -2678,3 +2678,20 @@ it('fails object-valued stack redaction closed for an unreadable sensitive list'
   expect(result).not.toContain('stack-credential');
   expect(result).toContain('sensitiveFieldNames unreadable');
 });
+
+it.each(['code', 'errno'])(
+  'renders bigint typed arrays in %s without a format failure',
+  (key) => {
+    const onFormatError = mock(() => {});
+    const output = errorToString(
+      Object.assign(new Error('test'), {
+        [key]: new BigInt64Array([42n]),
+      }),
+      80,
+      { onFormatError },
+    );
+    expect(output).toContain('42');
+    expect(output).not.toContain('<unrenderable');
+    expect(onFormatError).not.toHaveBeenCalled();
+  },
+);

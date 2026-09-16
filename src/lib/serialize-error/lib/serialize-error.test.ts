@@ -1004,26 +1004,26 @@ test('restores nested causes and aggregate members while preserving non-error ca
   ).toBe(cause);
 });
 
-test('preserves stackless error payloads when serialized again', () => {
+test('preserves stackless data payloads without classifying them as errors', () => {
   const value = {
     name: 'CustomError',
     message: 'outer',
     cause: { name: 'Error', message: 'inner' },
   };
-  expect(isErrorLike(value)).toBe(true);
+  expect(isErrorLike(value)).toBe(false);
   expect(
-    serializeError(JSON.parse(JSON.stringify(serializeError(value)))),
+    serializeError(new Error('outer', { cause: value })).cause,
   ).toMatchObject(value);
 });
 
 test('nested deserialization handles cycles, depth limits, and prototype keys', () => {
-  const cyclic: any = { name: 'Error', message: 'cycle' };
+  const cyclic: any = { name: 'Error', message: 'cycle', stack: '' };
   cyclic.cause = cyclic;
   const restored = deserializeError(cyclic);
   expect(restored.cause).toBe(restored);
-  let deep: any = { name: 'Error', message: 'leaf' };
+  let deep: any = { name: 'Error', message: 'leaf', stack: '' };
   for (let i = 0; i < 150; i++) {
-    deep = { name: 'Error', message: 'outer', cause: deep };
+    deep = { name: 'Error', message: 'outer', stack: '', cause: deep };
   }
   let cursor: any = deserializeError(deep);
   for (let i = 0; i < 100; i++) {
@@ -1032,7 +1032,7 @@ test('nested deserialization handles cycles, depth limits, and prototype keys', 
   expect(typeof cursor).toBe('string');
   const malicious = deserializeError(
     JSON.parse(
-      '{"name":"Error","message":"outer","cause":{"name":"Error","message":"inner","__proto__":{"polluted":true}}}',
+      '{"name":"Error","message":"outer","cause":{"name":"Error","message":"inner","stack":"","__proto__":{"polluted":true}}}',
     ),
   );
   expect(malicious.cause).toBeInstanceOf(Error);
@@ -1105,4 +1105,23 @@ test.each(['bigint', 'binary'] as const)('bounds generated %s text', (kind) => {
   );
   expect(JSON.stringify(result).length).toBeLessThan(1_010_000);
   expect(String(result.leaf)).toContain('[max length exceeded]');
+});
+
+test('ordinary name/message data remains intact in an error cause', () => {
+  for (const cause of [
+    { name: {}, message: null },
+    { name: 'user', message: 'hello' },
+  ]) {
+    expect(isErrorLike(cause)).toBe(false);
+    const serialized = serializeError(new Error('outer', { cause }));
+    expect(serialized.cause).toEqual(cause);
+    expect(deserializeError(serialized).cause).toEqual(cause);
+    expect(deserializeError(serialized).cause).not.toBeInstanceOf(Error);
+  }
+  const stackless = new Error('real');
+  delete stackless.stack;
+  expect(isErrorLike(stackless)).toBe(true);
+  expect(
+    serializeError(new Error('outer', { cause: stackless })).cause,
+  ).toMatchObject({ name: 'Error', message: 'real' });
 });

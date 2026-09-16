@@ -12830,3 +12830,32 @@ test('constructor Infinity timeouts use the maximum timer delay and NaN uses def
     ).toBe(defaults[field]);
   }
 });
+
+test('startup timeout settles bookkeeping before an immediate retry', async () => {
+  const logger = new Logger({ sinks: [], callProcessExit: false });
+  const manager = new LifecycleManager({ logger });
+  class Pending extends BaseComponent {
+    public start(): Promise<void> {
+      // Separate the global timer from the per-component timer on Bun as well as Node.
+      const until = Date.now() + 20;
+      while (Date.now() < until) {
+        /* synchronous component work */
+      }
+      return new Promise(() => {});
+    }
+    public stop(): Promise<void> {
+      return Promise.resolve();
+    }
+  }
+  await manager.registerComponent(
+    new Pending(logger, { name: 'pending', startupTimeoutMS: 0 }),
+  );
+  expect((await manager.startAllComponents({ timeoutMS: 10 })).code).toBe(
+    'startup_timeout',
+  );
+  expect(manager.getStatus().isStarting).toBe(false);
+  expect((await manager.startAllComponents({ timeoutMS: 10 })).code).not.toBe(
+    'already_in_progress',
+  );
+  await manager.stopAllComponents();
+});

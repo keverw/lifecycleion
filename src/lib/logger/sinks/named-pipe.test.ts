@@ -4647,3 +4647,57 @@ describe('NamedPipeSink', () => {
     expect(sink.getHealth().droppedEntries).toBe(1);
   }, 15000);
 });
+
+test('reconnect refuses to overlap a pending write with a second pipe writer', async () => {
+  const tmpDir = new TmpDir({
+    unsafeCleanup: true,
+    prefix: 'pending-reconnect',
+  });
+  await tmpDir.initialize();
+  const pipePath = `${tmpDir.path}/pending-reconnect.pipe`;
+  await createNamedPipe(pipePath);
+  const readerFd = fs.openSync(
+    pipePath,
+    fs.constants.O_RDONLY | fs.constants.O_NONBLOCK,
+  );
+  const failures: SinkFailure[] = [];
+  const sink = new NamedPipeSink({
+    pipePath,
+    onError: (failure) => {
+      failures.push(failure);
+    },
+    closeTimeoutMS: 100,
+  });
+  try {
+    expect(await waitForOpenPipe(sink)).toBe(true);
+    const original = (sink as any).pipeStream;
+    sink.write({
+      timestamp: Date.now(),
+      type: 'info',
+      template: 'large',
+      message: 'x'.repeat(2_000_000),
+    });
+    expect(original.writableLength).toBeGreaterThan(0);
+    const healthBefore = sink.getHealth();
+    expect(healthBefore.isHealthy).toBe(true);
+    const result = await sink.reconnect();
+    expect(result.success).toBe(false);
+    expect((sink as any).pipeStream).toBe(original);
+    expect(failures).toHaveLength(1);
+    expect(failures[0]).toMatchObject({
+      kind: 'setup',
+      disposition: 'no_entry',
+    });
+    expect(failures[0].entry).toBeUndefined();
+    expect(sink.getHealth()).toMatchObject({
+      isHealthy: true,
+      consecutiveFailures: healthBefore.consecutiveFailures,
+      droppedEntries: healthBefore.droppedEntries,
+      lastError: failures[0].error,
+    });
+  } finally {
+    fs.closeSync(readerFd);
+    await sink.close();
+    await tmpDir.cleanup();
+  }
+});

@@ -779,6 +779,19 @@ export class NamedPipeSink implements LogSink {
         }
       }
 
+      // Let pending writes finish before replacing the stream. Destroying it does
+      // not cancel an in-flight FIFO write, so a replacement writer could interleave
+      // records with it. Keep this connection intact; reconnect can be retried once
+      // the reader has drained the pending writes. Calling close() is not required.
+      if (this.pipeStream && this.pipeStream.writableLength > 0) {
+        const error = new Error(
+          'Cannot reconnect until pending pipe writes finish; retry after the reader drains them',
+        );
+        // Reopening was refused; the current writer has not failed.
+        this.handleError('setup', error);
+        return { success: false, reason: 'error', error };
+      }
+
       // Close existing stream if any, bounded. `end()` alone is what `close()` stopped
       // doing: it flushes before calling back, and a FIFO whose reader is attached but not
       // consuming - the exact state that prompts a manual `reconnect()` - never flushes,

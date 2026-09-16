@@ -85,9 +85,9 @@ const UNSERIALIZABLE_FUNCTION = '<function>';
 const UNSERIALIZABLE_TEXT = '<unserializable: text>';
 
 /**
- * Check if a value looks like an Error (has name and message; stack is optional).
+ * Recognize Error instances or plain error payloads with textual identity and stack.
  *
- * Guarded: `in` is a trappable operation, so a `Proxy` with a hostile `has` threw out of
+ * Guarded: property reads are trappable operations, so hostile accessors cannot escape
  * what is only a shape test. This runs on the receiving end of IPC and on error paths, so
  * asking the question must not raise a failure of its own.
  */
@@ -98,8 +98,10 @@ export function isErrorLike(
     return (
       typeof value === 'object' &&
       value !== null &&
-      'name' in value &&
-      'message' in value
+      (isErrorValue(value) ||
+        (typeof (value as Record<string, unknown>).name === 'string' &&
+          typeof (value as Record<string, unknown>).message === 'string' &&
+          typeof (value as Record<string, unknown>).stack === 'string'))
     );
   } catch {
     return false;

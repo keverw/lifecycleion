@@ -42,7 +42,7 @@ throw restored;
 - `name`, `message`, `stack` (the non-enumerable ones Error hides)
 - All own properties from Error subclasses (`errCode`, `statusCode`, whatever)
 - Nested errors are recursively serialized
-- Error-like objects require `name` and `message`; `stack` is optional. JSON payloads without stacks retain their fields when serialized again. This shape heuristic applies at every depth, including ordinary data objects that happen to carry both keys; their own fields are preserved. On deserialization, reconstruction is limited to the root and error-shaped `cause`/`errors` values.
+- Plain error-like objects require string `name`, `message`, and `stack` fields. Real Error instances are recognized even without a stack. Other nested objects retain their fields as data; `cause` alone does not identify an error. Deserialization reconstructs the root explicitly, and only error-like nested `cause`/`errors` values. Stackless nested wire payloads remain data.
 - `deserializeError` reconstructs error-shaped `cause` values and `errors` array members as `Error` instances, including nested causes. Other causes and custom extras retain their values. Error subclass names are preserved; subclass prototypes are not restored.
 
 ## When a Value Cannot Be Serialized
@@ -121,7 +121,7 @@ Both the depth and cycle bounds mark where they stopped rather than dropping the
 
 ### isErrorLike
 
-Type guard that checks if a value looks like an Error (has `name` and `message`; `stack` is optional).
+Type guard that recognizes real Error instances, or objects with string `name`, `message`, and `stack` fields.
 
 ```typescript
 isErrorLike(value); // true | false

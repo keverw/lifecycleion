@@ -805,7 +805,19 @@ function isUnstableEntry(value: object, key: string): boolean {
   let descriptor: PropertyDescriptor | undefined;
 
   try {
-    descriptor = Object.getOwnPropertyDescriptor(value, key);
+    // Inherited Error diagnostics are rendered too. Check their descriptors without
+    // invoking a getter during the scan, and bound hostile prototype chains.
+    let current: object | null = value;
+    for (let depth = 0; current !== null; depth++) {
+      if (depth >= MAX_RENDER_DEPTH) {
+        return true;
+      }
+      descriptor = Object.getOwnPropertyDescriptor(current, key);
+      if (descriptor !== undefined) {
+        break;
+      }
+      current = Object.getPrototypeOf(current) as object | null;
+    }
   } catch {
     return true;
   }

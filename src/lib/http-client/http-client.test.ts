@@ -8576,3 +8576,48 @@ test.each(['query', 'path', 'fragment', 'origin'] as const)(
     );
   },
 );
+
+test('redirected GET removes body headers in every casing', async () => {
+  const requests: AdapterRequest[] = [];
+  const adapter: HTTPAdapter = {
+    getType: () => 'node',
+    send: (request): Promise<AdapterResponse> => {
+      requests.push(request);
+      return Promise.resolve<AdapterResponse>(
+        requests.length === 1
+          ? { status: 302, headers: { location: '/done' }, body: null }
+          : { status: 200, headers: {}, body: null },
+      );
+    },
+  };
+  const client = new HTTPClient({
+    adapter,
+    baseURL: 'http://example.test',
+    followRedirects: true,
+  });
+  client.addRequestInterceptor((request) =>
+    request.method === 'POST'
+      ? {
+          ...request,
+          headers: {
+            ...request.headers,
+            'Content-Length': '4',
+            'CONTENT-TYPE': 'text/plain',
+          },
+        }
+      : request,
+  );
+  await client
+    .post('/start', {
+      headers: { 'Content-Length': '4', 'CONTENT-TYPE': 'text/plain' },
+    })
+    .text('body')
+    .send();
+  expect(requests[1].method).toBe('GET');
+  expect(
+    Object.keys(requests[1].headers).map((key) => key.toLowerCase()),
+  ).not.toContain('content-length');
+  expect(
+    Object.keys(requests[1].headers).map((key) => key.toLowerCase()),
+  ).not.toContain('content-type');
+});

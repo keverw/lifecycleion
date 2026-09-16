@@ -1166,3 +1166,18 @@ describe('payload arrays at the exact remaining entry budget', () => {
     },
   );
 });
+
+test('snapshots changing inherited Error getters before the pre-walk can skip them', () => {
+  const root: Record<string, unknown> = { password: SECRET };
+  let reads = 0;
+  class ChangingError extends Error {
+    public override get cause(): unknown {
+      return ++reads === 1 ? {} : root;
+    }
+  }
+  root.context = { error: new ChangingError('nested') };
+  const result = redactMatchedPaths(root, paths('password'), undefined);
+  expect(JSON.stringify(result)).not.toContain(SECRET);
+  const nested = (result as any).context.error;
+  expect(JSON.stringify(nested.cause)).not.toContain(SECRET);
+});
