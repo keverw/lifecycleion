@@ -1342,15 +1342,9 @@ export class CookieJar {
       return canonicalRequestHost === canonicalCookieDomain;
     }
 
-    // An IP request host matches its own literal and nothing else - RFC 6265 §5.1.3, which
-    // has no subdomain reading for an address. The suffix test below is a *DNS* rule, and
-    // an address is not a name: `127.0.0.1` ends with `.0.1`, so `Domain=0.1` from
-    // `http://127.0.0.1/` passed it and was stored under a domain nobody owns. It was never
-    // sent, because `apexFor` buckets an address as itself and no lookup ever reaches that
-    // bucket - which is a property of the bucketing, not of this check, and exactly the
-    // kind of coupling that stops holding the next time bucketing changes. Refused here
-    // instead, where the rule actually lives.
-    if (canonicalRequestHost !== null) {
+    // DNS suffix rules apply only when neither side is an IP. In particular,
+    // `evil.10.0.0.5` must not match a cookie domain of `10.0.0.5`.
+    if (canonicalRequestHost !== null || canonicalCookieDomain !== null) {
       return false;
     }
 

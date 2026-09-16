@@ -9,6 +9,7 @@ import type {
 import {
   resolveAbsoluteURLForRuntime,
   stripCrossOriginURLCredentials,
+  stripURLCredentials,
 } from '../utils';
 
 /**
@@ -441,7 +442,7 @@ function parseXHRResponseHeaders(
 
 /**
  * Compares URLs as browsers evaluate request destinations:
- * - strips hash fragments (not sent over HTTP)
+ * - strips userinfo (omitted by responseURL) and hash fragments (not sent over HTTP)
  * - relies on URL normalization for equivalent forms
  *   (default ports, dot segments, encoding normalization, etc.)
  */
@@ -459,7 +460,10 @@ function didBrowserFollowRedirect(
     );
     normalizedRequest.hash = '';
 
-    return normalizedResponse.href !== normalizedRequest.href;
+    return (
+      stripURLCredentials(normalizedResponse.href) !==
+      stripURLCredentials(normalizedRequest.href)
+    );
   } catch {
     // Fallback for non-URL inputs: preserve prior behavior.
     return responseURL !== requestURL;

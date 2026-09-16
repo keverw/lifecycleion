@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { ArraySink } from './array';
+import { MAX_REDACTION_ENTRIES } from '../../internal/redact-paths';
 import type { LogEntry } from '../types';
 import { MAX_RENDER_DEPTH, TRUNCATED } from '../../internal/render-budget';
 import {
@@ -892,3 +893,40 @@ describe('ArraySink - a then-only thenable from onFormatError', () => {
     }
   });
 });
+
+test.each([MAX_REDACTION_ENTRIES - 1, MAX_REDACTION_ENTRIES])(
+  'does not enumerate named array keys after snapshot budget exhaustion (length %s)',
+  (length) => {
+    let enumerations = 0;
+    const items = new Proxy(
+      Object.assign(new Array<number>(length).fill(7), {
+        cursor: 'must not be copied after exhaustion',
+      }),
+      {
+        ownKeys(target) {
+          enumerations++;
+          return Reflect.ownKeys(target);
+        },
+      },
+    );
+    const sink = new ArraySink();
+
+    // The containing `items` property consumes one entry before the index walk.
+    sink.write({
+      timestamp: Date.now(),
+      type: 'info',
+      template: 't',
+      message: 'm',
+      redactedParams: { items },
+    });
+
+    const stored = sink.logs[0]?.redactedParams?.['items'] as unknown[];
+    expect(enumerations).toBe(0);
+    expect(stored).not.toBe(items);
+    expect(stored.length).toBe(MAX_REDACTION_ENTRIES);
+    expect(stored[0]).toBe(7);
+    expect(stored[MAX_REDACTION_ENTRIES - 2]).toBe(7);
+    expect(stored[MAX_REDACTION_ENTRIES - 1]).toBe('[max entries exceeded]');
+    expect(Object.hasOwn(stored, 'cursor')).toBe(false);
+  },
+);

@@ -240,8 +240,12 @@ describe('XHRAdapter', () => {
     });
 
     lastXHR.status = 204;
+    lastXHR.responseURL = 'https://api.example.test/next';
     lastXHR.simulateLoad();
-    await promise;
+    const response = await promise;
+
+    expect(response.status).toBe(204);
+    expect(response.wasRedirectDetected).toBeUndefined();
 
     expect(lastXHR.openArgs?.url).toBe(
       'https://user:hunter2@api.example.test/next',

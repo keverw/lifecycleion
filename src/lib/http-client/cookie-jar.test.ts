@@ -1186,6 +1186,19 @@ describe('CookieJar', () => {
       },
     );
 
+    test('refuses an IPv4 cookie domain as a DNS hostname suffix', () => {
+      // WHATWG URL parsing currently rejects this hostname before storage. Exercise
+      // the matcher too so its DNS rule does not depend on that upstream rejection.
+      expect(jar['domainMatches']('evil.10.0.0.5', '10.0.0.5')).toBe(false);
+      jar.parseSetCookieHeader(
+        'session=x; Domain=10.0.0.5; Path=/',
+        'http://evil.10.0.0.5/',
+      );
+
+      expect(jar.getAllCookies()).toHaveLength(0);
+      expect(jar.getCookiesFor('http://10.0.0.5/')).toHaveLength(0);
+    });
+
     test('accepts Domain= that is the address itself', () => {
       jar.parseSetCookieHeader(
         'session=x; Domain=127.0.0.1; Path=/',
