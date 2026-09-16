@@ -540,36 +540,20 @@ function withholdUnreached(
 /**
  * Whether `key` names something the walk can address on `container`.
  *
- * Own properties, and inherited ones only where they are enumerable - which is the set
+ * Own enumerable properties, and inherited enumerable properties before the terminal
+ * Object.prototype - which is the set
  * `normalizeParamsBag` flattens and therefore the set the walk resolves. A non-enumerable
  * inherited accessor, `__proto__` being the one that matters, names nothing the walk will
  * ever reach.
  */
 function isAddressableKey(container: object, key: string): boolean {
   try {
-    if (Object.prototype.hasOwnProperty.call(container, key)) {
-      return true;
-    }
-
-    for (
-      let proto: object | null = Object.getPrototypeOf(container) as
-        object | null;
-      proto !== null;
-      proto = Object.getPrototypeOf(proto) as object | null
-    ) {
-      const descriptor = Object.getOwnPropertyDescriptor(proto, key);
-
-      if (descriptor !== undefined) {
-        return descriptor.enumerable === true;
-      }
-    }
+    return isEnumerableBeforeTerminalPrototype(container, key);
   } catch {
     // A `Proxy` that refuses to answer. Nothing addressable can be established, and the
     // walk's own guards fail the container closed when it reaches it.
     return false;
   }
-
-  return false;
 }
 
 /**

@@ -439,6 +439,34 @@ describe('errorToString', () => {
       expect(rendered).toContain('AdditionalInfo.other');
     });
 
+    it('does not render Object.prototype pollution from class additionalInfo', () => {
+      class Config {}
+
+      Object.defineProperty(Config.prototype, 'ownPrototypeField', {
+        configurable: true,
+        enumerable: true,
+        value: 'kept',
+      });
+      Object.defineProperty(Object.prototype, 'pollutedSecret', {
+        configurable: true,
+        enumerable: true,
+        value: SECRET,
+      });
+
+      try {
+        const rendered = errorToString(
+          Object.assign(new Error('x'), { additionalInfo: new Config() }),
+        );
+
+        expect(rendered).toContain('AdditionalInfo.ownPrototypeField');
+        expect(rendered).toContain('kept');
+        expect(rendered).not.toContain('AdditionalInfo.pollutedSecret');
+        expect(rendered).not.toContain(SECRET);
+      } finally {
+        delete (Object.prototype as Record<string, unknown>)['pollutedSecret'];
+      }
+    });
+
     it('should fail closed when sensitiveFieldNames is null', () => {
       // `null` and `undefined` are not the same answer. A property nobody set reads
       // `undefined`; `null` is a value somebody assigned, so it is a caller who asked for

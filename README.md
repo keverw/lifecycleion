@@ -125,7 +125,7 @@ await manager.stopAllComponents();
 await logger.close();
 ```
 
-Tip: listen for `lifecycle-manager:shutdown-completed` when you want one place to react to shutdown results from manual stops, signals like `SIGINT` / `SIGTERM`, or logger-exit hooks. This is the centralized hook for logging or follow-up policy when `timedOut` is `true` or `stalledComponents` is non-empty. If `timedOut` is `true`, the payload reflects the result when the manager stopped waiting. Use repeated shutdown escalation separately when you want additional shutdown requests to retry or force behavior.
+Tip: listen for `lifecycle-manager:shutdown-completed` when you want one place to react to shutdown results from manual stops, signals like `SIGINT` / `SIGTERM`, or logger-exit hooks. This is the centralized hook for logging or follow-up policy when `timedOut` is `true` or `stalledComponents` is non-empty. If `timedOut` is `true`, the payload reflects the result when the manager stopped waiting; a stop already in flight remains protected against per-component overlap, while exit handling and later shutdown/escalation attempts may proceed. Use repeated shutdown escalation separately when you want additional shutdown requests to retry or force behavior.
 
 ## Available Libraries
 

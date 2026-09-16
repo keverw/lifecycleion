@@ -38,6 +38,21 @@ describe('ProcessSignalManager', () => {
   });
 
   describe('constructor', () => {
+    test('normalizes non-finite keypress throttles to the default window', () => {
+      for (const keypressThrottleMS of [Infinity, NaN]) {
+        manager = new ProcessSignalManager({ keypressThrottleMS });
+        const internal = manager as unknown as {
+          keypressThrottleMS: number;
+          lastActionTimes: { reload: number };
+          shouldThrottle(action: 'reload'): boolean;
+        };
+
+        expect(internal.keypressThrottleMS).toBe(200);
+        internal.lastActionTimes.reload = Date.now() - 201;
+        expect(internal.shouldThrottle('reload')).toBe(false);
+      }
+    });
+
     test('creates instance with no callbacks', () => {
       manager = new ProcessSignalManager({});
 
@@ -974,6 +989,48 @@ describe('ProcessSignalManager', () => {
   });
 
   describe('keyboard event handling', () => {
+    test('non-finite throttles still allow a second keypress after the default window', async () => {
+      const wasOriginallyTTY = process.stdin.isTTY;
+      // eslint-disable-next-line @typescript-eslint/unbound-method
+      const savedSetRawMode = process.stdin.setRawMode;
+      // eslint-disable-next-line @typescript-eslint/unbound-method
+      const savedPause = process.stdin.pause;
+
+      (process.stdin as any).isTTY = true;
+      (process.stdin as any).setRawMode = mock(() => {});
+      (process.stdin as any).pause = mock(() => {});
+
+      try {
+        let expectedCalls = 0;
+
+        for (const keypressThrottleMS of [Infinity, NaN]) {
+          manager = new ProcessSignalManager({
+            onReloadRequested: reloadCallback,
+            keypressThrottleMS,
+          });
+          manager.attach();
+
+          process.stdin.emit('keypress', 'r', { name: 'r' });
+          expectedCalls++;
+          const internal = manager as unknown as {
+            lastActionTimes: { reload: number };
+          };
+          internal.lastActionTimes.reload = Date.now() - 201;
+          process.stdin.emit('keypress', 'r', { name: 'r' });
+          expectedCalls++;
+          await sleep(1);
+
+          expect(reloadCallback).toHaveBeenCalledTimes(expectedCalls);
+          manager.detach();
+        }
+      } finally {
+        manager.detach();
+        (process.stdin as any).isTTY = wasOriginallyTTY;
+        (process.stdin as any).setRawMode = savedSetRawMode;
+        (process.stdin as any).pause = savedPause;
+      }
+    });
+
     test('handles Ctrl+C keypress', async () => {
       // Mock TTY mode
       const wasOriginallyTTY = process.stdin.isTTY;

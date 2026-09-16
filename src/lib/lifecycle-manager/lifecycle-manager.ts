@@ -1203,11 +1203,6 @@ export class LifecycleManager
         if (this.isShuttingDown) {
           this.logger.warn('Shutdown signal received during startup, aborting');
 
-          // Rollback: stop all started components in reverse order
-          // Note: Do NOT emit shutdown-initiated/shutdown-completed here, as
-          // stopAllComponents() has already emitted them. We just need to rollback.
-          await this.rollbackStartup(startedComponents);
-
           return {
             success: false,
             startedComponents: [],
@@ -1231,8 +1226,6 @@ export class LifecycleManager
           // Add to startedComponents so it's tracked as part of this bulk operation
           startedComponents.push(name);
         } else if (result.code === 'shutdown_in_progress') {
-          await this.rollbackStartup(startedComponents);
-
           return {
             success: false,
             startedComponents: [],
@@ -3313,6 +3306,7 @@ export class LifecycleManager
     );
 
     const stoppedComponents = new Set<string>();
+    const stoppingComponents = new Set<string>();
     let hasTimedOut = false;
     let timeoutHandle: NodeJS.Timeout | undefined;
     let pendingShutdownOperation: Promise<void> | null = null;
@@ -3394,6 +3388,12 @@ export class LifecycleManager
 
           if (result.success) {
             stoppedComponents.add(name);
+          } else if (result.code === 'component_already_stopping') {
+            // Another owner is already stopping this component. It is neither a new
+            // stall nor permission to overlap the stop, and it must not prevent later
+            // components in the shutdown order from being processed.
+            stoppingComponents.add(name);
+            continue;
           } else {
             // Component failed to stop - track as stalled but continue
             this.logger
@@ -3453,6 +3453,7 @@ export class LifecycleManager
           this.componentStates.get(name) === 'stopped'
         ) {
           stoppedComponents.add(name);
+          stoppingComponents.delete(name);
         }
       }
 
@@ -3461,7 +3462,10 @@ export class LifecycleManager
         .filter((stallInfo): stallInfo is ComponentStallInfo => !!stallInfo);
 
       const durationMS = Date.now() - startTime;
-      const isSuccess = !hasTimedOut && stalledComponents.length === 0;
+      const isSuccess =
+        !hasTimedOut &&
+        stalledComponents.length === 0 &&
+        stoppingComponents.size === 0;
 
       this.logger[isSuccess ? 'success' : 'warn'](
         isSuccess
@@ -3487,7 +3491,11 @@ export class LifecycleManager
               code: 'shutdown_timeout' as const,
               reason: `Shutdown timeout exceeded (${effectiveTimeout}ms)`,
             }
-          : {}),
+          : stoppingComponents.size > 0
+            ? {
+                reason: `Shutdown is still in progress for: ${Array.from(stoppingComponents).join(', ')}`,
+              }
+            : {}),
       };
 
       // Store for getLastShutdownResult() - useful for debugging and metrics
@@ -3515,32 +3523,27 @@ export class LifecycleManager
         clearTimeout(timeoutHandle);
       }
 
-      const finishShutdownState = () => {
-        this.isShuttingDown = false;
-        this.updateStartedFlag();
-        this.finalizePendingLoggerExit();
-      };
-
       if (hasTimedOut && pendingShutdownOperation !== null) {
-        // The public timeout remains an early return, but the operation it raced is not
-        // cancelled. Keep the manager in shutdown until that operation really settles so
-        // start/retry calls cannot overlap the still-running component.stop().
-        void pendingShutdownOperation
-          .catch((error: unknown) => {
-            try {
-              this.logger.warn(
-                'Shutdown operation failed after the global timeout: {{error.message}}',
-                { params: { error: toError(error) } },
-              );
-            } catch {
-              // This is the terminal rejection handler; a reporting failure must not
-              // turn the late shutdown failure into an unhandled rejection.
-            }
-          })
-          .then(finishShutdownState, finishShutdownState);
-      } else {
-        finishShutdownState();
+        // The public timeout remains an early return, and the operation it raced cannot
+        // be cancelled. Per-component `stopping` state continues to prevent overlap, but
+        // the process-wide shutdown latch must be released so logger.exit() and a later
+        // shutdown/escalation are not held forever by a stop() that never settles.
+        void pendingShutdownOperation.catch((error: unknown) => {
+          try {
+            this.logger.warn(
+              'Shutdown operation failed after the global timeout: {{error.message}}',
+              { params: { error: toError(error) } },
+            );
+          } catch {
+            // This is the terminal rejection handler; a reporting failure must not
+            // turn the late shutdown failure into an unhandled rejection.
+          }
+        });
       }
+
+      this.isShuttingDown = false;
+      this.updateStartedFlag();
+      this.finalizePendingLoggerExit();
     }
   }
 

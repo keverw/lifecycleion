@@ -4481,6 +4481,41 @@ describe('HTTPClient — redirect', () => {
     expect(followUpHeaders[0].cookie).toBe('sid=123');
   });
 
+  test('cross-origin redirect strips caller-supplied Cookie without a jar or interceptor', async () => {
+    const followUpHeaders: Array<Record<string, string | string[]>> = [];
+
+    const adapter: HTTPAdapter = {
+      getType: () => 'mock',
+      send: (request: AdapterRequest): Promise<AdapterResponse> => {
+        if (request.requestURL === 'https://example.com/start') {
+          return Promise.resolve({
+            status: 302,
+            headers: { location: 'https://other.example/dest' },
+            body: null,
+          });
+        }
+
+        followUpHeaders.push({ ...request.headers });
+        return Promise.resolve({
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+          body: new TextEncoder().encode('{}'),
+        });
+      },
+    };
+
+    const client = new HTTPClient({ adapter, followRedirects: true });
+
+    await client
+      .get('https://example.com/start', {
+        headers: { cookie: 'sid=123' },
+      })
+      .send();
+
+    expect(followUpHeaders).toHaveLength(1);
+    expect(followUpHeaders[0].cookie).toBeUndefined();
+  });
+
   test('redirect interceptor cannot leak sensitive headers after rewriting to a cross-origin target', async () => {
     const followUpHeaders: Array<Record<string, string | string[]>> = [];
 

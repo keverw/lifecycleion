@@ -144,6 +144,32 @@ describe('stringifyValue - rendering', () => {
 });
 
 describe('stringifyValue - redaction', () => {
+  test('does not promote a nested container from Object.prototype', () => {
+    const pollution = { password: SECRET, token: 'stolen-token' };
+    Object.defineProperty(Object.prototype, 'user', {
+      configurable: true,
+      enumerable: true,
+      value: pollution,
+    });
+
+    try {
+      const value = { ordinary: true };
+      const rendered = stringifyValue(value, {
+        redactedKeys: ['user.password'],
+      });
+      const masked = redactValue(value, {
+        redactedKeys: ['user.password'],
+      }) as Record<string, unknown>;
+
+      expect(rendered).toBe('{"ordinary":true}');
+      expect(rendered).not.toContain('stolen-token');
+      expect(Object.prototype.hasOwnProperty.call(masked, 'user')).toBe(false);
+      expect(JSON.stringify(masked)).not.toContain('stolen-token');
+    } finally {
+      delete (Object.prototype as Record<string, unknown>)['user'];
+    }
+  });
+
   test('matches applyRedaction for the same paths', () => {
     // The point of consolidating: one masking, reachable two ways.
     const shapes: [unknown, string[]][] = [

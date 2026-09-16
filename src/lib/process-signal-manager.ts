@@ -4,6 +4,8 @@ import {
 } from './safe-handle-callback';
 import { ulid } from 'ulid';
 import readline from 'readline';
+import { finiteClamp } from './clamp';
+import { MAX_TIMER_MS } from './internal/timer-limits';
 
 /**
  * The shutdown signal types that can trigger the shutdown callback
@@ -319,7 +321,12 @@ export class ProcessSignalManager {
     this.infoCallbackName = options.infoCallbackName ?? 'onInfoRequested';
     this.debugCallbackName = options.debugCallbackName ?? 'onDebugRequested';
     // Default to 200ms throttle (leading-edge rate limiting), 0 disables
-    this.keypressThrottleMS = options.keypressThrottleMS ?? 200;
+    this.keypressThrottleMS = finiteClamp(
+      options.keypressThrottleMS ?? 200,
+      0,
+      MAX_TIMER_MS,
+      200,
+    );
 
     // Initialize shutdown signal handlers if callback is provided (not yet registered with process)
     // These will be registered when listen() is called

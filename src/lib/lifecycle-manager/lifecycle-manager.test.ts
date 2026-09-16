@@ -3873,6 +3873,71 @@ describe('LifecycleManager - Bulk Operations', () => {
       expect(slowStatus?.state).toBe('stopped');
     });
 
+    test('shutdown owns rollback when it begins during startup and continues past an in-flight stop', async () => {
+      let releaseLastStart!: () => void;
+      const lastStart = new Promise<void>((resolve) => {
+        releaseLastStart = resolve;
+      });
+      const stopped: string[] = [];
+
+      class RecordingComponent extends BaseComponent {
+        constructor(
+          name: string,
+          private readonly stopDelayMS = 0,
+        ) {
+          super(logger, { name });
+        }
+        public start(): void {}
+        public async stop(): Promise<void> {
+          stopped.push(this.getName());
+          if (this.stopDelayMS > 0) {
+            await sleep(this.stopDelayMS);
+          }
+        }
+      }
+
+      class LastStartingComponent extends BaseComponent {
+        constructor() {
+          super(logger, { name: 'last-starting' });
+        }
+        public start(): Promise<void> {
+          return lastStart;
+        }
+        public stop(): void {
+          stopped.push(this.getName());
+        }
+      }
+
+      const lifecycle = new LifecycleManager({
+        logger,
+        shutdownWarningTimeoutMS: -1,
+      });
+      await lifecycle.registerComponent(new RecordingComponent('first'));
+      await lifecycle.registerComponent(new RecordingComponent('second', 50));
+      await lifecycle.registerComponent(new LastStartingComponent());
+
+      const startPromise = lifecycle.startAllComponents();
+      await sleep(5);
+      const stopPromise = lifecycle.stopAllComponents();
+      releaseLastStart();
+
+      const [startResult, stopResult] = await Promise.all([
+        startPromise,
+        stopPromise,
+      ]);
+
+      expect(startResult.code).toBe('shutdown_in_progress');
+      expect(stopResult.stalledComponents).toEqual([]);
+      expect(stopResult.success).toBe(true);
+      expect(stopped.sort()).toEqual(['first', 'last-starting', 'second']);
+      expect(lifecycle.getRunningComponentCount()).toBe(0);
+      expect(
+        ['first', 'second', 'last-starting'].every(
+          (name) => lifecycle.getComponentStatus(name)?.state === 'stopped',
+        ),
+      ).toBe(true);
+    });
+
     test('should block startup if stalled components exist', async () => {
       const lifecycle = new LifecycleManager({ logger });
 
@@ -9814,6 +9879,39 @@ describe('LifecycleManager - Signal Integration', () => {
       expect(logger.exitCode).toBe(7);
       expect(logger.isPendingExit).toBe(false);
     });
+
+    test('releases a logger exit when a manual shutdown times out on a never-settling stop', async () => {
+      class NeverSettlingStopComponent extends BaseComponent {
+        public start(): void {}
+        public stop(): Promise<void> {
+          return new Promise(() => {});
+        }
+      }
+
+      const lifecycle = new LifecycleManager({ logger });
+      await lifecycle.registerComponent(
+        new NeverSettlingStopComponent(logger, { name: 'never-settles' }),
+      );
+      await lifecycle.startAllComponents();
+      lifecycle.enableLoggerExitHook();
+      lifecycle.on('lifecycle-manager:shutdown-completed', () => {
+        logger.exit(7);
+      });
+
+      const result = await lifecycle.stopAllComponents({ timeoutMS: 20 });
+      await sleep(5);
+
+      expect(result.timedOut).toBe(true);
+      expect(logger.didExit).toBe(true);
+      expect(logger.exitCode).toBe(7);
+      expect(logger.isPendingExit).toBe(false);
+      expect(lifecycle.getComponentStatus('never-settles')?.state).toBe(
+        'stopping',
+      );
+      const startResult = await lifecycle.startComponent('never-settles');
+      expect(startResult.success).toBe(false);
+      expect(startResult.code).toBe('component_already_running');
+    });
   });
 
   describe('stopAllComponents() with timeout parameter', () => {
@@ -9909,7 +10007,7 @@ describe('LifecycleManager - Signal Integration', () => {
       expect(result.durationMS).toBeLessThan(200);
     });
 
-    test('keeps shutdown active until the stop raced by the global timeout settles', async () => {
+    test('keeps component overlap blocked after the global timeout while allowing another shutdown', async () => {
       const lifecycle = new LifecycleManager({ logger });
 
       await lifecycle.registerComponent(
@@ -9920,15 +10018,19 @@ describe('LifecycleManager - Signal Integration', () => {
       const result = await lifecycle.stopAllComponents({ timeoutMS: 20 });
 
       expect(result.code).toBe('shutdown_timeout');
-      expect((await lifecycle.startAllComponents()).code).toBe(
-        'shutdown_in_progress',
-      );
-      expect((await lifecycle.stopAllComponents()).code).toBe(
-        'already_in_progress',
-      );
+      expect(lifecycle.getComponentStatus('slow')?.state).toBe('stopping');
+      const startResult = await lifecycle.startComponent('slow');
+      expect(startResult.success).toBe(false);
+      expect(startResult.code).toBe('component_already_running');
+
+      const secondShutdown = await lifecycle.stopAllComponents();
+      expect(secondShutdown.success).toBe(false);
+      expect(secondShutdown.reason).toContain('still in progress for: slow');
+      expect(lifecycle.getComponentStatus('slow')?.state).toBe('stopping');
 
       await sleep(170);
 
+      expect(lifecycle.getComponentStatus('slow')?.state).toBe('stopped');
       expect((await lifecycle.startAllComponents()).success).toBe(true);
       await lifecycle.stopAllComponents();
     });

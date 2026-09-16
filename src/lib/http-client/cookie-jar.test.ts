@@ -1873,8 +1873,24 @@ describe('CookieJar', () => {
         '__Host-id=3; Secure; Path=/app',
         'https://example.com/app',
       );
-      jar.parseSetCookieHeader('__Host-id=4; Secure', 'https://example.com/');
       expect(jar.getAllCookies()).toHaveLength(0);
+
+      jar.parseSetCookieHeader('__Host-id=4; Secure', 'https://example.com/');
+      expect(jar.getCookieFor('__Host-id', 'https://example.com/')?.value).toBe(
+        '4',
+      );
+      jar.parseSetCookieHeader('__Host-id=4b; Secure', 'https://example.com');
+      expect(jar.getCookieFor('__Host-id', 'https://example.com/')?.value).toBe(
+        '4b',
+      );
+
+      jar.parseSetCookieHeader(
+        '__Host-id=refused; Secure',
+        'https://example.com/app/page',
+      );
+      expect(
+        jar.getCookieFor('__Host-id', 'https://example.com/app/page')?.value,
+      ).toBe('4b');
 
       jar.parseSetCookieHeader(
         '__Host-id=5; Secure; Path=/',

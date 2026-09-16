@@ -852,10 +852,6 @@ export class CookieJar {
       return;
     }
 
-    if (!this.hasValidNamePrefix(parsed)) {
-      return;
-    }
-
     let domain: string;
 
     // Set when `Domain=` names a public suffix that is also the request host. RFC 6265bis
@@ -896,6 +892,13 @@ export class CookieJar {
     }
 
     const path = this.resolvedCookiePath(parsed, address.pathname);
+
+    // Prefix validation uses the effective path. An omitted Path attribute on a root
+    // request resolves to `/` and therefore satisfies `__Host-`; an omission whose
+    // RFC default path is deeper than `/` still does not.
+    if (!this.hasValidNamePrefix({ ...parsed, path })) {
+      return;
+    }
 
     // RFC 6265bis §5.7 "Leave Secure Cookies Alone": a non-Secure cookie from a
     // non-secure scheme cannot replace, shadow or evict a stored Secure cookie of the

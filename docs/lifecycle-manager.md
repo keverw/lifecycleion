@@ -1566,8 +1566,7 @@ const lifecycle = new LifecycleManager({
 
 // If shutdown takes longer than 5s, warning is logged and exit proceeds
 logger.exit(0);
-// Output if timeout exceeded:
-// Shutdown timeout exceeded, proceeding with exit (timeoutMS: 5000)
+// The shutdown-completed payload has timedOut: true, then exit proceeds.
 ```
 
 **Important Notes:**
@@ -1576,7 +1575,7 @@ logger.exit(0);
 - Overwrites any existing `beforeExit` callback on the logger
 - If you need custom exit logic, set it up manually with `logger.setBeforeExitCallback()`
 - If `logger.exit()` is called while shutdown is already in progress, that exit call returns `{ action: 'wait' }` instead of exiting immediately.
-- The first such `logger.exit()` call is kept pending and allowed to proceed after the in-flight shutdown finishes.
+- The first such `logger.exit()` call is kept pending and allowed to proceed when the in-flight shutdown completes or reaches its global timeout.
 - Later duplicate `logger.exit()` calls during the same shutdown also return `{ action: 'wait' }`, but are otherwise ignored so they cannot override the pending exit code or exit early.
 
 #### Process Exit Design & Rationale
@@ -2220,7 +2219,7 @@ lifecycle.on('lifecycle-manager:shutdown-completed', (data) => {
 - `lifecycle-manager:shutdown-warning` - Global warning phase started
 - `lifecycle-manager:shutdown-warning-completed` - Warning phase completed
 - `lifecycle-manager:shutdown-warning-timeout` - Warning phase timed out
-- `lifecycle-manager:shutdown-completed` - Shutdown attempt completed, includes the `ShutdownResult` fields at the top level plus `method` / `duringStartup`. This is the best single event for centralized logging or follow-up policy when shutdown times out or leaves stalled components. If the global shutdown timeout was hit, the payload reflects the result at the moment the public call stopped waiting. The component stop already in flight is not cancelled: the manager remains in shutdown and rejects overlapping start/stop operations until that stop settles.
+- `lifecycle-manager:shutdown-completed` - Shutdown attempt completed, includes the `ShutdownResult` fields at the top level plus `method` / `duringStartup`. This is the best single event for centralized logging or follow-up policy when shutdown times out or leaves stalled components. If the global shutdown timeout was hit, the payload reflects the result at the moment the public call stopped waiting. A component stop already in flight is not cancelled: its per-component state continues to reject an overlapping start or stop, while the process-wide shutdown latch is released so exit handling and later shutdown/escalation attempts can proceed.
 
 **Component Registration:**
 

@@ -11,6 +11,7 @@ import {
 } from './internal/redact-paths';
 import {
   ANONYMOUS_ROOT,
+  isEnumerableBeforeTerminalPrototype,
   normalizeAlongRedactPaths,
   unrootedReport,
   unwrapRedactionRoot,
@@ -412,6 +413,10 @@ function asAddressableBag(
 
   try {
     for (const key in source) {
+      if (!isEnumerableBeforeTerminalPrototype(source, key)) {
+        continue;
+      }
+
       // Bounded like every other walk in this file. The rows this bag becomes are bounded
       // - the loop that writes them stops the moment the budget runs out - but *building*
       // it was not, and a bag is a forwarding accessor defined per key: `additionalInfo`

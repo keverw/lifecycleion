@@ -114,6 +114,35 @@ describe('Logger', () => {
       }
     });
 
+    test('nested redaction does not promote enumerable Object.prototype pollution', () => {
+      const pollution = { password: 'hunter2secret', token: 'stolen-token' };
+      Object.defineProperty(Object.prototype, 'user', {
+        configurable: true,
+        enumerable: true,
+        value: pollution,
+      });
+
+      try {
+        logger.info('password={{user.password}} token={{user.token}}', {
+          params: { ordinary: true },
+          redactedKeys: ['user.password'],
+        });
+
+        expect(arraySink.logs[0]?.message).toBe('password=(null) token=(null)');
+        expect(
+          Object.prototype.hasOwnProperty.call(
+            arraySink.logs[0]?.params,
+            'user',
+          ),
+        ).toBe(false);
+        expect(JSON.stringify(arraySink.logs[0]?.params)).not.toContain(
+          'stolen-token',
+        );
+      } finally {
+        delete (Object.prototype as Record<string, unknown>)['user'];
+      }
+    });
+
     test('should log error message', () => {
       logger.error('Test error message');
 
