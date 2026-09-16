@@ -80,4 +80,4 @@ splitCharacters('👨‍👩‍👧🇺🇸ab'); // ['👨‍👩‍👧', '🇺
 
 ## Untrusted settings
 
-`maskChar` is repeated once per hidden character and `percent` is not clamped, so a percent past `100` or a multi-character mask lengthens the output. Bound both before masking a value with settings you did not choose; the logger's default redaction does.
+`percent` is clamped to `0`–`100`, including infinities; `NaN` throws a `RangeError`. Values above `100` mask the entire string. `maskChar` is repeated once per hidden character, so a multi-character mask lengthens the output.

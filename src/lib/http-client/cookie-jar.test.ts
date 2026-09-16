@@ -2857,3 +2857,38 @@ test('unreadable secure cookie expiry blocks replacement without aborting header
   ).toBe('secure');
   expect(jar.getCookieHeaderString('http://example.com/')).toBe('other=ok');
 });
+
+test('nested private suffix tenants cannot set or delete parent-domain cookies', () => {
+  const jar = new CookieJar();
+  jar.parseSetCookieHeader(
+    'session=trusted; Domain=amazonaws.com; Path=/',
+    'https://www.amazonaws.com/',
+  );
+  for (const header of [
+    'session=attacker; Domain=amazonaws.com; Path=/',
+    'session=; Domain=amazonaws.com; Path=/; Max-Age=0',
+  ]) {
+    jar.parseSetCookieHeader(header, 'https://attacker.s3.amazonaws.com/');
+    expect(jar.getCookieHeaderString('https://www.amazonaws.com/')).toBe(
+      'session=trusted',
+    );
+  }
+  jar.parseSetCookieHeader(
+    'tenant=ok; Domain=attacker.s3.amazonaws.com; Path=/',
+    'https://attacker.s3.amazonaws.com/',
+  );
+  expect(
+    jar.getCookieHeaderString('https://sub.attacker.s3.amazonaws.com/'),
+  ).toBe('tenant=ok');
+});
+
+test.each(['gov.uk', 'com'])(
+  'public suffix host %s can store host-only cookies',
+  (host) => {
+    const jar = new CookieJar();
+    jar.parseSetCookieHeader('a=1; Path=/', `https://${host}/`);
+    jar.parseSetCookieHeader(`b=2; Domain=${host}; Path=/`, `https://${host}/`);
+    expect(jar.getCookieHeaderString(`https://${host}/`)).toBe('a=1; b=2');
+    expect(jar.getCookieHeaderString(`https://child.${host}/`)).toBe('');
+  },
+);

@@ -227,6 +227,8 @@ class NonBlockingPipeStream extends Writable {
   public readonly fd: number;
   private retryTimer?: NodeJS.Timeout;
   private cancelWrite?: () => void;
+  private writeInFlight = false;
+  private closeAfterWrite?: () => void;
   private partialWriteFailures = new WeakSet<Error>();
 
   constructor(descriptor: number) {
@@ -287,6 +289,7 @@ class NonBlockingPipeStream extends Writable {
         return;
       }
 
+      this.writeInFlight = true;
       fs.write(
         this.fd,
         buffer,
@@ -294,6 +297,16 @@ class NonBlockingPipeStream extends Writable {
         buffer.length - offset,
         null,
         (error, written) => {
+          this.writeInFlight = false;
+          if (this.destroyed) {
+            if (error === null) {
+              offset += written;
+            }
+            this.cancelWrite?.();
+            this.closeAfterWrite?.();
+            this.closeAfterWrite = undefined;
+            return;
+          }
           const code = error?.code;
 
           if (code === 'EAGAIN' || code === 'EWOULDBLOCK') {
@@ -331,9 +344,16 @@ class NonBlockingPipeStream extends Writable {
     error: Error | null,
     callback: (error?: Error | null) => void,
   ): void {
-    this.cancelWrite?.();
-
-    fs.close(this.fd, (closeError) => callback(error ?? closeError));
+    const close = (): void => {
+      this.cancelWrite?.();
+      fs.close(this.fd, (closeError) => callback(error ?? closeError));
+    };
+    // A queued fs.write owns the descriptor until its callback runs.
+    if (this.writeInFlight) {
+      this.closeAfterWrite = close;
+    } else {
+      close();
+    }
   }
 }
 
@@ -1075,7 +1095,7 @@ export class NamedPipeSink implements LogSink {
           finish();
         }, remainingCloseMS);
 
-        timeoutHandle.unref?.();
+        // Keep the process alive until an explicitly awaited close settles.
 
         try {
           stream.end(() => {

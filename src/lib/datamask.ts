@@ -15,11 +15,9 @@
  * hidden behind one mask character or shown whole - and a code point where it does not,
  * which still never splits a surrogate pair. See {@link splitCharacters}.
  *
- * `maskChar.repeat(maskCount)` writes one mask character per hidden character, so a
- * `percent` past 100 or a multi-character `maskChar` lengthens the output. Neither is
- * clamped here: the functions do what they are asked, and a caller masking untrusted
- * input with untrusted settings bounds them first, as the logger's default redaction
- * does. A NaN percentage throws RangeError rather than silently returning unmasked input.
+ * Percentages are clamped to 0–100, including infinities. A multi-character mask
+ * lengthens the output. A NaN percentage throws RangeError rather than silently
+ * returning unmasked input.
  */
 
 import { splitGraphemes } from './internal/graphemes';
@@ -75,6 +73,7 @@ export function maskString(
   maskChar ??= DEFAULT_MASK_CHAR;
   percent ??= DEFAULT_MASK_PERCENT;
   rejectNaNPercent(percent);
+  percent = Math.max(0, Math.min(100, percent));
   // In characters, so the prefix and suffix each end on a whole one.
   const characters = splitCharacters(value);
   const length = characters.length;

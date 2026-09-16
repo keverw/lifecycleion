@@ -606,9 +606,10 @@ describe('serializeError on values that are error-shaped without being errors', 
     });
 
     expect(reported).toHaveLength(1);
-    expect(result.name).toBe('Error');
-    expect(typeof result.message).toBe('string');
-    expect(result.message).not.toBe('');
+    expect(result.name).toBe('HostileError');
+    expect(result.message).toBe('boom');
+    expect(result.stack).toBe('stack');
+    expect(result.serializationFailure).toBe('<unserializable: keys>');
   });
 
   test('keeps the three members of an error-shaped array', () => {
@@ -1059,4 +1060,15 @@ test('nested data bags with name and message retain their own fields', () => {
   expect(
     (deserializeError(payload) as Error & { context: unknown }).context,
   ).toEqual(bag);
+});
+
+test('preserves nested causal identity when the root exhausts its text allowance', () => {
+  const inner = new Error('middle', { cause: new Error('leaf') });
+  const root = new Error('x'.repeat(2_000_000), { cause: inner });
+  const result = serializeError(root);
+  expect((result.cause as SerializedError).name).toBe('Error');
+  expect((result.cause as SerializedError).message).toBe('middle');
+  expect(
+    ((result.cause as SerializedError).cause as SerializedError).message,
+  ).toBe('leaf');
 });

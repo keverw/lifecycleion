@@ -44,7 +44,8 @@ export interface AdapterRequest {
   /** Passed by the client so NodeAdapter can populate StreamResponseInfo. */
   requestID?: string;
   /**
-   * The resolved URL of the original request, before any redirect hop. Passed by the
+   * The resolved URL last selected by the caller, including retry interceptor origin changes,
+   * before any server redirect hop. Passed by the
    * client so an adapter can tell a hop to another origin from the request the caller
    * addressed. Every network adapter withholds URL userinfo on such a hop, and
    * `NodeAdapter` also withholds its configured client certificate and SNI override

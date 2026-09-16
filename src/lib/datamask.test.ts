@@ -102,9 +102,12 @@ describe('maskString', () => {
     expect(maskString('abc', '*', 50)).toBe('a*c');
   });
 
-  test('does what it is asked with settings past the usual range, as documented', () => {
-    // Neither is clamped here; the logger's default redaction bounds both first.
-    expect(maskString('abcd', '*', 150)).toBe('abc******');
+  test('clamps percentages while preserving multi-character masks', () => {
+    for (const percent of [100, 150, Infinity, Number.MAX_VALUE]) {
+      expect(maskString('hunter2secret', '*', percent)).toBe('*'.repeat(13));
+    }
+    expect(maskString('abcd', '*', -10)).toBe('abcd');
+    expect(maskString('abcd', '*', -Infinity)).toBe('abcd');
     expect(maskString('abc', 'xy', 50)).toBe('axyc');
   });
 

@@ -716,6 +716,7 @@ export class BaseHTTPClient {
         //     on each attempt of that hop, so this stays in sync with Set-Cookie from prior responses)
         //  5. Runs redirect-phase interceptors and observers
         //  6. Continues the loop with the updated request state
+        const credentialScope = { url: finalRequest.requestURL };
         let currentInterceptedRequest: InterceptedRequest = finalRequest;
         let redirectHistory: string[] = [];
         let hopCount = 0;
@@ -730,6 +731,7 @@ export class BaseHTTPClient {
           // its own call; the shared retryPolicy tracks budget across all hops.
           const attemptResult = await this._dispatchRequestAttempts({
             request: currentInterceptedRequest,
+            credentialScope,
             timeout,
             cancelSignal,
             signalReleasers,
@@ -1453,6 +1455,8 @@ export class BaseHTTPClient {
    */
   private async _dispatchRequestAttempts<T>(params: {
     request: InterceptedRequest;
+    /** Latest destination explicitly selected by the caller or a retry interceptor. */
+    credentialScope: { url: string };
     /** Per-attempt timeout in ms. Each attempt gets its own independent timer — NOT a total deadline across all retries. */
     timeout: number;
     /** Cancellation signal from user cancel / cancelAll / external AbortSignal — NOT timeout. Also used to abort retry delays. */
@@ -1506,6 +1510,7 @@ export class BaseHTTPClient {
   }> {
     const {
       request: baseRequest,
+      credentialScope,
       timeout,
       cancelSignal,
       signalReleasers,
@@ -1783,6 +1788,20 @@ export class BaseHTTPClient {
         attemptRequest = retryIntercept;
       }
 
+      // Only an origin change explicitly selects a new credential destination.
+      // Editing a redirected URL's path, query or fragment must not authorize the
+      // server-selected origin. Preserve this scope without changing observer URLs.
+      if (
+        !hopContext ||
+        (isRetry &&
+          this._isCrossOriginRedirect(
+            baseRequest.requestURL,
+            attemptRequest.requestURL,
+          ))
+      ) {
+        credentialScope.url = attemptRequest.requestURL;
+      }
+
       const sentRequest = this._buildAttemptRequest(attemptRequest, {
         requestID,
         timeout,
@@ -1825,7 +1844,7 @@ export class BaseHTTPClient {
           // The origin the caller addressed, so an adapter can tell a redirect hop to
           // another host from the request it was configured for. See
           // `AdapterRequest.initialURL`.
-          initialURL,
+          initialURL: credentialScope.url,
           // Always handed over for a bodied request, whether or not the caller asked for
           // progress: the stamp is what lets the wait on `requestBodySettled` tell an
           // upload that is still moving from one that has stalled. A bodiless request

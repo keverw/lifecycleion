@@ -8480,3 +8480,99 @@ test('303 redirect preserves HEAD', async () => {
   expect(response.status).toBe(200);
   expect(methods).toEqual(['HEAD', 'HEAD']);
 });
+
+test('retry interceptor destinations are caller-authorized but redirect destinations remain guarded', async () => {
+  const requests: AdapterRequest[] = [];
+  const adapter: HTTPAdapter = {
+    getType: () => 'node',
+    send: (request): Promise<AdapterResponse> => {
+      requests.push(request);
+      if (requests.length === 1) {
+        return Promise.resolve({ status: 503, headers: {}, body: null });
+      }
+      if (requests.length === 2 || requests.length === 3) {
+        return Promise.resolve({
+          status: 302,
+          headers: {
+            location:
+              requests.length === 2
+                ? 'https://retry.example/next'
+                : 'https://redirect.example/',
+          },
+          body: null,
+        });
+      }
+      return Promise.resolve({ status: 200, headers: {}, body: null });
+    },
+  };
+  const client = new HTTPClient({ adapter, followRedirects: true });
+  client.addRequestInterceptor(
+    (request) => ({ ...request, requestURL: 'https://retry.example/' }),
+    { phases: ['retry'] },
+  );
+  const response = await client
+    .get('https://original.example/')
+    .retryPolicy({ strategy: 'fixed', maxRetryAttempts: 1, delayMS: 1 })
+    .send();
+  expect(response.status).toBe(200);
+  expect(requests[1].initialURL).toBe('https://retry.example/');
+  expect(requests[2].requestURL).toBe('https://retry.example/next');
+  expect(requests[2].initialURL).toBe('https://retry.example/');
+  expect(requests[3].requestURL).toBe('https://redirect.example/');
+  expect(requests[3].initialURL).toBe('https://retry.example/');
+});
+
+test.each(['query', 'path', 'fragment', 'origin'] as const)(
+  'a %s rewrite on a redirected retry only authorizes a new origin when explicitly changed',
+  async (rewrite) => {
+    const requests: AdapterRequest[] = [];
+    const adapter: HTTPAdapter = {
+      getType: () => 'node',
+      send: (request): Promise<AdapterResponse> => {
+        requests.push(request);
+        if (requests.length === 1) {
+          return Promise.resolve({
+            status: 302,
+            headers: { location: 'https://attacker.example/resource' },
+            body: null,
+          });
+        }
+        return Promise.resolve({
+          status: requests.length === 2 ? 503 : 200,
+          headers: {},
+          body: null,
+        });
+      },
+    };
+    const client = new HTTPClient({ adapter, followRedirects: true });
+    client.addRequestInterceptor(
+      (request) => {
+        const url = new URL(request.requestURL);
+        if (rewrite === 'query') {
+          url.searchParams.set('retry', '2');
+        } else if (rewrite === 'path') {
+          url.pathname = '/retry';
+        } else if (rewrite === 'fragment') {
+          url.hash = 'retry';
+        } else {
+          url.hostname = 'caller-selected.example';
+        }
+        return { ...request, requestURL: url.href };
+      },
+      { phases: ['retry'] },
+    );
+    const response = await client
+      .get('https://original.example/')
+      .retryPolicy({ strategy: 'fixed', maxRetryAttempts: 1, delayMS: 1 })
+      .send();
+    expect(response.status).toBe(200);
+    expect(requests).toHaveLength(3);
+    expect(requests[1].initialURL).toBe('https://original.example/');
+    expect(requests[2].requestURL).not.toBe(requests[1].requestURL);
+    expect(requests[2].initialURL).toBe(
+      rewrite === 'origin'
+        ? 'https://caller-selected.example/resource'
+        : 'https://original.example/',
+    );
+  },
+);

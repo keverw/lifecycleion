@@ -264,11 +264,16 @@ function serializeErrorInner(
     // Keep enough of the shared text allowance aside for causal structure. A huge
     // message is useful, but not at the cost of erasing the key that explains why the
     // error happened. `errors` receives the same treatment for AggregateError.
+    // Reserve at most half: a nested error may inherit only the causal reserve,
+    // and still needs room for its own identity before reserving for its children.
     const priorityKeys = priorityErrorKeys(error);
     const reservedCharacters =
       priorityKeys.length === 0
         ? 0
-        : Math.min(CAUSAL_CHARACTER_RESERVE, budget.remainingCharacters);
+        : Math.min(
+            CAUSAL_CHARACTER_RESERVE,
+            Math.floor(budget.remainingCharacters / 2),
+          );
 
     budget.remainingCharacters -= reservedCharacters;
 
@@ -423,8 +428,7 @@ function serializeErrorInner(
       // here reports the read that refused and marks what it could not carry.
       report(shape.error, path);
 
-      copy.name = 'Error';
-      copy.message = UNSERIALIZABLE_TEXT;
+      defineEntry(copy, 'serializationFailure', UNSERIALIZABLE_KEYS);
     }
 
     return deepSerializeRecord(copy, seen, depth, path, report, budget, true);

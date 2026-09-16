@@ -1068,7 +1068,7 @@ describe('errorToString', () => {
         { onFormatError: (_error, _kind, path) => paths.push(path) },
       );
 
-      expect(paths[0]).toBe('cause.additionalInfo.items[0].token');
+      expect(paths[0]).toBe('cause.additionalInfo.items.0.token');
     });
 
     it('should not let the render reporter raise a failure of its own', () => {
@@ -2610,4 +2610,16 @@ describe('errorToString - an options object that refuses to be read', () => {
 
     expect(rendered).toContain('boom');
   });
+});
+
+it('counts each error in a cause chain once toward the depth limit', () => {
+  let error = new Error('deep-marker');
+  error.stack = undefined;
+  for (let index = 0; index < 60; index++) {
+    error = new Error('level', { cause: error });
+    error.stack = undefined;
+  }
+  expect(errorToString(error, 400, { maxRenderLength: 20_000_000 })).toContain(
+    'deep-marker',
+  );
 });

@@ -258,6 +258,11 @@ registered → starting → running → stopping → stopped
 
 **Note:** Required components that timeout enter `starting-timed-out` and trigger rollback. Optional components that fail enter `failed` state and startup continues.
 
+Once a required startup failure begins rollback, the bulk startup timer is cleared.
+Rollback uses the component shutdown timeouts, and startup returns the original failure
+after cleanup finishes. A concurrent shutdown also cancels the remaining bulk starts,
+even if shutdown finishes before startup resumes.
+
 **Starting-Timed-Out State Definition:**
 A component enters "starting-timed-out" when:
 

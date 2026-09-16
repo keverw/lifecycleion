@@ -288,3 +288,16 @@ describe('DOMException capability probing', () => {
     }
   });
 });
+
+test('proxy-wrapped errors follow the runtime brand check', () => {
+  const proxy = new Proxy(new Error('proxied'), {});
+  const hasIsError =
+    typeof (Error as { isError?: unknown }).isError === 'function';
+  const result = toError(proxy);
+  if (hasIsError) {
+    expect(result).not.toBe(proxy);
+    expect(result.cause).toBe(proxy);
+  } else {
+    expect(result).toBe(proxy);
+  }
+});

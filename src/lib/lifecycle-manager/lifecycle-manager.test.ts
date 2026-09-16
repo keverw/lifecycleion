@@ -12738,3 +12738,102 @@ describe('LifecycleManager - AutoStart & Registration Metadata', () => {
     });
   });
 });
+
+test('a startup failure retains its result while rollback exceeds the startup deadline', async () => {
+  const logger = new Logger({ sinks: [], callProcessExit: false });
+  const manager = new LifecycleManager({ logger });
+  const stopping = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  class Started extends BaseComponent {
+    public start() {
+      return Promise.resolve();
+    }
+    public stop() {
+      stopping.resolve();
+      return release.promise;
+    }
+  }
+  const failure = new Error('original failure');
+  class Failing extends BaseComponent {
+    public start() {
+      return Promise.reject(failure);
+    }
+    public stop() {
+      return Promise.resolve();
+    }
+  }
+  await manager.registerComponent(new Started(logger, { name: 'started' }));
+  await manager.registerComponent(
+    new Failing(logger, { name: 'failing', dependencies: ['started'] }),
+  );
+  const startup = manager.startAllComponents({ timeoutMS: 100 });
+  await stopping.promise;
+  await sleep(150);
+  release.resolve();
+  const result = await startup;
+  expect(result.code).toBe('required_component_failed');
+  expect(result.error).toBeDefined();
+  expect((await manager.startAllComponents()).code).not.toBe(
+    'already_in_progress',
+  );
+  await manager.stopAllComponents();
+});
+
+test('completed shutdown between bulk starts prevents remaining components from starting', async () => {
+  const logger = new Logger({ sinks: [], callProcessExit: false });
+  const manager = new LifecycleManager({
+    logger,
+    shutdownWarningTimeoutMS: -1,
+  });
+  await manager.registerComponent(new TestComponent(logger, { name: 'first' }));
+  await manager.registerComponent(new TestComponent(logger, { name: 'later' }));
+  const internals = manager as unknown as {
+    startComponentInternal: (
+      name: string,
+      ...args: unknown[]
+    ) => Promise<{ success: boolean }>;
+  };
+  const start = internals.startComponentInternal.bind(manager);
+  const calls: string[] = [];
+  const spy = spyOn(internals, 'startComponentInternal').mockImplementation(
+    async (name, ...args) => {
+      calls.push(name);
+      const result = await start(name, ...args);
+      // Pause at the boundary between component completion and the next bulk iteration.
+      if (name === 'first') {
+        await manager.stopAllComponents();
+      }
+      return result;
+    },
+  );
+  try {
+    expect((await manager.startAllComponents()).code).toBe(
+      'shutdown_in_progress',
+    );
+    expect(calls).toEqual(['first']);
+    expect(manager.getRunningComponentCount()).toBe(0);
+  } finally {
+    spy.mockRestore();
+    await manager.stopAllComponents();
+  }
+});
+
+test('constructor Infinity timeouts use the maximum timer delay and NaN uses defaults', () => {
+  const logger = new Logger({ sinks: [], callProcessExit: false });
+  for (const field of [
+    'startupTimeoutMS',
+    'messageTimeoutMS',
+    'shutdownWarningTimeoutMS',
+  ] as const) {
+    const manager = new LifecycleManager({ logger, [field]: Infinity });
+    expect(Reflect.get(manager, field)).toBe(2_147_483_647);
+    const defaults = {
+      startupTimeoutMS: 60000,
+      messageTimeoutMS: 5000,
+      shutdownWarningTimeoutMS: 500,
+    };
+    expect(
+      Reflect.get(new LifecycleManager({ logger, [field]: NaN }), field),
+    ).toBe(defaults[field]);
+  }
+});

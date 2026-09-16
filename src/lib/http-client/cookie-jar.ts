@@ -933,6 +933,11 @@ export class CookieJar {
         return;
       }
 
+      // A nested private suffix must not grant a tenant scope over its parent.
+      if (this.apexFor(requestHostname) !== this.apexFor(normalizedDomain)) {
+        return;
+      }
+
       domain = normalizedDomain;
     } else {
       domain = requestHostname;
@@ -1179,12 +1184,9 @@ export class CookieJar {
     } else if (result.domain !== null) {
       return true;
     } else {
-      // Bare hostnames like 'localhost' — tldts domain is null but valid
-      return (
-        (result.isIcann !== true ||
-          this.publicSuffixes.isRemovedSuffix(domain)) &&
-        HOSTNAME_PATTERN.test(domain)
-      );
+      // Bare hosts and public suffix hosts can both be syntactically valid.
+      // Domain scope is enforced separately in storeParsed.
+      return HOSTNAME_PATTERN.test(domain);
     }
   }
 

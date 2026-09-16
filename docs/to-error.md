@@ -110,10 +110,15 @@ isErrorValue(foreign); // true
 **It never throws.** `instanceof` walks a prototype chain, which a revoked `Proxy` refuses,
 so the check is guarded. You can call it on a reporting path without a `try` of your own.
 
-A hostile object can claim the brand with `Symbol.toStringTag` and will be reported as an
-error. That is the same bargain `instanceof` already offers, since a `Proxy` can forge a
-prototype chain, and it costs nothing: read anything off the result with `describeError` or
-[`errorToString`](./error-to-string.md), both of which guard every read.
+Where available, `Error.isError` checks the internal error slot; genuine `DOMException`
+instances are also accepted. Older runtimes fall back to `instanceof` and the string
+brand, which objects can imitate through a borrowed prototype or `Symbol.toStringTag`.
+Read properties with `describeError` or [`errorToString`](./error-to-string.md), which
+guard every read.
+
+A `Proxy` around an `Error` has no error internal slot of its own. On runtimes
+with `Error.isError`, it is wrapped and retained as `cause`, just like an object
+borrowing `Error.prototype`. Older runtimes using `instanceof` may return it unchanged.
 
 ### Which One Do I Want?
 

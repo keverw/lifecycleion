@@ -252,19 +252,25 @@ export class LifecycleManager
     // into a zero-length warning. Every negative means the same thing to the check that
     // reads it, so they collapse to one.
     this.shutdownWarningTimeoutMS = finiteClamp(
-      options.shutdownWarningTimeoutMS ?? 500,
+      options.shutdownWarningTimeoutMS === Infinity
+        ? MAX_TIMER_MS
+        : (options.shutdownWarningTimeoutMS ?? 500),
       -1,
       MAX_TIMER_MS,
       500,
     );
     this.messageTimeoutMS = finiteClamp(
-      options.messageTimeoutMS ?? 5000,
+      options.messageTimeoutMS === Infinity
+        ? MAX_TIMER_MS
+        : (options.messageTimeoutMS ?? 5000),
       0,
       MAX_TIMER_MS,
       5000,
     );
     this.startupTimeoutMS = finiteClamp(
-      options.startupTimeoutMS ?? 60000,
+      options.startupTimeoutMS === Infinity
+        ? MAX_TIMER_MS
+        : (options.startupTimeoutMS ?? 60000),
       0,
       MAX_TIMER_MS,
       60000,
@@ -1063,6 +1069,7 @@ export class LifecycleManager
 
     // Set starting flag and clear previous shutdown state
     this.isStarting = true;
+    const shutdownTokenAtBulkStart = this.shutdownToken;
     this.autoAttachedSignalsDuringStartup = false;
     this.unexpectedStopsDuringStartup.clear();
     this.resetRepeatedShutdownRequestState();
@@ -1117,7 +1124,7 @@ export class LifecycleManager
         reportCallbackError('bulk startup timeout notification', error);
       }
     };
-    // Bound the caller's wait, including any rollback already in progress.
+    // The startup deadline bounds starts. Rollback has its own stop timeouts.
     if (bulkDelay > 0) {
       timeoutHandle = setTimeout(expireStartup, bulkDelay);
     }
@@ -1236,7 +1243,10 @@ export class LifecycleManager
           }
 
           // Check if shutdown was triggered during startup
-          if (this.isShuttingDown) {
+          if (
+            this.isShuttingDown ||
+            this.shutdownToken !== shutdownTokenAtBulkStart
+          ) {
             this.logger.warn(
               'Shutdown signal received during startup, aborting',
             );
@@ -1266,6 +1276,18 @@ export class LifecycleManager
                   hasExpired: () => hasTimedOut,
                 },
           );
+
+          if (this.shutdownToken !== shutdownTokenAtBulkStart) {
+            return {
+              success: false,
+              startedComponents: [],
+              failedOptionalComponents,
+              skippedDueToDependency: [...skippedDueToDependency],
+              reason: 'Shutdown triggered during startup',
+              code: 'shutdown_in_progress',
+              durationMS: Date.now() - startTime,
+            };
+          }
 
           // Promise continuations drain before timers. Completion observers may
           // consume the remaining budget, so record a successful promotion before
@@ -1343,6 +1365,7 @@ export class LifecycleManager
                   },
                 );
 
+              clearTimeout(timeoutHandle);
               await this.rollbackStartup(startedComponents);
 
               return {
@@ -1413,6 +1436,7 @@ export class LifecycleManager
                   },
                 );
 
+              clearTimeout(timeoutHandle);
               await this.rollbackStartup(startedComponents);
 
               return {
@@ -1439,6 +1463,7 @@ export class LifecycleManager
           startedComponents.push(...unexpectedStopResult.startedComponents);
 
           if (unexpectedStopResult.requiredFailure) {
+            clearTimeout(timeoutHandle);
             await this.rollbackStartup(startedComponents);
 
             return {
@@ -1490,6 +1515,7 @@ export class LifecycleManager
         startedComponents.push(...unexpectedStopResult.startedComponents);
 
         if (unexpectedStopResult.requiredFailure) {
+          clearTimeout(timeoutHandle);
           await this.rollbackStartup(startedComponents);
 
           return {

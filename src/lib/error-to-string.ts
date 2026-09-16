@@ -1869,7 +1869,7 @@ function stringifyValueInner(
 
         const result = stringifyValue(
           item,
-          `${path}[${String(index)}]`,
+          joinPath(path, String(index)),
           maxRowLength,
           seen,
           depth + 1,
@@ -1898,7 +1898,7 @@ function stringifyValueInner(
           parts.push(text);
         }
       } catch (error) {
-        reportRender(error, `${path}[${String(index)}]`);
+        reportRender(error, joinPath(path, String(index)));
         parts.push(UNRENDERABLE_VALUE);
       }
     }
@@ -1937,7 +1937,7 @@ function stringifyValueInner(
           path,
           Math.max(KEY_VALUE_TABLE_MIN_WIDTH, maxRowLength - 4),
           seen,
-          depth + 1,
+          depth,
           budget,
           redactFunction,
           report,
@@ -2051,7 +2051,7 @@ function stringifyValueInner(
           path,
           Math.max(KEY_VALUE_TABLE_MIN_WIDTH, maxRowLength - 4),
           seen,
-          depth + 1,
+          depth,
           budget,
           redactFunction,
           report,

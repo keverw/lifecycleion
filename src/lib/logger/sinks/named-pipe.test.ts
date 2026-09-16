@@ -5,6 +5,7 @@ import * as os from 'os';
 import { exec, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
+import type { Writable } from 'node:stream';
 import { NamedPipeSink } from './named-pipe';
 import type { SinkFailure, SinkFailureKind } from './internal/sink-failure';
 import { LogLevel } from '../types';
@@ -274,6 +275,119 @@ describe('NamedPipeSink', () => {
     });
     return;
   }
+
+  test('destroy waits for an outstanding fs.write before closing its descriptor', async () => {
+    const pipePath = `${tmpDir.path}/in-flight-destroy.pipe`;
+    await createNamedPipe(pipePath);
+    const reader = fs.openSync(
+      pipePath,
+      fs.constants.O_RDONLY | fs.constants.O_NONBLOCK,
+    );
+    const sink = new NamedPipeSink({
+      pipePath,
+      closeTimeoutMS: 100,
+      onError: () => {},
+    });
+    let writeSpy: { mockRestore(): void } | undefined;
+    try {
+      expect(await waitForOpenPipe(sink)).toBe(true);
+      const stream = (
+        sink as unknown as {
+          pipeStream: Writable & { fd: number };
+        }
+      ).pipeStream;
+      const write = fs.write;
+      let complete: (() => void) | undefined;
+      writeSpy = spyOn(fs, 'write').mockImplementation(((
+        fd: number,
+        buffer: Buffer,
+        offset: number,
+        length: number,
+        position: null,
+        callback: (
+          error: NodeJS.ErrnoException | null,
+          written: number,
+          buffer: Buffer,
+        ) => void,
+      ) => {
+        if (fd !== stream.fd) {
+          return write(fd, buffer, offset, length, position, callback);
+        }
+        complete = () => callback(null, length, buffer);
+      }) as typeof fs.write);
+      stream.write(Buffer.from('pending'), () => {});
+      expect(complete).toBeDefined();
+      stream.destroy();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(() => fs.fstatSync(stream.fd)).not.toThrow();
+      const closed = new Promise<void>((resolve) =>
+        stream.once('close', resolve),
+      );
+      complete?.();
+      await closed;
+      expect(() => fs.fstatSync(stream.fd)).toThrow();
+    } finally {
+      writeSpy?.mockRestore();
+      await sink.close();
+      fs.closeSync(reader);
+    }
+  });
+
+  test('Node stays alive until a backpressured close reports buffered loss', async () => {
+    const pipePath = `${tmpDir.path}/node-close.pipe`;
+    await createNamedPipe(pipePath);
+    const reader = fs.openSync(
+      pipePath,
+      fs.constants.O_RDONLY | fs.constants.O_NONBLOCK,
+    );
+    const scriptPath = `${tmpDir.path}/node-close.ts`;
+    const modulePath = fileURLToPath(
+      new URL('./named-pipe.ts', import.meta.url),
+    );
+    await fsPromises.writeFile(
+      scriptPath,
+      `
+      import { NamedPipeSink } from ${JSON.stringify(modulePath)};
+      const sink = new NamedPipeSink({ pipePath: ${JSON.stringify(pipePath)}, closeTimeoutMS: 100, format: entry => entry.message, onError: failure => console.log('loss', failure.disposition) });
+      while (!sink.getHealth().isInitialized) await new Promise(resolve => setTimeout(resolve, 10));
+      sink.write({ timestamp: Date.now(), type: 'info', template: 'large', message: 'x'.repeat(2_000_000) });
+      await sink.close();
+      console.log('closed');
+    `,
+    );
+    const built = await Bun.build({
+      entrypoints: [scriptPath],
+      target: 'node',
+      format: 'esm',
+    });
+    expect(built.success).toBe(true);
+    const executable = `${tmpDir.path}/node-close.mjs`;
+    await fsPromises.writeFile(executable, await built.outputs[0].text());
+    try {
+      const child = spawn('node', [executable], {
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      let stdout = '';
+      let stderr = '';
+      child.stdout.on('data', (chunk) => {
+        stdout += String(chunk);
+      });
+      child.stderr.on('data', (chunk) => {
+        stderr += String(chunk);
+      });
+      const watchdog = setTimeout(() => child.kill('SIGKILL'), 5000);
+      const code = await new Promise<number | null>((resolve, reject) => {
+        child.on('error', reject);
+        child.on('close', resolve);
+      }).finally(() => clearTimeout(watchdog));
+      expect(stderr).toBe('');
+      expect(code).toBe(0);
+      expect(stdout).toContain('loss lost');
+      expect(stdout).toContain('closed');
+    } finally {
+      fs.closeSync(reader);
+    }
+  }, 10000);
 
   beforeEach(async () => {
     tmpDir = new TmpDir({
