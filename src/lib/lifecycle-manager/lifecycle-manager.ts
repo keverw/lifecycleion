@@ -2230,25 +2230,6 @@ export class LifecycleManager
     from: string | null,
     options?: SendMessageOptions,
   ): Promise<MessageResult> {
-    // Check if shutting down
-    const state = this.componentStates.get(componentName);
-    if (
-      this.isShuttingDown ||
-      state === 'stopping' ||
-      state === 'force-stopping'
-    ) {
-      return {
-        sent: false,
-        componentFound: this.hasComponent(componentName),
-        componentRunning: false,
-        handlerImplemented: false,
-        data: undefined,
-        error: new Error('Cannot send message: shutdown in progress'),
-        timedOut: false,
-        code: 'error',
-      };
-    }
-
     // Find component
     const component = this.components.find(
       (c) => c.getName() === componentName,
@@ -2264,6 +2245,25 @@ export class LifecycleManager
         error: null,
         timedOut: false,
         code: 'not_found',
+      };
+    }
+
+    // Teardown is an expected unavailable state, not a handler failure.
+    const state = this.componentStates.get(componentName);
+    if (
+      this.isShuttingDown ||
+      state === 'stopping' ||
+      state === 'force-stopping'
+    ) {
+      return {
+        sent: false,
+        componentFound: true,
+        componentRunning: false,
+        handlerImplemented: false,
+        data: undefined,
+        error: null,
+        timedOut: false,
+        code: 'stopped',
       };
     }
 

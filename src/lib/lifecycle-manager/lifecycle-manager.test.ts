@@ -10256,7 +10256,8 @@ describe('LifecycleManager - Signal Integration', () => {
             options,
           );
           expect(message.sent).toBe(false);
-          expect(message.code).toBe('error');
+          expect(message.code).toBe('stopped');
+          expect(message.error).toBeNull();
           expect(lifecycle.getValue('slow', 'resource', options)).toMatchObject(
             {
               found: false,
@@ -10658,6 +10659,106 @@ describe('LifecycleManager - Messaging, Health & Values', () => {
       expect(result.code).toBe('sent');
     });
 
+    test.each(['stopping', 'force-stopping'] as const)(
+      'reports stopped during a component-only %s without blocking other providers',
+      async (phase) => {
+        const lifecycle = new LifecycleManager({ logger });
+        let releaseStop!: () => void;
+        let notifyStopEntered!: () => void;
+        const stopPending = new Promise<void>((resolve) => {
+          releaseStop = resolve;
+        });
+        const stopEntered = new Promise<void>((resolve) => {
+          notifyStopEntered = resolve;
+        });
+        let messageCalls = 0;
+        let valueCalls = 0;
+
+        class Provider extends BaseComponent {
+          constructor(name: string) {
+            super(logger, { name, dependencies: [] });
+          }
+          public async start() {}
+          public async stop() {
+            if (this.getName() !== 'target') {
+              return;
+            }
+            if (phase === 'force-stopping') {
+              throw new Error('enter force phase');
+            }
+            notifyStopEntered();
+            await stopPending;
+          }
+          public async onShutdownForce() {
+            notifyStopEntered();
+            await stopPending;
+          }
+          public onMessage<T>() {
+            if (this.getName() === 'target') {
+              messageCalls++;
+            }
+            return 'available' as T;
+          }
+          public getValue<T>() {
+            if (this.getName() === 'target') {
+              valueCalls++;
+            }
+            return { found: true, value: 'available' as T };
+          }
+        }
+
+        await lifecycle.registerComponent(new Provider('target'));
+        await lifecycle.registerComponent(new Provider('other'));
+        await lifecycle.startAllComponents();
+        const stopping = lifecycle.stopComponent('target');
+        try {
+          await stopEntered;
+          expect(lifecycle.getComponentStatus('target')?.state).toBe(phase);
+          expect(lifecycle.getShutdownEscalationStatus().isShuttingDown).toBe(
+            false,
+          );
+          for (const options of [
+            undefined,
+            { includeStopped: true, includeStalled: true },
+          ]) {
+            expect(
+              await lifecycle.sendMessageToComponent('target', {}, options),
+            ).toEqual({
+              sent: false,
+              componentFound: true,
+              componentRunning: false,
+              handlerImplemented: false,
+              data: undefined,
+              error: null,
+              timedOut: false,
+              code: 'stopped',
+            });
+            expect(
+              lifecycle.getValue('target', 'resource', options),
+            ).toMatchObject({
+              found: false,
+              componentRunning: false,
+              handlerImplemented: false,
+              code: 'stopped',
+            });
+          }
+          expect(messageCalls).toBe(0);
+          expect(valueCalls).toBe(0);
+          expect(
+            await lifecycle.sendMessageToComponent('other', {}),
+          ).toMatchObject({ sent: true, code: 'sent', error: null });
+          expect(lifecycle.getValue('other', 'resource')).toMatchObject({
+            found: true,
+            value: 'available',
+          });
+        } finally {
+          releaseStop();
+          await stopping;
+          await lifecycle.stopAllComponents();
+        }
+      },
+    );
+
     test('should reject messages during shutdown', async () => {
       const lifecycle = new LifecycleManager({ logger });
 
@@ -10689,9 +10790,16 @@ describe('LifecycleManager - Messaging, Health & Values', () => {
       });
 
       expect(result.sent).toBe(false);
-      expect(result.error?.message).toContain('shutdown in progress');
+      expect(result.error).toBeNull();
       expect(result.timedOut).toBe(false);
-      expect(result.code).toBe('error');
+      expect(result.code).toBe('stopped');
+      expect(
+        await lifecycle.sendMessageToComponent('missing', {}),
+      ).toMatchObject({
+        componentFound: false,
+        code: 'not_found',
+        error: null,
+      });
 
       await shutdownPromise;
     });

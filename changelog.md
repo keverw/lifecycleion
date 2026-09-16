@@ -180,6 +180,7 @@
 
 ## 1.0.0 (Unreleased)
 
+- Report messages refused during component or manager teardown as `stopped` with no handler error; preserve `not_found` for missing targets. Add isolated component-stop coverage for messages and value providers in both stop phases.
 - Block value-provider hooks during stopping and force-stopping, including with stopped/stalled overrides after the bulk shutdown timeout.
 - Cap post-failure escalation windows at the timer limit so reported deadlines match expiry; handle overflow in derived windows too.
 - Reject ambiguous combined Fetch fallback Set-Cookie headers instead of guessing cookie boundaries; preserve single cookies and Expires dates. Add cookie-jar round-trip, attribute-scope, and cross-host redirect coverage.
