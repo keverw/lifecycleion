@@ -254,7 +254,9 @@ export class LifecycleManager
     this.shutdownWarningTimeoutMS = finiteClamp(
       options.shutdownWarningTimeoutMS === Infinity
         ? MAX_TIMER_MS
-        : (options.shutdownWarningTimeoutMS ?? 500),
+        : options.shutdownWarningTimeoutMS === -Infinity
+          ? -1
+          : (options.shutdownWarningTimeoutMS ?? 500),
       -1,
       MAX_TIMER_MS,
       500,
@@ -1280,24 +1282,10 @@ export class LifecycleManager
             };
           }
 
-          // Promise continuations drain before timers. Completion observers may
-          // consume the remaining budget, so record a successful promotion before
-          // taking the timeout snapshot here.
-          if (
-            !hasTimedOut &&
-            deadline !== undefined &&
-            Date.now() >= deadline
-          ) {
-            if (result.success) {
-              startedComponents.push(name);
-            }
-            expireStartup();
-            break;
-          }
-          if (hasTimedOut) {
-            if (result.success) {
-              startedComponents.push(name);
-            }
+          // A bulk timeout has no completed outcome to account for. Other results
+          // must be handled before checking the clock so failures retain their errors
+          // and rollback, and already-running components remain in the snapshot.
+          if (hasTimedOut && result.code === 'component_startup_timeout') {
             break;
           }
 
@@ -1469,6 +1457,15 @@ export class LifecycleManager
               error: unexpectedStopResult.requiredFailure.error,
               durationMS: Date.now() - startTime,
             };
+          }
+
+          // Promise continuations and completion observers can exhaust the budget
+          // before timers run. Account for the settled result before expiring startup.
+          if (deadline !== undefined && Date.now() >= deadline) {
+            expireStartup();
+          }
+          if (hasTimedOut) {
+            break;
           }
         }
 

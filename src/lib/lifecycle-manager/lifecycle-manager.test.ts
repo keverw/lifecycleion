@@ -6568,30 +6568,33 @@ describe('LifecycleManager - Multi-Phase Shutdown', () => {
       expect(didWarningComplete).toBe(true);
     });
 
-    test('should skip warning phase when shutdownWarningTimeoutMS < 0', async () => {
-      const lifecycle = new LifecycleManager({
-        logger,
-        shutdownWarningTimeoutMS: -1,
-      });
-      let isWarningCalled = false;
+    test.each([-1, -Infinity])(
+      'should skip warning phase when shutdownWarningTimeoutMS is %s',
+      async (timeoutMS) => {
+        const lifecycle = new LifecycleManager({
+          logger,
+          shutdownWarningTimeoutMS: timeoutMS,
+        });
+        let isWarningCalled = false;
 
-      class WarningComponent extends TestComponent {
-        public onShutdownWarning() {
-          isWarningCalled = true;
+        class WarningComponent extends TestComponent {
+          public onShutdownWarning() {
+            isWarningCalled = true;
+          }
         }
-      }
 
-      await lifecycle.registerComponent(
-        new WarningComponent(logger, {
-          name: 'warning-comp',
-        }),
-      );
+        await lifecycle.registerComponent(
+          new WarningComponent(logger, {
+            name: 'warning-comp',
+          }),
+        );
 
-      await lifecycle.startAllComponents();
-      await lifecycle.stopAllComponents();
+        await lifecycle.startAllComponents();
+        await lifecycle.stopAllComponents();
 
-      expect(isWarningCalled).toBe(false);
-    });
+        expect(isWarningCalled).toBe(false);
+      },
+    );
 
     test('should timeout warning phase and continue to graceful', async () => {
       const lifecycle = new LifecycleManager({
@@ -12913,5 +12916,94 @@ test('shutdown during startup reports survivors without bypassing haltOnStall', 
       haltOnStall: false,
       retryStalled: false,
     });
+  }
+});
+
+test.each([false, true])(
+  'a settled startup failure past the deadline retains its outcome (optional: %s)',
+  async (isOptional) => {
+    const logger = new Logger({ sinks: [], callProcessExit: false });
+    const manager = new LifecycleManager({
+      logger,
+      shutdownWarningTimeoutMS: -1,
+    });
+    const failure = new Error('failure after blocking');
+    let now = Date.now();
+    const clock = spyOn(Date, 'now').mockImplementation(() => now);
+    class Failing extends BaseComponent {
+      public start() {
+        now += 1000;
+        throw failure;
+      }
+      public stop() {}
+    }
+    try {
+      await manager.registerComponent(
+        new TestComponent(logger, { name: 'started' }),
+      );
+      await manager.registerComponent(
+        new Failing(logger, {
+          name: 'failing',
+          dependencies: ['started'],
+          optional: isOptional,
+        }),
+      );
+      const result = await manager.startAllComponents({ timeoutMS: 100 });
+      expect(result.code).toBe(
+        isOptional ? 'startup_timeout' : 'required_component_failed',
+      );
+      if (isOptional) {
+        expect(result.failedOptionalComponents).toEqual([
+          { name: 'failing', error: failure },
+        ]);
+        expect(result.startedComponents).toEqual(['started']);
+      } else {
+        expect(result.error).toBe(failure);
+        expect(result.startedComponents).toEqual([]);
+        expect(manager.isComponentRunning('started')).toBe(false);
+      }
+    } finally {
+      clock.mockRestore();
+      await manager.stopAllComponents();
+    }
+  },
+);
+
+test('an already-running result past the deadline remains in the startup snapshot', async () => {
+  const logger = new Logger({ sinks: [], callProcessExit: false });
+  const manager = new LifecycleManager({
+    logger,
+    shutdownWarningTimeoutMS: -1,
+  });
+  await manager.registerComponent(
+    new TestComponent(logger, { name: 'running' }),
+  );
+  let now = Date.now();
+  const clock = spyOn(Date, 'now').mockImplementation(() => now);
+  const internals = manager as unknown as {
+    startComponentInternal: (
+      ...args: unknown[]
+    ) => Promise<{ success: boolean; code?: string }>;
+  };
+  const start = internals.startComponentInternal.bind(manager);
+  const spy = spyOn(internals, 'startComponentInternal').mockImplementation(
+    async (...args) => {
+      // Simulate a concurrent permitted start before the bulk call observes it.
+      await start(...args);
+      const result = await start(...args);
+      expect(result.code).toBe('component_already_running');
+      now += 1000;
+      return result;
+    },
+  );
+  try {
+    const result = await manager.startAllComponents({ timeoutMS: 100 });
+    expect(result.code).toBe('startup_timeout');
+    expect(result.startedComponents).toEqual(['running']);
+    expect(manager.isComponentRunning('running')).toBe(true);
+  } finally {
+    spy.mockRestore();
+    clock.mockRestore();
+    await manager.stopAllComponents();
   }
 });
