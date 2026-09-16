@@ -654,6 +654,18 @@ describe('CookieJar', () => {
       expect(cookie?.sameSite).toBe('Strict');
     });
 
+    test('matches Secure and HttpOnly by attribute name when they have values', () => {
+      jar.parseSetCookieHeader(
+        'auth=token; Secure=true; HttpOnly=1',
+        'https://example.com',
+      );
+
+      const cookie = jar.getCookieFor('auth', 'https://example.com');
+      expect(cookie?.secure).toBe(true);
+      expect(cookie?.httpOnly).toBe(true);
+      expect(jar.getCookieFor('auth', 'http://example.com')).toBeUndefined();
+    });
+
     test('parses SameSite=Lax', () => {
       jar.parseSetCookieHeader(
         'auth=token; SameSite=Lax',

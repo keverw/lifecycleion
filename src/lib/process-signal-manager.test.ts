@@ -1,4 +1,12 @@
-import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  mock,
+  spyOn,
+  test,
+} from 'bun:test';
 import {
   muteConsoleError,
   restoreConsoleError,
@@ -1059,6 +1067,33 @@ describe('ProcessSignalManager', () => {
         manager.detach();
       } finally {
         // Restore original values
+        (process.stdin as any).isTTY = wasOriginallyTTY;
+        (process.stdin as any).setRawMode = savedSetRawMode;
+        (process.stdin as any).pause = savedPause;
+      }
+    });
+
+    test('forwards Ctrl+C to SIGINT when a TTY manager has no shutdown callback', () => {
+      const wasOriginallyTTY = process.stdin.isTTY;
+      // eslint-disable-next-line @typescript-eslint/unbound-method
+      const savedSetRawMode = process.stdin.setRawMode;
+      // eslint-disable-next-line @typescript-eslint/unbound-method
+      const savedPause = process.stdin.pause;
+      (process.stdin as any).isTTY = true;
+      (process.stdin as any).setRawMode = mock(() => {});
+      (process.stdin as any).pause = mock(() => {});
+      const killSpy = spyOn(process, 'kill').mockImplementation(() => true);
+
+      try {
+        manager = new ProcessSignalManager({ onReloadRequested: () => {} });
+        manager.attach();
+
+        process.stdin.emit('keypress', '', { ctrl: true, name: 'c' });
+
+        expect(killSpy).toHaveBeenCalledWith(process.pid, 'SIGINT');
+      } finally {
+        manager.detach();
+        killSpy.mockRestore();
         (process.stdin as any).isTTY = wasOriginallyTTY;
         (process.stdin as any).setRawMode = savedSetRawMode;
         (process.stdin as any).pause = savedPause;

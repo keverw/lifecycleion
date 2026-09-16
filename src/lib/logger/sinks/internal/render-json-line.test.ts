@@ -1,5 +1,9 @@
 import { describe, expect, test } from 'bun:test';
-import { renderJSONLine, spliceRenderedParams } from './render-json-line';
+import {
+  exceedsJSONEncodedStringLength,
+  renderJSONLine,
+  spliceRenderedParams,
+} from './render-json-line';
 import { TRUNCATED_LENGTH } from '../../../internal/render-budget';
 import type { LogEntry } from '../../types';
 
@@ -12,6 +16,24 @@ const base: LogEntry = {
 };
 
 describe('renderJSONLine', () => {
+  test('predicts JSON string length without materializing the encoded value', () => {
+    for (const value of [
+      'plain',
+      'quote"slash\\',
+      '\0\b\t\n\f\r',
+      '😀',
+      '\ud800',
+      '\udc00',
+    ]) {
+      const encodedLength = JSON.stringify(value).length;
+
+      expect(exceedsJSONEncodedStringLength(value, encodedLength)).toBe(false);
+      expect(exceedsJSONEncodedStringLength(value, encodedLength - 1)).toBe(
+        true,
+      );
+    }
+  });
+
   test('is one parseable object, with the envelope JSON.stringify would produce', () => {
     const line = renderJSONLine(
       { ...base, redactedParams: { userID: 7, tags: ['a', 'b'] } },
@@ -104,6 +126,17 @@ describe('renderJSONLine', () => {
 
     expect(line.length).toBeLessThan(1_100_000);
     expect(String(parsed.params['huge']).endsWith(TRUNCATED_LENGTH)).toBe(true);
+  });
+
+  test('bounds the JSON-encoded message rather than only its source length', () => {
+    const line = renderJSONLine(
+      { ...base, message: '\0'.repeat(1_000_000) },
+      () => {},
+    );
+    const parsed = JSON.parse(line) as { message: string };
+
+    expect(line.length).toBeLessThan(1_100_000);
+    expect(parsed.message.endsWith(TRUNCATED_LENGTH)).toBe(true);
   });
 
   test('stays JSON when the bag itself cannot be rendered', () => {

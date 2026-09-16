@@ -675,26 +675,34 @@ export class ProcessSignalManager {
       readline.emitKeypressEvents(process.stdin);
     }
 
-    // Create the keypress handler
-    // Note: Keypresses directly invoke callbacks
-    // They don't emit actual process signals to avoid recursion and keep it simple
+    // Create the keypress handler. Letter keys and Escape invoke callbacks directly;
+    // Ctrl+C is forwarded once as SIGINT because raw mode suppresses the terminal's
+    // normal signal generation.
     this.keypressHandler = (str, key): void => {
       const keyObj = key as Record<string, unknown>;
       const keyName = keyObj.name as string;
       // Note: key.name is always lowercase for letter keys, regardless of shift state
       // So checking for 'r' catches both 'r' and 'R' (making it case-insensitive)
 
-      // Handle Ctrl+C manually (if shutdown handler is registered)
-      if (keyObj.ctrl && keyName === 'c' && this.onShutdownRequested) {
+      // Raw mode suppresses the terminal driver's normal Ctrl+C -> SIGINT behavior.
+      // Forward it once for all attached managers, even when this is a reload-only
+      // manager, so the process default (or any external SIGINT listener) still works.
+      if (keyObj.ctrl && keyName === 'c') {
+        const leader = shared.attachedInstances.values().next().value;
+
+        if (leader !== this.instanceID) {
+          return;
+        }
+
         if (this.shouldThrottle('shutdown')) {
           return;
         }
 
-        safeHandleCallback(
-          this.shutdownCallbackName,
-          this.onShutdownRequested,
-          'SIGINT',
-        );
+        if (process.listenerCount('SIGINT') > 0) {
+          process.emit('SIGINT', 'SIGINT');
+        } else {
+          process.kill(process.pid, 'SIGINT');
+        }
       }
       // Treat escape as a SIGINT signal (if shutdown handler is registered)
       else if (keyName === 'escape' && this.onShutdownRequested) {

@@ -4212,8 +4212,15 @@ export class LifecycleManager
 
     for (const name of componentNames) {
       const component = this.getComponent(name);
+      const state = this.componentStates.get(name);
 
-      if (component?.onShutdownWarning) {
+      // A global timeout releases the manager-wide latch while this component can still
+      // be stopping. Do not run its warning hook alongside stop()/onShutdownForce().
+      if (
+        component?.onShutdownWarning &&
+        state !== 'stopping' &&
+        state !== 'force-stopping'
+      ) {
         warningTargets.push({ name, component });
       }
     }
@@ -4458,6 +4465,8 @@ export class LifecycleManager
       this.componentStates.set(name, 'stopped');
       this.runningComponents.delete(name);
       this.stalledComponents.delete(name); // Clear stalled status on successful stop
+      this.componentErrors.set(name, null);
+      this.componentUnexpectedStopHadError.delete(name);
       this.updateStartedFlag();
 
       // Auto-detach signals if this was the last component and option is enabled
@@ -4632,6 +4641,10 @@ export class LifecycleManager
     try {
       const forcePromise = component.onShutdownForce();
 
+      // A late graceful completion can win the race and abandon this attempt. Observe
+      // its rejection immediately, including when the force timeout is disabled.
+      void Promise.resolve(forcePromise).catch(() => {});
+
       if (toTimerDelayMS(timeoutMS) > 0) {
         const timeoutPromise = new Promise<never>((_, reject) => {
           timeoutHandle = setTimeout(() => {
@@ -4736,6 +4749,8 @@ export class LifecycleManager
       this.componentStates.set(name, 'stopped');
       this.runningComponents.delete(name);
       this.stalledComponents.delete(name); // Clear stalled status on successful force stop
+      this.componentErrors.set(name, null);
+      this.componentUnexpectedStopHadError.delete(name);
       this.updateStartedFlag();
 
       // Auto-detach signals if this was the last component and option is enabled

@@ -2056,6 +2056,70 @@ describe('LifecycleManager - Registration & Individual Lifecycle', () => {
       expect(stoppedEvents).toHaveLength(1);
     }, 3000);
 
+    test('a force rejection after graceful wins is observed when force timeout is disabled', async () => {
+      class RejectingAbandonedForceComponent extends BaseComponent {
+        public start(): void {}
+
+        public async stop(): Promise<void> {
+          await sleep(25);
+        }
+
+        public async onShutdownForce(): Promise<void> {
+          await sleep(50);
+          throw new Error('late force rejection');
+        }
+      }
+
+      const lifecycle = new LifecycleManager({ logger });
+      const component = new RejectingAbandonedForceComponent(logger, {
+        name: 'rejecting-abandoned-force',
+        shutdownGracefulTimeoutMS: 10,
+        shutdownForceTimeoutMS: 0,
+      });
+      const unhandled: unknown[] = [];
+      const onUnhandled = (error: unknown): void => {
+        unhandled.push(error);
+      };
+
+      process.on('unhandledRejection', onUnhandled);
+      try {
+        await lifecycle.registerComponent(component);
+        await lifecycle.startComponent('rejecting-abandoned-force');
+
+        expect(
+          (await lifecycle.stopComponent('rejecting-abandoned-force')).success,
+        ).toBe(true);
+        await sleep(60);
+        expect(unhandled).toHaveLength(0);
+      } finally {
+        process.off('unhandledRejection', onUnhandled);
+      }
+    });
+
+    test('a successful in-band force stop clears the graceful error', async () => {
+      class SuccessfulForceComponent extends BaseComponent {
+        public start(): void {}
+        public stop(): never {
+          throw new Error('graceful failed');
+        }
+        public onShutdownForce(): void {}
+      }
+
+      const lifecycle = new LifecycleManager({ logger });
+      await lifecycle.registerComponent(
+        new SuccessfulForceComponent(logger, { name: 'successful-force' }),
+      );
+      await lifecycle.startComponent('successful-force');
+
+      const result = await lifecycle.stopComponent('successful-force');
+
+      expect(result.success).toBe(true);
+      expect(result.status?.lastError).toBeNull();
+      expect(
+        lifecycle.getComponentStatus('successful-force')?.lastError,
+      ).toBeNull();
+    });
+
     test('graceful late resolution should not double-emit stopped when force finishes later', async () => {
       class GracefulWinsBeforeForceCompletesComponent extends BaseComponent {
         constructor() {
@@ -10010,8 +10074,16 @@ describe('LifecycleManager - Signal Integration', () => {
     test('keeps component overlap blocked after the global timeout while allowing another shutdown', async () => {
       const lifecycle = new LifecycleManager({ logger });
 
+      let warningCalls = 0;
+
+      class SlowStopWithWarningComponent extends SlowStopComponent {
+        public onShutdownWarning(): void {
+          warningCalls++;
+        }
+      }
+
       await lifecycle.registerComponent(
-        new SlowStopComponent(logger, 'slow', 150),
+        new SlowStopWithWarningComponent(logger, 'slow', 150),
       );
       await lifecycle.startAllComponents();
 
@@ -10027,6 +10099,7 @@ describe('LifecycleManager - Signal Integration', () => {
       expect(secondShutdown.success).toBe(false);
       expect(secondShutdown.reason).toContain('still in progress for: slow');
       expect(lifecycle.getComponentStatus('slow')?.state).toBe('stopping');
+      expect(warningCalls).toBe(1);
 
       await sleep(170);
 

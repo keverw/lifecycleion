@@ -684,19 +684,21 @@ export class CookieJar {
 
     for (let i = 1; i < parts.length; i++) {
       const part = parts[i];
-      const lowerPart = part.toLowerCase();
+      const eqIdx = part.indexOf('=');
+      const attrName = (eqIdx === -1 ? part : part.slice(0, eqIdx))
+        .trim()
+        .toLowerCase();
 
-      if (lowerPart === 'secure') {
+      // Flag attributes are matched by name; RFC 6265bis ignores any value.
+      if (attrName === 'secure') {
         cookie.secure = true;
-      } else if (lowerPart === 'httponly') {
+      } else if (attrName === 'httponly') {
         cookie.httpOnly = true;
       } else {
-        const eqIdx = part.indexOf('=');
         if (eqIdx === -1) {
           continue;
         }
 
-        const attrName = part.slice(0, eqIdx).trim().toLowerCase();
         const attrValue = part.slice(eqIdx + 1).trim();
 
         switch (attrName) {

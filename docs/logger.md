@@ -1316,7 +1316,7 @@ Two things to know about `failure.entry`. It is the full `LogEntry`, so it carri
 
 A close-time `'lost'` or `'no_entry'` is this callback, not the logger's diagnostic channel. With no `onError` the sink already writes it to `console.error`. With one, a `logger.error(...)` inside the handler during `Logger.close()` is dropped (`handleLog` is already a no-op) and does not fall through to that console line, because the handler succeeded. The example uses `console.error` for that reason.
 
-In text mode (`jsonFormat: false`) the message is written as given, so a message that contains a newline spans two lines in the file, and one built from untrusted input can forge a line. Use `jsonFormat: true` where that matters: every field is escaped there, and one entry is always one line.
+In text mode (`jsonFormat: false`), CR, LF, and the Unicode line/paragraph separators in the message are collapsed to spaces so one entry remains one physical line. JSON mode escapes them instead, preserving the characters in the parsed message while still keeping one entry per line.
 
 #### Health Monitoring
 

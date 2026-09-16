@@ -3002,9 +3002,12 @@ export class BaseHTTPClient {
       attemptNumber,
     );
 
-    // Preserve an explicit content-type from interceptors/callers; otherwise
-    // infer one from the serialized body shape.
-    if (contentType && headers['content-type'] === undefined) {
+    // A native FormData body owns its Content-Type: Fetch/XHR install the multipart
+    // boundary, and NodeAdapter replaces it with the boundary used by its serializer.
+    if (observedBodies.body instanceof FormData) {
+      delete headers['content-type'];
+    } else if (contentType && headers['content-type'] === undefined) {
+      // Preserve an explicit content-type for every other body; otherwise infer it.
       headers['content-type'] = contentType;
     }
 
@@ -3539,17 +3542,20 @@ async function settleUploadBeforeNextDispatch(
     // whether anything moved since the wait was last armed - if so, the stall is
     // measured from that report, and the timer sleeps for the remainder.
     const arm = (sinceMS: number): void => {
-      deadlineID = setTimeout(() => {
-        const quietForMS = Date.now() - lastActivityAt();
+      deadlineID = setTimeout(
+        () => {
+          const quietForMS = Date.now() - lastActivityAt();
 
-        if (quietForMS >= stallMS) {
-          resolve('deadline');
+          if (quietForMS >= stallMS) {
+            resolve('deadline');
 
-          return;
-        }
+            return;
+          }
 
-        arm(stallMS - quietForMS);
-      }, sinceMS);
+          arm(stallMS - quietForMS);
+        },
+        Math.min(Math.max(0, sinceMS), MAX_TIMER_MS),
+      );
     };
 
     // The clock is read on entry too. Silence before the wait began is still silence:

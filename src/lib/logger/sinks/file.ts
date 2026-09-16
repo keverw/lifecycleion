@@ -3,6 +3,7 @@ import { describeError, toError } from '../../to-error';
 import { renderOnce, type RenderedLine } from './internal/rendered-line';
 import { reportThroughHandler } from '../../internal/failure-reporter';
 import { renderJSONLine } from './internal/render-json-line';
+import { renderTextLine } from './internal/render-text-line';
 import {
   DEFAULT_CLOSE_TIMEOUT_MS,
   resolveMaxQueueSize,
@@ -1437,7 +1438,7 @@ export class FileSink implements LogSink {
           text += `[${entry.entityName}] `;
         }
       }
-      text += entry.message;
+      text += renderTextLine(entry.message);
       formatted = text;
     }
 

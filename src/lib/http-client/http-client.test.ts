@@ -3885,6 +3885,24 @@ describe('HTTPClient — FormData upload', () => {
     expect(res.body.received).toBe(true);
     expect(res.body.fields.username).toBe('alice');
   });
+
+  test('removes an inherited Content-Type so the adapter can add the multipart boundary', async () => {
+    const client = makeClient({
+      followRedirects: true,
+      defaultHeaders: { 'Content-Type': 'application/json' },
+    });
+    const fd = new FormData();
+    fd.append('username', 'alice');
+    let contentType: string | string[] | undefined;
+
+    client.addResponseObserver((_response, request) => {
+      contentType = request.headers['content-type'];
+    });
+
+    await client.post('/api/upload').formData(fd).send();
+
+    expect(contentType).toBeUndefined();
+  });
 });
 
 describe('HTTPClient — timeout resolution', () => {

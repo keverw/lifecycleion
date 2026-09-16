@@ -331,7 +331,8 @@ manager.attach();
 // This manager only responds to:
 // - SIGHUP signal
 // - R or r key press
-// Shutdown signals (SIGINT, SIGTERM, SIGTRAP) will not be handled
+// It does not install shutdown callbacks for SIGINT, SIGTERM, or SIGTRAP.
+// Ctrl+C is still forwarded as SIGINT so the terminal's normal interrupt works.
 ```
 
 ### Throttling Keyboard Events

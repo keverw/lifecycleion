@@ -8,6 +8,7 @@ import { diagnosticEntry } from '../internal/diagnostic-entry';
 import { describeError, toError } from '../../to-error';
 import { renderOnce, type RenderedLine } from './internal/rendered-line';
 import { renderJSONLine } from './internal/render-json-line';
+import { renderTextLine } from './internal/render-text-line';
 import { reportThroughHandler } from '../../internal/failure-reporter';
 import { readUnknownMember } from '../../internal/read-member';
 import {
@@ -2506,7 +2507,7 @@ export class NamedPipeSink implements LogSink {
           text += `[${entry.entityName}] `;
         }
       }
-      text += entry.message;
+      text += renderTextLine(entry.message);
       formatted = text;
     }
 
