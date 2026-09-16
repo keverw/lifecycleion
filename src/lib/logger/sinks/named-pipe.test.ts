@@ -81,6 +81,29 @@ async function waitForOpenPipe(
   return false;
 }
 
+// Open failures are asynchronous too. Tests interested in a particular failure wait for
+// that observable result instead of assuming the filesystem, stream open, and fstat have
+// all completed within a fixed number of milliseconds.
+async function waitForFailure(
+  failures: SinkFailure[],
+  predicate: (failure: SinkFailure) => boolean,
+  timeoutMS = 5000,
+): Promise<SinkFailure | undefined> {
+  const deadline = Date.now() + timeoutMS;
+
+  while (Date.now() < deadline) {
+    const failure = failures.find(predicate);
+
+    if (failure !== undefined) {
+      return failure;
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+
+  return failures.find(predicate);
+}
+
 // A reader's data arrives whenever the FIFO delivers it, which under a full suite run can
 // be well after any fixed delay. Waited for by content rather than by clock: the assertion
 // wants the line, not a moment.
@@ -322,10 +345,13 @@ describe('NamedPipeSink', () => {
     });
 
     try {
-      await new Promise((resolve) => setTimeout(resolve, 300));
+      const swappedPathFailure = await waitForFailure(
+        errors,
+        (failure) => failure.kind === 'not_a_pipe',
+      );
 
       expect(sink.getHealth().isInitialized).toBe(false);
-      expect(errors.map((failure) => failure.kind)).toContain(
+      expect(swappedPathFailure?.kind).toBe(
         'not_a_pipe' satisfies SinkFailureKind,
       );
 
@@ -336,7 +362,9 @@ describe('NamedPipeSink', () => {
         message: 'must not land in the file',
       });
 
-      await new Promise((resolve) => setTimeout(resolve, 100));
+      // Wait for a complete second open attempt rather than sleeping and possibly reading
+      // the file before the vulnerable path has even run.
+      expect((await sink.reconnect()).success).toBe(false);
 
       expect(await fsPromises.readFile(filePath, 'utf8')).toBe('');
     } finally {
@@ -1030,7 +1058,7 @@ describe('NamedPipeSink', () => {
     const reader = startPipeReader(pipePath);
     const sink = new NamedPipeSink({ pipePath });
 
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(await waitForOpenPipe(sink)).toBe(true);
 
     const entryFor = (message: string): LogEntry => ({
       timestamp: Date.now(),
@@ -1826,9 +1854,9 @@ describe('NamedPipeSink', () => {
       expect(lostFormats[0]?.error.message).not.toContain(
         'message refused to serialize',
       );
-      expect(
-        (lostFormats[0]?.error.cause as Error | undefined)?.message,
-      ).toBe('message refused to serialize');
+      expect((lostFormats[0]?.error.cause as Error | undefined)?.message).toBe(
+        'message refused to serialize',
+      );
       expect(sink.getHealth().droppedEntries).toBe(3);
     } finally {
       await sink.close();
