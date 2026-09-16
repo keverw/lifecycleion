@@ -303,10 +303,12 @@ export class LifecycleManager
       );
       // Invalid explicit durations fall back to the derived default instead of
       // breaking the post-failure arming timer.
-      const armedAfterFailureMS = finiteClampMin(
-        repeatedShutdownRequestPolicy.armedAfterFailureMS,
-        0,
-        withinMS * forceAfterCount,
+      const armedAfterFailureMS = toTimerDelayMS(
+        finiteClampMin(
+          repeatedShutdownRequestPolicy.armedAfterFailureMS,
+          0,
+          withinMS * forceAfterCount,
+        ),
       );
       this.repeatedShutdownRequestPolicy = {
         forceAfterCount,
@@ -2594,16 +2596,20 @@ export class LifecycleManager
       };
     }
 
-    // Check if running
-    const isRunning = this.isComponentRunning(componentName);
-    const isStalled = this.stalledComponents.has(componentName);
+    // A stop in flight can still be present in runningComponents. Neither
+    // override permits entering a provider while it is tearing down resources.
+    const state = this.componentStates.get(componentName);
+    const isStopping = state === 'stopping' || state === 'force-stopping';
+    const isRunning = !isStopping && this.isComponentRunning(componentName);
+    const isStalled = !isStopping && this.stalledComponents.has(componentName);
     const allowStopped = options?.includeStopped === true;
     const allowStalled = options?.includeStalled === true;
     const isStopped = !isRunning && !isStalled;
 
     if (
-      !isRunning &&
-      !((isStopped && allowStopped) || (isStalled && allowStalled))
+      isStopping ||
+      (!isRunning &&
+        !((isStopped && allowStopped) || (isStalled && allowStalled)))
     ) {
       const code = isStalled ? 'stalled' : 'stopped';
       this.lifecycleEvents.componentValueReturned(componentName, key, from, {

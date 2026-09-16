@@ -1607,6 +1607,44 @@ describe('Logger', () => {
       expect(String(consoled[0])).toContain('inner boom');
     });
 
+    test('delivers an async nested report and unrelated same-turn reports', async () => {
+      const sink = new ArraySink();
+      let isNestedScheduled = false;
+      const reportingLogger = new Logger({
+        sinks: [
+          {
+            write(entry) {
+              sink.write(entry);
+              if (!isNestedScheduled) {
+                isNestedScheduled = true;
+                safeHandleCallback('asyncSinkCallback', async () => {
+                  await Promise.resolve();
+                  throw new Error('async nested boom');
+                });
+              }
+            },
+          },
+        ],
+        callProcessExit: false,
+      });
+      reportingLogger.registerReportErrorListener();
+      try {
+        for (const message of ['first outer boom', 'second outer boom']) {
+          safeHandleCallback('outerCallback', () => {
+            throw new Error(message);
+          });
+        }
+        await sleep(10);
+        expect(sink.logs).toHaveLength(3);
+        expect(sink.logs[0].message).toContain('first outer boom');
+        expect(sink.logs[1].message).toContain('second outer boom');
+        expect(sink.logs[2].message).toContain('async nested boom');
+      } finally {
+        reportingLogger.unregisterReportErrorListener();
+        await reportingLogger.close();
+      }
+    });
+
     test('re-entrancy guard is shared when multiple loggers trigger render failures', () => {
       const hostileValue = (): Record<string, unknown> => {
         const value: Record<string, unknown> = {};

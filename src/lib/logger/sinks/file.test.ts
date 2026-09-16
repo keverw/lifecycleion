@@ -2067,6 +2067,8 @@ describe('FileSink - async self-logging onError', () => {
     await sink.flush();
 
     expect(sink.getHealth().droppedByKind.queue_full).toBe(1);
+    // Destination health recovers independently of historical loss counters.
+    expect(sink.getHealth().isHealthy).toBe(true);
 
     sink.write({
       timestamp: Date.now(),

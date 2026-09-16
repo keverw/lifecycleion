@@ -711,6 +711,14 @@ await client
 
 A `CookieJar` provides cookie storage with Public Suffix List domain matching, path matching, secure-flag enforcement, and expiry handling.
 
+Fetch uses `Headers.getSetCookie()` to preserve individual response cookie lines.
+On legacy implementations without it, the fallback accepts a single unambiguous
+cookie, including Expires date commas. If a comma is followed by text containing
+`=` before the next comma or semicolon, the entire Set-Cookie header is omitted:
+it could be combined cookies or text inside a Path/extension attribute, and
+splitting it could invent cookies or broaden their scope. Use a runtime with
+`getSetCookie()` or NodeAdapter to reliably receive multiple cookies.
+
 ```typescript
 import { CookieJar, HTTPClient } from 'lifecycleion/http-client';
 

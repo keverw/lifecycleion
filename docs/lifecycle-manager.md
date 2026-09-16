@@ -1162,7 +1162,7 @@ interface HealthReport {
 
 ### Value Sharing
 
-Components can share values with each other. **By default, only running components can provide values.** Use the `includeStopped` or `includeStalled` options to retrieve values from components in other states.
+Components can share values with each other. **By default, only running components can provide values.** Use the `includeStopped` or `includeStalled` options to retrieve values from components in other states. Value requests remain blocked during `stopping` and `force-stopping`, even with these overrides or after the bulk shutdown timeout.
 
 ```typescript
 class ConfigComponent extends BaseComponent {
@@ -1440,7 +1440,7 @@ const lifecycle = new LifecycleManager({
 - The repeated-request counter belongs to one active escalation state
 - If shutdown completes successfully, the repeated-request state resets immediately
 - If shutdown completes unsuccessfully, times out, or leaves stalled components behind, escalation stays armed briefly so follow-up shutdown requests can continue the same force count
-- That post-failure armed period defaults to `withinMS * forceAfterCount`, or uses `armedAfterFailureMS` when explicitly configured
+- That post-failure armed period defaults to `withinMS * forceAfterCount`, or uses `armedAfterFailureMS` when explicitly configured. The effective duration is capped at 2,147,483,647 ms to match the timer limit
 - A shutdown request received during that armed period continues the same escalation state and starts a fresh shutdown attempt
 - While that retry is running, the armed timer is no longer active because shutdown is in progress again
 - If the retry also finishes unsuccessfully, the manager re-arms the post-failure window so follow-up requests can continue the same escalation state

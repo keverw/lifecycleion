@@ -3750,6 +3750,39 @@ describe('NamedPipeSink', () => {
     await sink.close();
   }, 15000);
 
+  test('destination health is independent of historical queue overflow', async () => {
+    const pipePath = `${tmpDir.path}/overflow-health.pipe`;
+    await createNamedPipe(pipePath);
+    const readerFd = fs.openSync(
+      pipePath,
+      fs.constants.O_RDONLY | fs.constants.O_NONBLOCK,
+    );
+    const sink = new NamedPipeSink({
+      pipePath,
+      maxQueueSize: 1,
+      closeTimeoutMS: 200,
+      onError: () => {},
+    });
+    try {
+      // Both writes precede the asynchronous open, so the second evicts the first.
+      for (const message of ['first', 'second']) {
+        sink.write({
+          timestamp: Date.now(),
+          type: 'info',
+          template: message,
+          message,
+        });
+      }
+      expect(sink.getHealth().droppedByKind.queue_full).toBe(1);
+      expect(await waitForOpenPipe(sink)).toBe(true);
+      expect(sink.getHealth().isHealthy).toBe(true);
+      expect(sink.getHealth().droppedEntries).toBe(1);
+    } finally {
+      await sink.close();
+      fs.closeSync(readerFd);
+    }
+  });
+
   test('droppedByKind splits the total by reason and always sums to it', async () => {
     const makeEntry = (message: string): LogEntry => ({
       timestamp: Date.now(),

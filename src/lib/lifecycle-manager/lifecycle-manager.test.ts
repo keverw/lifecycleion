@@ -8187,6 +8187,49 @@ describe('LifecycleManager - Signal Integration', () => {
       expect(status.hasTriggeredForceShutdown).toBe(false);
     });
 
+    test.each([false, true])(
+      'caps the %s derived post-failure window to the actual timer delay',
+      async (isDerived) => {
+        const maxTimerMS = 2_147_483_647;
+        const lifecycle = new LifecycleManager({
+          logger,
+          repeatedShutdownRequestPolicy: {
+            forceAfterCount: 3,
+            withinMS: isDerived ? Number.MAX_VALUE : 100,
+            ...(isDerived ? {} : { armedAfterFailureMS: Number.MAX_VALUE }),
+            onForceShutdown: () => {},
+          },
+        });
+        await lifecycle.registerComponent(
+          new FailingStopComponent(logger, 'failing-stop', 'stop failed'),
+        );
+        await lifecycle.startAllComponents();
+        const timerSpy = spyOn(globalThis, 'setTimeout');
+        const before = Date.now();
+        try {
+          await lifecycle.stopAllComponents();
+          expect(
+            timerSpy.mock.calls.some((call) => call[1] === maxTimerMS),
+          ).toBe(true);
+        } finally {
+          timerSpy.mockRestore();
+        }
+        const after = Date.now();
+        const status = lifecycle.getShutdownEscalationStatus();
+        expect(status.isArmed).toBe(true);
+        expect(status.armedAfterFailureMS).toBe(maxTimerMS);
+        expect(status.armedUntil).toBeGreaterThanOrEqual(before + maxTimerMS);
+        expect(status.armedUntil).toBeLessThanOrEqual(after + maxTimerMS);
+        // Inspect and clear the long-lived timer without waiting 24 days.
+        const internals = lifecycle as unknown as {
+          repeatedShutdownExpiryTimer: ReturnType<typeof setTimeout>;
+          resetRepeatedShutdownRequestState(): void;
+        };
+        expect(internals.repeatedShutdownExpiryTimer).toBeDefined();
+        internals.resetRepeatedShutdownRequestState();
+      },
+    );
+
     test('should not report armed escalation after the armed window has expired', async () => {
       const lifecycle = new LifecycleManager({
         logger,
@@ -10162,6 +10205,7 @@ describe('LifecycleManager - Signal Integration', () => {
         let warningCalls = 0;
         let messageCalls = 0;
         let healthCalls = 0;
+        let valueCalls = 0;
 
         class SlowStopWithWarningComponent extends SlowStopComponent {
           public async stop(): Promise<void> {
@@ -10172,6 +10216,10 @@ describe('LifecycleManager - Signal Integration', () => {
           }
           public async onShutdownForce(): Promise<void> {
             await sleep(150);
+          }
+          public getValue<T>() {
+            valueCalls++;
+            return { found: true, value: 'resource' as T };
           }
           public onShutdownWarning(): void {
             warningCalls++;
@@ -10209,7 +10257,16 @@ describe('LifecycleManager - Signal Integration', () => {
           );
           expect(message.sent).toBe(false);
           expect(message.code).toBe('error');
+          expect(lifecycle.getValue('slow', 'resource', options)).toMatchObject(
+            {
+              found: false,
+              componentRunning: false,
+              handlerImplemented: false,
+              code: 'stopped',
+            },
+          );
         }
+        expect(valueCalls).toBe(0);
         const health = await lifecycle.checkComponentHealth('slow');
         expect(health.healthy).toBe(false);
         expect(health.code).toBe('stopped');

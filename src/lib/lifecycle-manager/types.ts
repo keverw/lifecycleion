@@ -422,7 +422,8 @@ export interface SendMessageOptions {
 }
 
 /**
- * Options for requesting a value from a component
+ * Options for requesting a value from a component. Neither option permits
+ * invoking a component during stopping or force-stopping.
  */
 export interface GetValueOptions {
   /**
@@ -1151,6 +1152,7 @@ export interface RepeatedShutdownRequestPolicy {
   /**
    * How long escalation should remain armed after an unsuccessful shutdown
    * returns. When omitted, the manager derives it as `withinMS * forceAfterCount`.
+   * The effective duration is capped at 2,147,483,647 ms (the timer limit).
    * Set to `0` to disable post-failure arming entirely — the escalation window
    * will not persist once a shutdown attempt returns, and each new request will
    * start a fresh escalation cycle. (Note: `withinMS = 0` is a separate option

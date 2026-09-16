@@ -1344,7 +1344,9 @@ console.log(health);
 `consecutiveFailures`, and therefore `isHealthy`, counts write failures only in both
 queueing sinks. A `'format'` failure never reached the destination and says nothing about
 whether the sink can write, so it is reported through `onError` (with `disposition`) and
-recorded in `lastError`, but it does not mark the sink unhealthy.
+recorded in `lastError`, but it does not mark the sink unhealthy. Queue overflow
+also leaves destination health unchanged; monitor `droppedByKind.queue_full`
+and `droppedEntries` as well as `isHealthy` to detect log loss.
 
 #### Flush Pending Writes
 
@@ -1852,6 +1854,13 @@ logger.isReportErrorAvailable(); // boolean — are the global event primitives 
 `'not_available'` from `registerReportErrorListener` means the global object exposes neither native nor polyfilled event methods. From `unregisterReportErrorListener` it means the removal itself was refused - the methods are there, but `removeEventListener` threw - so **the listener is still attached and still receiving**, and the registration is deliberately kept so that a later `register` does not add a second one. `isReportErrorListenerRegistered()` agrees with it and still answers `true`. See [global-event-target](./global-event-target.md). On Node.js, Lifecycleion installs them for you.
 
 ## Where Failures Go
+
+Custom sinks must not repeatedly report their own asynchronous failures through
+`safeHandleCallback` or the global `'error'` channel while handling a reported error.
+The listener and shared host-report guards cover synchronous re-entry only; a later
+microtask can re-enter the logger and create an asynchronous feedback loop. Use the
+sink error callback or a separate destination for those failures. Unrelated reports
+in the same turn remain deliverable.
 
 The logger has a separate asynchronous path for things that go wrong while logging:
 

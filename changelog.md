@@ -180,6 +180,11 @@
 
 ## 1.0.0 (Unreleased)
 
+- Block value-provider hooks during stopping and force-stopping, including with stopped/stalled overrides after the bulk shutdown timeout.
+- Cap post-failure escalation windows at the timer limit so reported deadlines match expiry; handle overflow in derived windows too.
+- Reject ambiguous combined Fetch fallback Set-Cookie headers instead of guessing cookie boundaries; preserve single cookies and Expires dates. Add cookie-jar round-trip, attribute-scope, and cross-host redirect coverage.
+- Pin destination health independently of historical queue loss, and document that async custom-sink reports can re-enter the global error listener after its synchronous guard ends.
+
 - Block component messages and health hooks during graceful and force shutdown, including after the bulk timeout releases the manager's shutdown latch. Message overrides cannot bypass teardown protection. Starting a component in either phase now returns `component_already_stopping`.
 - Log abandoned force-hook failures after graceful shutdown wins, without changing the stopped state. Bulk shutdown timeout reporting now uses the same normalized duration as its timer; constructor `shutdownOptions.timeoutMS: NaN` uses the documented 30-second default.
 - Add regression coverage for both shutdown phases, late force rejection, NaN shutdown timeouts, public-suffix overrides, and credential-bearing unfollowed redirect metadata. Clarify default Fetch upload limits, deferred logger diagnostics, and retry timer lifetime.

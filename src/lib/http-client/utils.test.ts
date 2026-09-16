@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test';
+import { CookieJar } from './cookie-jar';
 import {
   assertSupportedAdapterRuntimeAndConfig,
   buildURL,
@@ -676,21 +677,59 @@ describe('extractFetchHeaders', () => {
     expect(extractFetchHeaders(new Headers())).toEqual({});
   });
 
-  test('falls back to headers.get("set-cookie") when getSetCookie is unavailable', () => {
+  test.each([
+    'a=1, b=2',
+    'a=1, b = 2',
+    'a=1; Expires=Wed, 21 Oct 2099 07:28:00 GMT, b=2',
+    'safe=1; Secure; Path=/restricted, admin=1',
+    'safe=1; Extension=value, admin=1; Path=/',
+  ])('rejects ambiguous fallback cookie boundaries: %s', (raw) => {
     const headers = {
       entries: function* () {
-        yield ['content-type', 'application/json'] as [string, string];
-        yield ['set-cookie', 'a=1, b=2'] as [string, string];
+        yield ['set-cookie', raw];
+        yield ['content-type', 'application/json'];
       },
-      get(name: string) {
-        return name === 'set-cookie' ? 'a=1, b=2' : null;
-      },
+      get: () => raw,
     } as unknown as Headers;
+    const extracted = extractFetchHeaders(headers);
+    expect(extracted).toEqual({ 'content-type': 'application/json' });
+    const jar = new CookieJar();
+    jar.processResponseHeaders(extracted, 'https://example.com/');
+    expect(jar.getAllCookies()).toEqual([]);
+  });
 
-    expect(extractFetchHeaders(headers)).toEqual({
-      'content-type': 'application/json',
-      'set-cookie': ['a=1, b=2'],
-    });
+  test.each(['a=1', 'a=1; Expires=Wed, 21 Oct 2099 07:28:00 GMT'])(
+    'preserves an unambiguous fallback cookie: %s',
+    (raw) => {
+      const headers = {
+        entries: function* () {
+          yield ['set-cookie', raw];
+        },
+        get: () => raw,
+      } as unknown as Headers;
+      const extracted = extractFetchHeaders(headers);
+      expect(extracted['set-cookie']).toEqual([raw]);
+      const jar = new CookieJar();
+      jar.processResponseHeaders(extracted, 'https://example.com/');
+      expect(jar.getCookieHeaderString('https://example.com/')).toBe('a=1');
+      if (raw.includes('Expires=')) {
+        expect(
+          jar.getCookieFor('a', 'https://example.com/')?.expires?.getTime(),
+        ).toBe(Date.parse('Wed, 21 Oct 2099 07:28:00 GMT'));
+      }
+    },
+  );
+
+  test('preserves exact cookie lines with comma-containing attributes via getSetCookie', () => {
+    const raw = 'safe=1; Secure; Path=/restricted, admin=1';
+    const headers = new Headers({ 'set-cookie': raw });
+    const extracted = extractFetchHeaders(headers);
+    expect(extracted['set-cookie']).toEqual([raw]);
+    const jar = new CookieJar();
+    jar.processResponseHeaders(extracted, 'https://example.com/');
+    expect(jar.getAllCookies()).toHaveLength(1);
+    expect(jar.getAllCookies()[0].path).toBe('/restricted, admin=1');
+    expect(jar.getCookieHeaderString('https://example.com/')).toBe('');
   });
 });
 

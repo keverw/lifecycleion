@@ -4502,6 +4502,41 @@ describe('HTTPClient — redirect', () => {
     expect(followUpHeaders[0].cookie).toBe('sid=123');
   });
 
+  test('cross-host redirects store response cookies at the source and send only target cookies', async () => {
+    const jar = new CookieJar();
+    jar.parseSetCookieHeader('target=2; Secure', 'https://other.example/');
+    const seen: Array<Record<string, string | string[]>> = [];
+    const adapter: HTTPAdapter = {
+      getType: () => 'mock',
+      send: (request): Promise<AdapterResponse> => {
+        seen.push({ ...request.headers });
+        if (request.requestURL === 'https://example.com/start') {
+          return Promise.resolve({
+            status: 302,
+            headers: {
+              location: 'https://other.example/dest',
+              'set-cookie': ['source=1; Secure; Path=/'],
+            },
+            body: null,
+          });
+        }
+        return Promise.resolve({ status: 200, headers: {}, body: null });
+      },
+    };
+    const client = new HTTPClient({
+      adapter,
+      cookieJar: jar,
+      followRedirects: true,
+    });
+    await client.get('https://example.com/start').send();
+    expect(seen).toHaveLength(2);
+    expect(seen[1].cookie).toBe('target=2');
+    expect(jar.getCookieHeaderString('https://example.com/')).toBe('source=1');
+    expect(jar.getCookieHeaderString('https://other.example/')).toBe(
+      'target=2',
+    );
+  });
+
   test('cross-origin redirect strips caller-supplied Cookie without a jar or interceptor', async () => {
     const followUpHeaders: Array<Record<string, string | string[]>> = [];
 
