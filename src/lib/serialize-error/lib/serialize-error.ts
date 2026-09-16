@@ -375,6 +375,16 @@ function serializeErrorInner(
     const source = error as unknown as Record<string, unknown>;
     const copy: SerializedError = {} as SerializedError;
 
+    const priorityKeys: string[] = priorityErrorKeys(source);
+    const reservedCharacters =
+      priorityKeys.length === 0
+        ? 0
+        : Math.min(
+            CAUSAL_CHARACTER_RESERVE,
+            Math.floor(budget.remainingCharacters / 2),
+          );
+    budget.remainingCharacters -= reservedCharacters;
+
     // Put identity before extras: the serialization pass may stop at any extra key.
     copy.name =
       readText(source, 'name', path, report, budget) ??
@@ -387,12 +397,17 @@ function serializeErrorInner(
       copy.stack = stack;
     }
 
+    budget.remainingCharacters += reservedCharacters;
+
     // Spread replaced by a guarded per-key copy: a spread runs every own getter under no
     // guard at all, so one throwing accessor took the whole serialization down.
     const shape = describeContainer(source);
 
     if (shape.kind === 'object') {
-      for (const key of shape.keys) {
+      for (const key of [
+        ...priorityKeys.filter((key) => shape.keys.includes(key)),
+        ...shape.keys.filter((key) => !priorityKeys.includes(key)),
+      ]) {
         // Charged and stopped, exactly as the `isErrorValue` branch above charges its own
         // enumeration. This one was free: an error-*like* bag - a plain object carrying
         // `name`, `message` and `stack`, which is what arrives over IPC - copied every one
@@ -774,7 +789,8 @@ function deepSerialize(
   }
 
   if (value === null || typeof value !== 'object') {
-    return coerceUnJSONableLeaf(value);
+    const leaf = coerceUnJSONableLeaf(value);
+    return typeof leaf === 'string' ? boundedText(leaf, budget) : leaf;
   }
 
   // Past the cap nothing further is walked. Without it a payload nested deeper than the
@@ -828,7 +844,7 @@ function deepSerialize(
     // empty, so a buffer crossed the wire as `{}` - indistinguishable from an empty object
     // and silent about its size.
     if (ArrayBuffer.isView(value) || isArrayBufferLike(value)) {
-      return describeBinaryView(value);
+      return boundedText(describeBinaryView(value), budget);
     }
 
     const shape = describeContainer(value);

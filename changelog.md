@@ -180,7 +180,9 @@
 
 ## 1.0.0 (Unreleased)
 
-- Bound bulk startup deadlines even with a hung start or rollback, prevent overlapping retries during late startup cleanup, and block signal/message/value handlers during unsafe component transitions. Shutdown notification logger failures no longer prevent signal-driven shutdown.
+- Bound bulk startup deadlines even with a hung start. Allow retry and unregistration while an abandoned start remains pending, prevent its late completion from stopping a newer run, and block recovery only while automatic late cleanup is running.
+- Clarify that the bulk startup time budget excludes failure rollback. Once a required component fails, `startAllComponents()` waits for rollback under the component shutdown timeouts and returns `required_component_failed` with the original error, even past the startup deadline. Another bulk startup remains blocked until rollback finishes.
+- Block signal/message/value handlers during unsafe component transitions. Shutdown notification logger failures no longer prevent signal-driven shutdown.
 - Preserve piped stdin flow when detaching or rolling back an attachment that never acquired stdin.
 - Default temporary directories to private `0o700` permissions, with a validated `mode` option for callers needing other permission bits; existing parent permissions are unchanged.
 - Avoid automatic replay of partially written FIFO records, reporting partial loss with byte counts. Omit caller-controlled property paths from default diagnostic messages.

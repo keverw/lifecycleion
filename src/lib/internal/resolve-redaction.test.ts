@@ -152,3 +152,15 @@ describe('resolveRedaction branches', () => {
     ).toBe(replacement);
   });
 });
+
+test('negative percentages do not partially expose derived values', () => {
+  for (const request of [
+    -1,
+    { percent: -1 },
+    { strategy: 'email' as const, userPercent: -1 },
+  ]) {
+    expect(
+      resolveRedaction('secret', 'derived-secret-value', true, () => request),
+    ).toBe(REDACTED_PLACEHOLDER);
+  }
+});

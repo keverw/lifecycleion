@@ -167,6 +167,74 @@ describe('NamedPipeSink', () => {
       }
     },
   );
+  test('a complete syscall remains successful when destroyed before its callback', async () => {
+    const pipePath = `${tmpDir.path}/complete-destroy.pipe`;
+    await createNamedPipe(pipePath);
+    const reader = fs.openSync(
+      pipePath,
+      fs.constants.O_RDONLY | fs.constants.O_NONBLOCK,
+    );
+    const failures: SinkFailure[] = [];
+    const sink = new NamedPipeSink({
+      pipePath,
+      onError: (failure) => {
+        failures.push(failure);
+      },
+    });
+    let writeSpy: { mockRestore(): void } | undefined;
+    try {
+      expect(await waitForOpenPipe(sink)).toBe(true);
+      const stream = (
+        sink as unknown as { pipeStream: Writable & { fd: number } }
+      ).pipeStream;
+      const write = fs.write;
+      writeSpy = spyOn(fs, 'write').mockImplementation(((
+        fd: number,
+        buffer: Buffer,
+        offset: number,
+        length: number,
+        position: null,
+        callback: (
+          error: NodeJS.ErrnoException | null,
+          written: number,
+          buffer: Buffer,
+        ) => void,
+      ) => {
+        return write(
+          fd,
+          buffer,
+          offset,
+          length,
+          position,
+          (error, written, result) => {
+            if (fd === stream.fd) {
+              stream.destroy();
+            }
+            callback(error, written, result);
+          },
+        );
+      }) as typeof fs.write);
+      sink.write({
+        timestamp: Date.now(),
+        type: 'info',
+        template: 'complete',
+        message: 'complete',
+      });
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(
+        failures.filter((failure) => failure.disposition === 'lost'),
+      ).toEqual([]);
+      expect(sink.getHealth().droppedEntries).toBe(0);
+      const received = Buffer.alloc(4096);
+      const length = fs.readSync(reader, received, 0, received.length, null);
+      expect(received.subarray(0, length).toString()).toContain('complete');
+    } finally {
+      writeSpy?.mockRestore();
+      await sink.close();
+      fs.closeSync(reader);
+    }
+  });
+
   test('a partial low-level write is reported lost without replaying the original record', async () => {
     const pipePath = `${tmpDir.path}/partial-write.pipe`;
     await createNamedPipe(pipePath);

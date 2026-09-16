@@ -269,14 +269,14 @@ A component enters "starting-timed-out" when:
 1. `start()` exceeds `startupTimeoutMS`
 2. The manager marks the component `starting-timed-out` and treats it as not running
 
-After an individual component timeout, this state behaves like `registered`: the component can be started again, unregistered normally, and will not be stopped during shutdown because it is not running. The state is cleared automatically on a successful start. Bulk startup deadlines have the additional protection described below.
+After an individual component timeout, this state behaves like `registered`: the component can be started again, unregistered normally, and will not be stopped during shutdown because it is not running. The state is cleared automatically on a successful start. Bulk startup deadlines follow the same recovery rules described below.
 
-After a bulk startup deadline, restart and unregistration remain blocked until the
-timed-out `start()` settles and any automatic cleanup finishes. A late successful start
-is stopped automatically; a rejected start releases the block. A `start()` that never
-settles remains blocked, so component cancellation must settle its startup promise.
-Returning from `onStartupAborted()` alone does not prove startup has ended. Automatic
-late cleanup also blocks restart and unregistration for individual component timeouts.
+After a bulk startup deadline, restart and unregistration are allowed even if the
+abandoned `start()` never settles. A late successful start is stopped automatically
+only if its attempt still owns the registered component. A retry or replacement makes
+the old completion stale, so it cannot stop the new run. Once automatic late cleanup
+actually starts, restart and unregistration are blocked until that cleanup finishes.
+These cleanup protections also apply to individual component timeouts.
 
 Use `getStartTimedOutComponentNames()` to inspect components currently in this state.
 For accounting purposes, `getStoppedComponentNames()` and `getStoppedComponentCount()` include
@@ -705,7 +705,7 @@ startAllComponents(options?: StartupOptions): Promise<StartupResult>
 ```typescript
 interface StartupOptions {
   ignoreStalledComponents?: boolean; // Allow bulk startup to proceed by skipping stalled components
-  timeoutMS?: number; // Total time budget for startup process (default: constructor's startupTimeoutMS)
+  timeoutMS?: number; // Startup time budget, excluding failure rollback (default: constructor's startupTimeoutMS)
 }
 ```
 
@@ -741,10 +741,11 @@ Timeouts operate at **two independent levels** - they don't compete, they're lay
 
 **1. Global Timeout (Bulk Operation)**
 
-- `startAllComponents({ timeoutMS })` sets a total time budget for the entire operation
+- `startAllComponents({ timeoutMS })` sets a time budget for starting components; failure rollback uses its own shutdown timeouts
 - If exceeded: manager stops initiating new components and promptly returns a snapshot of partial results with `timedOut: true` and `code: 'startup_timeout'`.
 - The remaining bulk budget also bounds the current component start, even when its own timeout is disabled. Previously started components remain running unless rollback had already begun for a separate failure.
-- A start still in flight receives `onStartupAborted()` when implemented; if it later resolves, the manager stops it automatically. Restarting or unregistering that component is blocked until its start and late cleanup settle. Cancellation must settle the startup promise to release this protection. A rollback already in progress continues in the background and blocks another bulk startup until it finishes.
+- A start still in flight receives `onStartupAborted()` when implemented. Restart and unregistration are allowed while the abandoned start remains pending. If it later resolves and still owns the component, automatic cleanup stops it; recovery is blocked only while that cleanup runs. A stale completion cannot stop a retry or replacement.
+- Once a required failure starts rollback, the startup timer is cleared. Startup waits for rollback and returns the original failure; another bulk startup is blocked until rollback finishes.
 - Timeouts cannot preempt synchronous JavaScript that blocks the event loop.
 - Constructor option sets the default: `new LifecycleManager({ startupTimeoutMS: 60000 })`
 - Method parameter overrides: `await lifecycle.startAllComponents({ timeoutMS: 30000 })`

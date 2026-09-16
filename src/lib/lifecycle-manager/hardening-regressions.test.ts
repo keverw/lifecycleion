@@ -96,9 +96,15 @@ describe('LifecycleManager hardening regressions', () => {
     await manager.stopAllComponents();
   });
 
-  test.each([false, true])(
-    'bulk deadline bounds a hung start and cleans late completion (abort hook=%p)',
-    async (hasAbort) => {
+  test.each(
+    [false, true].flatMap((hasAbort) =>
+      (['cleanup', 'restart', 'bulk-restart', 'replace'] as const).map(
+        (recovery) => ({ hasAbort, recovery }),
+      ),
+    ),
+  )(
+    'bulk deadline permits recovery and handles late completion (%p)',
+    async ({ hasAbort, recovery }) => {
       const { logger, manager } = setup();
       const gate = deferred();
       let starts = 0,
@@ -107,7 +113,7 @@ describe('LifecycleManager hardening regressions', () => {
       class Component extends BaseComponent {
         public start() {
           starts++;
-          return gate.promise;
+          return starts === 1 ? gate.promise : undefined;
         }
         public stop() {
           stops++;
@@ -134,19 +140,36 @@ describe('LifecycleManager hardening regressions', () => {
           startedComponents: [],
         });
         await sleep(10);
-        expect((await manager.startComponent('hung')).code).toBe(
-          'component_already_starting',
-        );
-        expect((await manager.unregisterComponent('hung')).success).toBe(false);
         expect(starts).toBe(1);
         expect(aborts).toBe(hasAbort ? 1 : 0);
+        if (recovery === 'replace') {
+          expect((await manager.unregisterComponent('hung')).success).toBe(
+            true,
+          );
+          await manager.registerComponent(
+            new Component(logger, { name: 'hung' }),
+          );
+        }
+        if (recovery === 'bulk-restart') {
+          expect((await manager.startAllComponents()).success).toBe(true);
+        } else if (recovery !== 'cleanup') {
+          expect((await manager.startComponent('hung')).success).toBe(true);
+        }
+        expect(stops).toBe(0);
       } finally {
         gate.resolve();
         await sleep(20);
       }
-      expect(stops).toBe(1);
-      expect(manager.isComponentRunning('hung')).toBe(false);
-      expect((await manager.startComponent('hung')).success).toBe(true);
+      if (recovery === 'cleanup') {
+        expect(stops).toBe(1);
+        expect(manager.isComponentRunning('hung')).toBe(false);
+        expect((await manager.startComponent('hung')).success).toBe(true);
+      } else {
+        // The old completion must not stop the retry or replacement instance.
+        expect(starts).toBe(2);
+        expect(stops).toBe(0);
+        expect(manager.isComponentRunning('hung')).toBe(true);
+      }
       await manager.stopAllComponents();
     },
   );
@@ -187,9 +210,10 @@ describe('LifecycleManager hardening regressions', () => {
     }
   });
 
-  test('bulk deadline returns while failure rollback remains in flight and blocks overlap', async () => {
+  test('failure rollback outlives the startup deadline, blocks overlap, and preserves the failure', async () => {
     const { logger, manager } = setup();
     const gate = deferred();
+    const rollbackStarted = deferred();
     class Component extends BaseComponent {
       public start() {
         if (this.getName() === 'fails') {
@@ -197,6 +221,7 @@ describe('LifecycleManager hardening regressions', () => {
         }
       }
       public stop() {
+        rollbackStarted.resolve();
         return gate.promise;
       }
     }
@@ -206,16 +231,29 @@ describe('LifecycleManager hardening regressions', () => {
     await manager.registerComponent(
       new Component(logger, { name: 'fails', dependencies: ['ready'] }),
     );
+    let isSettled = false;
+    const startup = manager
+      .startAllComponents({ timeoutMS: 20 })
+      .then((result) => {
+        isSettled = true;
+        return result;
+      });
     try {
-      const result = await manager.startAllComponents({ timeoutMS: 20 });
-      expect(result.code).toBe('startup_timeout');
+      await rollbackStarted.promise;
+      await sleep(40);
+      expect(isSettled).toBe(false);
       expect((await manager.startAllComponents()).code).toBe(
         'already_in_progress',
       );
     } finally {
       gate.resolve();
-      await sleep(20);
+      await startup;
     }
+    expect(await startup).toMatchObject({
+      success: false,
+      code: 'required_component_failed',
+    });
+    expect((await startup).error?.message).toBe('startup failed');
     expect(manager.isComponentRunning('ready')).toBe(false);
   });
 

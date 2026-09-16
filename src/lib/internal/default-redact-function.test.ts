@@ -135,3 +135,12 @@ describe('masking cuts between characters, never inside one', () => {
     );
   });
 });
+
+test('lone surrogate mask characters fall back to a well-formed mask', () => {
+  expect(
+    maskWithConfig('secret-value', { maskChar: '\ud800', percent: 100 }),
+  ).toBe('*'.repeat(12));
+  expect(
+    maskWithConfig('secret-value', { maskChar: '\udc00', percent: 100 }),
+  ).toBe('*'.repeat(12));
+});

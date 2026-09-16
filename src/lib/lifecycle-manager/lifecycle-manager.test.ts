@@ -39,7 +39,7 @@ const requireDefined = <T>(value: T | null | undefined, label: string): T => {
 };
 
 test.each(['restart', 'replace'] as const)(
-  'a bulk startup timeout permits %s only after the abandoned start rejects',
+  'a bulk startup timeout permits %s while the abandoned start remains unresolved',
   async (operation) => {
     const logger = new Logger({ sinks: [], callProcessExit: false });
     const manager = new LifecycleManager({ logger, startupTimeoutMS: 20 });
@@ -63,15 +63,6 @@ test.each(['restart', 'replace'] as const)(
     await manager.registerComponent(component);
     expect((await manager.startAllComponents()).timedOut).toBe(true);
     await sleep(30);
-    expect((await manager.startComponent('recoverable')).code).toBe(
-      'component_already_starting',
-    );
-    expect((await manager.unregisterComponent('recoverable')).success).toBe(
-      false,
-    );
-    expect(component.calls).toBe(1);
-    first.reject(new Error('startup cancelled'));
-    await sleep(10);
     if (operation === 'restart') {
       expect((await manager.startComponent('recoverable')).success).toBe(true);
     } else {
@@ -83,6 +74,8 @@ test.each(['restart', 'replace'] as const)(
       await manager.registerComponent(replacement);
       expect((await manager.startComponent('recoverable')).success).toBe(true);
     }
+    first.resolve();
+    await sleep(10);
     expect(manager.isComponentRunning('recoverable')).toBe(true);
     expect(component.stops).toBe(0);
     await manager.stopAllComponents();

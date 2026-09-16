@@ -203,3 +203,23 @@ describe('datamask', () => {
     expect(datamask.email('test@example.com')).toBe('t**t@e****le.com');
   });
 });
+
+test('rejects non-number percentages from JavaScript callers', () => {
+  for (const percent of ['50%', '50', {}, false]) {
+    expect(() =>
+      maskString('secret-value', '*', percent as unknown as number),
+    ).toThrow(TypeError);
+    expect(() =>
+      maskEmail('secret@example.com', '*', percent as unknown as number),
+    ).toThrow(TypeError);
+    expect(() =>
+      maskDomain('secret.example', '*', percent as unknown as number),
+    ).toThrow(TypeError);
+  }
+});
+
+test('lone surrogate mask characters cannot produce malformed output', () => {
+  expect(maskString('secret', '\ud800', 100)).toBe('******');
+  expect(maskString('secret', '\udc00', 100)).toBe('******');
+  expect(maskString('secret', '😀', 100)).toBe('😀'.repeat(6));
+});

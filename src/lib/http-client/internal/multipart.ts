@@ -200,7 +200,15 @@ export function calculateMultipartFormDataSize(
   formData: FormData,
   boundary: string,
 ): number {
+  return measureMultipartFormData(formData, boundary).totalSize;
+}
+
+function measureMultipartFormData(
+  formData: FormData,
+  boundary: string,
+): { totalSize: number; partSizes: number[] } {
   let size = 0;
+  const partSizes: number[] = [];
 
   for (const [name, value] of formData.entries()) {
     const fieldName = formatFieldName(name);
@@ -232,14 +240,16 @@ export function calculateMultipartFormDataSize(
         `Content-Disposition: form-data; name="${fieldName}"; ${formatFilename(filename)}\r\nContent-Type: ${contentType}\r\n\r\n`,
       );
       // Blob.size is already the exact byte length of the binary payload.
-      size += (value as Blob).size;
+      const partSize = (value as Blob).size;
+      partSizes.push(partSize);
+      size += partSize;
       size += Buffer.byteLength('\r\n');
     }
   }
 
   // Final terminating boundary line — note the extra trailing `--`.
   size += Buffer.byteLength(`--${boundary}--\r\n`);
-  return size;
+  return { totalSize: size, partSizes };
 }
 
 /**
@@ -264,7 +274,8 @@ export async function serializeMultipartFormData(
    */
   onSourceWait?: (isWaiting: boolean) => void,
 ): Promise<void> {
-  const totalSize = calculateMultipartFormDataSize(formData, boundary);
+  const { totalSize, partSizes } = measureMultipartFormData(formData, boundary);
+  let partIndex = 0;
 
   // Servers need the boundary to parse the multipart body. We set an exact
   // Content-Length too, so upload progress is based on known total bytes
@@ -425,6 +436,15 @@ export async function serializeMultipartFormData(
         `Content-Disposition: form-data; name="${fieldName}"; ${formatFilename(filename)}\r\nContent-Type: ${contentType}\r\n\r\n`,
       );
 
+      // Compare against the sizing pass, even if the source's size later changes.
+      const partSize = partSizes[partIndex++];
+      if (partSize === undefined) {
+        throw new Error(
+          'Multipart body changed after Content-Length was calculated',
+        );
+      }
+      let partBytes = 0;
+
       // Blob.stream() lets us forward large files piece-by-piece instead of
       // concatenating the whole payload into a single upload buffer.
       const reader = (value as Blob)
@@ -466,7 +486,10 @@ export async function serializeMultipartFormData(
             // request, and throwing afterwards could not take those bytes back. The
             // shortfall check has no equivalent problem - bytes that were never written
             // need no undoing - which is why only this side needs the early exit.
-            if (uploadedBytes + chunk.byteLength > totalSize) {
+            if (
+              partBytes + chunk.byteLength > partSize ||
+              uploadedBytes + chunk.byteLength > totalSize
+            ) {
               await cancelReaderQuietly(reader);
 
               // What actually went on the wire, and the chunk that was refused, kept
@@ -482,6 +505,7 @@ export async function serializeMultipartFormData(
 
             // Each chunk contributes to upload progress immediately after write.
             await write(chunk);
+            partBytes += chunk.byteLength;
           }
         }
       } finally {
@@ -493,6 +517,12 @@ export async function serializeMultipartFormData(
         // Cancelling a reader whose stream has already closed is a no-op, so the ordinary
         // `isDone` exit costs nothing by coming through here too.
         await cancelReaderQuietly(reader);
+      }
+
+      if (!req.destroyed && partBytes !== partSize) {
+        throw new Error(
+          `Request body source did not match its Content-Length: part expected ${String(partSize)} bytes, received ${String(partBytes)}`,
+        );
       }
 
       if (!req.destroyed) {

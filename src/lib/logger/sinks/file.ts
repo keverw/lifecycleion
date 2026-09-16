@@ -1766,9 +1766,15 @@ export class FileSink implements LogSink {
     // resumes in that window, times out, and reports the sink shut down - and this then
     // renamed the live log to an archive that `setupLogFile` would never replace, because
     // it early-returns on a closed sink. Re-checking after the awaits is the same pattern
-    // `writeEntry` follows for the same reason; the stream is already ended here, so
-    // standing down leaves nothing half-done.
-    if (this.closing || this.closed) {
+    // `writeEntry` follows for the same reason. During the drain phase the ended
+    // stream must be reopened for the accepted entry before rotation stands down.
+    if (this.closed) {
+      return;
+    }
+    if (this.closing) {
+      // Rotation already ended the stream. Reopen it so close can drain the
+      // accepted entry without rotating the file during shutdown.
+      await this.setupLogFile();
       return;
     }
 

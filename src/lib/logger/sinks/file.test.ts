@@ -3302,3 +3302,62 @@ describe('FileSink - entries written during close', () => {
     expect((await fsPromises.readdir(nanDir)).length).toBe(1);
   });
 });
+
+test('close drains an accepted entry when rotation already ended its stream', async () => {
+  const directory = new TmpDir({ unsafeCleanup: true });
+  await directory.initialize();
+  const failures: SinkFailure[] = [];
+  const sink = new FileSink({
+    logDir: directory.path,
+    basename: 'race',
+    maxSizeMB: 0.001,
+    maxRetries: 0,
+    onError: (failure) => {
+      failures.push(failure);
+    },
+  });
+  const entry = (message: string): LogEntry => ({
+    timestamp: Date.now(),
+    type: 'info',
+    template: message,
+    message,
+  });
+  const reached = Promise.withResolvers<void>();
+  const resume = Promise.withResolvers<void>();
+  const internals = sink as unknown as {
+    reserveRotatedFileName: (date: string) => Promise<string>;
+  };
+  let rotationSpy: { mockRestore(): void } | undefined;
+  try {
+    sink.write(entry('first'));
+    await sink.flush();
+    rotationSpy = spyOn(internals, 'reserveRotatedFileName').mockImplementation(
+      async () => {
+        reached.resolve();
+        await resume.promise;
+        return `${directory.path}/archive.log`;
+      },
+    );
+    sink.write(entry('second-' + 'x'.repeat(2000)));
+    await reached.promise;
+    const closing = sink.close();
+    resume.resolve();
+    await closing;
+    const files = await fsPromises.readdir(directory.path);
+    const contents = (
+      await Promise.all(
+        files.map((file) =>
+          fsPromises.readFile(`${directory.path}/${file}`, 'utf8'),
+        ),
+      )
+    ).join('');
+    expect(contents).toContain('second-');
+    expect(failures).toEqual([]);
+    expect(sink.getHealth().droppedEntries).toBe(0);
+  } finally {
+    resume.resolve();
+    rotationSpy?.mockRestore();
+    await sink.close();
+    await directory.cleanup();
+  }
+});

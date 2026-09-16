@@ -302,7 +302,11 @@ class NonBlockingPipeStream extends Writable {
             if (error === null) {
               offset += written;
             }
-            this.cancelWrite?.();
+            if (error === null && offset === buffer.length) {
+              finish();
+            } else {
+              this.cancelWrite?.();
+            }
             this.closeAfterWrite?.();
             this.closeAfterWrite = undefined;
             return;

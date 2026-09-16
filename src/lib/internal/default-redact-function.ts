@@ -232,7 +232,9 @@ export function matchRedactMaskConfig(value: unknown): RedactMaskConfigMatch {
           ? setting === 'string' || setting === 'email' || setting === 'domain'
           : key === 'maskChar'
             ? typeof setting === 'string' && setting.length > 0
-            : typeof setting === 'number' && Number.isFinite(setting);
+            : typeof setting === 'number' &&
+              Number.isFinite(setting) &&
+              setting >= 0;
       if (!isValid) {
         return { kind: 'defaults' };
       }
@@ -272,7 +274,9 @@ function normalizeMaskChar(value: unknown): string {
 
   const codePoint = value.slice(0, 2).codePointAt(0);
 
-  return codePoint === undefined ? '*' : String.fromCodePoint(codePoint);
+  return codePoint === undefined || (codePoint >= 0xd800 && codePoint <= 0xdfff)
+    ? '*'
+    : String.fromCodePoint(codePoint);
 }
 
 /**

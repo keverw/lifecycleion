@@ -812,7 +812,7 @@ export interface UnregisterOptions {
 export interface StartupOptions {
   /** Allow bulk startup to proceed by skipping stalled components (default: false) */
   ignoreStalledComponents?: boolean;
-  /** Global timeout for entire startup process in milliseconds (default: constructor's startupTimeoutMS) */
+  /** Startup time budget in milliseconds, excluding failure rollback (default: constructor's startupTimeoutMS) */
   timeoutMS?: number;
 }
 

@@ -81,3 +81,5 @@ splitCharacters('👨‍👩‍👧🇺🇸ab'); // ['👨‍👩‍👧', '🇺
 ## Untrusted settings
 
 `percent` is clamped to `0`–`100`, including infinities; `NaN` throws a `RangeError`. Values above `100` mask the entire string. `maskChar` is repeated once per hidden character, so a multi-character mask lengthens the output.
+
+Non-number percentages (for example, `"50%"` from JavaScript configuration) throw `TypeError`. A lone surrogate in `maskChar` is replaced with `*`; valid emoji masks remain intact.

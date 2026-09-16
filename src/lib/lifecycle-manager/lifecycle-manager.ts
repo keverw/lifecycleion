@@ -3941,7 +3941,6 @@ export class LifecycleManager
               }),
             );
             if (useBulkDeadline) {
-              this.pendingBulkStartupCleanup.set(name, startAttemptToken);
               bulkStartup?.onTimeout();
             }
             if (useBulkDeadline || !component.onStartupAborted) {
@@ -4086,7 +4085,6 @@ export class LifecycleManager
         bulkStartup &&
         (bulkStartup.hasExpired() || Date.now() >= bulkStartup.deadline)
       ) {
-        this.pendingBulkStartupCleanup.set(name, startAttemptToken);
         bulkStartup.onTimeout();
         this.monitorLateStartupCompletion(
           name,
@@ -5223,8 +5221,8 @@ export class LifecycleManager
 
         // Late startup completed after the manager had already timed out. Mark
         // it running briefly so the normal stop path can clean it up.
-        // Keep bulk attempts locked through cleanup; individual timeouts also
-        // acquire the lock here once their late cleanup actually begins.
+        // Lock recovery only while cleanup is actually running. An abandoned
+        // start may never settle; the attempt token protects a replacement run.
         this.pendingBulkStartupCleanup.set(name, startAttemptToken);
         this.componentStates.set(name, 'running');
         this.runningComponents.add(name);

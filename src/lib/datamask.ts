@@ -17,7 +17,8 @@
  *
  * Percentages are clamped to 0–100, including infinities. A multi-character mask
  * lengthens the output. A NaN percentage throws RangeError rather than silently
- * returning unmasked input.
+ * returning unmasked input. Non-number percentages throw TypeError. Lone surrogate
+ * mask characters fall back to `*`.
  */
 
 import { splitGraphemes } from './internal/graphemes';
@@ -46,7 +47,10 @@ export const DEFAULT_MASK_PERCENT = 60;
 /** How much of an email's local part is hidden when no percent is given. */
 export const DEFAULT_EMAIL_USER_PERCENT = 50;
 
-function rejectNaNPercent(percent: number | null): void {
+function validatePercent(percent: number | null): void {
+  if (percent !== null && typeof percent !== 'number') {
+    throw new TypeError('Mask percentage must be a number');
+  }
   if (Number.isNaN(percent)) {
     throw new RangeError('Mask percentage must not be NaN');
   }
@@ -71,8 +75,10 @@ export function maskString(
   percent: number | null = DEFAULT_MASK_PERCENT,
 ): string {
   maskChar ??= DEFAULT_MASK_CHAR;
+  // Unicode mode matches lone surrogates while preserving valid astral pairs.
+  maskChar = maskChar.replace(/[\uD800-\uDFFF]/gu, DEFAULT_MASK_CHAR);
   percent ??= DEFAULT_MASK_PERCENT;
-  rejectNaNPercent(percent);
+  validatePercent(percent);
   percent = Math.max(0, Math.min(100, percent));
   // In characters, so the prefix and suffix each end on a whole one.
   const characters = splitCharacters(value);
@@ -108,7 +114,7 @@ export function maskDomain(
   maskChar: string | null = DEFAULT_MASK_CHAR,
   percent: number | null = DEFAULT_MASK_PERCENT,
 ): string {
-  rejectNaNPercent(percent);
+  validatePercent(percent);
   if (!value.includes('.')) {
     return maskString(value, maskChar, percent);
   }
@@ -145,8 +151,8 @@ export function maskEmail(
   domainPercent: number | null = DEFAULT_MASK_PERCENT,
 ): string {
   userPercent ??= DEFAULT_EMAIL_USER_PERCENT;
-  rejectNaNPercent(userPercent);
-  rejectNaNPercent(domainPercent);
+  validatePercent(userPercent);
+  validatePercent(domainPercent);
   if (!value.includes('@')) {
     return maskString(value, maskChar, userPercent);
   }

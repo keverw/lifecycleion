@@ -2623,3 +2623,58 @@ it('counts each error in a cause chain once toward the depth limit', () => {
     'deep-marker',
   );
 });
+
+it('object-valued conventional members use bounded rendering and redaction', () => {
+  let calls = 0;
+  const code = {
+    secret: 'hidden-credential',
+    huge: 'x'.repeat(2_000_000),
+    toJSON() {
+      calls++;
+      throw new Error('must not run');
+    },
+  };
+  const result = errorToString(
+    { message: 'failure', code, sensitiveFieldNames: ['code.secret'] },
+    80,
+    { maxRenderLength: 1000 },
+  );
+  expect(result).not.toContain('hidden-credential');
+  expect(result.length).toBeLessThan(3000);
+  expect(calls).toBe(0);
+});
+
+it.each([undefined, { detail: 'context' }, 'context'])(
+  'redacts object-valued stacks with additionalInfo=%p',
+  (additionalInfo) => {
+    let reads = 0;
+    const result = errorToString({
+      message: 'failure',
+      additionalInfo,
+      stack: { secret: 'stack-credential', visible: 'trace-location' },
+      get sensitiveFieldNames() {
+        reads++;
+        return ['stack.secret'];
+      },
+    });
+    expect(result).not.toContain('stack-credential');
+    expect(result).toContain('trace-location');
+    expect(reads).toBe(1);
+  },
+);
+
+it('fails object-valued stack redaction closed for an unreadable sensitive list', () => {
+  const result = errorToString(
+    {
+      message: 'failure',
+      stack: { secret: 'stack-credential' },
+      get sensitiveFieldNames() {
+        throw new Error('unreadable');
+      },
+    },
+    80,
+    { onFormatError: () => {} },
+  );
+  expect(result).not.toContain('stack-credential');
+  expect(result).toContain('sensitiveFieldNames unreadable');
+});

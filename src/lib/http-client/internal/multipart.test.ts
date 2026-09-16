@@ -454,9 +454,7 @@ describe('serializeMultipartFormData', () => {
 
     expect(req.destroyed).toBe(false);
     expect(headers['content-length']).toBeDefined();
-    expect(caught?.message).toBe(
-      'Request stream closed before the body was fully written',
-    );
+    expect(caught?.message).toContain('part expected 10 bytes, received 4');
   });
 
   test('rejects, and says so accurately, when a blob yields more than its size', async () => {
@@ -1162,4 +1160,75 @@ describe('serializeMultipartFormData', () => {
 
     expect(writeOrder.length).toBeGreaterThan(1);
   });
+});
+
+test.each([
+  [3, 1],
+  [1, 3],
+])(
+  'rejects offsetting multipart size changes (%p, %p)',
+  async (firstSize, secondSize) => {
+    const part = (length: number) => ({
+      name: 'file.bin',
+      type: 'application/octet-stream',
+      size: 2,
+      stream: () =>
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(new Uint8Array(length).fill(65));
+            controller.close();
+          },
+        }),
+    });
+    const form = {
+      entries: () =>
+        [
+          ['first', part(firstSize)],
+          ['second', part(secondSize)],
+        ][Symbol.iterator](),
+    } as unknown as FormData;
+    const capture = makeCapture();
+    let failure: unknown;
+    try {
+      await serializeMultipartFormData(form, capture.req, 'boundary');
+    } catch (error) {
+      failure = error;
+    }
+    expect(failure).toBeInstanceOf(Error);
+    expect((failure as Error).message).toContain('Content-Length');
+    expect(capture.getBody().toString()).not.toContain('name="second"');
+    if (firstSize > 2) {
+      expect(capture.getBody().toString()).not.toContain('AAA');
+    }
+  },
+);
+
+test('uses the original part size even when size changes after the sizing pass', async () => {
+  let reads = 0;
+  const file = {
+    name: 'growing.bin',
+    type: 'application/octet-stream',
+    get size() {
+      return ++reads === 1 ? 2 : 3;
+    },
+    stream: () =>
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new Uint8Array(3).fill(65));
+          controller.close();
+        },
+      }),
+  };
+  const form = {
+    entries: () => [['file', file]][Symbol.iterator](),
+  } as unknown as FormData;
+  const capture = makeCapture();
+  let failure: unknown;
+  try {
+    await serializeMultipartFormData(form, capture.req, 'boundary');
+  } catch (error) {
+    failure = error;
+  }
+  expect(failure).toBeInstanceOf(Error);
+  expect(capture.getBody().toString()).not.toContain('AAA');
 });

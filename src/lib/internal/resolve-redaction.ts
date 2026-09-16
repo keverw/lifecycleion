@@ -77,7 +77,7 @@ export function resolveRedaction(
       // `NaN` used to do, serializing to `null` in the output. `Number(process.env.X)`
       // reaches here, and `{ percent: NaN }` already fell back to the default, so the
       // two spellings agreeing matters.
-      if (!Number.isFinite(requested)) {
+      if (!Number.isFinite(requested) || requested < 0) {
         return isDerived
           ? REDACTED_PLACEHOLDER
           : defaultRedactValue(key, value);

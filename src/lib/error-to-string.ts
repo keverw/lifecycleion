@@ -779,6 +779,17 @@ function safeStringify(
     }
   }
 
+  if (
+    value !== null &&
+    typeof value === 'object' &&
+    budget !== undefined &&
+    !ArrayBuffer.isView(value)
+  ) {
+    const leaf = renderLeafWithinBudget(budget, value, path, reportRender);
+    noteLeafCut(budget, leaf, budget.truncations);
+    return leaf.text;
+  }
+
   try {
     return stringifyPrimitive(value, path, reportRender);
   } catch (error) {
@@ -1005,6 +1016,7 @@ function errorToASCIITable(
   if (error && typeof error === 'object') {
     const err = error as Record<string, unknown>;
     table.addRow('Key', 'Value');
+    let ownPaths: RedactPath[] | null | undefined;
 
     // Label as rendered, member name as read off the value.
     const members: [string, string][] = [
@@ -1034,7 +1046,28 @@ function errorToASCIITable(
         continue;
       }
 
-      const value = read;
+      let value = read;
+      if (value !== null && typeof value === 'object') {
+        if (ownPaths === undefined) {
+          ownPaths = readOwnSensitivePaths(err, report);
+        }
+        if (ownPaths === null) {
+          value = '*** (sensitiveFieldNames unreadable)';
+        } else {
+          const masked = redactAddressedValue(
+            { [key]: value },
+            ownPaths,
+            redactFunction,
+            report,
+            reportRender,
+            budget,
+          );
+          value =
+            masked !== null && typeof masked === 'object'
+              ? readMember(masked, key)
+              : masked;
+        }
+      }
 
       // Absent, not merely falsy. A truthiness test dropped every conventional member
       // that legitimately holds a falsy value: `code: 0` and `errno: 0` are ordinary on a
@@ -1068,6 +1101,7 @@ function errorToASCIITable(
     // marker rows below can say which of the two refused.
     const additionalInfoRead = readMemberOrThrew(err, 'additionalInfo');
     const cause = readMemberOrThrew(err, 'cause');
+    const stack = readMemberOrThrew(err, 'stack');
     const isInfoUnreadable = isReadFailure(additionalInfoRead);
     const additionalInfo = isInfoUnreadable ? undefined : additionalInfoRead;
 
@@ -1101,9 +1135,12 @@ function errorToASCIITable(
     // rule; reading the list separately for each would let them disagree about whether it
     // was usable, and rendering the cause outside the rule is how a masked
     // `additionalInfo` came to sit beside a cause printed in the clear.
-    let ownPaths: RedactPath[] | null = [];
-
-    if (hasInfo || hasCause) {
+    if (
+      ownPaths === undefined &&
+      (hasInfo ||
+        hasCause ||
+        (stack !== null && typeof stack === 'object' && !isReadFailure(stack)))
+    ) {
       // Unusable means `additionalInfo` and `cause` are dropped wholesale below. An entry
       // that parses but resolves to nothing is not that case: it masks nothing, exactly
       // as the logger's `redactedKeys` does.
@@ -1113,7 +1150,7 @@ function errorToASCIITable(
     // Every table is its own root. An error nested in another's `additionalInfo` is
     // addressed by the parent's entries as a whole or not at all - the parent's walk has
     // already run by the time this is reached - and its own list covers its own contents.
-    const sensitivePaths = ownPaths;
+    const sensitivePaths = ownPaths === undefined ? [] : ownPaths;
 
     // Marked, not dropped. `hasInfo` is false for a read that refused, so this is the row
     // that keeps an unreadable `additionalInfo` from rendering as an absent one. The
@@ -1194,7 +1231,7 @@ function errorToASCIITable(
 
           addErrorTail(
             table,
-            err,
+            stack,
             cause,
             sensitivePaths,
             path,
@@ -1249,7 +1286,7 @@ function errorToASCIITable(
 
           addErrorTail(
             table,
-            err,
+            stack,
             cause,
             sensitivePaths,
             path,
@@ -1288,7 +1325,7 @@ function errorToASCIITable(
 
           addErrorTail(
             table,
-            err,
+            stack,
             cause,
             sensitivePaths,
             path,
@@ -1373,7 +1410,7 @@ function errorToASCIITable(
 
     addErrorTail(
       table,
-      err,
+      stack,
       cause,
       sensitivePaths,
       path,
@@ -1404,7 +1441,7 @@ function errorToASCIITable(
  */
 function addErrorTail(
   table: KeyValueASCIITable,
-  err: Record<string, unknown>,
+  stack: unknown,
   cause: unknown,
   sensitive: RedactPath[] | null,
   path: string,
@@ -1474,16 +1511,33 @@ function addErrorTail(
   // accessor that threw answered `undefined` under `readMember` and the truthiness test
   // below dropped the row, so the one member an operator reaches for first went missing
   // with nothing said about it.
-  const stack = readMemberOrThrew(err, 'stack');
-
   if (isReadFailure(stack)) {
     reportRender(stack.error, joinPath(path, 'stack'));
     table.addValueOnSeparateRow('Stack', UNRENDERABLE_VALUE);
   } else if (stack) {
     chargeUnits(budget, rowFrameCost(maxRowLength, depth));
 
+    let renderedStack: unknown = stack;
+    if (typeof stack === 'object') {
+      if (sensitive === null) {
+        renderedStack = '*** (sensitiveFieldNames unreadable)';
+      } else {
+        const masked = redactAddressedValue(
+          { stack },
+          sensitive,
+          redactFunction,
+          report,
+          reportRender,
+          budget,
+        );
+        renderedStack =
+          masked !== null && typeof masked === 'object'
+            ? readMember(masked, 'stack')
+            : masked;
+      }
+    }
     const stackText = safeStringify(
-      stack,
+      renderedStack,
       joinPath(path, 'stack'),
       reportRender,
       budget,

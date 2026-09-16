@@ -1072,3 +1072,37 @@ test('preserves nested causal identity when the root exhausts its text allowance
     ((result.cause as SerializedError).cause as SerializedError).message,
   ).toBe('leaf');
 });
+
+test('plain error-like objects reserve space for cause before identity and extras', () => {
+  const result = serializeError({
+    name: 'RemoteError',
+    message: 'x'.repeat(2_000_000),
+    stack: '',
+    payload: 'y'.repeat(2_000_000),
+    cause: new Error('root failure'),
+  });
+  expect((result.cause as SerializedError).message).toBe('root failure');
+});
+
+test('generated symbol and bigint strings share the text budget', () => {
+  const result = serializeError(
+    Object.assign(new Error('failure'), {
+      symbols: Array.from({ length: 16 }, () => Symbol('x'.repeat(1_000_000))),
+      digits: 10n ** 10000n,
+    }),
+  );
+  expect(JSON.stringify(result).length).toBeLessThan(1_010_000);
+});
+
+test.each(['bigint', 'binary'] as const)('bounds generated %s text', (kind) => {
+  const view = new Uint8Array(1);
+  Object.defineProperty(view, 'constructor', {
+    value: { name: 'x'.repeat(2_000_000) },
+  });
+  const leaf = kind === 'bigint' ? 10n ** 10_000n : view;
+  const result = serializeError(
+    Object.assign(new Error('failure'), { prefix: 'x'.repeat(995_000), leaf }),
+  );
+  expect(JSON.stringify(result).length).toBeLessThan(1_010_000);
+  expect(String(result.leaf)).toContain('[max length exceeded]');
+});
