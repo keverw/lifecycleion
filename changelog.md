@@ -180,6 +180,10 @@
 
 ## 1.0.0 (Unreleased)
 
+- Block component messages and health hooks during graceful and force shutdown, including after the bulk timeout releases the manager's shutdown latch. Message overrides cannot bypass teardown protection. Starting a component in either phase now returns `component_already_stopping`.
+- Log abandoned force-hook failures after graceful shutdown wins, without changing the stopped state. Bulk shutdown timeout reporting now uses the same normalized duration as its timer; constructor `shutdownOptions.timeoutMS: NaN` uses the documented 30-second default.
+- Add regression coverage for both shutdown phases, late force rejection, NaN shutdown timeouts, public-suffix overrides, and credential-bearing unfollowed redirect metadata. Clarify default Fetch upload limits, deferred logger diagnostics, and retry timer lifetime.
+
 - `healthCheckTimeoutMS: 0` now disables the health-check timeout, matching startup and signal timeout semantics, instead of racing the check against a zero-delay timer.
 - `serializeError()` now reserves a bounded allowance for `cause` and `AggregateError.errors`, so an oversized message cannot erase the causal slot or rename it to the length marker before IPC serialization reaches it.
 - `FileSink` and `NamedPipeSink` now report one independently concurrent format failure after the active `onError` handler settles, while synchronous re-entry and further self-generated reports remain bounded by a one-report deferred fuse.

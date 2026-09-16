@@ -121,6 +121,8 @@ console.log(created.status); // 201
 
 ## HTTPClient Configuration
 
+The default `FetchAdapter` cannot confirm upload completion before a redirect or retry. For Node uploads that require attempts to finish sending before the next dispatch, select `NodeAdapter`; see [Uploads That Outlive the Response](#uploads-that-outlive-the-response).
+
 ```typescript
 interface HTTPClientConfig {
   adapter?: HTTPAdapter; // Default: FetchAdapter

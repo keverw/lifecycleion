@@ -825,7 +825,7 @@ Timeouts operate at **two independent levels** - they don't compete, they're lay
 - `stopAllComponents({ timeoutMS })` sets a total time budget for the entire shutdown operation
 - If exceeded: the manager **halts further stop attempts** after the current component completes and returns partial results
 - Components not yet processed are left in their current state
-- Constructor option sets the default: `new LifecycleManager({ shutdownOptions: { timeoutMS: 30000 } })`
+- Constructor option sets the default: `new LifecycleManager({ shutdownOptions: { timeoutMS: 30000 } })`. Constructor `timeoutMS: NaN` uses that 30,000ms default. A per-call `timeoutMS: NaN` retains the safety-timer maximum delay (2,147,483,647ms); use a finite duration to bound a shutdown explicitly.
 - Method parameter overrides: `await lifecycle.stopAllComponents({ timeoutMS: 5000 })`
 
 **2. Per-Component Timeouts (Individual Component)**
@@ -972,7 +972,7 @@ interface ComponentOperationResult {
 #### `sendMessageToComponent(componentName, payload, options?)`
 
 Send a message to a specific component.
-By default, only running components receive messages, so use `includeStopped`/`includeStalled` to override.
+By default, only running components receive messages, so use `includeStopped`/`includeStalled` to override. Messages remain blocked during `stopping` and `force-stopping`, even with these overrides or after the bulk shutdown timeout.
 
 ```typescript
 sendMessageToComponent<T = unknown>(
@@ -1063,7 +1063,7 @@ if (result.sent) {
 #### `broadcastMessage(payload, options?)`
 
 Broadcast a message to multiple components.
-By default, only running components receive messages, so use `includeStopped`/`includeStalled` to override.
+By default, only running components receive messages, so use `includeStopped`/`includeStalled` to override. Messages remain blocked during `stopping` and `force-stopping`, even with these overrides or after the bulk shutdown timeout.
 When `componentNames` is provided, only those targets are considered, and stopped/stalled targets are reported but not sent unless explicitly included.
 
 ```typescript
@@ -1101,6 +1101,8 @@ interface BroadcastResult {
 ### Health Monitoring
 
 #### `checkComponentHealth(name)`
+
+Health hooks are skipped during `stopping` and `force-stopping`; the result is unhealthy, including after a bulk shutdown timeout.
 
 Check the health of a specific component.
 

@@ -1,4 +1,4 @@
-import { describe, expect, test, beforeEach, mock } from 'bun:test';
+import { describe, expect, test, beforeEach, mock, spyOn } from 'bun:test';
 import { Logger } from '../logger';
 import { ArraySink } from '../logger/sinks/array';
 import { BaseComponent } from './base-component';
@@ -2056,7 +2056,7 @@ describe('LifecycleManager - Registration & Individual Lifecycle', () => {
       expect(stoppedEvents).toHaveLength(1);
     }, 3000);
 
-    test('a force rejection after graceful wins is observed when force timeout is disabled', async () => {
+    test('a force rejection after graceful wins is logged when force timeout is disabled', async () => {
       class RejectingAbandonedForceComponent extends BaseComponent {
         public start(): void {}
 
@@ -2087,13 +2087,66 @@ describe('LifecycleManager - Registration & Individual Lifecycle', () => {
         await lifecycle.startComponent('rejecting-abandoned-force');
 
         expect(
-          (await lifecycle.stopComponent('rejecting-abandoned-force')).success,
+          (
+            await lifecycle.stopComponent('rejecting-abandoned-force', {
+              timeout: 10,
+            })
+          ).success,
         ).toBe(true);
         await sleep(60);
         expect(unhandled).toHaveLength(0);
+        expect(
+          arraySink.logs.filter(
+            (entry) =>
+              entry.message ===
+              'Force shutdown failed after graceful stop completed',
+          ),
+        ).toHaveLength(1);
+        expect(
+          lifecycle.getComponentStatus('rejecting-abandoned-force')?.state,
+        ).toBe('stopped');
       } finally {
         process.off('unhandledRejection', onUnhandled);
       }
+    });
+
+    test('logs a force rejection in the same turn as graceful completion', async () => {
+      let finishStop: () => void = () => {};
+      class SimultaneousForceFailureComponent extends BaseComponent {
+        public start(): void {}
+        public stop(): Promise<void> {
+          return new Promise((resolve) => {
+            finishStop = resolve;
+          });
+        }
+        public onShutdownForce(): Promise<void> {
+          finishStop();
+          return Promise.reject(new Error('simultaneous force rejection'));
+        }
+      }
+      const lifecycle = new LifecycleManager({ logger });
+      await lifecycle.registerComponent(
+        new SimultaneousForceFailureComponent(logger, {
+          name: 'simultaneous-force-failure',
+          shutdownForceTimeoutMS: 0,
+        }),
+      );
+      await lifecycle.startComponent('simultaneous-force-failure');
+      const result = await lifecycle.stopComponent(
+        'simultaneous-force-failure',
+        { timeout: 5 },
+      );
+      expect(result.success).toBe(true);
+      expect(
+        lifecycle.getComponentStatus('simultaneous-force-failure')?.state,
+      ).toBe('stopped');
+      expect(
+        arraySink.logs.filter(
+          (entry) =>
+            entry.message ===
+            'Force shutdown failed after graceful stop completed',
+        ),
+      ).toHaveLength(1);
     });
 
     test('a successful in-band force stop clears the graceful error', async () => {
@@ -9974,7 +10027,7 @@ describe('LifecycleManager - Signal Integration', () => {
       );
       const startResult = await lifecycle.startComponent('never-settles');
       expect(startResult.success).toBe(false);
-      expect(startResult.code).toBe('component_already_running');
+      expect(startResult.code).toBe('component_already_stopping');
     });
   });
 
@@ -10051,6 +10104,36 @@ describe('LifecycleManager - Signal Integration', () => {
       expect(lifecycle.getRunningComponentCount()).toBe(0);
     });
 
+    test.each(['constructor', 'call'] as const)(
+      'NaN bulk shutdown timeout from %s uses the intended timer duration',
+      async (source) => {
+        const lifecycle = new LifecycleManager({
+          logger,
+          shutdownOptions:
+            source === 'constructor' ? { timeoutMS: Number.NaN } : undefined,
+        });
+        await lifecycle.registerComponent(
+          new SlowStopComponent(logger, 'nan-timeout', 20),
+        );
+        await lifecycle.startAllComponents();
+        const timerSpy = spyOn(globalThis, 'setTimeout');
+        try {
+          const result = await lifecycle.stopAllComponents(
+            source === 'call' ? { timeoutMS: Number.NaN } : undefined,
+          );
+          const expectedDelay = source === 'constructor' ? 30000 : 2 ** 31 - 1;
+          expect(timerSpy.mock.calls[0]?.[1]).toBe(expectedDelay);
+          expect(result.success).toBe(true);
+          expect(result.timedOut).toBeUndefined();
+          expect(lifecycle.getComponentStatus('nan-timeout')?.state).toBe(
+            'stopped',
+          );
+        } finally {
+          timerSpy.mockRestore();
+        }
+      },
+    );
+
     test('should return shutdown_timeout code when bulk shutdown times out', async () => {
       const lifecycle = new LifecycleManager({ logger });
 
@@ -10071,42 +10154,81 @@ describe('LifecycleManager - Signal Integration', () => {
       expect(result.durationMS).toBeLessThan(200);
     });
 
-    test('keeps component overlap blocked after the global timeout while allowing another shutdown', async () => {
-      const lifecycle = new LifecycleManager({ logger });
+    test.each(['stopping', 'force-stopping'] as const)(
+      'keeps component overlap blocked in %s after the global timeout while allowing another shutdown',
+      async (phase) => {
+        const lifecycle = new LifecycleManager({ logger });
 
-      let warningCalls = 0;
+        let warningCalls = 0;
+        let messageCalls = 0;
+        let healthCalls = 0;
 
-      class SlowStopWithWarningComponent extends SlowStopComponent {
-        public onShutdownWarning(): void {
-          warningCalls++;
+        class SlowStopWithWarningComponent extends SlowStopComponent {
+          public async stop(): Promise<void> {
+            if (phase === 'force-stopping') {
+              throw new Error('enter force phase');
+            }
+            await super.stop();
+          }
+          public async onShutdownForce(): Promise<void> {
+            await sleep(150);
+          }
+          public onShutdownWarning(): void {
+            warningCalls++;
+          }
+          public onMessage<TData>(): TData {
+            messageCalls++;
+            return undefined as TData;
+          }
+          public healthCheck() {
+            healthCalls++;
+            return { healthy: true };
+          }
         }
-      }
 
-      await lifecycle.registerComponent(
-        new SlowStopWithWarningComponent(logger, 'slow', 150),
-      );
-      await lifecycle.startAllComponents();
+        await lifecycle.registerComponent(
+          new SlowStopWithWarningComponent(logger, 'slow', 150),
+        );
+        await lifecycle.startAllComponents();
 
-      const result = await lifecycle.stopAllComponents({ timeoutMS: 20 });
+        const result = await lifecycle.stopAllComponents({ timeoutMS: 20 });
 
-      expect(result.code).toBe('shutdown_timeout');
-      expect(lifecycle.getComponentStatus('slow')?.state).toBe('stopping');
-      const startResult = await lifecycle.startComponent('slow');
-      expect(startResult.success).toBe(false);
-      expect(startResult.code).toBe('component_already_running');
+        expect(result.code).toBe('shutdown_timeout');
+        expect(lifecycle.getComponentStatus('slow')?.state).toBe(phase);
+        const startResult = await lifecycle.startComponent('slow');
+        expect(startResult.success).toBe(false);
+        expect(startResult.code).toBe('component_already_stopping');
+        for (const options of [
+          undefined,
+          { includeStopped: true, includeStalled: true },
+        ]) {
+          const message = await lifecycle.sendMessageToComponent(
+            'slow',
+            {},
+            options,
+          );
+          expect(message.sent).toBe(false);
+          expect(message.code).toBe('error');
+        }
+        const health = await lifecycle.checkComponentHealth('slow');
+        expect(health.healthy).toBe(false);
+        expect(health.code).toBe('stopped');
+        expect(messageCalls).toBe(0);
+        expect(healthCalls).toBe(0);
 
-      const secondShutdown = await lifecycle.stopAllComponents();
-      expect(secondShutdown.success).toBe(false);
-      expect(secondShutdown.reason).toContain('still in progress for: slow');
-      expect(lifecycle.getComponentStatus('slow')?.state).toBe('stopping');
-      expect(warningCalls).toBe(1);
+        const secondShutdown = await lifecycle.stopAllComponents();
+        expect(secondShutdown.success).toBe(false);
+        expect(secondShutdown.reason).toContain('still in progress for: slow');
+        expect(lifecycle.getComponentStatus('slow')?.state).toBe(phase);
+        expect(warningCalls).toBe(1);
 
-      await sleep(170);
+        await sleep(170);
 
-      expect(lifecycle.getComponentStatus('slow')?.state).toBe('stopped');
-      expect((await lifecycle.startAllComponents()).success).toBe(true);
-      await lifecycle.stopAllComponents();
-    });
+        expect(lifecycle.getComponentStatus('slow')?.state).toBe('stopped');
+        expect((await lifecycle.startAllComponents()).success).toBe(true);
+        await lifecycle.stopAllComponents();
+      },
+    );
   });
 });
 

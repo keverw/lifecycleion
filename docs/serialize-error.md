@@ -72,7 +72,10 @@ It fires at most once per call. With no handler it first dispatches a cancelable
 dispatch is unavailable it uses `globalThis.reportError()` when present; an unclaimed
 dispatch, unavailable reporting function, or reporting failure ends at guarded
 `console.error`. A custom sink that calls this function should pass a handler that
-terminates locally.
+terminates locally. If a supplied handler throws or rejects, the failure goes directly to
+guarded `console.error`, without broadcasting again. Nested host reports also terminate
+there to prevent recursion. See the [shared routing summary](./safe-handle-callback.md#the-reporting-pattern)
+for how this differs from logger-owned diagnostics and sink-owned callbacks.
 
 **The cause never enters the payload.** It comes from the caller's own getter and may
 carry the value it was hiding, and this object is about to cross a wire - so the marker

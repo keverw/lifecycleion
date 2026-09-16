@@ -374,6 +374,8 @@ const result = await runner.waitForCompletion();
 
 #### `cancel()`
 
+Pending retry delays keep the Node process alive so awaited retries can finish. Call `cancel()` or `reset()` when abandoning a runner.
+
 Cancels the current operation and any scheduled retries.
 
 Returns `Promise<CancelResult>`:

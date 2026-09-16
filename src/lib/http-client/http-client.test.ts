@@ -4034,31 +4034,34 @@ describe('HTTPClient — redirect', () => {
     expect(builder.error?.detectedRedirectURL).toBe('https://example.com/next');
   });
 
-  test('passes through detectedRedirectURL for absolute redirect targets', async () => {
-    const adapter: HTTPAdapter = {
-      getType: () => 'node',
-      send: (_request: AdapterRequest): Promise<AdapterResponse> =>
-        Promise.resolve({
-          status: 302,
-          detectedRedirectURL: 'https://other.test/next',
-          headers: { location: 'https://other.test/next' },
-          body: null,
-        }),
-    };
+  test.each(['https://other.test/next', 'https://user:pass@other.test/next'])(
+    'preserves an unfollowed absolute redirect target %s in the response and error',
+    async (target) => {
+      const adapter: HTTPAdapter = {
+        getType: () => 'node',
+        send: (_request: AdapterRequest): Promise<AdapterResponse> =>
+          Promise.resolve({
+            status: 302,
+            detectedRedirectURL: target,
+            headers: { location: target },
+            body: null,
+          }),
+      };
 
-    const client = new HTTPClient({
-      adapter,
-      baseURL: 'https://example.com',
-      followRedirects: false,
-    });
+      const client = new HTTPClient({
+        adapter,
+        baseURL: 'https://example.com',
+        followRedirects: false,
+      });
 
-    const builder = client.get('/start');
-    const res = await builder.send();
+      const builder = client.get('/start');
+      const res = await builder.send();
 
-    expect(res.requestURL).toBe('https://example.com/start');
-    expect(res.detectedRedirectURL).toBe('https://other.test/next');
-    expect(builder.error?.detectedRedirectURL).toBe('https://other.test/next');
-  });
+      expect(res.requestURL).toBe('https://example.com/start');
+      expect(res.detectedRedirectURL).toBe(target);
+      expect(builder.error?.detectedRedirectURL).toBe(target);
+    },
+  );
 
   test('does not retain detectedRedirectURL on the final followed response', async () => {
     let callCount = 0;

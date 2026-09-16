@@ -269,10 +269,14 @@ export class LifecycleManager
       60000,
     );
     this.shutdownOptions = {
-      timeoutMS: 30000,
       retryStalled: true,
       haltOnStall: true,
       ...options.shutdownOptions,
+      // Constructor NaN means the documented default, as for startup and messaging.
+      // Other values retain their timer-boundary semantics, including zero disabling it.
+      timeoutMS: Number.isNaN(options.shutdownOptions?.timeoutMS)
+        ? 30000
+        : (options.shutdownOptions?.timeoutMS ?? 30000),
     };
     this.attachSignalsBeforeStartup =
       options.attachSignalsBeforeStartup ?? false;
@@ -1987,8 +1991,14 @@ export class LifecycleManager
       };
     }
 
-    // Check if component is running
-    if (!this.isComponentRunning(name)) {
+    // Teardown may outlive the bulk shutdown latch. Do not enter a health hook
+    // while either stop phase is still using the component.
+    const state = this.componentStates.get(name);
+    if (
+      !this.isComponentRunning(name) ||
+      state === 'stopping' ||
+      state === 'force-stopping'
+    ) {
       const isStalled = this.stalledComponents.has(name);
       return {
         name,
@@ -2219,7 +2229,12 @@ export class LifecycleManager
     options?: SendMessageOptions,
   ): Promise<MessageResult> {
     // Check if shutting down
-    if (this.isShuttingDown) {
+    const state = this.componentStates.get(componentName);
+    if (
+      this.isShuttingDown ||
+      state === 'stopping' ||
+      state === 'force-stopping'
+    ) {
       return {
         sent: false,
         componentFound: this.hasComponent(componentName),
@@ -3217,8 +3232,9 @@ export class LifecycleManager
     options?: StopAllOptions,
   ): Promise<ShutdownResult> {
     const startTime = Date.now();
-    const effectiveTimeout =
-      options?.timeoutMS ?? this.shutdownOptions?.timeoutMS ?? 30000;
+    const effectiveTimeout = toTimerDelayMS(
+      options?.timeoutMS ?? this.shutdownOptions?.timeoutMS ?? 30000,
+    );
     const shouldRetryStalled = options?.retryStalled ?? true;
     const shouldHaltOnStall = options?.haltOnStall ?? true;
 
@@ -3731,6 +3747,16 @@ export class LifecycleManager
         componentName: name,
         reason: 'Component already starting',
         code: 'component_already_starting',
+        status: this.getComponentStatus(name),
+      };
+    }
+
+    if (currentState === 'stopping' || currentState === 'force-stopping') {
+      return {
+        success: false,
+        componentName: name,
+        reason: `Component is already ${currentState}`,
+        code: 'component_already_stopping',
         status: this.getComponentStatus(name),
       };
     }
@@ -4637,6 +4663,17 @@ export class LifecycleManager
     const { promise: stoppedDuringForcePromise, cleanup: cleanupForceWaiter } =
       this.createPendingForceStopWaiter(name);
     let timeoutHandle: NodeJS.Timeout | undefined;
+    const reportFailureAfterGracefulStop = (error: unknown): void => {
+      try {
+        this.logger
+          .entity(name)
+          .warn('Force shutdown failed after graceful stop completed', {
+            params: { error: toError(error) },
+          });
+      } catch {
+        // A caller-supplied logger must not turn a completed stop into a rejection.
+      }
+    };
 
     try {
       const forcePromise = component.onShutdownForce();
@@ -4738,6 +4775,11 @@ export class LifecycleManager
         this.componentStates.get(name) === 'stopped' &&
         !this.runningComponents.has(name)
       ) {
+        // Graceful completion won. Report abandoned cleanup failures without
+        // changing this or a subsequent run's state.
+        void Promise.resolve(forcePromise).catch(
+          reportFailureAfterGracefulStop,
+        );
         return {
           success: true,
           componentName: name,
@@ -4787,6 +4829,9 @@ export class LifecycleManager
         this.componentStates.get(name) === 'stopped' &&
         !this.runningComponents.has(name)
       ) {
+        // The force rejection can win Promise.race in the same turn that graceful
+        // completion marks the component stopped. It still needs to be reported.
+        reportFailureAfterGracefulStop(error);
         return {
           success: true,
           componentName: name,

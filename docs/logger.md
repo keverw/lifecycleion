@@ -1712,9 +1712,13 @@ guarded `console.error` and is not reported again.
 | Redaction fails                                               | `kind: 'redaction'`, `path`       |
 | Rendering fails                                               | `kind: 'render'`, `path`          |
 
-Everything else, including errors reported by other Lifecycleion modules and by your own
-code using [the reporting pattern](./safe-handle-callback.md#the-reporting-pattern), reaches
-your sinks normally through `registerReportErrorListener()`.
+Unclaimed standalone helper failures and callback failures use
+[the shared host reporting route](./safe-handle-callback.md#the-reporting-pattern).
+`registerReportErrorListener()` can receive and log those global `'error'` events.
+Supplied failure handlers, sink-owned reports, and nested host reports can instead
+terminate directly at guarded `console.error`; registering a logger does not intercept
+every fallback. A successful global listener must call `preventDefault()` to suppress
+the host route's console fall-through (the logger listener does this by default).
 
 Do not call ordinary logger methods from a `'diagnostic'` listener or
 `writeDiagnostic()`. A diagnostic sink should write directly to its destination. If that
@@ -1912,6 +1916,8 @@ include `context` and the failing `sink`; event-handler diagnostics include `eve
 `ArraySink` has `onFormatError` (which also reports a throwing `transformer`, under
 `kind: 'transform'`), while `ConsoleSink` has none, since it does not queue or
 transform anything. See [Built-In Sinks](#built-in-sinks).
+
+Logger diagnostics are delivered in a microtask, including diagnostics from synchronous sink failures. Calling `process.exit()` in the same turn can discard them before listeners or the console fallback run. Await `logger.close()` during orderly shutdown to allow queued diagnostics and sink cleanup to run.
 
 ### Why the Fall-Back Is the Console
 

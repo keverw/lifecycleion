@@ -144,7 +144,20 @@ function reportToHost(error: Error): void {
 }
 ```
 
-Four details are load-bearing:
+The fallback writes to guarded `console.error`, not `console.log`. The three host rungs are shared by callback reporting and **standalone** formatting/serialization with no `onFormatError`. They are conditional routes, not three writes for every failure:
+
+| Source                                                                                                | Route                                                                                            | When it bypasses the logger                                                                                                                             |
+| ----------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `safeHandleCallback` / `reportCallbackError`                                                          | Global cancelable `'error'` event → host `reportError` only if dispatch is unavailable → console | An unclaimed or throwing dispatch goes straight to console; nested host reports also go straight there to prevent recursion                             |
+| Standalone `serializeError`, `errorToString`, `stringifyValue`, related render/redaction helpers      | Supplied `onFormatError`, otherwise the same host route                                          | A supplied handler that throws or rejects ends at console; it is never rebroadcast                                                                      |
+| Logger-owned formatting, sink-method failures, logger event-handler failures                          | Logger `'diagnostic'` event and selected diagnostic sinks                                        | Failed diagnostic delivery goes straight to console; no selected destination (or a closed logger) falls back there when there is no diagnostic listener |
+| Sink-owned callbacks such as `FileSink.onError` / `NamedPipeSink.onError` / `ArraySink.onFormatError` | Supplied callback, otherwise console                                                             | These local reports do not enter the global host route; a failing callback also ends at console                                                         |
+
+A registered logger can claim the global event with `preventDefault()`; merely observing it does not suppress fallback. Its diagnostics are deferred to a microtask, so an immediate `process.exit()` can prevent them from being delivered. Await `logger.close()` for orderly shutdown. Custom sinks and formatters using standalone helpers should supply a local failure handler to avoid re-entering a registered logger. See [logger failure routing](./logger.md#where-errors-go-when-the-logger-cannot-log-them).
+
+The outline above shows routing only. Production callback reporting passes a lazily rendered report to the host/console rungs, keeping the original cause structured for global listeners; nested reporting is guarded across bundled copies. If even the console write throws, the terminal guard swallows that failure.
+
+Five details are load-bearing:
 
 **Dispatch comes first, not `reportError()`.** The WHATWG "report an exception" algorithm suggests reaching for `globalThis.reportError()` first, and in browsers that does dispatch an `'error'` event. Other runtimes do not follow it: on Bun 1.3.14 `globalThis.reportError()` exists but writes to stderr without notifying a single `addEventListener('error', ...)` listener, and it sets the process exit code to 1 as a side effect. A `reportError()`-first order would therefore make reports invisible to listeners on Bun, and would let a failed callback turn a clean run into a failing one. Dispatch-first reaches listeners on browsers, Bun, and Node alike.
 
