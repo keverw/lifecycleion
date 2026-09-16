@@ -10,7 +10,7 @@ import {
   redactMatchedPaths,
 } from './redact-paths';
 import { REDACTION_FAILED_MARKER } from './default-redact-function';
-import { TRUNCATED } from './render-budget';
+import { TRUNCATED, TRUNCATED_LENGTH } from './render-budget';
 
 // This module had no direct tests: it was covered only through `stringify-value` and the
 // logger's `applyRedaction`, both of which exercise it with well-behaved payloads. What
@@ -1181,3 +1181,25 @@ test('snapshots changing inherited Error getters before the pre-walk can skip th
   const nested = (result as any).context.error;
   expect(JSON.stringify(nested.cause)).not.toContain(SECRET);
 });
+
+test.each(['root', 'long'])(
+  'opaque failure reports format the %s path consistently',
+  (kind) => {
+    const key = kind === 'root' ? '' : 'x'.repeat(1100);
+    const opaque = new (class Opaque {})();
+    Object.defineProperty(opaque, 'field', {
+      enumerable: true,
+      get() {
+        throw new Error('unreadable field');
+      },
+    });
+    const reported: string[] = [];
+    const input = key === '' ? opaque : { [key]: opaque };
+    redactMatchedPaths(input, paths('password'), undefined, (_error, path) =>
+      reported.push(path),
+    );
+    expect(reported).toEqual([
+      key === '' ? '<root>' : `${key.slice(0, 1000)}${TRUNCATED_LENGTH}`,
+    ]);
+  },
+);

@@ -46,3 +46,16 @@ describe('PublicSuffixResolver', () => {
     }
   });
 });
+
+test('unrelated overrides preserve PSL exception rules', () => {
+  for (const overrides of [
+    { add: ['corp.internal'] },
+    { remove: ['herokuapp.com'] },
+  ]) {
+    const resolver = new PublicSuffixResolver(overrides);
+    expect(resolver.apexFor('city.kawasaki.jp')).toBe('city.kawasaki.jp');
+    expect(resolver.apexFor('www.city.kawasaki.jp')).toBe('city.kawasaki.jp');
+    expect(resolver.apexFor('www.ck')).toBe('www.ck');
+    expect(resolver.apexFor('a.www.ck')).toBe('www.ck');
+  }
+});

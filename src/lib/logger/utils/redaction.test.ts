@@ -2120,3 +2120,69 @@ describe('applyRedaction - a named member that throws once and answers afterward
     expect(reported).toEqual(['redaction:profile']);
   });
 });
+
+test('preserves an unmatched class instance with more than 1024 properties', () => {
+  const record = new (class Record {})();
+  for (let index = 0; index < 2048; index++) {
+    Object.defineProperty(record, `field${index}`, {
+      value: index,
+      enumerable: true,
+    });
+  }
+  expect(
+    applyRedaction({ password: 'secret', record }, ['password']).record,
+  ).toBe(record);
+});
+
+test('reports opaque inspection exhaustion without dropping later diagnostics', () => {
+  const failures: Array<{ kind: string; path: string }> = [];
+  const holder = Object.assign(new (class Holder {})(), {
+    items: new Array(1_000_000).fill(0),
+  });
+  const error = new Error('safe');
+  const later = Object.assign(new (class Context {})(), {
+    detail: { label: 'safe' },
+  });
+  const result = applyRedaction(
+    { password: 'secret', holder, error, later },
+    ['password'],
+    undefined,
+    (_error, kind, path) => failures.push({ kind, path }),
+  );
+  expect(result.holder).toBe(REDACTION_FAILED_MARKER);
+  expect(result.error).toBe(error);
+  expect(result.later).toBe(later);
+  expect(failures).toEqual([{ kind: 'redaction', path: 'holder' }]);
+});
+
+test('shares a one-million-entry opaque inspection budget across values', () => {
+  const failures: Array<{ kind: string; path: string }> = [];
+  const input: Record<string, unknown> = { password: 'secret' };
+  const holders: object[] = [];
+  for (let index = 0; index < 125; index++) {
+    const holder = Object.assign(new (class Holder {})(), {
+      entries: new Array(8000).fill(0),
+    });
+    holders.push(holder);
+    input[`holder${index}`] = holder;
+  }
+  const error = new Error('safe');
+  input.error = error;
+
+  const result = applyRedaction(
+    input,
+    ['password'],
+    undefined,
+    (_error, kind, path) => failures.push({ kind, path }),
+  );
+
+  expect(result.error).toBe(error);
+  expect(result.holder123).toBe(holders[123]);
+  expect(result.holder124).toBe(REDACTION_FAILED_MARKER);
+  expect(failures).toEqual([
+    {
+      kind: 'redaction',
+      path: 'holder124',
+    },
+  ]);
+});

@@ -1052,9 +1052,7 @@ export class FileSink implements LogSink {
                 ? kind
                 : this.closed
                   ? 'close'
-                  : !hasRetryRoom()
-                    ? 'queue_full'
-                    : 'write',
+                  : 'write',
             );
           }
         }

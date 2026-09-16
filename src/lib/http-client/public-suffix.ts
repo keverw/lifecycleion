@@ -242,13 +242,14 @@ export class PublicSuffixResolver {
         }
       }
 
-      // Longest matching public suffix wins, so the walk starts at the whole hostname and
-      // shortens from the left: for `a.b.corp.internal` with `corp.internal` added, the
-      // first hit is `corp.internal` and the apex is the one label in front of it.
+      // Parse the whole hostname so bundled wildcard exceptions remain in force.
+      // Only caller additions may narrow that result; probing bundled suffixes
+      // individually loses the exception context (e.g. city.kawasaki.jp).
+      const bundled = parse(normalized, { allowPrivateDomains: true });
+      const bundledLength = bundled.publicSuffix?.split('.').length ?? 0;
       for (let i = 0; i < labels.length; i++) {
         const candidate = labels.slice(i).join('.');
-
-        if (this.isPublicSuffix(candidate)) {
+        if (this.added.has(candidate) && labels.length - i >= bundledLength) {
           return i === 0 ? normalized : labels.slice(i - 1).join('.');
         }
       }

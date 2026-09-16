@@ -3377,6 +3377,9 @@ describe('LifecycleManager - Registration & Individual Lifecycle', () => {
 
       expect(component.stopCalled).toBe(true);
       expect(lifecycle.isComponentRunning('test')).toBe(false);
+      expect(lifecycle.getComponentStatus('test')?.lastError).toBe(
+        result.error,
+      );
       expect(lifecycle.getComponentStatus('test')?.state).toBe(
         'starting-timed-out',
       );
@@ -12858,4 +12861,57 @@ test('startup timeout settles bookkeeping before an immediate retry', async () =
     'already_in_progress',
   );
   await manager.stopAllComponents();
+});
+
+test('shutdown during startup reports survivors without bypassing haltOnStall', async () => {
+  const logger = new Logger({ sinks: [], callProcessExit: false });
+  const manager = new LifecycleManager({
+    logger,
+    shutdownWarningTimeoutMS: -1,
+  });
+  let stops = 0;
+  class Stalling extends BaseComponent {
+    public start() {}
+    public stop() {
+      stops++;
+      throw new Error('cannot stop');
+    }
+  }
+  await manager.registerComponent(new TestComponent(logger, { name: 'first' }));
+  await manager.registerComponent(
+    new Stalling(logger, { name: 'second', dependencies: ['first'] }),
+  );
+  await manager.registerComponent(
+    new TestComponent(logger, { name: 'later', dependencies: ['second'] }),
+  );
+  const internals = manager as unknown as {
+    startComponentInternal: (
+      name: string,
+      ...args: unknown[]
+    ) => Promise<{ success: boolean }>;
+  };
+  const start = internals.startComponentInternal.bind(manager);
+  const spy = spyOn(internals, 'startComponentInternal').mockImplementation(
+    async (name, ...args) => {
+      const result = await start(name, ...args);
+      if (name === 'second') {
+        await manager.stopAllComponents();
+      }
+      return result;
+    },
+  );
+  try {
+    const result = await manager.startAllComponents();
+    expect(result.code).toBe('shutdown_in_progress');
+    expect(result.startedComponents).toEqual(['first']);
+    expect(manager.isComponentRunning('first')).toBe(true);
+    expect(manager.isComponentRunning('later')).toBe(false);
+    expect(stops).toBe(1);
+  } finally {
+    spy.mockRestore();
+    await manager.stopAllComponents({
+      haltOnStall: false,
+      retryStalled: false,
+    });
+  }
 });

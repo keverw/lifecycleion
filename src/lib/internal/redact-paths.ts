@@ -93,7 +93,28 @@ function isSeen(
  * invisible to every pass that is not running away.
  */
 export const MAX_REDACTION_ENTRIES = 1_000_000;
-const MAX_OPAQUE_SCAN_ENTRIES = 1024;
+// Bound each opaque graph independently so one large record cannot spend the
+// entire pass's inspection allowance and discard unrelated values after it.
+const MAX_OPAQUE_SCAN_ENTRIES = 16_384;
+
+// Node exposes its cached stack through a native accessor. It is not a
+// user-defined getter that can change on each template lookup. Preserve the Error
+// itself (including subclass private fields), but still scan the stack's value.
+const nativeStackDescriptor = Object.getOwnPropertyDescriptor(
+  new Error(),
+  'stack',
+);
+
+function isNativeStackAccessor(
+  key: string,
+  descriptor: PropertyDescriptor,
+): boolean {
+  return (
+    key === 'stack' &&
+    nativeStackDescriptor?.get !== undefined &&
+    descriptor.get === nativeStackDescriptor.get
+  );
+}
 
 // Error renderers read these even when hidden or inherited. Inspect the same fields
 // before passing an opaque Error through, and snapshot getters before scanning them.
@@ -144,7 +165,11 @@ function snapshotOpaqueAccessors(
       }
       owner = Object.getPrototypeOf(owner) as object | null;
     }
-    if (descriptor && !('value' in descriptor)) {
+    if (
+      descriptor &&
+      !('value' in descriptor) &&
+      !isNativeStackAccessor(key, descriptor)
+    ) {
       descriptors[key] = {
         value: (value as Record<string, unknown>)[key],
         enumerable: descriptor.enumerable,
@@ -822,7 +847,11 @@ function isUnstableEntry(value: object, key: string): boolean {
     return true;
   }
 
-  return descriptor !== undefined && descriptor.get !== undefined;
+  return (
+    descriptor !== undefined &&
+    descriptor.get !== undefined &&
+    !isNativeStackAccessor(key, descriptor)
+  );
 }
 
 /**
@@ -1369,6 +1398,7 @@ function redactPathsInner(
       // one that leads back to an ancestor whose masked copy is being built.
       // Keep its opaque shape: replacing the whole value avoids exposing its fields.
       let hasUnsafeReference: boolean;
+      let inspectionError: unknown;
       let snapshot: object = value;
       const allowance = Math.min(
         MAX_OPAQUE_SCAN_ENTRIES,
@@ -1392,12 +1422,20 @@ function redactPathsInner(
         hasUnsafeReference =
           !isLeaf &&
           needsFullWalk(snapshot, seen, new Set(), scan, path.length);
-      } catch {
+      } catch (error) {
+        inspectionError = error;
         hasUnsafeReference = true;
       } finally {
         state.opaqueScan.scanLeft -= allowance - scan.scanLeft;
       }
       if (hasUnsafeReference) {
+        report(
+          inspectionError ??
+            new Error(
+              'Opaque value contains an unsafe reference or could not be fully inspected',
+            ),
+          pathText(path) || '<root>',
+        );
         state.routeDependentResults++;
         return REDACTION_FAILED_MARKER;
       }

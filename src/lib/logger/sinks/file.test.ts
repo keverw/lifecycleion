@@ -2872,6 +2872,11 @@ describe('FileSink - entries written during close', () => {
           (f) => f.disposition === 'lost' && f.entry?.message === 'failed line',
         );
         expect(finalLoss).toHaveLength(1);
+        expect(finalLoss[0]?.kind).toBe('write');
+        expect(sink.getHealth().droppedByKind.write).toBe(1);
+        expect(sink.getHealth().droppedByKind.queue_full).toBe(
+          shouldFillFromCallback ? 0 : 1,
+        );
         expect(attempts).toBe(2);
         expect(sink.getHealth().queueSize).toBe(0);
       } finally {

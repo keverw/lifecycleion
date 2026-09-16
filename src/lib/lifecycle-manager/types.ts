@@ -271,7 +271,10 @@ export interface StartupResult {
   /** True if all required components started */
   success: boolean;
 
-  /** Names of components that started successfully */
+  /**
+   * Names of components that started successfully. When shutdown interrupts startup,
+   * includes only components from this pass still running when the result is returned.
+   */
   startedComponents: string[];
 
   /** Optional components that failed (app continues) */

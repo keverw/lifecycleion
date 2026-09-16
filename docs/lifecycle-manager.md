@@ -261,7 +261,10 @@ registered → starting → running → stopping → stopped
 Once a required startup failure begins rollback, the bulk startup timer is cleared.
 Rollback uses the component shutdown timeouts, and startup returns the original failure
 after cleanup finishes. A concurrent shutdown also cancels the remaining bulk starts,
-even if shutdown finishes before startup resumes.
+even if shutdown finishes before startup resumes. Shutdown owns cleanup in this case;
+startup does not launch a second rollback that could bypass `haltOnStall`. The aborted
+startup result lists components from that startup pass that are still running when it
+returns. Consult the shutdown result for stalls and incomplete stops.
 
 **Starting-Timed-Out State Definition:**
 A component enters "starting-timed-out" when:

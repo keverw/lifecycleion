@@ -2892,3 +2892,20 @@ test.each(['gov.uk', 'com'])(
     expect(jar.getCookieHeaderString(`https://child.${host}/`)).toBe('');
   },
 );
+
+test('unrelated suffix overrides do not widen exception-domain cookies', () => {
+  const jar = new CookieJar({ publicSuffixes: { add: ['corp.internal'] } });
+  jar.parseSetCookieHeader(
+    'bad=x; Domain=kawasaki.jp; Path=/',
+    'https://city.kawasaki.jp/',
+  );
+  expect(jar.getAllCookies()).toEqual([]);
+  expect(jar.getCookieHeaderString('https://kawasaki.jp/')).toBe('');
+  jar.parseSetCookieHeader(
+    'good=x; Domain=city.kawasaki.jp; Path=/',
+    'https://city.kawasaki.jp/',
+  );
+  expect(jar.getCookieHeaderString('https://www.city.kawasaki.jp/')).toBe(
+    'good=x',
+  );
+});

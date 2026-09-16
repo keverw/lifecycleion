@@ -959,7 +959,7 @@ export class LifecycleManager
    * - On failure: triggers rollback (stops all started components)
    * - Optional components don't trigger rollback on failure
    * - Dependents still attempt to start if an optional dependency fails
-   * - Handles shutdown signal during startup (aborts and rolls back)
+   * - Handles shutdown during startup (aborts; shutdown owns cleanup)
    */
   public async startAllComponents(
     options?: StartupOptions,
@@ -1237,7 +1237,9 @@ export class LifecycleManager
 
             return {
               success: false,
-              startedComponents: [],
+              startedComponents: startedComponents.filter((name) =>
+                this.isComponentRunning(name),
+              ),
               failedOptionalComponents: [],
               skippedDueToDependency: [],
               reason: 'Shutdown triggered during startup',
@@ -1262,9 +1264,14 @@ export class LifecycleManager
           );
 
           if (this.shutdownToken !== shutdownTokenAtBulkStart) {
+            if (result.success || result.code === 'component_already_running') {
+              startedComponents.push(name);
+            }
             return {
               success: false,
-              startedComponents: [],
+              startedComponents: startedComponents.filter((name) =>
+                this.isComponentRunning(name),
+              ),
               failedOptionalComponents,
               skippedDueToDependency: [...skippedDueToDependency],
               reason: 'Shutdown triggered during startup',
@@ -1303,7 +1310,9 @@ export class LifecycleManager
           } else if (result.code === 'shutdown_in_progress') {
             return {
               success: false,
-              startedComponents: [],
+              startedComponents: startedComponents.filter((name) =>
+                this.isComponentRunning(name),
+              ),
               failedOptionalComponents,
               skippedDueToDependency: Array.from(skippedDueToDependency),
               reason: result.reason || 'Shutdown triggered during startup',
@@ -3425,14 +3434,15 @@ export class LifecycleManager
               timeoutHandle = setTimeout(() => {
                 hasTimedOut = true;
 
-                this.logger.warn(
-                  'Shutdown timeout exceeded, halting further stop attempts',
-                  {
-                    params: { timeoutMS: effectiveTimeout },
-                  },
-                );
-
                 resolve('timeout');
+                try {
+                  this.logger.warn(
+                    'Shutdown timeout exceeded, halting further stop attempts',
+                    { params: { timeoutMS: effectiveTimeout } },
+                  );
+                } catch (error) {
+                  reportCallbackError('shutdown timeout notification', error);
+                }
               }, toTimerDelayMS(effectiveTimeout));
             })
           : null;
@@ -5194,6 +5204,7 @@ export class LifecycleManager
         // timed-out start's catch record its state before beginning late cleanup.
         await Promise.resolve();
         const timeoutState = this.componentStates.get(name);
+        const timeoutError = this.componentErrors.get(name) ?? null;
 
         if (
           this.getComponent(name) !== component ||
@@ -5243,6 +5254,7 @@ export class LifecycleManager
         }
 
         this.componentStates.set(name, timeoutState);
+        this.componentErrors.set(name, timeoutError);
       })
       .catch((error: unknown) => {
         // A rejection from `start()` itself needs nothing further - the component is
