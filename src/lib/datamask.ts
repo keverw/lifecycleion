@@ -19,7 +19,7 @@
  * `percent` past 100 or a multi-character `maskChar` lengthens the output. Neither is
  * clamped here: the functions do what they are asked, and a caller masking untrusted
  * input with untrusted settings bounds them first, as the logger's default redaction
- * does.
+ * does. A NaN percentage throws RangeError rather than silently returning unmasked input.
  */
 
 import { splitGraphemes } from './internal/graphemes';
@@ -48,6 +48,12 @@ export const DEFAULT_MASK_PERCENT = 60;
 /** How much of an email's local part is hidden when no percent is given. */
 export const DEFAULT_EMAIL_USER_PERCENT = 50;
 
+function rejectNaNPercent(percent: number | null): void {
+  if (Number.isNaN(percent)) {
+    throw new RangeError('Mask percentage must not be NaN');
+  }
+}
+
 /**
  * Mask a proportion of `value`, keeping the ends readable.
  *
@@ -68,6 +74,7 @@ export function maskString(
 ): string {
   maskChar ??= DEFAULT_MASK_CHAR;
   percent ??= DEFAULT_MASK_PERCENT;
+  rejectNaNPercent(percent);
   // In characters, so the prefix and suffix each end on a whole one.
   const characters = splitCharacters(value);
   const length = characters.length;
@@ -102,6 +109,7 @@ export function maskDomain(
   maskChar: string | null = DEFAULT_MASK_CHAR,
   percent: number | null = DEFAULT_MASK_PERCENT,
 ): string {
+  rejectNaNPercent(percent);
   if (!value.includes('.')) {
     return maskString(value, maskChar, percent);
   }
@@ -138,6 +146,8 @@ export function maskEmail(
   domainPercent: number | null = DEFAULT_MASK_PERCENT,
 ): string {
   userPercent ??= DEFAULT_EMAIL_USER_PERCENT;
+  rejectNaNPercent(userPercent);
+  rejectNaNPercent(domainPercent);
   if (!value.includes('@')) {
     return maskString(value, maskChar, userPercent);
   }

@@ -27,6 +27,16 @@ test('null optional settings use defaults without overriding an explicit zero', 
   expect(maskEmail(input, null, 0, 0)).toBe(input);
 });
 
+test.each(['', 'secret', 'secret@example.com'])(
+  'rejects NaN percentages before masking %j',
+  (value) => {
+    expect(() => maskString(value, '*', NaN)).toThrow(RangeError);
+    expect(() => maskDomain(value, '*', NaN)).toThrow(RangeError);
+    expect(() => maskEmail(value, '*', NaN)).toThrow(RangeError);
+    expect(() => maskEmail(value, '*', 50, NaN)).toThrow(RangeError);
+  },
+);
+
 test('a broken Intl.Segmenter is probed only once', async () => {
   // A fresh process gives the module a fresh lazy cache without exposing a test-only
   // reset hook in the public API.
