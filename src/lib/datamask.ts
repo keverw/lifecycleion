@@ -4,7 +4,7 @@
  *
  * The successor to the `datamask` npm package, which this library used for its default
  * redaction and which has the same three functions with the same arguments and
- * defaults. What changed is the unit: `datamask` indexed a string by UTF-16 code unit,
+ * defaults, including treating null optional settings as omitted. What changed is the unit: `datamask` indexed a string by UTF-16 code unit,
  * so an emoji-heavy value came back cut through a surrogate pair - a lone `\uD83D` at
  * the seam, `isWellFormed()` false - and the same broken text went wherever the mask
  * did. These count in code points, so a cut never lands inside a character. A value with
@@ -63,9 +63,11 @@ export const DEFAULT_EMAIL_USER_PERCENT = 50;
  */
 export function maskString(
   value: string,
-  maskChar: string = DEFAULT_MASK_CHAR,
-  percent: number = DEFAULT_MASK_PERCENT,
+  maskChar: string | null = DEFAULT_MASK_CHAR,
+  percent: number | null = DEFAULT_MASK_PERCENT,
 ): string {
+  maskChar ??= DEFAULT_MASK_CHAR;
+  percent ??= DEFAULT_MASK_PERCENT;
   // In characters, so the prefix and suffix each end on a whole one.
   const characters = splitCharacters(value);
   const length = characters.length;
@@ -97,8 +99,8 @@ export function maskString(
  */
 export function maskDomain(
   value: string,
-  maskChar: string = DEFAULT_MASK_CHAR,
-  percent: number = DEFAULT_MASK_PERCENT,
+  maskChar: string | null = DEFAULT_MASK_CHAR,
+  percent: number | null = DEFAULT_MASK_PERCENT,
 ): string {
   if (!value.includes('.')) {
     return maskString(value, maskChar, percent);
@@ -131,10 +133,11 @@ export function maskDomain(
  */
 export function maskEmail(
   value: string,
-  maskChar: string = DEFAULT_MASK_CHAR,
-  userPercent: number = DEFAULT_EMAIL_USER_PERCENT,
-  domainPercent: number = DEFAULT_MASK_PERCENT,
+  maskChar: string | null = DEFAULT_MASK_CHAR,
+  userPercent: number | null = DEFAULT_EMAIL_USER_PERCENT,
+  domainPercent: number | null = DEFAULT_MASK_PERCENT,
 ): string {
+  userPercent ??= DEFAULT_EMAIL_USER_PERCENT;
   if (!value.includes('@')) {
     return maskString(value, maskChar, userPercent);
   }

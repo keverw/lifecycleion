@@ -1100,6 +1100,89 @@ describe('ProcessSignalManager', () => {
       }
     });
 
+    test.each([true, false])(
+      'coordinates Ctrl+C with legacy copies (legacy first=%p)',
+      (isLegacyFirst) => {
+        const wasTTY = process.stdin.isTTY;
+        // eslint-disable-next-line @typescript-eslint/unbound-method
+        const savedSetRawMode = process.stdin.setRawMode;
+        // eslint-disable-next-line @typescript-eslint/unbound-method
+        const savedPause = process.stdin.pause;
+        const stateKey = Symbol.for('lifecycleion.ProcessSignalManager.v1');
+        const globals = globalThis as any;
+        const savedState = globals[stateKey];
+        // The exact old shared-state shape deliberately has no forwarding capability set.
+        const shared = {
+          keypressEventsEmittedOnStdin: true,
+          attachedInstances: new Set<string>(),
+          rawModeOwner: null,
+          rawModeEnabledByManager: false,
+        };
+        globals[stateKey] = shared;
+        (process.stdin as any).isTTY = true;
+        (process.stdin as any).setRawMode = mock(() => {});
+        (process.stdin as any).pause = mock(() => {});
+        const oldShutdown = mock(() => {});
+        const oldKeypress = (_text: string, key: any) => {
+          if (key.ctrl && key.name === 'c') {
+            oldShutdown();
+          }
+        };
+        const external = mock(() => {});
+        const currentShutdown = mock(() => {});
+        const secondShutdown = mock(() => {});
+        manager = new ProcessSignalManager({
+          onShutdownRequested: currentShutdown,
+          keypressThrottleMS: 0,
+        });
+        const second = new ProcessSignalManager({
+          onShutdownRequested: secondShutdown,
+          keypressThrottleMS: 0,
+        });
+        const attachOld = () => {
+          shared.attachedInstances.add('legacy-instance');
+          process.on('SIGINT', oldShutdown);
+          process.stdin.on('keypress', oldKeypress);
+        };
+        try {
+          if (isLegacyFirst) {
+            attachOld();
+          }
+          manager.attach();
+          if (!isLegacyFirst) {
+            attachOld();
+          }
+          second.attach();
+          process.on('SIGINT', external);
+          process.stdin.emit('keypress', '', { ctrl: true, name: 'c' });
+          expect(oldShutdown).toHaveBeenCalledTimes(1);
+          expect(currentShutdown).toHaveBeenCalledTimes(1);
+          expect(secondShutdown).toHaveBeenCalledTimes(1);
+          expect(external).not.toHaveBeenCalled();
+
+          shared.attachedInstances.delete('legacy-instance');
+          process.off('SIGINT', oldShutdown);
+          process.stdin.off('keypress', oldKeypress);
+          process.stdin.emit('keypress', '', { ctrl: true, name: 'c' });
+          expect(currentShutdown).toHaveBeenCalledTimes(2);
+          expect(secondShutdown).toHaveBeenCalledTimes(2);
+          expect(external).toHaveBeenCalledTimes(1);
+        } finally {
+          shared.attachedInstances.delete('legacy-instance');
+          process.off('SIGINT', oldShutdown);
+          process.off('SIGINT', external);
+          process.stdin.off('keypress', oldKeypress);
+          manager.detach();
+          second.detach();
+          expect((shared as any).sigintForwardingInstances.size).toBe(0);
+          globals[stateKey] = savedState;
+          (process.stdin as any).isTTY = wasTTY;
+          (process.stdin as any).setRawMode = savedSetRawMode;
+          (process.stdin as any).pause = savedPause;
+        }
+      },
+    );
+
     test('handles Escape keypress', async () => {
       // Mock TTY mode
       const wasOriginallyTTY = process.stdin.isTTY;

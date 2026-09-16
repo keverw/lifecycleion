@@ -183,7 +183,9 @@ An error nested inside another's `additionalInfo` starts a fresh path root: the 
 
 A bare name is taken literally, so `sensitiveFieldNames: ['password-hash']` masks `additionalInfo['password-hash']`.
 
-The rendered table and `onFormatError` spell the same location from the error - `additionalInfo.password` - and copying that spelling into `sensitiveFieldNames` is accepted too: an entry beginning `additionalInfo.` is read both as written and with that prefix removed, so `['additionalInfo.user.password']` masks `additionalInfo.user.password` exactly as `['user.password']` does. Only the dotted spelling is aliased this way, and a bag that genuinely holds a key named `additionalInfo` is masked at both readings.
+Paths are case-sensitive, just like JavaScript property names. The table's `AdditionalInfo.password` is a display label; use `['password']` to mask that property, or `['additionalInfo.password']` with the actual property name. The capitalized `AdditionalInfo.` display prefix is not an alias.
+
+An entry beginning `additionalInfo.` is read both as written and with that prefix removed, so `['additionalInfo.user.password']` masks `additionalInfo.user.password` exactly as `['user.password']` does. This lowercase spelling also matches the paths reported by `onFormatError`. Only the dotted spelling is aliased this way, and a bag that genuinely holds a key named `additionalInfo` is masked at both readings.
 
 An unquoted path segment is a run of name characters - letters, digits, combining marks, `_`, `$`, `@` and `-` - so ordinary key names need no quoting inside a path either: `user.password-hash`, `user.@id`, and `users[0].api-key` all work. A key that contains anything else, including a delimiter, whitespace, or any other punctuation, needs the quoted bracket form, which is the only way to disambiguate it: `user["a.b"]`, `user["my key"]`, `user["a+b"]`.
 

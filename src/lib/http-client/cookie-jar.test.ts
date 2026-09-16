@@ -1,6 +1,28 @@
 import { describe, test, expect, beforeEach } from 'bun:test';
 import { CookieJar } from './cookie-jar';
 
+test.each([
+  'my_app.example.com',
+  'ab--cd.example.com',
+  'foo--bar.example.com',
+  'xn--mnchen-3ya.de',
+])('preserves cookie scopes and deletion for URL hostname %s', (host) => {
+  const jar = new CookieJar();
+  const url = `https://${host}/`;
+  jar.parseSetCookieHeader('session=host; Path=/', url);
+  expect(jar.getCookieHeaderString(url)).toBe('session=host');
+  expect(jar.getCookieHeaderString(`https://sub.${host}/`)).toBe('');
+  jar.parseSetCookieHeader('session=; Path=/; Max-Age=0', url);
+  expect(jar.getCookieHeaderString(url)).toBe('');
+  jar.parseSetCookieHeader(`scoped=domain; Domain=${host}; Path=/`, url);
+  expect(jar.getCookieHeaderString(`https://sub.${host}/`)).toBe(
+    'scoped=domain',
+  );
+  expect(jar.getCookieHeaderString(`https://other${host}/`)).toBe('');
+  jar.parseSetCookieHeader(`scoped=; Domain=${host}; Path=/; Max-Age=0`, url);
+  expect(jar.getAllCookies()).toEqual([]);
+});
+
 test.each(['example.com.', '[::1]', '[2001:db8::1]'])(
   'deletes host-only cookies using their canonical identity on %s',
   (host) => {

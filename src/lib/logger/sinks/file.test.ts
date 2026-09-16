@@ -2755,6 +2755,13 @@ describe('FileSink - entries refused at the door', () => {
 });
 
 describe('FileSink - entries written during close', () => {
+  const makeEntry = (message: string): LogEntry => ({
+    timestamp: Date.now(),
+    type: 'info',
+    message,
+    template: message,
+  });
+
   let tmpDir: TmpDir;
 
   beforeEach(async () => {
@@ -2817,6 +2824,62 @@ describe('FileSink - entries written during close', () => {
       statSpy.mockRestore();
     }
   });
+
+  test.each([false, true])(
+    'reports a failed line lost when retry room is consumed (callback=%p)',
+    async (shouldFillFromCallback) => {
+      const failures: SinkFailure[] = [];
+      const sink = new FileSink({
+        logDir: tmpDir.path,
+        basename: 'full-retry',
+        maxQueueSize: 1,
+        onError: (failure) => {
+          failures.push(failure);
+          if (shouldFillFromCallback && failure.disposition === 'retrying') {
+            sink.write(makeEntry('callback survivor'));
+          }
+        },
+      });
+      await sink.flush();
+      const internals = sink as unknown as {
+        writeEntry: (entry: unknown) => Promise<void>;
+      };
+      const started = Promise.withResolvers<void>();
+      const pending = Promise.withResolvers<void>();
+      let attempts = 0;
+      internals.writeEntry = () => {
+        attempts++;
+        if (attempts === 1) {
+          started.resolve();
+          return pending.promise;
+        }
+        return Promise.resolve();
+      };
+      try {
+        sink.write(makeEntry('failed line'));
+        await started.promise;
+        if (!shouldFillFromCallback) {
+          sink.write(makeEntry('evicted while busy'));
+          sink.write(makeEntry('survivor'));
+          // The aggregate overflow report has already fired before the failed retry.
+          expect(failures.filter((f) => f.kind === 'queue_full')).toHaveLength(
+            1,
+          );
+        }
+        pending.reject(new Error('write failed'));
+        await sink.flush();
+        const finalLoss = failures.filter(
+          (f) => f.disposition === 'lost' && f.entry?.message === 'failed line',
+        );
+        expect(finalLoss).toHaveLength(1);
+        expect(attempts).toBe(2);
+        expect(sink.getHealth().queueSize).toBe(0);
+      } finally {
+        pending.resolve();
+        await sink.close();
+      }
+    },
+  );
 
   test('a write still in flight when close() gives up is lost, not re-queued', async () => {
     // `close()` gives up on its drain at `closeTimeoutMS` and returns with the pass it was

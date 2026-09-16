@@ -1,5 +1,6 @@
 import { parse } from 'tldts';
-import { normalizeDomain } from '../domain-utils/helpers';
+import { toASCII } from 'tr46';
+import { checkDNSLength, toAsciiDots } from '../domain-utils/helpers';
 import { PublicSuffixResolver } from './public-suffix';
 import type { PublicSuffixOverrides } from './public-suffix';
 import { normalizeAdapterResponseHeaders } from './utils';
@@ -660,6 +661,7 @@ export class CookieJar {
    *  canonical IP literals. RFC 6265 treats a leading dot as ignored, and persisted jars
    *  from browser-oriented implementations commonly retain it. */
   private normalizeStoredDomain(domain: string): string {
+    domain = toAsciiDots(domain);
     const withoutLeadingDot = domain.startsWith('.') ? domain.slice(1) : domain;
     const raw = withoutLeadingDot.endsWith('.')
       ? withoutLeadingDot.slice(0, -1)
@@ -676,7 +678,30 @@ export class CookieJar {
       return '';
     }
 
-    return normalizeDomain(this.unbracketHost(raw));
+    // URL hosts allow underscores and hyphens that strict DNS validation rejects.
+    // Keep IDNA safety checks and length limits without silently discarding their cookies.
+    try {
+      const ascii = toASCII(
+        this.unbracketHost(raw).normalize('NFC').toLowerCase(),
+        {
+          useSTD3ASCIIRules: false,
+          checkHyphens: false,
+          checkBidi: true,
+          checkJoiners: true,
+          transitionalProcessing: false,
+          verifyDNSLength: false,
+        },
+      );
+      // IDNA alone permits URL delimiters in non-strict mode. Reject anything
+      // that URL parsing would interpret as credentials, a port, a path, or an escape.
+      return ascii &&
+        checkDNSLength(ascii) &&
+        new URL(`http://${ascii}/`).hostname === ascii
+        ? ascii
+        : '';
+    } catch {
+      return '';
+    }
   }
 
   private parseCookieString(header: string): ParsedCookie | null {

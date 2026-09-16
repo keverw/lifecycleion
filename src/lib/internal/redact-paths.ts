@@ -95,6 +95,22 @@ function isSeen(
 export const MAX_REDACTION_ENTRIES = 1_000_000;
 const MAX_OPAQUE_SCAN_ENTRIES = 1024;
 
+// Error renderers read these even when hidden or inherited. Inspect the same fields
+// before passing an opaque Error through, and snapshot getters before scanning them.
+const ERROR_RENDER_MEMBERS = [
+  'name',
+  'message',
+  'stack',
+  'cause',
+  'additionalInfo',
+  'code',
+  'errno',
+  'errPrefix',
+  'errType',
+  'errCode',
+  'sensitiveFieldNames',
+] as const;
+
 /** Preserve opaque rendering while making template-visible getters stable. */
 function snapshotOpaqueAccessors(
   value: object,
@@ -114,9 +130,7 @@ function snapshotOpaqueAccessors(
   const visible = Object.keys(value);
   if (isError) {
     visible.push(
-      ...['name', 'message', 'stack', 'cause'].filter(
-        (key) => !visible.includes(key),
-      ),
+      ...ERROR_RENDER_MEMBERS.filter((key) => !visible.includes(key)),
     );
   }
   let didSnapshot = false;
@@ -981,9 +995,7 @@ function needsFullWalk(
   const keys = isErrorValue(value)
     ? [
         ...shape.keys,
-        ...['name', 'message', 'stack', 'cause'].filter(
-          (key) => !shape.keys.includes(key),
-        ),
+        ...ERROR_RENDER_MEMBERS.filter((key) => !shape.keys.includes(key)),
       ]
     : shape.keys;
   for (const key of keys) {
@@ -1358,7 +1370,7 @@ function redactPathsInner(
         const isLeaf =
           Object.keys(snapshot).length === 0 &&
           (!isErrorValue(snapshot) ||
-            ['name', 'message', 'stack', 'cause'].every((key) => {
+            ERROR_RENDER_MEMBERS.every((key) => {
               const field = (snapshot as Record<string, unknown>)[key];
               return (
                 field === null ||

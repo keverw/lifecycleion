@@ -971,10 +971,14 @@ export class FileSink implements LogSink {
           // times, against a sink that could only answer `Cannot write to closed sink` -
           // before finally being counted. `NamedPipeSink.requeue` takes the same view: past
           // the close, the honest answer is that the entry is lost.
-          const willRetry =
+          const hasRetryRoom = () =>
+            this.maxQueueSize === undefined ||
+            this.writeQueue.length < this.maxQueueSize;
+          let willRetry =
             queuedEntry.formatError === undefined &&
             !this.closed &&
-            queuedEntry.attempts < this.maxRetries;
+            queuedEntry.attempts < this.maxRetries &&
+            hasRetryRoom();
 
           // The shared rung, which also closes a gap this had and `NamedPipeSink` did
           // not: the console line lived *inside* the `catch` for a throwing callback, so
@@ -986,59 +990,54 @@ export class FileSink implements LogSink {
           // would otherwise print four lines for every entry, and a disk that filled up
           // under a logging loop turns that into the flood the fallback is supposed to
           // rescue you from. One line per entry actually lost says the same thing.
-          if (this.onError !== undefined || !willRetry) {
-            // Held across the report for a `'format'` failure only, and until the handler
-            // settles rather than returns - see `scheduleFormatReport`. A write failure
-            // is retried and the handler hears every attempt by contract; the chain this
-            // breaks is the one where the handler's own line cannot render either.
-            const report = (onReported?: () => void) =>
-              reportThroughHandler(
-                this.onError === undefined
-                  ? undefined
-                  : // The handler's result is returned, not dropped: `reportThroughHandler`
-                    // follows a promise so an `async` handler that rejects lands on the
-                    // console rung instead of becoming an unhandled rejection.
-                    () =>
-                      this.onError?.({
-                        kind,
-                        error: err,
-                        target: this.currentLogFile ?? this.logDir,
-                        entry: queuedEntry.entry,
-                        attempt: queuedEntry.attempts + 1,
-                        disposition: willRetry ? 'retrying' : 'lost',
-                      }),
-                () =>
-                  `FileSink error writing to ${this.currentLogFile ?? this.logDir}: ${describeError(err)}`,
-                onReported,
-              );
+          const reportFailure = (willRetryEntry: boolean) => {
+            if (this.onError !== undefined || !willRetryEntry) {
+              // Held across the report for a `'format'` failure only, and until the handler
+              // settles rather than returns - see `scheduleFormatReport`. A write failure
+              // is retried and the handler hears every attempt by contract; the chain this
+              // breaks is the one where the handler's own line cannot render either.
+              const report = (onReported?: () => void) =>
+                reportThroughHandler(
+                  this.onError === undefined
+                    ? undefined
+                    : // The handler's result is returned, not dropped: `reportThroughHandler`
+                      // follows a promise so an `async` handler that rejects lands on the
+                      // console rung instead of becoming an unhandled rejection.
+                      () =>
+                        this.onError?.({
+                          kind,
+                          error: err,
+                          target: this.currentLogFile ?? this.logDir,
+                          entry: queuedEntry.entry,
+                          attempt: queuedEntry.attempts + 1,
+                          disposition: willRetryEntry ? 'retrying' : 'lost',
+                        }),
+                  () =>
+                    `FileSink error writing to ${this.currentLogFile ?? this.logDir}: ${describeError(err)}`,
+                  onReported,
+                );
 
-            if (kind === 'format') {
-              this.scheduleFormatReport((onReported) => report(onReported));
-            } else {
-              report();
+              if (kind === 'format') {
+                this.scheduleFormatReport((onReported) => report(onReported));
+              } else {
+                report();
+              }
             }
+          };
+          reportFailure(willRetry);
+          // A callback may enqueue another line or close the sink. Recheck before
+          // committing a retry and report its final loss if the callback consumed room.
+          if (willRetry && (this.closed || !hasRetryRoom())) {
+            willRetry = false;
+            reportFailure(false);
           }
 
           if (willRetry) {
-            // Re-queued at the *front*, where it came from, and not at the back.
-            //
-            // The queue drains with `shift`, so pushing moved a failed line behind every
-            // line that arrived after it: one transient `ENOSPC` or `EAGAIN` wrote the
-            // file out of timestamp order. Under `maxQueueSize` it cost more than order -
-            // `enforceQueueLimit` evicts the *oldest* entry to make room, so the re-pushed
-            // line survived at the tail while a newer line that had never failed was
-            // dropped for it, up to `maxRetries` of them per failing entry.
-            //
-            // Retried immediately as a result, which is what the attempt count bounds: the
-            // entry gets no more than `maxRetries` further tries and is then given up on,
-            // and a stream that needs recreating is recreated by `writeEntry` on the next
-            // one. Fewer if the queue is at `maxQueueSize` - it is the oldest entry again
-            // once it is back at the head, so the eviction below can take it, which is the
-            // drop-oldest policy applied to the line that has already failed rather than
-            // to a newer one that has not.
+            // Preserve ordering, but never enqueue a retry that the queue cap would
+            // immediately evict. Its write failure must say 'lost' even when the
+            // aggregate queue-full notification has already been emitted.
             queuedEntry.attempts++;
             this.writeQueue.unshift(queuedEntry);
-            this.enforceQueueLimit();
           } else {
             // Max retries exceeded - entry is lost
             //
@@ -1049,7 +1048,13 @@ export class FileSink implements LogSink {
             // documented meaning, "lines this sink did not deliver". `flush()` reads the
             // same counter, so the two can no longer disagree about what was lost.
             this.countDropped(
-              kind === 'format' || kind === 'close' ? kind : 'write',
+              kind === 'format' || kind === 'close'
+                ? kind
+                : this.closed
+                  ? 'close'
+                  : !hasRetryRoom()
+                    ? 'queue_full'
+                    : 'write',
             );
           }
         }

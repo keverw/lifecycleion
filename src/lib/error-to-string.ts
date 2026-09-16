@@ -198,8 +198,9 @@ function readMemberOrThrew(
  * The parsed list, plus each `additionalInfo.`-prefixed entry read from the bag.
  *
  * The path root is the `additionalInfo` bag itself, so `['password']` names
- * `additionalInfo.password` - which is also exactly how the rendered table and every
- * `onFormatError` report spell that location. Copying that spelling back into
+ * `additionalInfo.password` - which is also how an `onFormatError` report spells that
+ * location. The table uses the display label `AdditionalInfo.password`; paths remain
+ * case-sensitive and that capitalized prefix is not an alias. Copying the property path into
  * `sensitiveFieldNames` is the obvious thing to do, and it looked for
  * `additionalInfo.additionalInfo.password`, matched nothing, and printed the secret: a
  * fail-open answer to the one entry the docs' own output invites. Each such entry now
@@ -238,7 +239,7 @@ function withAdditionalInfoAliases(paths: RedactPath[]): RedactPath[] {
   return aliases.length === 0 ? paths : [...paths, ...aliases];
 }
 
-/** The member `sensitiveFieldNames` is rooted at, as the rendered table spells it. */
+/** The actual member name that `sensitiveFieldNames` is rooted at. */
 const ADDITIONAL_INFO_PREFIX = 'additionalInfo';
 
 /**

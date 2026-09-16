@@ -17,6 +17,48 @@ import { EOL } from './constants';
 import * as redactPaths from './internal/redact-paths';
 import type { RedactFunction } from './logger/types';
 
+it.each(['additionalInfo', 'code', 'errno', 'errPrefix', 'errType', 'errCode'])(
+  'does not leak masked ancestors through hidden Error.%s',
+  (member) => {
+    for (const useGetter of [false, true]) {
+      const info: Record<string, unknown> = { password: 'hidden-error-secret' };
+      const nested = new Error('nested');
+      Object.defineProperty(
+        nested,
+        member,
+        useGetter ? { get: () => info } : { value: info },
+      );
+      info.ctx = nested;
+      const outer = Object.assign(new Error('outer'), {
+        additionalInfo: info,
+        sensitiveFieldNames: ['password'],
+      });
+      const output = errorToString(outer);
+      expect(output).not.toContain('hidden-error-secret');
+      expect(output).toContain(REDACTION_FAILED_MARKER);
+    }
+  },
+);
+
+it('snapshots hidden Error getters once before redaction inspection', () => {
+  const info: Record<string, unknown> = { password: 'hidden-error-secret' };
+  const nested = new Error('nested');
+  let reads = 0;
+  Object.defineProperty(nested, 'additionalInfo', {
+    get: () => (++reads === 1 ? { safe: 'ok' } : info),
+  });
+  info.ctx = nested;
+  const output = errorToString(
+    Object.assign(new Error('outer'), {
+      additionalInfo: info,
+      sensitiveFieldNames: ['password'],
+    }),
+  );
+  expect(output).not.toContain('hidden-error-secret');
+  expect(output).toContain('ok');
+  expect(reads).toBe(1);
+});
+
 it.each([10_000, 1_000_000])(
   'counts JSON escaping inside array objects against a %d character cap',
   (limit) => {

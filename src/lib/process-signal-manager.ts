@@ -29,6 +29,9 @@ interface ProcessSignalManagerSharedState {
    */
   attachedInstances: Set<string>;
 
+  /** Instances using shared SIGINT forwarding; absent in older package copies. */
+  sigintForwardingInstances?: Set<string>;
+
   /**
    * The instance ID that enabled raw mode, or null if raw mode wasn't enabled by us.
    * Only this instance (or the last remaining instance) should disable raw mode.
@@ -68,7 +71,9 @@ function getSharedState(): ProcessSignalManagerSharedState {
       rawModeEnabledByManager: false,
     };
   }
-  return g[SHARED_STATE_KEY];
+  const shared = g[SHARED_STATE_KEY];
+  shared.sigintForwardingInstances ??= new Set();
+  return shared;
 }
 
 /**
@@ -689,6 +694,22 @@ export class ProcessSignalManager {
       // Forward it once for all attached managers, even when this is a reload-only
       // manager, so the process default (or any external SIGINT listener) still works.
       if (keyObj.ctrl && keyName === 'c') {
+        // Older copies invoke their callback directly. Forwarding SIGINT alongside
+        // them would invoke that callback twice; electing an old leader loses ours.
+        // Keep shared terminal ownership, but use direct callbacks in a mixed cohort.
+        const hasLegacyInstance = [...shared.attachedInstances].some(
+          (id) => !shared.sigintForwardingInstances?.has(id),
+        );
+        if (hasLegacyInstance) {
+          if (this.onShutdownRequested && !this.shouldThrottle('shutdown')) {
+            safeHandleCallback(
+              this.shutdownCallbackName,
+              this.onShutdownRequested,
+              'SIGINT',
+            );
+          }
+          return;
+        }
         const leader = shared.attachedInstances.values().next().value;
 
         if (leader !== this.instanceID) {
@@ -746,6 +767,7 @@ export class ProcessSignalManager {
     // ADD FIRST, then check - prevents race condition where two instances
     // both see size === 0 before either adds themselves
     shared.attachedInstances.add(this.instanceID);
+    shared.sigintForwardingInstances?.add(this.instanceID);
     const isFirstInstance = shared.attachedInstances.size === 1;
 
     try {
@@ -755,6 +777,7 @@ export class ProcessSignalManager {
     } catch (error) {
       // If registration fails, clean up and rethrow
       shared.attachedInstances.delete(this.instanceID);
+      shared.sigintForwardingInstances?.delete(this.instanceID);
       this.keypressHandler = undefined;
       throw error;
     }
@@ -831,6 +854,7 @@ export class ProcessSignalManager {
     }
 
     shared.attachedInstances.delete(this.instanceID);
+    shared.sigintForwardingInstances?.delete(this.instanceID);
 
     // If we attempted to enable raw mode and it appears to have been enabled,
     // record that raw mode is managed by us (even if the original setRawMode(true) threw).
@@ -942,6 +966,7 @@ export class ProcessSignalManager {
     // Remove this instance from shared state even if we never registered a handler.
     // (Set.delete is a safe no-op if we weren't attached.)
     const wasAttachedToStdin = shared.attachedInstances.delete(this.instanceID);
+    shared.sigintForwardingInstances?.delete(this.instanceID);
 
     // Re-check ownership AFTER deletion to get accurate state
     // (avoids race where ownership is transferred to us between capture and deletion)

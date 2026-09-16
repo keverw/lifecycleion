@@ -8,6 +8,25 @@ import {
   splitCharacters,
 } from './datamask';
 
+test('null optional settings use defaults without overriding an explicit zero', () => {
+  for (const mask of [maskString, maskDomain]) {
+    const input = 'hunter2secret.example.com';
+    expect(mask(input, null)).toBe(mask(input));
+    expect(mask(input, '#', null)).toBe(mask(input, '#'));
+    expect(mask(input, null, null)).toBe(mask(input));
+    expect(mask(input, null, 0)).toBe(input);
+  }
+  const input = 'hunter2secret@example.com';
+  expect(maskEmail(input, null)).toBe(maskEmail(input));
+  expect(maskEmail(input, '#', null)).toBe(maskEmail(input, '#'));
+  expect(maskEmail(input, '#', 20, null)).toBe(maskEmail(input, '#', 20));
+  expect(maskEmail(input, null, null, null)).toBe(maskEmail(input));
+  expect(maskEmail('hunter2secret', null, null)).toBe(
+    maskString('hunter2secret', '*', 50),
+  );
+  expect(maskEmail(input, null, 0, 0)).toBe(input);
+});
+
 test('a broken Intl.Segmenter is probed only once', async () => {
   // A fresh process gives the module a fresh lazy cache without exposing a test-only
   // reset hook in the public API.

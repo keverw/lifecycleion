@@ -1871,18 +1871,10 @@ export class NamedPipeSink implements LogSink {
       // `writeQueue` and so was not among the ones that call reported.
       this.countDropped('close');
 
-      // And said out loud, once. The drain loop in `close()` pushes the backlog into the
-      // stream's buffer and sets `closed` without awaiting the write callbacks, so every
-      // callback that errors afterwards lands here - reported by the caller as
-      // `disposition: 'retrying'` while this made it final. An `onError` consumer whose
-      // job is to fall back to another destination on `'lost'` was told the opposite of
-      // what happened, and `abandonQueueOnClose()` had already run against an empty queue,
-      // so nothing else was going to tell it. Once per close, like the cap's report and
-      // that one: a close abandoning a full stream buffer would otherwise fire the
-      // callback for every entry in it.
-      if (!this.didReportPostCloseLoss) {
-        this.didReportPostCloseLoss = true;
-
+      // Each failed write needs its own final disposition for fallback consumers.
+      // The write callback already reports known closed-sink losses; only synthesize
+      // a close report when no final write failure was reported for this entry.
+      if (!wasReported) {
         this.handleError(
           'close',
           new Error(
@@ -2411,12 +2403,13 @@ export class NamedPipeSink implements LogSink {
           const wasPartiallyWritten =
             stream instanceof NonBlockingPipeStream &&
             stream.consumePartialWriteFailure(error);
+          const willRetry =
+            !this.closed &&
+            !wasPartiallyWritten &&
+            queued.attempts < this.maxRetries;
           this.handleError('write', error, {
             attempt: queued.attempts + 1,
-            disposition:
-              !wasPartiallyWritten && queued.attempts < this.maxRetries
-                ? 'retrying'
-                : 'lost',
+            disposition: willRetry ? 'retrying' : 'lost',
             entry: queued.entry,
             // Only the stream still in hand may be marked unhealthy by this. The callback
             // runs later than the write that started it, and `reconnect()` may have put a
@@ -2430,7 +2423,7 @@ export class NamedPipeSink implements LogSink {
           if (wasPartiallyWritten) {
             this.countDropped('write');
           } else {
-            this.requeue(queued, true);
+            this.requeue(queued, !willRetry);
           }
 
           return;
@@ -2447,15 +2440,16 @@ export class NamedPipeSink implements LogSink {
         this.pauseUntilDrain();
       }
     } catch (error) {
+      const willRetry = !this.closed && queued.attempts < this.maxRetries;
       this.handleError('write', error, {
         attempt: queued.attempts + 1,
-        disposition: queued.attempts < this.maxRetries ? 'retrying' : 'lost',
+        disposition: willRetry ? 'retrying' : 'lost',
         entry: queued.entry,
       });
       // The line never reached the pipe, so it goes back on the queue and out on a later
       // attempt - the same answer `FileSink` gives a throwing write. Reported just above,
       // so the cap inside does not report it a second time.
-      this.requeue(queued, true);
+      this.requeue(queued, !willRetry);
     }
   }
 

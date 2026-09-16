@@ -2996,7 +2996,62 @@ describe('NamedPipeSink', () => {
     }
   }, 15000);
 
-  test('a write that fails after close is reported, once', async () => {
+  test('late write callbacks report every lost line without retrying after close', async () => {
+    const pipePath = `${tmpDir.path}/late-write-callbacks.pipe`;
+    await createNamedPipe(pipePath);
+    const readerFd = fs.openSync(
+      pipePath,
+      fs.constants.O_RDONLY | fs.constants.O_NONBLOCK,
+    );
+    const failures: SinkFailure[] = [];
+    const sink = new NamedPipeSink({
+      pipePath,
+      onError: (failure) => {
+        failures.push(failure);
+      },
+    });
+    const callbacks: Array<(error?: Error | null) => void> = [];
+    try {
+      expect(await waitForOpenPipe(sink)).toBe(true);
+      const stream = (sink as unknown as { pipeStream: fs.WriteStream })
+        .pipeStream;
+      const writeSpy = spyOn(stream, 'write').mockImplementation(
+        (_chunk: unknown, callback: unknown) => {
+          callbacks.push(callback as (error?: Error | null) => void);
+          return true;
+        },
+      );
+      for (let i = 0; i < 3; i++) {
+        sink.write({
+          timestamp: Date.now(),
+          type: 'info',
+          message: `late-${i}`,
+          template: `late-${i}`,
+        });
+      }
+      expect(callbacks).toHaveLength(3);
+      writeSpy.mockRestore();
+      await sink.close();
+      for (const callback of callbacks) {
+        callback(new Error('late EPIPE'));
+      }
+      const losses = failures.filter((failure) => failure.entry !== undefined);
+      expect(
+        losses.map((failure) => [failure.entry?.message, failure.disposition]),
+      ).toEqual([
+        ['late-0', 'lost'],
+        ['late-1', 'lost'],
+        ['late-2', 'lost'],
+      ]);
+      expect(sink.getHealth().droppedEntries).toBe(3);
+      expect(sink.getHealth().queueSize).toBe(0);
+    } finally {
+      await sink.close();
+      fs.closeSync(readerFd);
+    }
+  });
+
+  test('each unreported write that fails after close is reported lost', async () => {
     // The drain loop pushes the backlog into the stream's buffer and sets `closed` without
     // awaiting the write callbacks, so a callback that errors afterwards lands in
     // `requeue` past `abandonQueueOnClose()`. It counted the loss and said nothing - while
@@ -3053,12 +3108,13 @@ describe('NamedPipeSink', () => {
 
       expect(sink.getHealth().droppedEntries).toBe(3);
 
-      // Once, like the cap's report and `abandonQueueOnClose()`'s: a close abandoning a
-      // full stream buffer would otherwise fire the callback for every entry in it.
+      // Fallback consumers need the identity of every lost entry.
       const closeFailures = failures.filter((entry) => entry.kind === 'close');
 
-      expect(closeFailures).toHaveLength(1);
-      expect(closeFailures[0]?.disposition).toBe('lost');
+      expect(closeFailures).toHaveLength(3);
+      expect(
+        closeFailures.every((failure) => failure.disposition === 'lost'),
+      ).toBe(true);
       expect(closeFailures[0]?.error.message).toContain(
         'after the sink was closed',
       );
@@ -3070,10 +3126,10 @@ describe('NamedPipeSink', () => {
 
   test('a close that times out with writes still buffered reports the loss before it resolves', async () => {
     // The stream's buffered writes are errored by `destroy()` and land in `requeue` past
-    // `closed`, which reports once - but on a later tick, after `await close()` had
+    // `closed`, which reports each failed line on a later tick, after `await close()` had
     // answered, so a shutdown handler that exits on that answer never heard it.
     // `FileSink` reports its in-flight write before its close resolves; this sink now
-    // says the same thing at the same moment, and the callbacks do not repeat it.
+    // reports buffered bytes at the same moment; later callbacks identify individual losses.
     const pipePath = `${tmpDir.path}/close-buffered-loss.pipe`;
     await createNamedPipe(pipePath);
 

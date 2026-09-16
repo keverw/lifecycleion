@@ -3720,13 +3720,13 @@ export class LifecycleManager
       hasExpired: () => boolean;
     },
   ): Promise<ComponentOperationResult> {
-    // Active late cleanup still owns the component until its stop completes.
+    // A timed-out bulk start owns the component until it settles and cleanup ends.
     if (this.pendingBulkStartupCleanup.has(name)) {
       return {
         success: false,
         componentName: name,
         code: 'component_already_starting',
-        reason: 'Timed-out startup cleanup is still in progress',
+        reason: 'Timed-out startup is still awaiting completion or cleanup',
         status: this.getComponentStatus(name),
       };
     }
@@ -3915,6 +3915,7 @@ export class LifecycleManager
               }),
             );
             if (useBulkDeadline) {
+              this.pendingBulkStartupCleanup.set(name, startAttemptToken);
               bulkStartup?.onTimeout();
             }
             if (useBulkDeadline || !component.onStartupAborted) {
@@ -4059,6 +4060,7 @@ export class LifecycleManager
         bulkStartup &&
         (bulkStartup.hasExpired() || Date.now() >= bulkStartup.deadline)
       ) {
+        this.pendingBulkStartupCleanup.set(name, startAttemptToken);
         bulkStartup.onTimeout();
         this.monitorLateStartupCompletion(
           name,
@@ -5195,8 +5197,8 @@ export class LifecycleManager
 
         // Late startup completed after the manager had already timed out. Mark
         // it running briefly so the normal stop path can clean it up.
-        // Only active cleanup owns this lock. A start that never settles must not
-        // prevent recovery; the identity and attempt checks above fence old starts.
+        // Keep bulk attempts locked through cleanup; individual timeouts also
+        // acquire the lock here once their late cleanup actually begins.
         this.pendingBulkStartupCleanup.set(name, startAttemptToken);
         this.componentStates.set(name, 'running');
         this.runningComponents.add(name);

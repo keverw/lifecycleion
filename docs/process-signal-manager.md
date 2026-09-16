@@ -62,6 +62,12 @@ Three signals trigger graceful shutdown:
 
 #### SIGINT (Signal Interrupt)
 
+In raw terminal mode, current package copies forward Ctrl+C once as SIGINT, so
+external SIGINT listeners also receive it. When older package copies sharing the
+terminal are detected, Ctrl+C uses the legacy behavior: each manager invokes its own
+shutdown callback directly. Forwarding resumes when only current copies remain.
+Terminal raw-mode ownership stays shared across versions.
+
 - **Typical source:** Pressing `Ctrl+C` in the terminal
 - **Purpose:** Polite request to stop - "please shut down gracefully"
 - **Default behavior:** Terminate the process immediately
