@@ -105,6 +105,67 @@ async function waitForReaderData(
 }
 
 describe('NamedPipeSink', () => {
+  test.each([1, 3])(
+    'retries failed FIFO writes in order with maxRetries=%d',
+    async (maxRetries) => {
+      const pipePath = `${tmpDir.path}/retry-order.pipe`;
+      await createNamedPipe(pipePath);
+      let reader = fs.openSync(
+        pipePath,
+        fs.constants.O_RDONLY | fs.constants.O_NONBLOCK,
+      );
+      const failures: SinkFailure[] = [];
+      const sink = new NamedPipeSink({
+        pipePath,
+        maxRetries,
+        formatter: (entry) => entry.message,
+        onError: (failure) => {
+          failures.push(failure);
+        },
+      });
+      try {
+        expect(await waitForOpenPipe(sink)).toBe(true);
+        fs.closeSync(reader);
+        reader = -1;
+        for (const message of ['A', 'B', 'C']) {
+          sink.write({
+            timestamp: Date.now(),
+            type: 'info',
+            template: message,
+            message,
+          });
+        }
+        for (let i = 0; i < 100 && failures.length < 3; i++) {
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+        reader = fs.openSync(
+          pipePath,
+          fs.constants.O_RDONLY | fs.constants.O_NONBLOCK,
+        );
+        await sink.reconnect();
+        const buffer = Buffer.alloc(100);
+        let received = '';
+        for (let i = 0; i < 100 && received.length < 6; i++) {
+          try {
+            const length = fs.readSync(reader, buffer, 0, buffer.length, null);
+            received += buffer.toString('utf8', 0, length);
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== 'EAGAIN') {
+              throw error;
+            }
+          }
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+        expect(received).toBe('A\nB\nC\n');
+        expect(sink.getHealth().droppedEntries).toBe(0);
+      } finally {
+        await sink.close();
+        if (reader >= 0) {
+          fs.closeSync(reader);
+        }
+      }
+    },
+  );
   test('a partial low-level write is reported lost without replaying the original record', async () => {
     const pipePath = `${tmpDir.path}/partial-write.pipe`;
     await createNamedPipe(pipePath);
@@ -1403,80 +1464,47 @@ describe('NamedPipeSink', () => {
   }, 15000);
 
   test('requeues an entry whose write fails asynchronously', async () => {
-    // A stream reports `EPIPE` through the write callback and an `'error'` event, not by
-    // throwing, so treating `write()` returning as delivery meant the one entry that
-    // actually failed was the one never retried.
     const pipePath = `${tmpDir.path}/async-fail.pipe`;
     await createNamedPipe(pipePath);
-
     const reader = startPipeReader(pipePath);
     const sink = new NamedPipeSink({ pipePath, onError: () => {} });
-
+    let live: fs.WriteStream | undefined;
     try {
       expect(await waitForOpenPipe(sink)).toBe(true);
-
-      const written: string[] = [];
-      let failuresLeft = 1;
-
-      // A stream that fails its first write on the next tick - as a real one does - and
-      // accepts what follows. The connection itself stays up, so the sink's answer is to
-      // try the line again rather than to reconnect.
+      live = (sink as unknown as { pipeStream: fs.WriteStream }).pipeStream;
+      const failedStream = live;
+      let writes = 0;
+      // A failed write is followed by an error event. It must not be retried in
+      // the gap before that event invalidates the connection.
       (
-        sink as unknown as {
-          pipeStream: {
-            destroyed: boolean;
-            write: (
-              chunk: string,
-              callback: (error?: Error | null) => void,
-            ) => boolean;
-            end: (callback?: () => void) => void;
-            destroy: () => void;
-          };
+        live as unknown as {
+          write: (chunk: string, callback: (error: Error) => void) => boolean;
         }
-      ).pipeStream = {
-        destroyed: false,
-        write: (chunk, callback) => {
-          if (failuresLeft > 0) {
-            failuresLeft--;
-
-            setTimeout(() => {
-              callback(new Error('EPIPE'));
-            }, 0);
-
-            return true;
-          }
-
-          written.push(chunk);
-
-          setTimeout(() => {
-            callback(null);
-          }, 0);
-
-          return true;
-        },
-        end: (callback?: () => void) => {
-          callback?.();
-        },
-        destroy: () => {
-          // Nothing to tear down.
-        },
+      ).write = (_chunk, callback) => {
+        writes++;
+        setTimeout(() => {
+          const error = new Error('EPIPE');
+          callback(error);
+          failedStream.emit('error', error);
+        }, 0);
+        return true;
       };
-
       sink.write({
         timestamp: Date.now(),
         type: 'info',
         template: 'retried',
         message: 'retried',
       });
-
       await new Promise((resolve) => setTimeout(resolve, 150));
-
-      // Written on the second attempt rather than dropped on the first.
-      expect(written.join('')).toContain('retried');
+      expect(writes).toBe(1);
+      expect(await waitForOpenPipe(sink, 5000)).toBe(true);
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      expect(reader.data.join('')).toContain('retried');
       expect(sink.getHealth().queueSize).toBe(0);
       expect(sink.getHealth().droppedEntries).toBe(0);
     } finally {
       await sink.close();
+      live?.destroy();
       reader.stop();
     }
   }, 15000);

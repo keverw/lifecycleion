@@ -11,6 +11,20 @@ function withExtras(error: Error): Error & Record<string, unknown> {
   return error as Error & Record<string, unknown>;
 }
 
+test('error-like identity survives an exhausted extras budget', () => {
+  const result = serializeError({
+    payload: 'x'.repeat(2_000_000),
+    extra: 1,
+    name: 'RemoteError',
+    message: 'connection failed',
+    stack: 'remote stack',
+  });
+  expect(result.name).toBe('RemoteError');
+  expect(result.message).toBe('connection failed');
+  expect(result.stack).toBe('remote stack');
+  expect(deserializeError(result).message).toBe('connection failed');
+});
+
 class WorkerCrashedError extends Error {
   public errPrefix = 'IPCWorkerErr';
   public errType = 'Client';

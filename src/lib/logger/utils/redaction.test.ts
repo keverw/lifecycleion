@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { CurlyBrackets } from '../../curly-brackets';
 import {
   muteConsoleError,
   restoreConsoleError,
@@ -10,6 +11,181 @@ import {
   REDACTION_FAILED_MARKER,
 } from './redaction';
 import type { RedactFunction } from '../types';
+
+test('preserves an opaque value with a harmless own getter', () => {
+  const ctx = new (class Context {})();
+  Object.defineProperty(ctx, 'label', { enumerable: true, get: () => 'safe' });
+  const result = applyRedaction({ password: 'hunter2secret', ctx }, [
+    'password',
+  ]);
+  expect(result.ctx).toBeInstanceOf(ctx.constructor);
+  expect(CurlyBrackets('{{ctx.label}}', result)).toBe('safe');
+});
+
+test('opaque getters are read once and cannot change to an ancestor during lookup', () => {
+  const params: Record<string, unknown> = { password: 'hunter2secret' };
+  let reads = 0;
+  const ctx = new (class Context {})();
+  Object.defineProperty(ctx, 'params', {
+    enumerable: true,
+    get: () => (++reads === 1 ? 'safe' : params),
+  });
+  params.ctx = ctx;
+  const result = applyRedaction(params, ['password']);
+  expect(CurlyBrackets('{{ctx.params}}', result)).toBe('safe');
+  expect(CurlyBrackets('{{ctx.params.password}}', result)).not.toContain(
+    'hunter2secret',
+  );
+  expect(reads).toBe(1);
+});
+
+test('opaque accessor snapshots preserve private-field string rendering', () => {
+  class Context {
+    #label = 'context';
+    public toString() {
+      return this.#label;
+    }
+  }
+  const ctx = new Context();
+  Object.defineProperty(ctx, 'label', { enumerable: true, get: () => 'safe' });
+  const result = applyRedaction({ password: 'hunter2secret', ctx }, [
+    'password',
+  ]);
+  expect(CurlyBrackets('{{ctx}} {{ctx.label}}', result)).toBe('context safe');
+});
+
+test('unmatched functions with getters remain callable opaque leaves', () => {
+  const callback = () => 'safe';
+  Object.defineProperty(callback, 'label', {
+    enumerable: true,
+    get: () => 'safe',
+  });
+  const result = applyRedaction({ password: 'hunter2secret', callback }, [
+    'password',
+  ]);
+  expect(result.callback).toBe(callback);
+  expect((result.callback as typeof callback)()).toBe('safe');
+  expect(CurlyBrackets('{{callback}}', result)).toBe('[Function: callback]');
+});
+
+test('large binary bodies are leaves and an oversized opaque graph does not discard later values', () => {
+  const buffer = Buffer.alloc(2_000_000);
+  const holder = Object.assign(new (class Holder {})(), {
+    items: new Array<number>(1_000_000).fill(0),
+  });
+  const date = new Date(0);
+  const error = new Error('safe');
+  const result = applyRedaction(
+    { password: 'hunter2secret', buffer, holder, date, error },
+    ['password'],
+  );
+  expect(result.buffer).toBe(buffer);
+  expect(result.holder).toBe(REDACTION_FAILED_MARKER);
+  expect(result.date).toBe(date);
+  expect(CurlyBrackets('{{error.message}}', result)).toBe('safe');
+});
+
+test('binary template lookup ignores custom reference properties', () => {
+  const params: Record<string, unknown> = { password: 'hunter2secret' };
+  params.body = Object.assign(Buffer.from([7]), { params });
+  const result = applyRedaction(params, ['password']);
+  expect(CurlyBrackets('{{body.0}} {{body.length}}', result)).toBe('7 1');
+  expect(CurlyBrackets('{{body.params.password}}', result)).not.toContain(
+    'hunter2secret',
+  );
+});
+
+test('withholds an opaque getter that returns the unmasked ancestor', () => {
+  const params: Record<string, unknown> = { password: 'hunter2secret' };
+  const ctx = new (class Context {})();
+  Object.defineProperty(ctx, 'params', { enumerable: true, get: () => params });
+  params.ctx = ctx;
+  const result = applyRedaction(params, ['password']);
+  expect(result.ctx).toBe(REDACTION_FAILED_MARKER);
+});
+
+test.each(['name', 'message', 'stack', 'cause'])(
+  'withholds a non-enumerable Error %s back-reference',
+  (key) => {
+    const params: Record<string, unknown> = { password: 'hunter2secret' };
+    const ctx = new Error('context');
+    Object.defineProperty(ctx, key, {
+      value: params,
+      configurable: true,
+      enumerable: false,
+    });
+    params.ctx = ctx;
+    const result = applyRedaction(params, ['password']);
+    expect(result.ctx).toBe(REDACTION_FAILED_MARKER);
+    expect(CurlyBrackets(`{{ctx.${key}.password}}`, result)).not.toContain(
+      'hunter2secret',
+    );
+  },
+);
+
+test('optimization scan exhaustion does not discard unrelated opaque values or hide back-references', () => {
+  const date = new Date(0);
+  const url = new URL('https://example.com/');
+  const error = new Error('safe');
+  const params: Record<string, unknown> = {
+    password: 'hunter2secret',
+    a: new Array<number>(600_000).fill(0),
+    b: new Array<number>(600_000).fill(0),
+    date,
+    url,
+    error,
+  };
+  params.ctx = Object.assign(new (class Context {})(), { params });
+  const result = applyRedaction(params, ['password']);
+  expect(result.date).toBe(date);
+  expect(result.url).toBe(url);
+  expect(result.error).toBe(error);
+  expect(result.ctx).toBe(REDACTION_FAILED_MARKER);
+});
+
+test.each(['class', 'error', 'cause'])(
+  'cuts a params back-reference through a %s',
+  (kind) => {
+    const params: Record<string, unknown> = { password: 'hunter2secret' };
+    const ctx =
+      kind === 'cause'
+        ? new Error('context', { cause: params })
+        : kind === 'error'
+          ? new Error('context')
+          : new (class Context {})();
+    if (kind !== 'cause') {
+      Object.assign(ctx, { params });
+    }
+    params.ctx = ctx;
+    const redacted = applyRedaction(params, ['password']);
+    const template =
+      kind === 'cause' ? '{{ctx.cause.password}}' : '{{ctx.params.password}}';
+    expect(CurlyBrackets(template, redacted)).not.toContain('hunter2secret');
+    expect(redacted.ctx).toBe(REDACTION_FAILED_MARKER);
+    expect(params.password).toBe('hunter2secret');
+  },
+);
+
+test.each([
+  { percent: NaN },
+  { percent: 'x' },
+  { maskChar: '' },
+  { strategy: 'invalid' },
+])(
+  'unusable mask settings %j do not enable partial masking of derived values',
+  (config) => {
+    const result = applyRedaction(
+      {
+        url: new URL('https://example.com/?key=hunter2secret'),
+        number: 1234567890123456,
+      },
+      ['url', 'number'],
+      (() => config) as RedactFunction,
+    );
+    expect(result.url).toBe('***REDACTED***');
+    expect(result.number).toBe('***REDACTED***');
+  },
+);
 
 // These suites deliberately drive the paths that fall through to `console.error` when
 // no handler is supplied. Captured rather than printed so a real failure in the run

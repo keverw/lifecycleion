@@ -370,6 +370,18 @@ function serializeErrorInner(
     const source = error as unknown as Record<string, unknown>;
     const copy: SerializedError = {} as SerializedError;
 
+    // Put identity before extras: the serialization pass may stop at any extra key.
+    copy.name =
+      readText(source, 'name', path, report, budget) ??
+      boundedText('Error', budget);
+    copy.message =
+      readText(source, 'message', path, report, budget) ??
+      boundedText('', budget);
+    const stack = readText(source, 'stack', path, report, budget);
+    if (stack !== undefined) {
+      copy.stack = stack;
+    }
+
     // Spread replaced by a guarded per-key copy: a spread runs every own getter under no
     // guard at all, so one throwing accessor took the whole serialization down.
     const shape = describeContainer(source);
@@ -403,32 +415,6 @@ function serializeErrorInner(
 
         defineEntry(copy, key, readOwnMember(source, key, path, report));
       }
-
-      // The three members by name, for the same reason the array branch below reads them
-      // that way: `isErrorLike` tests with `in`, so what makes this value error-shaped can
-      // live on its prototype, and an own-key copy carries none of it. An object created
-      // from an error-shaped prototype therefore serialized to its own keys alone -
-      // `{ field: 'email' }`, no `name`, no `message` - which is not a valid
-      // `SerializedError`, and `deserializeError` rebuilt a nameless `Error('')` from it.
-      if (!Object.prototype.hasOwnProperty.call(copy, 'name')) {
-        copy.name =
-          readText(source, 'name', path, report, budget) ??
-          boundedText('Error', budget);
-      }
-
-      if (!Object.prototype.hasOwnProperty.call(copy, 'message')) {
-        copy.message =
-          readText(source, 'message', path, report, budget) ??
-          boundedText('', budget);
-      }
-
-      if (!Object.prototype.hasOwnProperty.call(copy, 'stack')) {
-        const inheritedStack = readText(source, 'stack', path, report, budget);
-
-        if (inheritedStack !== undefined) {
-          copy.stack = inheritedStack;
-        }
-      }
     } else if (shape.kind === 'unreadable') {
       // Nothing could be enumerated, and that has to show. Acted on only for `'object'`,
       // an unreadable shape - a `Proxy` whose `ownKeys` trap throws - left `copy` empty
@@ -439,25 +425,6 @@ function serializeErrorInner(
 
       copy.name = 'Error';
       copy.message = UNSERIALIZABLE_TEXT;
-    } else {
-      // An array carrying `name`/`message`/`stack` is error-shaped by this module's own
-      // test, and `describeContainer` reports it as a length - so the `'object'` branch
-      // above never sees its keys and this returned a bare `{}`.
-      //
-      // The three members by name, exactly as the `isErrorValue` branch reads them, rather
-      // than by enumerating own property names. `isErrorLike` tests with `in`, so they may
-      // be inherited, and an own-only enumeration would miss them and produce a nameless
-      // error anyway; it would also materialize every index of the array, uncharged
-      // against `budget`, which is a synchronous stall inside a function documented never
-      // to throw and always to terminate. The elements are not carried: this is a value
-      // claiming to be an error, and what makes it one is these three.
-      copy.name =
-        readText(source, 'name', path, report, budget) ??
-        boundedText('Error', budget);
-      copy.message =
-        readText(source, 'message', path, report, budget) ??
-        boundedText('', budget);
-      copy.stack = readText(source, 'stack', path, report, budget);
     }
 
     return deepSerializeRecord(copy, seen, depth, path, report, budget, true);

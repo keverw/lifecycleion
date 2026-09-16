@@ -1,4 +1,6 @@
 import { getRedactPathParts, WILDCARD_PATH_SEGMENT } from './path-utils';
+import { isErrorValue } from '../to-error';
+import { isArrayBufferLike } from './binary-view';
 import {
   defineEntry,
   describeContainer,
@@ -91,6 +93,85 @@ function isSeen(
  * invisible to every pass that is not running away.
  */
 export const MAX_REDACTION_ENTRIES = 1_000_000;
+const MAX_OPAQUE_SCAN_ENTRIES = 1024;
+
+/** Preserve opaque rendering while making template-visible getters stable. */
+function snapshotOpaqueAccessors(
+  value: object,
+  budget: { scanLeft: number },
+): object {
+  const keys = Reflect.ownKeys(value);
+  // A constant-size leaf check remains available after the graph budget is spent.
+  if (keys.length > Math.max(8, budget.scanLeft)) {
+    throw new Error('Opaque value exceeds its inspection allowance');
+  }
+  budget.scanLeft = Math.max(0, budget.scanLeft - keys.length);
+  const descriptors = Object.getOwnPropertyDescriptors(value) as Record<
+    PropertyKey,
+    PropertyDescriptor
+  >;
+  const isError = isErrorValue(value);
+  const visible = Object.keys(value);
+  if (isError) {
+    visible.push(
+      ...['name', 'message', 'stack', 'cause'].filter(
+        (key) => !visible.includes(key),
+      ),
+    );
+  }
+  let didSnapshot = false;
+  for (const key of visible) {
+    let owner: object | null = value;
+    let descriptor: PropertyDescriptor | undefined;
+    for (let depth = 0; owner !== null && depth < MAX_RENDER_DEPTH; depth++) {
+      descriptor = Object.getOwnPropertyDescriptor(owner, key);
+      if (descriptor) {
+        break;
+      }
+      owner = Object.getPrototypeOf(owner) as object | null;
+    }
+    if (descriptor && !('value' in descriptor)) {
+      descriptors[key] = {
+        value: (value as Record<string, unknown>)[key],
+        enumerable: descriptor.enumerable,
+        configurable: true,
+        writable: true,
+      };
+      didSnapshot = true;
+    }
+  }
+  if (!didSnapshot) {
+    return value;
+  }
+  // Real built-in bases retain their internal brand. Class methods used by the
+  // renderer stay bound to the original, including methods using private fields.
+  const copy: object = isError
+    ? new Error()
+    : value instanceof Date
+      ? new Date(Date.prototype.getTime.call(value))
+      : (Object.create(
+          Object.getPrototypeOf(value) as object | null,
+        ) as object);
+  Object.setPrototypeOf(copy, Object.getPrototypeOf(value) as object | null);
+  const toString: unknown = Object.prototype.hasOwnProperty.call(
+    descriptors,
+    'toString',
+  )
+    ? (Reflect.get(descriptors, 'toString') as PropertyDescriptor).value
+    : (value as { toString?: unknown }).toString;
+  if (
+    typeof toString === 'function' &&
+    toString !== Object.prototype.toString &&
+    toString !== Error.prototype.toString
+  ) {
+    defineEntry(descriptors, 'toString', {
+      value: (toString as (this: object) => unknown).bind(value),
+      configurable: true,
+    });
+  }
+  Object.defineProperties(copy, descriptors);
+  return copy;
+}
 
 /**
  * Most entries a redaction list may hold before it is refused outright.
@@ -741,9 +822,9 @@ function isUnstableEntry(value: object, key: string): boolean {
  * full walk, which is unchanged and still decides the output. The scan only ever removes
  * work that would have produced the input.
  *
- * Traversal mirrors the walk's exactly - plain containers only, own enumerable keys, one
- * read per element - so it cannot conclude "nothing below" about a place the walk would
- * have entered. On the fallback path a value is read twice, once here and once by the
+ * The scan also inspects opaque values for references reachable by template lookup.
+ * Those values are never rebuilt as plain objects: an unsafe one is replaced whole.
+ * On the fallback path a value is read twice, once here and once by the
  * walk; only the walk's read reaches the output, and nothing in a subtree with no
  * candidate is masked either way, so the second read cannot change what is emitted.
  *
@@ -770,10 +851,15 @@ function needsFullWalk(
   value: unknown,
   seen: WeakSet<object>,
   visited: Set<object>,
-  state: RedactState,
+  state: Pick<RedactState, 'scanLeft' | 'aliases'>,
   depth = 0,
 ): boolean {
-  if (!isPlainContainer(value)) {
+  if (value === null || typeof value !== 'object') {
+    return false;
+  }
+
+  // Binary template members are intrinsic numeric values, never object edges.
+  if (ArrayBuffer.isView(value) || isArrayBufferLike(value)) {
     return false;
   }
 
@@ -890,7 +976,17 @@ function needsFullWalk(
     return false;
   }
 
-  for (const key of shape.keys) {
+  // Templates expose these Error fields even when non-enumerable or inherited.
+  // Their runtime values can be objects despite their usual diagnostic types.
+  const keys = isErrorValue(value)
+    ? [
+        ...shape.keys,
+        ...['name', 'message', 'stack', 'cause'].filter(
+          (key) => !shape.keys.includes(key),
+        ),
+      ]
+    : shape.keys;
+  for (const key of keys) {
     if (state.scanLeft <= 0) {
       return true;
     }
@@ -1086,10 +1182,11 @@ interface RedactState {
    *
    * Still a bound, and still per pass: the scan cannot exceed it either, and answers
    * "walk it properly" the moment it does, which is the conservative direction. The total
-   * work a pass can do is two counters' worth rather than one, which is what a cap on each
-   * of two distinct traversals means.
+   * work of the optimization scan and main walk is bounded independently.
    */
   scanLeft: number;
+  /** Security inspection of opaque values, independent of optimization scans. */
+  opaqueScan: { scanLeft: number; aliases: ForwardingAliases | undefined };
   /**
    * Copies standing in for the containers they forward to. See {@link ForwardingAliases}.
    *
@@ -1236,6 +1333,54 @@ function redactPathsInner(
         : firstEntryOver(nodes, (node) => node.below);
 
     if (inside === undefined) {
+      // Template lookup never descends into functions.
+      if (
+        typeof value === 'function' ||
+        ArrayBuffer.isView(value) ||
+        isArrayBufferLike(value)
+      ) {
+        return UNCHANGED;
+      }
+      // Opaque values still expose properties to template lookups. Do not return
+      // one that leads back to an ancestor whose masked copy is being built.
+      // Keep its opaque shape: replacing the whole value avoids exposing its fields.
+      let hasUnsafeReference: boolean;
+      let snapshot: object = value;
+      const allowance = Math.min(
+        MAX_OPAQUE_SCAN_ENTRIES,
+        state.opaqueScan.scanLeft,
+      );
+      const scan = { scanLeft: allowance, aliases: state.aliases };
+      try {
+        snapshot = snapshotOpaqueAccessors(value, scan);
+        // Empty opaque leaves and ordinary Error diagnostics need no graph walk.
+        // They remain safe even if earlier graphs spent the shared allowance.
+        const isLeaf =
+          Object.keys(snapshot).length === 0 &&
+          (!isErrorValue(snapshot) ||
+            ['name', 'message', 'stack', 'cause'].every((key) => {
+              const field = (snapshot as Record<string, unknown>)[key];
+              return (
+                field === null ||
+                (typeof field !== 'object' && typeof field !== 'function')
+              );
+            }));
+        hasUnsafeReference =
+          !isLeaf &&
+          needsFullWalk(snapshot, seen, new Set(), scan, path.length);
+      } catch {
+        hasUnsafeReference = true;
+      } finally {
+        state.opaqueScan.scanLeft -= allowance - scan.scanLeft;
+      }
+      if (hasUnsafeReference) {
+        state.routeDependentResults++;
+        return REDACTION_FAILED_MARKER;
+      }
+      if (snapshot !== value) {
+        state.didSnapshotUnstable = true;
+        return snapshot;
+      }
       return UNCHANGED;
     }
 
@@ -1912,6 +2057,7 @@ export function redactMatchedPaths(
     routeDependentResults: 0,
     entriesLeft: MAX_REDACTION_ENTRIES,
     scanLeft: MAX_REDACTION_ENTRIES,
+    opaqueScan: { scanLeft: MAX_REDACTION_ENTRIES, aliases },
     aliases,
     reportRender,
     maskBudget,

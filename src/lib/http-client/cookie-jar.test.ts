@@ -1,6 +1,24 @@
 import { describe, test, expect, beforeEach } from 'bun:test';
 import { CookieJar } from './cookie-jar';
 
+test.each(['example.com.', '[::1]', '[2001:db8::1]'])(
+  'deletes host-only cookies using their canonical identity on %s',
+  (host) => {
+    for (const expiry of [
+      'Max-Age=0',
+      'Expires=Thu, 01 Jan 1970 00:00:00 GMT',
+    ]) {
+      const jar = new CookieJar();
+      const url = `https://${host}/`;
+      jar.parseSetCookieHeader('session=secret; Path=/', url);
+      expect(jar.getCookieHeaderString(url)).toBe('session=secret');
+      jar.parseSetCookieHeader(`session=; Path=/; ${expiry}`, url);
+      expect(jar.getCookieHeaderString(url)).toBe('');
+      expect(jar.getAllCookies()).toEqual([]);
+    }
+  },
+);
+
 describe('CookieJar', () => {
   let jar: CookieJar;
 

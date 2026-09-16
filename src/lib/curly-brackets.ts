@@ -1,4 +1,8 @@
 import { getPathParts } from './internal/path-utils';
+import {
+  isArrayBufferLike,
+  readBinaryTemplateMember,
+} from './internal/binary-view';
 import { snapshotMembers } from './internal/read-member';
 import {
   TRUNCATED_LENGTH,
@@ -361,6 +365,14 @@ CurlyBrackets.compileTemplate = function (
         // unresolvable path is exactly what `fallback` is for, so treat an unreadable one
         // the same way rather than propagating.
         try {
+          if (
+            replacement !== null &&
+            typeof replacement === 'object' &&
+            (ArrayBuffer.isView(replacement) || isArrayBufferLike(replacement))
+          ) {
+            replacement = readBinaryTemplateMember(replacement, part);
+            continue;
+          }
           if (
             replacement !== undefined &&
             replacement !== null &&

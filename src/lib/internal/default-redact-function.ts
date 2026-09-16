@@ -219,18 +219,28 @@ export function matchRedactMaskConfig(value: unknown): RedactMaskConfigMatch {
     // the values, not just the keys, is what keeps the two spellings of "no settings"
     // landing in the same place.
     let hasSetting = false;
+    const config: Record<string, unknown> = {};
 
     for (const key of keys) {
-      if ((value as Record<string | symbol, unknown>)[key] !== undefined) {
-        hasSetting = true;
-
-        break;
+      const setting = (value as Record<string | symbol, unknown>)[key];
+      if (setting === undefined) {
+        continue;
       }
+
+      const isValid =
+        key === 'strategy'
+          ? setting === 'string' || setting === 'email' || setting === 'domain'
+          : key === 'maskChar'
+            ? typeof setting === 'string' && setting.length > 0
+            : typeof setting === 'number' && Number.isFinite(setting);
+      if (!isValid) {
+        return { kind: 'defaults' };
+      }
+      hasSetting = true;
+      config[key as string] = setting;
     }
 
-    return hasSetting
-      ? { kind: 'settings', config: value }
-      : { kind: 'defaults' };
+    return hasSetting ? { kind: 'settings', config } : { kind: 'defaults' };
   } catch {
     // A revoked `Proxy`, or an `ownKeys`/`getPrototypeOf` trap that throws. Unclassifiable,
     // so it cannot be honoured as a request - and handing it back as a literal would put a
@@ -294,9 +304,8 @@ function normalizePercent(value: unknown, fallback: number): number {
  *
  * Every setting is read inside the guard, none of them above it. `config` is whatever a
  * caller's `redactFunction` handed back, so each of these is an ordinary property that can
- * be an accessor that throws - and `matchRedactMaskConfig` does not settle that on this
- * function's behalf: it stops reading values at the first defined one, so a later key's
- * accessor is never exercised there. Read above the `try`, such a config threw out of here
+ * be an accessor that throws when this exported helper is called directly. Read above
+ * the `try`, such a config threw out of here
  * and came back as `***REDACTION FAILED***` even though it named a perfectly usable
  * setting, and which key it was depended on `Reflect.ownKeys` ordering. Inside, it lands
  * on the same opaque placeholder every other unusable request does.

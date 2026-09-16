@@ -38,7 +38,79 @@ const requireDefined = <T>(value: T | null | undefined, label: string): T => {
   return value;
 };
 
+test.each(['restart', 'replace'] as const)(
+  'a bulk startup timeout permits %s without waiting for the abandoned start',
+  async (operation) => {
+    const logger = new Logger({ sinks: [], callProcessExit: false });
+    const manager = new LifecycleManager({ logger, startupTimeoutMS: 20 });
+    const first = Promise.withResolvers<void>();
+    class Recoverable extends BaseComponent {
+      public calls = 0;
+      public stops = 0;
+      public start() {
+        this.calls++;
+        return this.calls === 1 ? first.promise : Promise.resolve();
+      }
+      public stop() {
+        this.stops++;
+      }
+      public onStartupAborted() {}
+    }
+    const component = new Recoverable(logger, {
+      name: 'recoverable',
+      startupTimeoutMS: 0,
+    });
+    await manager.registerComponent(component);
+    expect((await manager.startAllComponents()).timedOut).toBe(true);
+    await sleep(30);
+    if (operation === 'restart') {
+      expect((await manager.startComponent('recoverable')).success).toBe(true);
+    } else {
+      expect((await manager.unregisterComponent('recoverable')).success).toBe(
+        true,
+      );
+      const replacement = new Recoverable(logger, { name: 'recoverable' });
+      replacement.calls = 1;
+      await manager.registerComponent(replacement);
+      expect((await manager.startComponent('recoverable')).success).toBe(true);
+    }
+    first.resolve();
+    await sleep(10);
+    expect(manager.isComponentRunning('recoverable')).toBe(true);
+    expect(component.stops).toBe(0);
+    await manager.stopAllComponents();
+  },
+);
+
 describe('LifecycleManager - BaseComponent', () => {
+  test('late startup cleanup blocks recovery only until its stop finishes', async () => {
+    const logger = new Logger({ sinks: [], callProcessExit: false });
+    const manager = new LifecycleManager({ logger, startupTimeoutMS: 20 });
+    const startup = Promise.withResolvers<void>();
+    const cleanup = Promise.withResolvers<void>();
+    const stopping = Promise.withResolvers<void>();
+    class LateComponent extends BaseComponent {
+      public start() {
+        return startup.promise;
+      }
+      public stop() {
+        stopping.resolve();
+        return cleanup.promise;
+      }
+    }
+    await manager.registerComponent(
+      new LateComponent(logger, { name: 'late', startupTimeoutMS: 0 }),
+    );
+    expect((await manager.startAllComponents()).timedOut).toBe(true);
+    await sleep(30);
+    startup.resolve();
+    await stopping.promise;
+    expect((await manager.startComponent('late')).success).toBe(false);
+    expect((await manager.unregisterComponent('late')).success).toBe(false);
+    cleanup.resolve();
+    await sleep(10);
+    expect((await manager.unregisterComponent('late')).success).toBe(true);
+  });
   let logger: Logger;
   let arraySink: ArraySink;
 

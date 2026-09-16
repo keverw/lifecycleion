@@ -17,6 +17,23 @@ import { EOL } from './constants';
 import * as redactPaths from './internal/redact-paths';
 import type { RedactFunction } from './logger/types';
 
+it.each([10_000, 1_000_000])(
+  'counts JSON escaping inside array objects against a %d character cap',
+  (limit) => {
+    const truncations: TruncationInfo[] = [];
+    const error = Object.assign(new Error('boom'), {
+      additionalInfo: { items: [{ payload: '\u0000'.repeat(limit * 2) }] },
+    });
+    const rendered = errorToString(error, 80, {
+      maxRenderLength: limit,
+      onTruncate: (info) => truncations.push(info),
+    });
+    expect(rendered.length).toBeLessThanOrEqual(limit);
+    expect(rendered).toContain('[max length exceeded]');
+    expect(truncations).toHaveLength(1);
+  },
+);
+
 // These suites deliberately drive the paths that fall through to `console.error` when
 // no handler is supplied. Captured rather than printed so a real failure in the run
 // output still stands out; flip `DEBUG` in the helper to see them.

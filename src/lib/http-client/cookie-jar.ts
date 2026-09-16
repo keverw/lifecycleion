@@ -783,6 +783,7 @@ export class CookieJar {
     domain: string,
     path: string,
   ): void {
+    domain = this.normalizeStoredDomain(domain);
     const apex = this.apexFor(domain);
     this.buckets.get(apex)?.delete(this.cookieKey(name, domain, path));
     this.pruneEmptyBucket(apex);

@@ -567,6 +567,7 @@ export class NodeAdapter implements HTTPAdapter {
           }
         | undefined;
       let isStreamFactoryPending = false;
+      let abortStreamSetup: (() => void) | undefined;
 
       /**
        * Settle a socket failure that lands while a `streamResponse` factory is setting up.
@@ -1105,9 +1106,22 @@ export class NodeAdapter implements HTTPAdapter {
             }
 
             let writable: WritableLike | null | StreamResponseCancel;
+            const setupFailed = (error: Error): void => {
+              failStreamSetupOnSocketError?.(error);
+            };
+            const setupClosed = (): void => {
+              if (!res.complete) {
+                setupFailed(
+                  makeResponseStreamError(
+                    'Response stream closed during setup',
+                  ),
+                );
+              }
+            };
 
             try {
               isStreamFactoryPending = true;
+              abortStreamSetup = () => streamAbort.abort();
               failStreamSetupOnSocketError = (error: Error): void => {
                 failStreamSetupOnSocketError = undefined;
                 streamAbort.abort();
@@ -1127,6 +1141,11 @@ export class NodeAdapter implements HTTPAdapter {
                   errorCause: error,
                 });
               };
+              // Response-side termination may never emit a request-side error.
+              // Listen before awaiting caller code so a stalled factory cannot hide it.
+              res.once('error', setupFailed);
+              res.once('aborted', setupClosed);
+              res.once('close', setupClosed);
               writable = await request.streamResponse(
                 {
                   status: 200,
@@ -1147,6 +1166,11 @@ export class NodeAdapter implements HTTPAdapter {
               destroyRequestQuietly(req);
               failRequest(markStreamFactoryError(error, req, request.headers));
               return;
+            } finally {
+              abortStreamSetup = undefined;
+              res.removeListener('error', setupFailed);
+              res.removeListener('aborted', setupClosed);
+              res.removeListener('close', setupClosed);
             }
             isStreamFactoryPending = false;
             failStreamSetupOnSocketError = undefined;
@@ -1496,6 +1520,9 @@ export class NodeAdapter implements HTTPAdapter {
         const signal = request.signal;
 
         const onAbort = (): void => {
+          // Settlement removes the relay listener during this same abort dispatch.
+          // Notify a pending factory first, while its cleanup still has ownership.
+          abortStreamSetup?.();
           if (activeResponseStream) {
             const { status, headers, writable } = activeResponseStream;
             activeResponseStream = undefined;

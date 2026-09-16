@@ -55,6 +55,11 @@ const TYPED_ARRAY_BYTE_LENGTH = Object.getOwnPropertyDescriptor(
   'byteLength',
 )?.get;
 
+const TYPED_ARRAY_LENGTH = Object.getOwnPropertyDescriptor(
+  Object.getPrototypeOf(Uint8Array.prototype) as object,
+  'length',
+)?.get;
+
 const DATA_VIEW_BYTE_LENGTH = Object.getOwnPropertyDescriptor(
   DataView.prototype,
   'byteLength',
@@ -71,6 +76,27 @@ const SHARED_ARRAY_BUFFER_BYTE_LENGTH =
         ?.get
     : undefined;
 /* eslint-enable @typescript-eslint/unbound-method */
+
+/** Binary template lookup exposes numeric elements and intrinsic length, not expandos. */
+export function readBinaryTemplateMember(value: object, key: string): unknown {
+  const length = callByteLengthGetter(TYPED_ARRAY_LENGTH, value);
+  if (length === null) {
+    return undefined;
+  }
+  if (key === 'length') {
+    return length;
+  }
+  const index = Number(key);
+  if (
+    !Number.isSafeInteger(index) ||
+    index < 0 ||
+    index >= length ||
+    String(index) !== key
+  ) {
+    return undefined;
+  }
+  return (value as Record<string, unknown>)[key];
+}
 
 /** One intrinsic getter's answer for `value`, or `null` when it is not that kind. */
 function callByteLengthGetter(

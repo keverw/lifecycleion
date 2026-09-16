@@ -108,6 +108,78 @@ function makeErrorWritable(errorAfterBytes: number) {
   });
 }
 
+test.each(['abort', 'close'] as const)(
+  'cleans up a pending streamResponse factory after %s',
+  async (mode) => {
+    let response: http.ServerResponse | undefined;
+    const server = http.createServer((_req, res) => {
+      response = res;
+      res.writeHead(200, { 'Content-Length': '100' });
+      res.flushHeaders();
+    });
+    await new Promise<void>((resolve) =>
+      server.listen(0, '127.0.0.1', resolve),
+    );
+    const address = server.address();
+    if (!address || typeof address === 'string') {
+      throw new Error('No test address');
+    }
+    const controller = new AbortController();
+    const entered = Promise.withResolvers<AbortSignal>();
+    const factory = Promise.withResolvers<Writable>();
+    const { stream } = makeMemoryWritable();
+    let deadline: ReturnType<typeof setTimeout> | undefined;
+    const pending = new NodeAdapter()
+      .send(
+        makeAdapterRequest(`http://127.0.0.1:${String(address.port)}/`, {
+          signal: controller.signal,
+          streamResponse: (_info, context) => {
+            entered.resolve(context.signal);
+            return factory.promise;
+          },
+        }),
+      )
+      .then(
+        (result) => result,
+        (error: unknown) => error,
+      );
+    try {
+      const signal = await entered.promise;
+      if (mode === 'abort') {
+        controller.abort();
+      } else {
+        response?.socket?.end();
+      }
+      const result = await Promise.race([
+        pending,
+        new Promise<never>((_resolve, reject) => {
+          deadline = setTimeout(
+            () => reject(new Error('Adapter did not settle')),
+            1000,
+          );
+        }),
+      ]);
+      expect(signal.aborted).toBe(true);
+      if (mode === 'abort') {
+        expect(result).toBeInstanceOf(Error);
+      } else {
+        expect((result as AdapterResponse).isStreamError).toBe(true);
+      }
+      factory.resolve(stream);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(stream.destroyed).toBe(true);
+    } finally {
+      clearTimeout(deadline);
+      factory.resolve(stream);
+      controller.abort();
+      stream.destroy();
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      await pending;
+    }
+  },
+);
+
 class MockClientRequest extends EventEmitter {
   public destroyed = false;
   public headers: Record<string, string> = {};

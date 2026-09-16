@@ -36,6 +36,7 @@ import {
   chargeUnits,
   createSiblingBudget,
   createRenderBudget,
+  cutAt,
   foldTruncations,
   MAX_RENDER_DEPTH,
   MAX_RENDER_LENGTH,
@@ -893,7 +894,13 @@ export function errorToString(
       reportRender,
     );
 
-    return table.toString();
+    const rendered = table.toString();
+    if (rendered.length > budget.limit) {
+      noteTruncation(budget, 'length');
+      const marker = cutAt(TRUNCATED_LENGTH, budget.limit);
+      return cutAt(rendered, budget.limit - marker.length) + marker;
+    }
+    return rendered;
   } catch (error_) {
     // Said, not swallowed - the one degradation site in this file that was silent. What
     // reaches here is everything the per-value guards could not hold: a `RangeError` from
@@ -1857,6 +1864,7 @@ function stringifyValueInner(
       // branch does, so one unreadable element degrades alone.
       try {
         const item = source[index];
+        const remainingBefore = budget.remaining;
 
         const result = stringifyValue(
           item,
@@ -1878,7 +1886,15 @@ function stringifyValueInner(
         } else if (result instanceof KeyValueASCIITable) {
           parts.push(result.toString());
         } else {
-          parts.push(entriesToText(result, path, reportRender));
+          let text = entriesToText(result, path, reportRender);
+          const levels = rowTextLevels(maxRowLength, depth);
+          // Flattening quotes keys and values, expanding control characters up to
+          // sixfold. Replace the original charge only when the escaped form costs more.
+          if (text.length * levels > remainingBefore - budget.remaining) {
+            budget.remaining = remainingBefore;
+            text = chargeNestedText(budget, text, levels);
+          }
+          parts.push(text);
         }
       } catch (error) {
         reportRender(error, `${path}[${String(index)}]`);

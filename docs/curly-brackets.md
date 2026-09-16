@@ -121,6 +121,8 @@ More precisely, the fallback is used when any intermediate segment cannot be tra
 
 Each path segment resolves only an **own enumerable property**. Inherited properties such as the usual `constructor` and `__proto__`, and values added to `Object.prototype`, are treated as missing; an own enumerable property explicitly supplied with one of those names remains available. This keeps template lookup on the same property surface the logger's redaction walk can inspect. There are two narrow exceptions: array `length`, so `{{items.length}}` remains available, and standard `Error` fields (`name`, `message`, `stack`, and `cause`), so documented patterns such as `{{error.message}}` continue to work even though JavaScript defines these properties as non-enumerable or on a standard prototype.
 
+Binary values are leaves: Buffers and typed arrays expose only numeric elements and their intrinsic `length` to path lookup. Custom properties attached to binary values, including `ArrayBuffer` and `DataView`, are treated as missing. This lets redaction inspect a large binary body without walking every byte or following attached references back to unmasked params.
+
 An unquoted segment may hold Unicode letters, digits, and marks plus `_`, `$`, `@`, and `-`, so `{{user.password-hash}}` and `{{user.@id}}` resolve without quoting. Braces holding anything else - a space, a comma, `!` - are not a path and are left exactly as written. Note the consequence: a hyphenated phrase such as `{{opt-in}}` or `{{2024-01-01}}` _is_ a path, resolves to nothing, and renders the fallback. Escape the braces to render one literally. Substituted values are never re-scanned, so a value that contains such text survives intact.
 
 ### Escaping Brackets

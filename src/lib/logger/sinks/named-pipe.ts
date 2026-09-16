@@ -500,6 +500,7 @@ export class NamedPipeSink implements LogSink {
    * alive; an entry that never sees its event is simply collected.
    */
   private readonly suppressedWriteErrors = new WeakSet<object>();
+  private readonly failedWriteStreams = new WeakSet<object>();
   /**
    * When the last automatic reopen was attempted.
    *
@@ -648,6 +649,7 @@ export class NamedPipeSink implements LogSink {
       !this.isInitialized ||
       !this.pipeStream ||
       this.pipeStream.destroyed ||
+      this.failedWriteStreams.has(this.pipeStream) ||
       // Under backpressure the stream will take it, into a buffer with no cap. It waits
       // here instead, where `maxQueueSize` applies and `getHealth()` can see it.
       this.isAwaitingDrain
@@ -1802,7 +1804,8 @@ export class NamedPipeSink implements LogSink {
       // unbounded one. `'drain'` resumes it; see `pauseUntilDrain`.
       !this.isAwaitingDrain &&
       this.pipeStream !== undefined &&
-      !this.pipeStream.destroyed
+      !this.pipeStream.destroyed &&
+      !this.failedWriteStreams.has(this.pipeStream)
     ) {
       const queued = this.writeQueue.shift();
       if (queued) {
@@ -1947,6 +1950,7 @@ export class NamedPipeSink implements LogSink {
       this.isInitialized &&
       this.pipeStream !== undefined &&
       !this.pipeStream.destroyed &&
+      !this.failedWriteStreams.has(this.pipeStream) &&
       !this.isAwaitingDrain
     ) {
       this.processQueue();
@@ -2386,6 +2390,9 @@ export class NamedPipeSink implements LogSink {
       const stream = this.pipeStream;
       const canContinue = stream.write(messageToWrite, (error) => {
         if (error) {
+          // A write callback precedes the error event and automatic destruction.
+          // Stop all drains now; the error event owns connection teardown/recovery.
+          this.failedWriteStreams.add(stream);
           // Reported here, not left to the `'error'` event. Both describe the same
           // failure, but only this one knows *which line* it was and whether it is coming
           // back - the event reported `attempt: undefined` and a disposition of
