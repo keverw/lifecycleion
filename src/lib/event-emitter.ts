@@ -59,7 +59,13 @@ export class EventEmitterProtected {
     event: string,
     callback: EventCallback<T>,
   ): () => void {
+    let hasFired = false;
     const unsubscribe = this.on(event, (data: T) => {
+      // A nested emission may fire this listener while an outer snapshot still holds it.
+      if (hasFired) {
+        return;
+      }
+      hasFired = true;
       unsubscribe();
       return callback(data);
     });

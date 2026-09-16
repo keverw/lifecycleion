@@ -43,6 +43,25 @@ describe('EventEmitter', () => {
     expect(callback).toHaveBeenCalledWith('first');
   });
 
+  test('once subscription runs only once across nested emission snapshots', () => {
+    const emitter = new EventEmitter();
+    const callback = mock((_value: string) => {});
+
+    emitter.on<string>('test', (value) => {
+      if (value === 'outer') {
+        emitter.emit('test', 'inner');
+      }
+    });
+    emitter.once('test', callback);
+
+    emitter.emit('test', 'outer');
+    emitter.emit('test', 'later');
+
+    expect(callback).toHaveBeenCalledTimes(1);
+    expect(callback).toHaveBeenCalledWith('inner');
+    expect(emitter.listenerCount('test')).toBe(1);
+  });
+
   test('multiple subscribers', () => {
     const emitter = new EventEmitter();
     const callback1 = mock(() => {});
