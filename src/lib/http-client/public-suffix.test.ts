@@ -59,3 +59,20 @@ test('unrelated overrides preserve PSL exception rules', () => {
     expect(resolver.apexFor('a.www.ck')).toBe('www.ck');
   }
 });
+
+test('rejects added tenant boundaries beneath removed shared-cookie ancestors', () => {
+  expect(
+    () =>
+      new PublicSuffixResolver({
+        add: ['APPS.HEROKUAPP.COM.'],
+        remove: ['herokuapp.com'],
+      }),
+  ).toThrow(TypeError);
+  expect(
+    () =>
+      new PublicSuffixResolver({
+        add: ['apps.notherokuapp.com'],
+        remove: ['herokuapp.com'],
+      }),
+  ).not.toThrow();
+});

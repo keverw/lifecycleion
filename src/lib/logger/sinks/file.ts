@@ -493,12 +493,37 @@ export class FileSink implements LogSink {
     // asked about the lines up to its own call. The clock above is this call's, so a
     // flush that waited behind another still answers within its own timeout.
     const previous = this.pendingFlush;
-    const run = previous.then(() => this.flushWindow(timeoutMS, startTime));
+    const run = (async (): Promise<FlushResult> => {
+      let timer: NodeJS.Timeout | undefined;
+      try {
+        const isReady = await Promise.race([
+          previous.then(() => true),
+          new Promise<false>((resolve) => {
+            timer = setTimeout(() => resolve(false), timeoutMS);
+          }),
+        ]);
+        if (!isReady) {
+          // This caller never owned a counting window. Leave the counters for the
+          // active flush, and do not run an abandoned window later.
+          return {
+            success: false,
+            entriesWritten: 0,
+            entriesFailed: 0,
+            timedOut: true,
+          };
+        }
+      } finally {
+        clearTimeout(timer);
+      }
+      return this.flushWindow(timeoutMS, startTime);
+    })();
 
-    this.pendingFlush = run.then(
-      () => undefined,
-      () => undefined,
-    );
+    this.pendingFlush = previous
+      .then(() => run)
+      .then(
+        () => undefined,
+        () => undefined,
+      );
 
     return run;
   }

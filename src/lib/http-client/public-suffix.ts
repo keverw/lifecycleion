@@ -25,7 +25,8 @@ export interface PublicSuffixOverrides {
    * `evil.corp.internal` cannot claim `Domain=corp.internal`, while a server on
    * `https://corp.internal/` may still set it for itself alone. Use for internal or
    * multi-tenant domains the public list does not know about - `corp.internal`,
-   * `apps.acme-cloud.net`.
+   * `apps.acme-cloud.net`. An addition equal to or beneath a removed suffix is
+   * contradictory and throws a TypeError at construction.
    */
   add?: readonly string[];
 
@@ -153,10 +154,12 @@ export class PublicSuffixResolver {
     this.removed = normalizeList(overrides?.remove, 'remove');
 
     for (const suffix of this.added) {
-      if (this.removed.has(suffix)) {
-        throw new TypeError(
-          `publicSuffixes lists '${suffix}' in both add and remove; it can only be one`,
-        );
+      for (const removed of this.removed) {
+        if (suffix === removed || suffix.endsWith(`.${removed}`)) {
+          throw new TypeError(
+            `publicSuffixes cannot add '${suffix}' beneath removed suffix '${removed}'; shared cookies conflict with tenant isolation`,
+          );
+        }
       }
     }
 

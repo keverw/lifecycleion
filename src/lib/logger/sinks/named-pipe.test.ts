@@ -1802,6 +1802,36 @@ describe('NamedPipeSink', () => {
     }
   }, 20000);
 
+  test.each(['destroyed', 'errored'] as const)(
+    'reconnect accepts a failed stream with buffered writes (%s)',
+    async (state) => {
+      const pipePath = `${tmpDir.path}/failed-buffered.pipe`;
+      await createNamedPipe(pipePath);
+      const readerFd = fs.openSync(
+        pipePath,
+        fs.constants.O_RDONLY | fs.constants.O_NONBLOCK,
+      );
+      const sink = new NamedPipeSink({ pipePath, onError: () => {} });
+      try {
+        expect(await waitForOpenPipe(sink)).toBe(true);
+        const live = (sink as unknown as { pipeStream: fs.WriteStream })
+          .pipeStream;
+        // A failed stream can retain queued bytes until its deferred error handling.
+        if (state === 'destroyed') {
+          live.destroy(new Error('EPIPE'));
+        } else {
+          Object.defineProperty(live, 'errored', { value: new Error('EPIPE') });
+        }
+        Object.defineProperty(live, 'writableLength', { value: 100 });
+        expect((await sink.reconnect()).success).toBe(true);
+        expect(sink.getHealth().isInitialized).toBe(true);
+      } finally {
+        await sink.close();
+        fs.closeSync(readerFd);
+      }
+    },
+  );
+
   test('a late error from a replaced stream does not unseat the live one', async () => {
     // A stream ended by `reconnect()` can deliver its error after the replacement has
     // opened, and its handler is a closure over the stream it was attached to. Ungated,

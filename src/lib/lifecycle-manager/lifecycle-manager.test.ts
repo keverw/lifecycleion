@@ -13007,3 +13007,84 @@ test('an already-running result past the deadline remains in the startup snapsho
     await manager.stopAllComponents();
   }
 });
+
+test.each([false, true])(
+  'bulk timeout reconciles an earlier unexpected stop (optional: %s)',
+  async (isOptional) => {
+    const logger = new Logger({ sinks: [], callProcessExit: false });
+    const manager = new LifecycleManager({ logger });
+    const error = new Error('stopped while the next component was starting');
+    let reportStop: (error: Error) => void = () => {};
+    class First extends BaseComponent {
+      public start() {
+        reportStop = this.getUnexpectedStopReporter();
+      }
+      public stop() {}
+    }
+    class Pending extends BaseComponent {
+      public start() {
+        reportStop(error);
+        return new Promise<void>(() => {});
+      }
+      public stop() {}
+    }
+    await manager.registerComponent(
+      new First(logger, { name: 'first', optional: isOptional }),
+    );
+    await manager.registerComponent(
+      new Pending(logger, {
+        name: 'pending',
+        dependencies: ['first'],
+        startupTimeoutMS: 0,
+      }),
+    );
+    const result = await manager.startAllComponents({ timeoutMS: 40 });
+    expect(result.startedComponents).toEqual([]);
+    if (isOptional) {
+      expect(result.code).toBe('startup_timeout');
+      expect(result.failedOptionalComponents).toEqual([
+        { name: 'first', error },
+      ]);
+    } else {
+      expect(result.code).toBe('component_unexpected_stop');
+      expect(result.error).toBe(error);
+    }
+    await manager.stopAllComponents();
+  },
+);
+
+test('late startup clears its deadline before shutdown cleanup', async () => {
+  const logger = new Logger({ sinks: [], callProcessExit: false });
+  const manager = new LifecycleManager({ logger });
+  const start = Promise.withResolvers<void>();
+  const stopping = Promise.withResolvers<void>();
+  const stop = Promise.withResolvers<void>();
+  let aborted = 0;
+  class Late extends BaseComponent {
+    public start() {
+      return start.promise;
+    }
+    public stop() {
+      stopping.resolve();
+      return stop.promise;
+    }
+    public onStartupAborted() {
+      aborted++;
+    }
+  }
+  await manager.registerComponent(
+    new Late(logger, { name: 'late', startupTimeoutMS: 50 }),
+  );
+  const starting = manager.startComponent('late');
+  const shutdown = manager.stopAllComponents();
+  start.resolve();
+  try {
+    await stopping.promise;
+    await sleep(80);
+    expect(aborted).toBe(0);
+  } finally {
+    stop.resolve();
+    await starting;
+    await shutdown;
+  }
+});

@@ -2338,6 +2338,43 @@ describe('FileSink - accounting across a rotation', () => {
     await sink.close();
   });
 
+  test('a queued flush expires without stealing the active flush counting window', async () => {
+    const sink = new FileSink({
+      logDir: tmpDir.path,
+      basename: 'queued-timeout',
+    });
+    await sink.flush();
+    const internals = sink as unknown as {
+      isProcessing: boolean;
+      totalEntriesWritten: number;
+    };
+    internals.isProcessing = true;
+    const first = sink.flush(1000);
+    try {
+      const result = await Promise.race([
+        sink.flush(20),
+        new Promise<never>((_, reject) =>
+          setTimeout(
+            () => reject(new Error('queued flush exceeded its budget')),
+            250,
+          ),
+        ),
+      ]);
+      expect(result).toEqual({
+        success: false,
+        entriesWritten: 0,
+        entriesFailed: 0,
+        timedOut: true,
+      });
+      internals.totalEntriesWritten++;
+    } finally {
+      internals.isProcessing = false;
+    }
+    expect((await first).entriesWritten).toBe(1);
+    expect((await sink.flush()).entriesWritten).toBe(0);
+    await sink.close();
+  });
+
   test('overlapping flushes partition the written lines rather than both reporting them', async () => {
     // Each flush counts from a baseline the previous one advanced as it settled. Two in
     // flight together both read the same baseline, so both reported the same lines and a

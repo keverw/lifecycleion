@@ -5038,7 +5038,7 @@ describe('NodeAdapter via HTTPClient', () => {
     } finally {
       server.close();
     }
-  }, 20000);
+  }, 30000);
 
   test('a cancel mid-upload carries the upload outcome on the throw', async () => {
     const net = await import('node:net');

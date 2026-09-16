@@ -792,7 +792,8 @@ const jar = new CookieJar({
 The overrides belong to that jar alone; another `CookieJar` in the same process is
 unaffected. They are validated once in the constructor and a bad entry throws a `TypeError`
 rather than being ignored - an empty suffix, a wildcard, an empty label, a non-string, or a
-suffix named in both lists. A typo that silently did nothing would be a scoping hole you
+suffix named in both lists or added beneath a removed suffix. A removed ancestor
+allows shared cookies, which conflicts with an added child’s tenant isolation. A typo that silently did nothing would be a scoping hole you
 would only discover as a cookie going somewhere it should not.
 
 **SameSite is stored, not enforced.** The `SameSite` attribute is parsed and kept on the stored cookie for callers to read, but `getCookiesFor()` does not consult it. This jar serves a client, not a browser: there is no navigation, no top-level "site" to compare against, and no notion of a cross-site request, so every cookie whose domain, path, expiry and `Secure` rules match is sent, whatever its `SameSite` value.

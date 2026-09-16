@@ -783,7 +783,12 @@ export class NamedPipeSink implements LogSink {
       // not cancel an in-flight FIFO write, so a replacement writer could interleave
       // records with it. Keep this connection intact; reconnect can be retried once
       // the reader has drained the pending writes. Calling close() is not required.
-      if (this.pipeStream && this.pipeStream.writableLength > 0) {
+      if (
+        this.pipeStream &&
+        !this.pipeStream.destroyed &&
+        !this.pipeStream.errored &&
+        this.pipeStream.writableLength > 0
+      ) {
         const error = new Error(
           'Cannot reconnect until pending pipe writes finish; retry after the reader drains them',
         );

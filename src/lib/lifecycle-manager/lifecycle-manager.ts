@@ -1469,6 +1469,31 @@ export class LifecycleManager
           }
         }
 
+        // Reconcile stops even when the loop exited on a startup timeout.
+        const unexpectedStopResult = this.consumeUnexpectedStopsDuringStartup(
+          startedComponents,
+          failedOptionalComponents,
+        );
+
+        startedComponents.splice(0, startedComponents.length);
+        startedComponents.push(...unexpectedStopResult.startedComponents);
+
+        if (unexpectedStopResult.requiredFailure) {
+          clearTimeout(timeoutHandle);
+          await this.rollbackStartup(startedComponents);
+
+          return {
+            success: false,
+            startedComponents: [],
+            failedOptionalComponents,
+            skippedDueToDependency: Array.from(skippedDueToDependency),
+            reason: describeError(unexpectedStopResult.requiredFailure.error),
+            code: 'component_unexpected_stop',
+            error: unexpectedStopResult.requiredFailure.error,
+            durationMS: Date.now() - startTime,
+          };
+        }
+
         // Check if startup timed out during the process
         if (hasTimedOut) {
           const durationMS = Date.now() - startTime;
@@ -1492,31 +1517,6 @@ export class LifecycleManager
             timedOut: true,
             reason: `Startup timeout exceeded (${effectiveTimeout}ms)`,
             code: 'startup_timeout',
-          };
-        }
-
-        // Success - all components started (or optional ones failed gracefully)
-        const unexpectedStopResult = this.consumeUnexpectedStopsDuringStartup(
-          startedComponents,
-          failedOptionalComponents,
-        );
-
-        startedComponents.splice(0, startedComponents.length);
-        startedComponents.push(...unexpectedStopResult.startedComponents);
-
-        if (unexpectedStopResult.requiredFailure) {
-          clearTimeout(timeoutHandle);
-          await this.rollbackStartup(startedComponents);
-
-          return {
-            success: false,
-            startedComponents: [],
-            failedOptionalComponents,
-            skippedDueToDependency: Array.from(skippedDueToDependency),
-            reason: describeError(unexpectedStopResult.requiredFailure.error),
-            code: 'component_unexpected_stop',
-            error: unexpectedStopResult.requiredFailure.error,
-            durationMS: Date.now() - startTime,
           };
         }
 
@@ -4007,6 +4007,9 @@ export class LifecycleManager
       } else {
         await startPromise;
       }
+
+      // The startup deadline no longer applies once start() has settled.
+      clearTimeout(timeoutHandle);
 
       // A component can self-report an unexpected stop from inside start()
       // before the manager has promoted it to running. If that happened, do
