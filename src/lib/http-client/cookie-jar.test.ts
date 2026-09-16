@@ -1341,6 +1341,32 @@ describe('CookieJar', () => {
         restored.getCookieFor('session', 'http://localhost/')?.hostOnly,
       ).toBe(true);
     });
+
+    test('a tampered persisted public-suffix cookie cannot cross tenant buckets', () => {
+      const restored = new CookieJar();
+
+      expect(
+        restored.fromJSON({
+          cookies: [
+            {
+              name: 'session',
+              value: 'tossed',
+              domain: 'github.io',
+              path: '/',
+              hostOnly: false,
+              createdAt: Date.now(),
+            },
+          ],
+        }),
+      ).toBe(1);
+
+      expect(
+        restored.getCookieFor('session', 'https://victim.github.io/'),
+      ).toBeUndefined();
+      expect(
+        restored.getCookieFor('session', 'https://other.github.io/'),
+      ).toBeUndefined();
+    });
   });
 
   describe('publicSuffixes overrides', () => {

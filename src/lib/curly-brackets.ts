@@ -9,6 +9,7 @@ import {
 } from './internal/render-budget';
 import { createTruncationReporter } from './internal/truncation-reporter';
 import { stringifyTemplateValue } from './internal/stringify-template-value';
+import { isErrorValue } from './to-error';
 import {
   createFormatReporter,
   type FormatErrorHandler,
@@ -104,7 +105,61 @@ interface CurlyBracketsFunction {
   escape: (str: string) => string;
 }
 
-const PLACEHOLDER_PATTERN = /(?:\\)?{{(\s*[^{}]+?\s*)(?:\\)?\s*}}/g;
+// Keep the placeholder body in one non-overlapping group. The previous spelling put
+// `\s*` on both sides of a lazy `[^{}]+?`, so an unclosed `{{` followed by whitespace
+// made the regexp engine retry every possible division of that whitespace. A few hundred
+// spaces already took seconds. Trimming belongs below, after the one linear match.
+const PLACEHOLDER_PATTERN = /(?:\\)?{{([^{}]+?)(?:\\)?}}/g;
+
+/**
+ * Whether template lookup may read `key` from `value`.
+ *
+ * Params and the redaction walk are own-enumerable bags. Following their prototype here
+ * let `Object.prototype.password` reappear in a message after redaction had correctly
+ * omitted it, and exposed built-ins such as `constructor` and `__proto__` as if callers
+ * had supplied them. Keep lookup on the same surface the walk can inspect.
+ *
+ * Errors are the deliberate exception: `message` and `stack` are own non-enumerable
+ * properties and `name` normally lives on `Error.prototype`. `{{error.message}}` is a
+ * documented logger pattern, so those standard diagnostic fields stay addressable while
+ * arbitrary prototype properties do not.
+ */
+function hasTemplateMember(value: object, key: string): boolean {
+  if (Object.prototype.propertyIsEnumerable.call(value, key)) {
+    return true;
+  }
+
+  if (
+    (key !== 'name' &&
+      key !== 'message' &&
+      key !== 'stack' &&
+      key !== 'cause') ||
+    !isErrorValue(value)
+  ) {
+    return false;
+  }
+
+  // Include the instance and Error/DOMException prototypes, but not the final
+  // Object.prototype of that realm. Checking `key in value` here would put the polluted
+  // prototype route straight back for these four names.
+  let owner: object | null = value;
+
+  while (owner !== null) {
+    const parent = Object.getPrototypeOf(owner) as object | null;
+
+    if (parent === null) {
+      return false;
+    }
+
+    if (Object.prototype.hasOwnProperty.call(owner, key)) {
+      return true;
+    }
+
+    owner = parent;
+  }
+
+  return false;
+}
 
 /**
  * Processes a template string, replacing placeholders with corresponding values from a provided object.
@@ -262,19 +317,19 @@ CurlyBrackets.compileTemplate = function (
       let replacement: unknown = locals;
 
       for (const part of parts) {
-        // Both the membership test and the read run code this function does not own: a
-        // `Proxy` can throw from its `has` trap, and an ordinary property can be an
-        // accessor that throws — an `Error` with a hostile `message` getter reaching
-        // `{{error.message}}` is the case that matters, since the logger renders
-        // templates on paths that must not raise an error of their own. An unresolvable
-        // path is exactly what `fallback` is for, so treat an unreadable one the same
-        // way rather than propagating.
+        // Both the membership check and the read run code this function does not own: a
+        // `Proxy` can throw from a property-descriptor or prototype trap, and an ordinary
+        // property can be an accessor that throws — an `Error` with a hostile `message`
+        // getter reaching `{{error.message}}` is the case that matters, since the logger
+        // renders templates on paths that must not raise an error of their own. An
+        // unresolvable path is exactly what `fallback` is for, so treat an unreadable one
+        // the same way rather than propagating.
         try {
           if (
             replacement !== undefined &&
             replacement !== null &&
             typeof replacement === 'object' &&
-            part in replacement
+            hasTemplateMember(replacement, part)
           ) {
             replacement = (replacement as Record<string, unknown>)[part];
           } else {

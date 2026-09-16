@@ -1977,7 +1977,7 @@ interface ComponentOptions {
   // Values below 1000ms are silently raised to 1000ms to ensure reasonable cleanup time
   shutdownForceTimeoutMS?: number; // Force shutdown timeout in ms (default: 2000, minimum: 500)
   // Values below 500ms are silently raised to 500ms to prevent abrupt termination
-  healthCheckTimeoutMS?: number; // Health check timeout in milliseconds (default: 5000)
+  healthCheckTimeoutMS?: number; // Health check timeout in milliseconds (default: 5000, 0 = disabled)
   signalTimeoutMS?: number; // Signal handler timeout in milliseconds (default: 5000, 0 = disabled)
 }
 ```

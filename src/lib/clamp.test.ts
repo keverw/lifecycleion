@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test';
-import { clamp, finiteClampMin } from './clamp';
+import { clamp, finiteClamp, finiteClampMin } from './clamp';
 
 describe('clamp', () => {
   it('returns the value when within the range', () => {
@@ -54,6 +54,25 @@ describe('clamp with Infinity', () => {
     expect(clamp(5, -Infinity, 10)).toBe(5);
     expect(clamp(5, 0, Infinity)).toBe(5);
     expect(clamp(5, 0, -Infinity)).toBe(0); // Edge case; logically, max should never be -Infinity
+  });
+});
+
+describe('finiteClamp', () => {
+  it('returns a value inside the range and clamps either side', () => {
+    expect(finiteClamp(5, 1, 10, 3)).toBe(5);
+    expect(finiteClamp(0, 1, 10, 3)).toBe(1);
+    expect(finiteClamp(11, 1, 10, 3)).toBe(10);
+  });
+
+  it('returns the default for every non-finite value', () => {
+    expect(finiteClamp(NaN, 1, 10, 3)).toBe(3);
+    expect(finiteClamp(Infinity, 1, 10, 3)).toBe(3);
+    expect(finiteClamp(-Infinity, 1, 10, 3)).toBe(3);
+  });
+
+  it('preserves clamp semantics when the bounds are reversed or equal', () => {
+    expect(finiteClamp(5, 10, 1, 3)).toBe(10);
+    expect(finiteClamp(0, 5, 5, 3)).toBe(5);
   });
 });
 

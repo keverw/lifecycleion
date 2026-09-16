@@ -409,8 +409,9 @@ export class NodeAdapter implements HTTPAdapter {
       }
 
       if (this._config.mtls) {
-        // mTLS: present client cert. rejectUnauthorized stays true so the
-        // server cert is still validated even though we're sending our own.
+        // mTLS: present the client certificate and default server verification to true.
+        // The caller's explicit `rejectUnauthorized: false` may still override that
+        // default below; client authentication and server verification are independent.
         //
         // The certificate and key are the caller's identity, presented only to the origin
         // the caller addressed. A cross-origin hop gets the trust anchor and the

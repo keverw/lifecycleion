@@ -2017,6 +2017,29 @@ describe('errorToString - bounds that hold at the entry point', () => {
     expect(rendered).toContain('Stack');
   });
 
+  it('applies parent sensitive paths to an Error used directly as additionalInfo', () => {
+    for (const sensitiveFieldName of [
+      'message',
+      'additionalInfo.message',
+      'apiKey',
+      'additionalInfo.apiKey',
+    ]) {
+      const inner = Object.assign(new Error('hunter2secret'), {
+        apiKey: 'hunter2secret',
+      });
+      const error = Object.assign(new Error('outer'), {
+        additionalInfo: inner,
+        sensitiveFieldNames: [sensitiveFieldName],
+      });
+
+      const rendered = errorToString(error);
+
+      expect(rendered).toContain('AdditionalInfo');
+      expect(rendered).not.toContain('hunter2secret');
+      expect(rendered).toContain('REDACTED');
+    }
+  });
+
   it('renders a binary view as one value rather than a row per byte', () => {
     // A `Buffer` on an error is ordinary, and its keys are its bytes: forwarding them
     // spent the whole render budget on `AdditionalInfo.<n>` rows saying nothing, after

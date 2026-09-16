@@ -336,6 +336,51 @@ describe('CurlyBrackets', () => {
     );
   });
 
+  it('does not resolve properties through the prototype chain', () => {
+    Object.defineProperty(Object.prototype, 'leakedPassword', {
+      configurable: true,
+      enumerable: false,
+      value: 'hunter2secret',
+    });
+
+    try {
+      const rendered = CurlyBrackets(
+        '{{leakedPassword}} {{__proto__.leakedPassword}} {{constructor}}',
+        { ordinary: true },
+      );
+
+      expect(rendered).toBe('(null) (null) (null)');
+      expect(rendered).not.toContain('hunter2secret');
+      expect(rendered).not.toContain('Function');
+    } finally {
+      delete (Object.prototype as Record<string, unknown>)['leakedPassword'];
+    }
+  });
+
+  it('does not inherit standard Error fields from Object.prototype', () => {
+    Object.defineProperty(Object.prototype, 'cause', {
+      configurable: true,
+      enumerable: false,
+      value: 'prototype secret',
+    });
+
+    try {
+      expect(
+        CurlyBrackets('{{error.cause}}', { error: new Error('boom') }),
+      ).toBe('(null)');
+    } finally {
+      delete (Object.prototype as Record<string, unknown>)['cause'];
+    }
+  });
+
+  it('returns promptly for an unclosed placeholder followed by whitespace', () => {
+    const template = `{{${' '.repeat(500)}`;
+    const startedAt = performance.now();
+
+    expect(CurlyBrackets(template, {})).toBe(template);
+    expect(performance.now() - startedAt).toBeLessThan(250);
+  });
+
   it('should stringify full arrays and plain objects as JSON', () => {
     expect(
       CurlyBrackets('{{users}}', { users: ['Alice', 'Bob'] }, '(???)'),

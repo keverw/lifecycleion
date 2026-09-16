@@ -7,6 +7,7 @@ Utility functions for clamping numbers to a range, with safe handling for non-fi
 - [Usage](#usage)
 - [API](#api)
   - [clamp](#clamp)
+  - [finiteClamp](#finiteclamp)
   - [finiteClampMin](#finiteclampmin)
 
 <!-- tocstop -->
@@ -14,7 +15,7 @@ Utility functions for clamping numbers to a range, with safe handling for non-fi
 ## Usage
 
 ```typescript
-import { clamp, finiteClampMin } from 'lifecycleion/clamp';
+import { clamp, finiteClamp, finiteClampMin } from 'lifecycleion/clamp';
 ```
 
 ## API
@@ -29,6 +30,25 @@ clamp(0, 1, 10); // 1   (below min, clamped up)
 clamp(15, 1, 10); // 10  (above max, clamped down)
 clamp(-5, -10, -1); // -5  (within negative range)
 ```
+
+### finiteClamp
+
+Clamps a number between a minimum and maximum value, returning a caller-provided default when the value is `NaN`, `Infinity`, or `-Infinity`.
+
+```typescript
+finiteClamp(5, 1, 10, 3); // 5   (within range)
+finiteClamp(0, 1, 10, 3); // 1   (below min, clamped up)
+finiteClamp(15, 1, 10, 3); // 10  (above max, clamped down)
+finiteClamp(NaN, 1, 10, 3); // 3   (not finite, returns default)
+finiteClamp(Infinity, 1, 10, 3); // 3   (not finite, returns default)
+```
+
+**Parameters:**
+
+- `value` - The value to clamp
+- `min` - The minimum allowed value
+- `max` - The maximum allowed value
+- `defaultValue` - The value returned when `value` is not finite
 
 ### finiteClampMin
 

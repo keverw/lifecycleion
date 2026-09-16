@@ -66,6 +66,26 @@ describe('Logger', () => {
       expect(arraySink.logs[0].entityName).toBeUndefined();
     });
 
+    test('redaction cannot render a polluted prototype as a root param', () => {
+      Object.defineProperty(Object.prototype, 'password', {
+        configurable: true,
+        enumerable: false,
+        value: 'hunter2secret',
+      });
+
+      try {
+        logger.info('password={{password}}', {
+          params: { ordinary: true },
+          redactedKeys: ['password'],
+        });
+
+        expect(arraySink.logs[0]?.message).toBe('password=(null)');
+        expect(arraySink.logs[0]?.message).not.toContain('hunter2secret');
+      } finally {
+        delete (Object.prototype as Record<string, unknown>)['password'];
+      }
+    });
+
     test('should log error message', () => {
       logger.error('Test error message');
 

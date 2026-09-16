@@ -24,7 +24,7 @@ export interface ComponentOptions {
   /** Time to wait for force shutdown in milliseconds (default: 2000, minimum: 500) */
   shutdownForceTimeoutMS?: number;
 
-  /** Time to wait for healthCheck() in milliseconds (default: 5000) */
+  /** Time to wait for healthCheck() in milliseconds (default: 5000, 0 = disabled) */
   healthCheckTimeoutMS?: number;
 
   /** Time to wait for onReload/onInfo/onDebug in milliseconds (default: 5000, 0 = disabled) */

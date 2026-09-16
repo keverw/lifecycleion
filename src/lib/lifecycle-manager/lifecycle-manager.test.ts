@@ -11002,6 +11002,38 @@ describe('LifecycleManager - Messaging, Health & Values', () => {
       expect(result.code).toBe('timeout');
     });
 
+    test('healthCheckTimeoutMS 0 disables the timeout', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      class HealthCheckWithoutTimeout extends BaseComponent {
+        constructor(logger: Logger) {
+          super(logger, {
+            name: 'untimed-health',
+            dependencies: [],
+            healthCheckTimeoutMS: 0,
+          });
+        }
+
+        public async start() {}
+        public async stop() {}
+
+        public async healthCheck() {
+          await sleep(20);
+          return { healthy: true, message: 'Completed after an async turn' };
+        }
+      }
+
+      await lifecycle.registerComponent(new HealthCheckWithoutTimeout(logger));
+      await lifecycle.startAllComponents();
+
+      const result = await lifecycle.checkComponentHealth('untimed-health');
+
+      expect(result.healthy).toBe(true);
+      expect(result.timedOut).toBe(false);
+      expect(result.code).toBe('ok');
+      expect(result.message).toBe('Completed after an async turn');
+    });
+
     test('should normalize boolean false to unhealthy', async () => {
       const lifecycle = new LifecycleManager({ logger });
 

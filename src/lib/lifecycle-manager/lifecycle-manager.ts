@@ -1970,7 +1970,7 @@ export class LifecycleManager
    * Check the health of a specific component
    *
    * Calls the component's healthCheck() method if implemented.
-   * Times out after component's healthCheckTimeoutMS.
+   * Times out after component's healthCheckTimeoutMS. A timeout of 0 is disabled.
    *
    * @param name - Component name
    * @returns Health check result with status, message, details, and timing
@@ -2030,21 +2030,28 @@ export class LifecycleManager
 
     let timeoutHandle: NodeJS.Timeout | undefined;
     try {
-      // Create timeout promise
       const timeoutMS = component.healthCheckTimeoutMS;
+      const timeoutDelayMS = toTimerDelayMS(timeoutMS);
       const timeoutResult: ComponentHealthResult = {
         healthy: false,
         message: 'Health check timed out',
       };
-      const timeoutPromise = new Promise<ComponentHealthResult>((resolve) => {
-        timeoutHandle = setTimeout(() => {
-          resolve(timeoutResult);
-        }, toTimerDelayMS(timeoutMS));
-      });
 
-      // Race health check against timeout
       const healthCheckPromise = component.healthCheck();
-      const result = await Promise.race([healthCheckPromise, timeoutPromise]);
+      // Match startup and signal timeout semantics: zero means no timer. Racing against
+      // `setTimeout(..., 0)` made the outcome depend on whether an otherwise healthy
+      // check happened to settle before or after its first asynchronous turn.
+      const result =
+        timeoutDelayMS === 0
+          ? await healthCheckPromise
+          : await Promise.race([
+              healthCheckPromise,
+              new Promise<ComponentHealthResult>((resolve) => {
+                timeoutHandle = setTimeout(() => {
+                  resolve(timeoutResult);
+                }, timeoutDelayMS);
+              }),
+            ]);
 
       // Normalize boolean to ComponentHealthResult
       const isTimedOut = result === timeoutResult;

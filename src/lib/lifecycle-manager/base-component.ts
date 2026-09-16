@@ -85,7 +85,7 @@ export abstract class BaseComponent {
   /** Time to wait for force shutdown in milliseconds */
   public readonly shutdownForceTimeoutMS: number;
 
-  /** Time to wait for healthCheck() in milliseconds */
+  /** Time to wait for healthCheck() in milliseconds; 0 disables the timeout */
   public readonly healthCheckTimeoutMS: number;
 
   /** Time to wait for onReload/onInfo/onDebug in milliseconds */

@@ -2311,15 +2311,21 @@ export class NamedPipeSink implements LogSink {
       if (this.formatReportsInFlight === 0) {
         this.formatReportsInFlight++;
 
-        this.handleError('format', queued.formatError, {
-          attempt: queued.attempts + 1,
-          // No line was produced, and rendering is never repeated, so this one is gone.
-          disposition: 'lost',
-          entry: queued.entry,
-          onReported: () => {
-            this.formatReportsInFlight--;
+        this.handleError(
+          'format',
+          new Error('Failed to format a log entry; no line was written', {
+            cause: toError(queued.formatError),
+          }),
+          {
+            attempt: queued.attempts + 1,
+            // No line was produced, and rendering is never repeated, so this one is gone.
+            disposition: 'lost',
+            entry: queued.entry,
+            onReported: () => {
+              this.formatReportsInFlight--;
+            },
           },
-        });
+        );
       }
 
       return;
@@ -2448,13 +2454,20 @@ export class NamedPipeSink implements LogSink {
         if (this.formatReportsInFlight === 0) {
           this.formatReportsInFlight++;
 
-          this.handleError('format', error, {
-            disposition: 'fallback',
-            entry,
-            onReported: () => {
-              this.formatReportsInFlight--;
+          this.handleError(
+            'format',
+            new Error(
+              'NamedPipeSink formatter failed; the default format was used',
+              { cause: toError(error) },
+            ),
+            {
+              disposition: 'fallback',
+              entry,
+              onReported: () => {
+                this.formatReportsInFlight--;
+              },
             },
-          });
+          );
         }
       }
     }
@@ -2470,13 +2483,20 @@ export class NamedPipeSink implements LogSink {
         if (this.formatReportsInFlight === 0) {
           this.formatReportsInFlight++;
 
-          this.handleError('format', error, {
-            disposition: 'fallback',
-            entry,
-            onReported: () => {
-              this.formatReportsInFlight--;
+          this.handleError(
+            'format',
+            new Error(
+              'Failed to render a value in the log entry; a marker was written in its place',
+              { cause: toError(error) },
+            ),
+            {
+              disposition: 'fallback',
+              entry,
+              onReported: () => {
+                this.formatReportsInFlight--;
+              },
             },
-          });
+          );
         }
       });
     } else {

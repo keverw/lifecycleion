@@ -1132,10 +1132,33 @@ function errorToASCIITable(
         // all, so the error came out claiming to carry no `additionalInfo`; nothing is
         // skipped by not walking it, since a path cannot address a key it does not have.
         if (bag === NOT_ADDRESSABLE) {
+          // A non-plain value is one leaf to the redaction walk, but paths may still point
+          // into it. In that case the walk masks the whole leaf rather than pretending it
+          // can safely print the unnamed siblings. Skipping the walk here meant an Error
+          // used directly as `additionalInfo` ignored both `message` and the documented
+          // `additionalInfo.message` alias and rendered the secret in its nested table.
+          const directInfoBag = { [ADDITIONAL_INFO_PREFIX]: additionalInfo };
+          const directInfoPaths = sensitivePaths.map((sensitivePath) => ({
+            parts: [ADDITIONAL_INFO_PREFIX, ...sensitivePath.parts],
+            entry: sensitivePath.entry,
+          }));
+          const maskedBag = redactAddressedValue(
+            directInfoBag,
+            directInfoPaths,
+            redactFunction,
+            report,
+            reportRender,
+            budget,
+          );
+          const maskedInfo =
+            maskedBag !== null && typeof maskedBag === 'object'
+              ? (maskedBag as Record<string, unknown>)[ADDITIONAL_INFO_PREFIX]
+              : maskedBag;
+
           table.addRow(
             'AdditionalInfo',
             stringifyValue(
-              additionalInfo,
+              maskedInfo,
               joinPath(path, 'additionalInfo'),
               maxRowLength,
               seen,

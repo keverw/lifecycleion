@@ -1263,7 +1263,12 @@ describe('NamedPipeSink', () => {
 
     const health = sink.getHealth();
 
-    expect(health.lastError?.message).toContain('formatter blew up');
+    expect(health.lastError?.message).toBe(
+      'NamedPipeSink formatter failed; the default format was used',
+    );
+    expect((health.lastError?.cause as Error | undefined)?.message).toBe(
+      'formatter blew up',
+    );
     expect(health.consecutiveFailures).toBe(0);
     expect(health.isHealthy).toBe(true);
 
@@ -1815,6 +1820,15 @@ describe('NamedPipeSink', () => {
       );
 
       expect(lostFormats).toHaveLength(3);
+      expect(lostFormats[0]?.error.message).toBe(
+        'Failed to format a log entry; no line was written',
+      );
+      expect(lostFormats[0]?.error.message).not.toContain(
+        'message refused to serialize',
+      );
+      expect(
+        (lostFormats[0]?.error.cause as Error | undefined)?.message,
+      ).toBe('message refused to serialize');
       expect(sink.getHealth().droppedEntries).toBe(3);
     } finally {
       await sink.close();
@@ -3814,6 +3828,13 @@ describe('NamedPipeSink', () => {
 
     expect(formats).toHaveLength(1);
     expect(formats[0]?.disposition).toBe('fallback');
+    expect(formats[0]?.error.message).not.toContain('getter exploded');
+    expect(formats[0]?.error.message).toBe(
+      'Failed to render a value in the log entry; a marker was written in its place',
+    );
+    expect((formats[0]?.error.cause as Error | undefined)?.message).toBe(
+      'getter exploded',
+    );
     expect(sink.getHealth().droppedEntries).toBe(0);
   }, 15000);
 
