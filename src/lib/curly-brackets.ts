@@ -119,13 +119,18 @@ const PLACEHOLDER_PATTERN = /(?:\\)?{{([^{}]+?)(?:\\)?}}/g;
  * omitted it, and exposed built-ins such as `constructor` and `__proto__` as if callers
  * had supplied them. Keep lookup on the same surface the walk can inspect.
  *
- * Errors are the deliberate exception: `message` and `stack` are own non-enumerable
- * properties and `name` normally lives on `Error.prototype`. `{{error.message}}` is a
- * documented logger pattern, so those standard diagnostic fields stay addressable while
- * arbitrary prototype properties do not.
+ * Arrays and errors have narrow deliberate exceptions. Array `length` is safe numeric
+ * metadata and a conventional template path. Error `message` and `stack` are own
+ * non-enumerable properties and `name` normally lives on `Error.prototype`.
+ * `{{error.message}}` is a documented logger pattern, so those standard diagnostic fields
+ * stay addressable while arbitrary non-enumerable and prototype properties do not.
  */
 function hasTemplateMember(value: object, key: string): boolean {
   if (Object.prototype.propertyIsEnumerable.call(value, key)) {
+    return true;
+  }
+
+  if (key === 'length' && Array.isArray(value)) {
     return true;
   }
 

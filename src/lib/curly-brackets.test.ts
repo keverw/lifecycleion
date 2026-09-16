@@ -373,6 +373,21 @@ describe('CurlyBrackets', () => {
     }
   });
 
+  it('resolves array length without admitting arbitrary non-enumerable properties', () => {
+    const value = Object.defineProperty({}, 'hidden', {
+      enumerable: false,
+      value: 'not template data',
+    });
+
+    expect(
+      CurlyBrackets('{{items.length}} {{empty.length}} {{value.hidden}}', {
+        items: ['one', 'two'],
+        empty: [],
+        value,
+      }),
+    ).toBe('2 0 (null)');
+  });
+
   it('returns promptly for an unclosed placeholder followed by whitespace', () => {
     const template = `{{${' '.repeat(500)}`;
     const startedAt = performance.now();
