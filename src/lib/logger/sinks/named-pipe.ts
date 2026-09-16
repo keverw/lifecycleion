@@ -1,7 +1,7 @@
 import * as fs from 'fs';
 import { promises as fsPromises } from 'fs';
-import type { FileHandle } from 'fs/promises';
 import * as os from 'os';
+import { Writable } from 'stream';
 import type { LogEntry, LogSink, LoggerDiagnostic } from '../types';
 import { LogLevel, getLogLevel } from '../types';
 import { diagnosticEntry } from '../internal/diagnostic-entry';
@@ -213,6 +213,110 @@ const REOPEN_COOLDOWN_MS = 1000;
 const NO_READER_ERRNO = 'ENXIO';
 
 /**
+ * A Writable over the probe's non-blocking descriptor.
+ *
+ * Node's WriteStream assumes a blocking file descriptor. Bun currently mishandles the
+ * `EAGAIN` a non-blocking FIFO returns under pressure, so the handoff needs a tiny stream
+ * that treats it as backpressure and retries without holding a libuv worker or the event
+ * loop open. The Writable high-water mark still bounds its own buffer; NamedPipeSink's
+ * queue cap bounds everything not admitted to it.
+ */
+class NonBlockingPipeStream extends Writable {
+  public readonly pending = false;
+  public readonly fd: number;
+  private retryTimer?: NodeJS.Timeout;
+  private cancelWrite?: () => void;
+
+  constructor(descriptor: number) {
+    super({ highWaterMark: 16 * 1024, autoDestroy: true, emitClose: true });
+    this.fd = descriptor;
+  }
+
+  public override _write(
+    chunk: Buffer | string,
+    encoding: BufferEncoding,
+    callback: (error?: Error | null) => void,
+  ): void {
+    const buffer = Buffer.isBuffer(chunk)
+      ? chunk
+      : Buffer.from(chunk, encoding);
+    let offset = 0;
+    let isSettled = false;
+
+    const finish = (error?: Error | null): void => {
+      if (isSettled) {
+        return;
+      }
+
+      isSettled = true;
+      this.cancelWrite = undefined;
+
+      if (this.retryTimer !== undefined) {
+        clearTimeout(this.retryTimer);
+        this.retryTimer = undefined;
+      }
+
+      callback(error);
+    };
+
+    const writeRemaining = (): void => {
+      if (this.destroyed) {
+        finish(new Error('Named pipe stream was destroyed'));
+
+        return;
+      }
+
+      fs.write(
+        this.fd,
+        buffer,
+        offset,
+        buffer.length - offset,
+        null,
+        (error, written) => {
+          const code = error?.code;
+
+          if (code === 'EAGAIN' || code === 'EWOULDBLOCK') {
+            this.retryTimer = setTimeout(writeRemaining, 10);
+            this.retryTimer.unref?.();
+
+            return;
+          }
+
+          if (error !== null) {
+            finish(error);
+
+            return;
+          }
+
+          offset += written;
+
+          if (offset < buffer.length) {
+            writeRemaining();
+
+            return;
+          }
+
+          finish();
+        },
+      );
+    };
+
+    this.cancelWrite = () =>
+      finish(new Error('Named pipe stream was destroyed'));
+    writeRemaining();
+  }
+
+  public override _destroy(
+    error: Error | null,
+    callback: (error?: Error | null) => void,
+  ): void {
+    this.cancelWrite?.();
+
+    fs.close(this.fd, (closeError) => callback(error ?? closeError));
+  }
+}
+
+/**
  * How many distinct open failures are reported before one outage has said enough.
  *
  * The set in {@link NamedPipeSink.reportedOpenFailures} is what bounds reporting, and in
@@ -228,54 +332,21 @@ const NO_READER_ERRNO = 'ENXIO';
 const MAX_REPORTED_OPEN_FAILURES = 8;
 
 /**
- * How long an open is waited on before the caller is told it has not completed.
+ * How long a legacy or externally substituted pending stream may remain before recovery.
  *
- * The open the sink commits to is only started once a reader is known to be there - see
- * `openWriteProbe` - so in the ordinary case it completes at once and this is never
- * reached. It still covers the one gap the probe cannot close: the reader may hang up in
- * the instant between the probe answering and `createWriteStream` issuing its own
- * `open(2)`, and that open blocks the way every FIFO open for writing does. Nobody is
- * made to wait on it indefinitely - `reconnect()` answers, and the constructor's
- * `initPromise` settles, whether or not the pipe opened - and if the reader comes back the
- * stream still promotes itself and flushes.
+ * The production path now promotes an already-open numeric descriptor synchronously, so
+ * it does not create a pending pathname open. The stale-stream guard remains defensive
+ * for replaced streams and test/instrumentation substitutions that can still put the sink
+ * into that state.
  */
-const OPEN_WAIT_MS = 2000;
-
-/**
- * How long a pending open may stay in flight before `ensureConnection` gives up on it.
- *
- * An open that has outlived this is not slow, it is stuck: `waitForOpen` already answered
- * at {@link OPEN_WAIT_MS}, so anything still pending has had several times that. The case
- * that matters is a reader that recreates the FIFO - `rm pipe; mkfifo pipe` - which leaves
- * the blocked open pointing at an unlinked inode, so it can never emit `'open'` or
- * `'error'` and `pendingStream` is never cleared. Every later `write()` and every
- * `scheduleReopen` then returned at `ensureConnection`'s in-flight guard, and the sink sat
- * wedged with a growing queue, `lastError` undefined and `onError` silent - dropping the
- * oldest lines once the cap was reached, for the life of the process.
- *
- * Reached far less often since the probe: an open is only started once a reader has been
- * seen, so the plain "no reader yet" case - which used to leave an open pending forever,
- * every time - never gets this far. What is left is the narrow race the probe cannot
- * close, and this is still the only thing covering it.
- */
-const STALE_OPEN_MS = OPEN_WAIT_MS * 3;
+const STALE_OPEN_MS = 6000;
 
 /**
  * How many abandoned opens may be outstanding before no further attempt is made.
  *
- * `destroy()` cannot cancel an `open(2)` already blocked in the libuv threadpool, so each
- * abandoned attempt holds one of the four default slots until the kernel releases it -
- * possibly never. Retrying without a cap would trade a wedged sink for a process whose
- * every other file operation is starved, which is the worse of the two. Two leaves half
- * the pool for the rest of the process, and the sink reports rather than falls silent once
- * it is reached.
- *
- * Kept, and not simplified away, though the probe in `openPipe` means an open is only
- * started when a reader has just been seen. It makes this a backstop rather than the
- * ordinary path - a FIFO nobody reads no longer produces a single blocked open, let alone
- * two - but it does not make it unreachable: the reader can still hang up inside the race
- * the probe leaves, and a FIFO recreated underneath a blocked open still never settles.
- * The accounting is what says so out loud when it happens.
+ * The numeric-descriptor path does not create such opens. This cap remains paired with the
+ * defensive stale-stream machinery above so a substituted pending stream cannot trigger
+ * unbounded recovery attempts.
  */
 const MAX_ABANDONED_OPENS = 2;
 
@@ -303,18 +374,9 @@ export class NamedPipeSink implements LogSink {
   private formatter?: (entry: LogEntry) => string;
   private pipeStream?: fs.WriteStream;
   /**
-   * A stream that has been created but whose `open` has not completed.
-   *
-   * `createWriteStream` returns before the file is open, and for a FIFO that open waits
-   * for a reader. Treating the stream as usable at creation time is what let the queue
-   * cap be bypassed: every queued entry was handed straight to the stream, where Node
-   * buffers without limit, so `maxQueueSize` bounded nothing and `getHealth().queueSize`
-   * read zero while memory grew. Entries now stay in this sink's own queue until the pipe
-   * is genuinely open.
-   *
-   * Kept rather than abandoned on a timeout, and never joined by a second: one pending
-   * open costs one descriptor and one libuv threadpool slot (four by default), and it
-   * still promotes itself if a reader arrives later.
+   * A stream being validated and promoted. The numeric-descriptor path normally occupies
+   * this state only synchronously; keeping it explicit prevents concurrent reconnects and
+   * supports defensive cleanup if stream construction is substituted or interrupted.
    */
   private pendingStream?: fs.WriteStream;
   /**
@@ -442,16 +504,13 @@ export class NamedPipeSink implements LogSink {
    * Separate from `_isReconnecting`, which `getHealth` reports and which means what it
    * says - a *re*-open after a failure. This covers the constructor's first open too, and
    * covers all of them from the synchronous instant the attempt starts rather than from
-   * whenever `pendingStream` is finally assigned.
+   * across the asynchronous path and descriptor probe before a stream is installed.
    *
-   * That gap was the whole bug. `ensureConnection` refuses a second open on
-   * `_isReconnecting` and `pendingStream`, but the constructor's `initializePipe()` sets
-   * neither until *after* its `await fsPromises.stat()` - so a `write()` in the same tick
-   * as `new NamedPipeSink(...)`, which is the ordinary case, walked through every guard
-   * and started a second open of the same FIFO. Opening a FIFO with no reader does not
-   * fail, it blocks: two of libuv's four threadpool slots held indefinitely, and an
-   * orphaned stream destroyed only if its open ever completes. That is exactly the
-   * starvation the guards' own documentation says they prevent.
+   * That gap was the whole bug. `ensureConnection` refused a second attempt on
+   * `_isReconnecting` and `pendingStream`, but the constructor's `initializePipe()` set
+   * neither until *after* its first await. A `write()` in the same tick as construction
+   * therefore started a duplicate stat/probe sequence and could orphan whichever
+   * descriptor lost the promotion race.
    */
   private isOpening = false;
 
@@ -461,7 +520,10 @@ export class NamedPipeSink implements LogSink {
    * See the guard in {@link formatEntry}. A nested format failure is not lost output: the
    * line still renders through the default format and still goes out.
    */
-  private formatReportsInFlight = 0;
+  private formatReportActive = false;
+  private invokingFormatReport = false;
+  private deliveringDeferredFormatReport = false;
+  private deferredFormatReport?: (onReported: () => void) => void;
 
   /**
    * Whether the first entry refused because the sink is closing has been reported.
@@ -652,14 +714,14 @@ export class NamedPipeSink implements LogSink {
     this._isReconnecting = true;
 
     try {
-      // An open already in flight has to finish before this one starts. `_isReconnecting`
+      // An attempt already in flight has to finish before this one starts. `_isReconnecting`
       // is not the flag that covers it: the constructor's `initializePipe()` sets only
       // `isOpening`, so a `reconnect()` issued while the constructor's open was still
       // pending - an app that constructs the sink and reconnects on a "reader is ready"
-      // signal - ran a second `openPipe` concurrently against the same FIFO: two probes,
-      // two `createWriteStream` opens, one `pendingStream` assignment silently orphaned,
-      // and `MAX_ABANDONED_OPENS` reached twice as fast. `_isReconnecting` is already set
-      // above, so nothing new starts while this waits.
+      // signal - ran a second `openPipe` concurrently against the same FIFO. Two probes
+      // could both succeed and one descriptor could be orphaned when their promotions
+      // raced. `_isReconnecting` is already set above, so nothing new starts while this
+      // waits.
       if (this.isOpening) {
         await this.initPromise;
 
@@ -869,19 +931,8 @@ export class NamedPipeSink implements LogSink {
       await new Promise((resolve) => setTimeout(resolve, CLOSE_REOPEN_POLL_MS));
     }
 
-    // An open still in flight counts as a stream to wait for, exactly as an open one does.
-    // `waitForOpen` answers at `OPEN_WAIT_MS` whether or not the FIFO's write side has
-    // opened, so a reader that attaches after those two seconds - and well inside a
-    // thirty-second `closeTimeoutMS` - arrived to find `pipeStream` still undefined, the
-    // loop skipped, and the backlog abandoned with the whole budget unspent. `FileSink`
-    // waits on its queue with no stream condition at all; this is the same wait, held to
-    // the same deadline.
-    //
-    // Bounded by `closeTimeoutMS` either way, which is what makes waiting on a pending open
-    // safe: a reader that never comes costs the close its budget and no more, and the
-    // pending open is destroyed below exactly as before.
-    //
-    // `isOpening` counts too, for the same reason and on the one gate that omitted it.
+    // A substituted pending stream or an in-progress probe counts as work to wait for,
+    // exactly as an active stream does. The close deadline still bounds the wait.
     // `reopenForCloseDrain` races its init against a deadline and can return with the
     // open still in flight: `pendingStream` is assigned only after the `stat`, so a
     // reopen that got as far as opening but not as far as that left `isOpening` true and
@@ -918,9 +969,9 @@ export class NamedPipeSink implements LogSink {
       this.reopenAtMS = undefined;
     }
 
-    // An open still waiting for a reader is abandoned rather than waited on: it cannot
-    // complete without the reader that never came, and holding it would keep a descriptor
-    // and a threadpool slot for the life of the process.
+    // Defensive compatibility for a legacy or substituted stream left pending. The
+    // production descriptor-backed stream is promoted synchronously and never reaches
+    // this state.
     if (this.pendingStream) {
       // Counted like every other abandonment, even here: a `close()` is usually terminal,
       // but the count is what `MAX_ABANDONED_OPENS` reads and a sink can be closed while
@@ -1117,21 +1168,14 @@ export class NamedPipeSink implements LogSink {
    * `openPipe` is called directly instead, which still probes with `O_NONBLOCK` first, so
    * an absent reader costs one syscall rather than a wait.
    *
-   * Raced against what is left of the close's budget rather than awaited outright.
-   * `openPipe` waits up to `OPEN_WAIT_MS` for the stream to open, which is its own bound
-   * and not this one; a stream that opens after this returns is either promoted by the
-   * `'open'` handler and ended by the close, or left pending and destroyed by the close's
-   * own cleanup, exactly as any other in-flight open is.
+   * Raced against what is left of the close's grace budget rather than awaited outright.
    */
   private async reopenForCloseDrain(
     startTime: number,
     graceUntil: number,
   ): Promise<void> {
-    // The *grace* deadline, not the close's whole budget. `openPipe` waits up to
-    // `OPEN_WAIT_MS` for a stream it has already committed to opening, so an attempt raced
-    // only against `closeTimeoutMS` could sit here for the entire budget - thirty seconds
-    // by default - which is the stall this window exists to bound. The open is left in
-    // flight either way and the drain loop below picks up the stream if it lands.
+    // The *grace* deadline, not the close's whole budget, so a final recovery probe cannot
+    // consume the entire close timeout.
     const remainingMS = Math.min(
       this.closeTimeoutMS - (Date.now() - startTime),
       graceUntil - Date.now(),
@@ -1210,20 +1254,20 @@ export class NamedPipeSink implements LogSink {
      * reports. The unsupported-platform return above is the one exit it does not cover,
      * and does not need to: it happens before there is a probe to release.
      */
-    let probe: FileHandle | undefined;
+    let probe: number | undefined;
 
     const closeProbe = async (): Promise<void> => {
       if (probe === undefined) {
         return;
       }
 
-      try {
-        await probe.close();
-      } catch {
-        // Nothing further to try, and nothing that depends on it: the real stream already
-        // holds a descriptor of its own by the time this runs. A probe that will not close
-        // is not worth failing a working connection over.
-      }
+      const descriptor = probe;
+
+      probe = undefined;
+
+      await new Promise<void>((resolve) => {
+        fs.close(descriptor, () => resolve());
+      });
     };
 
     try {
@@ -1333,40 +1377,49 @@ export class NamedPipeSink implements LogSink {
         return;
       }
 
-      // Create write stream
+      // Turn the descriptor that answered the non-blocking probe into the stream itself.
+      // There is no second `open(2)` here: besides avoiding a gap in which the reader can
+      // observe EOF, this removes the probe-to-open race where the reader disappeared and
+      // the second, blocking open remained pinned in libuv after `close()` resolved.
+      // Asked again because both answers above came from an await. `close()` bounds its
+      // own drain and cleanup, so an attempt started before it can resume after shutdown
+      // has finished. The descriptor is cancellable now, but installing it after `closed`
+      // would still leak ownership into a sink that can never write again.
       //
-      // The probe is still open across this, and that overlap is load-bearing rather than
-      // untidy. A FIFO's reader sees EOF when the *last* writer closes it, so probing with
-      // an open/close pair and then opening for real leaves a gap with no writer in it -
-      // and `cat < pipe`, like every other reader that treats end of input as end of job,
-      // exits in that gap. Measured: the reader hung up before the first line was written.
-      // Holding both descriptors until this one is open means there is no gap to see.
-      // Asked again, because both answers above came from an await. `close()` bounds its
-      // own drain and cleanup, so an open that started before it can resume after it has
-      // finished - and `reconnect()` got exactly this guard while this path did not. The
-      // open that follows is the one that cannot be taken back: if the reader hung up in
-      // the probe-to-open window it blocks in the runtime's file-I/O thread pool, nothing
-      // is left to fire `'open'` and destroy it, and `ensureConnection` returns early on
-      // `closed` so `releaseStalePendingOpen` never runs either - a descriptor and a
-      // threadpool slot held for the life of the process, behind a `close()` that already
-      // resolved.
-      //
-      // `closed`, not `closing`: "behind a `close()` that already resolved" is what the
-      // hazard is about, and `closed` is the flag that says so. While a close is merely
-      // *draining* it is parked on `await this.initPromise`, which is this open - so
-      // refusing here guaranteed the one thing that drain loop will not proceed without, a
-      // `pipeStream`, could never appear, and the ordinary construct-write-close sequence
-      // reported its backlog lost with a reader attached and consuming. A stream opened from
-      // here during the drain is either promoted by the `'open'` handler below and ended by
-      // `close()`, or still pending and destroyed by `close()`'s own `pendingStream`
-      // cleanup; neither outlives the close.
+      // `closed`, not `closing`: while a close is merely draining it is parked on
+      // `await this.initPromise`, which is this attempt. Refusing during that phase would
+      // guarantee the drain never receives the stream it is waiting for.
       if (this.closed) {
         return;
       }
 
-      const stream = fs.createWriteStream(this.pipePath, {
-        flags: 'a', // Append mode
-      });
+      // Describe the descriptor, not the path checked before the open. A path can be
+      // replaced between `stat` and `open`; the descriptor is what subsequent writes use.
+      let isProbeFIFO = false;
+
+      try {
+        isProbeFIFO = fs.fstatSync(probe).isFIFO();
+      } catch {
+        // A descriptor that cannot be described is not trusted with log output.
+      }
+
+      if (!isProbeFIFO) {
+        this.reportOpenFailure(
+          'not_a_pipe',
+          `${this.pipePath} was not a named pipe (FIFO) when opened`,
+          undefined,
+        );
+        this.scheduleReopen(REOPEN_COOLDOWN_MS);
+
+        return;
+      }
+
+      const stream = new NonBlockingPipeStream(
+        probe,
+      ) as unknown as fs.WriteStream;
+
+      // Ownership moved to the stream. The `finally` block must not close the same fd.
+      probe = undefined;
 
       this.pendingStream = stream;
       this.pendingStreamSince = Date.now();
@@ -1448,12 +1501,10 @@ export class NamedPipeSink implements LogSink {
         this.ensureConnection();
 
         // And a backstop, because the call above is refused for the one failure it matters
-        // most for. This handler is registered before `waitForOpen` attaches its own
-        // `once('error')`, so a stream that errors *during* the open window runs it while
-        // `isOpening` - and, on every path but the constructor's, `_isReconnecting` - is
-        // still set, and `ensureConnection` returns having scheduled nothing at all. A pipe
-        // that failed while opening had no retry pending, and whatever its failed write had
-        // requeued waited for unrelated traffic that a quiet process never produces.
+        // most for. A stream that errors during promotion can run this while `isOpening` -
+        // and, on every path but the constructor's, `_isReconnecting` - is still set, so
+        // `ensureConnection` returns having scheduled nothing at all. The timer below is
+        // the retry that survives those guards.
         //
         // A timer rather than a second direct call, because a timer is the one thing those
         // flags cannot refuse: it fires after the open window has closed and they are down.
@@ -1464,10 +1515,17 @@ export class NamedPipeSink implements LogSink {
         this.scheduleReopen(REOPEN_COOLDOWN_MS);
       });
 
-      // Initialized means *open*, not merely constructed. Until this fires there is
-      // nowhere to put a line that Node would not buffer without limit, so entries wait
-      // in this sink's own queue, under its own cap, where `getHealth()` can see them.
+      // Kept for externally substituted WriteStreams and older runtime behavior. The
+      // descriptor-backed production stream is promoted synchronously below and does not
+      // emit `open`.
       stream.on('open', (fd: number) => {
+        // Descriptor-backed streams are promoted immediately below. A substituted stream
+        // may still emit `open`; it is confirmation of the connection already installed,
+        // not a stale stream to destroy.
+        if (this.pipeStream === stream) {
+          return;
+        }
+
         // Only the stream this sink is still waiting on may be promoted. An open that
         // completes after `reconnect()` abandoned it belongs to nothing, and installing it
         // would replace a live connection with one nobody is holding.
@@ -1499,14 +1557,10 @@ export class NamedPipeSink implements LogSink {
           return;
         }
 
-        // Asked of the descriptor this stream actually holds, not of the path. The `stat`
-        // and the probe above both answered for the path as it was a moment ago, and
-        // `createWriteStream` opens it again by name: a path swapped in that window - the
-        // FIFO replaced by a regular file, or by a symlink to one - passed the `not_a_pipe`
-        // check and then had every log line appended to whatever now sat there. `fstat`
-        // on the open descriptor cannot be raced the same way; what it describes is what
-        // the writes go to. Synchronous because it is one syscall on an fd already open,
-        // and an `await` here would reopen the promotion race this handler closes.
+        // Asked of the descriptor this stream actually holds, not of the path. `fstat` on
+        // an open descriptor cannot be raced by replacing the path: what it describes is
+        // what the writes go to. Synchronous because it is one syscall on an fd already
+        // open, and an await here would reopen the promotion race this handler closes.
         // Refused on the terms the path check refuses on: reported once per outage under
         // the same kind, and retried, so a FIFO put back is picked up.
         let isFIFO = false;
@@ -1553,30 +1607,30 @@ export class NamedPipeSink implements LogSink {
         this.processQueue();
       });
 
-      // Bounded: the reader seen a moment ago may have hung up in the meantime, and the
-      // caller asked a question that has to be answered. The open is left in flight either
-      // way - see `pendingStream`.
-      await this.waitForOpen(stream);
+      // The writable created over an already-open numeric descriptor emits no `open`
+      // event. Promote it now; the descriptor validation above is the same validation the
+      // compatibility event path needs for a substituted pathname stream.
+      if (this.closed || this.pendingStream !== stream) {
+        if (this.pendingStream === stream) {
+          this.pendingStream = undefined;
+          this.pendingStreamSince = undefined;
+        }
 
-      // The one exit that armed nothing. `waitForOpen` answers at `OPEN_WAIT_MS` whether
-      // or not the open has settled, and an open still in flight leaves `pendingStream`
-      // set - which `ensureConnection` reads as "an attempt is already running" and
-      // refuses every later one until `releaseStalePendingOpen` clears it. That only runs
-      // from `ensureConnection`, so a process that stopped logging never got there: the
-      // sink sat `isInitialized: false` with no timer behind it, contradicting
-      // `scheduleReopen`'s claim that recovery does not wait on traffic. Armed past
-      // `STALE_OPEN_MS`, so the timer finds the open old enough to abandon.
-      if (
-        !this.isInitialized &&
-        !this.closed &&
-        !this.closing &&
-        this.pendingStream === stream
-      ) {
-        this.scheduleReopen(STALE_OPEN_MS + REOPEN_COOLDOWN_MS);
+        stream.destroy();
+
+        return;
       }
+
+      this.pendingStream = undefined;
+      this.pendingStreamSince = undefined;
+      this.pipeStream = stream;
+      this.isInitialized = true;
+      this.reportedOpenFailures.clear();
+      this.reportedOpenFailureCap = false;
+      this.processQueue();
     } catch (error) {
-      // Classified rather than assumed. This block is reached by the `stat` failing *and*
-      // by a synchronous throw from `createWriteStream`, and only `ENOENT` means what
+      // Classified rather than assumed. This block is reached by the `stat` failing and
+      // by a synchronous stream-construction failure, and only `ENOENT` means what
       // `'not_found'` says - "the destination does not exist". `EACCES`, `ELOOP` and
       // `ENOTDIR` all arrive here too, and a handler switching on `kind` to decide whether
       // to recreate the FIFO acted on a false premise for every one of them. `'setup'` is
@@ -1599,17 +1653,8 @@ export class NamedPipeSink implements LogSink {
       // be picked up promptly, and the cost of asking is two syscalls.
       this.scheduleReopen(REOPEN_COOLDOWN_MS);
     } finally {
-      // Released once the real stream holds a descriptor of its own - or, on the
-      // {@link OPEN_WAIT_MS} path, once this sink has stopped waiting to find out.
-      //
-      // That second case is not the clean handover the first is: the open may still be in
-      // flight, so the probe can be the last writer to let go while a descriptor is yet to
-      // arrive. It is reached only when the reader hung up between the probe and the open -
-      // with a reader present the open completes at once - so there is normally nobody left
-      // to hand an EOF to, and a *new* reader attaching inside that window is the narrow
-      // case this does not cover. Holding the probe until the open settles instead would
-      // trade that for a descriptor pinned to an open that may never settle at all, which
-      // is the shape of the bug this whole path exists to remove.
+      // Released on every path that did not transfer the numeric descriptor to the active
+      // writable.
       await closeProbe();
     }
   }
@@ -1627,6 +1672,10 @@ export class NamedPipeSink implements LogSink {
     message: string,
     cause: unknown,
   ): void {
+    if (this.closing || this.closed) {
+      return;
+    }
+
     // Keyed on the kind as well as the text. The two are not redundant: both callers here
     // build the same `Could not open named pipe at <path>: ` prefix, so two failures that
     // rendered alike would otherwise be one - and the second would be swallowed while
@@ -1664,32 +1713,35 @@ export class NamedPipeSink implements LogSink {
   /**
    * Ask whether the FIFO has a reader, without waiting for one.
    *
-   * The open costs a syscall that returns immediately in both directions, which is the
-   * entire point: the blocking open this stands in front of cannot be cancelled once it is
-   * in flight, so the sink asks a question it can get out of before asking one it cannot.
-   * See {@link NO_READER_ERRNO} for why one `errno` covers both supported platforms.
+   * The open costs a syscall that returns immediately in both directions. On success the
+   * returned descriptor is the connection itself, so no blocking open follows it. See
+   * {@link NO_READER_ERRNO} for why one `errno` covers both supported platforms.
    *
-   * @returns An open descriptor, which the caller **must** keep open until the real stream
-   *          has one of its own and then close - see `openPipe`, where the overlap is what
-   *          keeps the reader from seeing EOF - or `null` when nothing is reading the pipe.
+   * @returns The open descriptor that becomes the write stream, or `null` when nothing is
+   *          reading the pipe. Reusing it means there is no second pathname open.
    */
-  private async openWriteProbe(): Promise<FileHandle | null> {
-    try {
-      return await fsPromises.open(
+  private async openWriteProbe(): Promise<number | null> {
+    return await new Promise<number | null>((resolve, reject) => {
+      fs.open(
         this.pipePath,
         fs.constants.O_WRONLY | fs.constants.O_NONBLOCK,
-      );
-    } catch (error) {
-      if (readUnknownMember(error, 'code') === NO_READER_ERRNO) {
-        return null;
-      }
+        (error, descriptor) => {
+          if (error === null) {
+            resolve(descriptor);
 
-      // Anything else is a real failure to open, and the caller decides what to call it -
-      // see `openPipe`, which reports it as `'setup'` and schedules another attempt. Read
-      // through `readUnknownMember` because `code` is a property on somebody else's value
-      // and this is a reporting path.
-      throw error;
-    }
+            return;
+          }
+
+          if (readUnknownMember(error, 'code') === NO_READER_ERRNO) {
+            resolve(null);
+
+            return;
+          }
+
+          reject(error);
+        },
+      );
+    });
   }
 
   /**
@@ -1920,12 +1972,8 @@ export class NamedPipeSink implements LogSink {
       return;
     }
 
-    // One timer, but the *soonest* one. Held blindly, a long deferral swallowed every
-    // short one behind it: the `OPEN_WAIT_MS` exit arms `STALE_OPEN_MS + REOPEN_COOLDOWN_MS`
-    // on an open still in flight, and when that open then failed, both the cooldown re-arm
-    // and its backstop were discarded - so a pipe whose reader was already back waited out
-    // the stale-open window instead of the cooldown this file documents. A later, longer
-    // request never displaces a sooner one.
+    // One timer, but the *soonest* one. A later, longer request never displaces a sooner
+    // recovery attempt.
     if (this.reopenTimer !== undefined) {
       if (
         this.reopenAtMS !== undefined &&
@@ -1950,43 +1998,6 @@ export class NamedPipeSink implements LogSink {
     timer.unref?.();
 
     this.reopenTimer = timer;
-  }
-
-  /**
-   * Wait for a freshly created stream to open, fail, or take too long.
-   *
-   * Resolves rather than rejecting in every case: the caller's contract is a status, and
-   * "the pipe has not opened yet" is one of the answers, not a failure to report. Which
-   * of the three happened is read off `isInitialized` afterwards.
-   */
-  private async waitForOpen(stream: fs.WriteStream): Promise<void> {
-    if (stream.destroyed) {
-      return;
-    }
-
-    await new Promise<void>((resolve) => {
-      let isSettled = false;
-
-      const finish = (): void => {
-        if (isSettled) {
-          return;
-        }
-
-        isSettled = true;
-        clearTimeout(timeoutHandle);
-        stream.off('open', finish);
-        stream.off('error', finish);
-        resolve();
-      };
-
-      const timeoutHandle = setTimeout(finish, OPEN_WAIT_MS);
-
-      // So a pending open cannot hold the process open on its own.
-      timeoutHandle.unref?.();
-
-      stream.once('open', finish);
-      stream.once('error', finish);
-    });
   }
 
   /**
@@ -2277,10 +2288,6 @@ export class NamedPipeSink implements LogSink {
    * Write a single entry
    */
   private writeEntry(queued: QueuedPipeEntry): void {
-    if (this.closed) {
-      return;
-    }
-
     // Before the stream check, not after it, because this entry has no line to write and
     // the pipe's state cannot change that. Checked second, an unrenderable entry logged
     // during an outage was requeued instead of reported, and once its retries ran out
@@ -2308,9 +2315,7 @@ export class NamedPipeSink implements LogSink {
       // own line for the same reason, and reached this branch again: a synchronous
       // recursion that ended in a stack overflow. The nested line is counted above and
       // left unreported, which is where the chain stops.
-      if (this.formatReportsInFlight === 0) {
-        this.formatReportsInFlight++;
-
+      this.scheduleFormatReport((onReported) => {
         this.handleError(
           'format',
           new Error('Failed to format a log entry; no line was written', {
@@ -2321,12 +2326,10 @@ export class NamedPipeSink implements LogSink {
             // No line was produced, and rendering is never repeated, so this one is gone.
             disposition: 'lost',
             entry: queued.entry,
-            onReported: () => {
-              this.formatReportsInFlight--;
-            },
+            onReported,
           },
         );
-      }
+      });
 
       return;
     }
@@ -2451,9 +2454,7 @@ export class NamedPipeSink implements LogSink {
         // Held until the handler settles, not until it returns: an `async` handler that
         // logged after its first `await` found a flag already cleared. A count, since a
         // second report can start while the first is still pending.
-        if (this.formatReportsInFlight === 0) {
-          this.formatReportsInFlight++;
-
+        this.scheduleFormatReport((onReported) => {
           this.handleError(
             'format',
             new Error(
@@ -2463,12 +2464,10 @@ export class NamedPipeSink implements LogSink {
             {
               disposition: 'fallback',
               entry,
-              onReported: () => {
-                this.formatReportsInFlight--;
-              },
+              onReported,
             },
           );
-        }
+        });
       }
     }
 
@@ -2480,9 +2479,7 @@ export class NamedPipeSink implements LogSink {
       // as `'format'`/`'fallback'` - the line is still written. Guarded like the
       // throwing-formatter report above, and for the same reason.
       formatted = renderJSONLine(entry, (error) => {
-        if (this.formatReportsInFlight === 0) {
-          this.formatReportsInFlight++;
-
+        this.scheduleFormatReport((onReported) => {
           this.handleError(
             'format',
             new Error(
@@ -2492,12 +2489,10 @@ export class NamedPipeSink implements LogSink {
             {
               disposition: 'fallback',
               entry,
-              onReported: () => {
-                this.formatReportsInFlight--;
-              },
+              onReported,
             },
           );
-        }
+        });
       });
     } else {
       let text = '';
@@ -2518,6 +2513,52 @@ export class NamedPipeSink implements LogSink {
     return formatted + '\n';
   }
 
+  /** Deliver one format report now and retain at most one that arrives while it settles. */
+  private scheduleFormatReport(report: (onReported: () => void) => void): void {
+    if (this.formatReportActive) {
+      if (
+        !this.invokingFormatReport &&
+        !this.deliveringDeferredFormatReport &&
+        this.deferredFormatReport === undefined
+      ) {
+        this.deferredFormatReport = report;
+      }
+
+      return;
+    }
+
+    this.startFormatReport(report, false);
+  }
+
+  private startFormatReport(
+    report: (onReported: () => void) => void,
+    isDeferred: boolean,
+  ): void {
+    this.formatReportActive = true;
+    this.deliveringDeferredFormatReport = isDeferred;
+
+    this.invokingFormatReport = true;
+
+    report(() => {
+      this.formatReportActive = false;
+      this.deliveringDeferredFormatReport = false;
+
+      if (isDeferred) {
+        return;
+      }
+
+      const pending = this.deferredFormatReport;
+
+      this.deferredFormatReport = undefined;
+
+      if (pending !== undefined) {
+        this.startFormatReport(pending, true);
+      }
+    });
+
+    this.invokingFormatReport = false;
+  }
+
   /**
    * Handle errors
    */
@@ -2530,7 +2571,7 @@ export class NamedPipeSink implements LogSink {
       disposition?: SinkFailureDisposition;
       /** The line this failure is about, when the sink still has it. See `QueuedPipeEntry`. */
       entry?: LogEntry;
-      /** Called once the handler has settled, `async` or not. See `formatReportsInFlight`. */
+      /** Called once the handler has settled, `async` or not. See `scheduleFormatReport`. */
       onReported?: () => void;
     },
   ): void {

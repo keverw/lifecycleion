@@ -81,10 +81,25 @@ function normalizeSuffix(entry: unknown, listName: string): string {
     );
   }
 
+  if (normalized.length > 253) {
+    throw new TypeError(
+      `publicSuffixes.${listName} entry '${entry}' is longer than a hostname`,
+    );
+  }
+
   for (const label of normalized.split('.')) {
     if (label === '') {
       throw new TypeError(
         `publicSuffixes.${listName} entry '${entry}' has an empty label`,
+      );
+    }
+
+    // Overrides are hostname suffixes, not URLs or arbitrary match strings. Keeping the
+    // accepted form deliberately narrow also prevents a typo such as a scheme, slash or
+    // whitespace from silently installing a rule that can never match a request host.
+    if (label.length > 63 || !/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(label)) {
+      throw new TypeError(
+        `publicSuffixes.${listName} entry '${entry}' is not a valid hostname suffix`,
       );
     }
   }

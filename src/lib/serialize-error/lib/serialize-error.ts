@@ -262,6 +262,17 @@ function serializeErrorInner(
   // The shared brand check, so a cross-realm error keeps the error branch - and guarded,
   // which a bare `instanceof` is not.
   if (isErrorValue(error)) {
+    // Keep enough of the shared text allowance aside for causal structure. A huge
+    // message is useful, but not at the cost of erasing the key that explains why the
+    // error happened. `errors` receives the same treatment for AggregateError.
+    const priorityKeys = priorityErrorKeys(error);
+    const reservedCharacters =
+      priorityKeys.length === 0
+        ? 0
+        : Math.min(CAUSAL_CHARACTER_RESERVE, budget.remainingCharacters);
+
+    budget.remainingCharacters -= reservedCharacters;
+
     const name =
       readText(error, 'name', path, report, budget) ??
       boundedText('Error', budget);
@@ -269,6 +280,9 @@ function serializeErrorInner(
       readText(error, 'message', path, report, budget) ??
       boundedText('', budget);
     const stack = readText(error, 'stack', path, report, budget);
+
+    budget.remainingCharacters += reservedCharacters;
+
     const result: SerializedError = {
       // Bound these immediately after the guarded read. Keeping the caller's complete
       // string in this intermediate record until `deepSerializeRecord` reaches it made
@@ -299,6 +313,24 @@ function serializeErrorInner(
         budget,
         true,
       );
+    }
+
+    // Insert causal members before ordinary extras so `deepSerializeRecord` spends the
+    // reserved allowance on them first. Preserve the literal keys even when their value
+    // must be reduced to a truncation marker.
+    for (const key of priorityKeys) {
+      if (!keys.includes(key)) {
+        continue;
+      }
+
+      if (budget.remaining <= 0) {
+        defineEntry(result, key, TRUNCATED);
+
+        continue;
+      }
+
+      budget.remaining--;
+      defineEntry(result, key, readOwnMember(error, key, path, report));
     }
 
     for (const key of keys) {
@@ -522,10 +554,33 @@ export function deserializeError(obj: SerializedError): Error {
  */
 const MAX_SERIALIZED_NODES = 100_000;
 
+/** Text retained for `cause` and AggregateError `errors` after a huge diagnostic field. */
+const CAUSAL_CHARACTER_RESERVE = 16_384;
+
 /** Values left to visit in one serialization. See {@link MAX_SERIALIZED_NODES}. */
 interface NodeBudget {
   remaining: number;
   remainingCharacters: number;
+}
+
+/** Own causal slots worth preserving ahead of arbitrary extra fields. */
+function priorityErrorKeys(error: object): Array<'cause' | 'errors'> {
+  const keys: Array<'cause' | 'errors'> = [];
+
+  try {
+    if (Object.prototype.hasOwnProperty.call(error, 'cause')) {
+      keys.push('cause');
+    }
+
+    if (Object.prototype.hasOwnProperty.call(error, 'errors')) {
+      keys.push('errors');
+    }
+  } catch {
+    // The later guarded enumeration reports hostile proxy traps. Reservation is an
+    // optimization for useful output, never a reason serialization itself may throw.
+  }
+
+  return keys;
 }
 
 /** Copy text into the shared serialization allowance, marking where it was cut. */
@@ -582,8 +637,31 @@ function deepSerializeRecord(
     // the final allowance is still emitted instead of being replaced by a truncated key.
     if (
       useBoundedTextValues &&
-      (key === 'name' || key === 'message' || key === 'stack')
+      (key === 'name' ||
+        key === 'message' ||
+        key === 'stack' ||
+        key === 'cause' ||
+        key === 'errors')
     ) {
+      if (key === 'cause' || key === 'errors') {
+        defineEntry(
+          result,
+          key,
+          budget.remainingCharacters <= 0
+            ? TRUNCATED_LENGTH
+            : deepSerialize(
+                value,
+                seen,
+                depth,
+                `${path}.${key}`,
+                report,
+                budget,
+              ),
+        );
+
+        continue;
+      }
+
       defineEntry(result, key, value);
 
       continue;

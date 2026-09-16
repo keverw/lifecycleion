@@ -1976,15 +1976,66 @@ describe('FileSink - async self-logging onError', () => {
     await new Promise((resolve) => setTimeout(resolve, 100));
     await sink.flush();
 
-    expect(calls).toBe(1);
-    expect(sink.getHealth().droppedEntries).toBe(2);
-    // Both were format losses, and the breakdown says so.
+    // One deferred report is allowed after the async handler settles; the line that
+    // handler logs is reported once, and its handler's own line is the recursion fuse.
+    expect(calls).toBe(2);
+    expect(sink.getHealth().droppedEntries).toBe(3);
+    // All three were format losses, and the breakdown says so.
     expect(sink.getHealth().droppedByKind).toEqual({
       queue_full: 0,
       write: 0,
-      format: 2,
+      format: 3,
       close: 0,
     });
+
+    await sink.close();
+  });
+
+  test('reports one concurrent format failure after the active handler settles', async () => {
+    let releaseFirst!: () => void;
+    const firstPending = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const entries: LogEntry[] = [];
+
+    const sink = new FileSink({
+      logDir: tmpDir.path,
+      basename: 'concurrent-format',
+      jsonFormat: true,
+      onError: (failure) => {
+        if (failure.kind !== 'format' || failure.entry === undefined) {
+          return;
+        }
+
+        entries.push(failure.entry);
+
+        return entries.length === 1 ? firstPending : undefined;
+      },
+    });
+
+    await sink.flush();
+
+    sink.write({
+      timestamp: Date.now(),
+      type: 'info',
+      template: 'first',
+      message: UNRENDERABLE_MESSAGE,
+    });
+    sink.write({
+      timestamp: Date.now(),
+      type: 'info',
+      template: 'second',
+      message: UNRENDERABLE_MESSAGE,
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(entries).toHaveLength(1);
+
+    releaseFirst();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(entries).toHaveLength(2);
+    expect(sink.getHealth().droppedByKind.format).toBe(2);
 
     await sink.close();
   });

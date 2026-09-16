@@ -70,27 +70,34 @@ export function isErrorValue(value: unknown): value is Error {
  */
 const domExceptionCodeGetter = (():
   ((this: unknown) => unknown) | undefined => {
-  const ctor: unknown = (globalThis as { DOMException?: unknown }).DOMException;
+  try {
+    const ctor: unknown = (globalThis as { DOMException?: unknown })
+      .DOMException;
 
-  if (typeof ctor !== 'function') {
+    if (typeof ctor !== 'function') {
+      return undefined;
+    }
+
+    const prototype: unknown = (ctor as { prototype?: unknown }).prototype;
+
+    if (typeof prototype !== 'object' || prototype === null) {
+      return undefined;
+    }
+
+    // Read off a plain record rather than as a method, which is what it is: an accessor
+    // to be invoked with a receiver of this module's choosing.
+    const descriptor = Object.getOwnPropertyDescriptor(prototype, 'code') as
+      { get?: unknown } | undefined;
+    const getter = descriptor?.get;
+
+    return typeof getter === 'function'
+      ? (getter as (this: unknown) => unknown)
+      : undefined;
+  } catch {
+    // A host can expose globals through accessors or proxies. Optional runtime probing
+    // must never make importing the error utilities fail.
     return undefined;
   }
-
-  const prototype: unknown = (ctor as { prototype?: unknown }).prototype;
-
-  if (typeof prototype !== 'object' || prototype === null) {
-    return undefined;
-  }
-
-  // Read off a plain record rather than as a method, which is what it is: an accessor
-  // to be invoked with a receiver of this module's choosing.
-  const descriptor = Object.getOwnPropertyDescriptor(prototype, 'code') as
-    { get?: unknown } | undefined;
-  const getter = descriptor?.get;
-
-  return typeof getter === 'function'
-    ? (getter as (this: unknown) => unknown)
-    : undefined;
 })();
 
 function isDOMExceptionInstance(value: unknown): boolean {

@@ -130,8 +130,25 @@ function hasTemplateMember(value: object, key: string): boolean {
     return true;
   }
 
-  if (key === 'length' && Array.isArray(value)) {
-    return true;
+  if (key === 'length') {
+    if (Array.isArray(value) || ArrayBuffer.isView(value)) {
+      return true;
+    }
+
+    // `arguments` has an own, non-enumerable numeric length. Do not generalize this to
+    // inherited accessors: the narrow own-data check keeps arbitrary hidden properties
+    // outside the template surface.
+    const descriptor = Object.getOwnPropertyDescriptor(value, 'length');
+
+    if (
+      descriptor !== undefined &&
+      'value' in descriptor &&
+      typeof descriptor.value === 'number' &&
+      Number.isSafeInteger(descriptor.value) &&
+      descriptor.value >= 0
+    ) {
+      return true;
+    }
   }
 
   if (
@@ -148,19 +165,33 @@ function hasTemplateMember(value: object, key: string): boolean {
   // Object.prototype of that realm. Checking `key in value` here would put the polluted
   // prototype route straight back for these four names.
   let owner: object | null = value;
+  const seen = new Set<object>();
+  let isFirst = true;
 
   while (owner !== null) {
+    if (seen.has(owner)) {
+      return false;
+    }
+
+    seen.add(owner);
+
     const parent = Object.getPrototypeOf(owner) as object | null;
+
+    // Inspect a null-prototype Error instance itself, but not the terminal prototype of
+    // an ordinary chain (Object.prototype, including its cross-realm counterpart).
+    if (
+      (isFirst || parent !== null) &&
+      Object.prototype.hasOwnProperty.call(owner, key)
+    ) {
+      return true;
+    }
 
     if (parent === null) {
       return false;
     }
 
-    if (Object.prototype.hasOwnProperty.call(owner, key)) {
-      return true;
-    }
-
     owner = parent;
+    isFirst = false;
   }
 
   return false;

@@ -4,7 +4,10 @@ import {
 } from '../../internal/default-redact-function';
 import { defineEntry } from '../../internal/container-entries';
 import { isPlainContainer } from '../../internal/is-plain-container';
-import { normalizeAlongRedactPaths } from '../../internal/redact-normalization';
+import {
+  isEnumerableBeforeTerminalPrototype,
+  normalizeAlongRedactPaths,
+} from '../../internal/redact-normalization';
 import {
   MAX_REDACTION_ENTRIES,
   parseRedactPaths,
@@ -97,6 +100,10 @@ function normalizeParamsBag(
   let defined = 0;
 
   for (const key in params) {
+    if (!isEnumerableBeforeTerminalPrototype(params, key)) {
+      continue;
+    }
+
     if (defined >= MAX_REDACTION_ENTRIES) {
       throw new Error(
         `params has more than ${String(MAX_REDACTION_ENTRIES)} keys; redaction refused the bag`,

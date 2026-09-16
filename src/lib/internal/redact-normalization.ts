@@ -26,6 +26,40 @@ import {
   type RedactPrefixNode,
 } from './redact-paths';
 
+/** Whether an enumerable key is supplied before the terminal Object.prototype. */
+export function isEnumerableBeforeTerminalPrototype(
+  source: object,
+  key: string,
+): boolean {
+  let owner: object | null = source;
+  let isFirst = true;
+  const seen = new Set<object>();
+
+  while (owner !== null) {
+    if (seen.has(owner)) {
+      return false;
+    }
+
+    seen.add(owner);
+
+    const descriptor = Object.getOwnPropertyDescriptor(owner, key);
+    const parent = Object.getPrototypeOf(owner) as object | null;
+
+    if (descriptor !== undefined) {
+      return descriptor.enumerable === true && (isFirst || parent !== null);
+    }
+
+    if (parent === null) {
+      return false;
+    }
+
+    owner = parent;
+    isFirst = false;
+  }
+
+  return false;
+}
+
 /**
  * A container holding exactly the keys `for...in` yields, each forwarding to the original.
  *
@@ -182,14 +216,19 @@ function forwardingContainerCopy(
     copies.set(recordCopy, recordCopy);
     aliases.set(recordCopy, source);
 
-    // `for...in`, matching the bag's own copy: a key on the prototype is resolvable by the
-    // renderer, so the walk has to see it too.
+    // `for...in`, matching the bag's own copy: a key on a custom prototype is resolvable
+    // by the renderer, so the walk has to see it too. Terminal Object.prototype pollution
+    // is excluded so it is not promoted into an own key on the snapshot.
     //
     // Counted against the same bound as the array branch above, since an `ownKeys` trap is
     // as free to invent a million keys as a `length` trap is to invent a million elements.
     let defined = 0;
 
     for (const key in record) {
+      if (!isEnumerableBeforeTerminalPrototype(record, key)) {
+        continue;
+      }
+
       if (defined >= MAX_REDACTION_ENTRIES) {
         return discard();
       }

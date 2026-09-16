@@ -33,7 +33,9 @@ import {
   chargeNestedText,
   chargeText,
   chargeUnits,
+  createSiblingBudget,
   createRenderBudget,
+  foldTruncations,
   MAX_RENDER_DEPTH,
   MAX_RENDER_LENGTH,
   noteTruncation,
@@ -543,6 +545,8 @@ function redactAddressedValue(
     return value;
   }
 
+  const maskBudget = createSiblingBudget(budget);
+
   try {
     // `reportRender` as well as `report`, the same split this file already keeps
     // everywhere else: a leaf renders on its way to the mask, and a `toString` that throws
@@ -558,7 +562,7 @@ function redactAddressedValue(
         reportRender,
         // This render's own allowance, so masking and the table that follows spend one
         // budget between them. See `StringifyValueOptions.maxRenderLength`.
-        budget,
+        maskBudget,
       );
     }
 
@@ -592,13 +596,18 @@ function redactAddressedValue(
         unrootedReport(report),
         aliases,
         unrootedReport(reportRender),
-        budget,
+        maskBudget,
       ),
     );
   } catch (error) {
     report(error, '<sensitiveFieldNames>');
 
     return REDACTION_FAILED_MARKER;
+  } finally {
+    // Masking is a sibling pass over the same value the table/string renderer emits.
+    // Only its truncation signals are folded back; charging its reads against the main
+    // allowance would count every masked character twice.
+    foldTruncations(budget, maskBudget);
   }
 }
 

@@ -86,6 +86,34 @@ describe('Logger', () => {
       }
     });
 
+    test('redaction does not promote enumerable Object.prototype pollution', () => {
+      Object.defineProperty(Object.prototype, 'pollutedSecret', {
+        configurable: true,
+        enumerable: true,
+        value: 'hunter2secret',
+      });
+
+      try {
+        logger.info('polluted={{pollutedSecret}}', {
+          params: { ordinary: true },
+          redactedKeys: ['missing'],
+        });
+
+        expect(arraySink.logs[0]?.message).toBe('polluted=(null)');
+        expect(
+          Object.prototype.hasOwnProperty.call(
+            arraySink.logs[0]?.params,
+            'pollutedSecret',
+          ),
+        ).toBe(false);
+        expect(JSON.stringify(arraySink.logs[0]?.params)).not.toContain(
+          'hunter2secret',
+        );
+      } finally {
+        delete (Object.prototype as Record<string, unknown>)['pollutedSecret'];
+      }
+    });
+
     test('should log error message', () => {
       logger.error('Test error message');
 

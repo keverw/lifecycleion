@@ -1002,8 +1002,8 @@ export class CookieJar {
   /**
    * Whether the jar already holds a Secure cookie named `name` whose scope meets a new
    * cookie stored for `domain` / `path` - RFC 6265bis §5.7 step 21: the stored cookie's
-   * domain domain-matches the new cookie's domain *or vice versa*, and its path
-   * path-matches the new path. Both directions, and without regard to `hostOnly`: a
+   * domain domain-matches the new cookie's domain *or vice versa*, and either path
+   * path-matches the other. Both directions, and without regard to `hostOnly`: a
    * host-only Secure cookie on `app.example.com` is shadowed by a `Domain=example.com`
    * cookie planted from `http://example.com`, which the send path would deliver beside
    * it, so the wider plant must be refused as much as the narrower one.
@@ -1033,7 +1033,11 @@ export class CookieJar {
         this.domainMatches(domain, scope.domain) ||
         this.domainMatches(scope.domain, domain);
 
-      if (isDomainMatch && this.pathMatches(path, scope.path)) {
+      if (
+        isDomainMatch &&
+        (this.pathMatches(path, scope.path) ||
+          this.pathMatches(scope.path, path))
+      ) {
         return true;
       }
     }

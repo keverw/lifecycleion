@@ -257,3 +257,34 @@ describe('isErrorValue', () => {
     }
   });
 });
+
+describe('DOMException capability probing', () => {
+  test('a throwing global DOMException getter does not abort module evaluation', async () => {
+    const descriptor = Object.getOwnPropertyDescriptor(
+      globalThis,
+      'DOMException',
+    );
+
+    Object.defineProperty(globalThis, 'DOMException', {
+      configurable: true,
+      get() {
+        throw new Error('hostile global getter');
+      },
+    });
+
+    try {
+      // Query suffix deliberately asks Bun to evaluate a fresh module instance after the
+      // hostile global is installed; TypeScript does not resolve query-suffixed modules.
+      // @ts-expect-error dynamic test-only module identity
+      const imported = await import('./to-error?hostile-domexception-probe');
+
+      expect(imported.isErrorValue(new Error('still works'))).toBe(true);
+    } finally {
+      if (descriptor === undefined) {
+        delete (globalThis as { DOMException?: unknown }).DOMException;
+      } else {
+        Object.defineProperty(globalThis, 'DOMException', descriptor);
+      }
+    }
+  });
+});

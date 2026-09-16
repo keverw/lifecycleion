@@ -22,6 +22,8 @@
  * does.
  */
 
+import { splitGraphemes } from './internal/graphemes';
+
 /**
  * Split a string into the characters the masks count in.
  *
@@ -36,45 +38,7 @@
  * counts the same units the mask will.
  */
 export function splitCharacters(value: string): string[] {
-  const segmenter = graphemeSegmenter();
-
-  if (segmenter === undefined) {
-    return Array.from(value);
-  }
-
-  const characters: string[] = [];
-
-  for (const { segment } of segmenter.segment(value)) {
-    characters.push(segment);
-  }
-
-  return characters;
-}
-
-/**
- * One segmenter for the module, built on first use: constructing one is the expensive
- * part, segmenting with it is not. `undefined` where the runtime has no `Intl.Segmenter`.
- */
-let cachedSegmenter: Intl.Segmenter | undefined | null = null;
-
-function graphemeSegmenter(): Intl.Segmenter | undefined {
-  if (cachedSegmenter === null) {
-    const ctor = (Intl as { Segmenter?: typeof Intl.Segmenter }).Segmenter;
-
-    // Mark the probe complete before invoking host code. A broken implementation should
-    // cost one failed construction, not one throw/catch for every redacted leaf forever.
-    cachedSegmenter = undefined;
-
-    if (typeof ctor === 'function') {
-      try {
-        cachedSegmenter = new ctor(undefined, { granularity: 'grapheme' });
-      } catch {
-        // Code-point splitting is the documented fallback when Segmenter is unavailable.
-      }
-    }
-  }
-
-  return cachedSegmenter;
+  return splitGraphemes(value);
 }
 
 /** The mask character used when none is given. */

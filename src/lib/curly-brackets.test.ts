@@ -388,6 +388,46 @@ describe('CurlyBrackets', () => {
     ).toBe('2 0 (null)');
   });
 
+  it('resolves typed-array, Buffer and arguments length', () => {
+    function getArguments(..._values: unknown[]): IArguments {
+      // Deliberately exercise the special non-enumerable `arguments.length` shape.
+      // eslint-disable-next-line prefer-rest-params
+      return arguments;
+    }
+
+    expect(
+      CurlyBrackets('{{typed.length}} {{buffer.length}} {{args.length}}', {
+        typed: new Uint8Array(4),
+        buffer: Buffer.from('abc'),
+        args: getArguments('one', 'two'),
+      }),
+    ).toBe('4 3 2');
+  });
+
+  it('terminates an Error prototype cycle and reads a null-prototype Error own field', () => {
+    const holder: { value?: object } = {};
+    const cyclicPrototype = new Proxy(
+      {},
+      {
+        getPrototypeOf: (): object => holder.value as object,
+      },
+    );
+
+    holder.value = cyclicPrototype;
+    const cyclic = new Error('boom');
+
+    Object.setPrototypeOf(cyclic, cyclicPrototype);
+
+    const bare = new Error('own message');
+
+    Object.setPrototypeOf(bare, null);
+
+    expect(CurlyBrackets('{{error.name}}', { error: cyclic })).toBe('(null)');
+    expect(CurlyBrackets('{{error.message}}', { error: bare })).toBe(
+      'own message',
+    );
+  });
+
   it('returns promptly for an unclosed placeholder followed by whitespace', () => {
     const template = `{{${' '.repeat(500)}`;
     const startedAt = performance.now();

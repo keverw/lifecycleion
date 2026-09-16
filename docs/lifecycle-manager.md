@@ -2220,7 +2220,7 @@ lifecycle.on('lifecycle-manager:shutdown-completed', (data) => {
 - `lifecycle-manager:shutdown-warning` - Global warning phase started
 - `lifecycle-manager:shutdown-warning-completed` - Warning phase completed
 - `lifecycle-manager:shutdown-warning-timeout` - Warning phase timed out
-- `lifecycle-manager:shutdown-completed` - Shutdown attempt completed, includes the `ShutdownResult` fields at the top level plus `method` / `duringStartup`. This is the best single event for centralized logging or follow-up policy when shutdown times out or leaves stalled components. If the global shutdown timeout was hit, the payload reflects the result at the moment the manager stopped waiting
+- `lifecycle-manager:shutdown-completed` - Shutdown attempt completed, includes the `ShutdownResult` fields at the top level plus `method` / `duringStartup`. This is the best single event for centralized logging or follow-up policy when shutdown times out or leaves stalled components. If the global shutdown timeout was hit, the payload reflects the result at the moment the public call stopped waiting. The component stop already in flight is not cancelled: the manager remains in shutdown and rejects overlapping start/stop operations until that stop settles.
 
 **Component Registration:**
 

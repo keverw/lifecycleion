@@ -81,29 +81,6 @@ async function waitForOpenPipe(
   return false;
 }
 
-// Open failures are asynchronous too. Tests interested in a particular failure wait for
-// that observable result instead of assuming the filesystem, stream open, and fstat have
-// all completed within a fixed number of milliseconds.
-async function waitForFailure(
-  failures: SinkFailure[],
-  predicate: (failure: SinkFailure) => boolean,
-  timeoutMS = 5000,
-): Promise<SinkFailure | undefined> {
-  const deadline = Date.now() + timeoutMS;
-
-  while (Date.now() < deadline) {
-    const failure = failures.find(predicate);
-
-    if (failure !== undefined) {
-      return failure;
-    }
-
-    await new Promise((resolve) => setTimeout(resolve, 25));
-  }
-
-  return failures.find(predicate);
-}
-
 // A reader's data arrives whenever the FIFO delivers it, which under a full suite run can
 // be well after any fixed delay. Waited for by content rather than by clock: the assertion
 // wants the line, not a moment.
@@ -314,61 +291,35 @@ describe('NamedPipeSink', () => {
     await sink.close();
   });
 
-  test('refuses a path swapped for a regular file between the probe and the open', async () => {
-    // The `stat` and the probe answer for the path as it was; `createWriteStream` opens
-    // it again by name. A FIFO replaced by a regular file in that window passed the
-    // `not_a_pipe` check and then took every line as an append to an ordinary file. The
-    // check now runs on the descriptor the stream actually opened. The swap is
-    // simulated by pointing the open at a regular file after the probe has passed.
-    const pipePath = `${tmpDir.path}/swapped.pipe`;
-    const filePath = `${tmpDir.path}/swapped-in.txt`;
+  test('hands the non-blocking probe descriptor to the stream without reopening the path', async () => {
+    // Reopening by pathname was both a path-swap opportunity and a blocking FIFO open
+    // that could pin the process after close. The stream must use the descriptor which
+    // already passed the non-blocking probe and descriptor-level FIFO check.
+    const pipePath = `${tmpDir.path}/descriptor-handoff.pipe`;
     await createNamedPipe(pipePath);
-    await fsPromises.writeFile(filePath, '');
 
     const reader = startPipeReader(pipePath);
-    const errors: SinkFailure[] = [];
-
-    const realCreate = fs.createWriteStream.bind(fs);
-    const createSpy = spyOn(fs, 'createWriteStream').mockImplementation(
-      (
-        target: fs.PathLike,
-        options?: Parameters<typeof fs.createWriteStream>[1],
-      ): fs.WriteStream =>
-        realCreate(target === pipePath ? filePath : target, options),
-    );
-
-    const sink = new NamedPipeSink({
-      pipePath,
-      onError: (failure) => {
-        errors.push(failure);
-      },
-    });
+    const sink = new NamedPipeSink({ pipePath });
 
     try {
-      const swappedPathFailure = await waitForFailure(
-        errors,
-        (failure) => failure.kind === 'not_a_pipe',
-      );
+      expect(await waitForOpenPipe(sink)).toBe(true);
 
-      expect(sink.getHealth().isInitialized).toBe(false);
-      expect(swappedPathFailure?.kind).toBe(
-        'not_a_pipe' satisfies SinkFailureKind,
-      );
+      // No pathname-backed pending open exists: the descriptor returned by the probe is
+      // already installed as the active stream.
+      expect(
+        (sink as unknown as { pendingStream?: fs.WriteStream }).pendingStream,
+      ).toBeUndefined();
 
       sink.write({
         timestamp: Date.now(),
         type: 'info',
-        template: 'must not land in the file',
-        message: 'must not land in the file',
+        template: 'through the original descriptor',
+        message: 'through the original descriptor',
       });
 
-      // Wait for a complete second open attempt rather than sleeping and possibly reading
-      // the file before the vulnerable path has even run.
-      expect((await sink.reconnect()).success).toBe(false);
-
-      expect(await fsPromises.readFile(filePath, 'utf8')).toBe('');
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(reader.data.join('')).toContain('through the original descriptor');
     } finally {
-      createSpy.mockRestore();
       await sink.close();
       reader.stop();
     }
@@ -3176,7 +3127,9 @@ describe('NamedPipeSink', () => {
     // `await fsPromises.stat()` - so a `write()` in the same tick as `new NamedPipeSink()`,
     // which is the ordinary case, walked through every guard and started a second open.
     // Opening a FIFO with no reader does not fail, it *blocks*, holding one of libuv's
-    // four threadpool slots for as long as it waits.
+    // four threadpool slots for as long as it waits. The current path probes once through
+    // `fs.open` and hands that descriptor to its bounded writable, so no pathname-backed
+    // WriteStream open should occur at all.
     const pipePath = `${tmpDir.path}/single-open.pipe`;
     await createNamedPipe(pipePath);
 
@@ -3211,7 +3164,7 @@ describe('NamedPipeSink', () => {
 
       expect(await waitForOpenPipe(sink)).toBe(true);
 
-      expect(opened.filter((target) => target === pipePath).length).toBe(1);
+      expect(opened.filter((target) => target === pipePath).length).toBe(0);
 
       await sink.close();
     } finally {
@@ -3735,15 +3688,64 @@ describe('NamedPipeSink', () => {
 
     await new Promise((resolve) => setTimeout(resolve, 100));
 
-    expect(calls).toBe(1);
-    expect(sink.getHealth().droppedEntries).toBe(2);
-    // Both were format losses, and the breakdown says so.
+    // One deferred report is allowed after the async handler settles; the line that
+    // handler logs is reported once, and its handler's own line is the recursion fuse.
+    expect(calls).toBe(2);
+    expect(sink.getHealth().droppedEntries).toBe(3);
+    // All three were format losses, and the breakdown says so.
     expect(sink.getHealth().droppedByKind).toEqual({
       queue_full: 0,
       write: 0,
-      format: 2,
+      format: 3,
       close: 0,
     });
+
+    await sink.close();
+  }, 15000);
+
+  test('reports one concurrent format failure after the active handler settles', async () => {
+    const pipePath = `${tmpDir.path}/concurrent-format.pipe`;
+    let releaseFirst!: () => void;
+    const firstPending = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const messages: string[] = [];
+
+    const sink = new NamedPipeSink({
+      pipePath,
+      closeTimeoutMS: 500,
+      jsonFormat: true,
+      onError: (failure) => {
+        if (failure.kind !== 'format') {
+          return;
+        }
+
+        messages.push(failure.entry?.message ?? 'missing');
+
+        return messages.length === 1 ? firstPending : undefined;
+      },
+    });
+
+    sink.write({
+      timestamp: Date.now(),
+      type: 'info',
+      template: 'first',
+      message: UNRENDERABLE_MESSAGE,
+    });
+    sink.write({
+      timestamp: Date.now(),
+      type: 'info',
+      template: 'second',
+      message: UNRENDERABLE_MESSAGE,
+    });
+
+    expect(messages).toEqual([UNRENDERABLE_MESSAGE]);
+
+    releaseFirst();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(messages).toEqual([UNRENDERABLE_MESSAGE, UNRENDERABLE_MESSAGE]);
+    expect(sink.getHealth().droppedByKind.format).toBe(2);
 
     await sink.close();
   }, 15000);

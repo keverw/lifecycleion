@@ -1402,11 +1402,11 @@ until something opens the read end. Until then `getHealth().isInitialized` is `f
 lines accumulate under `maxQueueSize` rather than in Node's own unbounded stream buffer.
 A `reconnect()` with nothing reading the pipe therefore reports failure rather than claiming
 success, and it reports it immediately: the sink asks whether a reader is there with a
-non-blocking open before it performs the real one, and gets `ENXIO` straight back when
-there is none. That is also what keeps a reader-less FIFO from parking a file-I/O thread
-and holding the whole process open. A blocking open of a pipe nobody is reading never
-returns and cannot be cancelled. The sink keeps asking on an `unref`'d one-second timer, so
-it opens and flushes the queue on its own if a reader turns up later.
+non-blocking open and gets `ENXIO` straight back when there is none. When it succeeds, that
+same descriptor becomes the writable connection; there is no second blocking open in a
+probe-to-stream gap. That is also what keeps a reader-less FIFO from parking a file-I/O
+thread and holding the whole process open. The sink keeps asking on an `unref`'d one-second
+timer, so it opens and flushes the queue on its own if a reader turns up later.
 
 `close()` gets one last chance at the pipe. If entries are still queued and the sink has no
 open stream, it re-probes for a reader across a short grace window (500ms, polled every

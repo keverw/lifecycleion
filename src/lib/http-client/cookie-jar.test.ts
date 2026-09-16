@@ -1499,6 +1499,10 @@ describe('CookieJar', () => {
       [{ add: [''] }, 'empty suffix'],
       [{ add: ['*.example.com'] }, 'wildcard'],
       [{ add: ['a..b'] }, 'empty label'],
+      [{ add: ['https://corp.internal'] }, 'scheme'],
+      [{ add: ['corp internal'] }, 'whitespace'],
+      [{ add: ['corp/internal'] }, 'path separator'],
+      [{ add: ['-corp.internal'] }, 'leading hyphen'],
       [{ add: [42 as unknown as string] }, 'non-string'],
       [{ add: ['corp.internal'], remove: ['corp.internal'] }, 'contradiction'],
     ])('throws on a %o config (%s)', (publicSuffixes) => {
@@ -1731,33 +1735,31 @@ describe('CookieJar', () => {
       expect(jar.getCookiesFor('http://sub.example.com/')).toHaveLength(0);
     });
 
-    test("a non-Secure cookie from http outside the Secure cookie's tree or path is stored", () => {
-      // A Secure cookie scoped to `/admin` does not cover `/`, and another registrable
-      // domain is another bucket entirely. Neither is a shadow.
+    test('a wider-path cookie from http cannot shadow a path-scoped Secure cookie', () => {
       jar.parseSetCookieHeader(
         'scoped=real; Secure; Path=/admin',
         'https://example.com/admin',
       );
       jar.parseSetCookieHeader('scoped=other; Path=/', 'http://example.com/');
-      jar.parseSetCookieHeader('session=real; Secure', 'https://example.com/');
-      jar.parseSetCookieHeader('session=elsewhere', 'http://example.org/');
 
-      expect(jar.getCookieFor('scoped', 'http://example.com/')?.value).toBe(
-        'other',
-      );
-      expect(jar.getCookieFor('session', 'http://example.org/')?.value).toBe(
-        'elsewhere',
-      );
-      // And the Secure originals are untouched.
-      expect(jar.getCookieFor('session', 'https://example.com/')?.value).toBe(
-        'real',
-      );
       expect(
         jar
           .getCookiesFor('https://example.com/admin')
           .filter((c) => c.name === 'scoped')
           .map((c) => c.value),
-      ).toEqual(['real', 'other']);
+      ).toEqual(['real']);
+    });
+
+    test("a non-Secure cookie outside the Secure cookie's domain tree is stored", () => {
+      jar.parseSetCookieHeader('session=real; Secure', 'https://example.com/');
+      jar.parseSetCookieHeader('session=elsewhere', 'http://example.org/');
+
+      expect(jar.getCookieFor('session', 'http://example.org/')?.value).toBe(
+        'elsewhere',
+      );
+      expect(jar.getCookieFor('session', 'https://example.com/')?.value).toBe(
+        'real',
+      );
     });
 
     test('the shadow check reads the stored scope, not a mutated live cookie', () => {

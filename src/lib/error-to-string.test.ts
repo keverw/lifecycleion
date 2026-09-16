@@ -2202,6 +2202,27 @@ describe('maxRenderLength and onTruncate', () => {
     expect(unbounded.length).toBeGreaterThan(bounded.length);
   });
 
+  it('does not charge masked content again before rendering it', () => {
+    const body = 'z'.repeat(400_000);
+    const plain = errorWith({ body });
+    const masked = errorWith({ body }) as Error & {
+      sensitiveFieldNames: string[];
+    };
+
+    masked.sensitiveFieldNames = ['body'];
+
+    const plainLength = errorToString(plain, undefined, {
+      maxRenderLength: 500_000,
+    }).length;
+    const maskedLength = errorToString(masked, undefined, {
+      maxRenderLength: 500_000,
+    }).length;
+
+    expect(plainLength).toBeGreaterThan(300_000);
+    expect(maskedLength).toBeGreaterThan(300_000);
+    expect(Math.abs(maskedLength - plainLength)).toBeLessThan(100);
+  });
+
   it('does not route truncation through onFormatError', () => {
     const failures: unknown[] = [];
 

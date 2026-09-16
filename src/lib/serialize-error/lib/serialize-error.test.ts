@@ -4,6 +4,7 @@ import {
   serializeError,
   deserializeError,
   isErrorLike,
+  type SerializedError,
 } from './serialize-error';
 
 function withExtras(error: Error): Error & Record<string, unknown> {
@@ -831,6 +832,34 @@ describe('error-shaped objects with inherited members', () => {
     expect(serialized.message).toEndWith('[max length exceeded]');
     expect(serialized['[max length exceeded]']).toBe('[max length exceeded]');
     expect(JSON.stringify(serialized).length).toBeLessThan(1_100_000);
+  });
+
+  test('preserves cause after a message spends the general text allowance', () => {
+    const serialized = serializeError(
+      new Error('x'.repeat(2_000_000), {
+        cause: new Error('nested-cause-secret'),
+      }),
+    );
+
+    expect(serialized).toHaveProperty('cause');
+    expect((serialized.cause as SerializedError).message).toBe(
+      'nested-cause-secret',
+    );
+    expect(JSON.stringify(serialized).length).toBeLessThan(1_100_000);
+  });
+
+  test('preserves AggregateError errors after a huge message', () => {
+    const serialized = serializeError(
+      new AggregateError(
+        [new Error('first nested failure')],
+        'x'.repeat(2_000_000),
+      ),
+    );
+
+    expect(serialized).toHaveProperty('errors');
+    expect((serialized.errors as SerializedError[])[0]?.message).toBe(
+      'first nested failure',
+    );
   });
 
   test('bounds a single enormous property name too', () => {

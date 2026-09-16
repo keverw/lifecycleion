@@ -128,7 +128,7 @@ import { MAX_TIMER_MS } from '../internal/timer-limits';
  * fields and per-call overrides still reach this boundary directly.
  */
 function toTimerDelayMS(requested: number): number {
-  if (!Number.isFinite(requested)) {
+  if (!Number.isFinite(requested) || requested < 0) {
     return MAX_TIMER_MS;
   }
 
@@ -3315,6 +3315,7 @@ export class LifecycleManager
     const stoppedComponents = new Set<string>();
     let hasTimedOut = false;
     let timeoutHandle: NodeJS.Timeout | undefined;
+    let pendingShutdownOperation: Promise<void> | null = null;
 
     try {
       // Start global timeout clock (halts further stop attempts after it fires)
@@ -3422,10 +3423,12 @@ export class LifecycleManager
         }
       };
 
+      pendingShutdownOperation = shutdownOperation();
+
       if (timeoutPromise) {
-        await Promise.race([shutdownOperation(), timeoutPromise]);
+        await Promise.race([pendingShutdownOperation, timeoutPromise]);
       } else {
-        await shutdownOperation();
+        await pendingShutdownOperation;
       }
 
       const finalStalledNames = new Set<string>();
@@ -3512,11 +3515,32 @@ export class LifecycleManager
         clearTimeout(timeoutHandle);
       }
 
-      // Reset state
-      this.isShuttingDown = false;
-      this.updateStartedFlag();
+      const finishShutdownState = () => {
+        this.isShuttingDown = false;
+        this.updateStartedFlag();
+        this.finalizePendingLoggerExit();
+      };
 
-      this.finalizePendingLoggerExit();
+      if (hasTimedOut && pendingShutdownOperation !== null) {
+        // The public timeout remains an early return, but the operation it raced is not
+        // cancelled. Keep the manager in shutdown until that operation really settles so
+        // start/retry calls cannot overlap the still-running component.stop().
+        void pendingShutdownOperation
+          .catch((error: unknown) => {
+            try {
+              this.logger.warn(
+                'Shutdown operation failed after the global timeout: {{error.message}}',
+                { params: { error: toError(error) } },
+              );
+            } catch {
+              // This is the terminal rejection handler; a reporting failure must not
+              // turn the late shutdown failure into an unhandled rejection.
+            }
+          })
+          .then(finishShutdownState, finishShutdownState);
+      } else {
+        finishShutdownState();
+      }
     }
   }
 
@@ -3753,7 +3777,23 @@ export class LifecycleManager
             // Call abort callback if implemented
             if (component.onStartupAborted) {
               try {
-                component.onStartupAborted();
+                Promise.resolve(component.onStartupAborted()).catch(
+                  (error: unknown) => {
+                    try {
+                      const err = toError(error);
+
+                      this.logger
+                        .entity(name)
+                        .warn(
+                          'Error in onStartupAborted callback: {{error.message}}',
+                          { params: { error: err } },
+                        );
+                    } catch {
+                      // Terminal rejection handler: reporting must not create another
+                      // unhandled rejection from this timer path.
+                    }
+                  },
+                );
               } catch (error) {
                 const err = toError(error);
 
@@ -4331,7 +4371,22 @@ export class LifecycleManager
             // Call abort callback if implemented
             if (component.onGracefulStopTimeout) {
               try {
-                component.onGracefulStopTimeout();
+                Promise.resolve(component.onGracefulStopTimeout()).catch(
+                  (error: unknown) => {
+                    try {
+                      const err = toError(error);
+
+                      this.logger
+                        .entity(name)
+                        .warn(
+                          'Error in onGracefulStopTimeout callback: {{error.message}}',
+                          { params: { error: err } },
+                        );
+                    } catch {
+                      // See the startup-abort hook above.
+                    }
+                  },
+                );
               } catch (error) {
                 const err = toError(error);
 
@@ -4580,7 +4635,22 @@ export class LifecycleManager
             // Call abort callback if implemented
             if (component.onShutdownForceAborted) {
               try {
-                component.onShutdownForceAborted();
+                Promise.resolve(component.onShutdownForceAborted()).catch(
+                  (error: unknown) => {
+                    try {
+                      const err = toError(error);
+
+                      this.logger
+                        .entity(name)
+                        .warn(
+                          'Error in onShutdownForceAborted callback: {{error.message}}',
+                          { params: { error: err } },
+                        );
+                    } catch {
+                      // See the startup-abort hook above.
+                    }
+                  },
+                );
               } catch (error) {
                 const err = toError(error);
 

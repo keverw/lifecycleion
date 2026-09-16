@@ -9908,6 +9908,30 @@ describe('LifecycleManager - Signal Integration', () => {
       expect(result.durationMS).toBeGreaterThanOrEqual(50);
       expect(result.durationMS).toBeLessThan(200);
     });
+
+    test('keeps shutdown active until the stop raced by the global timeout settles', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+
+      await lifecycle.registerComponent(
+        new SlowStopComponent(logger, 'slow', 150),
+      );
+      await lifecycle.startAllComponents();
+
+      const result = await lifecycle.stopAllComponents({ timeoutMS: 20 });
+
+      expect(result.code).toBe('shutdown_timeout');
+      expect((await lifecycle.startAllComponents()).code).toBe(
+        'shutdown_in_progress',
+      );
+      expect((await lifecycle.stopAllComponents()).code).toBe(
+        'already_in_progress',
+      );
+
+      await sleep(170);
+
+      expect((await lifecycle.startAllComponents()).success).toBe(true);
+      await lifecycle.stopAllComponents();
+    });
   });
 });
 

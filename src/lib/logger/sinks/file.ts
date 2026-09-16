@@ -321,7 +321,10 @@ export class FileSink implements LogSink {
    * that handler is still pending: a second failure reported meanwhile must not clear the
    * guard the first one still holds.
    */
-  private formatReportsInFlight = 0;
+  private formatReportActive = false;
+  private invokingFormatReport = false;
+  private deliveringDeferredFormatReport = false;
+  private deferredFormatReport?: (onReported: () => void) => void;
 
   constructor(options: FileSinkOptions) {
     this.logDir = options.logDir;
@@ -395,9 +398,13 @@ export class FileSink implements LogSink {
     // the bag `entry.redactedParams` points at, since redaction no longer copies it.
     const rendered = renderOnce(() => this.formatEntry(entry));
 
-    // See `formatReportsInFlight`. Only the unrenderable line is refused: a handler's
-    // line that does render is queued as any other, since it cannot re-enter the report.
-    if (rendered.formatError !== undefined && this.formatReportsInFlight > 0) {
+    // The one deferred report is the recursion fuse. If its handler logs another value
+    // that cannot render, count that line but do not enqueue a third generation which
+    // would begin after the guard settled and repeat forever.
+    if (
+      rendered.formatError !== undefined &&
+      (this.invokingFormatReport || this.deliveringDeferredFormatReport)
+    ) {
       this.countDropped('format');
 
       return;
@@ -854,6 +861,13 @@ export class FileSink implements LogSink {
       // Process any queued writes
       await this.processQueue();
     } catch (error) {
+      // `close()` may stop waiting for initialization before the filesystem operation
+      // itself settles. Once closing has begun, do not claim that a failed setup is still
+      // being retried after the sink has promised to shut down.
+      if (this.closing || this.closed) {
+        return;
+      }
+
       // Said, not swallowed. Entries do stay queued and `writeEntry` retries `setupLogFile`
       // later, so nothing is lost here - but a constructor-time `EACCES` or `EISDIR` left
       // no trace at all until some later write happened to hit the missing stream, and a
@@ -973,38 +987,35 @@ export class FileSink implements LogSink {
           // rescue you from. One line per entry actually lost says the same thing.
           if (this.onError !== undefined || !willRetry) {
             // Held across the report for a `'format'` failure only, and until the handler
-            // settles rather than returns - see `formatReportsInFlight`. A write failure
+            // settles rather than returns - see `scheduleFormatReport`. A write failure
             // is retried and the handler hears every attempt by contract; the chain this
             // breaks is the one where the handler's own line cannot render either.
-            const shouldGuardReentry = kind === 'format';
+            const report = (onReported?: () => void) =>
+              reportThroughHandler(
+                this.onError === undefined
+                  ? undefined
+                  : // The handler's result is returned, not dropped: `reportThroughHandler`
+                    // follows a promise so an `async` handler that rejects lands on the
+                    // console rung instead of becoming an unhandled rejection.
+                    () =>
+                      this.onError?.({
+                        kind,
+                        error: err,
+                        target: this.currentLogFile ?? this.logDir,
+                        entry: queuedEntry.entry,
+                        attempt: queuedEntry.attempts + 1,
+                        disposition: willRetry ? 'retrying' : 'lost',
+                      }),
+                () =>
+                  `FileSink error writing to ${this.currentLogFile ?? this.logDir}: ${describeError(err)}`,
+                onReported,
+              );
 
-            if (shouldGuardReentry) {
-              this.formatReportsInFlight++;
+            if (kind === 'format') {
+              this.scheduleFormatReport((onReported) => report(onReported));
+            } else {
+              report();
             }
-
-            reportThroughHandler(
-              this.onError === undefined
-                ? undefined
-                : // The handler's result is returned, not dropped: `reportThroughHandler`
-                  // follows a promise so an `async` handler that rejects lands on the
-                  // console rung instead of becoming an unhandled rejection.
-                  () =>
-                    this.onError?.({
-                      kind,
-                      error: err,
-                      target: this.currentLogFile ?? this.logDir,
-                      entry: queuedEntry.entry,
-                      attempt: queuedEntry.attempts + 1,
-                      disposition: willRetry ? 'retrying' : 'lost',
-                    }),
-              () =>
-                `FileSink error writing to ${this.currentLogFile ?? this.logDir}: ${describeError(err)}`,
-              shouldGuardReentry
-                ? () => {
-                    this.formatReportsInFlight--;
-                  }
-                : undefined,
-            );
           }
 
           if (willRetry) {
@@ -1834,42 +1845,86 @@ export class FileSink implements LogSink {
    * A value in `entry` would not render and a marker was written in its place.
    *
    * `'fallback'`, because the line goes out: this is advisory, and does not touch
-   * `consecutiveFailures`. Guarded by `formatReportsInFlight` for the same reason the
+   * `consecutiveFailures`. Guarded by `scheduleFormatReport` for the same reason the
    * lost-line report is - an `onError` that logs the failure back with the same
    * unrenderable value in it would report from inside its own report, without bound.
    * Under the guard the handler's line still renders, marker and all, and is queued;
    * only the nested report is skipped.
    */
   private reportRenderFallback(entry: LogEntry, error: Error): void {
-    if (this.formatReportsInFlight > 0) {
-      return;
-    }
-
     const failure = new FileSinkError(
       'Failed to render a value in the log entry; a marker was written in its place',
       error,
     );
 
     this.lastError = failure;
-    this.formatReportsInFlight++;
+    this.scheduleFormatReport((onReported) => {
+      reportThroughHandler(
+        this.onError === undefined
+          ? undefined
+          : () =>
+              this.onError?.({
+                kind: 'format',
+                error: failure,
+                target: this.currentLogFile ?? this.logDir,
+                entry,
+                disposition: 'fallback',
+              }),
+        () =>
+          `FileSink error rendering an entry for ${this.currentLogFile ?? this.logDir}: ${describeError(failure)}`,
+        onReported,
+      );
+    });
+  }
 
-    reportThroughHandler(
-      this.onError === undefined
-        ? undefined
-        : () =>
-            this.onError?.({
-              kind: 'format',
-              error: failure,
-              target: this.currentLogFile ?? this.logDir,
-              entry,
-              disposition: 'fallback',
-            }),
-      () =>
-        `FileSink error rendering an entry for ${this.currentLogFile ?? this.logDir}: ${describeError(failure)}`,
-      () => {
-        this.formatReportsInFlight--;
-      },
-    );
+  /** Deliver one format report now and retain at most one that arrives while it settles. */
+  private scheduleFormatReport(report: (onReported: () => void) => void): void {
+    if (this.formatReportActive) {
+      // While delivering the one deferred report, do not let self-logging create another
+      // generation. The lost entry is still reflected in health; only its callback is
+      // coalesced. No async-context machinery is needed, so browser-capable logger code
+      // remains portable.
+      if (
+        !this.invokingFormatReport &&
+        !this.deliveringDeferredFormatReport &&
+        this.deferredFormatReport === undefined
+      ) {
+        this.deferredFormatReport = report;
+      }
+
+      return;
+    }
+
+    this.startFormatReport(report, false);
+  }
+
+  private startFormatReport(
+    report: (onReported: () => void) => void,
+    isDeferred: boolean,
+  ): void {
+    this.formatReportActive = true;
+    this.deliveringDeferredFormatReport = isDeferred;
+
+    this.invokingFormatReport = true;
+
+    report(() => {
+      this.formatReportActive = false;
+      this.deliveringDeferredFormatReport = false;
+
+      if (isDeferred) {
+        return;
+      }
+
+      const pending = this.deferredFormatReport;
+
+      this.deferredFormatReport = undefined;
+
+      if (pending !== undefined) {
+        this.startFormatReport(pending, true);
+      }
+    });
+
+    this.invokingFormatReport = false;
   }
 
   /**

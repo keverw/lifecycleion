@@ -1,3 +1,5 @@
+import { graphemeBoundaryAtOrBefore } from './graphemes';
+
 /**
  * The bounds one render may not exceed, shared by every renderer that walks caller data.
  *
@@ -84,7 +86,7 @@ export const TRUNCATED_LENGTH = '[max length exceeded]';
 export const MIN_KEY_ALLOWANCE = 256;
 
 /**
- * Cut `text` at `end` without splitting a surrogate pair.
+ * Cut `text` at `end` without splitting a user-perceived character.
  *
  * `slice` counts UTF-16 code units, so a cut that lands between the two halves of an
  * astral character keeps a lone surrogate: `stringifyValue('😀'.repeat(200), {
@@ -94,8 +96,10 @@ export const MIN_KEY_ALLOWANCE = 256;
  * the text it is appended to - the grapheme-aware `splitWord` in the table renderer
  * already holds to that on the wrapping side.
  *
- * Only ever cuts one unit *shorter*, never longer, so every budget charged against the
- * result stays within its allowance.
+ * `Intl.Segmenter` supplies the full grapheme boundary where the runtime has it. The
+ * portable fallback covers surrogate pairs, combining marks, joiners, variation and
+ * skin-tone modifiers, tag sequences, and flags. Either path only ever cuts *shorter*,
+ * never longer, so every budget charged against the result stays within its allowance.
  */
 export function cutAt(text: string, end: number): string {
   const limit = Math.max(0, Math.min(end, text.length));
@@ -104,7 +108,10 @@ export function cutAt(text: string, end: number): string {
     return text.slice(0, limit);
   }
 
-  return text.slice(0, graphemeSafeCut(text, limit));
+  return text.slice(
+    0,
+    graphemeBoundaryAtOrBefore(text, limit) ?? graphemeSafeCut(text, limit),
+  );
 }
 
 /**

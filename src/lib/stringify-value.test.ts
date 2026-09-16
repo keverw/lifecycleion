@@ -2927,6 +2927,19 @@ describe('cutAt - a cut inside a character steps back to a boundary', () => {
     expect(cutAt(flags, 2)).toBe('');
   });
 
+  test('uses full grapheme boundaries for Hangul and Indic clusters', () => {
+    // These clusters are not expressible as a short list of attaching code points. They
+    // are the cases where the shared Intl.Segmenter path is stronger than the portable
+    // fallback used on runtimes without Segmenter.
+    const hangulJamo = 'x\u1100\u1161y';
+    const devanagariConjunct = 'x\u0915\u094D\u0937y';
+
+    expect(cutAt(hangulJamo, 2)).toBe('x');
+    expect(cutAt(hangulJamo, 3)).toBe('x\u1100\u1161');
+    expect(cutAt(devanagariConjunct, 3)).toBe('x');
+    expect(cutAt(devanagariConjunct, 4)).toBe('x\u0915\u094D\u0937');
+  });
+
   test('a render cut inside a character is still well-formed', () => {
     const rendered = stringifyValue('e\u0301'.repeat(200), {
       maxRenderLength: 7,
