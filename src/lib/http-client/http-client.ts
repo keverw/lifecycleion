@@ -3501,8 +3501,8 @@ interface UploadActivity {
  * - its stall watchdog sees to that - but `HTTPAdapter` is a public extension point, and
  * a custom adapter that set the field and never settled it held a followed `307`/`308`,
  * or a retry, until the caller aborted: no timeout, no error, nothing on any channel. An
- * adapter that reports no progress at all gets the bound flat, from the moment the wait
- * begins. `0` disables it exactly as it disables the per-attempt timer. What happens at
+ * adapter that reports no progress at all gets the bound from dispatch. `0` disables
+ * it exactly as it disables the per-attempt timer. What happens at
  * the bound is decided at each site - the request fails as a timeout rather than
  * dispatching a second upload beside one that may still be going out.
  */
@@ -3560,20 +3560,11 @@ async function settleUploadBeforeNextDispatch(
       );
     };
 
-    // The clock is read on entry too. Silence before the wait began is still silence:
-    // an upload that last moved long before the early response arrived - stalled at one
-    // second, answered at twenty-five against a thirty-second bound - was given a whole
-    // further bound from here, since the first arm always slept for all of it. Every
-    // attempt stamps the clock when it dispatches, so the clock cannot be older than
-    // the attempt whose upload this waits on.
+    // Count silence before this wait, including retry backoff. Even an overdue check
+    // runs through the timer: an already-completed upload must get its promise callbacks
+    // processed before we declare it stalled. A pending upload is checked next tick,
+    // without granting it another full stall window.
     const quietOnEntryMS = Date.now() - lastActivityAt();
-
-    if (quietOnEntryMS >= stallMS) {
-      resolve('deadline');
-
-      return;
-    }
-
     arm(stallMS - Math.max(0, quietOnEntryMS));
   });
 

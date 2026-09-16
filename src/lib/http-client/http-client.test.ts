@@ -5870,6 +5870,74 @@ describe('HTTPClient — builder state', () => {
     expect(await res.requestBodySettled).toBe(uploadFailure);
   });
 
+  for (const outcome of ['response', 'throw'] as const) {
+    for (const isCompleted of [true, false]) {
+      test(`${outcome} retry after long backoff ${isCompleted ? 'accepts a completed upload' : 'times out a stalled upload'}`, async () => {
+        let attempts = 0;
+        const signals: AbortSignal[] = [];
+        const reports: ErrorEvent[] = [];
+        const onGlobalError = (event: Event): void => {
+          reports.push(event as ErrorEvent);
+          event.preventDefault();
+        };
+        const upload = isCompleted
+          ? Promise.resolve(undefined)
+          : new Promise<Error | undefined>(() => {});
+        const adapter: HTTPAdapter = {
+          getType: () => 'node',
+          send: (request: AdapterRequest): Promise<AdapterResponse> => {
+            attempts++;
+            if (request.signal) {
+              signals.push(request.signal);
+            }
+            if (attempts > 1) {
+              return Promise.resolve({ status: 200, headers: {}, body: null });
+            }
+            if (outcome === 'throw') {
+              return Promise.reject(
+                Object.assign(new Error('connection closed'), {
+                  [REQUEST_BODY_SETTLED_KEY]: upload,
+                }),
+              );
+            }
+            return Promise.resolve({
+              status: 503,
+              headers: {},
+              body: null,
+              requestBodySettled: upload,
+            });
+          },
+        };
+
+        globalThis.addEventListener('error', onGlobalError);
+        try {
+          // Backoff outlasts the stall window even though send() answers immediately.
+          const response = await new HTTPClient({
+            adapter,
+            timeout: 20,
+            retryPolicy: {
+              strategy: 'fixed',
+              maxRetryAttempts: 1,
+              delayMS: 60,
+            },
+          })
+            .put('https://example.com/upload')
+            .json({ a: 1 })
+            .send();
+
+          expect(attempts).toBe(isCompleted ? 2 : 1);
+          expect(response.status).toBe(isCompleted ? 200 : 0);
+          expect(response.isTimeout).toBe(!isCompleted);
+          expect(response.isCancelled).toBe(false);
+          expect(signals[0]?.aborted).toBe(!isCompleted);
+          expect(reports).toHaveLength(isCompleted ? 0 : 1);
+        } finally {
+          globalThis.removeEventListener('error', onGlobalError);
+        }
+      });
+    }
+  }
+
   test("a retry waits for the previous attempt's upload to settle first", async () => {
     // The redirect loop waits on `requestBodySettled` before the next hop; the retry
     // loop did not. `NodeAdapter.send()` resolves when the response is consumed, so an
