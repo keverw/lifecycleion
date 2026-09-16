@@ -474,6 +474,7 @@ function serializeErrorInner(
 
 /**
  * Turn a serialized error object back into a throwable Error.
+ * At most 100,000 extra properties are copied; surplus extras are omitted.
  * Useful on the receiving end of IPC / RPC when you need to re-throw.
  *
  * The extras are installed with {@link defineEntry} rather than `Object.assign`. Assign
@@ -518,9 +519,17 @@ export function deserializeError(obj: SerializedError): Error {
     error.stack = rawStack;
   }
 
+  let extrasLeft = MAX_SERIALIZED_NODES;
+
+  // Enumeration itself still allocates all keys, but no surplus getter is read
+  // and no surplus property is allocated on the reconstructed error.
   for (const key of Object.keys(source)) {
     if (key === 'name' || key === 'message' || key === 'stack') {
       continue;
+    }
+
+    if (extrasLeft-- <= 0) {
+      break;
     }
 
     defineEntry(error as unknown as Record<string, unknown>, key, source[key]);

@@ -1,4 +1,5 @@
 import { parse } from 'tldts';
+import { normalizeDomain } from '../domain-utils/helpers';
 import { PublicSuffixResolver } from './public-suffix';
 import type { PublicSuffixOverrides } from './public-suffix';
 import { normalizeAdapterResponseHeaders } from './utils';
@@ -500,19 +501,27 @@ export class CookieJar {
       const count = this.getAllCookies().length;
       this.buckets.clear();
       return count;
-    } else if (scope === 'domain') {
-      const count = this.buckets.get(this.apexFor(host))?.size ?? 0;
-      this.buckets.delete(this.apexFor(host));
+    }
+
+    const normalizedHost = this.normalizeStoredDomain(host);
+
+    if (!normalizedHost) {
+      return 0;
+    }
+
+    const apex = this.apexFor(normalizedHost);
+
+    if (scope === 'domain') {
+      const count = this.buckets.get(apex)?.size ?? 0;
+      this.buckets.delete(apex);
       return count;
     } else {
-      const apex = this.apexFor(host);
       const bucket = this.buckets.get(apex);
 
       if (!bucket) {
         return 0;
       }
 
-      const normalizedHost = this.normalizeStoredDomain(host);
       let count = 0;
 
       for (const [key, cookie] of bucket.entries()) {
@@ -647,7 +656,7 @@ export class CookieJar {
     return `${name}@${domain}${path}`;
   }
 
-  /** Canonical form for stored cookie domains: no leading dot, lowercase DNS names;
+  /** Canonical form for stored cookie domains: no leading dot, ASCII/IDNA DNS names;
    *  canonical IP literals. RFC 6265 treats a leading dot as ignored, and persisted jars
    *  from browser-oriented implementations commonly retain it. */
   private normalizeStoredDomain(domain: string): string {
@@ -661,7 +670,13 @@ export class CookieJar {
       return ip;
     }
 
-    return this.unbracketHost(raw).toLowerCase();
+    // Keep malformed whitespace and repeated trailing dots invalid rather than
+    // letting the general domain helper trim them into a different scope.
+    if (raw.trim() !== raw || raw.endsWith('.')) {
+      return '';
+    }
+
+    return normalizeDomain(this.unbracketHost(raw));
   }
 
   private parseCookieString(header: string): ParsedCookie | null {
@@ -866,6 +881,10 @@ export class CookieJar {
       // RFC 6265 §5.2.3 / §5.1.3: ignore a leading dot and match domains
       // case-insensitively. URL.host is lowercased but Domain= is not.
       const normalizedDomain = this.normalizeStoredDomain(parsed.domain);
+
+      if (!normalizedDomain) {
+        return;
+      }
 
       // A public suffix - `co.uk`, `github.io`, `localhost` - may not be spanned, but
       // naming your own host is not spanning anything. RFC 6265bis §5.5 refuses the

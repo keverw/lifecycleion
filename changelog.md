@@ -180,7 +180,12 @@
 
 ## 1.0.0 (Unreleased)
 
-- Report messages refused during component or manager teardown as `stopped` with no handler error; preserve `not_found` for missing targets. Add isolated component-stop coverage for messages and value providers in both stop phases.
+- Report messages refused during a component's own teardown as `stopped` with no handler error; preserve `not_found` for missing targets. During bulk shutdown, running siblings remain messageable until their own teardown begins. Add coverage for both individual stop phases and messaging/broadcasts to running siblings during bulk shutdown.
+- Forward `includeStopped` and `includeStalled` through component-scoped `getValue()` calls, matching the manager-level API; cover both options with integration tests.
+- Fail closed on invalid payload-array lengths and hidden indexes beyond the advertised length during redaction. Preserve entry-budget limits, including at the exact budget boundary, without enumerating exhausted arrays.
+- Canonicalize cookie domains through IDNA so Unicode `Domain=` attributes match punycode request hosts; apply the same normalization to programmatic and restored cookies and to scoped clearing, and reject invalid scopes.
+- Generate multipart boundaries with 128 bits of cryptographic randomness instead of `Math.random()`. Streamed bodies remain unscanned for boundary collisions.
+- Limit `deserializeError()` to copying 100,000 extra properties, omitting surplus properties without reading their values. Key enumeration still allocates the input key list.
 - Block value-provider hooks during stopping and force-stopping, including with stopped/stalled overrides after the bulk shutdown timeout.
 - Cap post-failure escalation windows at the timer limit so reported deadlines match expiry; handle overflow in derived windows too.
 - Reject ambiguous combined Fetch fallback Set-Cookie headers instead of guessing cookie boundaries; preserve single cookies and Expires dates. Add cookie-jar round-trip, attribute-scope, and cross-host redirect coverage.

@@ -70,13 +70,48 @@ export type ContainerShape =
  * answer `redact-normalization` gives an array whose `length` is past the cap, and the one
  * `applyRedaction` gives a root bag with that many keys.
  *
+ * @param arrayEntryBudget Opts redaction walks into index/length consistency checks
+ * before they could return an untouched array. Arrays that will exhaust this budget
+ * are left to the caller's truncation path without allocating an own-key list.
  * @returns The container's shape, or `'unreadable'` when asking threw or the answer was
  *          too large to walk. Never throws.
  */
-export function describeContainer(value: object): ContainerShape {
+export function describeContainer(
+  value: object,
+  arrayEntryBudget = 0,
+): ContainerShape {
   try {
     if (Array.isArray(value)) {
-      return { kind: 'array', length: (value as unknown[]).length };
+      const length = (value as unknown[]).length;
+
+      if (!Number.isInteger(length) || length < 0 || length > 2 ** 32 - 1) {
+        throw new Error('array length is invalid; its contents were not read');
+      }
+
+      // A Proxy can hide live slots behind a shorter length. Larger arrays already
+      // exhaust every walk's entry budget; do not enumerate their keys before that
+      // budget can stop them. Shorter arrays must account for every advertised slot.
+      if (length < arrayEntryBudget) {
+        // Index loops also read non-enumerable slots. Include them here, plus the
+        // array's own length property, so hiding an index cannot evade validation.
+        const keys = Object.getOwnPropertyNames(value);
+
+        if (keys.length > MAX_REDACTION_ENTRIES + 1) {
+          throw new Error(
+            'array has too many own keys; its contents were not read',
+          );
+        }
+
+        for (const key of keys) {
+          if (isArrayIndexKey(key) && Number(key) >= length) {
+            throw new Error(
+              'array index exceeds its length; its contents were not read',
+            );
+          }
+        }
+      }
+
+      return { kind: 'array', length };
     }
 
     const keys = Object.keys(value);

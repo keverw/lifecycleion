@@ -711,6 +711,8 @@ await client
 
 A `CookieJar` provides cookie storage with Public Suffix List domain matching, path matching, secure-flag enforcement, and expiry handling.
 
+Cookie domains are canonicalized through IDNA to lowercase ASCII: for example, `Domain=münchen.de` matches the request host `xn--mnchen-3ya.de`. The same normalization applies to cookies stored through `setCookie()` or restored through `fromJSON()`, and to hosts passed to `clear()`; invalid domain scopes are rejected.
+
 Fetch uses `Headers.getSetCookie()` to preserve individual response cookie lines.
 On legacy implementations without it, the fallback accepts a single unambiguous
 cookie, including Expires date commas. If a comma is followed by text containing

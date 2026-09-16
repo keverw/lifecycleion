@@ -13,7 +13,11 @@
  * logger's own step, and only the machinery below is shared.
  */
 
-import { defineEntry } from './container-entries';
+import {
+  defineEntry,
+  describeContainer,
+  isArrayIndexKey,
+} from './container-entries';
 import { REDACTION_FAILED_MARKER } from './default-redact-function';
 import type { ReportFormatFailure } from './format-reporter';
 import { isPlainContainer } from './is-plain-container';
@@ -120,7 +124,13 @@ function forwardingContainerCopy(
   try {
     if (Array.isArray(source)) {
       const elements = source as unknown[];
-      const length = elements.length;
+      const shape = describeContainer(elements, MAX_REDACTION_ENTRIES + 1);
+
+      if (shape.kind !== 'array') {
+        return null;
+      }
+
+      const length = shape.length;
 
       // Both checks below bound this copy exactly as the walk that follows is bounded, and
       // for the same reason: this runs one `defineProperty` per element, *before* the walk
@@ -186,6 +196,11 @@ function forwardingContainerCopy(
       let definedNamed = length;
 
       for (const key of Object.keys(asRecord)) {
+        // Recheck this enumeration too: a Proxy can change its answer between reads.
+        if (isArrayIndexKey(key) && Number(key) >= length) {
+          return discard();
+        }
+
         if (Object.prototype.hasOwnProperty.call(arrayCopy, key)) {
           continue;
         }

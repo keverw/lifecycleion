@@ -806,7 +806,7 @@ function needsFullWalk(
 
   // The shared enumeration, so this scan cannot conclude "nothing below" about a container
   // the walk itself would have entered - the one property that makes skipping it sound.
-  const shape = describeContainer(value);
+  const shape = describeContainer(value, state.scanLeft);
 
   if (shape.kind === 'unreadable') {
     // A read that failed says nothing about what is underneath it, so the scan refuses to
@@ -1384,7 +1384,7 @@ function redactPathsInner(
   try {
     // The shared enumeration, so this walk and the renderer cannot disagree about what a
     // container holds - the divergence between the two that this design exists to remove.
-    const shape = describeContainer(value);
+    const shape = describeContainer(value, state.entriesLeft);
 
     if (shape.kind === 'unreadable') {
       // The walk cannot tell whether something named for redaction sits below. Handing

@@ -2250,11 +2250,7 @@ export class LifecycleManager
 
     // Teardown is an expected unavailable state, not a handler failure.
     const state = this.componentStates.get(componentName);
-    if (
-      this.isShuttingDown ||
-      state === 'stopping' ||
-      state === 'force-stopping'
-    ) {
+    if (state === 'stopping' || state === 'force-stopping') {
       return {
         sent: false,
         componentFound: true,
@@ -3020,7 +3016,8 @@ export class LifecycleManager
           compName: string,
           key: string,
           from: string | null,
-        ) => this.getValueInternal<T>(compName, key, from),
+          options?: GetValueOptions,
+        ) => this.getValueInternal<T>(compName, key, from, options),
       };
 
       // Assign lifecycle reference to component

@@ -26,6 +26,21 @@ afterEach(() => {
 type RedactFunctionLike = (keyName: string, value: unknown) => unknown;
 
 describe('applyRedaction', () => {
+  test.each([0, Number.NaN, -1, 0.5, '0'])(
+    'fails closed on payload array length %p',
+    (length) => {
+      const items = new Proxy([{ password: 'hunter2secret' }], {
+        get: (target, key) =>
+          key === 'length' ? length : Reflect.get(target, key),
+      });
+      const result = applyRedaction({ items, safe: 'ok' }, [
+        'items[0].password',
+      ]);
+      expect(result.items).toBe(REDACTION_FAILED_MARKER);
+      expect(result.safe).toBe('ok');
+    },
+  );
+
   test('should redact specified keys', () => {
     const params = {
       username: 'john',

@@ -972,7 +972,7 @@ interface ComponentOperationResult {
 #### `sendMessageToComponent(componentName, payload, options?)`
 
 Send a message to a specific component.
-By default, only running components receive messages, so use `includeStopped`/`includeStalled` to override. Messages remain blocked during `stopping` and `force-stopping`, even with these overrides or after the bulk shutdown timeout. Messages refused during teardown return `code: 'stopped'` and `error: null`; missing targets return `not_found`.
+By default, only running components receive messages, so use `includeStopped`/`includeStalled` to override. During bulk shutdown, components still running can receive messages until their own teardown begins. Messages remain blocked during `stopping` and `force-stopping`, even with these overrides or after the bulk shutdown timeout. Messages refused during teardown return `code: 'stopped'` and `error: null`; missing targets return `not_found`.
 
 ```typescript
 sendMessageToComponent<T = unknown>(
@@ -1063,7 +1063,7 @@ if (result.sent) {
 #### `broadcastMessage(payload, options?)`
 
 Broadcast a message to multiple components.
-By default, only running components receive messages, so use `includeStopped`/`includeStalled` to override. Messages remain blocked during `stopping` and `force-stopping`, even with these overrides or after the bulk shutdown timeout. Messages refused during teardown return `code: 'stopped'` and `error: null`.
+By default, only running components receive messages, so use `includeStopped`/`includeStalled` to override. During bulk shutdown, components still running can receive messages until their own teardown begins. Messages remain blocked during `stopping` and `force-stopping`, even with these overrides or after the bulk shutdown timeout. Messages refused during teardown return `code: 'stopped'` and `error: null`.
 When `componentNames` is provided, only those targets are considered, and stopped/stalled targets are reported but not sent unless explicitly included.
 
 ```typescript

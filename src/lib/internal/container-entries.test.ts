@@ -22,6 +22,23 @@ describe('describeContainer', () => {
     expect(describeContainer([])).toEqual({ kind: 'array', length: 0 });
   });
 
+  it('rejects a live non-enumerable index beyond a claimed length', () => {
+    const array: unknown[] = [];
+    Object.defineProperty(array, '0', { value: 'secret', configurable: true });
+    const liar = new Proxy(array, {
+      get: (target, key) => (key === 'length' ? 0 : Reflect.get(target, key)),
+    });
+    expect(describeContainer(liar, MAX_REDACTION_ENTRIES).kind).toBe(
+      'unreadable',
+    );
+  });
+
+  it('keeps valid sparse arrays readable', () => {
+    const sparse = new Array(3);
+    sparse[2] = 'present';
+    expect(describeContainer(sparse)).toEqual({ kind: 'array', length: 3 });
+  });
+
   it('reports an object by its own enumerable string keys', () => {
     expect(describeContainer({ a: 1, b: 2 })).toEqual({
       kind: 'object',

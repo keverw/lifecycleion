@@ -943,3 +943,29 @@ describe('error-shaped objects with inherited members', () => {
     expect(rebuilt.message).toBe('no stack on the wire');
   });
 });
+
+test('deserializeError bounds extra-property reads while preserving error identity', () => {
+  const payload: SerializedError = {
+    name: 'RemoteError',
+    message: 'failure',
+    stack: 'remote stack',
+  };
+  for (let index = 0; index < 100_000; index++) {
+    payload[`extra${String(index)}`] = index;
+  }
+  let didReadSurplus = false;
+  Object.defineProperty(payload, 'surplus', {
+    enumerable: true,
+    get() {
+      didReadSurplus = true;
+      throw new Error('must not be read');
+    },
+  });
+  const error = deserializeError(payload);
+  expect(error.name).toBe('RemoteError');
+  expect(error.message).toBe('failure');
+  expect(error.stack).toBe('remote stack');
+  expect(withExtras(error)['extra99999']).toBe(99_999);
+  expect(Object.hasOwn(error, 'surplus')).toBe(false);
+  expect(didReadSurplus).toBe(false);
+});

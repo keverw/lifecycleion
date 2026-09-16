@@ -8,6 +8,62 @@ describe('CookieJar', () => {
     jar = new CookieJar();
   });
 
+  test.each(['münchen.de', 'xn--mnchen-3ya.de', '.MÜNCHEN.de'])(
+    'canonicalizes IDN Domain=%s',
+    (domain) => {
+      jar.parseSetCookieHeader(
+        `session=x; Domain=${domain}; Path=/`,
+        'https://münchen.de/',
+      );
+      expect(jar.getAllCookies()[0]?.domain).toBe('xn--mnchen-3ya.de');
+      for (const host of [
+        'münchen.de',
+        'xn--mnchen-3ya.de',
+        'sub.xn--mnchen-3ya.de',
+      ]) {
+        expect(jar.getCookieHeaderString(`https://${host}/`)).toBe('session=x');
+      }
+      expect(jar.getCookieHeaderString('https://other.de/')).toBe('');
+    },
+  );
+
+  test('canonicalizes programmatic and restored IDN cookies', () => {
+    expect(
+      jar.setCookie({ name: 'id', value: '1', domain: 'münchen.de' }),
+    ).toBe(true);
+    expect(jar.getCookieHeaderString('https://xn--mnchen-3ya.de/')).toBe(
+      'id=1',
+    );
+    jar.fromJSON({
+      cookies: [
+        { name: 'id', value: '2', domain: 'münchen.de', createdAt: Date.now() },
+      ],
+    });
+    expect(jar.getCookieHeaderString('https://xn--mnchen-3ya.de/')).toBe(
+      'id=2',
+    );
+  });
+
+  test.each(['hostname', 'domain'] as const)(
+    'canonicalizes an IDN host when clearing by %s',
+    (scope) => {
+      expect(
+        jar.setCookie({ name: 'id', value: '1', domain: 'münchen.de' }),
+      ).toBe(true);
+      expect(jar.clear('münchen.de', scope)).toBe(1);
+      expect(jar.getAllCookies()).toEqual([]);
+    },
+  );
+
+  test.each(['münchen..de', 'münchen.de/path', 'xn--.de', 'münchen.de..'])(
+    'rejects invalid IDN scope %s',
+    (domain) => {
+      expect(jar.setCookie({ name: 'id', value: '1', domain })).toBe(false);
+      jar.parseSetCookieHeader(`id=1; Domain=${domain}`, 'https://münchen.de/');
+      expect(jar.getAllCookies()).toEqual([]);
+    },
+  );
+
   describe('setCookie validation', () => {
     test('returns true for valid hostname', () => {
       expect(

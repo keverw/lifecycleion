@@ -172,13 +172,16 @@ export function sanitizeContentType(raw: string): string {
  * Generates a random boundary string for use as the multipart delimiter.
  *
  * The boundary must not appear anywhere in the body content (RFC 7578 §4.1).
- * The "----" prefix and random suffix make accidental collision essentially
- * impossible for normal payloads. For adversarial inputs (a file that happens
- * to contain the boundary string) you would need boundary detection — we don't
- * do that here, matching browser FormData behavior.
+ * A fresh 128-bit cryptographic suffix makes collisions impractical without
+ * scanning or buffering streamed file contents. Content is not collision-checked.
  */
 export function generateMultipartBoundary(): string {
-  return `----NodeAdapterFormBoundary${Math.random().toString(36).slice(2)}`;
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  const suffix = Array.from(bytes, (byte) =>
+    byte.toString(16).padStart(2, '0'),
+  ).join('');
+
+  return `----NodeAdapterFormBoundary${suffix}`;
 }
 
 /**

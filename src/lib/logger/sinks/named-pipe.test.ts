@@ -1177,7 +1177,7 @@ describe('NamedPipeSink', () => {
     const reader = startPipeReader(pipePath);
     const sink = new NamedPipeSink({ pipePath });
 
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(await waitForOpenPipe(sink)).toBe(true);
 
     const healthy = sink.getHealth();
 

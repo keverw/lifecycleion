@@ -50,6 +50,119 @@ describe('LifecycleManager - BaseComponent', () => {
     });
   });
 
+  test.each([false, true])(
+    'component-scoped getValue forwards availability options (stalled=%p)',
+    async (isStalled) => {
+      const manager = new LifecycleManager({ logger });
+      class Provider extends BaseComponent {
+        public async start() {}
+        public async stop() {
+          if (isStalled) {
+            await new Promise(() => {});
+          }
+        }
+        public getValue<T>(_key: string, from: string | null) {
+          return { found: true, value: from as T };
+        }
+      }
+      class Reader extends BaseComponent {
+        public async start() {}
+        public async stop() {}
+        public read(allow: boolean) {
+          return this.lifecycle.getValue('provider', 'status', {
+            includeStopped: allow && !isStalled,
+            includeStalled: allow && isStalled,
+          });
+        }
+      }
+      const reader = new Reader(logger, { name: 'reader', dependencies: [] });
+      await manager.registerComponent(
+        new Provider(logger, {
+          name: 'provider',
+          dependencies: [],
+          shutdownGracefulTimeoutMS: 10,
+          shutdownForceTimeoutMS: 10,
+        }),
+      );
+      await manager.registerComponent(reader);
+      await manager.startAllComponents();
+      await manager.stopComponent('provider');
+      expect(reader.read(false).found).toBe(false);
+      expect(reader.read(true)).toMatchObject({
+        found: true,
+        componentRunning: false,
+        handlerImplemented: true,
+        value: 'reader',
+        code: 'found',
+      });
+      await manager.stopComponent('reader');
+    },
+  );
+
+  test('running siblings remain messageable until their own teardown during bulk shutdown', async () => {
+    const manager = new LifecycleManager({ logger });
+    const entered = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    class Provider extends BaseComponent {
+      public async start() {}
+      public async stop() {}
+      public onMessage<TData = unknown>() {
+        return 'ok' as TData;
+      }
+      public getValue<T>() {
+        return { found: true, value: 'ok' as T };
+      }
+    }
+    class Dependent extends BaseComponent {
+      public async start() {}
+      public async stop() {
+        entered.resolve();
+        await release.promise;
+      }
+      public onMessage<TData = unknown>() {
+        return 'unexpected' as TData;
+      }
+    }
+    await manager.registerComponent(
+      new Provider(logger, { name: 'provider', dependencies: [] }),
+    );
+    await manager.registerComponent(
+      new Dependent(logger, { name: 'dependent', dependencies: ['provider'] }),
+    );
+    await manager.startAllComponents();
+    const stopping = manager.stopAllComponents();
+    await entered.promise;
+    try {
+      expect(manager.getValue('provider', 'status').found).toBe(true);
+      expect(
+        await manager.sendMessageToComponent('provider', {}),
+      ).toMatchObject({
+        code: 'sent',
+        componentRunning: true,
+        handlerImplemented: true,
+        data: 'ok',
+      });
+      expect(
+        await manager.sendMessageToComponent(
+          'dependent',
+          {},
+          { includeStopped: true },
+        ),
+      ).toMatchObject({ code: 'stopped', componentRunning: false });
+      const results = await manager.broadcastMessage(
+        {},
+        { includeStopped: true },
+      );
+      expect(results.some((r) => r.code === 'sent' && r.running)).toBe(true);
+      expect(results.some((r) => r.code === 'stopped' && !r.running)).toBe(
+        true,
+      );
+    } finally {
+      release.resolve();
+      await stopping;
+    }
+  });
+
   describe('BaseComponent - Name Validation', () => {
     test('should accept valid kebab-case names', () => {
       const validNames = [
@@ -10761,6 +10874,7 @@ describe('LifecycleManager - Messaging, Health & Values', () => {
 
     test('should reject messages during shutdown', async () => {
       const lifecycle = new LifecycleManager({ logger });
+      const enteredStop = Promise.withResolvers<void>();
 
       class SlowComponent extends BaseComponent {
         constructor(logger: Logger) {
@@ -10769,6 +10883,7 @@ describe('LifecycleManager - Messaging, Health & Values', () => {
 
         public async start() {}
         public async stop() {
+          enteredStop.resolve();
           await sleep(100);
         }
 
@@ -10784,6 +10899,7 @@ describe('LifecycleManager - Messaging, Health & Values', () => {
       await lifecycle.startAllComponents();
 
       const shutdownPromise = lifecycle.stopAllComponents();
+      await enteredStop.promise;
 
       const result = await lifecycle.sendMessageToComponent('slow', {
         test: 'data',

@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 
 import {
+  MAX_REDACTION_ENTRIES,
   findPathInto,
   indexStep,
   literalStep,
@@ -1107,4 +1108,61 @@ describe('snapshotList self-contradiction check', () => {
 
     expect(parseRedactPaths(lying)).toBeNull();
   });
+});
+
+test.each([0, Number.NaN, -1])(
+  'rejects inconsistent payload array length %p in the path walker',
+  (length) => {
+    const items = new Proxy([{ password: SECRET }], {
+      get: (target, key) =>
+        key === 'length' ? length : Reflect.get(target, key),
+    });
+    const result = redactMatchedPaths(
+      { items },
+      paths('items[0].password'),
+      undefined,
+    ) as { items: unknown };
+    expect(result.items).toBe(REDACTION_FAILED_MARKER);
+  },
+);
+
+describe('payload arrays at the exact remaining entry budget', () => {
+  test.each([false, true])(
+    'withholds a hidden slot without enumerating an exhausted array (nested=%p)',
+    (isNested) => {
+      // The containing object consumes one entry before entering its array.
+      const length = MAX_REDACTION_ENTRIES - (isNested ? 1 : 0);
+      const target = new Array<unknown>(length + 1);
+      target[length] = { password: SECRET };
+      let enumerations = 0;
+      let didReadHiddenSlot = false;
+      const items = new Proxy(target, {
+        get(array, key) {
+          if (key === 'length') {
+            return length;
+          }
+          if (key === String(length)) {
+            didReadHiddenSlot = true;
+          }
+          return Reflect.get(array, key);
+        },
+        ownKeys(array) {
+          enumerations++;
+          return Reflect.ownKeys(array);
+        },
+      });
+      const payload = isNested ? { items } : items;
+      const path = `${isNested ? 'items' : ''}[${String(length)}].password`;
+      const result = redactMatchedPaths(payload, paths(path), undefined);
+      const output = (
+        isNested ? (result as { items: unknown[] }).items : result
+      ) as unknown[];
+
+      expect(result).not.toBe(payload);
+      expect(output).not.toBe(items);
+      expect(output[length]).toBeUndefined();
+      expect(didReadHiddenSlot).toBe(false);
+      expect(enumerations).toBe(0);
+    },
+  );
 });

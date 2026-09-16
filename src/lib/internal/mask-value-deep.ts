@@ -194,7 +194,7 @@ export function maskValueDeep(
   try {
     // The shared enumeration, so this walk and the rendering walks cannot disagree about
     // what a container holds or about a read that refused.
-    const shape = describeContainer(value);
+    const shape = describeContainer(value, budget.remaining);
 
     if (shape.kind === 'unreadable') {
       // Nothing can be enumerated, so nothing of the original may survive - and there is

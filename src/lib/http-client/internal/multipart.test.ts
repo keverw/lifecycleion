@@ -1,6 +1,6 @@
 // cspell:ignore résumé
 import { EventEmitter } from 'node:events';
-import { describe, expect, test } from 'bun:test';
+import { describe, expect, test, spyOn } from 'bun:test';
 import {
   calculateMultipartFormDataSize,
   generateMultipartBoundary,
@@ -66,6 +66,24 @@ function makeCapture(
 }
 
 describe('generateMultipartBoundary', () => {
+  test('uses 128 cryptographic bits without consulting Math.random', () => {
+    const random = spyOn(Math, 'random').mockImplementation(() => {
+      throw new Error('weak randomness');
+    });
+    const secure = spyOn(crypto, 'getRandomValues');
+    try {
+      expect(generateMultipartBoundary()).toMatch(
+        /^----NodeAdapterFormBoundary[0-9a-f]{32}$/,
+      );
+      expect(secure).toHaveBeenCalledTimes(1);
+      expect(secure.mock.calls[0]?.[0]?.byteLength).toBe(16);
+      expect(random).not.toHaveBeenCalled();
+    } finally {
+      random.mockRestore();
+      secure.mockRestore();
+    }
+  });
+
   test('returns a non-empty string', () => {
     expect(generateMultipartBoundary().length).toBeGreaterThan(0);
   });

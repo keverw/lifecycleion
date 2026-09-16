@@ -161,3 +161,5 @@ For RESTful APIs, don't use `serializeError` - it exposes internals like stack t
 ## Security Note
 
 For security, avoid exposing internal error details or stack traces in public APIs. Log detailed error information server-side for debugging purposes.
+
+`deserializeError` copies at most 100,000 extra properties, omitting any surplus without reading their values. This bounds property copying, but key enumeration still allocates the input key list; callers accepting untrusted IPC should also limit the incoming message size.
