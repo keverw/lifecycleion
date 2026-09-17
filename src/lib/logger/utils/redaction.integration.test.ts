@@ -13,6 +13,17 @@ test('Node and Bun preserve unmatched Errors, their causes, and private fields',
       `
       import assert from 'node:assert/strict';
       import { applyRedaction, REDACTION_FAILED_MARKER } from ${JSON.stringify(new URL('./redaction.ts', import.meta.url).pathname)};
+      class AccessorError extends Error {
+        get code() { return 'E_TEST'; }
+      }
+      const accessorError = new AccessorError('original error');
+      const originalStack = accessorError.stack;
+      const copied = applyRedaction({ password: 'secret', error: accessorError }, ['password']).error;
+      assert.notEqual(copied, accessorError);
+      assert.ok(copied instanceof AccessorError);
+      assert.equal(copied.code, 'E_TEST');
+      assert.equal(copied.stack, originalStack);
+      assert.equal(accessorError.stack, originalStack);
       class Diagnostic extends Error {
         #detail = 'private detail';
         get detail() { return this.#detail; }

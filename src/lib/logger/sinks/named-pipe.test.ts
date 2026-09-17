@@ -3003,6 +3003,46 @@ describe('NamedPipeSink', () => {
     }
   }, 15000);
 
+  test('reconnect at the cap clears initialization so queued writes can recover', async () => {
+    const pipePath = `${tmpDir.path}/reconnect-initialized-cap.pipe`;
+    await createNamedPipe(pipePath);
+    const readerFd = fs.openSync(
+      pipePath,
+      fs.constants.O_RDONLY | fs.constants.O_NONBLOCK,
+    );
+    const sink = new NamedPipeSink({ pipePath });
+    const internals = sink as unknown as {
+      abandonedOpens: number;
+      lastReopenAttempt: number;
+      ensureConnection: () => void;
+    };
+    try {
+      expect(await waitForOpenPipe(sink)).toBe(true);
+      // Defensive state: a live writer coexists with the cap's worth of stale opens.
+      internals.abandonedOpens = 2;
+      const status = await sink.reconnect();
+      expect(status.success).toBe(false);
+      expect(sink.getHealth().isInitialized).toBe(false);
+      sink.write({
+        timestamp: Date.now(),
+        type: 'info',
+        template: 'held',
+        message: 'held',
+      });
+      expect(sink.getHealth().queueSize).toBe(1);
+
+      internals.abandonedOpens = 0;
+      internals.lastReopenAttempt = 0;
+      internals.ensureConnection();
+      expect(await waitForOpenPipe(sink)).toBe(true);
+      expect(sink.getHealth().queueSize).toBe(0);
+    } finally {
+      internals.abandonedOpens = 0;
+      await sink.close();
+      fs.closeSync(readerFd);
+    }
+  }, 15000);
+
   test('at the abandoned-open cap, neither a write nor reconnect() starts another open', async () => {
     // The cap was only read while a stale `pendingStream` existed, and abandoning one
     // clears it - so after two real abandons the next `write()` found nothing pending,

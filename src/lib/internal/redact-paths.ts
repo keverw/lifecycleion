@@ -182,6 +182,21 @@ function snapshotOpaqueAccessors(
   if (!didSnapshot) {
     return value;
   }
+  // A native stack getter reads its receiver's captured stack. Installing it on
+  // the new Error would expose this function's stack instead of the original's.
+  const stackDescriptor = descriptors.stack;
+  if (
+    isError &&
+    stackDescriptor &&
+    isNativeStackAccessor('stack', stackDescriptor)
+  ) {
+    descriptors.stack = {
+      value: value.stack,
+      enumerable: stackDescriptor.enumerable,
+      configurable: stackDescriptor.configurable,
+      writable: true,
+    };
+  }
   // Real built-in bases retain their internal brand. Class methods used by the
   // renderer stay bound to the original, including methods using private fields.
   const copy: object = isError

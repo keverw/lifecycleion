@@ -9,7 +9,7 @@ import { ConsoleSink } from './sinks/console';
 import { sleep } from '../sleep';
 import { safeHandleCallback } from '../safe-handle-callback';
 import { stringifyValue } from '../stringify-value';
-import type { LogEntry, LoggerDiagnostic, LogSink } from './types';
+import type { LogEntry, LogOptions, LoggerDiagnostic, LogSink } from './types';
 
 function collectDiagnostics(seen: LoggerDiagnostic[]): LogSink {
   return {
@@ -44,6 +44,22 @@ describe('Logger', () => {
   });
 
   describe('Basic Logging', () => {
+    test.each(
+      [null, 0, false, {}, [], Symbol('scope')].map((name) => ({ name })),
+    )(
+      'ignores non-string scope names (%p) without dropping the log',
+      ({ name }) => {
+        logger.info('message', {
+          serviceName: name,
+          entityName: name,
+        } as unknown as LogOptions);
+        expect(arraySink.logs).toHaveLength(1);
+        expect(arraySink.logs[0].message).toBe('message');
+        expect(arraySink.logs[0].serviceName).toBeUndefined();
+        expect(arraySink.logs[0].entityName).toBeUndefined();
+      },
+    );
+
     test('a service or entity name cannot carry a line break into the sinks', () => {
       // The text sinks frame these as `[service] [entity]` with nothing escaped, so a
       // name holding a newline ended the line and started a second, forged, entry.

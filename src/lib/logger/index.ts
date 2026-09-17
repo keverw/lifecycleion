@@ -206,8 +206,8 @@ function describeResourceTarget(event: Event): string | undefined {
  * separators - becomes one space and the result is trimmed, so a name cannot break a text sink's line or
  * hide inside its `[service] [entity]` prefix. Empty after that means no name.
  */
-function sanitizeScopeName(name: string | undefined): string | undefined {
-  if (name === undefined) {
+function sanitizeScopeName(name: unknown): string | undefined {
+  if (typeof name !== 'string') {
     return undefined;
   }
 

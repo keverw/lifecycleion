@@ -114,7 +114,7 @@ console.log(errorToString(err, 120));
 
 ## Recognized Fields
 
-The following fields are automatically extracted from error objects when present and truthy. A falsy value produces no row at all, so `errno: 0`, `code: 0`, or `message: ''` are omitted rather than rendered:
+The following fields are automatically extracted from error objects when their values are neither `undefined` nor `null`. Falsy values such as `errno: 0`, `code: 0`, and `message: ''` still produce rows. The `stack` field is an exception: a falsy stack produces no row.
 
 | Field       | Table Label |
 | ----------- | ----------- |

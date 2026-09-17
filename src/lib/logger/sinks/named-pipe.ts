@@ -823,6 +823,8 @@ export class NamedPipeSink implements LogSink {
 
       // Whatever the old stream was waiting to drain is no longer anyone's business.
       this.isAwaitingDrain = false;
+      // The writer is gone even if the cap below prevents opening a replacement.
+      this.isInitialized = false;
 
       // Nothing new is opened past the cap: a `reconnect()` on a "reader is ready" signal
       // that fires while the kernel still holds the cap's worth of blocked opens would
@@ -856,8 +858,6 @@ export class NamedPipeSink implements LogSink {
         // count is one `MAX_ABANDONED_OPENS` cannot see. See {@link abandonPendingOpen}.
         this.abandonPendingOpen(this.pendingStream);
       }
-
-      this.isInitialized = false;
 
       // The deduplication that keeps an automatic retry from calling `onError` once a
       // second is deliberately not applied to an attempt the caller asked for by name. The
