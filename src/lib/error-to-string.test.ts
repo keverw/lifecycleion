@@ -2795,3 +2795,48 @@ it.each(['code', 'stack'])(
     expect(onTruncate).not.toHaveBeenCalled();
   },
 );
+
+it('review follow-up: masks class additionalInfo back-references through nested errors', () => {
+  class Info {
+    public password = 'CLASS_BACKREF_SECRET';
+    public nested = Object.assign(new Error('nested'), {
+      additionalInfo: this,
+    });
+  }
+  const result = errorToString({
+    message: 'outer',
+    additionalInfo: new Info(),
+    sensitiveFieldNames: ['password'],
+  });
+  expect(result).not.toContain('CLASS_BACKREF_SECRET');
+});
+
+it.each([
+  'additionalInfo.password',
+  "additionalInfo['my key']",
+  'additionalInfo.user.password',
+])('review follow-up: custom redactor receives original alias %s', (entry) => {
+  const keys: string[] = [];
+  const result = errorToString(
+    {
+      message: 'outer',
+      additionalInfo: {
+        password: 'SECRET',
+        'my key': 'SECRET',
+        user: { password: 'SECRET' },
+        'user.password': 'SECRET',
+      },
+      sensitiveFieldNames: [entry],
+    },
+    80,
+    {
+      redactFunction: (key) => {
+        keys.push(key);
+        return key === entry ? 'CUSTOM_MASK' : null;
+      },
+    },
+  );
+  expect(keys.length).toBeGreaterThan(0);
+  expect(keys.every((key) => key === entry)).toBe(true);
+  expect(result).toContain('CUSTOM_MASK');
+});

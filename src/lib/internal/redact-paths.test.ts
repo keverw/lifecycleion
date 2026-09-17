@@ -1243,3 +1243,25 @@ test('snapshotting an error without a stack does not invent a library stack', ()
   expect(result.error.message).toBe('original');
   expect(result.error.cause).toBe('cause');
 });
+
+test('review follow-up: rebuilt metadata is a detached writable snapshot', () => {
+  const source = { secret: 'hidden' };
+  const names = ['secret'];
+  Object.defineProperty(source, 'sensitiveFieldNames', { value: names });
+  const copy = redactMatchedPaths(source, paths('secret'), undefined) as Record<
+    string,
+    unknown
+  >;
+  expect(copy).not.toBe(source);
+  expect(copy.sensitiveFieldNames).toEqual(['secret']);
+  names.push('later');
+  expect(copy.sensitiveFieldNames).toEqual(['secret']);
+  copy.sensitiveFieldNames = ['replacement'];
+  expect(copy.sensitiveFieldNames).toEqual(['replacement']);
+  const ordinary = redactMatchedPaths(
+    { secret: 'hidden' },
+    paths('secret'),
+    undefined,
+  ) as object;
+  expect(Object.hasOwn(ordinary, 'sensitiveFieldNames')).toBe(false);
+});

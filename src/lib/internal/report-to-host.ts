@@ -232,6 +232,20 @@ function dispatchErrorEvent(error: Error): DispatchOutcome {
     return 'unavailable';
   }
 
+  // A hostile message must not make an otherwise usable dispatch unavailable:
+  // reportError can treat the fallback as uncaught and terminate a server process.
+  let message = '';
+
+  try {
+    const value: unknown = error.message;
+
+    if (typeof value === 'string') {
+      message = value;
+    }
+  } catch {
+    // Keep the original error available to listeners, with no message hint.
+  }
+
   let event: Event;
 
   try {
@@ -239,7 +253,7 @@ function dispatchErrorEvent(error: Error): DispatchOutcome {
       errorEventConstructor as new (type: string, init: ErrorEventInit) => Event
     )('error', {
       error,
-      message: error.message,
+      message,
       cancelable: true,
     });
   } catch {
@@ -292,10 +306,10 @@ function dispatchErrorEvent(error: Error): DispatchOutcome {
  * Dispatch leads deliberately, rather than trying `reportError()` first as the WHATWG
  * "report an exception" algorithm would suggest:
  *
- * - Bun (measured on 1.3.14) provides `globalThis.reportError` but it writes to stderr
- *   without dispatching an `'error'` event, so a `reportError()`-first order would make
- *   Lifecycleion's own callback failures invisible to `addEventListener('error', ...)` —
- *   including `logger.registerReportErrorListener()` — on that runtime.
+ * - Bun provides `globalThis.reportError`, but its handling is runtime-dependent:
+ *   Bun 1.3.14 wrote to stderr without dispatching an `'error'` event, and Bun 1.4.0
+ *   can terminate the process for an unhandled report. Dispatching first lets
+ *   Lifecycleion's listeners claim callback failures before host reporting is used.
  * - In browsers, calling `reportError()` *after* a dispatch would notify the same
  *   listeners twice, since the native call dispatches an `'error'` event of its own.
  *

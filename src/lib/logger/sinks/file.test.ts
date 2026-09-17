@@ -3461,3 +3461,63 @@ test('close drains an accepted entry when rotation already ended its stream', as
     await directory.cleanup();
   }
 });
+
+test('failed rotation keeps appending and recovers when renaming becomes available', async () => {
+  const directory = new TmpDir({ unsafeCleanup: true });
+  await directory.initialize();
+  const failures: SinkFailure[] = [];
+  const sink = new FileSink({
+    logDir: directory.path,
+    basename: 'rotation-failure',
+    maxSizeMB: 0.001,
+    maxRetries: 0,
+    jsonFormat: false,
+    onError: (failure) => {
+      failures.push(failure);
+    },
+  });
+  const entry = (message: string): LogEntry => ({
+    timestamp: Date.now(),
+    type: 'info',
+    template: message,
+    message,
+  });
+  let renameSpy: { mockRestore(): void } | undefined;
+  try {
+    sink.write(entry('before-' + 'x'.repeat(2000)));
+    await sink.flush();
+    renameSpy = spyOn(fsPromises, 'rename').mockRejectedValue(
+      new Error('archive rename denied'),
+    );
+    for (const message of ['during-first', 'during-second']) {
+      sink.write(entry(message));
+      await sink.flush();
+    }
+    const currentFile = `${directory.path}/rotation-failure-${new Date().toISOString().slice(0, 10)}.log`;
+    const contents = await fsPromises.readFile(currentFile, 'utf8');
+    expect(contents).toContain('before-');
+    expect(contents).toContain('during-first');
+    expect(contents).toContain('during-second');
+    expect(failures.length).toBeGreaterThan(0);
+    expect(
+      failures.every(
+        (failure) =>
+          failure.kind === 'setup' && failure.disposition === 'no_entry',
+      ),
+    ).toBe(true);
+    expect(sink.getHealth().droppedEntries).toBe(0);
+
+    renameSpy.mockRestore();
+    renameSpy = undefined;
+    sink.write(entry('after-recovery'));
+    await sink.flush();
+    expect(await fsPromises.readFile(currentFile, 'utf8')).toContain(
+      'after-recovery',
+    );
+    expect((await fsPromises.readdir(directory.path)).length).toBe(2);
+  } finally {
+    renameSpy?.mockRestore();
+    await sink.close();
+    await directory.cleanup();
+  }
+});

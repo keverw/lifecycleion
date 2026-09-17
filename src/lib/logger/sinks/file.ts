@@ -1481,7 +1481,7 @@ export class FileSink implements LogSink {
   /**
    * Setup the log file
    */
-  private async setupLogFile(): Promise<void> {
+  private async setupLogFile(shouldSkipRotation = false): Promise<void> {
     // Nothing to open for a sink that is already closed. `close()` bounds its drain loop,
     // so a `writeEntry` suspended in here - a slow `mkdir` on a network mount is enough -
     // resumed *after* that loop gave up, after the stream `close()` found had been
@@ -1636,7 +1636,7 @@ export class FileSink implements LogSink {
 
       // Rotate if already at size limit
       const maxSizeBytes = this.maxSizeMB * 1024 * 1024;
-      if (this.currentLogSize >= maxSizeBytes) {
+      if (!shouldSkipRotation && this.currentLogSize >= maxSizeBytes) {
         await this.rotateFile();
       }
 
@@ -1809,10 +1809,30 @@ export class FileSink implements LogSink {
     try {
       await fsPromises.rename(this.currentLogFile, rotatedFile);
     } catch (error) {
-      throw new FileSinkError(
+      const failure = new FileSinkError(
         `Error rotating log file from ${this.currentLogFile} to ${rotatedFile}`,
         toError(error),
       );
+      this.lastError = failure;
+      reportThroughHandler(
+        this.onError === undefined
+          ? undefined
+          : () =>
+              this.onError?.({
+                kind: 'setup',
+                error: failure,
+                target: this.currentLogFile ?? this.logDir,
+                disposition: 'no_entry',
+              }),
+        () => describeError(failure),
+      );
+
+      // The current file may still be writable when archiving is not. Reopen it
+      // without immediately trying to rotate its unchanged size again; otherwise
+      // every queued entry fails setup (or reopening recurses indefinitely).
+      // A later write will try rotation again, so recovery needs no restart.
+      await this.setupLogFile(true);
+      return;
     }
 
     // Setup new file (queue processing will resume after this)

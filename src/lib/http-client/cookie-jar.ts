@@ -560,10 +560,22 @@ export class CookieJar {
   }
 
   /**
-   * Serializes the jar to JSON.
+   * Serializes detached cookie snapshots using their stored scope. Caller edits to
+   * live cookie objects cannot widen that scope after a save and restore. Cookies
+   * whose mutable fields cannot be safely read are omitted, as on the send path.
    */
   public toJSON(): CookieJarJSON {
-    return { cookies: this.getAllCookies() };
+    const cookies: Cookie[] = [];
+
+    for (const stored of this.getAllCookies()) {
+      const cookie = this.snapshotForSend(stored);
+
+      if (cookie !== null) {
+        cookies.push(cookie);
+      }
+    }
+
+    return { cookies };
   }
 
   /**

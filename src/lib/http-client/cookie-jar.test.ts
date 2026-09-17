@@ -2410,6 +2410,65 @@ describe('CookieJar', () => {
   });
 
   describe('toJSON / fromJSON', () => {
+    test('serialization preserves stored scope despite caller edits', () => {
+      jar.setCookie({
+        name: 'session',
+        value: 'secret',
+        domain: 'api.example.com',
+        path: '/private',
+        secure: true,
+        hostOnly: true,
+        createdAt: Date.now(),
+      });
+      const stored = jar.getAllCookies()[0];
+      Object.assign(stored, {
+        name: 'other',
+        value: 'updated',
+        domain: 'example.com',
+        path: '/',
+        secure: false,
+        hostOnly: false,
+      });
+
+      const data = jar.toJSON();
+      const restored = new CookieJar();
+      expect(restored.fromJSON(JSON.parse(JSON.stringify(data)))).toBe(1);
+      expect(
+        restored.getCookieHeaderString('http://sibling.example.com/'),
+      ).toBe('');
+      expect(
+        restored.getCookieHeaderString('http://api.example.com/private'),
+      ).toBe('');
+      expect(restored.getCookieHeaderString('https://api.example.com/')).toBe(
+        '',
+      );
+      expect(
+        restored.getCookieHeaderString('https://api.example.com/private'),
+      ).toBe('session=updated');
+      expect(data.cookies[0]).not.toBe(stored);
+    });
+
+    test('serialization detaches mutable expiry and omits unreadable cookies', () => {
+      jar.setCookie({
+        name: 'session',
+        value: 'secret',
+        domain: 'example.com',
+        expires: new Date(Date.now() + 60_000),
+        createdAt: Date.now(),
+      });
+      const stored = jar.getAllCookies()[0];
+      const data = jar.toJSON();
+      expect(data.cookies[0].expires).not.toBe(stored.expires);
+      stored.expires?.setTime(0);
+      expect(data.cookies[0].expires?.getTime()).toBeGreaterThan(Date.now());
+      Object.defineProperty(stored, 'value', {
+        get() {
+          throw new Error('unreadable');
+        },
+      });
+      expect(jar.toJSON().cookies).toEqual([]);
+    });
+
     test('round-trips cookies through serialization', () => {
       jar.setCookie({
         name: 'session',

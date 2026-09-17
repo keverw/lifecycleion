@@ -234,3 +234,34 @@ test('a global that silently drops the write still guards one copy against itsel
     clearSharedHostReportState();
   }
 });
+
+test('a throwing message accessor still reaches error listeners without reportError', async () => {
+  const { reportToHost } = await importReportToHostCopy('throwing-message');
+  const error = new Error('original');
+  Object.defineProperty(error, 'message', {
+    get() {
+      throw new Error('cannot read message');
+    },
+  });
+  const events: ErrorEvent[] = [];
+  const reported: unknown[] = [];
+  const originalReportError = globalThis.reportError;
+  const onError = (event: ErrorEvent): void => {
+    events.push(event);
+    event.preventDefault();
+  };
+  globalThis.reportError = (value: unknown): void => {
+    reported.push(value);
+  };
+  globalThis.addEventListener('error', onError);
+  try {
+    reportToHost(error);
+    expect(events).toHaveLength(1);
+    expect(events[0].error).toBe(error);
+    expect(events[0].message).toBe('');
+    expect(reported).toEqual([]);
+  } finally {
+    globalThis.removeEventListener('error', onError);
+    globalThis.reportError = originalReportError;
+  }
+});

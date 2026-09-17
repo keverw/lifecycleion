@@ -228,7 +228,9 @@ function withAdditionalInfoAliases(paths: RedactPath[]): RedactPath[] {
         path.entry.slice(ADDITIONAL_INFO_PREFIX.length + 1),
       ]);
       if (stripped !== null) {
-        aliases.push(...stripped);
+        aliases.push(
+          ...stripped.map((alias) => ({ ...alias, entry: path.entry })),
+        );
       }
     }
   }
@@ -543,6 +545,7 @@ function redactAddressedValue(
   report: ReportFormatFailure,
   reportRender: ReportFormatFailure,
   budget: RenderBudget,
+  origin?: object,
 ): unknown {
   if (paths.length === 0) {
     return value;
@@ -590,6 +593,18 @@ function redactAddressedValue(
       aliases,
       unrootedReport(report),
     );
+
+    // asAddressableBag can stand in for a class instance. Preserve that identity
+    // after normalization replaces the bag again, so nested errors cannot return
+    // through the original instance to unmasked fields.
+    const normalized = bag[ANONYMOUS_ROOT];
+    if (
+      origin !== undefined &&
+      normalized !== null &&
+      typeof normalized === 'object'
+    ) {
+      aliases.set(normalized, origin);
+    }
 
     return unwrapRedactionRoot(
       redactMatchedPaths(
@@ -1309,6 +1324,11 @@ function errorToASCIITable(
                 report,
                 reportRender,
                 budget,
+                typeof additionalInfo === 'object' &&
+                  additionalInfo !== null &&
+                  bag !== additionalInfo
+                  ? additionalInfo
+                  : undefined,
               );
 
         // The walk can fail the whole value closed, and what it hands back then is the

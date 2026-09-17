@@ -2043,15 +2043,33 @@ function redactPathsInner(
     // renderer prints, so a path naming one it does not have reaches nothing - exactly as
     // a typo does, and masking over that would blank a payload for a misspelling.
     if (didMask) {
-      // Error-shaped plain objects can carry non-enumerable redaction metadata.
-      // Forward reads (including failures) so their own renderer still honors it.
-      // Normalization copies only enumerable keys, so consult its original too.
+      // Keep hidden masking metadata without retaining the original container or
+      // exposing a live getter. Null preserves fail-closed behavior for unreadable lists.
       if (!Object.hasOwn(copy, 'sensitiveFieldNames')) {
-        Object.defineProperty(copy, 'sensitiveFieldNames', {
-          get: (): unknown =>
-            Reflect.get(origin ?? value, 'sensitiveFieldNames'),
-          enumerable: false,
-        });
+        let sensitiveNames: unknown;
+        try {
+          const raw: unknown = Reflect.get(
+            origin ?? value,
+            'sensitiveFieldNames',
+          );
+          if (raw !== undefined) {
+            const names = snapshotList(raw);
+            sensitiveNames =
+              names !== null && names.every((name) => typeof name === 'string')
+                ? names
+                : null;
+          }
+        } catch {
+          sensitiveNames = null;
+        }
+        if (sensitiveNames !== undefined) {
+          Object.defineProperty(copy, 'sensitiveFieldNames', {
+            value: sensitiveNames,
+            writable: true,
+            configurable: true,
+            enumerable: false,
+          });
+        }
       }
       recordWalkResult(value, memoKey, state, copy, routeDependentBefore);
 
