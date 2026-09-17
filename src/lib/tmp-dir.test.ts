@@ -489,3 +489,16 @@ test.each([NaN, Infinity, -1, 0o1000, 1.5, '750', null])(
     );
   },
 );
+
+test('leaf mode does not remove traversal permissions from new parents', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'tmp-mode-test-'));
+  const baseDirectory = path.join(root, 'parent', 'base');
+  const dir = new TmpDir({ baseDirectory, mode: 0o600 });
+  try {
+    await dir.initialize();
+    expect((await fs.stat(dir.path)).mode & 0o777).toBe(0o600);
+    expect((await fs.stat(baseDirectory)).mode & 0o700).toBe(0o700);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});

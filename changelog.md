@@ -180,6 +180,10 @@
 
 ## 1.0.0 (Unreleased)
 
+- Prevent credentials from an earlier HTTP attempt from reappearing on redirects after a retry changes hosts. Restore parent-domain cookie lookup below nested private suffixes while retaining public-suffix isolation.
+- Prevent cached redaction results from exposing secrets through cycles hidden by the depth limit. Depth-capped results are no longer cached; deeply shared graphs beyond the limit can require substantially more synchronous work, still bounded by the entry budget. Preserve rendered depth, opaque-value inspection depth, and original error stacks when redacting.
+- Preserve named-pipe retry order, leave dependencies running while a concurrent component stop is unfinished, keep newly created temporary-directory parents traversable, and report failed error-text conversions through `onFormatError`.
+
 - Bound bulk startup deadlines even with a hung start. Allow retry and unregistration while an abandoned start remains pending, prevent its late completion from stopping a newer run, and block recovery only while automatic late cleanup is running.
 - Clarify that the bulk startup time budget excludes failure rollback. Once a required component fails, `startAllComponents()` waits for rollback under the component shutdown timeouts and returns `required_component_failed` with the original error, even past the startup deadline. Another bulk startup remains blocked until rollback finishes.
 - Block signal/message/value handlers during unsafe component transitions. Shutdown notification logger failures no longer prevent signal-driven shutdown.

@@ -412,6 +412,7 @@ function redactValueWith(
         // replacements got a fresh cap of its own whatever the caller had asked for, and
         // the truncation it caused was invisible to `onTruncate`.
         maskBudget,
+        1,
       );
 
       return isContainerRoot ? unwrapRedactionRoot(walked) : walked;

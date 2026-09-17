@@ -3502,11 +3502,10 @@ export class LifecycleManager
           if (result.success) {
             stoppedComponents.add(name);
           } else if (result.code === 'component_already_stopping') {
-            // Another owner is already stopping this component. It is neither a new
-            // stall nor permission to overlap the stop, and it must not prevent later
-            // components in the shutdown order from being processed.
+            // Preserve reverse dependency order. A concurrent stop still owns this
+            // component; its dependencies must remain available until it settles.
             stoppingComponents.add(name);
-            continue;
+            break;
           } else {
             // Component failed to stop - track as stalled but continue
             this.logger

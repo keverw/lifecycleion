@@ -364,8 +364,8 @@ export class CookieJar {
    * Cookies with the Secure attribute are omitted unless the URL uses the `https:` scheme
    * (RFC 6265 §5.4).
    *
-   * Only scans the apex-domain bucket for the URL — O(cookies in that domain)
-   * instead of O(all cookies).
+   * Scans the URL and ancestor-domain buckets, including parents above nested
+   * private suffixes, instead of scanning all cookies.
    *
    * Returns *copies*, not the stored objects. A cookie's `name`, `domain`, `path`,
    * `hostOnly` and `secure` come from the scope `setCookie` accepted it with, and every
@@ -396,11 +396,19 @@ export class CookieJar {
 
     const now = Date.now();
     const result: Cookie[] = [];
-    const apex = this.apexFor(hostname);
+    // A parent domain can live above a nested private suffix. Include its
+    // bucket while retaining the ordinary domain/host-only checks below.
+    const candidateBuckets = new Set<string>();
+    const labels = hostname.split('.');
+    for (let index = 0; index < labels.length; index++) {
+      candidateBuckets.add(this.apexFor(labels.slice(index).join('.')));
+    }
 
-    const apexBucket = this.buckets.get(apex);
-
-    if (apexBucket) {
+    for (const apex of candidateBuckets) {
+      const apexBucket = this.buckets.get(apex);
+      if (!apexBucket) {
+        continue;
+      }
       for (const stored of apexBucket.values()) {
         // Every check below runs against the snapshot, never the stored object: the
         // fields were read once each, so what is vetted is what goes out. A cookie whose
@@ -412,6 +420,17 @@ export class CookieJar {
         }
 
         if (this.isExpired(cookie, now)) {
+          continue;
+        }
+
+        // Persisted cookies can predate the current suffix policy. Never let
+        // a domain cookie for a public suffix span its tenants.
+        if (
+          !cookie.hostOnly &&
+          cookie.domain &&
+          this.isPublicSuffix(cookie.domain) &&
+          !this.hostOnlyDomainMatches(hostname, cookie.domain)
+        ) {
           continue;
         }
 

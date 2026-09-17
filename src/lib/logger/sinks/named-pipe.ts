@@ -156,6 +156,8 @@ export type ReconnectStatus =
  * never a reason for one sink's handler to be told less than the other's.
  */
 interface QueuedPipeEntry extends RenderedLine {
+  /** Original write order, retained across retries. */
+  sequence: number;
   entry: LogEntry;
   /**
    * Writes already attempted for this line. What makes a failed write recoverable rather
@@ -481,6 +483,7 @@ export class NamedPipeSink implements LogSink {
    * it since, including a secret added under a key that was named in `redactedKeys`.
    */
   private writeQueue: QueuedPipeEntry[] = [];
+  private nextWriteSequence = 0;
   private isInitialized = false;
   private maxQueueSize?: number;
   private maxRetries: number;
@@ -645,6 +648,7 @@ export class NamedPipeSink implements LogSink {
       ...this.renderEntry(entry),
       entry,
       attempts: 0,
+      sequence: this.nextWriteSequence++,
     };
 
     // Handed straight to `writeEntry`, which reports it, rather than queued. A render is
@@ -1886,12 +1890,8 @@ export class NamedPipeSink implements LogSink {
    * write that did not land is not the same as a line the caller did not want. It goes
    * back on the queue and out when the pipe is next usable, up to `maxRetries`.
    *
-   * Re-queued at the **back**, which is the opposite of `FileSink`'s front: it costs
-   * ordering against a failing entry blocking everything behind it, and during an outage
-   * nothing is being written in order anyway. Under `maxQueueSize` the two also differ in
-   * what a full queue evicts: `enforceQueueLimit` drops the oldest, so here a retried
-   * entry survives at the tail while a newer line that never failed is the one lost,
-   * where `FileSink`'s retried line is the oldest and goes first.
+   * Re-queued in original write order to preserve order across reconnections.
+   * If the queue is full, the oldest-entry eviction policy still applies.
    *
    * An entry that has used up its attempts is counted as a drop rather than vanishing,
    * so `getHealth().droppedEntries` means "lines this sink did not deliver" whatever the
@@ -1952,7 +1952,20 @@ export class NamedPipeSink implements LogSink {
       return;
     }
 
-    this.writeQueue.push({ ...queued, attempts: queued.attempts + 1 });
+    // Several in-flight writes can fail together. Unshifting each callback
+    // would reverse them; insert by original order ahead of newer entries.
+    const retry = { ...queued, attempts: queued.attempts + 1 };
+    let low = 0;
+    let high = this.writeQueue.length;
+    while (low < high) {
+      const middle = Math.floor((low + high) / 2);
+      if (this.writeQueue[middle].sequence < queued.sequence) {
+        low = middle + 1;
+      } else {
+        high = middle;
+      }
+    }
+    this.writeQueue.splice(low, 0, retry);
     this.enforceQueueLimit();
 
     // `closing`, but not yet `closed`: `close()` sets the flag before its drain loop runs,

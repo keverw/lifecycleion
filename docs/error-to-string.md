@@ -179,7 +179,7 @@ const err = new Error('auth failed');
 
 A bare name does **not** match at depth. `sensitiveFieldNames: ['password']` masks `additionalInfo.password` and leaves `additionalInfo.user.password` rendered, exactly as `redactedKeys: ['password']` does in the logger. Name the path to reach it.
 
-An error nested inside another's `additionalInfo` starts a fresh path root: the outer error's entries address it as a whole (`['cause']` masks the nested error entirely), and the nested error's own `sensitiveFieldNames` covers its own contents.
+An error nested in `cause` or `additionalInfo` starts a fresh path root. Its own `sensitiveFieldNames` covers its contents. An outer path naming that error, or pointing inside it (such as `cause.additionalInfo.token`), masks the entire nested error. To retain its message and stack while masking a field, put the field's path in the nested error's own `sensitiveFieldNames`.
 
 A bare name is taken literally, so `sensitiveFieldNames: ['password-hash']` masks `additionalInfo['password-hash']`.
 

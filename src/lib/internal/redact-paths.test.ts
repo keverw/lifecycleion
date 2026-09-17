@@ -1203,3 +1203,43 @@ test.each(['root', 'long'])(
     ]);
   },
 );
+
+test('opaque inspection depth is independent of its position in the plain container tree', () => {
+  const opaque = Object.assign(new Error('diagnostic'), {
+    details: { ok: true },
+  });
+  let nested: unknown = opaque;
+  for (let level = 0; level < 98; level++) {
+    nested = { child: nested };
+  }
+  const reports: unknown[] = [];
+  const result = redactMatchedPaths(
+    { password: SECRET, nested },
+    paths('password'),
+    undefined,
+    (error) => reports.push(error),
+  ) as Record<string, unknown>;
+  let node: any = result.nested;
+  for (let level = 0; level < 98; level++) {
+    node = node.child;
+  }
+  expect(node).toBe(opaque);
+  expect(reports).toEqual([]);
+});
+
+test('snapshotting an error without a stack does not invent a library stack', () => {
+  const error = new Error('original');
+  delete error.stack;
+  Object.defineProperty(error, 'cause', {
+    get: () => 'cause',
+    configurable: true,
+  });
+  const result = redactMatchedPaths(
+    { password: SECRET, error },
+    paths('password'),
+    undefined,
+  ) as { error: Error };
+  expect(result.error.stack).toBeUndefined();
+  expect(result.error.message).toBe('original');
+  expect(result.error.cause).toBe('cause');
+});

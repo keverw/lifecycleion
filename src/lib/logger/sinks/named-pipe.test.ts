@@ -4771,3 +4771,41 @@ test('reconnect refuses to overlap a pending write with a second pipe writer', a
     await tmpDir.cleanup();
   }
 });
+
+test('a failed pipe write retains its position ahead of newer queued entries', async () => {
+  const sink = new NamedPipeSink({
+    pipePath: '/tmp/lifecycleion-order-test.pipe',
+  });
+  const state = sink as unknown as {
+    closing: boolean;
+    writeQueue: Array<{ entry: LogEntry; attempts: number; sequence: number }>;
+    requeue: (entry: {
+      entry: LogEntry;
+      attempts: number;
+      sequence: number;
+    }) => void;
+  };
+  const older: LogEntry = {
+    message: 'older',
+    template: 'older',
+    type: 'info',
+    timestamp: Date.now(),
+  };
+  const newer: LogEntry = {
+    message: 'newer',
+    template: 'newer',
+    type: 'info',
+    timestamp: Date.now(),
+  };
+  state.closing = true;
+  state.writeQueue.push({ entry: newer, attempts: 0, sequence: 1 });
+  state.requeue({ entry: older, attempts: 0, sequence: 0 });
+  expect(state.writeQueue.map(({ entry }) => entry.message)).toEqual([
+    'older',
+    'newer',
+  ]);
+  expect(state.writeQueue[0].attempts).toBe(1);
+  state.writeQueue.length = 0;
+  state.closing = false;
+  await sink.close();
+});

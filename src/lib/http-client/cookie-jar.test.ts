@@ -2879,7 +2879,7 @@ test('nested private suffix tenants cannot set or delete parent-domain cookies',
   );
   expect(
     jar.getCookieHeaderString('https://sub.attacker.s3.amazonaws.com/'),
-  ).toBe('tenant=ok');
+  ).toBe('tenant=ok; session=trusted');
 });
 
 test.each(['gov.uk', 'com'])(
@@ -2908,4 +2908,17 @@ test('unrelated suffix overrides do not widen exception-domain cookies', () => {
   expect(jar.getCookieHeaderString('https://www.city.kawasaki.jp/')).toBe(
     'good=x',
   );
+});
+
+test('sends parent-domain cookies below nested private suffixes without widening host-only cookies', () => {
+  const jar = new CookieJar();
+  jar.parseSetCookieHeader(
+    'parent=yes; Domain=amazonaws.com; Path=/',
+    'https://www.amazonaws.com/',
+  );
+  jar.parseSetCookieHeader('host=only; Path=/', 'https://amazonaws.com/');
+  expect(jar.getCookieHeaderString('https://bucket.s3.amazonaws.com/')).toBe(
+    'parent=yes',
+  );
+  expect(jar.getCookieHeaderString('https://unrelated.example/')).toBe('');
 });

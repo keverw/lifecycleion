@@ -13088,3 +13088,43 @@ test('late startup clears its deadline before shutdown cleanup', async () => {
     await shutdown;
   }
 });
+
+test('bulk shutdown leaves dependencies running while a concurrent stop owns their dependent', async () => {
+  const logger = new Logger({ sinks: [], callProcessExit: false });
+  const manager = new LifecycleManager({ logger });
+  const pending = Promise.withResolvers<void>();
+  const stops: string[] = [];
+  class Dependency extends BaseComponent {
+    public start() {}
+    public stop() {
+      stops.push('dependency');
+    }
+  }
+  class Dependent extends BaseComponent {
+    public start() {}
+    public async stop() {
+      stops.push('dependent-start');
+      await pending.promise;
+      stops.push('dependent-end');
+    }
+  }
+  await manager.registerComponent(
+    new Dependency(logger, { name: 'dependency' }),
+  );
+  await manager.registerComponent(
+    new Dependent(logger, { name: 'dependent', dependencies: ['dependency'] }),
+  );
+  await manager.startAllComponents();
+  const individualStop = manager.stopComponent('dependent');
+  try {
+    const result = await manager.stopAllComponents();
+    expect(result.success).toBe(false);
+    expect(stops).toEqual(['dependent-start']);
+    expect(manager.isComponentRunning('dependency')).toBe(true);
+  } finally {
+    pending.resolve();
+    await individualStop;
+    await manager.stopAllComponents();
+  }
+  expect(stops).toEqual(['dependent-start', 'dependent-end', 'dependency']);
+});

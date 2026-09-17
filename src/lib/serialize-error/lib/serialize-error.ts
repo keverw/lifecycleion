@@ -156,7 +156,7 @@ function readText(
   // one round trip in disagreement.
   return value === undefined || value === null
     ? undefined
-    : boundedText(describeValue(value), budget);
+    : boundedText(describeValue(value, report, `${path}.${key}`), budget);
 }
 
 /**
@@ -183,10 +183,15 @@ function readOwnMember(
 }
 
 /** `String(value)` without letting a `toString` or `Symbol.toPrimitive` escape. */
-function describeValue(value: unknown): string {
+function describeValue(
+  value: unknown,
+  report: ReportFormatFailure = () => {},
+  path = '<root>',
+): string {
   try {
     return String(value);
-  } catch {
+  } catch (error) {
+    report(error, path);
     return UNSERIALIZABLE_TEXT;
   }
 }
@@ -453,7 +458,7 @@ function serializeErrorInner(
 
   const result: SerializedError = {
     name: boundedText('Error', budget),
-    message: boundedText(describeValue(error), budget),
+    message: boundedText(describeValue(error, report, path), budget),
   };
 
   return deepSerializeRecord(result, seen, depth, path, report, budget, true);

@@ -1158,3 +1158,23 @@ test('restores a received stackless serialized cause and leaves unreadable ident
       .cause,
   ).toBe(unreadable);
 });
+
+test('reports failed conversion of an error diagnostic to text', () => {
+  const failure = new Error('conversion failed');
+  const error = new Error('original');
+  Object.defineProperty(error, 'message', {
+    value: {
+      toString() {
+        throw failure;
+      },
+    },
+  });
+  const reports: unknown[] = [];
+  const serialized = serializeError(error, {
+    onFormatError: (info) => {
+      reports.push(info);
+    },
+  });
+  expect(serialized.message).toBe('<unserializable: text>');
+  expect(reports).toHaveLength(1);
+});

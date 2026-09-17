@@ -604,6 +604,7 @@ function redactAddressedValue(
         aliases,
         unrootedReport(reportRender),
         maskBudget,
+        1,
       ),
     );
   } catch (error) {

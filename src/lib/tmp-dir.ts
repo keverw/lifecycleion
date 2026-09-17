@@ -355,7 +355,10 @@ export class TmpDir {
       // The parent once, so each attempt below can be an *exclusive* create of the leaf.
       // `mkdir` with `recursive: true` succeeds on a directory that already exists, which
       // is why the old stat-then-mkdir could not be made exclusive by itself.
-      await fs.mkdir(this.baseDirectory, { recursive: true, mode: this.mode });
+      await fs.mkdir(this.baseDirectory, {
+        recursive: true,
+        mode: this.mode | 0o700,
+      });
 
       let attemptsMade = 0;
 

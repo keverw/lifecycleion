@@ -206,6 +206,11 @@ function snapshotOpaqueAccessors(
       : (Object.create(
           Object.getPrototypeOf(value) as object | null,
         ) as object);
+  // Never retain the stack captured by this temporary Error. An inherited
+  // stack (for example DOMException) was snapshotted above, or is absent.
+  if (isError) {
+    Reflect.deleteProperty(copy, 'stack');
+  }
   Object.setPrototypeOf(copy, Object.getPrototypeOf(value) as object | null);
   const toString: unknown = Object.prototype.hasOwnProperty.call(
     descriptors,
@@ -682,12 +687,9 @@ function firstEntryOver(
  * it decides whether the node is scanned or walked in full, and the two can answer
  * differently for a container holding an unstable entry.
  *
- * So is the depth, and only because of the cap: how far a subtree gets to be walked before
- * {@link MAX_RENDER_DEPTH} cuts it is the one thing about the route that changes the answer
- * without changing the node set. Carrying it here is what lets a capped result be memoized
- * at all - counting the cap as route-dependent instead left every payload deeper than the
- * cap walking route by route, which is the blowup this memo exists to stop, arriving one
- * level lower down.
+ * Depth distinguishes positions with different remaining inspection allowances.
+ * It is not enough to make a capped result reusable: the cut can hide a back-edge
+ * that closes on a different ancestor chain. Such results are never memoized.
  */
 function walkPositionKey(
   nodes: readonly RedactPathNode[],
@@ -1198,8 +1200,8 @@ interface RedactState {
    *   and whether a back-edge closes depends on the route, not on the node - so a marker
    *   must never be replayed onto a route where the same node is not in a cycle. The same
    *   goes for the entry budget, which stops at whatever the walk order reached first.
-   *   The depth cap is handled by the key rather than by this guard; see
-   *   {@link walkPositionKey}. {@link RedactState.routeDependentResults} is what counts those,
+   *   A depth cut can hide a back-edge that would close on another route, even at
+   *   the same depth. {@link RedactState.routeDependentResults} counts all three,
    *   and a subtree that produced one is not recorded.
    *
    * Both {@link UNCHANGED} and a rebuilt copy are recorded. The copy matters as much as
@@ -1218,15 +1220,11 @@ interface RedactState {
    * than on the node.
    *
    * The memo above replays a result onto every reference that reaches a node, so a result
-   * that would have been different by another route must never go into it. Three produce
-   * one: a cycle, which closes on some routes and not others, and the entry budget, which
-   * is spent in walk order and so stops at whichever reference got there first. The depth
-   * cap is the third such result and is *not* counted here - it is keyed instead, by the
-   * depth {@link walkPositionKey} carries, so a capped subtree is replayed only onto a
-   * route standing exactly as far down. Counted rather than flagged, because what matters
-   * is whether one landed
-   * *inside the subtree just walked* - which is a comparison of this number before and
-   * after, and not a property of the pass as a whole.
+   * that would have been different by another route must never go into it. Three
+   * produce one: a cycle, the entry budget, and the depth cap. A depth cut leaves
+   * the tail uninspected, so a cached ancestor can retain a reference that closes
+   * a cycle on a later route. Counted rather than flagged because what matters is
+   * whether one landed inside the subtree just walked, measured before and after.
    */
   routeDependentResults: number;
   /**
@@ -1255,6 +1253,8 @@ interface RedactState {
   scanLeft: number;
   /** Security inspection of opaque values, independent of optimization scans. */
   opaqueScan: { scanLeft: number; aliases: ForwardingAliases | undefined };
+  /** Synthetic wrapper levels excluded from the rendered depth. */
+  depthOffset: number;
   /**
    * Copies standing in for the containers they forward to. See {@link ForwardingAliases}.
    *
@@ -1435,8 +1435,7 @@ function redactPathsInner(
               );
             }));
         hasUnsafeReference =
-          !isLeaf &&
-          needsFullWalk(snapshot, seen, new Set(), scan, path.length);
+          !isLeaf && needsFullWalk(snapshot, seen, new Set(), scan, 0);
       } catch (error) {
         inspectionError = error;
         hasUnsafeReference = true;
@@ -1521,23 +1520,15 @@ function redactPathsInner(
   // masking correctly one level before it, with nothing reported. Over-masking is the only
   // direction a cap may fail in. Still not reported: a cap is not a failure, and the one
   // redaction report a broken `redactFunction` needs should not be spent on it.
-  if (path.length >= MAX_RENDER_DEPTH) {
+  if (path.length - state.depthOffset >= MAX_RENDER_DEPTH) {
+    // The uninspected tail may close a cycle on another route. Neither this
+    // result nor any ancestor built around it is safe to reuse from the cache.
+    state.routeDependentResults++;
     if (firstEntryOver(nodes, (node) => node.below) !== undefined) {
       state.didTruncate = true;
     }
 
     return TRUNCATED;
-  }
-
-  // Already walked from this same position. See `RedactState.walkResults` for what makes
-  // the position enough to key the answer on. `undefined` is never a recorded result - the
-  // walk answers with `UNCHANGED` or with a container - so it is free to mean "not
-  // recorded".
-  const memoKey = walkPositionKey(nodes, shouldSkipCandidateScan, path.length);
-  const recorded = state.walkResults.get(value)?.get(memoKey);
-
-  if (recorded !== undefined) {
-    return recorded;
   }
 
   // Where the counter stood before this node was walked, so what the walk comes back with
@@ -1589,6 +1580,18 @@ function redactPathsInner(
     state.routeDependentResults++;
 
     return REDACTION_FAILED_MARKER;
+  }
+
+  // Consult the cache only after checking the current route for a cycle.
+  // Already walked from this same position. See `RedactState.walkResults` for what makes
+  // the position enough to key the answer on. `undefined` is never a recorded result - the
+  // walk answers with `UNCHANGED` or with a container - so it is free to mean "not
+  // recorded".
+  const memoKey = walkPositionKey(nodes, shouldSkipCandidateScan, path.length);
+  const recorded = state.walkResults.get(value)?.get(memoKey);
+
+  if (recorded !== undefined) {
+    return recorded;
   }
 
   // Both the node and whatever it forwards to. A back-edge in the payload still points at
@@ -2124,8 +2127,10 @@ export function redactMatchedPaths(
   aliases?: ForwardingAliases,
   reportRender: ReportFormatFailure = NOOP_FORMAT_REPORTER,
   maskBudget: RenderBudget = createRenderBudget(),
+  depthOffset = 0,
 ): unknown {
   const state: RedactState = {
+    depthOffset,
     didMaskAnything: false,
     didFailToRead: false,
     didSnapshotUnstable: false,

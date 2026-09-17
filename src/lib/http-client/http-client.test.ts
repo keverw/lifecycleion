@@ -8621,3 +8621,47 @@ test('redirected GET removes body headers in every casing', async () => {
     Object.keys(requests[1].headers).map((key) => key.toLowerCase()),
   ).not.toContain('content-type');
 });
+
+test('redirects inherit the actual retry request, including credentials and method', async () => {
+  const sent: AdapterRequest[] = [];
+  const adapter: HTTPAdapter = {
+    getType: () => 'mock',
+    send: (request): Promise<AdapterResponse> => {
+      sent.push(request);
+      return Promise.resolve<AdapterResponse>(
+        sent.length === 1
+          ? { status: 503, headers: {}, body: null }
+          : sent.length === 2
+            ? { status: 307, headers: { location: '/next' }, body: null }
+            : { status: 200, headers: {}, body: null },
+      );
+    },
+  };
+  const client = new HTTPClient({ adapter, followRedirects: true });
+  client.addRequestInterceptor(
+    (request) => ({
+      ...request,
+      headers: { ...request.headers, authorization: 'host-a-secret' },
+    }),
+    { phases: ['initial'] },
+  );
+  client.addRequestInterceptor(
+    (request) => ({
+      ...request,
+      requestURL: 'https://b.example/retry',
+      method: 'POST',
+      body: 'retry-body',
+      headers: { ...request.headers, authorization: 'host-b-secret' },
+    }),
+    { phases: ['retry'] },
+  );
+  await client
+    .get('https://a.example/start')
+    .retryPolicy({ strategy: 'fixed', maxRetryAttempts: 1, delayMS: 1 })
+    .send();
+  expect(sent).toHaveLength(3);
+  expect(sent[2].requestURL).toBe('https://b.example/next');
+  expect(sent[2].headers.authorization).toBe('host-b-secret');
+  expect(sent[2].method).toBe('POST');
+  expect(sent[2].body).toBe('retry-body');
+});

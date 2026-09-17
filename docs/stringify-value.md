@@ -266,7 +266,9 @@ A `toJSON` method is **not** called. `JSON.stringify` honours it, but this does 
 
 Masking a value the renderer prints whole replaces it with a **string** - nothing is rebuilt for it. That is what keeps the shape stable: `"[Map]"` before, `"***REDACTED***"` after. Only plain objects and arrays are ever rebuilt, because they are the only things either walk enters.
 
-Two cases fail closed and so do change a value nobody named, both marked rather than silently altered: a container whose keys cannot be read, and a container that holds itself once a mask has landed elsewhere in the payload. Redaction can copy around neither, and handing back the original would risk returning it unmasked. A cycle in a payload where nothing matched at all is left exactly as it came in.
+Unreadable keys and cycles can force changes to values nobody named: a container whose keys cannot be read, and a container that holds itself once a mask has landed elsewhere in the payload. Redaction can copy around neither, and handing back the original would risk returning it unmasked. A cycle in a payload where nothing matched at all is left exactly as it came in.
+
+Opaque values such as errors and class instances also require inspection because template lookups can reach their properties. Each opaque graph has a 16,384-entry inspection allowance and a separate depth limit. If inspection cannot establish that a value is safe, redaction uses `***REDACTION FAILED***` and reports the failure; it does not return an unchecked reference.
 
 ### What Masking Reaches
 

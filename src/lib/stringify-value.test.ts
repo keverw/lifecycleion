@@ -3184,3 +3184,16 @@ describe('stringifyValue / redactValue - an options object that refuses to be re
     );
   });
 });
+
+test('a synthetic redaction root does not consume rendered depth', () => {
+  let value: Record<string, unknown> = { last: 'visible-boundary' };
+  for (let depth = 0; depth < 99; depth++) {
+    value = { child: value };
+  }
+  const input = { secret: 's', value };
+  const redacted = stringifyValue(input, {
+    redactedKeys: ['secret'],
+    redactFunction: () => 's',
+  });
+  expect(redacted).toBe(stringifyValue(input));
+});

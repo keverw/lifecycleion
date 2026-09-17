@@ -922,15 +922,15 @@ export class BaseHTTPClient {
             //  - 303 (See Other) becomes GET except for GET and HEAD
             //  - 301 (Moved Permanently) / 302 (Found) rewrite POST to GET
             //  - 307 (Temporary Redirect) / 308 (Permanent Redirect) preserve method/body
-            let redirectMethod: HTTPMethod = currentInterceptedRequest.method;
+            let redirectMethod: HTTPMethod = attemptResult.sentRequest.method;
 
             if (
               (adapterResponse.status === 303 &&
-                currentInterceptedRequest.method !== 'GET' &&
-                currentInterceptedRequest.method !== 'HEAD') ||
+                attemptResult.sentRequest.method !== 'GET' &&
+                attemptResult.sentRequest.method !== 'HEAD') ||
               ((adapterResponse.status === 301 ||
                 adapterResponse.status === 302) &&
-                currentInterceptedRequest.method === 'POST')
+                attemptResult.sentRequest.method === 'POST')
             ) {
               redirectMethod = 'GET';
             }
@@ -990,13 +990,13 @@ export class BaseHTTPClient {
 
             const redirectRequest = this._sanitizeRedirectRequest(
               {
-                ...currentInterceptedRequest,
+                ...attemptResult.sentRequest,
                 requestURL: redirectURL,
                 method: redirectMethod,
                 body:
                   redirectMethod === 'GET'
                     ? undefined
-                    : currentInterceptedRequest.body,
+                    : attemptResult.sentRequest.body,
               },
               {
                 fromURL: attemptResult.sentRequest.requestURL,
