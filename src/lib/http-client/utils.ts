@@ -520,11 +520,12 @@ export function extractFetchHeaders(
     }
   } else {
     // Legacy Headers implementations can combine cookie lines. A comma before
-    // another name=value may be a cookie boundary OR part of a Path/extension
-    // attribute. Reject that ambiguous header: splitting can invent cookies or
-    // broaden their scope, and keeping it can apply one cookie's attributes to
-    // another. Ordinary Expires date commas do not contain an '=' before the
-    // next delimiter and remain intact.
+    // another name=value may be a cookie boundary, a valid part of a Path or
+    // extension attribute, or an invalid cookie-value octet accepted by a
+    // permissive server. Reject that ambiguous header: splitting can invent
+    // cookies or broaden their scope, and keeping it can apply one cookie's
+    // attributes to another. Ordinary Expires date commas do not contain an '='
+    // before the next delimiter and remain intact.
     const raw = headers.get('set-cookie');
 
     if (raw && !/,[^;,]*=/.test(raw)) {

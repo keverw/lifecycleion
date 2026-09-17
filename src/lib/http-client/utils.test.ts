@@ -680,6 +680,7 @@ describe('extractFetchHeaders', () => {
   test.each([
     'a=1, b=2',
     'a=1, b = 2',
+    'prefs=a,b=c; Path=/',
     'a=1; Expires=Wed, 21 Oct 2099 07:28:00 GMT, b=2',
     'safe=1; Secure; Path=/restricted, admin=1',
     'safe=1; Extension=value, admin=1; Path=/',

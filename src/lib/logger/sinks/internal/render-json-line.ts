@@ -42,7 +42,10 @@ export function renderJSONLine(
   // Keep the ordinary JSON.stringify behavior (including a hostile runtime value
   // throwing) while bounding the encoded form of a real string. Check the encoded length
   // without first allocating that full encoding: one control-heavy megabyte can otherwise
-  // allocate roughly six megabytes merely to discover that it needs truncation.
+  // allocate roughly six megabytes merely to discover that it needs truncation. JavaScript
+  // callers and custom transformers can still violate LogEntry's string type at runtime.
+  // JSON.stringify returns undefined for undefined, functions and symbols; render those
+  // through the guarded formatter instead of interpolating the invalid JSON token.
   let renderedMessage: string;
 
   if (
@@ -54,7 +57,12 @@ export function renderJSONLine(
       { onFormatError },
     );
   } else {
-    renderedMessage = `{"message":${JSON.stringify(entry.message)}}`;
+    const encodedMessage = JSON.stringify(entry.message);
+
+    renderedMessage =
+      encodedMessage === undefined
+        ? stringifyValue({ message: entry.message }, { onFormatError })
+        : `{"message":${encodedMessage}}`;
   }
   const envelope = spliceRenderedObject(
     envelopeBase,

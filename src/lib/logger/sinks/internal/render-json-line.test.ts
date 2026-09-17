@@ -55,6 +55,22 @@ describe('renderJSONLine', () => {
     );
   });
 
+  test.each([
+    [undefined, '[undefined]'],
+    [function runtimeMessage(): void {}, '[Function: runtimeMessage]'],
+    [Symbol('runtime-message'), 'Symbol(runtime-message)'],
+  ])(
+    'keeps a runtime-invalid message parseable: %s',
+    (message, expectedMessage) => {
+      const line = renderJSONLine(
+        { ...base, message: message as unknown as string },
+        () => {},
+      );
+
+      expect(JSON.parse(line)).toMatchObject({ message: expectedMessage });
+    },
+  );
+
   test('renders what JSON.stringify refuses, as markers inside valid JSON', () => {
     const cyclic: Record<string, unknown> = { a: 1 };
 
