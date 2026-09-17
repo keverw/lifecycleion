@@ -1265,3 +1265,111 @@ test('review follow-up: rebuilt metadata is a detached writable snapshot', () =>
   ) as object;
   expect(Object.hasOwn(ordinary, 'sensitiveFieldNames')).toBe(false);
 });
+
+test('repeated opaque siblings share one successful inspection and stable snapshot', () => {
+  let reads = 0;
+  const shared = Object.assign(new Error('safe'), {
+    a: 1,
+    b: 2,
+    c: 3,
+    d: 4,
+    e: 5,
+    f: 6,
+  });
+  Object.defineProperty(shared, 'detail', {
+    enumerable: true,
+    get: () => {
+      reads++;
+      return 'safe detail';
+    },
+  });
+  const input = { secret: SECRET, values: new Array(60_000).fill(shared) };
+  const reports: string[] = [];
+  const result = redactMatchedPaths(
+    input,
+    paths('secret'),
+    undefined,
+    (_error, path) => reports.push(path),
+  ) as typeof input;
+  expect(reports).toEqual([]);
+  expect(result.values).toHaveLength(60_000);
+  expect(result.values.every((value) => value instanceof Error)).toBe(true);
+  expect(result.values.every((value) => value === result.values[0])).toBe(true);
+  expect(reads).toBe(1);
+});
+
+test('repeated opaque graphs do not repeatedly spend the aggregate scan budget', () => {
+  class Holder {
+    public data = new Array(3000).fill(1);
+  }
+  const shared = new Holder();
+  const values = new Array(2000).fill(shared);
+  Object.defineProperty(values, '0', { enumerable: true, get: () => shared });
+  const result = redactMatchedPaths(
+    { secret: SECRET, values },
+    paths('secret'),
+    undefined,
+  ) as { values: unknown[] };
+  expect(result.values).toHaveLength(2000);
+  expect(result.values.every((value) => value === shared)).toBe(true);
+});
+
+test.each([false, true])(
+  'opaque inspection successes stay within their ancestor context (unsafeFirst=%s)',
+  (isUnsafeFirst) => {
+    const ancestor: Record<string, unknown> = { secret: SECRET };
+    const opaque = Object.assign(new (class Holder {})(), { link: ancestor });
+    ancestor.opaque = opaque;
+    const input = isUnsafeFirst
+      ? [ancestor, opaque]
+      : [opaque, ancestor, opaque];
+    const index = isUnsafeFirst ? 0 : 1;
+    const result = redactMatchedPaths(
+      input,
+      paths(`${index}.secret`),
+      undefined,
+    ) as typeof input;
+    const redactedAncestor = result[index] as Record<string, unknown>;
+    expect(result[isUnsafeFirst ? 1 : 0]).toBe(opaque);
+    expect(result.at(-1)).toBe(opaque);
+    expect(redactedAncestor.opaque).toBe(REDACTION_FAILED_MARKER);
+    expect(redactedAncestor.secret).not.toBe(SECRET);
+  },
+);
+
+test('a cached opaque value is still masked when another selector addresses it', () => {
+  const shared = Object.assign(new (class Holder {})(), { secret: SECRET });
+  const result = redactMatchedPaths(
+    { first: shared, second: shared },
+    paths('second.secret'),
+    () => 'MASKED',
+  ) as { first: unknown; second: unknown };
+  expect(result.first).toBe(shared);
+  expect(result.second).toBe('MASKED');
+});
+
+test('repeated opaque values share inspection across separate row wrappers', () => {
+  let reads = 0;
+  const shared = new Error('safe');
+  Object.defineProperty(shared, 'detail', {
+    enumerable: true,
+    get: () => {
+      reads++;
+      return 'safe';
+    },
+  });
+  const rows = Array.from({ length: 60_000 }, () => ({ diagnostic: shared }));
+  const reports: string[] = [];
+  const result = redactMatchedPaths(
+    { secret: SECRET, rows },
+    paths('secret'),
+    undefined,
+    (_error, path) => reports.push(path),
+  ) as { rows: Array<{ diagnostic: Error }> };
+  expect(reports).toEqual([]);
+  expect(result.rows).toHaveLength(rows.length);
+  expect(result.rows.every((row) => row.diagnostic instanceof Error)).toBe(
+    true,
+  );
+  expect(reads).toBe(1);
+});

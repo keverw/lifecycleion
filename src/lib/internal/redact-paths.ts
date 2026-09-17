@@ -1251,6 +1251,13 @@ interface RedactState {
    * work of the optimization scan and main walk is bounded independently.
    */
   scanLeft: number;
+  /** Successful opaque inspections, reusable only when their references avoid the active route. */
+  opaqueResults: WeakMap<
+    object,
+    { snapshot: object; references: WeakSet<object> }
+  >;
+  /** Same identities as `seen`, in traversal order, for bounded cache-hit checks. */
+  ancestors: object[];
   /** Security inspection of opaque values, independent of optimization scans. */
   opaqueScan: { scanLeft: number; aliases: ForwardingAliases | undefined };
   /** Synthetic wrapper levels excluded from the rendered depth. */
@@ -1412,6 +1419,23 @@ function redactPathsInner(
       // Opaque values still expose properties to template lookups. Do not return
       // one that leads back to an ancestor whose masked copy is being built.
       // Keep its opaque shape: replacing the whole value avoids exposing its fields.
+      const cached = state.opaqueResults.get(value);
+      if (cached !== undefined) {
+        if (
+          state.ancestors.some((ancestor) => cached.references.has(ancestor))
+        ) {
+          report(
+            new Error(
+              'Opaque value contains a reference to an ancestor being redacted',
+            ),
+            pathText(path) || '<root>',
+          );
+          state.routeDependentResults++;
+          return REDACTION_FAILED_MARKER;
+        }
+        return cached.snapshot === value ? UNCHANGED : cached.snapshot;
+      }
+
       let hasUnsafeReference: boolean;
       let inspectionError: unknown;
       let snapshot: object = value;
@@ -1420,6 +1444,7 @@ function redactPathsInner(
         state.opaqueScan.scanLeft,
       );
       const scan = { scanLeft: allowance, aliases: state.aliases };
+      const visited = new Set<object>();
       try {
         snapshot = snapshotOpaqueAccessors(value, scan);
         // Empty opaque leaves and ordinary Error diagnostics need no graph walk.
@@ -1435,7 +1460,7 @@ function redactPathsInner(
               );
             }));
         hasUnsafeReference =
-          !isLeaf && needsFullWalk(snapshot, seen, new Set(), scan, 0);
+          !isLeaf && needsFullWalk(snapshot, seen, visited, scan, 0);
       } catch (error) {
         inspectionError = error;
         hasUnsafeReference = true;
@@ -1453,6 +1478,20 @@ function redactPathsInner(
         state.routeDependentResults++;
         return REDACTION_FAILED_MARKER;
       }
+      // Cache only a complete successful inspection. A later occurrence may have
+      // different ancestors, so keep its reachable identities rather than a bare
+      // "safe" flag. Cache hits check at most the bounded active depth and do not
+      // repeat property reads or charge the graph's scan cost again.
+      visited.add(value);
+      visited.add(snapshot);
+      const references = new WeakSet(visited);
+      for (const reference of visited) {
+        const origin = state.aliases?.get(reference);
+        if (origin !== undefined) {
+          references.add(origin);
+        }
+      }
+      state.opaqueResults.set(value, { snapshot, references });
       if (snapshot !== value) {
         state.didSnapshotUnstable = true;
         return snapshot;
@@ -1600,10 +1639,13 @@ function redactPathsInner(
   // {@link ForwardingAliases}.
   const origin = state.aliases?.get(value);
 
+  const ancestorCount = state.ancestors.length;
   seen.add(value);
+  state.ancestors.push(value);
 
   if (origin !== undefined) {
     seen.add(origin);
+    state.ancestors.push(origin);
   }
 
   try {
@@ -2080,6 +2122,7 @@ function redactPathsInner(
 
     return UNCHANGED;
   } finally {
+    state.ancestors.length = ancestorCount;
     seen.delete(value);
 
     if (origin !== undefined) {
@@ -2167,6 +2210,8 @@ export function redactMatchedPaths(
     routeDependentResults: 0,
     entriesLeft: MAX_REDACTION_ENTRIES,
     scanLeft: MAX_REDACTION_ENTRIES,
+    opaqueResults: new WeakMap(),
+    ancestors: [],
     opaqueScan: { scanLeft: MAX_REDACTION_ENTRIES, aliases },
     aliases,
     reportRender,

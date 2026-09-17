@@ -592,6 +592,8 @@ Four failure modes, all fail closed:
 | A param cannot be read (a getter that throws)                                       | That key becomes the marker where it sits, while every other param, including the redacted one, redacts normally |
 | The `params` object cannot be read at all (a revoked `Proxy`, a throwing `ownKeys`) | **Only** the redacted keys are returned, each set to the marker. Other params are dropped from `redactedParams`  |
 
+Large graphs can also exhaust the bounded inspection budget and produce this marker. Within one redaction operation, repeated references to the same successfully inspected error or class instance reuse that inspection, including across separate row objects. Each reuse checks for references to ancestors currently being redacted. Distinct objects still require separate inspections and can reach the limit; the cache does not persist between log calls.
+
 The marker is deliberately distinct from an ordinary `***` mask. An operator seeing `***`
 concludes redaction worked, so a broken `redactFunction` would otherwise hide itself behind
 output that looks successful.
