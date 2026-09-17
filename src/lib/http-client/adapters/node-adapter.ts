@@ -305,6 +305,11 @@ export class NodeAdapter implements HTTPAdapter {
   private _config: NodeAdapterConfig;
 
   constructor(config: NodeAdapterConfig = {}) {
+    // Reject malformed initial configuration before it can enter request retries.
+    // Still normalize per request below so callers can refresh their revocation list.
+    if (config.crl !== undefined) {
+      normalizeCRL(config.crl);
+    }
     this._config = config;
   }
 

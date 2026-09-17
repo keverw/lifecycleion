@@ -3100,6 +3100,64 @@ describe('FileSink - entries written during close', () => {
     expect(sink.getHealth().droppedEntries).toBe(0);
   });
 
+  test('a write interrupted during setup is classified as a close failure', async () => {
+    const sink = new FileSink({
+      logDir: tmpDir.path,
+      basename: 'setup-close-race',
+    });
+    await sink.flush();
+    const internals = sink as unknown as {
+      closed: boolean;
+      logFileStream: unknown;
+      setupLogFile: () => Promise<void>;
+      writeEntry: (queued: {
+        entry: LogEntry;
+        attempts: number;
+        formatted: string;
+        formatError: undefined;
+      }) => Promise<void>;
+    };
+    const stream = internals.logFileStream;
+    const setup = internals.setupLogFile;
+    internals.logFileStream = undefined;
+    internals.setupLogFile = () => {
+      internals.closed = true;
+      return Promise.resolve();
+    };
+    try {
+      const failure = await internals
+        .writeEntry({
+          entry: {
+            timestamp: Date.now(),
+            type: 'info',
+            template: 'line',
+            message: 'line',
+          },
+          attempts: 0,
+          formatted: 'line\n',
+          formatError: undefined,
+        })
+        .then(
+          () => undefined,
+          (error: unknown) => error,
+        );
+      expect(failure).toBeInstanceOf(Error);
+      expect((failure as Error).message).toBe('Cannot write to closed sink');
+      expect(
+        (
+          sink as unknown as {
+            failureKindFor: (error: Error) => SinkFailureKind;
+          }
+        ).failureKindFor(failure as Error),
+      ).toBe('close');
+    } finally {
+      internals.closed = false;
+      internals.logFileStream = stream;
+      internals.setupLogFile = setup;
+      await sink.close();
+    }
+  });
+
   test('an oversized-line rotation cannot resume writing after close completes', async () => {
     const sink = new FileSink({
       logDir: tmpDir.path,

@@ -7050,3 +7050,7 @@ describe('NodeAdapter — abort listeners are released when the request settles'
     }
   }, 20000);
 });
+
+test('rejects malformed initial CRLs before any request or retry', () => {
+  expect(() => new NodeAdapter({ crl: 'garbage' })).toThrow();
+});

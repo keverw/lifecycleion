@@ -174,14 +174,9 @@ function snapshotValue(
       }
     }
 
-    // namedArrayKeys materializes every index key through Object.keys. Do not
-    // enumerate after the final index has spent the remaining budget either.
-    if (budget.entriesLeft <= 0) {
-      copy.push(TRUNCATED_ENTRIES);
-
-      return copy;
-    }
-
+    // All indices fit. Inspect named keys before claiming anything was omitted;
+    // the final index may have spent the budget exactly. Arrays whose indices
+    // exceed the budget already returned above, without enumerating their keys.
     // An array's *named* properties, which the redaction walks carry and the renderers
     // print - `maskValueDeep` and `redactPathsInner` both call `namedArrayKeys` precisely
     // because they exist. Copied by index alone, a bag whose `items` is

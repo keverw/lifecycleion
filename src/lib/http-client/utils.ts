@@ -418,10 +418,10 @@ export function assertSupportedAdapterRuntimeAndConfig(
   if (
     config.followRedirects === true &&
     config.maxRedirects !== undefined &&
-    config.maxRedirects < 1
+    (!Number.isFinite(config.maxRedirects) || config.maxRedirects < 1)
   ) {
     throw new Error(
-      'HTTPClient maxRedirects must be greater than or equal to 1 when followRedirects is true.',
+      'HTTPClient maxRedirects must be greater than or equal to 1 when followRedirects is true. It must also be finite.',
     );
   }
 

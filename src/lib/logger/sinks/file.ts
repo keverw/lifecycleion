@@ -1334,6 +1334,11 @@ export class FileSink implements LogSink {
       await this.setupLogFile();
     }
 
+    // Setup may return without a stream when close finishes while it is suspended.
+    if (this.closed) {
+      throw new FileSinkError('Cannot write to closed sink');
+    }
+
     if (!this.logFileStream) {
       throw new FileSinkError('No log file stream available');
     }

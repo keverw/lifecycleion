@@ -895,7 +895,7 @@ describe('ArraySink - a then-only thenable from onFormatError', () => {
 });
 
 test.each([MAX_REDACTION_ENTRIES - 1, MAX_REDACTION_ENTRIES])(
-  'does not enumerate named array keys after snapshot budget exhaustion (length %s)',
+  'only enumerates named array keys when all indices fit (length %s)',
   (length) => {
     let enumerations = 0;
     const items = new Proxy(
@@ -921,7 +921,7 @@ test.each([MAX_REDACTION_ENTRIES - 1, MAX_REDACTION_ENTRIES])(
     });
 
     const stored = sink.logs[0]?.redactedParams?.['items'] as unknown[];
-    expect(enumerations).toBe(0);
+    expect(enumerations).toBe(length === MAX_REDACTION_ENTRIES - 1 ? 1 : 0);
     expect(stored).not.toBe(items);
     expect(stored.length).toBe(MAX_REDACTION_ENTRIES);
     expect(stored[0]).toBe(7);
@@ -930,3 +930,18 @@ test.each([MAX_REDACTION_ENTRIES - 1, MAX_REDACTION_ENTRIES])(
     expect(Object.hasOwn(stored, 'cursor')).toBe(false);
   },
 );
+
+test('does not mark an array truncated when its final element exactly spends the budget', () => {
+  const items = new Array<number>(MAX_REDACTION_ENTRIES - 1).fill(7);
+  const sink = new ArraySink();
+  sink.write({
+    timestamp: Date.now(),
+    type: 'info',
+    template: 't',
+    message: 'm',
+    redactedParams: { items },
+  });
+  const stored = sink.logs[0]?.redactedParams?.['items'] as unknown[];
+  expect(stored).toHaveLength(items.length);
+  expect(stored[stored.length - 1]).toBe(7);
+});

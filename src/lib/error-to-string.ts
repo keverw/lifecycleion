@@ -994,6 +994,38 @@ function resolveTableWidth(maxRowLength: number): number {
   );
 }
 
+/** Conventional object-valued members need the same nested error redaction as extras. */
+function stringifyErrorMember(
+  value: unknown,
+  path: string,
+  maxRowLength: number,
+  seen: WeakSet<object>,
+  depth: number,
+  budget: RenderBudget,
+  redactFunction: RedactFieldFunction | undefined,
+  report: ReportFormatFailure,
+  reportRender: ReportFormatFailure,
+): string | KeyValueASCIITable | NestedKeyValueEntry[] {
+  if (
+    value === null ||
+    typeof value !== 'object' ||
+    ArrayBuffer.isView(value)
+  ) {
+    return safeStringify(value, path, reportRender, budget);
+  }
+  return stringifyValue(
+    value,
+    path,
+    maxRowLength,
+    seen,
+    depth + 1,
+    budget,
+    redactFunction,
+    report,
+    reportRender,
+  );
+}
+
 function errorToASCIITable(
   error: unknown,
   path: string,
@@ -1082,16 +1114,28 @@ function errorToASCIITable(
         // level, and none of that is any string this walk produces.
         chargeUnits(budget, rowFrameCost(maxRowLength, depth));
 
+        const rendered = stringifyErrorMember(
+          value,
+          joinPath(path, key),
+          maxRowLength,
+          seen,
+          depth,
+          budget,
+          redactFunction,
+          report,
+          reportRender,
+        );
+        // Structured values have already charged their recursive render. Preserve
+        // tables and entry trees so the table renderer can lay out their borders.
         table.addRow(
           label,
-          // `chargeNestedText`, because a cause's table is re-emitted by every ancestor:
-          // billed once, a 200 KB `message` twenty-five causes deep rendered 26 MB against
-          // the 1 MB cap.
-          chargeNestedText(
-            budget,
-            safeStringify(value, joinPath(path, key), reportRender, budget),
-            rowTextLevels(maxRowLength, depth, label.length),
-          ),
+          typeof rendered === 'string'
+            ? chargeNestedText(
+                budget,
+                rendered,
+                rowTextLevels(maxRowLength, depth, label.length),
+              )
+            : rendered,
         );
       }
     }
@@ -1538,24 +1582,31 @@ function addErrorTail(
             : masked;
       }
     }
-    const stackText = safeStringify(
+    const stackText = stringifyErrorMember(
       renderedStack,
       joinPath(path, 'stack'),
-      reportRender,
+      maxRowLength,
+      seen,
+      depth,
       budget,
+      redactFunction,
+      report,
+      reportRender,
     );
 
-    table.addValueOnSeparateRow(
-      'Stack',
-      chargeNestedText(
-        budget,
-        stackText,
-        // `ownRowTextLevels`, not `rowTextLevels`: a stack is written on its own row, one
-        // padded line per line of it, and a stack of many short lines was charged for its
-        // characters and emitted as full-width rows.
-        ownRowTextLevels(stackText, maxRowLength, depth),
-      ),
-    );
+    if (typeof stackText === 'string') {
+      table.addValueOnSeparateRow(
+        'Stack',
+        chargeNestedText(
+          budget,
+          stackText,
+          // Text stacks occupy full-width rows rather than a key/value cell.
+          ownRowTextLevels(stackText, maxRowLength, depth),
+        ),
+      );
+    } else {
+      table.addRow('Stack', stackText);
+    }
   }
 }
 

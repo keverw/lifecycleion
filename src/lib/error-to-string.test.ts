@@ -2695,3 +2695,41 @@ it.each(['code', 'errno'])(
     expect(onFormatError).not.toHaveBeenCalled();
   },
 );
+
+it.each(['code', 'message', 'stack'])(
+  'masks nested error secrets in object-valued %s',
+  (key) => {
+    const nested = {
+      message: 'nested failure',
+      additionalInfo: { token: 'NESTED_SECRET', visible: 'visible-value' },
+      sensitiveFieldNames: ['token'],
+    };
+    const result = errorToString({ message: 'outer', [key]: { nested } });
+    expect(result).not.toContain('NESTED_SECRET');
+    expect(result).toContain('visible-value');
+  },
+);
+
+it.each(['code', 'message', 'stack'])(
+  'lays out nested errors in %s like a structured cause',
+  (key) => {
+    const nested = {
+      message: 'nested failure',
+      additionalInfo: { token: 'NESTED_SECRET', visible: 'visible-value' },
+      sensitiveFieldNames: ['token'],
+    };
+    for (const value of [nested, { e: nested }]) {
+      const output = errorToString({ [key]: value });
+      const reference = errorToString({ cause: value });
+      const normalizeLabel = (text: string) =>
+        text
+          .split('\n')
+          .slice(3) // The outer header's column widths depend on the member label.
+          .join('\n')
+          .replace(/^\| +(?:Code|Message|Stack|Cause) +\|$/gm, '| MEMBER |');
+      expect(output).not.toContain('NESTED_SECRET');
+      expect(output).not.toContain('\\n');
+      expect(normalizeLabel(output)).toBe(normalizeLabel(reference));
+    }
+  },
+);

@@ -1107,7 +1107,7 @@ test.each(['bigint', 'binary'] as const)('bounds generated %s text', (kind) => {
   expect(String(result.leaf)).toContain('[max length exceeded]');
 });
 
-test('ordinary name/message data remains intact in an error cause', () => {
+test('serialization preserves ordinary name/message data without treating it as an error', () => {
   for (const cause of [
     { name: {}, message: null },
     { name: 'user', message: 'hello' },
@@ -1115,8 +1115,11 @@ test('ordinary name/message data remains intact in an error cause', () => {
     expect(isErrorLike(cause)).toBe(false);
     const serialized = serializeError(new Error('outer', { cause }));
     expect(serialized.cause).toEqual(cause);
-    expect(deserializeError(serialized).cause).toEqual(cause);
-    expect(deserializeError(serialized).cause).not.toBeInstanceOf(Error);
+    // On receipt, textual name/message pairs also match stackless SerializedError.
+    if (typeof cause.name !== 'string') {
+      expect(deserializeError(serialized).cause).toEqual(cause);
+      expect(deserializeError(serialized).cause).not.toBeInstanceOf(Error);
+    }
   }
   const stackless = new Error('real');
   delete stackless.stack;
@@ -1124,4 +1127,34 @@ test('ordinary name/message data remains intact in an error cause', () => {
   expect(
     serializeError(new Error('outer', { cause: stackless })).cause,
   ).toMatchObject({ name: 'Error', message: 'real' });
+});
+
+test('restores stackless serialized causes and aggregate members', () => {
+  const child = new Error('child');
+  delete child.stack;
+  const outer = new AggregateError([child, 'ordinary'], 'outer', {
+    cause: child,
+  });
+  const restored = deserializeError(serializeError(outer));
+  expect(restored.cause).toBeInstanceOf(Error);
+  expect((restored.cause as Error).message).toBe('child');
+  expect((restored as AggregateError).errors[0]).toBeInstanceOf(Error);
+  expect((restored as AggregateError).errors[1]).toBe('ordinary');
+});
+
+test('restores a received stackless serialized cause and leaves unreadable identities alone', () => {
+  const cause = { name: 'RemoteFailure', message: 'failed' };
+  const restored = deserializeError({ name: 'Error', message: 'outer', cause });
+  expect(restored.cause).toBeInstanceOf(Error);
+  expect((restored.cause as Error).name).toBe('RemoteFailure');
+  const unreadable = {
+    get name(): string {
+      throw new Error('unreadable');
+    },
+    message: 'data',
+  };
+  expect(
+    deserializeError({ name: 'Error', message: 'outer', cause: unreadable })
+      .cause,
+  ).toBe(unreadable);
 });

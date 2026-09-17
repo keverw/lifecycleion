@@ -136,7 +136,7 @@ interface HTTPClientConfig {
   includeAttemptHeader?: boolean; // Default: false — sends x-local-client-request-attempt header with the 1-based attempt number as a decimal string. The counter is global across redirect hops: attempt 2 on a redirect hop follows attempt 1 on the initial request, not reset per hop.
   userAgent?: string; // Auto-set to 'lifecycleion-http-client' for NodeAdapter and MockAdapter, and for FetchAdapter on server runtimes. Browsers block this header — constructor throws if set with FetchAdapter or XHRAdapter in a browser.
   followRedirects?: boolean; // Default: false (security-conscious default)
-  maxRedirects?: number; // Default: 5 (only meaningful when followRedirects: true; throws at construction unless followRedirects: true; must be >= 1)
+  maxRedirects?: number; // Default: 5 (only meaningful when followRedirects: true; throws at construction unless followRedirects: true; must be finite and >= 1)
 }
 ```
 
@@ -1207,7 +1207,7 @@ The value is read and normalized on **every request**, so refreshing a revocatio
 
 **Bundles are split for you.** A PEM string or Buffer holding several concatenated CRLs, the format Apache's `SSLCARevocationFile`, nginx's `ssl_crl`, and HAProxy's `crl-file` all expect and CA tooling exports, is split into the array Node requires. This includes Buffers: `fs.readFileSync('bundle.pem')` without an encoding returns one, and its contents are PEM like any other bundle, so it would otherwise be truncated exactly as a string would. Strings and Buffers nested inside an array are split too, so `[bundleOfTwo, oneMore]` contributes three CRLs rather than two. DER Buffers are passed through untouched because DER encodes exactly one CRL, so there is nothing to split.
 
-**Only PEM blocks and whitespace are accepted.** Anything else in the string, such as a truncated or corrupted CRL, a damaged delimiter, or decoded text from `openssl ... -text`, is refused with an error rather than split. The rule is exact rather than a best guess: a parser cannot tell a half-written CRL from a line of commentary, so admitting commentary would mean silently dropping the truncated entry and enforcing a revocation set you never supplied. Strip any annotation before passing a bundle here.
+**Only PEM blocks and whitespace are accepted.** Initial CRL framing is validated when `NodeAdapter` is constructed, before any request or retry, including for clients using plain HTTP. The CRL is still read and normalized per HTTPS request so callers can refresh it. Anything else in the string, such as a truncated or corrupted CRL, a damaged delimiter, or decoded text from `openssl ... -text`, is refused with an error rather than split. The rule is exact rather than a best guess: a parser cannot tell a half-written CRL from a line of commentary, so admitting commentary would mean silently dropping the truncated entry and enforcing a revocation set you never supplied. Strip any annotation before passing a bundle here.
 
 **Do not put two CRLs for the same issuer in one bundle.** OpenSSL uses the **first** CRL it has for an issuer, not the newest. In testing, a stale CRL followed by one revoking the server's certificate accepted the connection, while the same pair in the opposite order rejected it. Splitting does not change this. It is how CRL selection works. Supply exactly one current CRL per issuer.
 

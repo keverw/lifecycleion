@@ -491,7 +491,18 @@ export function deserializeError(obj: SerializedError): Error {
     }
   };
   const restoreNested = (value: unknown, depth: number): unknown => {
-    if (!isErrorLike(value)) {
+    // SerializedError requires name and message, but its stack is optional.
+    let isSerializedError = false;
+    try {
+      isSerializedError =
+        value !== null &&
+        typeof value === 'object' &&
+        typeof (value as Record<string, unknown>).name === 'string' &&
+        typeof (value as Record<string, unknown>).message === 'string';
+    } catch {
+      // An unreadable identity does not establish a serialized error shape.
+    }
+    if (!isErrorLike(value) && !isSerializedError) {
       return value; // Error causes may be arbitrary values, not just errors.
     }
     if (depth >= MAX_RENDER_DEPTH || extrasLeft <= 0) {

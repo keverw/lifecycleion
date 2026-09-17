@@ -42,8 +42,8 @@ throw restored;
 - `name`, `message`, `stack` (the non-enumerable ones Error hides)
 - All own properties from Error subclasses (`errCode`, `statusCode`, whatever)
 - Nested errors are recursively serialized
-- Plain error-like objects require string `name`, `message`, and `stack` fields. Real Error instances are recognized even without a stack. Other nested objects retain their fields as data; `cause` alone does not identify an error. Deserialization reconstructs the root explicitly, and only error-like nested `cause`/`errors` values. Stackless nested wire payloads remain data.
-- `deserializeError` reconstructs error-shaped `cause` values and `errors` array members as `Error` instances, including nested causes. Other causes and custom extras retain their values. Error subclass names are preserved; subclass prototypes are not restored.
+- During serialization, plain error-like objects require string `name`, `message`, and `stack` fields. Real Error instances are recognized even without a stack. Other nested objects retain their fields as data; `cause` alone does not identify an error. During deserialization, the root is always reconstructed explicitly, while nested reconstruction is limited to `cause` values and `errors` array members.
+- `deserializeError` reconstructs error-shaped `cause` values and `errors` array members as `Error` instances, including nested causes. A nested object with string `name` and `message` fields qualifies even without a `stack`; ordinary data with that same shape is therefore also reconstructed as an error. Other causes and custom extras retain their values. Error subclass names are preserved; subclass prototypes are not restored.
 
 ## When a Value Cannot Be Serialized
 

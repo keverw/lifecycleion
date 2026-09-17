@@ -1504,3 +1504,16 @@ describe('matchesFilter', () => {
     ).toBe(false);
   });
 });
+
+test.each([NaN, Infinity, -Infinity])(
+  'rejects non-finite maxRedirects %s',
+  (maxRedirects) => {
+    expect(() =>
+      assertSupportedAdapterRuntimeAndConfig(
+        { followRedirects: true, maxRedirects },
+        'node',
+        false,
+      ),
+    ).toThrow();
+  },
+);
