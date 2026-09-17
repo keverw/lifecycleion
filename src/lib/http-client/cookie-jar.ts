@@ -1090,36 +1090,38 @@ export class CookieJar {
     domain: string,
     path: string,
   ): boolean {
-    const bucket = this.buckets.get(this.apexFor(domain));
-
-    if (!bucket) {
-      return false;
-    }
-
     const now = Date.now();
-    for (const stored of bucket.values()) {
-      const scope = this.storedScopes.get(stored);
+    // Matching scopes can cross bucket boundaries at nested public suffixes,
+    // in either direction (a wider insecure cookie can shadow a narrow secure one).
+    for (const bucket of this.buckets.values()) {
+      for (const stored of bucket.values()) {
+        const scope = this.storedScopes.get(stored);
 
-      if (scope === undefined || scope.secure !== true || scope.name !== name) {
-        continue;
-      }
-
-      const isDomainMatch =
-        this.domainMatches(domain, scope.domain) ||
-        this.domainMatches(scope.domain, domain);
-
-      if (
-        isDomainMatch &&
-        (this.pathMatches(path, scope.path) ||
-          this.pathMatches(scope.path, path))
-      ) {
-        // Unreadable live cookie fields must not throw or authorize an insecure
-        // replacement. Only a trusted expired snapshot releases the secure scope.
-        const cookie = this.snapshotForSend(stored);
-        if (cookie !== null && this.isExpired(cookie, now)) {
+        if (
+          scope === undefined ||
+          scope.secure !== true ||
+          scope.name !== name
+        ) {
           continue;
         }
-        return true;
+
+        const isDomainMatch =
+          this.domainMatches(domain, scope.domain) ||
+          this.domainMatches(scope.domain, domain);
+
+        if (
+          isDomainMatch &&
+          (this.pathMatches(path, scope.path) ||
+            this.pathMatches(scope.path, path))
+        ) {
+          // Unreadable live cookie fields must not throw or authorize an insecure
+          // replacement. Only a trusted expired snapshot releases the secure scope.
+          const cookie = this.snapshotForSend(stored);
+          if (cookie !== null && this.isExpired(cookie, now)) {
+            continue;
+          }
+          return true;
+        }
       }
     }
 

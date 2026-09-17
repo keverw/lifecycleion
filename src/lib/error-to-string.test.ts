@@ -2733,3 +2733,65 @@ it.each(['code', 'message', 'stack'])(
     }
   },
 );
+
+it.each([
+  "additionalInfo['my key']",
+  'additionalInfo["a.b"]',
+  'additionalInfo[0]',
+])('review regression: masks bracket alias %s', (path) => {
+  const result = errorToString({
+    message: 'outer',
+    additionalInfo: {
+      'my key': 'BRACKET_SECRET',
+      'a.b': 'BRACKET_SECRET',
+      0: 'BRACKET_SECRET',
+    },
+    sensitiveFieldNames: [path],
+  });
+  // Each spelling must mask the key it names.
+  const key = path.includes('my key')
+    ? 'my key'
+    : path.includes('a.b')
+      ? 'a.b'
+      : '0';
+  const isolated = errorToString({
+    message: 'outer',
+    additionalInfo: { [key]: 'BRACKET_SECRET' },
+    sensitiveFieldNames: [path],
+  });
+  expect(isolated).not.toContain('BRACKET_SECRET');
+  expect(result).toContain('***');
+});
+
+it('review regression: preserves hidden nested masking metadata', () => {
+  const nested = {
+    message: 'nested',
+    additionalInfo: {
+      own: 'OWN_SECRET',
+      parent: 'PARENT_SECRET',
+      visible: 'visible',
+    },
+  };
+  Object.defineProperty(nested, 'sensitiveFieldNames', { value: ['own'] });
+  const result = errorToString({
+    message: 'outer',
+    additionalInfo: { nested },
+    sensitiveFieldNames: ['nested.additionalInfo.parent'],
+  });
+  expect(result).not.toContain('OWN_SECRET');
+  expect(result).not.toContain('PARENT_SECRET');
+  expect(result).toContain('visible');
+});
+
+it.each(['code', 'stack'])(
+  'review regression: charges object-valued %s once',
+  (key) => {
+    const onTruncate = mock(() => {});
+    const result = errorToString({ [key]: ['x'.repeat(800)] }, 80, {
+      maxRenderLength: 3000,
+      onTruncate,
+    });
+    expect(result.replaceAll(/[^x]/g, '')).toHaveLength(800);
+    expect(onTruncate).not.toHaveBeenCalled();
+  },
+);

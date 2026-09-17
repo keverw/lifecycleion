@@ -2922,3 +2922,25 @@ test('sends parent-domain cookies below nested private suffixes without widening
   );
   expect(jar.getCookieHeaderString('https://unrelated.example/')).toBe('');
 });
+
+test.each([false, true])(
+  'review regression: protects secure cookies across nested suffix buckets (isWide=%s)',
+  (isWide) => {
+    const jar = new CookieJar();
+    jar.parseSetCookieHeader(
+      isWide
+        ? 'session=secure; Secure; Domain=amazonaws.com; Path=/'
+        : 'session=secure; Secure; Path=/',
+      isWide ? 'https://amazonaws.com/' : 'https://x.s3.amazonaws.com/',
+    );
+    jar.parseSetCookieHeader(
+      isWide
+        ? 'session=plain; Path=/'
+        : 'session=plain; Domain=amazonaws.com; Path=/',
+      isWide ? 'http://x.s3.amazonaws.com/' : 'http://amazonaws.com/',
+    );
+    expect(jar.getCookieHeaderString('https://x.s3.amazonaws.com/')).toBe(
+      'session=secure',
+    );
+  },
+);

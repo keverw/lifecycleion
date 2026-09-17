@@ -1883,6 +1883,13 @@ export class NamedPipeSink implements LogSink {
     });
   }
 
+  private hasRetryRoom(): boolean {
+    return (
+      this.maxQueueSize === undefined ||
+      this.writeQueue.length < this.maxQueueSize
+    );
+  }
+
   /**
    * Put a failed entry back on the queue, or give up on it.
    *
@@ -1891,7 +1898,7 @@ export class NamedPipeSink implements LogSink {
    * back on the queue and out when the pipe is next usable, up to `maxRetries`.
    *
    * Re-queued in original write order to preserve order across reconnections.
-   * If the queue is full, the oldest-entry eviction policy still applies.
+   * If the queue is full, report this failed entry lost without evicting queued work.
    *
    * An entry that has used up its attempts is counted as a drop rather than vanishing,
    * so `getHealth().droppedEntries` means "lines this sink did not deliver" whatever the
@@ -1925,7 +1932,11 @@ export class NamedPipeSink implements LogSink {
       return;
     }
 
-    if (queued.attempts >= this.maxRetries) {
+    if (
+      wasReported ||
+      queued.attempts >= this.maxRetries ||
+      !this.hasRetryRoom()
+    ) {
       this.countDropped('write');
 
       if (!wasReported) {
@@ -1935,7 +1946,7 @@ export class NamedPipeSink implements LogSink {
         this.handleError(
           'write',
           new Error(
-            `Write to ${this.pipePath} failed after ${String(queued.attempts + 1)} attempts; the pipe was unavailable and the entry was not written`,
+            `Write to ${this.pipePath} failed after ${String(queued.attempts + 1)} attempts; the entry could not be retained for retry and was not written`,
           ),
           {
             attempt: queued.attempts + 1,
@@ -2457,7 +2468,8 @@ export class NamedPipeSink implements LogSink {
           const willRetry =
             !this.closed &&
             !wasPartiallyWritten &&
-            queued.attempts < this.maxRetries;
+            queued.attempts < this.maxRetries &&
+            this.hasRetryRoom();
           this.handleError('write', error, {
             attempt: queued.attempts + 1,
             disposition: willRetry ? 'retrying' : 'lost',
@@ -2491,7 +2503,10 @@ export class NamedPipeSink implements LogSink {
         this.pauseUntilDrain();
       }
     } catch (error) {
-      const willRetry = !this.closed && queued.attempts < this.maxRetries;
+      const willRetry =
+        !this.closed &&
+        queued.attempts < this.maxRetries &&
+        this.hasRetryRoom();
       this.handleError('write', error, {
         attempt: queued.attempts + 1,
         disposition: willRetry ? 'retrying' : 'lost',

@@ -8665,3 +8665,183 @@ test('redirects inherit the actual retry request, including credentials and meth
   expect(sent[2].method).toBe('POST');
   expect(sent[2].body).toBe('retry-body');
 });
+
+test.each([false, true])(
+  'review regression: redirected retry clears inherited wire headers (shouldRefresh=%s)',
+  async (shouldRefresh) => {
+    const requests: AdapterRequest[] = [];
+    const adapter: HTTPAdapter = {
+      getType: () => 'node',
+      send: (request): Promise<AdapterResponse> => {
+        requests.push(request);
+        return Promise.resolve<AdapterResponse>(
+          requests.length === 1
+            ? {
+                status: 302,
+                body: null,
+                headers: { location: '/next' },
+                effectiveRequestHeaders: {
+                  ...request.headers,
+                  host: 'original.example',
+                  authorization: 'Basic ORIGINAL_SECRET',
+                },
+              }
+            : {
+                status: requests.length === 2 ? 503 : 200,
+                headers: {},
+                body: null,
+              },
+        );
+      },
+    };
+    const client = new HTTPClient({ adapter, followRedirects: true });
+    client.addRequestInterceptor(
+      (request) => ({
+        ...request,
+        requestURL: 'https://other.example/retry',
+        headers: shouldRefresh
+          ? { ...request.headers, authorization: 'Bearer refreshed' }
+          : request.headers,
+      }),
+      { phases: ['retry'] },
+    );
+    const response = await client
+      .get('https://user:password@original.example/')
+      .retryPolicy({ strategy: 'fixed', maxRetryAttempts: 1, delayMS: 1 })
+      .send();
+    expect(response.status).toBe(200);
+    expect(requests).toHaveLength(3);
+    expect(requests[1].headers.authorization).toBeUndefined();
+    expect(requests[2].headers.host).toBeUndefined();
+    if (shouldRefresh) {
+      expect(requests[2].headers.authorization).toBe('Bearer refreshed');
+    } else {
+      expect(requests[2].headers.authorization).toBeUndefined();
+    }
+  },
+);
+
+test.each([false, true])(
+  'failover retry preserves caller credentials (redirected=%s)',
+  async (isRedirected) => {
+    const requests: AdapterRequest[] = [];
+    const client = new HTTPClient({
+      followRedirects: true,
+      adapter: {
+        getType: () => 'node',
+        send: (request): Promise<AdapterResponse> => {
+          requests.push(request);
+          return Promise.resolve<AdapterResponse>(
+            isRedirected && requests.length === 1
+              ? {
+                  status: 302,
+                  headers: { location: '/next' },
+                  body: null,
+                  effectiveRequestHeaders: {
+                    ...request.headers,
+                    host: 'api.example',
+                  },
+                }
+              : {
+                  status:
+                    requests.length === (isRedirected ? 2 : 1) ? 503 : 200,
+                  headers: {},
+                  body: null,
+                },
+          );
+        },
+      },
+    });
+    client.addRequestInterceptor(
+      (request) => ({ ...request, requestURL: 'https://mirror.example/x' }),
+      { phases: ['retry'] },
+    );
+    const response = await client
+      .get('https://api.example/x')
+      .headers({ Authorization: 'Bearer tok', 'X-Api-Key': 'k' })
+      .retryPolicy({ strategy: 'fixed', maxRetryAttempts: 1, delayMS: 1 })
+      .send();
+    expect(response.status).toBe(200);
+    expect(requests.at(-1)?.headers).toMatchObject({
+      authorization: 'Bearer tok',
+      'x-api-key': 'k',
+    });
+    expect(requests.at(-1)?.headers.host).toBeUndefined();
+  },
+);
+
+test.each([false, true])(
+  'Node redirect retry regenerates Host and follows URL Basic auth scope (absolute=%s)',
+  async (isAbsolute) => {
+    const { NodeAdapter } = await import('./adapters/node-adapter');
+    const received: Array<{ host: string | null; auth: string | null }> = [];
+    const observed: Array<string | string[] | undefined> = [];
+    const mirror = Bun.serve({
+      port: 0,
+      fetch: (request) => {
+        received.push({
+          host: request.headers.get('host'),
+          auth: request.headers.get('authorization'),
+        });
+        return new Response('ok');
+      },
+    });
+    const origin = Bun.serve({
+      port: 0,
+      fetch: (request) => {
+        received.push({
+          host: request.headers.get('host'),
+          auth: request.headers.get('authorization'),
+        });
+        return new URL(request.url).pathname === '/start'
+          ? new Response(null, {
+              status: 302,
+              headers: {
+                location: isAbsolute
+                  ? `${new URL(request.url).origin}/next`
+                  : '/next',
+              },
+            })
+          : new Response(null, { status: 503 });
+      },
+    });
+    try {
+      const client = new HTTPClient({
+        adapter: new NodeAdapter(),
+        followRedirects: true,
+      });
+      client.addRequestInterceptor(
+        (request) => ({ ...request, requestURL: mirror.url.href }),
+        { phases: ['retry'] },
+      );
+      client.addResponseObserver(
+        (_response, request) => {
+          observed.push(request.headers.authorization);
+        },
+        { phases: ['redirect', 'retry', 'final'] },
+      );
+      const url = new URL('/start', origin.url);
+      url.username = 'user';
+      url.password = 'password';
+      const response = await client
+        .get(url.href)
+        .retryPolicy({ strategy: 'fixed', maxRetryAttempts: 1, delayMS: 1 })
+        .send();
+      expect(response.status).toBe(200);
+      const basic = `Basic ${btoa('user:password')}`;
+      expect(received).toEqual([
+        { host: origin.url.host, auth: basic },
+        { host: origin.url.host, auth: isAbsolute ? null : basic },
+        { host: mirror.url.host, auth: null },
+      ]);
+      expect(observed).toEqual([
+        basic,
+        isAbsolute ? undefined : basic,
+        undefined,
+      ]);
+    } finally {
+      await origin.stop(true);
+      await mirror.stop(true);
+    }
+  },
+);

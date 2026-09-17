@@ -13128,3 +13128,54 @@ test('bulk shutdown leaves dependencies running while a concurrent stop owns the
   }
   expect(stops).toEqual(['dependent-start', 'dependent-end', 'dependency']);
 });
+
+test('review regression: bulk shutdown continues unrelated stops while protecting busy dependencies', async () => {
+  const logger = new Logger({ sinks: [], callProcessExit: false });
+  const manager = new LifecycleManager({ logger });
+  const pending = Promise.withResolvers<void>();
+  const stops: string[] = [];
+  class Dependency extends BaseComponent {
+    public start() {}
+    public stop() {
+      stops.push(this.getName());
+    }
+  }
+  class Dependent extends BaseComponent {
+    public start() {}
+    public async stop() {
+      stops.push('dependent-start');
+      await pending.promise;
+      stops.push('dependent-end');
+    }
+  }
+  await manager.registerComponent(
+    new Dependency(logger, { name: 'unrelated' }),
+  );
+  await manager.registerComponent(new Dependency(logger, { name: 'base' }));
+  await manager.registerComponent(
+    new Dependency(logger, { name: 'dependency', dependencies: ['base'] }),
+  );
+  await manager.registerComponent(
+    new Dependent(logger, { name: 'dependent', dependencies: ['dependency'] }),
+  );
+  await manager.startAllComponents();
+  const individualStop = manager.stopComponent('dependent');
+  try {
+    const result = await manager.stopAllComponents({ haltOnStall: false });
+    expect(result.success).toBe(false);
+    expect(stops).toEqual(['dependent-start', 'unrelated']);
+    expect(manager.isComponentRunning('dependency')).toBe(true);
+    expect(manager.isComponentRunning('base')).toBe(true);
+  } finally {
+    pending.resolve();
+    await individualStop;
+    await manager.stopAllComponents();
+  }
+  expect(stops).toEqual([
+    'dependent-start',
+    'unrelated',
+    'dependent-end',
+    'dependency',
+    'base',
+  ]);
+});

@@ -4809,3 +4809,67 @@ test('a failed pipe write retains its position ahead of newer queued entries', a
   state.closing = false;
   await sink.close();
 });
+
+test.each(['callback', 'throw', 'reentrant'] as const)(
+  'review regression: full queue reports failed pipe entry lost (%s)',
+  async (mode) => {
+    const failures: SinkFailure[] = [];
+    const sink = new NamedPipeSink({
+      pipePath: '/tmp/lifecycleion-full-retry-test.pipe',
+      maxQueueSize: 1,
+      onError: (failure) => {
+        failures.push(failure);
+        if (mode === 'reentrant' && failure.disposition === 'retrying') {
+          state.writeQueue.push(newer);
+        }
+      },
+    });
+    const entry: LogEntry = {
+      message: 'failed',
+      template: 'failed',
+      type: 'info',
+      timestamp: Date.now(),
+    };
+    const newer = {
+      entry: { ...entry, message: 'newer' },
+      attempts: 0,
+      sequence: 1,
+    };
+    const state = sink as any;
+    state.closing = true;
+    state.didReportDrop = true;
+    if (mode !== 'reentrant') {
+      state.writeQueue.push(newer);
+    }
+    state.pipeStream = {
+      destroyed: false,
+      write: (_message: string, callback: (error: Error) => void) => {
+        if (mode === 'throw') {
+          throw new Error('write failed');
+        }
+        callback(new Error('write failed'));
+        return true;
+      },
+    };
+    try {
+      state.writeEntry({
+        entry,
+        attempts: 0,
+        sequence: 0,
+        formatted: 'failed',
+      });
+      expect(
+        failures
+          .filter((failure) => failure.disposition === 'lost')
+          .map((failure) => failure.entry),
+      ).toEqual([entry]);
+      expect(state.writeQueue).toEqual([newer]);
+      expect(sink.getHealth().droppedEntries).toBe(1);
+    } finally {
+      state.pipeStream = undefined;
+      state.writeQueue.length = 0;
+      state.closing = false;
+      await sink.close();
+    }
+  },
+);

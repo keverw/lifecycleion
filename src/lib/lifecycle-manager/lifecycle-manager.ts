@@ -3419,6 +3419,16 @@ export class LifecycleManager
 
     const stoppedComponents = new Set<string>();
     const stoppingComponents = new Set<string>();
+    const protectedDependencies = new Set<string>();
+    const protectDependencies = (name: string): void => {
+      for (const dependency of this.getComponent(name)?.getDependencies() ??
+        []) {
+        if (!protectedDependencies.has(dependency)) {
+          protectedDependencies.add(dependency);
+          protectDependencies(dependency);
+        }
+      }
+    };
     let hasTimedOut = false;
     let timeoutHandle: NodeJS.Timeout | undefined;
     let pendingShutdownOperation: Promise<void> | null = null;
@@ -3458,6 +3468,11 @@ export class LifecycleManager
               },
             );
             break;
+          }
+
+          if (protectedDependencies.has(name)) {
+            stoppingComponents.add(name);
+            continue;
           }
 
           this.logger.entity(name).info('Stopping component');
@@ -3505,7 +3520,11 @@ export class LifecycleManager
             // Preserve reverse dependency order. A concurrent stop still owns this
             // component; its dependencies must remain available until it settles.
             stoppingComponents.add(name);
-            break;
+            protectDependencies(name);
+            if (shouldHaltOnStall) {
+              break;
+            }
+            continue;
           } else {
             // Component failed to stop - track as stalled but continue
             this.logger

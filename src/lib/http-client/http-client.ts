@@ -991,6 +991,9 @@ export class BaseHTTPClient {
             const redirectRequest = this._sanitizeRedirectRequest(
               {
                 ...attemptResult.sentRequest,
+                headers:
+                  attemptResult.redirectRequestHeaders ??
+                  attemptResult.sentRequest.headers,
                 requestURL: redirectURL,
                 method: redirectMethod,
                 body:
@@ -1488,6 +1491,8 @@ export class BaseHTTPClient {
   }): Promise<{
     adapterResponse: AdapterResponse | null;
     sentRequest: AttemptRequest;
+    /** Headers for following a redirect, excluding adapter-generated origin headers. */
+    redirectRequestHeaders?: Record<string, string | string[]>;
     attemptCount: number;
     wasCancelled: boolean;
     wasTimeout: boolean;
@@ -2108,9 +2113,23 @@ export class BaseHTTPClient {
           ? (adapterResponse.streamErrorCode ?? 'stream_write_error')
           : undefined;
 
+        // Observers retain the wire snapshot, but Node-generated Host and URL
+        // Basic auth must not become caller headers on the next hop. The adapter
+        // will regenerate them for that hop; explicit caller headers still carry
+        // through same-origin redirects and caller-directed failover retries.
+        const redirectRequestHeaders = { ...observedSentRequest.headers };
+        for (const key of ['host', 'authorization']) {
+          if (Object.hasOwn(sentRequest.headers, key)) {
+            redirectRequestHeaders[key] = sentRequest.headers[key];
+          } else {
+            delete redirectRequestHeaders[key];
+          }
+        }
+
         return {
           adapterResponse,
           sentRequest: observedSentRequest,
+          redirectRequestHeaders,
           attemptCount: attemptNumber,
           wasCancelled: false,
           wasTimeout: false,

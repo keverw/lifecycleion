@@ -211,31 +211,27 @@ function readMemberOrThrew(
  * Applied to the *parsed* list rather than to the raw one, deliberately: expanding the
  * caller's array first would hand `parseRedactPaths` a clean copy of it, and a hostile
  * list - one that under-reports its length, or whose entries cannot be read - must reach
- * the parser as it is so that it is refused as it was. Only the dotted spelling is
- * aliased; a bracket path with nothing before it is not a path this grammar reads.
+ * the parser as it is so that it is refused as it was.
  */
 function withAdditionalInfoAliases(paths: RedactPath[]): RedactPath[] {
   const aliases: RedactPath[] = [];
-
   for (const path of paths) {
-    const { entry } = path;
-
+    if (path.parts.length > 1 && path.parts[0] === ADDITIONAL_INFO_PREFIX) {
+      aliases.push({ ...path, parts: path.parts.slice(1) });
+    }
+    // Preserve the literal-key reading of dotted aliases as well.
     if (
-      entry.startsWith(`${ADDITIONAL_INFO_PREFIX}.`) &&
-      entry.length > ADDITIONAL_INFO_PREFIX.length + 1 &&
-      // Each entry appears once per reading in `paths`; alias it once.
-      path.parts.length === 1
+      path.parts.length === 1 &&
+      path.entry.startsWith(`${ADDITIONAL_INFO_PREFIX}.`)
     ) {
       const stripped = parseRedactPaths([
-        entry.slice(ADDITIONAL_INFO_PREFIX.length + 1),
+        path.entry.slice(ADDITIONAL_INFO_PREFIX.length + 1),
       ]);
-
       if (stripped !== null) {
         aliases.push(...stripped);
       }
     }
   }
-
   return aliases.length === 0 ? paths : [...paths, ...aliases];
 }
 
@@ -1130,7 +1126,10 @@ function errorToASCIITable(
         // tables and entry trees so the table renderer can lay out their borders.
         table.addRow(
           label,
-          typeof rendered === 'string'
+          typeof rendered === 'string' &&
+            (typeof value !== 'object' ||
+              value === null ||
+              ArrayBuffer.isView(value))
             ? chargeNestedText(
                 budget,
                 rendered,
@@ -1598,12 +1597,16 @@ function addErrorTail(
     if (typeof stackText === 'string') {
       table.addValueOnSeparateRow(
         'Stack',
-        chargeNestedText(
-          budget,
-          stackText,
-          // Text stacks occupy full-width rows rather than a key/value cell.
-          ownRowTextLevels(stackText, maxRowLength, depth),
-        ),
+        typeof renderedStack === 'object' &&
+          renderedStack !== null &&
+          !ArrayBuffer.isView(renderedStack)
+          ? stackText
+          : chargeNestedText(
+              budget,
+              stackText,
+              // Text stacks occupy full-width rows rather than a key/value cell.
+              ownRowTextLevels(stackText, maxRowLength, depth),
+            ),
       );
     } else {
       table.addRow('Stack', stackText);
