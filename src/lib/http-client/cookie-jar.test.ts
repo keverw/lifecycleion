@@ -3003,3 +3003,54 @@ test.each([false, true])(
     );
   },
 );
+
+test.each(['maxAge', 'createdAt', 'expires', 'getTime'])(
+  'cookie cleanup tolerates throwing %s and continues removing expired entries',
+  (field) => {
+    const jar = new CookieJar();
+    jar.setCookie({
+      name: 'broken',
+      value: 'x',
+      domain: 'example.com',
+      path: '/',
+      maxAge: 60,
+    });
+    jar.setCookie({
+      name: 'expired',
+      value: 'x',
+      domain: 'other.example',
+      path: '/',
+      expires: new Date(0),
+    });
+    jar.setCookie({
+      name: 'live',
+      value: 'x',
+      domain: 'example.com',
+      path: '/',
+    });
+    const broken = jar
+      .getAllCookies()
+      .find((cookie) => cookie.name === 'broken');
+    if (!broken) {
+      throw new Error('Missing test cookie');
+    }
+    if (field === 'getTime') {
+      delete broken.maxAge;
+      broken.expires = new Date();
+      broken.expires.getTime = () => {
+        throw new Error('date unreadable');
+      };
+    } else {
+      if (field === 'expires') {
+        delete broken.maxAge;
+      }
+      Object.defineProperty(broken, field, {
+        get: () => {
+          throw new Error('field unreadable');
+        },
+      });
+    }
+    expect(jar.clearExpiredCookies()).toBe(2);
+    expect(jar.getAllCookies().map((cookie) => cookie.name)).toEqual(['live']);
+  },
+);

@@ -3483,22 +3483,41 @@ test('failed rotation keeps appending and recovers when renaming becomes availab
     message,
   });
   let renameSpy: { mockRestore(): void } | undefined;
+  let clockSpy: { mockRestore(): void } | undefined;
+  let clockNow = Date.now();
+  let renameAttempts = 0;
   try {
     sink.write(entry('before-' + 'x'.repeat(2000)));
     await sink.flush();
-    renameSpy = spyOn(fsPromises, 'rename').mockRejectedValue(
-      new Error('archive rename denied'),
-    );
-    for (const message of ['during-first', 'during-second']) {
+    clockSpy = spyOn(Date, 'now').mockImplementation(() => clockNow);
+    renameSpy = spyOn(fsPromises, 'rename').mockImplementation(() => {
+      renameAttempts++;
+      return Promise.reject(new Error('archive rename denied'));
+    });
+    for (const message of Array.from(
+      { length: 50 },
+      (_, index) => `during-${index}`,
+    )) {
       sink.write(entry(message));
       await sink.flush();
     }
     const currentFile = `${directory.path}/rotation-failure-${new Date().toISOString().slice(0, 10)}.log`;
     const contents = await fsPromises.readFile(currentFile, 'utf8');
     expect(contents).toContain('before-');
-    expect(contents).toContain('during-first');
-    expect(contents).toContain('during-second');
-    expect(failures.length).toBeGreaterThan(0);
+    for (let index = 0; index < 50; index++) {
+      expect(contents).toContain(`during-${index}`);
+    }
+    expect(renameAttempts).toBe(1);
+    expect(failures).toHaveLength(1);
+    clockNow += 1000;
+    sink.write(entry('still-failing'));
+    await sink.flush();
+    expect(renameAttempts).toBe(2);
+    expect(failures).toHaveLength(1);
+    clockNow += 1000;
+    sink.write(entry('waiting-for-backoff'));
+    await sink.flush();
+    expect(renameAttempts).toBe(2);
     expect(
       failures.every(
         (failure) =>
@@ -3507,6 +3526,7 @@ test('failed rotation keeps appending and recovers when renaming becomes availab
     ).toBe(true);
     expect(sink.getHealth().droppedEntries).toBe(0);
 
+    clockNow += 1000;
     renameSpy.mockRestore();
     renameSpy = undefined;
     sink.write(entry('after-recovery'));
@@ -3515,7 +3535,19 @@ test('failed rotation keeps appending and recovers when renaming becomes availab
       'after-recovery',
     );
     expect((await fsPromises.readdir(directory.path)).length).toBe(2);
+
+    // A successful rotation ends the outage: the next one reports independently.
+    renameSpy = spyOn(fsPromises, 'rename').mockImplementation(() => {
+      renameAttempts++;
+      return Promise.reject(new Error('another archive outage'));
+    });
+    sink.write(entry('new-outage-' + 'x'.repeat(2000)));
+    await sink.flush();
+    expect(renameAttempts).toBe(3);
+    expect(failures).toHaveLength(2);
+    expect(sink.getHealth().droppedEntries).toBe(0);
   } finally {
+    clockSpy?.mockRestore();
     renameSpy?.mockRestore();
     await sink.close();
     await directory.cleanup();

@@ -51,6 +51,10 @@ const MAX_ROTATION_NAME_ATTEMPTS = 100;
 /** Megabytes a log file grows to before it is rotated, where the caller named nothing. */
 const DEFAULT_MAX_SIZE_MB = 10;
 
+/** Failed archive renames retry on later writes, with bounded exponential backoff. */
+const ROTATION_RETRY_INITIAL_MS = 1000;
+const ROTATION_RETRY_MAX_MS = 30_000;
+
 /**
  * The rotation threshold this sink will honour, in megabytes.
  *
@@ -274,6 +278,8 @@ export class FileSink implements LogSink {
   private isProcessing = false;
   private lastError?: Error;
   private consecutiveFailures = 0;
+  private rotationRetryDelayMS = 0;
+  private nextRotationAttemptAt = 0;
   private totalEntriesWritten = 0;
   /**
    * Whether the first entry refused because the sink is closing has been reported.
@@ -1770,6 +1776,12 @@ export class FileSink implements LogSink {
       return;
     }
 
+    // Keep the writable file open during an archive outage. All size-rotation
+    // paths share this gate, including setup and the before-write size check.
+    if (Date.now() < this.nextRotationAttemptAt) {
+      return;
+    }
+
     const currentDate = new Date().toISOString().slice(0, 10); // YYYY-MM-DD (UTC)
 
     // Close current stream, bounded: see `endStreamWithin`. Read before the rename below
@@ -1814,26 +1826,39 @@ export class FileSink implements LogSink {
         toError(error),
       );
       this.lastError = failure;
-      reportThroughHandler(
-        this.onError === undefined
-          ? undefined
-          : () =>
-              this.onError?.({
-                kind: 'setup',
-                error: failure,
-                target: this.currentLogFile ?? this.logDir,
-                disposition: 'no_entry',
-              }),
-        () => describeError(failure),
+      const shouldReport = this.rotationRetryDelayMS === 0;
+      this.rotationRetryDelayMS = Math.min(
+        this.rotationRetryDelayMS === 0
+          ? ROTATION_RETRY_INITIAL_MS
+          : this.rotationRetryDelayMS * 2,
+        ROTATION_RETRY_MAX_MS,
       );
+      this.nextRotationAttemptAt = Date.now() + this.rotationRetryDelayMS;
+      if (shouldReport) {
+        reportThroughHandler(
+          this.onError === undefined
+            ? undefined
+            : () =>
+                this.onError?.({
+                  kind: 'setup',
+                  error: failure,
+                  target: this.currentLogFile ?? this.logDir,
+                  disposition: 'no_entry',
+                }),
+          () => describeError(failure),
+        );
+      }
 
       // The current file may still be writable when archiving is not. Reopen it
       // without immediately trying to rotate its unchanged size again; otherwise
       // every queued entry fails setup (or reopening recurses indefinitely).
-      // A later write will try rotation again, so recovery needs no restart.
+      // A later write after the backoff will retry; recovery needs no restart.
       await this.setupLogFile(true);
       return;
     }
+
+    this.rotationRetryDelayMS = 0;
+    this.nextRotationAttemptAt = 0;
 
     // Setup new file (queue processing will resume after this)
     await this.setupLogFile();

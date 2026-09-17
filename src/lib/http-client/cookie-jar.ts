@@ -481,7 +481,8 @@ export class CookieJar {
   }
 
   /**
-   * Removes expired cookies from the jar. Returns the number of cookies removed.
+   * Removes expired cookies, including those with unreadable expiry data.
+   * Returns the number of cookies removed.
    */
   public clearExpiredCookies(): number {
     const now = Date.now();
@@ -1397,22 +1398,25 @@ export class CookieJar {
   }
 
   private isExpired(cookie: Cookie, now: number): boolean {
-    // Fails closed: `setCookie` refuses an expiry that cannot be read, but a comparison
-    // against `NaN` is never true, and "never expired" is the wrong side to land on for
-    // a cookie whose expiry is unknown.
-    if (cookie.maxAge !== undefined) {
-      const expiresAt = cookie.createdAt + cookie.maxAge * 1000;
+    // Unknown expiry fails closed, including accessors installed on a live cookie.
+    // Read each field once so a changing getter cannot disagree with its own check.
+    try {
+      const maxAge = cookie.maxAge;
+      if (maxAge !== undefined) {
+        const expiresAt = cookie.createdAt + maxAge * 1000;
+        return !Number.isFinite(expiresAt) || now >= expiresAt;
+      }
 
-      return !Number.isFinite(expiresAt) || now >= expiresAt;
+      const expires = cookie.expires;
+      if (expires) {
+        const expiresAt = expires.getTime();
+        return Number.isNaN(expiresAt) || now >= expiresAt;
+      }
+
+      return false;
+    } catch {
+      return true;
     }
-
-    if (cookie.expires) {
-      const expiresAt = cookie.expires.getTime();
-
-      return Number.isNaN(expiresAt) || now >= expiresAt;
-    }
-
-    return false;
   }
 
   private domainMatches(requestHost: string, cookieDomain: string): boolean {

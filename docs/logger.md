@@ -1192,6 +1192,8 @@ service.error('Login failed');
 
 Writes logs to files with automatic rotation based on size and date, and log level filtering.
 
+If an archive rename fails but the current file remains writable, logging continues in that file. Rotation retries on later writes with exponential delays from 1 to 30 seconds, and `onError` reports the rename failure once until a rotation succeeds. The file can exceed its size limit during this recovery period.
+
 ```typescript
 import { FileSink, LogLevel } from 'lifecycleion/logger';
 
