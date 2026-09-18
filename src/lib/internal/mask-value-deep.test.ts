@@ -188,7 +188,32 @@ describe('maskValueDeep named array properties', () => {
     expect(budget.truncations).toBe(1);
   });
 
-  test('reuses the child marker without enumerating at the entry-budget boundary', () => {
+  test('marks a named-property tail separately from a truncated child', () => {
+    const items = [{ nested: 'x'.repeat(400) }] as unknown[] & {
+      foo?: string;
+    };
+    items.foo = 'secret';
+    const budget = createRenderBudget(60);
+
+    const masked = maskValueDeep(
+      'items',
+      items,
+      maskLeaf,
+      undefined,
+      undefined,
+      undefined,
+      budget,
+    ) as unknown[] & { foo?: string };
+
+    expect(masked).toEqual([
+      { nested: REDACTED_PLACEHOLDER },
+      REDACTED_PLACEHOLDER,
+    ]);
+    expect(masked.foo).toBeUndefined();
+    expect(budget.truncations).toBe(2);
+  });
+
+  test('marks the unknown array tail at the entry-budget boundary', () => {
     let enumerations = 0;
     const target = ['', '', ''] as unknown[] & { note?: string };
     target.note = 'request-42';
@@ -212,8 +237,13 @@ describe('maskValueDeep named array properties', () => {
     );
 
     expect(enumerations).toBe(0);
-    expect(masked).toEqual(['', '', REDACTED_PLACEHOLDER]);
-    expect(budget.truncations).toBe(1);
+    expect(masked).toEqual([
+      '',
+      '',
+      REDACTED_PLACEHOLDER,
+      REDACTED_PLACEHOLDER,
+    ]);
+    expect(budget.truncations).toBe(2);
   });
 
   test('marks the truncation rather than dropping named keys silently', () => {

@@ -219,9 +219,10 @@ export function maskValueDeep(
       const source = value as unknown[];
       const masked: unknown[] = [];
 
-      // Whether the truncation marker below has already gone in, so the named pass does
-      // not add a second one for the same spent budget.
-      let didMarkTruncation = false;
+      // Index coverage and tail marking are separate facts: a child may truncate while
+      // every index was still visited, and that must not hide omitted named properties.
+      let didStopIndexLoop = false;
+      let didMarkArrayTail = false;
 
       // A counted index loop, not `for...of`: iteration resolves `Symbol.iterator` off
       // the value, which is caller code on a subclass, free to throw or to yield
@@ -237,7 +238,8 @@ export function maskValueDeep(
         if (budget.remaining <= 0) {
           noteTruncation(budget, 'length');
           masked.push(REDACTED_PLACEHOLDER);
-          didMarkTruncation = true;
+          didStopIndexLoop = true;
+          didMarkArrayTail = true;
 
           break;
         }
@@ -249,8 +251,6 @@ export function maskValueDeep(
         // perfectly well everywhere else lost its shape, and the two walks disagreed
         // about a value they are meant to treat identically.
         try {
-          const truncationsBeforeElement = budget.truncations;
-
           chargeUnits(budget, 1);
 
           masked.push(
@@ -265,15 +265,6 @@ export function maskValueDeep(
               reportRender,
             ),
           );
-
-          // A child can spend the final unit and install its own marker. Treat that as
-          // this budget's marker too, so the named-property pass does not add a duplicate.
-          if (
-            budget.remaining <= 0 &&
-            budget.truncations > truncationsBeforeElement
-          ) {
-            didMarkTruncation = true;
-          }
         } catch (error) {
           report(error, key);
           masked.push(REDACTION_FAILED_MARKER);
@@ -303,7 +294,7 @@ export function maskValueDeep(
       // conservative marker.
       let namedKeys: string[] = [];
       const didCompleteIndexes =
-        !didMarkTruncation && masked.length === shape.length;
+        !didStopIndexLoop && masked.length === shape.length;
       const canEnumerateNamedKeys =
         budget.remaining > 0 ||
         (didCompleteIndexes && shape.length < entryBudget);
@@ -318,18 +309,18 @@ export function maskValueDeep(
           report(error, key);
           masked.push(REDACTION_FAILED_MARKER);
         }
-      } else if (!didMarkTruncation) {
+      } else if (!didMarkArrayTail) {
         noteTruncation(budget, 'length');
         masked.push(REDACTED_PLACEHOLDER);
-        didMarkTruncation = true;
+        didMarkArrayTail = true;
       }
 
       for (const namedKey of namedKeys) {
         if (budget.remaining <= 0) {
-          if (!didMarkTruncation) {
+          if (!didMarkArrayTail) {
             noteTruncation(budget, 'length');
             masked.push(REDACTED_PLACEHOLDER);
-            didMarkTruncation = true;
+            didMarkArrayTail = true;
           }
 
           break;
