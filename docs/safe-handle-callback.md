@@ -179,7 +179,7 @@ When testing code like this, dispatch against the real global `EventTarget`. A s
 
 Reporting uses web-standard primitives: an `ErrorEvent` of the standard `'error'` type, dispatched through the `EventTarget` methods on the global object.
 
-> Earlier versions dispatched a custom `'reportError'` event type, which was Lifecycleion's own convention rather than a web standard. That type is no longer used or listened for. See the changelog.
+> Callback failures use the standard `'error'` event type. Call `preventDefault()` in a listener to claim a report and suppress its console fallback.
 
 Browsers, Bun, and Deno expose those primitives on `globalThis` natively. Node.js is a partial case: the `ErrorEvent` constructor is a global as of Node 25, but `globalThis` is still not an `EventTarget`, so `addEventListener` / `removeEventListener` / `dispatchEvent` are missing. Lifecycleion supplies that missing surface. Importing this module installs the three methods, backed by one shared `EventTarget`, without ever overwriting an existing implementation. See [global-event-target](./global-event-target.md) for the details and guarantees.
 

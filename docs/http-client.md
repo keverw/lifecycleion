@@ -776,26 +776,21 @@ spans a public suffix, and both halves of the list count: the ICANN half (`com`,
 keeps one tenant of a shared platform from setting a cookie every other tenant on it would
 send - browsers consult it for exactly that reason. Hosts under a public suffix are also
 bucketed separately, so `evil.github.io` and `victim.github.io` never share cookie storage.
-IP literals are not public suffixes. Bare single-label hostnames - `localhost`, `myapp`,
-an unqualified machine name - are, because the list carries no registrable name beneath
-them: without that, `Domain=localhost` from `https://evil.localhost/` was a suffix of the
-request host and landed in the `localhost` bucket, where an ordinary `http://localhost/`
-request then sent it.
+IP literals are not public suffixes. Bare single-label hostnames such as `localhost`,
+`myapp`, and unqualified machine names are treated as public suffixes because the list
+provides no registrable name beneath them. A response from `https://evil.localhost/`
+cannot set a `Domain=localhost` cookie for requests to `http://localhost/`.
 
-Naming your own host is not spanning anything, so RFC 6265bis §5.5 applies: a `Domain=`
-that is a public suffix is refused only when it differs from the request host, and kept
-**host-only** when it matches. A server on `http://localhost/` setting `Domain=localhost`
-for itself keeps working, and keeps reaching itself. What it loses is the reach it never
-had a use for, and `evil.localhost` loses the reach it did. The same now holds one label
-up: `Domain=github.io` from `https://github.io/` is kept host-only rather than dropped.
+Under RFC 6265bis §5.5, a `Domain=` that names a public suffix is refused when it differs
+from the request host and kept **host-only** when it matches. For example,
+`Domain=localhost` from `http://localhost/` and `Domain=github.io` from
+`https://github.io/` are accepted as host-only cookies.
 
-The door this closes is the _store_ side, not the send side: a sibling could file a cookie
-under a name it did not own and let the owner's own requests pick it up. `sub.localhost`
-was never reachable from a `Domain=localhost` cookie - hosts under a bare name are bucketed
-separately, exactly as `evil.github.io` and `victim.github.io` are - so the toss ran the
-other way round. It also covers deletion: `Max-Age=0; Domain=localhost` from
-`https://evil.localhost/` used to evict the cookie `http://localhost/` had set for itself,
-and is now refused before it can.
+These checks apply when cookies are stored, including deletion attempts. A
+`Max-Age=0; Domain=localhost` response cookie from `https://evil.localhost/` cannot evict
+a cookie belonging to `http://localhost/`. Hosts under a bare name are bucketed separately,
+so a `Domain=localhost` cookie is not sent to `sub.localhost`, just as cookies for
+`evil.github.io` and `victim.github.io` remain separate.
 
 The list ships compiled into `tldts` and is looked up offline - nothing is downloaded at
 runtime - which also means it is a snapshot frozen at the installed `tldts` version. Since
@@ -1271,7 +1266,7 @@ It is Node diverging from the library it links, not an OpenSSL limitation: `open
 - **Every certificate in the chain needs a covering CRL.** Node enables `X509_V_FLAG_CRL_CHECK_ALL`, so supplying a CRL for one root while connecting through another fails with `UNABLE_TO_GET_CRL` even when nothing was revoked. Cover every root the client talks to, or give the scoped CRL its own client. This makes adding a root an outage unless its CRL lands first.
 - **CRLs expire.** Past `nextUpdate` the handshake fails with `CRL_HAS_EXPIRED`, including for certificates that were never revoked. Either refresh well inside that window, or export with a `nextUpdate` far enough out that a stalled refresh cannot take you down.
 
-**No connection-pool handling is needed.** `crl` is part of Node's connection pool key, so changing it partitions the pool: a socket established under the old CRL is never reused for a request carrying the new one. Testing against a shared keepAlive agent confirmed that after a CRL update, the previously good connection is rejected rather than reused.
+**No connection-pool handling is needed.** `crl` is part of Node's connection pool key, so changing it partitions the pool: a socket established under the old CRL is never reused for a request carrying the new one. Requests using an updated CRL establish connections under that CRL rather than reusing sockets validated against the old one.
 
 **Runtime support.** Bun ignored `crl` entirely through 1.3.14 and accepted a revoked certificate with no error. Bun implemented it in 1.4.0, where it matches Node on every case tested, including malformed-CRL rejection, expiry, coverage, and pool partitioning. **Require Bun >= 1.4.0 if you depend on revocation.** This library's own enforcement tests probe the runtime and skip where `crl` is unsupported, rather than passing for the wrong reason. The bundle-splitting tests run everywhere, since that part is the library's job rather than the runtime's.
 
@@ -1652,7 +1647,7 @@ Since the client treats anything other than `false` as retryable, an unset value
 
 `isRetryable` is a hint about whether another attempt is worth making, and its contract only assigns meaning to `false`. An adapter may set it `true` for a failure it considers transient without knowing whether the request was delivered. Replaying a non-idempotent request needs a stronger statement, so adapters make it separately via `wasDefinitelyNotSent: true`, which claims only one thing: no request bytes reached the server. A custom adapter that sets `isRetryable: true` alone will not unlock a `POST` retry.
 
-`isRetryable: false` is now reserved for failures that no method should retry because another attempt cannot succeed, not for ones that merely might have been delivered. A rejected TLS certificate is the example: both `NodeAdapter` and `FetchAdapter` resolve those as `495` with `isRetryable: false`, since the same request against the same server fails identically every time. On `FetchAdapter` this is a server-runtime classification. Bun puts the OpenSSL code on the error and Node hangs it off `cause`, while a browser reports an opaque `TypeError` with neither, so a browser TLS failure keeps the ordinary transport-error shape.
+`isRetryable: false` is reserved for failures that no method should retry because another attempt cannot succeed, not for ones that merely might have been delivered. A rejected TLS certificate is the example: both `NodeAdapter` and `FetchAdapter` resolve those as `495` with `isRetryable: false`, since the same request against the same server fails identically every time. On `FetchAdapter` this is a server-runtime classification. Bun puts the OpenSSL code on the error and Node hangs it off `cause`, while a browser reports an opaque `TypeError` with neither, so a browser TLS failure keeps the ordinary transport-error shape.
 
 #### Why a Retry Did Not Happen
 

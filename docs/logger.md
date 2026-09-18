@@ -495,7 +495,7 @@ It stands in for an array **index**, and only for one. That has two consequences
 
 That is the grammar's existing rule rather than a wildcard exception. Quoting disambiguates a key that contains a delimiter, but it never changes what a segment means. The same is already true of numbers. The paths `users[0]`, `users["0"]`, `users['0']` and `users.0` are one entry, and that one entry addresses both an array's slot `0` and a plain object's key `"0"`, because the parser does not distinguish an index from a name and the container decides. The consequence for wildcards is simply that there is no spelling which addresses only a named property called `*` on an array.
 
-Concrete paths are unchanged: `users[0].password` still masks that one element, and where both a concrete entry and a wildcard match the same location, the concrete one is the key handed to a [`redactFunction`](#custom-redaction-function).
+A concrete path such as `users[0].password` masks that one element, and where both a concrete entry and a wildcard match the same location, the concrete one is the key handed to a [`redactFunction`](#custom-redaction-function).
 
 A wildcard that resolves to nothing - the parent is missing, or is not a container - masks nothing and does not warn, exactly as an unreachable concrete path does. It adds no failure mode of its own: a container that genuinely refuses to be read still fails closed and still reports, wildcard or not.
 
@@ -1387,7 +1387,7 @@ Both queueing sinks, `FileSink` and `NamedPipeSink`, answer a failed write the s
 
 - the entry goes back on the queue and is retried up to `maxRetries` (default 3)
 - the queue holds up to `maxQueueSize` entries (default 10,000). Pass `-1` to hold
-  everything, matching the previous unbounded default
+  entries without a queue-size limit
 - over the cap, the **oldest** entry is dropped and counted in
   `getHealth().droppedEntries` and `getHealth().droppedByKind.queue_full`. The first
   drop in each overflow episode is reported through `onError` with
@@ -1428,8 +1428,8 @@ back a moment later. The probe is non-blocking, so a pipe nobody is reading cost
 of immediate syscalls and the close returns at the end of the window - never the full
 `closeTimeoutMS`. A sink with an empty queue skips the window entirely and closes at once.
 
-`NamedPipeSink.reconnect()` remains available for reconnecting on demand. Because the sink
-now reopens on its own, a `reconnect()` that races one of those automatic attempts answers
+`NamedPipeSink.reconnect()` reconnects on demand. Because the sink
+also reopens on its own, a `reconnect()` that races one of those automatic attempts answers
 `already_reconnecting`, meaning the reconnection it would have performed is already under way.
 
 ```typescript
@@ -1874,7 +1874,7 @@ microtask can re-enter the logger and create an asynchronous feedback loop. Use 
 sink error callback or a separate destination for those failures. Unrelated reports
 in the same turn remain deliverable.
 
-`LoggerOptions.onSinkError` was removed in 1.0.0. Migrate its handler to a `'diagnostic'` listener and filter `diagnostic.kind === 'sink'`. The fields `error`, `context`, and `sink` are available on the diagnostic. Delivery is asynchronous. This is separate from the `onError` option on `FileSink` and `NamedPipeSink`, which receives `SinkFailure`. Their JSON output now includes raw `params` when `redactedParams` is absent. Configure redaction before persisting sensitive params.
+To observe logger-owned sink failures, register a `'diagnostic'` listener and filter `diagnostic.kind === 'sink'`. The fields `error`, `context`, and `sink` are available on the diagnostic. Delivery is asynchronous. This is separate from the `onError` option on `FileSink` and `NamedPipeSink`, which receives `SinkFailure`. Their JSON output includes raw `params` when `redactedParams` is absent. Configure redaction before persisting sensitive params.
 
 The logger has a separate asynchronous path for things that go wrong while logging:
 

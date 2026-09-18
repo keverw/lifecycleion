@@ -161,9 +161,8 @@ what asking for an unbounded render means.
 
 An `ArrayBuffer` or `SharedArrayBuffer` - the backing store rather than a view over one -
 is always named with its size, whatever the allowance. There is no decode to skip: a buffer
-has no useful string form at any size, and it previously rendered as `[ArrayBuffer]`, which
-said nothing about how much of it there was. Nothing is dropped, so it is not counted as a
-truncation.
+has no useful string form at any size. The summary identifies its kind and byte length.
+Nothing is dropped, so it is not counted as a truncation.
 
 Every view type is recognized by its own name - `Uint8Array`, `Int16Array`, `DataView`,
 Node's `Buffer` - and the size is always in bytes, not elements. Recognition uses the
