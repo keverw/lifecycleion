@@ -95,7 +95,7 @@ initDevMode({ detect: 'cmd', strict: true });
 
 ```typescript
 initDevMode(true);
-initDevMode(false); // no-op — value stays true
+initDevMode(false); // no-op - value stays true
 ```
 
 This is critical for HTML injection: the server injects a `<script>` tag that sets the global before any module code runs. When client-side code calls `initDevMode()`, it's a no-op because the server-injected value already won.

@@ -110,7 +110,7 @@ Use `reportCallbackError()` when reporting a callback failure. If you need a dif
 
 ```typescript
 function reportToHost(error: Error): void {
-  // Rung 1: dispatch on the standard channel. `cancelable: true` is required — see below.
+  // Rung 1: dispatch on the standard channel. `cancelable: true` is required - see below.
   if (
     typeof globalThis.dispatchEvent === 'function' &&
     typeof globalThis.ErrorEvent === 'function'
@@ -127,7 +127,7 @@ function reportToHost(error: Error): void {
     }
 
     // Dispatched but unclaimed: fall through to the console, exactly as an
-    // unhandled error would. Never fall on to `reportError()` here — in browsers
+    // unhandled error would. Never fall on to `reportError()` here - in browsers
     // that dispatches a second event to the listeners that already saw this one.
     console.error(error);
 

@@ -1468,7 +1468,7 @@ Every sink reports a failure in the same shape, so one handler serves both:
 ```typescript
 interface SinkFailure {
   // What failed. 'write' means a line is at risk; 'format' means a line could not be
-  // formatted — `disposition` says what that cost, since NamedPipeSink substitutes its
+  // formatted - `disposition` says what that cost, since NamedPipeSink substitutes its
   // own default format and carries on, while a line that could not be rendered at all is
   // gone. Either way the pipe itself is healthy: reconnecting here acts on a working sink.
   kind:
@@ -1489,12 +1489,12 @@ interface SinkFailure {
 
   // What became of the line. This, not `kind`, is what says whether to write it
   // somewhere else:
-  //   'retrying'  — the sink will try again; a fallback write here duplicates it
-  //   'lost'      — it will not arrive: out of retries, unrenderable, or dropped at the cap
-  //   'fallback'  — the line was written, degraded: a custom formatter threw and the
+  //   'retrying'  - the sink will try again; a fallback write here duplicates it
+  //   'lost'      - it will not arrive: out of retries, unrenderable, or dropped at the cap
+  //   'fallback'  - the line was written, degraded: a custom formatter threw and the
   //                  default format was used, or a param would not render and a marker
   //                  stands in for it; a later failure is reported separately
-  //   'no_entry'  — the failure is not about a particular line (open, rotate, close)
+  //   'no_entry'  - the failure is not about a particular line (open, rotate, close)
   disposition: 'retrying' | 'lost' | 'fallback' | 'no_entry';
 }
 ```
@@ -1860,7 +1860,7 @@ Teardown and inspection:
 ```typescript
 logger.unregisterReportErrorListener(); // 'success' | 'not_registered' | 'not_available'
 logger.isReportErrorListenerRegistered(); // boolean
-logger.isReportErrorAvailable(); // boolean — are the global event primitives present?
+logger.isReportErrorAvailable(); // boolean - are the global event primitives present?
 ```
 
 `'not_available'` from `registerReportErrorListener` means the global event primitives are unavailable or attaching the listener failed. From `unregisterReportErrorListener` it means the removal itself was refused - the methods are there, but `removeEventListener` threw - so **the listener is still attached and still receiving**, and the registration is deliberately kept so that a later `register` does not add a second one. `isReportErrorListenerRegistered()` agrees with it and still answers `true`. See [global-event-target](./global-event-target.md). On Node.js, Lifecycleion installs them for you.
@@ -2263,7 +2263,7 @@ logger.info('User {{username}} logged in', {
 
 // Mute console in production, unmute in development.
 // lifecycleion/dev-mode provides a runtime-settable flag that works across
-// bundlers and SSR — recommended over process.env.NODE_ENV directly:
+// bundlers and SSR - recommended over process.env.NODE_ENV directly:
 import { getDevMode } from 'lifecycleion/dev-mode';
 
 if (!getDevMode()) {
