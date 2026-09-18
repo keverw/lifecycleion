@@ -999,7 +999,7 @@ export class BaseHTTPClient {
                 body:
                   redirectMethod === 'GET'
                     ? undefined
-                    : attemptResult.sentRequest.body,
+                    : attemptResult.sentRequest.rawBody,
               },
               {
                 fromURL: attemptResult.sentRequest.requestURL,

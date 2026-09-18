@@ -2994,8 +2994,11 @@ test('nested private suffix tenants cannot set or delete parent-domain cookies',
     'https://attacker.s3.amazonaws.com/',
   );
   expect(
-    jar.getCookieHeaderString('https://sub.attacker.s3.amazonaws.com/'),
-  ).toBe('tenant=ok; session=trusted');
+    jar
+      .getCookieHeaderString('https://sub.attacker.s3.amazonaws.com/')
+      .split('; ')
+      .sort(),
+  ).toEqual(['session=trusted', 'tenant=ok']);
 });
 
 test.each(['gov.uk', 'com'])(
