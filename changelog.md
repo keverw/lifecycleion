@@ -23,7 +23,7 @@
 - [0.0.19 (July 24, 2026)](#0019-july-24-2026)
 - [0.0.20 (Aug 21, 2026)](#0020-aug-21-2026)
 - [0.0.21 (Aug 25, 2026)](#0021-aug-25-2026)
-- [0.1.0 (Sep 17, 2026)](#010-sep-17-2026)
+- [0.1.0 (Sep 18, 2026)](#010-sep-18-2026)
 
 <!-- tocstop -->
 
@@ -178,7 +178,7 @@
 - **The backing event target is re-validated at the moment the globals are bound to it.** `installGlobalEventTarget` validated the shared state's `target` when it read the state, then bound `globalThis.addEventListener` and friends to a second, unguarded read of the same field, the one read in the module that actually matters. The field belongs to an object anything on the global object can reach, so a getter returning a real `EventTarget` when probed and something else afterwards would have bound the three methods to a value that never passed a check, and a getter throwing on that second read turned a perfectly viable install into `'blocked'` with all three methods rolled back, leaving Node with no event methods at all. The bind now takes the target and the three methods off it in one validated pass. Binding a method read later would have been the same gap moved one level in, since a method on somebody else's object is no more ours to trust than the field holding it. A target that no longer vouches for itself is treated as absent: installation proceeds with a fresh one, which orphans nothing, since a target that cannot service the three methods never had listeners registered through this module.
 - Corrected the `retrySuppressedReason` documentation for `adapter_veto`, which said no built-in adapter produces it. `NodeAdapter` and `FetchAdapter` do not, for the reason given, but `MockAdapter` does. `transportError: { isRetryable: false }` leaves the default retryable `status: 0` in place, so the veto is what stops the retry. That is the point of the example the same page already gives.
 
-## 0.1.0 (Sep 17, 2026)
+## 0.1.0 (Sep 18, 2026)
 
 - **BREAKING: callback failures use the global `'error'` event instead of `'reportError'`.** Update global listeners and call `preventDefault()` to claim handled reports. The original thrown value is retained on `event.error.cause`. `Logger.registerReportErrorListener()` follows the new channel, cancels handled reports by default, supports optional browser resource-error capture, and returns `'closed'` after shutdown. `close()` detaches it. `unregisterReportErrorListener()` can now return `'not_available'`.
 - **BREAKING: `LoggerOptions.onSinkError` was removed.** Use the asynchronous `'diagnostic'` event or `diagnosticSinks` for logger-owned sink, event-handler, rendering, and redaction failures. Diagnostic sinks can implement `writeDiagnostic()`. Otherwise they receive a rendered entry. Without diagnostic sinks, regular sinks receive diagnostics. Delivery failures fall back to guarded `console.error`. Runtime configuration is available through `addDiagnosticSink()`, `removeDiagnosticSink()`, and `getDiagnosticSinks()`. See [failure routing](./docs/logger.md#where-failures-go).
