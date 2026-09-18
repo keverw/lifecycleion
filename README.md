@@ -4,12 +4,14 @@
 
 A collection of foundational TypeScript utilities for managing application lifecycle, logging, retries, events, and common programming patterns.
 
+> ⚠️ **Pre-1.0.0:** Lifecycleion is maturing and usable, but still pre-1.0. The core APIs are stabilizing yet may still change before 1.0.0. Pin a version and review release notes when upgrading.
+
 <!-- toc -->
 
 - [Why Lifecycleion?](#why-lifecycleion)
   - [Key Features](#key-features)
 - [Installation](#installation)
-  - [Peer dependency: `tldts`](#peer-dependency-tldts)
+  - [Peer Dependency: `tldts`](#peer-dependency-tldts)
 - [Quick Example](#quick-example)
 - [Available Libraries](#available-libraries)
 - [Change Log](#change-log)
@@ -44,26 +46,26 @@ yarn add lifecycleion
 bun add lifecycleion
 ```
 
-### Peer dependency: `tldts`
+### Peer Dependency: `tldts`
 
 Lifecycleion declares [`tldts`](https://github.com/remusao/tldts) as a required peer
 dependency. It carries the compiled Public Suffix List that `http-client`'s `CookieJar`
 scopes cookies with and that `domain-utils` re-exports, and it is a peer rather than a
-direct dependency for two reasons: a single copy in the tree means one PSL snapshot rather
-than two disagreeing ones, and you can refresh the list by upgrading `tldts` within its
+direct dependency for two reasons: a compatible shared installation avoids duplicate PSL snapshots, and you can refresh the list by upgrading `tldts` within its
 supported range without waiting on a Lifecycleion release.
 
-npm 7+, pnpm 8+ and Bun install peer dependencies automatically, so most projects need do
-nothing. **Yarn does not**, in either Yarn 1 or Berry, and neither does pnpm 7 or older or
-npm 6 - install it explicitly there:
+Ensure your installation includes a version of `tldts` satisfying `^7.4.10`. If your
+package manager does not install peers automatically, or that behavior is disabled,
+install it explicitly:
 
 ```bash
-yarn add tldts
+npm install 'tldts@^7.4.10'
 ```
 
 `tldts` is imported at module load by `lifecycleion/http-client` and
-`lifecycleion/domain-utils`, so on those managers a missing install is a module-resolution
-error the first time either entry point is loaded, not a deferred or partial failure.
+`lifecycleion/domain-utils`. A missing peer prevents those entry points from loading.
+The peer allows consumers to update the PSL within the supported range, but does not
+itself guarantee that a dependency tree contains only one version.
 
 For Node.js runtimes, Lifecycleion currently targets `Node >=25`. Some libraries, including `safe-handle-callback`, `logger`'s error listener, and `lru-cache`'s `onChange`, report errors on the standard global `'error'` event channel: an `ErrorEvent` dispatched through the global `EventTarget` methods. Those are web-standard primitives, and browsers, Bun, and Deno expose them on `globalThis` natively.
 
@@ -125,7 +127,7 @@ await manager.stopAllComponents();
 await logger.close();
 ```
 
-Tip: listen for `lifecycle-manager:shutdown-completed` when you want one place to react to shutdown results from manual stops, signals like `SIGINT` / `SIGTERM`, or logger-exit hooks. This is the centralized hook for logging or follow-up policy when `timedOut` is `true` or `stalledComponents` is non-empty. If `timedOut` is `true`, the payload reflects the result when the manager stopped waiting; a stop already in flight remains protected against per-component overlap, while exit handling and later shutdown/escalation attempts may proceed. Use repeated shutdown escalation separately when you want additional shutdown requests to retry or force behavior.
+Tip: listen for `lifecycle-manager:shutdown-completed` when you want one place to react to shutdown results from manual stops, signals like `SIGINT` / `SIGTERM`, or logger-exit hooks. This is the centralized hook for logging or follow-up policy when `timedOut` is `true` or `stalledComponents` is non-empty. If `timedOut` is `true`, the payload reflects the result when the manager stopped waiting. A stop already in flight remains protected against per-component overlap, while exit handling and later shutdown/escalation attempts may proceed. Use repeated shutdown escalation separately when you want additional shutdown requests to retry or force behavior.
 
 ## Available Libraries
 
@@ -165,7 +167,7 @@ Each library has reference documentation in the [docs](./docs) folder. Click a l
 | [single-event-observer](./docs/single-event-observer.md)           | `lifecycleion/single-event-observer`                    | Lightweight type-safe observer pattern for a single event type, with public and protected notify variants                                     |
 | [sleep](./docs/sleep.md)                                           | `lifecycleion/sleep`                                    | Pause async execution for a given number of milliseconds                                                                                      |
 | [strings](./docs/strings.md)                                       | `lifecycleion/strings`                                  | String type guard, case conversion (PascalCase, camelCase, CONSTANT_CASE), grapheme splitting, character filtering, and chopping helpers      |
-| [tmp-dir](./docs/tmp-dir.md)                                       | `lifecycleion/tmp-dir`                                  | Create and automatically clean up uniquely-named temporary directories with configurable prefix, postfix, and unsafe cleanup support          |
+| [tmp-dir](./docs/tmp-dir.md)                                       | `lifecycleion/tmp-dir`                                  | Create uniquely named temporary directories with explicit cleanup, configurable prefix, postfix, and unsafe cleanup support                   |
 | [stringify-value](./docs/stringify-value.md)                       | `lifecycleion/stringify-value`                          | Render any value as a display string, or return it with parts redacted                                                                        |
 | [to-error](./docs/to-error.md)                                     | `lifecycleion/to-error`                                 | Coerce any thrown or rejected value into an `Error` (`toError`), or describe it as a string that is always safe to read (`describeError`)     |
 | [unix-time-helpers](./docs/unix-time-helpers.md)                   | `lifecycleion/unix-time-helpers`                        | Unix timestamp utilities for seconds, milliseconds, high-resolution timing, and unit conversion                                               |

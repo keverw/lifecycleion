@@ -39,8 +39,8 @@ Never throws. A value that resists rendering degrades to a placeholder rather th
 
 `stringifyValue` is intended for display, logging, and diagnostic output. Its output is
 lossy and may contain descriptive markers, so do not use it as an API payload, persistence
-format, or round-trip serialization format. Use JSON—or a format such as BSON or CBOR when
-JSON's data model is insufficient—for structured data interchange.
+format, or round-trip serialization format. Use JSON for structured data interchange, or a format such as BSON or CBOR when
+JSON's data model is insufficient.
 
 ### Options
 
@@ -116,7 +116,7 @@ it off.
 
 Truncation is a degradation rather than a failure, so it does **not** reach
 `onFormatError` - that channel means something _refused_ to render and hands you an error.
-There is no error here; the walk succeeded and could not represent everything. Ask for
+There is no error here. The walk succeeded but could not represent everything. Ask for
 `onTruncate` instead:
 
 ```typescript
@@ -273,7 +273,7 @@ Masking a value the renderer prints whole replaces it with a **string** - nothin
 
 Unreadable keys and cycles can force changes to values nobody named: a container whose keys cannot be read, and a container that holds itself once a mask has landed elsewhere in the payload. Redaction can copy around neither, and handing back the original would risk returning it unmasked. A cycle in a payload where nothing matched at all is left exactly as it came in.
 
-Opaque values such as errors and class instances also require inspection because template lookups can reach their properties. Each opaque graph has a 16,384-entry inspection allowance and a separate depth limit. If inspection cannot establish that a value is safe, redaction uses `***REDACTION FAILED***` and reports the failure; it does not return an unchecked reference.
+Opaque values such as errors and class instances also require inspection because template lookups can reach their properties. Each opaque graph has a 16,384-entry inspection allowance and a separate depth limit. If inspection cannot establish that a value is safe, redaction uses `***REDACTION FAILED***` and reports the failure. It does not return an unchecked reference.
 
 ### What Masking Reaches
 
@@ -298,5 +298,5 @@ Nothing reaches a log line, because the renderer cannot see it either. But it me
   - `kind: 'redaction'` means your `redactFunction` threw, or a value could not be read to mask it.
   - `kind: 'render'` means a value refused to be read or turned into text. Either call can raise it: `redactValue` hands back structure, but masking a leaf renders it first, so a `toString` that throws under a masked key reports here too. Render subjects are rooted at `<value>` in both, so the same leaf is named the same way whichever half reports it. It fires only when a read actually threw, never for the ordinary degradations.
   - Both come from the same walk over the same value and address it the same way, which is why they are one callback with a discriminator rather than two. Each kind carries its own once-per-call budget, so a value that fails both ways is reported both ways.
-  - With no handler it first dispatches a cancelable global `'error'` event, so a `logger.registerReportErrorListener()` can record it. If event dispatch is unavailable it uses `globalThis.reportError()` when present; an unclaimed dispatch, unavailable reporting function, or reporting failure ends at guarded `console.error`. Logger-owned formatting uses the logger's separate diagnostic channel. **Pass a handler when calling this from inside a custom sink or formatter** and have that handler terminate locally; otherwise the standalone host path can reach a registered logger while it is already writing.
+  - With no handler it first dispatches a cancelable global `'error'` event, so a `logger.registerReportErrorListener()` can record it. If event dispatch is unavailable it uses `globalThis.reportError()` when present. An unclaimed dispatch, unavailable reporting function, or reporting failure ends at guarded `console.error`. Logger-owned formatting uses the logger's separate diagnostic channel. **Pass a handler when calling this from inside a custom sink or formatter** and have that handler terminate locally. Otherwise the standalone host path can reach a registered logger while it is already writing.
   - The cause is never written into the rendered string: it comes from your own getter or `redactFunction` and may carry the value it was hiding.

@@ -10,7 +10,7 @@
   - [Using a Fallback](#using-a-fallback)
   - [Escaping Brackets](#escaping-brackets)
   - [Compiling Templates](#compiling-templates)
-  - [Telling an Unreadable Placeholder from an Absent One](#telling-an-unreadable-placeholder-from-an-absent-one)
+  - [Telling an Unreadable Placeholder From an Absent One](#telling-an-unreadable-placeholder-from-an-absent-one)
   - [Bounding How Much a Template Renders](#bounding-how-much-a-template-renders)
   - [Escaping Utility](#escaping-utility)
 - [Credits / Inspiration](#credits--inspiration)
@@ -20,7 +20,7 @@
 ## Features
 
 - **Performance Optimized**: Automatically short-circuits when no placeholders are detected, avoiding unnecessary processing for plain strings.
-- **Fallback Support**: Specify a fallback string to use whenever a placeholder's corresponding value is not found, instead of the default `undefined`.
+- **Fallback Support**: Specify a fallback string to use whenever a placeholder's corresponding value is not found, instead of the default `'(null)'`.
 - **Nested Path Support**: Resolve nested object properties with paths like `{{user.name}}`, array indexes like `{{users[0].name}}`, and quoted bracket keys like `{{user["display-name"]}}`.
 - **Escaped Brackets**: Safely include literal `{{` and `}}` in your templates without them being replaced, by escaping them with a backslash (`\`).
 - **Efficient Template Reuse**: With `compileTemplate`, compile your template once and reuse it with different sets of data, improving performance for repeated template processing.
@@ -119,7 +119,7 @@ console.log(displayName); // Outputs: "Alice - USR-12345"
 
 More precisely, the fallback is used when any intermediate segment cannot be traversed, or when the final resolved value is `null` or `undefined`. Final values like `false`, `0`, and `''` are rendered normally. Supported path syntax is dot notation, numeric indexes, and quoted bracket keys. Wildcards are not supported.
 
-Each path segment resolves only an **own enumerable property**. Inherited properties such as the usual `constructor` and `__proto__`, and values added to `Object.prototype`, are treated as missing; an own enumerable property explicitly supplied with one of those names remains available. This keeps template lookup on the same property surface the logger's redaction walk can inspect. There are two narrow exceptions: array `length`, so `{{items.length}}` remains available, and standard `Error` fields (`name`, `message`, `stack`, and `cause`), so documented patterns such as `{{error.message}}` continue to work even though JavaScript defines these properties as non-enumerable or on a standard prototype.
+Each path segment resolves only an **own enumerable property**. Inherited properties such as the usual `constructor` and `__proto__`, and values added to `Object.prototype`, are treated as missing, but an own enumerable property explicitly supplied with one of those names remains available. This keeps template lookup on the same property surface the logger's redaction walk can inspect. There are narrow exceptions: `length` on arrays, typed arrays, Buffers, and arguments objects, so `{{items.length}}` remains available, and standard `Error` fields (`name`, `message`, `stack`, and `cause`), so documented patterns such as `{{error.message}}` continue to work even though JavaScript defines these properties as non-enumerable or on a standard prototype.
 
 Binary values are leaves: Buffers and typed arrays expose only numeric elements and their intrinsic `length` to path lookup. Custom properties attached to binary values, including `ArrayBuffer` and `DataView`, are treated as missing. This lets redaction inspect a large binary body without walking every byte or following attached references back to unmasked params.
 
@@ -144,7 +144,7 @@ console.log(template({ name: 'Alice' })); // Outputs: "Hello, Alice!"
 console.log(template({})); // Outputs: "Hello, (???)!"
 ```
 
-### Telling an Unreadable Placeholder from an Absent One
+### Telling an Unreadable Placeholder From an Absent One
 
 Both render the fallback. `{{user.token}}` on an object whose `token` accessor throws
 produces exactly what a typo produces, and until `onFormatError` existed the two were
@@ -163,7 +163,7 @@ The path is rooted at the placeholder as written, so a template with many of the
 says which one refused. It fires at most once per render of the template - not once per
 placeholder. With no handler it first dispatches a cancelable global `'error'` event, so a
 `logger.registerReportErrorListener()` can record it. If event dispatch is unavailable it
-uses `globalThis.reportError()` when present; an unclaimed dispatch, unavailable reporting
+uses `globalThis.reportError()` when present. An unclaimed dispatch, unavailable reporting
 function, or reporting failure ends at guarded `console.error`. Logger-owned template
 rendering uses the logger's separate diagnostic channel. A custom sink or formatter that
 calls this function should pass a handler that terminates locally.
@@ -172,7 +172,7 @@ The cause is never written into the output: it comes from your own getter and ma
 the value it was hiding, and the rendered string is going wherever you send it.
 
 `compileTemplate` takes the same options as its third argument, and each render of a
-compiled template gets its own budget.
+compiled template gets its own budget. Options are read once when the template is compiled, so changing the options object later does not change the compiled template. Unreadable option members use their defaults.
 
 ### Bounding How Much a Template Renders
 
@@ -191,7 +191,7 @@ message someone else wrote - then the repeat count is theirs to choose too.
 Only the values substituted in are charged. The literal text between placeholders is
 passed through untouched and costs nothing, and neither does the fallback, so the cap
 governs interpolation rather than the length of the template itself. A plain string costs
-exactly its own length; a container costs its rendered form, so it also pays for its
+exactly its own length. A container costs its rendered form, so it also pays for its
 braces, quotes, commas and key names.
 
 Raise it, or turn it off, when you are rendering something other than a log line:

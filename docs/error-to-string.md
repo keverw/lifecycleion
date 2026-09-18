@@ -61,8 +61,8 @@ interface TruncationInfo {
 
 `maxRenderLength` is one allowance for the whole table, shared by every row and by the
 masking that runs before them, so an error with a long `cause` chain costs one cap rather
-than one per link. It is separate from `maxRowLength`, which sets the table's _width_;
-this sets how much may be emitted in total.
+than one per link. It is separate from `maxRowLength`, which sets the table's _width_.
+This sets how much may be emitted in total.
 
 Truncation does not reach `onFormatError` - that channel means a value _refused_ to render
 and hands you an error, and there is none here. `onTruncate` fires at most once per call
@@ -183,7 +183,7 @@ An error nested in `cause` or `additionalInfo` starts a fresh path root. Its own
 
 A bare name is taken literally, so `sensitiveFieldNames: ['password-hash']` masks `additionalInfo['password-hash']`.
 
-Paths are case-sensitive, just like JavaScript property names. The table's `AdditionalInfo.password` is a display label; use `['password']` to mask that property, or `['additionalInfo.password']` with the actual property name. The capitalized `AdditionalInfo.` display prefix is not an alias.
+Paths are case-sensitive, just like JavaScript property names. The table's `AdditionalInfo.password` is a display label. Use `['password']` to mask that property, or `['additionalInfo.password']` with the actual property name. The capitalized `AdditionalInfo.` display prefix is not an alias.
 
 An entry beginning `additionalInfo.` is read both as written and with that prefix removed, so `['additionalInfo.user.password']` masks `additionalInfo.user.password` exactly as `['user.password']` does. This lowercase spelling also matches the paths reported by `onFormatError`. Only the dotted spelling is aliased this way, and a bag that genuinely holds a key named `additionalInfo` is masked at both readings.
 
@@ -191,7 +191,7 @@ An unquoted path segment is a run of name characters - letters, digits, combinin
 
 A wildcard segment addresses **every element of an array**, with `*` and `[*]` the same rule written two ways - so `users[*].password` and `users.*.password` both mask the password of every user. It stands in for an array index and only for one: against a plain object it is the key literally spelled `*`, and an array's named properties are not expanded over either. The quoted `["*"]` is the same segment rather than an escape hatch, for the reason quoting never changes a segment's meaning: `users[0]`, `users["0"]` and `users.0` are already one entry too. See [Wildcards Over Arrays](./logger.md#wildcards-over-arrays), which covers this surface too.
 
-Entries the grammar rejects mask **nothing** beyond a key spelled literally that way. A trailing dot or an unterminated bracket is reported through `onFormatError` under `kind: 'redaction'` with the entry as written, since it is a configuration error knowable without the payload; a partial wildcard such as `us*rs` has no path syntax and is simply a literal key name. The logger's `redactedKeys` behaves identically and reports the failure through its diagnostic channel.
+Entries the grammar rejects mask **nothing** beyond a key spelled literally that way. A trailing dot or an unterminated bracket is reported through `onFormatError` under `kind: 'redaction'` with the entry as written, since it is a configuration error knowable without the payload. A partial wildcard such as `us*rs` has no path syntax and is simply a literal key name. The logger's `redactedKeys` behaves identically and reports the failure through its diagnostic channel.
 
 A dotted or bracketed entry is treated as ambiguous and both readings are covered, the same way the logger's `redactedKeys` does: `'user.password'` masks the nested `additionalInfo.user.password` _and_ a literal key spelled `'user.password'`, when either exists.
 
@@ -236,10 +236,10 @@ Pass `onFormatError` to find out why a value failed to redact - it receives the 
 also reports rendering failures under `kind: 'render'`. Both come from the same walk over
 the same value and address it the same way, which is why they are one callback with a
 discriminator rather than two. It fires at most once per kind per call. With no handler it
-first dispatches a cancelable global `'error'` event; if dispatch is unavailable it uses
-`globalThis.reportError()` when present; an unclaimed dispatch or unavailable/failed
+first dispatches a cancelable global `'error'` event. If dispatch is unavailable it uses
+`globalThis.reportError()` when present. An unclaimed dispatch or unavailable/failed
 reporting function ends at guarded `console.error`. The same option is on
-`stringifyValue`; logger-owned formatting failures instead become `LoggerDiagnostic`
+`stringifyValue`. Logger-owned formatting failures instead become `LoggerDiagnostic`
 values on the logger's separate channel.
 
 If the `redactFunction` throws, or reading the value throws, the result is `***REDACTION FAILED***` - never the original value. That is the same marker the logger uses for the same condition, and it is deliberately distinct from a successful mask so a broken `redactFunction` cannot hide behind output that looks fine.
@@ -288,7 +288,7 @@ first is the worst possible outcome. It is written so it cannot:
   It fires **at most once per render** (a failure is raised per value, and one report per
   value would be its own flood). With no handler it first dispatches a cancelable global
   `'error'` event, so a `logger.registerReportErrorListener()` can record it. If event
-  dispatch is unavailable it uses `globalThis.reportError()` when present; an unclaimed
+  dispatch is unavailable it uses `globalThis.reportError()` when present. An unclaimed
   dispatch, unavailable reporting function, or reporting failure ends at guarded
   `console.error`. Logger-owned formatting uses the logger's separate diagnostic channel.
   A custom sink that calls this function should pass a handler that terminates locally.

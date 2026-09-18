@@ -592,7 +592,7 @@ Four failure modes, all fail closed:
 | A param cannot be read (a getter that throws)                                       | That key becomes the marker where it sits, while every other param, including the redacted one, redacts normally |
 | The `params` object cannot be read at all (a revoked `Proxy`, a throwing `ownKeys`) | **Only** the redacted keys are returned, each set to the marker. Other params are dropped from `redactedParams`  |
 
-Large graphs can also exhaust the bounded inspection budget and produce this marker. Within one redaction operation, repeated references to the same successfully inspected error or class instance reuse that inspection, including across separate row objects. Each reuse checks for references to ancestors currently being redacted. Distinct objects still require separate inspections and can reach the limit; the cache does not persist between log calls.
+Large graphs can also exhaust the bounded inspection budget and produce this marker. Within one redaction operation, repeated references to the same successfully inspected error or class instance reuse that inspection, including across separate row objects. Each reuse checks for references to ancestors currently being redacted. Distinct objects still require separate inspections and can reach the limit. The cache does not persist between log calls.
 
 The marker is deliberately distinct from an ordinary `***` mask. An operator seeing `***`
 concludes redaction worked, so a broken `redactFunction` would otherwise hide itself behind
@@ -627,7 +627,7 @@ logger.on<LoggerDiagnostic>('diagnostic', (diagnostic) => {
 A diagnostic has `kind: 'redaction'` when masking failed and `kind: 'render'` when a
 value refused to be read or converted to text. It carries the normalized cause in `error`
 and the structural location in `path`. Each kind is emitted at most once per formatting
-operation; ordinary bounds such as `[circular]` and `[max depth exceeded]` are not failures.
+operation. Ordinary bounds such as `[circular]` and `[max depth exceeded]` are not failures.
 
 ### When a Value Cannot Be Rendered
 
@@ -638,7 +638,7 @@ logger.
 
 A standalone `stringifyValue()`, `errorToString()`, `serializeError()`, or
 `CurlyBrackets()` call has no logger diagnostic channel. Those functions retain their
-per-call `onFormatError` option; without one, they use the standard global `'error'`
+per-call `onFormatError` option. Without one, they use the standard global `'error'`
 reporting path.
 
 > **If your own sink, formatter, or diagnostic writer calls a standalone renderer, pass it
@@ -650,7 +650,7 @@ reporting path.
 
 The cause is not put into the ordinary log line. It came from caller-owned code such as a
 getter, `toString`, or `redactFunction`, and may itself contain the value. It is available
-on `LoggerDiagnostic.error`; treat it like exception telemetry when forwarding it.
+on `LoggerDiagnostic.error`. Treat it like exception telemetry when forwarding it.
 
 `errorObject()` formats the error and its params separately, so each operation can emit
 one diagnostic per kind. A value that fails both redaction and rendering emits both kinds.
@@ -888,9 +888,9 @@ console.log(logger.getSinks().length); // 0
   once, and removes them from the logger
 - After `logger.close()`, the logger is marked as closed and will not accept new log messages
 - The logger is marked closed _before_ its sinks close, so shutdown cannot start new writes
-  or recurse. Close-time `onError` still fires; it is the sink's callback, not a
+  or recurse. Close-time `onError` still fires because it is the sink's callback, not a
   diagnostic, so logging those reports back through _this_ logger is dropped with no
-  console fallback. Use `console.error` or a destination this logger does not own — see
+  console fallback. Use `console.error` or a destination this logger does not own. See
   [Where Failures Go](#where-failures-go)
 - Adding a sink after `logger.close()` does not reopen the logger. Create a new `Logger`
   instance for a fresh start
@@ -1316,7 +1316,7 @@ const fileSink = new FileSink({
 });
 ```
 
-Two things to know about `failure.entry`. It is the full `LogEntry`, so it carries `params` as well as `redactedParams`: a handler that serializes the whole failure for paging or a backup sink is serializing the raw values, including any the log line masked. Forward `redactedParams ?? params`, or only `message`, rather than the entry itself. And a handler that logs the failure back through this sink is safe: the sink refuses, and counts in `droppedEntries`, a line from inside a `'format'` report that cannot render either, which is what stops a failure carrying an unrenderable `entry` from reporting itself forever. A `'write'` failure is reported on every attempt, so a handler that logs each one through a sink that is also failing multiplies the queue by `maxRetries + 1` per line; the queue cap bounds it, but log elsewhere.
+Two things to know about `failure.entry`. It is the full `LogEntry`, so it carries `params` as well as `redactedParams`: a handler that serializes the whole failure for paging or a backup sink is serializing the raw values, including any the log line masked. Forward `redactedParams ?? params`, or only `message`, rather than the entry itself. And a handler that logs the failure back through this sink is safe: the sink refuses, and counts in `droppedEntries`, a line from inside a `'format'` report that cannot render either, which is what stops a failure carrying an unrenderable `entry` from reporting itself forever. A `'write'` failure is reported on every attempt, so a handler that logs each one through a sink that is also failing multiplies the queue by `maxRetries + 1` per line. The queue cap bounds it, but log elsewhere.
 
 A close-time `'lost'` or `'no_entry'` is this callback, not the logger's diagnostic channel. With no `onError` the sink already writes it to `console.error`. With one, a `logger.error(...)` inside the handler during `Logger.close()` is dropped (`handleLog` is already a no-op) and does not fall through to that console line, because the handler succeeded. The example uses `console.error` for that reason.
 
@@ -1349,7 +1349,7 @@ console.log(health);
 queueing sinks. A `'format'` failure never reached the destination and says nothing about
 whether the sink can write, so it is reported through `onError` (with `disposition`) and
 recorded in `lastError`, but it does not mark the sink unhealthy. Queue overflow
-also leaves destination health unchanged; monitor `droppedByKind.queue_full`
+also leaves destination health unchanged. Monitor `droppedByKind.queue_full`
 and `droppedEntries` as well as `isHealthy` to detect log loss.
 
 #### Flush Pending Writes
@@ -1379,7 +1379,7 @@ if (result.timedOut) {
 
 ### NamedPipeSink
 
-A named-pipe record that fails after a partial low-level write is reported through `onError` with `disposition: 'lost'`, counted in `droppedEntries`, and not automatically retried. Its error carries `bytesWritten` and the underlying failure as `cause`. Never-started buffered records retain the normal retry policy. A FIFO cannot retract bytes already consumed or guarantee exactly-once records across reader failures; consumers must tolerate truncated records and resynchronize their framing. A fallback for a partial record should use a separate destination.
+A named-pipe record that fails after a partial low-level write is reported through `onError` with `disposition: 'lost'`, counted in `droppedEntries`, and not automatically retried. Its error carries `bytesWritten` and the underlying failure as `cause`. Never-started buffered records retain the normal retry policy. A FIFO cannot retract bytes already consumed or guarantee exactly-once records across reader failures, so consumers must tolerate truncated records and resynchronize their framing. A fallback for a partial record should use a separate destination.
 
 Writes logs to a named pipe (FIFO) for log aggregation. Linux/macOS only.
 
@@ -1411,7 +1411,7 @@ lines accumulate under `maxQueueSize` rather than in Node's own unbounded stream
 A `reconnect()` with nothing reading the pipe therefore reports failure rather than claiming
 success, and it reports it immediately: the sink asks whether a reader is there with a
 non-blocking open and gets `ENXIO` straight back when there is none. When it succeeds, that
-same descriptor becomes the writable connection; there is no second blocking open in a
+same descriptor becomes the writable connection. There is no second blocking open in a
 probe-to-stream gap. That is also what keeps a reader-less FIFO from parking a file-I/O
 thread and holding the whole process open. The sink keeps asking on an `unref`'d one-second
 timer, so it opens and flushes the queue on its own if a reader turns up later.
@@ -1498,7 +1498,7 @@ interface SinkFailure {
 A `close()` that gives up at `closeTimeoutMS` reports differently on the two sinks, because
 they know different things. `FileSink` waits on one write at a time, so the write it
 abandons may already be on disk: reported as `'close'` / `'no_entry'` and not counted in
-`droppedEntries`; bytes the stream still held when the final flush timed out are reported
+`droppedEntries`. Bytes the stream still held when the final flush timed out are reported
 the same way, before `close()` resolves. `NamedPipeSink` hands the stream a burst, so what
 it abandons is whatever is still buffered for a reader that did not take it: reported once
 as `'close'` / `'lost'` before `close()` resolves, with each entry counted as its write
@@ -1507,7 +1507,7 @@ the bytes in the stream's buffer are no longer lines the sink can name - so a fa
 handler learns that lines were lost, and how many from `getHealth().droppedEntries`.
 Those reports still reach `onError`. That is the sink's callback, not `writeDiagnostic`.
 If this sink is owned by a `Logger` that is itself closing, do not log them through that
-logger — `handleLog` is already a no-op and there is no diagnostic fallback. The examples
+logger, because `handleLog` is already a no-op and there is no diagnostic fallback. The examples
 use `console.error`.
 
 #### Error Handling & Reconnection
@@ -1550,7 +1550,7 @@ if (pipeSink.getHealth().isReconnecting) {
 }
 ```
 
-A reconnect also refuses while the current stream has buffered writes. It leaves that connection intact and reports an error; retry after the reader drains it. This prevents concurrent writers from interleaving log records.
+A reconnect also refuses while the current stream has buffered writes. It leaves that connection intact and reports an error. Retry after the reader drains it. This prevents concurrent writers from interleaving log records.
 
 **Important:** If `reconnect()` fails, the `onError` handler will be called again with the failure details. When implementing retry logic, consider adding delays and retry limits to avoid rapid repeated failures.
 
@@ -1686,7 +1686,7 @@ interface BeforeExitResult {
 A sink whose `write()` or `close()` throws or rejects produces a logger diagnostic with
 `kind: 'sink'`, the normalized failure in `error`, the failing `sink`, and `context` set
 to `'write'` or `'close'`. It follows the same diagnostic route as logger formatting and
-event-handler failures; there is no separate logger callback API.
+event-handler failures. There is no separate logger callback API.
 
 `write()` may return any thenable, not only a `Promise`. The returned value is adopted
 rather than called on directly, so a `then`-only thenable reports the rejection it actually
@@ -1726,18 +1726,18 @@ Unclaimed standalone helper failures and callback failures use
 [the shared host reporting route](./safe-handle-callback.md#the-reporting-pattern).
 `registerReportErrorListener()` can receive and log those global `'error'` events.
 Supplied failure handlers, sink-owned reports, and nested host reports can instead
-terminate directly at guarded `console.error`; registering a logger does not intercept
+terminate directly at guarded `console.error`. Registering a logger does not intercept
 every fallback. A successful global listener must call `preventDefault()` to suppress
 the host route's console fall-through (the logger listener does this by default).
 
 Do not call ordinary logger methods from a `'diagnostic'` listener or
 `writeDiagnostic()`. A diagnostic sink should write directly to its destination. If that
-write cannot be completed, throw or return a rejected promise; the logger will terminate
+write cannot be completed, throw or return a rejected promise. The logger will terminate
 it at guarded `console.error`.
 
 That console fallback is the diagnostic _delivery_ failing. It is not the same path as
 `FileSink` / `NamedPipeSink` `onError`. Those callbacks are the sink's own report for a
-lost or abandoned line; the logger never turns them into a diagnostic. With no `onError`,
+lost or abandoned line. The logger never turns them into a diagnostic. With no `onError`,
 the sink already writes the failure to guarded `console.error`. With one, that handler is
 the destination: if it logs through _this_ logger during `Logger.close()`, `handleLog` is
 already a no-op and nothing else runs, because the handler returned successfully. Use
@@ -1752,7 +1752,7 @@ When a log includes an `exitCode`, the logger will:
    - Callback must return `{ action: 'proceed' }` to continue with exit
    - Or return `{ action: 'wait' }` to prevent exit (e.g., shutdown already in progress)
    - **IMPORTANT:** If the callback throws an error or rejects, the exit process proceeds automatically to prevent the application from hanging
-   - Errors from the callback use the standard host path: global `'error'`; `globalThis.reportError()` when event dispatch is unavailable; then guarded `console.error`
+   - Errors from the callback use the standard host path: global `'error'`, followed by `globalThis.reportError()` when event dispatch is unavailable, then guarded `console.error`
    - Design your callback to handle errors internally if you need guaranteed cleanup
 2. Set `logger.didExit = true` and `logger.exitCode = <code>`
 3. Close all sinks
@@ -1778,7 +1778,7 @@ This is useful for:
 Lifecycleion catches errors thrown by callbacks you hand it, including event handlers,
 `onChange`, and lifecycle hooks, so one bad callback cannot break an operation. Those
 errors use the standard host path rather than being rethrown: a cancelable global
-`'error'` event; `globalThis.reportError()` when event dispatch is unavailable; then
+`'error'` event, followed by `globalThis.reportError()` when event dispatch is unavailable, then
 guarded `console.error`.
 
 `registerReportErrorListener()` attaches that listener and routes what it hears into this logger's sinks:
@@ -1859,21 +1859,23 @@ logger.isReportErrorListenerRegistered(); // boolean
 logger.isReportErrorAvailable(); // boolean — are the global event primitives present?
 ```
 
-`'not_available'` from `registerReportErrorListener` means the global object exposes neither native nor polyfilled event methods. From `unregisterReportErrorListener` it means the removal itself was refused - the methods are there, but `removeEventListener` threw - so **the listener is still attached and still receiving**, and the registration is deliberately kept so that a later `register` does not add a second one. `isReportErrorListenerRegistered()` agrees with it and still answers `true`. See [global-event-target](./global-event-target.md). On Node.js, Lifecycleion installs them for you.
+`'not_available'` from `registerReportErrorListener` means the global event primitives are unavailable or attaching the listener failed. From `unregisterReportErrorListener` it means the removal itself was refused - the methods are there, but `removeEventListener` threw - so **the listener is still attached and still receiving**, and the registration is deliberately kept so that a later `register` does not add a second one. `isReportErrorListenerRegistered()` agrees with it and still answers `true`. See [global-event-target](./global-event-target.md). On Node.js, Lifecycleion installs them for you.
 
 ## Where Failures Go
 
 Custom sinks must not repeatedly report their own asynchronous failures through
 `safeHandleCallback` or the global `'error'` channel while handling a reported error.
-The listener and shared host-report guards cover synchronous re-entry only; a later
+The listener and shared host-report guards cover synchronous re-entry only. A later
 microtask can re-enter the logger and create an asynchronous feedback loop. Use the
 sink error callback or a separate destination for those failures. Unrelated reports
 in the same turn remain deliverable.
 
+`LoggerOptions.onSinkError` was removed in 1.0.0. Migrate its handler to a `'diagnostic'` listener and filter `diagnostic.kind === 'sink'`. The fields `error`, `context`, and `sink` are available on the diagnostic. Delivery is asynchronous. This is separate from the `onError` option on `FileSink` and `NamedPipeSink`, which receives `SinkFailure`. Their JSON output now includes raw `params` when `redactedParams` is absent. Configure redaction before persisting sensitive params.
+
 The logger has a separate asynchronous path for things that go wrong while logging:
 
 1. Emit the logger's `'diagnostic'` event.
-2. Offer the diagnostic to every configured `diagnosticSinks` entry; when there are none, offer
+2. Offer the diagnostic to every configured `diagnosticSinks` entry. When there are none, offer
    it to every regular sink instead.
 3. If there is nowhere to send it, or a diagnostic delivery itself fails, use guarded
    `console.error`.
@@ -1889,17 +1891,20 @@ listeners and otherwise ends at guarded `console.error`. That covers a `close()`
 _throws_. A sink's own close-time `'lost'` / `'no_entry'` report goes to `onError` (or to
 `console.error` when none is set), not through this diagnostic channel.
 
-`LoggerDiagnostic.error` is the normalized underlying failure and `message` is a
-guardedly rendered description safe to persist. For `'redaction'` and `'render'` kinds the
-message names what failed and where but never interpolates the thrown text: with no
+`LoggerDiagnostic.error` is the normalized underlying failure. For `'redaction'` and
+`'render'` kinds, `message` is generic and omits both caller-controlled property paths
+and thrown text: with no
 `diagnosticSinks` configured a diagnostic falls back to the ordinary log sinks, and a
-redaction failure's cause is derived from the value being masked — a getter throwing
+redaction failure's cause is derived from the value being masked. A getter throwing
 `cannot read <secret>` would otherwise route around the masking on the line above it.
+
+Sink and event-handler diagnostic messages can include the underlying error text. They
+are not automatically redacted.
 
 `LoggerDiagnostic.error` still carries that cause in full, and every `'diagnostic'`
 listener and `writeDiagnostic()` sink receives it. It can contain data that caller-owned
 code put in the thrown error. A sink that persists diagnostics should apply the same access
-controls it uses for exception telemetry; the logger cannot safely run its normal redaction
+controls it uses for exception telemetry. The logger cannot safely run its normal redaction
 pipeline here because that pipeline may be what failed.
 
 **The built-in sinks deliberately do not persist that cause.** `ConsoleSink`, `FileSink`,
@@ -1926,8 +1931,8 @@ class DiagnosticSink implements LogSink {
 ```
 
 The diagnostic `kind` identifies the source: `'sink'`, `'event-handler'`, `'redaction'`,
-or `'render'`. Formatting diagnostics include their structural `path`; sink diagnostics
-include `context` and the failing `sink`; event-handler diagnostics include `event`.
+or `'render'`. Formatting diagnostics include their structural `path`. Sink diagnostics
+include `context` and the failing `sink`. Event-handler diagnostics include `event`.
 
 `FileSink` and `NamedPipeSink` have their own `onError`, and
 `ArraySink` has `onFormatError` (which also reports a throwing `transformer`, under
@@ -1942,7 +1947,7 @@ It is the terminal rung: if a diagnostic listener or diagnostic sink fails, the 
 diagnostic and that secondary failure are written there directly and never dispatched
 again. The console call is also guarded, so a broken console cannot make `logger.info()`
 throw or create an unhandled rejection. Because `Logger` also exposes the inherited public
-`emit()`, a malformed manually emitted `'diagnostic'` payload is treated as untrusted; if
+`emit()`, a malformed manually emitted `'diagnostic'` payload is treated as untrusted. If
 its listener fails, an unreadable or non-string `message` is omitted rather than escaping
 the terminal guard.
 
@@ -1979,14 +1984,14 @@ Two caveats remain:
 `stringifyValue()`, `errorToString()`, `serializeError()` and `CurlyBrackets()` can be
 called with no logger involved at all. With no handler, they first dispatch a cancelable
 global `'error'` event, so `registerReportErrorListener()` can record it. If event dispatch
-is unavailable they use `globalThis.reportError()` when present; an unclaimed dispatch,
+is unavailable they use `globalThis.reportError()` when present. An unclaimed dispatch,
 unavailable reporting function, or reporting failure ends at guarded `console.error`.
 There is no loop to worry about when nothing is logging.
 
 > **If your own sink, formatter, transformer, or diagnostic writer calls one of them, pass
 > it a handler.** The handler must terminate locally. In particular, do not send a failure
-> raised inside `writeDiagnostic()` back through the same logger's diagnostic channel;
-> throwing from the handler itself is guarded by the renderer. Save the failure and throw
+> raised inside `writeDiagnostic()` back through the same logger's diagnostic channel.
+> Throwing from the handler itself is guarded by the renderer. Save the failure and throw
 > or reject from `writeDiagnostic()` to use the guarded console terminal instead.
 
 The safest diagnostic writer needs no renderer at all:

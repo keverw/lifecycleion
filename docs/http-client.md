@@ -280,7 +280,7 @@ interface HTTPResponse<T = unknown> {
   adapterType: AdapterType;
   isStreamed: boolean; // Body was piped to a StreamResponseFactory; body is null
   isStreamError: boolean; // Body delivery failed after headers arrived; see Stream Errors and Replay
-  requestBodySettled?: Promise<Error | undefined>; // How the *request* body ended, on every bodied request; see Uploads That Outlive the Response
+  requestBodySettled?: Promise<Error | undefined>; // Optional adapter-reported upload outcome; see Uploads That Outlive the Response
 }
 ```
 
@@ -288,41 +288,59 @@ interface HTTPResponse<T = unknown> {
 
 #### Uploads That Outlive the Response
 
-For ordinary requests, the server receives the body and then responds. No separate upload tracking is needed. This section covers the less common case where a server responds early, while the client may still be sending the body. Receiving a response confirms that the server answered; it does not necessarily confirm that the entire upload was sent.
+For ordinary requests, the server receives the body and then responds. No separate upload tracking is needed. This section covers the less common case where a server responds early, while the client may still be sending the body. Receiving a response confirms that the server answered, but it does not necessarily confirm that the entire upload was sent.
 
 `NodeAdapter` exposes `requestBodySettled` on bodied requests to track that separate upload outcome. The client uses it to wait before following a redirect or dispatching a retry. `FetchAdapter` exposes the response status and body, but no separate upload-completion signal, so it cannot provide that wait.
 
-In browsers, `XHRAdapter` adds upload progress but currently does not expose `requestBodySettled` either. Progress reporting does not provide the same client-managed wait. XHR also follows redirects automatically before this adapter can detect them; browser `FetchAdapter` blocks redirects instead. Neither browser adapter supports client-managed redirect following.
+In browsers, `XHRAdapter` adds upload progress but currently does not expose `requestBodySettled` either. Progress reporting does not provide the same client-managed wait. XHR also follows redirects automatically before this adapter can detect them. Browser `FetchAdapter` blocks redirects instead. Neither browser adapter supports client-managed redirect following.
 
-With request buffering disabled, as with nginx `proxy_request_buffering off` or any endpoint that acks a streaming upload as soon as it has what it needs, the answer arrives while the upload is still going. The response is real and is delivered immediately, and what happens to the rest of the body afterwards used to be invisible: it can fail on its own (a `File` that yields fewer bytes than its `Blob.size` puts a body on the wire short of its `Content-Length`), or be cut short by the adapter's stall watchdog seconds after you already read a clean `2xx`.
+`requestBodySettled` resolves with an `Error` if the upload failed or with `undefined`
+if the adapter finished writing it. It never rejects. For `NodeAdapter`, it is available
+once a supported body has entered the adapter's upload tracking, including when the
+response arrives after the upload has finished. It does not prove that the server
+processed or committed the data.
 
-`requestBodySettled` is that outcome. It is present whenever this request had a body writer, meaning every bodied request, not only the ones whose writer was still running when the response resolved. Presence is not the test for "the upload outlived the answer." It resolves with the failure or with `undefined`, and it never rejects:
+Check that the field exists before interpreting its resolution:
 
 ```ts
 const response = await client.post('/upload').body(form).send();
 
-if (response.status === 200) {
+if (response.requestBodySettled !== undefined) {
   const uploadFailure = await response.requestBodySettled;
-
   if (uploadFailure) {
-    // The server answered 200, but the body behind it never went out in full.
+    // Handle an incomplete upload separately from the HTTP response status.
   }
+} else {
+  // No upload outcome was reported; absence does not establish upload success.
 }
 ```
 
-It rides on every response to a bodied request, not only the successful ones: a failed response stream (`isStreamError`), a connection reset before any headers, a TLS failure. Those are the shapes where the writer is most likely to have been mid-flight, so `undefined` there means the body went out, never "no one was looking".
+The client carries reported outcomes onto cancellation, timeout, transport-error, and
+redirect results. Absence means no adapter reported an outcome: for example, a bodiless
+request, a request refused before upload tracking began, or an adapter without this
+capability. After redirects, the final response carries the latest reported upload
+outcome, including when a bodied `POST` becomes a bodiless `GET`. Redirect-phase observers
+see that hop's outcome.
 
-That includes the responses the client builds itself, with no adapter response behind them at all - a cancel, a per-attempt timeout, an adapter that threw, a retry-phase interceptor that cancelled or threw, and the terminal redirect outcomes (`redirect_disabled`, a redirect loop, a redirect interceptor that threw). The adapter carries the promise on the error it throws and the client reads it off there, which is what makes `undefined` safe to read as "the body went out" everywhere: while the field was absent on those paths, `await response.requestBodySettled` answered `undefined` for an upload that had been torn down mid-flight - the documented success value, on the one path where you would most likely think to ask.
+Before following a redirect or retrying, the client waits for a reported upload outcome.
+Cancellation ends the wait. The request's `timeout` bounds inactivity during this wait,
+including silence since dispatch. Upload-progress reports restart that inactivity clock.
+On expiry, the client returns a timeout, aborts the attempt, and reports the stalled
+settlement through the global `'error'` channel. `timeout: 0`, negative values, and
+`Infinity` disable this client wait bound. A custom adapter that supplies the promise
+must settle it and honor cancellation.
 
-With `followRedirects: true`, the outcome belongs to the _upload_, not to the last hop. A `301`, `302` or `303` rewrites a `POST` to a bodiless `GET`, so the final response was never behind a body writer of its own; `requestBodySettled` on it carries the outcome from the latest hop that had a body. A `307` or `308` resends the body, and that resend is the latest bodied hop, so its outcome is the one reported. A `POST` that an early `302` answered mid-upload and a bodiless `GET` completed therefore resolves with the truncation, not with `undefined`. The redirect-phase response observers see each hop's own outcome.
+`NodeAdapter` also watches uploads left running after an early response closes. It checks
+socket progress at roughly five-second intervals and allows a pending multipart source
+read roughly sixty seconds before declaring it stalled. These adapter safeguards are
+separate from the client's timeout. Continuing progress does not waive the normal
+per-attempt response deadline.
 
-A retry waits the same way a redirect does. An early `503` to a bodied `PUT` can arrive while the body is still going out; the next attempt is dispatched only once that upload has settled, after the backoff, so the retry never uploads the same body beside the attempt it is replacing. A cancel ends the wait, and the result carries the outcome of the attempt that was waited on.
-
-Both waits are bounded by the request's `timeout`, as a stall bound rather than a deadline: the clock restarts every time the upload reports progress, so an upload that is still moving is never cut, however long it takes. `NodeAdapter` reports progress as it writes and settles `requestBodySettled` through its own stall watchdog, so an ordinary request never sees the bound. A custom adapter that sets the field and never settles it used to hold the redirect, or the retry, until the caller aborted; once its upload has reported no progress for `timeout` the request now fails as a timeout rather than dispatching a second upload beside one that may still be going out, and the broken contract is reported on the global `'error'` channel naming the adapter. An adapter that reports no progress at all gets the bound flat. `timeout: 0` leaves the wait unbounded, as it leaves the per-attempt timer. Silence from before the wait began counts: the clock is read when the wait starts, and every attempt stamps it when it dispatches. When the bound is reached the attempt whose upload was given up on is torn down through its own abort signal, as a per-attempt timeout tears one down - `NodeAdapter` destroys the request and settles `requestBodySettled`; a custom adapter should honour the signal the same way - so a request reported as timed out does not go on uploading.
-
-The promise exists from the moment the request has a body, not from the first byte written, so an abort that lands before the writer starts is reported the same way rather than falling back to `undefined`. Absence is left to mean one thing: no adapter reported an upload outcome for this request - it had no body, it was never dispatched (cancelled or refused by an interceptor before it reached an adapter), or the adapter does not report this at all, which today is every adapter but `NodeAdapter`.
-
-It is advisory and changes nothing the client decides. `status`, `isFailed`, `isNetworkError`, and retries are all untouched. That is deliberate: carried on the response as a transport failure instead, a `413` that answered and stopped reading would reach you as a network error with the server's own explanation dropped. Every such failure is also reported on the global `'error'` channel, whether or not anyone awaits this. `NodeAdapter` is the only adapter that reports it today.
+The upload outcome is advisory: its resolved error does not itself change the received
+status, `isFailed`, `isNetworkError`, or retry eligibility. This preserves an early `413`
+and its explanation even if the server stops reading the body. Failures detected after
+an early response are also reported on the global `'error'` channel. A timeout while the
+client waits to dispatch another hop is a separate request failure.
 
 ### Content-Type Detection and Body Parsing
 
@@ -366,7 +384,7 @@ When a request settles through the client's failure path the builder's `.error` 
 interface HTTPClientError {
   code: ErrorCode; // See error codes below
   message: string;
-  cause?: Error; // The originally thrown value, always attached when the failure came from a throw or rejection
+  cause?: Error; // Normalized underlying failure; a wrapped non-Error value is retained on cause.cause
   initialURL: string;
   requestURL: string; // URL of the last adapter attempt, or the redirect target if redirect handling failed before the follow-up was dispatched
   wasRedirectDetected: boolean;
@@ -633,7 +651,7 @@ Phases describe where in the request lifecycle a callback fires. Interceptors, r
 
 **`retry` phase** carries `{ type: 'retry', attempt, maxAttempts, redirect? }`.
 `attempt` and `maxAttempts` use the same global adapter-attempt numbering, including
-redirect hops; `maxAttempts` is the highest attempt number available to the current retry
+redirect hops. `maxAttempts` is the highest attempt number available to the current retry
 loop after retries spent on earlier hops. The optional `redirect` field is set when the
 retry is occurring on a post-redirect URL.
 
@@ -711,7 +729,7 @@ await client
 
 A `CookieJar` provides cookie storage with Public Suffix List domain matching, path matching, secure-flag enforcement, and expiry handling.
 
-Cookie domains are canonicalized through IDNA to lowercase ASCII: for example, `Domain=münchen.de` matches the request host `xn--mnchen-3ya.de`. The same normalization applies to cookies stored through `setCookie()` or restored through `fromJSON()`, and to hosts passed to `clear()`; invalid domain scopes are rejected.
+Cookie domains are canonicalized through IDNA to lowercase ASCII: for example, `Domain=münchen.de` matches the request host `xn--mnchen-3ya.de`. The same normalization applies to cookies stored through `setCookie()` or restored through `fromJSON()`, and to hosts passed to `clear()`. Invalid domain scopes are rejected.
 
 Fetch uses `Headers.getSetCookie()` to preserve individual response cookie lines.
 On legacy implementations without it, the fallback accepts a single unambiguous
@@ -737,7 +755,19 @@ When a `CookieJar` is attached to the client:
 2. After every response the `set-cookie` headers are parsed and stored in the jar.
 3. Cookies are maintained across redirect hops.
 
-**Secure cookies and the request scheme.** The `Secure` attribute is enforced on both sides of the jar. On the way out, `getCookiesFor()` withholds a `Secure` cookie unless the request scheme is `https:` or `wss:`. On the way in, `parseSetCookieHeader()` and `processResponseHeaders()` follow RFC 6265bis: a `Secure` cookie from a response over `http:` (or any scheme other than `https:` / `wss:`) is refused, and a non-`Secure` cookie from such a response is refused when the jar already holds a `Secure` cookie of the same name whose domain domain-matches the new one in either direction and whose path overlaps it in either direction. That rejects both a narrower plant beneath a wider Secure path and a wider plant above a narrower Secure path, including a `Max-Age=0` or past `Expires` that would evict the protected cookie. So a plain-text hop, a mixed `http`/`https` session, or an attacker on the wire cannot plant, replace or delete the `https:` session cookie ("cookie forcing"). A response over `https:` may still replace or downgrade its own cookie, as browsers allow. The `__Secure-` prefix requires `Secure`, and `__Host-` requires `Secure`, no `Domain` attribute and `Path=/`, matched case-insensitively; a cookie that claims a prefix without meeting it is refused. `setCookie()` has no request URL to judge and is not scheme-gated: a cookie set programmatically or restored through `fromJSON()` is stored as given. `localhost` over `http:` is not treated as secure - the jar would never have sent a `Secure` cookie there either, so store-time and send-time agree.
+**Secure cookies and the request scheme.** `getCookiesFor()` sends Secure cookies only
+over `https:` or `wss:`. Response parsing refuses Secure cookies from other schemes,
+and refuses insecure cookies that would replace or shadow an existing, unexpired Secure
+cookie of the same name with overlapping domain/path scope, including deletion attempts.
+HTTPS responses may replace or downgrade their cookies. HTTP localhost is not treated
+as secure. Use an HTTPS origin for Secure-cookie mocks.
+
+Cookie-name prefixes are matched case-insensitively. `__Secure-` requires `Secure`, while
+`__Host-` also requires no `Domain` attribute and an effective path of `/`. An omitted
+`Path` is accepted for `__Host-` only when the request URL's default path is `/`.
+Programmatic `setCookie()` and `fromJSON()` have no request scheme to check, but still
+validate prefixes: `__Host-` requires `secure: true`, `hostOnly: true`, and path `/`.
+They also validate domains, expiry, and header framing, so cookies are not stored unchecked.
 
 **Cookie scoping uses the full Public Suffix List.** The jar refuses a `Domain=` that
 spans a public suffix, and both halves of the list count: the ICANN half (`com`,
@@ -755,7 +785,7 @@ request then sent it.
 Naming your own host is not spanning anything, so RFC 6265bis §5.5 applies: a `Domain=`
 that is a public suffix is refused only when it differs from the request host, and kept
 **host-only** when it matches. A server on `http://localhost/` setting `Domain=localhost`
-for itself keeps working, and keeps reaching itself; what it loses is the reach it never
+for itself keeps working, and keeps reaching itself. What it loses is the reach it never
 had a use for, and `evil.localhost` loses the reach it did. The same now holds one label
 up: `Domain=github.io` from `https://github.io/` is kept host-only rather than dropped.
 
@@ -789,7 +819,7 @@ const jar = new CookieJar({
 });
 ```
 
-The overrides belong to that jar alone; another `CookieJar` in the same process is
+The overrides belong to that jar alone. Another `CookieJar` in the same process is
 unaffected. They are validated once in the constructor and a bad entry throws a `TypeError`
 rather than being ignored - an empty suffix, a wildcard, an empty label, a non-string, or a
 suffix named in both lists or added beneath a removed suffix. A removed ancestor
@@ -846,13 +876,14 @@ jar.clear('api.example.com', 'hostname'); // Remove cookies for exactly that hos
 jar.clear('example.com', 'domain'); // Remove example.com and all its subdomains (the entire apex bucket) — returns count removed
 
 // Inspection
-jar.getAllCookies(); // All stored cookies, including expired — call clearExpiredCookies() first if needed
+jar.getAllCookies(); // Live stored objects, including expired — prefer setCookie() for updates
 jar.getStoredDomains(); // [{ domain, count }]
 
 // Serialization
-const data = jar.toJSON();
-const restored = jar.fromJSON(data); // Clears existing cookies first, then loads from the snapshot
-// `fromJSON` returns how many cookies it actually restored. A cookie with a missing or
+const data = jar.toJSON(); // Validated copies with the accepted scope; not live jar entries
+const restored = jar.fromJSON(data); // Replaces existing cookies after preparing the snapshot
+// `fromJSON` validates/copies the payload before clearing; malformed structure throws
+// without replacing the jar. It returns how many cookies it accepted. A cookie with a missing or
 // invalid domain, an `expires` that cannot be read as a date, a `maxAge` / `createdAt`
 // that is not a finite number, or a name or value the `Cookie` header cannot carry as
 // one pair, is refused, so compare against `data.cookies.length` to detect drops. A
@@ -886,13 +917,21 @@ Cross-origin redirects strip unsafe headers (Authorization, Cookie, etc.) from t
 
 With `NodeAdapter`, URL-based Basic auth follows the resolved redirect URL: from `https://user:pass@example.com/start`, a relative `Location: /next` retains those credentials, while an absolute `Location: https://example.com/next` without userinfo does not. An explicitly supplied `Authorization` header still carries through same-origin redirects.
 
-**Credentials in the `Location` URL are stripped too, on the same rule.** `user:pass@` in a URL is `Authorization: Basic` by another name — `NodeAdapter` copies it onto `options.auth` and `fetch` sends it for you — and a redirect target is the remote server's choice, so `Location: https://admin:secret@other.host/` does not authenticate this client to a host you never named. The userinfo is removed before the hop is recorded, so `redirectHistory`, the followed `requestURL`, and the observers and errors built from them do not carry it either. Same-origin userinfo is left alone. Fetch treats the same shape as fatal (a cross-origin `locationURL` that includes credentials is a network error); stripping keeps the redirect followable and matches what this client already does to every other credential on a cross-origin hop.
+**Credentials in the `Location` URL are stripped too, on the same rule.** `user:pass@` in a URL is `Authorization: Basic` by another name. `NodeAdapter` copies it onto `options.auth`. A redirect target is the remote server's choice, so `Location: https://admin:secret@other.host/` does not authenticate this client to a host you never named. The userinfo is removed before the hop is recorded, so `redirectHistory`, the followed `requestURL`, and the observers and errors built from them do not carry it either. Same-origin userinfo is left alone. Fetch treats the same shape as fatal (a cross-origin `locationURL` that includes credentials is a network error). Stripping keeps the redirect followable and matches what this client already does to every other credential on a cross-origin hop.
 
-`detectedRedirectURL` is the exception, deliberately: it reports the target as the server wrote it, including any userinfo, for a hop this client did **not** follow (`followRedirects: false`, or a redirect that ends the request). Nothing is sent to it. If you follow it yourself, decide about those credentials yourself — and treat the field as untrusted remote input if you log it.
+`detectedRedirectURL` is the exception, deliberately: it reports the target as the server wrote it, including any userinfo, for a hop this client did **not** follow (`followRedirects: false`, or a redirect that ends the request). Nothing is sent to it. If you follow it yourself, decide about those credentials yourself, and treat the field as untrusted remote input if you log it.
 
-**A `Location` that is not an absolute `http(s)` URL is refused** before any adapter sees it, and reported as `request_setup_error`.
+**A `Location` that cannot be resolved to an absolute `http(s)` URL is refused** before
+adapter dispatch and reported as `request_setup_error`. Relative locations are resolved
+against the current request. Redirect interceptors run before this validation and may
+repair or cancel the target. An invalid URL introduced by an interceptor is reported as
+`interceptor_error`.
 
-**Scheme downgrades are followed.** A `307` or `308` from an `https:` URL to an `http:` `Location` is followed with the method and body intact, as curl and Node's own clients do: the target is the server's instruction, and the hop counts as cross-origin, so `Authorization` and the jar's cookies are stripped and a `Secure` cookie is never sent to it. The request body itself does go out in the clear on that hop. If that is not acceptable for a given client, leave `followRedirects` off and handle the `redirect_disabled` error, or reject the hop from a redirect-phase interceptor by checking `request.requestURL`'s scheme.
+Redirects start from the latest dispatched attempt, including retry-interceptor changes
+to its method, body, and headers. Structured JSON and form bodies remain available for
+redirect interceptors, and generated body headers are recalculated after their edits.
+
+**Scheme downgrades are followed.** A `307` or `308` from an `https:` URL to an `http:` `Location` is followed with the method and body intact, as curl and Node's own clients do: the target is the server's instruction, and the hop counts as cross-origin, so forwarded credentials are stripped and jar cookies are recomputed for the target. Secure cookies are withheld, but matching non-Secure cookies can be sent. The request body itself does go out in the clear on that hop. If that is not acceptable for a given client, leave `followRedirects` off and handle the `redirect_disabled` error, or reject the hop from a redirect-phase interceptor by checking `request.requestURL`'s scheme.
 
 Note: `MockAdapter` strips the domain before route matching, so "cross-origin" redirects in tests are effectively same-origin to its router. Header stripping still applies, but test routes don't need to be registered per-domain.
 
@@ -1179,17 +1218,22 @@ interface NodeAdapterConfig {
 
 TLS certificate errors resolve as status `495` (transport error, not retryable) rather than throwing, so they flow through the normal error path. That includes every revocation failure, such as `CERT_REVOKED`, `UNABLE_TO_GET_CRL`, `CRL_HAS_EXPIRED` and friends.
 
-**URL credentials stay with the origin you addressed.** `user:pass@` on a request URL is
-`Authorization: Basic` by another name. Every network adapter withholds it on a
-cross-origin hop; `NodeAdapter` additionally copies same-origin userinfo onto
-`options.auth`. `HTTPClient` already strips userinfo from a `Location` before dispatch,
-so a client-driven redirect never reaches this; the adapter guards cover `send()` called
-directly with an `initialURL` on one origin and a `requestURL` still carrying userinfo for
-another. Without `initialURL`, or on a same-origin hop, the credentials are sent as before.
+**URL credentials and TLS identity are scoped to the caller-selected origin.**
+`AdapterRequest.initialURL` identifies that origin, including an origin explicitly
+selected by a retry interceptor. On a hop to another origin, all network adapters
+withhold URL userinfo, and `NodeAdapter` also withholds `servername` and
+`mtls.cert` / `mtls.key`. The client strips cross-origin Location userinfo before
+recording the followed hop. Same-origin userinfo is preserved. Node uses it for Basic
+auth, while Fetch remains subject to the runtime's URL-credential restrictions.
 
-**TLS identity stays with the origin you addressed.** `servername` and `mtls.cert` / `mtls.key` describe _who you are talking to_ and _who you are_; a `Location` header is the remote server's choice, not yours. When the client follows a redirect to a different origin (scheme, host or port), `NodeAdapter` sends that hop without the SNI override and without the client certificate, so a redirect can never make the adapter authenticate to, or verify a certificate against a name meant for, a host you never named. Your _trust_ settings — `ca`, `mtls.ca`, `crl` and `rejectUnauthorized` — say which servers to believe, and apply to every connection the adapter opens, hops included. A hop that needs your identity to succeed fails with `495`, which is the correct answer: address it directly if you mean to authenticate there. Same-origin redirects are unaffected. The adapter tells a hop apart from the original request through `AdapterRequest.initialURL`, which the client sets on every attempt; driven directly without it, the adapter applies the identity as configured, and an `initialURL` it cannot parse is treated as cross-origin.
+TLS trust settings (`ca`, `mtls.ca`, `crl`, and `rejectUnauthorized`) apply on every
+connection. A target requiring the withheld client certificate can fail TLS or reject
+the request. This does not guarantee one particular HTTP status. Address that origin
+directly, or explicitly select it in an interceptor, if it should receive the configured
+identity. For direct adapter calls, omitting `initialURL` applies the configured identity, while
+an unparseable `initialURL` is treated as cross-origin.
 
-**The socket you configured stays with the origin you addressed, too.** `socketPath` is your chosen endpoint, and often a privileged one — `/var/run/docker.sock` is the usual example. A redirect to a different origin is sent over TCP to the host the `Location` actually names, not over your socket with only the request line and `Host` header changed; otherwise a remote server's `Location` would become a request you never made against that socket. Same-origin redirects keep the socket, and the adapter driven directly (no `initialURL`) uses it as configured.
+**The socket you configured stays with the origin you addressed, too.** `socketPath` is your chosen endpoint, and often a privileged one. `/var/run/docker.sock` is the usual example. A redirect to a different origin is sent over TCP to the host the `Location` actually names, not over your socket with only the request line and `Host` header changed. Otherwise a remote server's `Location` would become a request you never made against that socket. Same-origin redirects keep the socket, and the adapter driven directly (no `initialURL`) uses it as configured.
 
 #### Certificate Revocation (`crl`)
 
@@ -1450,14 +1494,14 @@ A Node stream, such as `fs.createWriteStream()`, a socket, or a `zlib` transform
 `WritableLike` as it is, and everything below is already true of it. The rest of this
 section only matters if you hand-roll the sink.
 
-Two expectations the adapter relies on:
+Expectations for a custom writable:
 
 - **Define `off` or `removeListener`.** Both are optional on the type so an existing
   object still compiles, but the adapter attaches listeners for the life of a request and
   takes them off again afterwards. With neither method it cannot, so it attaches one
   permanent listener per event to that writable instead and registers each request behind
   it - rather than adding a listener per request to a sink reused across many of them,
-  until Node warns about a leak. Behaviour is unchanged either way; what you save by
+  until Node warns about a leak. Behaviour is unchanged either way. What you save by
   defining one is that listener. Either name works. A Node stream has both.
 - **Report a failed write.** Either call the callback passed to `write` / `end` with the
   error, or emit `'error'`, which is what a Node stream does. A write that fails destroys
@@ -1476,8 +1520,8 @@ Two expectations the adapter relies on:
   it loses nothing as long as it honours the point above. The read is guarded, so an
   `errored` accessor that throws costs that one signal rather than the request. It happens
   inside `end`'s callback, a tick after the call, where an escaping throw would be an
-  uncaught exception rather than a failed download. That is not a general licence to throw:
-  a sink whose `on` or `destroy` throws still fails the request.
+  uncaught exception rather than a failed download. Implement listener registration and destruction reliably: throwing methods can prevent
+  the adapter from observing failures or completing cleanup.
 
 ##### How Long That Listener Stays
 
@@ -1616,7 +1660,7 @@ Since the client treats anything other than `false` as retryable, an unset value
 
 | Value                   | Meaning                                                                   |
 | ----------------------- | ------------------------------------------------------------------------- |
-| `adapter_veto`          | The adapter reported `isRetryable: false`, so no attempt can succeed      |
+| `adapter_veto`          | The adapter vetoed automatic retry for this response                      |
 | `stream_error`          | The body failed after headers arrived, so the server received the request |
 | `non_idempotent_method` | A `POST` or `PATCH` with no proof of non-delivery                         |
 

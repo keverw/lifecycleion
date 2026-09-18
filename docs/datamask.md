@@ -10,9 +10,9 @@ Mask emails, domains and plain strings: a proportion of each is hidden behind a 
   - [maskDomain](#maskdomain)
   - [maskEmail](#maskemail)
   - [datamask](#datamask)
-- [Characters, not code units](#characters-not-code-units)
+- [Characters, Not Code Units](#characters-not-code-units)
   - [splitCharacters](#splitcharacters)
-- [Untrusted settings](#untrusted-settings)
+- [Untrusted Settings](#untrusted-settings)
 
 <!-- tocstop -->
 
@@ -66,7 +66,7 @@ datamask.domain('example.com', '*', 50); // 'ex***le.com'
 datamask.email('test@example.com'); // 't**t@e****le.com'
 ```
 
-## Characters, not code units
+## Characters, Not Code Units
 
 The masks count in characters as a reader sees them, so an emoji-heavy value comes back with every character whole and each hidden one behind exactly one mask character: the `datamask` package indexed by UTF-16 code unit and could leave a lone surrogate at the seam. Where the runtime has `Intl.Segmenter` (Node, Bun, every current browser) a character is a grapheme cluster - a family emoji built from several code points and joiners, a flag, a skin-tone variant, or `e` plus a combining accent is one character. Without it, a character is a code point, which still never splits a surrogate pair but can show the base of a cluster with its modifier masked.
 
@@ -78,8 +78,8 @@ The splitter the masks use, exported so a caller sizing a value before masking i
 splitCharacters('👨‍👩‍👧🇺🇸ab'); // ['👨‍👩‍👧', '🇺🇸', 'a', 'b']
 ```
 
-## Untrusted settings
+## Untrusted Settings
 
-`percent` is clamped to `0`–`100`, including infinities; `NaN` throws a `RangeError`. Values above `100` mask the entire string. `maskChar` is repeated once per hidden character, so a multi-character mask lengthens the output.
+`percent` is clamped to `0`–`100`, including infinities. `NaN` throws a `RangeError`. Values above `100` mask the entire string. `maskChar` is repeated once per hidden character, so a multi-character mask lengthens the output.
 
-Non-number percentages (for example, `"50%"` from JavaScript configuration) throw `TypeError`. A lone surrogate in `maskChar` is replaced with `*`; valid emoji masks remain intact.
+Non-number percentages (for example, `"50%"` from JavaScript configuration) throw `TypeError`. A lone surrogate in `maskChar` is replaced with `*`, while valid emoji masks remain intact.

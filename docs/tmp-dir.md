@@ -70,7 +70,7 @@ await tmpDir.cleanup();
 Getter that returns the full absolute path to the temporary directory.
 
 - Throws `ErrTmpDirNotInitialized` if `initialize()` has not been called.
-- Throws `ErrTmpDirWasCleanedUp` if `cleanup()` has already run.
+- Throws `ErrTmpDirWasCleanedUp` after successful removal. If cleanup failed because the directory is non-empty, the initialized path remains readable so you can empty it and retry cleanup.
 
 ```typescript
 tmpDir.path; // "/tmp/tmp-12345-A1B2C3D4E5F6"
@@ -82,7 +82,7 @@ Creates the temporary directory on disk.
 
 - Retries up to `maxTries` times to find a unique name.
 - Safe to call more than once. After the first successful call, subsequent calls are no-ops.
-- Once cleaned up, the instance remains in that state and will not recreate the directory.
+- After any call to `cleanup()`, initialization rejects with `ErrTmpDirWasCleanedUp`. Concurrent initialization calls share one exclusive directory creation. If cleanup starts during that creation, initialization rejects and cleanup waits for the creation before removing it.
 
 ```typescript
 await tmpDir.initialize();
@@ -100,12 +100,9 @@ Removes the temporary directory.
   instance is finished either way: a later `initialize()` throws `ErrTmpDirWasCleanedUp`
   rather than creating a directory. Construct a new `TmpDir` instead of reusing one past
   its `cleanup()`.
-- It first waits for any `initialize()` still in flight, ignoring that create's failure
-  (a create that failed left nothing to remove). Refusing a _later_ `initialize()` is what
-  closes the rest of the race: a failed create retried alongside a `cleanup()` used to
-  begin after cleanup had already returned, and its directory was orphaned.
+- It waits for any `initialize()` still in flight before removing the directory. A failed creation leaves nothing to remove.
 - With `unsafeCleanup: true`, cleanup uses recursive removal and can delete non-empty directories.
-- With `unsafeCleanup: false` (default), cleanup of non-empty directories throws.
+- With `unsafeCleanup: false` (default), cleanup removes an empty directory and refuses a non-empty one. An already-removed directory counts as successfully cleaned up.
 
 ```typescript
 await tmpDir.cleanup();
@@ -133,8 +130,8 @@ Notes:
 
 - `baseDirectory` is trimmed before validation and must be an absolute path.
 - `random12chars` uses upper/lowercase letters and digits.
-- Unknown option keys are ignored. `mode` is strictly validated when supplied; other options ignore values of the wrong type. Invalid `baseDirectory`, `maxTries`, `prefix`, or `postfix` values of the expected type throw a configuration error.
-- `mode` is applied to the leaf, subject to the process umask. Newly created parents use `mode | 0o700` so the owner can create and traverse the temporary directory. Existing directories are not chmodded. Permission-bit behavior is platform-dependent on Windows; this option does not configure Windows ACLs.
+- Unknown option keys are ignored. `mode` is strictly validated when supplied, while other options ignore values of the wrong type. Invalid `baseDirectory`, `maxTries`, `prefix`, or `postfix` values of the expected type throw a configuration error.
+- `mode` is applied to the leaf, subject to the process umask. Newly created parents use `mode | 0o700` so the owner can create and traverse the temporary directory. Existing directories are not chmodded. Permission-bit behavior is platform-dependent on Windows. This option does not configure Windows ACLs.
 - `prefix` and `postfix` are refused if they carry a path separator or a control character, so the directory always sits directly inside `baseDirectory`. A `prefix` of `'../escape'` used to create, and with `unsafeCleanup` delete, a directory outside it.
 
 ### Error Classes

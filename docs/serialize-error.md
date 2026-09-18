@@ -42,8 +42,8 @@ throw restored;
 - `name`, `message`, `stack` (the non-enumerable ones Error hides)
 - All own properties from Error subclasses (`errCode`, `statusCode`, whatever)
 - Nested errors are recursively serialized
-- During serialization, plain error-like objects require string `name`, `message`, and `stack` fields. Real Error instances are recognized even without a stack. Other nested objects retain their fields as data; `cause` alone does not identify an error. During deserialization, the root is always reconstructed explicitly, while nested reconstruction is limited to `cause` values and `errors` array members.
-- `deserializeError` reconstructs error-shaped `cause` values and `errors` array members as `Error` instances, including nested causes. A nested object with string `name` and `message` fields qualifies even without a `stack`; ordinary data with that same shape is therefore also reconstructed as an error. Other causes and custom extras retain their values. Error subclass names are preserved; subclass prototypes are not restored.
+- During serialization, plain error-like objects require string `name`, `message`, and `stack` fields. Real Error instances are recognized even without a stack. Other nested objects retain their fields as data. `cause` alone does not identify an error. During deserialization, the root is always reconstructed explicitly, while nested reconstruction is limited to `cause` values and `errors` array members.
+- `deserializeError` reconstructs error-shaped `cause` values and `errors` array members as `Error` instances, including nested causes. A nested object with string `name` and `message` fields qualifies even without a `stack`, so ordinary data with that same shape is also reconstructed as an error. Other causes and custom extras retain their values. Error subclass names are preserved, but subclass prototypes are not restored.
 
 ## When a Value Cannot Be Serialized
 
@@ -65,13 +65,12 @@ const serialized = serializeError(error, {
 });
 ```
 
-The options object itself is read once, up front, and a member whose getter throws counts
-as absent - so passing a hostile or exotic bag cannot make the one function documented never
-to throw throw while describing somebody else's failure.
+The options object itself is read once, up front. A member whose getter throws counts
+as absent, so an option-read failure does not replace the original error being described.
 
 It fires at most once per call. With no handler it first dispatches a cancelable global
 `'error'` event, so a `logger.registerReportErrorListener()` can record it. If event
-dispatch is unavailable it uses `globalThis.reportError()` when present; an unclaimed
+dispatch is unavailable it uses `globalThis.reportError()` when present. An unclaimed
 dispatch, unavailable reporting function, or reporting failure ends at guarded
 `console.error`. A custom sink that calls this function should pass a handler that
 terminates locally. If a supplied handler throws or rejects, the failure goes directly to
@@ -101,7 +100,7 @@ A `bigint` gets its digits rather than a marker, because the digits are the _val
 
 ## Bounds on the Walk
 
-`serializeError` never throws and always terminates, which is what lets it run at a boundary where a second failure would replace the one being reported. `JSON.stringify` makes the opposite trade - it raises a `TypeError` on a cycle - so the walk here is bounded instead, and a payload that reaches a bound is cut rather than refused.
+`serializeError` contains property-read and conversion failures and bounds its own traversal. It cannot preempt a getter or proxy trap that blocks the JavaScript thread, and key enumeration can allocate a large key list before traversal limits apply. A payload that reaches a traversal bound is cut rather than rejected.
 
 Three things stop the walk, all marked `[max depth exceeded]` in the payload:
 
@@ -115,7 +114,21 @@ The last one is the least obvious: a value referenced twice side by side is seri
 
 Both the depth and cycle bounds mark where they stopped rather than dropping the entry, so a receiving side always sees _that_ something was cut and where. The marker text is shared with the other renderers in this library and reads `[max depth exceeded]` for all three causes, so it names the most common one and not necessarily the one that fired.
 
-**String values are passed through unchanged.** There is no length cap on `message`, `stack`, or any own property - a bound there would silently hand the receiver a wrong message rather than a truncated render, and it is the receiver, not the marker, that parses this payload. A transport with a frame limit should enforce its own, where it can fail loudly.
+String content and property names share a 1,000,000-character allowance. Cuts use
+`[max length exceeded]`. A bounded allowance is reserved for `cause` and `errors` so an
+oversized message does not erase those fields outright. This is a content budget, not
+an exact JSON byte limit: escaping, structure, and markers add overhead. Enforce any
+transport frame limit separately.
+
+Dates become ISO strings (invalid dates become `null`). Buffers, typed arrays, DataViews,
+ArrayBuffers, and SharedArrayBuffers become `<binary: Kind, N bytes>` summaries rather
+than byte-by-byte objects.
+
+`deserializeError()` bounds nested cause/aggregate reconstruction at 100 levels and
+copies at most 100,000 extra properties/aggregate entries across the reconstruction.
+Surplus extras are omitted without reading their values. Key enumeration still allocates
+the input key list. An empty or absent serialized stack leaves the new Error's generated
+stack intact. `__proto__` is copied as data without changing the reconstructed prototype.
 
 ## API
 
@@ -164,4 +177,4 @@ For RESTful APIs, don't use `serializeError` - it exposes internals like stack t
 
 For security, avoid exposing internal error details or stack traces in public APIs. Log detailed error information server-side for debugging purposes.
 
-`deserializeError` shares a budget of 100,000 extra properties and aggregate entries across the reconstructed error graph. Nested error reconstruction stops at 100 levels with a truncation marker, and cyclic error references are reused. Surplus properties are omitted without reading their values. This bounds property copying, but key enumeration still allocates the input key list; callers accepting untrusted IPC should also limit the incoming message size.
+`deserializeError` shares a budget of 100,000 extra properties and aggregate entries across the reconstructed error graph. Nested error reconstruction stops at 100 levels with a truncation marker, and cyclic error references are reused. Surplus properties are omitted without reading their values. This bounds property copying, but key enumeration still allocates the input key list. Callers accepting untrusted IPC should also limit the incoming message size.

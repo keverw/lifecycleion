@@ -56,21 +56,28 @@ This example demonstrates the logger exit hook integration feature:
 - **`enableLoggerExitHook: true`** - Automatically enables graceful shutdown when logger exits
 - **`shutdownOptions: { timeoutMS: 30000 }`** - Maximum time to wait for shutdown (30 seconds)
 
-With this enabled, calling `logger.exit(code)` or `logger.error('message', { exitCode: 1 })` will:
+The logger exit hook requests graceful shutdown and waits until it completes or reaches
+the global timeout. A timeout means the manager stopped waiting; component work may
+still be in flight.
 
-1. Trigger graceful component shutdown (in reverse dependency order)
-2. Wait up to 30 seconds for all components to stop
-3. Exit the process with the specified exit code
+This demo also installs a `shutdown-completed` listener that calls `process.exit(0)` on
+successful shutdown and `process.exit(1)` otherwise. That listener runs before the
+logger resumes its pending exit, so it overrides a requested logger exit code. In an
+application that must preserve `logger.exit(code)`, let the logger perform that exit and
+keep the completion listener for reporting/policy instead. Close persistent log sinks
+before an application-controlled exit if their queued output must be drained.
 
 This is useful for handling fatal errors gracefully:
 
 ```typescript
 // Fatal error triggers graceful shutdown
 logger.error('Database connection lost', { exitCode: 1 });
-// Components will stop gracefully before process exits
+// Requests shutdown; this demo exits according to the shutdown result.
 ```
 
 ## Expected Output
+
+The output below is illustrative; timestamps, formatting, and timing can vary.
 
 ```
 === LifecycleManager Simple Demo ===

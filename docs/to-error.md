@@ -110,7 +110,7 @@ isErrorValue(foreign); // true
 **It never throws.** `instanceof` walks a prototype chain, which a revoked `Proxy` refuses,
 so the check is guarded. You can call it on a reporting path without a `try` of your own.
 
-Where available, `Error.isError` checks the internal error slot; genuine `DOMException`
+Where available, `Error.isError` checks the internal error slot. Genuine `DOMException`
 instances are also accepted. Older runtimes fall back to `instanceof` and the string
 brand, which objects can imitate through a borrowed prototype or `Symbol.toStringTag`.
 Read properties with `describeError` or [`errorToString`](./error-to-string.md), which
