@@ -131,10 +131,10 @@ interface HTTPClientConfig {
   // Same rules for the per-request override, whose default is this value.
   cookieJar?: CookieJar | null; // Cookie management (null disables)
   retryPolicy?: RetryPolicyOptions; // Retry strategy (disabled by default)
-  retryNonIdempotentMethods?: boolean; // Default: false — do not retry POST/PATCH. See Non-Idempotent Methods
-  includeRequestID?: boolean; // Default: false — sends x-local-client-request-id header
-  includeAttemptHeader?: boolean; // Default: false — sends x-local-client-request-attempt header with the 1-based attempt number as a decimal string. The counter is global across redirect hops: attempt 2 on a redirect hop follows attempt 1 on the initial request, not reset per hop.
-  userAgent?: string; // Auto-set to 'lifecycleion-http-client' for NodeAdapter and MockAdapter, and for FetchAdapter on server runtimes. Browsers block this header — constructor throws if set with FetchAdapter or XHRAdapter in a browser.
+  retryNonIdempotentMethods?: boolean; // Default: false - do not retry POST/PATCH. See Non-Idempotent Methods
+  includeRequestID?: boolean; // Default: false - sends x-local-client-request-id header
+  includeAttemptHeader?: boolean; // Default: false - sends x-local-client-request-attempt header with the 1-based attempt number as a decimal string. The counter is global across redirect hops: attempt 2 on a redirect hop follows attempt 1 on the initial request, not reset per hop.
+  userAgent?: string; // Auto-set to 'lifecycleion-http-client' for NodeAdapter and MockAdapter, and for FetchAdapter on server runtimes. Browsers block this header - constructor throws if set with FetchAdapter or XHRAdapter in a browser.
   followRedirects?: boolean; // Default: false (security-conscious default)
   maxRedirects?: number; // Default: 5 (only meaningful when followRedirects: true; throws at construction unless followRedirects: true; must be finite and >= 1)
 }
@@ -211,7 +211,7 @@ const builder = client
   .onAttemptStart((e) => console.log(e))
   .onAttemptEnd((e) => console.log(e))
   .signal(controller.signal) // external AbortSignal, composed with builder.cancel()
-  .streamResponse((info, ctx) => writable); // NodeAdapter only — pipe response body to a writable stream
+  .streamResponse((info, ctx) => writable); // NodeAdapter only - pipe response body to a writable stream
 
 const response = await builder.send();
 ```
@@ -260,7 +260,7 @@ Existing query strings in the path are preserved and merged. When the same key a
 interface HTTPResponse<T = unknown> {
   status: number;
   headers: Record<string, string | string[]>; // Lowercase keys; set-cookie is always string[]
-  body: T; // Parsed or raw — see below
+  body: T; // Parsed or raw - see below
   contentType: 'json' | 'text' | 'binary';
   isJSON: boolean;
   isText: boolean;
@@ -394,7 +394,7 @@ interface HTTPClientError {
   requestID: string;
   isTimeout: boolean;
   isRetriesExhausted: boolean; // true when all retry attempts were spent
-  cancelReason?: string; // set when cancelled with an explicit string reason — via builder.cancel('reason'), client.cancel(id, 'reason'), client.cancelAll/Own/WithLabel('reason'), controller.abort('reason'), or an interceptor/stream factory cancel
+  cancelReason?: string; // set when cancelled with an explicit string reason - via builder.cancel('reason'), client.cancel(id, 'reason'), client.cancelAll/Own/WithLabel('reason'), controller.abort('reason'), or an interceptor/stream factory cancel
 }
 ```
 
@@ -486,9 +486,9 @@ client.addRequestInterceptor((request) => {
 interface RequestInterceptorFilter {
   phases?: ('initial' | 'retry' | 'redirect')[]; // Default: ['initial']
   methods?: HTTPMethod[];
-  hosts?: string[]; // Exact hostnames or wildcard patterns. '*.example.com' = one subdomain label only; '**.example.com' = any depth. Neither matches the apex — list it explicitly. '*' matches everything. PSL tail guard prevents '*.com'-style patterns.
-  schemes?: ('http' | 'https')[]; // Match on request scheme. requestURL is absolute whenever it could be resolved before dispatch — MockAdapter synthesizes `http://...` URLs when no baseURL is configured, browser adapters resolve against window.location, Node adapter requires absolute URLs.
-  bodyContainsKeys?: string[]; // Dot-path object matching like 'data.results'; array indexing is not supported; the body must be a plain object at the root level — JSON array responses never match
+  hosts?: string[]; // Exact hostnames or wildcard patterns. '*.example.com' = one subdomain label only; '**.example.com' = any depth. Neither matches the apex - list it explicitly. '*' matches everything. PSL tail guard prevents '*.com'-style patterns.
+  schemes?: ('http' | 'https')[]; // Match on request scheme. requestURL is absolute whenever it could be resolved before dispatch - MockAdapter synthesizes `http://...` URLs when no baseURL is configured, browser adapters resolve against window.location, Node adapter requires absolute URLs.
+  bodyContainsKeys?: string[]; // Dot-path object matching like 'data.results'; array indexing is not supported; the body must be a plain object at the root level - JSON array responses never match
 }
 ```
 
@@ -514,7 +514,7 @@ client.addRequestInterceptor((request, phase, context) => {
 interface RequestInterceptorContext {
   initialURL: string; // Original resolved URL for this send(). During `initial` interceptors this is the pre-interceptor resolved URL; later phases match HTTPResponse.initialURL
   redirectHistory: string[]; // Redirect targets already recorded for this send; during redirect-phase interceptors this includes the current detected target before any rewrite returned from that interceptor
-  requestID: string; // ULID for this send() — matches HTTPResponse.requestID and HTTPClientError.requestID
+  requestID: string; // ULID for this send() - matches HTTPResponse.requestID and HTTPClientError.requestID
   attemptNumber: number; // 1-based attempt that will be dispatched after this interceptor chain completes; increments across retries and redirect hops
 }
 ```
@@ -565,12 +565,12 @@ Use `request.timeout` to inspect what timeout budget was configured for that att
 interface ResponseObserverFilter {
   phases?: ('retry' | 'redirect' | 'final')[]; // Default: ['final']
   methods?: HTTPMethod[];
-  hosts?: string[]; // Exact hostnames or wildcard patterns. '*.example.com' = one subdomain label only; '**.example.com' = any depth. Neither matches the apex — list it explicitly. '*' matches everything. PSL tail guard prevents '*.com'-style patterns.
-  schemes?: ('http' | 'https')[]; // Match on request scheme. requestURL is absolute whenever it could be resolved before dispatch — MockAdapter synthesizes `http://...` URLs when no baseURL is configured, browser adapters resolve against window.location, Node adapter requires absolute URLs.
+  hosts?: string[]; // Exact hostnames or wildcard patterns. '*.example.com' = one subdomain label only; '**.example.com' = any depth. Neither matches the apex - list it explicitly. '*' matches everything. PSL tail guard prevents '*.com'-style patterns.
+  schemes?: ('http' | 'https')[]; // Match on request scheme. requestURL is absolute whenever it could be resolved before dispatch - MockAdapter synthesizes `http://...` URLs when no baseURL is configured, browser adapters resolve against window.location, Node adapter requires absolute URLs.
   statusCodes?: number[];
   contentTypes?: ('json' | 'text' | 'binary')[];
   contentTypeHeaders?: string[]; // Supports wildcards like 'image/*'
-  bodyContainsKeys?: string[]; // Dot-path object matching like 'data.results'; array indexing is not supported; the body must be a plain object at the root level — JSON array responses never match
+  bodyContainsKeys?: string[]; // Dot-path object matching like 'data.results'; array indexing is not supported; the body must be a plain object at the root level - JSON array responses never match
 }
 ```
 
@@ -618,8 +618,8 @@ When a request fails before any adapter attempt is dispatched (for example reque
 interface ErrorObserverFilter {
   phases?: ('retry' | 'final')[]; // Default: ['final']
   methods?: HTTPMethod[];
-  hosts?: string[]; // Exact hostnames or wildcard patterns. '*.example.com' = one subdomain label only; '**.example.com' = any depth. Neither matches the apex — list it explicitly. '*' matches everything. PSL tail guard prevents '*.com'-style patterns.
-  schemes?: ('http' | 'https')[]; // Match on request scheme. requestURL is absolute whenever it could be resolved before dispatch — MockAdapter synthesizes `http://...` URLs when no baseURL is configured, browser adapters resolve against window.location, Node adapter requires absolute URLs.
+  hosts?: string[]; // Exact hostnames or wildcard patterns. '*.example.com' = one subdomain label only; '**.example.com' = any depth. Neither matches the apex - list it explicitly. '*' matches everything. PSL tail guard prevents '*.com'-style patterns.
+  schemes?: ('http' | 'https')[]; // Match on request scheme. requestURL is absolute whenever it could be resolved before dispatch - MockAdapter synthesizes `http://...` URLs when no baseURL is configured, browser adapters resolve against window.location, Node adapter requires absolute URLs.
 }
 ```
 
@@ -630,7 +630,7 @@ client.addErrorObserver(
   (error, request, phase) => {
     if (phase.type === 'retry') {
       console.log(
-        `Attempt ${phase.attempt}/${phase.maxAttempts} failed, retrying…`,
+        `Attempt ${phase.attempt}/${phase.maxAttempts} failed, retrying...`,
       );
     }
   },
@@ -716,7 +716,7 @@ await client
 // Disable retries for one request (even if the client has a default policy)
 await client.get('/expensive-report').retryPolicy(null).send();
 
-// A POST is already not retried by default — opt in only when the write is
+// A POST is already not retried by default - opt in only when the write is
 // safe to repeat, for example when guarded by an idempotency key
 await client
   .post('/payments')
@@ -776,26 +776,21 @@ spans a public suffix, and both halves of the list count: the ICANN half (`com`,
 keeps one tenant of a shared platform from setting a cookie every other tenant on it would
 send - browsers consult it for exactly that reason. Hosts under a public suffix are also
 bucketed separately, so `evil.github.io` and `victim.github.io` never share cookie storage.
-IP literals are not public suffixes. Bare single-label hostnames - `localhost`, `myapp`,
-an unqualified machine name - are, because the list carries no registrable name beneath
-them: without that, `Domain=localhost` from `https://evil.localhost/` was a suffix of the
-request host and landed in the `localhost` bucket, where an ordinary `http://localhost/`
-request then sent it.
+IP literals are not public suffixes. Bare single-label hostnames such as `localhost`,
+`myapp`, and unqualified machine names are treated as public suffixes because the list
+provides no registrable name beneath them. A response from `https://evil.localhost/`
+cannot set a `Domain=localhost` cookie for requests to `http://localhost/`.
 
-Naming your own host is not spanning anything, so RFC 6265bis §5.5 applies: a `Domain=`
-that is a public suffix is refused only when it differs from the request host, and kept
-**host-only** when it matches. A server on `http://localhost/` setting `Domain=localhost`
-for itself keeps working, and keeps reaching itself. What it loses is the reach it never
-had a use for, and `evil.localhost` loses the reach it did. The same now holds one label
-up: `Domain=github.io` from `https://github.io/` is kept host-only rather than dropped.
+Under RFC 6265bis §5.5, a `Domain=` that names a public suffix is refused when it differs
+from the request host and kept **host-only** when it matches. For example,
+`Domain=localhost` from `http://localhost/` and `Domain=github.io` from
+`https://github.io/` are accepted as host-only cookies.
 
-The door this closes is the _store_ side, not the send side: a sibling could file a cookie
-under a name it did not own and let the owner's own requests pick it up. `sub.localhost`
-was never reachable from a `Domain=localhost` cookie - hosts under a bare name are bucketed
-separately, exactly as `evil.github.io` and `victim.github.io` are - so the toss ran the
-other way round. It also covers deletion: `Max-Age=0; Domain=localhost` from
-`https://evil.localhost/` used to evict the cookie `http://localhost/` had set for itself,
-and is now refused before it can.
+These checks apply when cookies are stored, including deletion attempts. A
+`Max-Age=0; Domain=localhost` response cookie from `https://evil.localhost/` cannot evict
+a cookie belonging to `http://localhost/`. Hosts under a bare name are bucketed separately,
+so a `Domain=localhost` cookie is not sent to `sub.localhost`, just as cookies for
+`evil.github.io` and `victim.github.io` remain separate.
 
 The list ships compiled into `tldts` and is looked up offline - nothing is downloaded at
 runtime - which also means it is a snapshot frozen at the installed `tldts` version. Since
@@ -823,7 +818,7 @@ The overrides belong to that jar alone. Another `CookieJar` in the same process 
 unaffected. They are validated once in the constructor and a bad entry throws a `TypeError`
 rather than being ignored - an empty suffix, a wildcard, an empty label, a non-string, or a
 suffix named in both lists or added beneath a removed suffix. A removed ancestor
-allows shared cookies, which conflicts with an added child’s tenant isolation. A typo that silently did nothing would be a scoping hole you
+allows shared cookies, which conflicts with an added child's tenant isolation. A typo that silently did nothing would be a scoping hole you
 would only discover as a cookie going somewhere it should not.
 
 **SameSite is stored, not enforced.** The `SameSite` attribute is parsed and kept on the stored cookie for callers to read, but `getCookiesFor()` does not consult it. This jar serves a client, not a browser: there is no navigation, no top-level "site" to compare against, and no notion of a cross-site request, so every cookie whose domain, path, expiry and `Secure` rules match is sent, whatever its `SameSite` value.
@@ -834,7 +829,7 @@ would only discover as a cookie going somewhere it should not.
 // Options are optional; `publicSuffixes` is described above.
 const jar = new CookieJar();
 
-// Manually set a cookie (createdAt is optional — injected automatically if omitted)
+// Manually set a cookie (createdAt is optional - injected automatically if omitted)
 // Returns false if domain is missing or syntactically invalid (empty string, spaces, etc.),
 // if the expiry cannot be read (an `expires` that is an Invalid Date, or a `maxAge` /
 // `createdAt` that is not a finite number - such a cookie would never be found expired),
@@ -856,7 +851,7 @@ const ok = jar.setCookie({
 // `path`, `hostOnly` and `secure` come from the scope `setCookie` accepted, and every
 // other field is read once, so a stored cookie mutated through `getAllCookies()` cannot
 // be sent with a wider scope or a different framing than it was stored with. Writing to
-// a returned cookie does not change the jar — use `setCookie` to update a stored cookie.
+// a returned cookie does not change the jar - use `setCookie` to update a stored cookie.
 const cookies = jar.getCookiesFor('https://api.example.com/users');
 const session = jar.getCookieFor('session', 'https://api.example.com/');
 
@@ -871,12 +866,12 @@ const cookieHeader = jar.getCookieHeaderString('https://api.example.com/users');
 
 // Maintenance
 jar.clearExpiredCookies(); // Returns count removed
-jar.clear(); // Remove all cookies — returns count removed
-jar.clear('api.example.com', 'hostname'); // Remove cookies for exactly that hostname only — returns count removed
-jar.clear('example.com', 'domain'); // Remove example.com and all its subdomains (the entire apex bucket) — returns count removed
+jar.clear(); // Remove all cookies - returns count removed
+jar.clear('api.example.com', 'hostname'); // Remove cookies for exactly that hostname only - returns count removed
+jar.clear('example.com', 'domain'); // Remove example.com and all its subdomains (the entire apex bucket) - returns count removed
 
 // Inspection
-jar.getAllCookies(); // Live stored objects, including expired — prefer setCookie() for updates
+jar.getAllCookies(); // Live stored objects, including expired - prefer setCookie() for updates
 jar.getStoredDomains(); // [{ domain, count }]
 
 // Serialization
@@ -1015,7 +1010,7 @@ const response = await client.get('/users').signal(controller.signal).send();
 // Cancel from outside:
 controller.abort();
 
-// Cancel with a reason — surfaced on HTTPClientError.cancelReason:
+// Cancel with a reason - surfaced on HTTPClientError.cancelReason:
 controller.abort('user_navigated_away');
 ```
 
@@ -1024,7 +1019,7 @@ The external signal is composed with the client's cancel signal (`builder.cancel
 ## Client Identity
 
 ```typescript
-client.clientID; // ULID string — unique per HTTPClient or sub-client instance
+client.clientID; // ULID string - unique per HTTPClient or sub-client instance
 client.adapterType; // AdapterType: 'fetch' | 'xhr' | 'node' | 'mock'
 ```
 
@@ -1137,14 +1132,14 @@ const client = new HTTPClient({
   baseURL: 'http://localhost', // host is ignored for routing; path still matters
 });
 
-// Custom CA — internal services that use a private certificate authority.
+// Custom CA - internal services that use a private certificate authority.
 // Accepts a PEM string, a Buffer, or an array of either (one CA per element).
 const client = new HTTPClient({
   adapter: new NodeAdapter({ ca: fs.readFileSync('internal-ca.crt') }),
   baseURL: 'https://internal.example.com',
 });
 
-// Multiple CAs — no need to concatenate into a bundle
+// Multiple CAs - no need to concatenate into a bundle
 const client = new HTTPClient({
   adapter: new NodeAdapter({
     ca: [fs.readFileSync('internal-ca.crt'), fs.readFileSync('partner-ca.crt')],
@@ -1154,12 +1149,12 @@ const client = new HTTPClient({
 
 // Dialing by IP with a DNS-named cert (service registry pattern).
 //
-// When a service registry gives you an instance IP, connect directly to it —
+// When a service registry gives you an instance IP, connect directly to it -
 // Node.js skips DNS entirely when the target is an IP address. The server's
 // cert SAN is a DNS name, not the IP, so TLS verification fails unless you
 // tell Node which hostname to check the cert against via servername.
 //
-// Redirects are disabled by default, which is exactly what you want here —
+// Redirects are disabled by default, which is exactly what you want here -
 // an unexpected redirect from an internal service is a misconfiguration
 // worth surfacing, not silently following.
 //
@@ -1169,9 +1164,9 @@ const client = new HTTPClient({
 const client = new HTTPClient({
   adapter: new NodeAdapter({
     ca: fs.readFileSync('internal-ca.crt'),
-    servername: 'billing.internal', // cert SAN — TLS verifies against this name
+    servername: 'billing.internal', // cert SAN - TLS verifies against this name
   }),
-  baseURL: 'https://10.0.0.5:443', // IP from the registry — where bytes go
+  baseURL: 'https://10.0.0.5:443', // IP from the registry - where bytes go
 });
 
 // mTLS
@@ -1203,15 +1198,15 @@ const client = new HTTPClient({
 ```typescript
 interface NodeAdapterConfig {
   socketPath?: string; // Unix domain socket path. Used only for the origin the request addressed, never on a cross-origin redirect hop.
-  ca?: string | Buffer | Array<string | Buffer>; // Trusted CA cert(s) for servers using a private CA. Array allows multiple CAs without bundling. No client cert required — use mtls for that.
-  servername?: string; // TLS SNI hostname. Required when dialing by IP but the cert SAN is a DNS name — without it, TLS verification fails because the IP does not match the DNS SAN. Sent only to the origin the request addressed, never on a cross-origin redirect hop.
+  ca?: string | Buffer | Array<string | Buffer>; // Trusted CA cert(s) for servers using a private CA. Array allows multiple CAs without bundling. No client cert required - use mtls for that.
+  servername?: string; // TLS SNI hostname. Required when dialing by IP but the cert SAN is a DNS name - without it, TLS verification fails because the IP does not match the DNS SAN. Sent only to the origin the request addressed, never on a cross-origin redirect hop.
   mtls?: {
     // Your TLS identity. Presented only to the origin the request addressed, never on a cross-origin redirect hop.
     cert: string | Buffer;
     key: string | Buffer;
     ca?: string | Buffer | Array<string | Buffer>; // Trust anchor for the server. Applies on every hop, like `ca`.
   };
-  crl?: string | Buffer | Array<string | Buffer>; // Certificate revocation list(s). A concatenated PEM bundle is split for you — see below.
+  crl?: string | Buffer | Array<string | Buffer>; // Certificate revocation list(s). A concatenated PEM bundle is split for you - see below.
   rejectUnauthorized?: boolean; // Default: true
 }
 ```
@@ -1257,21 +1252,21 @@ The value is read and normalized on **every request**, so refreshing a revocatio
 
 **Do not put two CRLs for the same issuer in one bundle.** OpenSSL uses the **first** CRL it has for an issuer, not the newest. In testing, a stale CRL followed by one revoking the server's certificate accepted the connection, while the same pair in the opposite order rejected it. Splitting does not change this. It is how CRL selection works. Supply exactly one current CRL per issuer.
 
-This exists because Node reads only the **first** CRL of a concatenated string and silently ignores the rest, unlike `ca`, which reads every certificate in a bundle:
+Raw Node reads only the **first** CRL of a concatenated string and silently ignores the rest, unlike `ca`, which reads every certificate in a bundle:
 
 | passed as           | `ca`          | `crl` (raw Node)         |
 | ------------------- | ------------- | ------------------------ |
 | concatenated bundle | reads **all** | reads **only the first** |
 | array               | reads all     | reads all                |
 
-It is Node diverging from the library it links, not an OpenSSL limitation: `openssl verify -crl_check_all -CRLfile bundle.pem` correctly finds a CRL that sits second in the file. The failure mode is the reason this is worth handling for you. A truncated bundle reports `UNABLE_TO_GET_CRL`, which reads as "no CRL supplied" rather than "your bundle was cut short," and a bundle whose first entry happens to cover the root in use appears to work until the roster or export order changes.
+It is Node diverging from the library it links, not an OpenSSL limitation: `openssl verify -crl_check_all -CRLfile bundle.pem` correctly finds a CRL that sits second in the file. Raw Node reports a truncated bundle as `UNABLE_TO_GET_CRL`, which reads as "no CRL supplied" rather than "your bundle was cut short," and a bundle whose first entry happens to cover the root in use appears to work until the roster or export order changes.
 
 **Two things to plan for.** Both are fail-closed, so a stale or partial CRL never silently stops enforcing, but both can refuse healthy connections:
 
 - **Every certificate in the chain needs a covering CRL.** Node enables `X509_V_FLAG_CRL_CHECK_ALL`, so supplying a CRL for one root while connecting through another fails with `UNABLE_TO_GET_CRL` even when nothing was revoked. Cover every root the client talks to, or give the scoped CRL its own client. This makes adding a root an outage unless its CRL lands first.
 - **CRLs expire.** Past `nextUpdate` the handshake fails with `CRL_HAS_EXPIRED`, including for certificates that were never revoked. Either refresh well inside that window, or export with a `nextUpdate` far enough out that a stalled refresh cannot take you down.
 
-**No connection-pool handling is needed.** `crl` is part of Node's connection pool key, so changing it partitions the pool: a socket established under the old CRL is never reused for a request carrying the new one. Testing against a shared keepAlive agent confirmed that after a CRL update, the previously good connection is rejected rather than reused.
+**No connection-pool handling is needed.** `crl` is part of Node's connection pool key, so changing it partitions the pool: a socket established under the old CRL is never reused for a request carrying the new one. Requests using an updated CRL establish connections under that CRL rather than reusing sockets validated against the old one.
 
 **Runtime support.** Bun ignored `crl` entirely through 1.3.14 and accepted a revoked certificate with no error. Bun implemented it in 1.4.0, where it matches Node on every case tested, including malformed-CRL rejection, expiry, coverage, and pool partitioning. **Require Bun >= 1.4.0 if you depend on revocation.** This library's own enforcement tests probe the runtime and skip where `crl` is unsupported, rather than passing for the wrong reason. The bundle-splitting tests run everywhere, since that part is the library's job rather than the runtime's.
 
@@ -1449,7 +1444,7 @@ The factory receives:
 
 ```typescript
 interface StreamResponseInfo {
-  status: 200; // Always 200 — not called for other statuses
+  status: 200; // Always 200 - not called for other statuses
   headers: Record<string, string | string[]>;
   url: string; // Resolved URL for this attempt
   attempt: number; // 1-based; increments on retry
@@ -1507,10 +1502,10 @@ Expectations for a custom writable:
   error, or emit `'error'`, which is what a Node stream does. A write that fails destroys
   the stream and its `'error'` often arrives after the request has already settled, so the
   adapter keeps an `'error'` listener on your sink across that gap to stop the event from
-  becoming an uncaught exception. The wait is bounded but not brief: a real
+  becoming an uncaught exception. The wait is bounded but not brief because a real
   `fs.WriteStream` closes its file descriptor asynchronously before it emits, so the error
-  lands a poll phase later, and a removal counted in turns of the loop expired first.
-  This turned the very error the listener existed to absorb into an uncaught exception.
+  lands a poll phase later. The listener window is measured by elapsed time so a delayed
+  poll phase does not expire that coverage before the error arrives.
   See [How long that listener stays](#how-long-that-listener-stays).
 - **Emit `'close'` when you are finished.** That is how the adapter learns nothing further
   is coming and takes the listener off at once, instead of waiting out the timers below.
@@ -1582,7 +1577,7 @@ A transport failure is not by itself a licence to replay. `status: 0` means no u
 
 Treating a stream error as a transport failure is the mistake worth guarding against: the superficial resemblance is strong, but it inverts the replay decision. `HTTPClient` already applies this internally. A stream error is never retried, even though its status might otherwise be retryable.
 
-Terminal means terminal for a `3xx` too: a redirect whose body failed is **not** followed, even with `followRedirects: true`. The `Location` header survived, so following would work, and that is the problem, because the hop would continue, a healthy destination would answer `200`, and the failure would be gone from the result. A per-attempt timeout that struck mid-body is the case that stings, since a later hop reports its own `isTimeout`. Nothing is lost by stopping: the response reports the real `3xx` status alongside `isStreamError`, with `wasRedirectDetected` and `detectedRedirectURL` still telling you where it pointed.
+`HTTPClient` treats a truncated `3xx` as terminal even with `followRedirects: true`. It does not dispatch the redirect hop. The response reports the real `3xx` status alongside `isStreamError`, with `wasRedirectDetected` and `detectedRedirectURL` still telling you where it pointed. A per-attempt timeout that strikes mid-body remains attached to this response instead of being replaced by the result of a later hop.
 
 With `followRedirects: false` the same truncated `3xx` reports differently, and deliberately so. That path is not about following. The request ends at the redirect whether or not the body arrived, so it reports what it reports for _every_ disabled redirect: `redirect_disabled`, `status: 0`, `isStreamError: false`, and `wasRedirectDetected` / `detectedRedirectURL` pointing at the target. A per-attempt timeout that struck mid-body is not surfaced there either: `isTimeout` stays `false`, because the timeout is incidental to an outcome that was already decided by the config. Reading `isTimeout` to mean "a timeout occurred somewhere" rather than "a timeout is why this failed" will surprise you here.
 
@@ -1613,7 +1608,7 @@ The same replay question applies to a failure with no response at all, where `is
 
 It does not pair that with `isRetryable: false`. Whether a partly-sent request may be replayed is the method question, and withholding the proof already answers it. A blanket veto would additionally stop retrying an idempotent `PUT` after an ordinary socket error, which is the case a retry is most likely to fix.
 
-A body-byte count cannot supply the proof in either direction: an empty-body request writes headers and nothing else, so the counter stays at `0` even after the server acted on it, and the counter tracks bytes handed to the stream rather than bytes on the wire, so it can be non-zero for a connection that was never established.
+`NodeAdapter` uses transport error codes rather than body-byte counts for this proof. A byte count cannot establish delivery in either direction: an empty-body request writes headers and nothing else, so the counter stays at `0` even after the server acted on it, and the counter tracks bytes handed to the stream rather than bytes on the wire, so it can be non-zero for a connection that was never established.
 
 `XHRAdapter` sets neither. It never sets `wasDefinitelyNotSent`, because it has no way to prove non-delivery: upload progress events are suppressed for cross-origin requests that CORS does not grant access to, and such a request is still delivered. The browser blocks the response, not the request, so the absence of progress is not evidence that nothing was sent. It does not set `isRetryable: false` in its place either, since that flag blocks a retry for every method: inferring it from upload progress would stop retrying an idempotent `PUT` after an ordinary network error, and would override `retryNonIdempotentMethods` even when the caller has stated the replay is safe.
 
@@ -1622,17 +1617,17 @@ A body-byte count cannot supply the proof in either direction: an empty-body req
 `MockAdapter` can simulate any of it via `transportError`, so the replay rules are testable without a socket. It delivers no response data at all, meaning no body, headers, cookies, or terminal progress, and accepts the signals a real adapter would attach:
 
 ```typescript
-// Proven undelivered — a POST may be replayed
+// Proven undelivered - a POST may be replayed
 adapter.routes.post('/orders', () => ({
   status: 200,
   transportError: { wasDefinitelyNotSent: true },
 }));
 
-// Delivery unknown — a POST is not replayed, an idempotent GET still is
+// Delivery unknown - a POST is not replayed, an idempotent GET still is
 adapter.routes.post('/orders', () => ({ status: 200, transportError: true }));
 
 // Nothing should retry this, whatever the method. The default status 0 is
-// retryable, so the veto is what stops it — pair it with a non-retryable
+// retryable, so the veto is what stops it - pair it with a non-retryable
 // status like 495 and the status alone ends the request, proving nothing.
 adapter.routes.get('/secure', () => ({
   status: 200,
@@ -1652,7 +1647,7 @@ Since the client treats anything other than `false` as retryable, an unset value
 
 `isRetryable` is a hint about whether another attempt is worth making, and its contract only assigns meaning to `false`. An adapter may set it `true` for a failure it considers transient without knowing whether the request was delivered. Replaying a non-idempotent request needs a stronger statement, so adapters make it separately via `wasDefinitelyNotSent: true`, which claims only one thing: no request bytes reached the server. A custom adapter that sets `isRetryable: true` alone will not unlock a `POST` retry.
 
-`isRetryable: false` is now reserved for failures that no method should retry because another attempt cannot succeed, not for ones that merely might have been delivered. A rejected TLS certificate is the example: both `NodeAdapter` and `FetchAdapter` resolve those as `495` with `isRetryable: false`, since the same request against the same server fails identically every time. On `FetchAdapter` this is a server-runtime classification. Bun puts the OpenSSL code on the error and Node hangs it off `cause`, while a browser reports an opaque `TypeError` with neither, so a browser TLS failure keeps the ordinary transport-error shape.
+`isRetryable: false` is reserved for failures that no method should retry because another attempt cannot succeed, not for ones that merely might have been delivered. A rejected TLS certificate is the example: both `NodeAdapter` and `FetchAdapter` resolve those as `495` with `isRetryable: false`, since the same request against the same server fails identically every time. On `FetchAdapter` this is a server-runtime classification. Bun puts the OpenSSL code on the error and Node hangs it off `cause`, while a browser reports an opaque `TypeError` with neither, so a browser TLS failure keeps the ordinary transport-error shape.
 
 #### Why a Retry Did Not Happen
 
@@ -1712,7 +1707,7 @@ This only ever _removes_ retries relative to the retry policy. It never introduc
 ```typescript
 adapter.routes.post('/orders', () => ({
   status: 200,
-  body: { id: 1 }, // discarded — a real post-header failure loses the body
+  body: { id: 1 }, // discarded - a real post-header failure loses the body
   streamError: true,
 }));
 
@@ -1731,14 +1726,14 @@ After calling `.send()`, the builder exposes live state:
 const builder = client.get('/users');
 const response = await builder.send();
 
-builder.requestID; // ULID assigned at construction time — available before and after send()
+builder.requestID; // ULID assigned at construction time - available before and after send()
 builder.state; // Current RequestState
 builder.response; // HTTPResponse<T> | null
 builder.error; // HTTPClientError | null
 builder.attemptCount; // Total adapter calls made (null before send)
 builder.nextRetryDelayMS; // Scheduled delay for next retry (ms), or null
 builder.nextRetryAt; // Epoch ms for next retry, or null
-builder.startedAt; // Epoch ms when first attempt dispatched (null before send, and null when no adapter attempt was dispatched — e.g. pre-send cancel(), pre-aborted AbortSignal, request setup error, or interceptor cancel/error)
+builder.startedAt; // Epoch ms when first attempt dispatched (null before send, and null when no adapter attempt was dispatched - e.g. pre-send cancel(), pre-aborted AbortSignal, request setup error, or interceptor cancel/error)
 builder.elapsedMS; // Wall-clock ms including retry waits; freezes on completion (null when startedAt is null)
 ```
 

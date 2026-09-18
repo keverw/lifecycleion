@@ -92,7 +92,7 @@ The output is JSON-serializable, which takes more than avoiding cycles - three l
 | `function`        | `<function>`            | drop the key silently - and **call** an own `toJSON`, so a hostile one threw from inside your `stringify` |
 | `symbol`          | `<symbol: Symbol(...)>` | drop the key silently                                                                                     |
 
-The two markers use the same angle brackets as `<unserializable: value>` on purpose: this payload is parsed by a receiver who cannot ask what a value means, so a marker has to read as the library talking rather than as something a caller might have stored. It is recognizable, not provable - a property whose real value is the text `<function>` is indistinguishable, exactly as it already is for the `<unserializable: …>` markers.
+The two markers use the same angle brackets as `<unserializable: value>` on purpose: this payload is parsed by a receiver who cannot ask what a value means, so a marker has to read as the library talking rather than as something a caller might have stored. It is recognizable, not provable - a property whose real value is the text `<function>` is indistinguishable, exactly as it already is for the `<unserializable: ...>` markers.
 
 A `bigint` gets its digits rather than a marker, because the digits are the _value_ and the receiver can parse them back. What does not survive is its type: a `bigint` and a string of the same digits arrive identical.
 

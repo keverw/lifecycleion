@@ -278,8 +278,8 @@ first is the worst possible outcome. It is written so it cannot:
   errorToString(err, 80, {
     onFormatError: (error, kind, path) => {
       // kind: 'render' here; 'redaction' when a redactFunction is what threw
-      // path: 'additionalInfo.items.0.token' — structural, never a value
-      // error: the getter's own throw — may contain the value, which is why the
+      // path: 'additionalInfo.items.0.token' - structural, never a value
+      // error: the getter's own throw - may contain the value, which is why the
       //        table above never carries it
     },
   });
@@ -309,8 +309,8 @@ first is the worst possible outcome. It is written so it cannot:
   twice, so a payload that reuses one subtree doubles in size per level without ever being
   circular or especially deep. The masking walk is bounded the same way.
 - The whole render is still wrapped as a backstop, and returns
-  `<error could not be rendered>` if anything escapes. With the limits above that is no
-  longer reachable through payload size alone.
+  `<error could not be rendered>` if anything escapes. With the limits above, payload size
+  alone cannot reach this backstop.
 
 For a single-line description rather than a table, see
 [`describeError`](./to-error.md#describeerror), which offers the same guarantee.

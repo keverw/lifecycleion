@@ -41,23 +41,71 @@ function startPipeReader(pipePath: string): {
   const data: string[] = [];
   let isStopped = false;
 
-  // Open pipe for reading in non-blocking mode
-  const stream = fs.createReadStream(pipePath, {
-    encoding: 'utf8',
-  });
+  // `fs.createReadStream` was the obvious way to do this and it is the wrong
+  // one. Opening a FIFO for reading blocks until a writer arrives, and the
+  // tests that matter here are the ones where the write side never opens - a
+  // failed sink, an unusable path, a close that never completes. That open
+  // cannot be cancelled: `destroy()` returns without releasing it, so the
+  // thread stays parked for the rest of the run.
+  //
+  // Park enough of them and every later filesystem call queues behind them,
+  // `beforeEach`'s mkdtemp and `afterEach`'s rm included, which is why one
+  // failing test was followed by every remaining test in this file dying in a
+  // hook rather than on its own assertion. Measured on a 10-core machine, 8
+  // parked opens were harmless and 16 were not; a 2-core CI runner has fewer
+  // threads to lose, which is why it cascaded there and not here.
+  //
+  // O_RDWR so the open returns immediately and never reports EOF - a FIFO
+  // opened for both directions always has a writer, this one. O_NONBLOCK so a
+  // read with nothing buffered returns EAGAIN rather than parking a thread of
+  // its own. Neither `net.Socket` nor `createReadStream` will consume the
+  // descriptor that combination produces under Bun, so the read is an explicit
+  // poll.
+  const fd = fs.openSync(
+    pipePath,
+    fs.constants.O_RDWR | fs.constants.O_NONBLOCK,
+  );
+  const buffer = Buffer.alloc(64 * 1024);
+  let isClosed = false;
 
-  stream.on('data', (chunk: string | Buffer) => {
-    if (!isStopped) {
-      const text = typeof chunk === 'string' ? chunk : chunk.toString('utf8');
-      data.push(text);
+  const poll = setInterval(() => {
+    if (isStopped || isClosed) {
+      return;
     }
-  });
+
+    try {
+      const bytesRead = fs.readSync(fd, buffer, 0, buffer.length, null);
+
+      if (bytesRead > 0) {
+        data.push(buffer.subarray(0, bytesRead).toString('utf8'));
+      }
+    } catch (error) {
+      // EAGAIN is the expected answer for "nothing buffered yet" on a
+      // non-blocking descriptor, not a failure to report.
+      if ((error as NodeJS.ErrnoException).code !== 'EAGAIN') {
+        clearInterval(poll);
+      }
+    }
+  }, 5);
+
+  // Nothing here should keep the process alive on its own.
+  poll.unref?.();
 
   return {
     data,
     stop: () => {
       isStopped = true;
-      stream.destroy();
+
+      if (!isClosed) {
+        isClosed = true;
+        clearInterval(poll);
+
+        try {
+          fs.closeSync(fd);
+        } catch {
+          // Already gone is the state this wants to reach.
+        }
+      }
     },
   };
 }
@@ -1736,8 +1784,23 @@ describe('NamedPipeSink', () => {
       const health = sink.getHealth();
 
       // Held under the cap rather than handed to a buffer nothing bounds.
-      expect(health.queueSize).toBe(10);
+      //
+      // The eviction count is the assertion that means something, not the queue
+      // depth. `queueSize` is a reading taken at one instant of a queue that is
+      // draining the whole time, so what is left in it at 200ms is a fact about
+      // how fast the FIFO accepted the last few entries. Linux and macOS agree
+      // exactly on the part that matters - 473 entries evicted, every one of
+      // them `queue_full` - and disagree only on whether the final 10 had left
+      // the queue by the time it was read. Asserting `toBe(10)` pinned the
+      // reading rather than the bound, and failed on Linux for draining sooner.
+      //
+      // The regression this guards is still caught: the bug was 500 entries
+      // going into a buffer with no cap, which reported an empty queue *and no
+      // drops at all*. An eviction count above zero is what that state cannot
+      // produce.
+      expect(health.queueSize).toBeLessThanOrEqual(10);
       expect(health.droppedEntries).toBeGreaterThan(0);
+      expect(health.droppedByKind.queue_full).toBeGreaterThan(0);
     } finally {
       await sink.close();
       fs.closeSync(readerFd);

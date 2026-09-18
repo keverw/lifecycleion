@@ -12,18 +12,9 @@ import type {
   AdapterResponse,
   AdapterType,
 } from '../types';
-// The shared coercion, not a fourth copy of it. Each adapter carried a near-identical
-// body, on the grounds that the HTTP client should not import across module boundaries -
-// which it already does for `sleep`, `deep-clone` and `retry-utils`. Aliased so the call
-// sites read unchanged.
-//
-// The *message* is not unchanged, and that is deliberate. The local copies produced
-// `new Error(String(value))`; `toError` produces
-// `new Error('Non-error value thrown: <description>', { cause: value })`. So a non-`Error`
-// rejection - `throw 'socket hang up'` - now reaches `AdapterResponse.errorCause` with the
-// prefix on `message` and the original value on `cause`, where before it carried only the
-// coerced text. See the 1.0.0 changelog entry: "HTTP adapters preserve non-`Error`
-// rejection values on `cause`."
+// Shared error normalization preserves Error instances and wraps other thrown values.
+// Non-Error values receive a "Non-error value thrown: <description>" message, with the
+// original value retained on cause for consumers of the normalized error.
 import { isErrorValue, toError as normalizeError } from '../../to-error';
 // Guard error members for the same reason adapter marker reads are guarded.
 import { readMember as readObjectMember } from '../../internal/read-member';

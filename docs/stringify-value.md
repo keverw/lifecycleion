@@ -148,10 +148,9 @@ about whether decoding could have produced anything you keep - not about the val
 binary. A view nested in a nearly-full container is judged against what that container has
 left, so the same buffer can render at the top of a value and be summarized deeper in.
 
-This exists because the decoded form has to be built in full before it can be measured:
-`String(buffer)` on forty megabytes costs about a second and forty megabytes to produce a
-couple of hundred characters of surviving output. A view too large for the allowance skips
-that work entirely.
+A view too large for the remaining allowance skips decoding entirely. Measuring the decoded
+form requires building it in full: `String(buffer)` on forty megabytes costs about a second
+and forty megabytes to produce a couple of hundred characters of surviving output.
 
 The substitution is a `'length'` truncation like any other, so `onTruncate` fires for it.
 `dropped` is absent: the text was never built, so nothing ever measured what was lost.
@@ -161,9 +160,8 @@ what asking for an unbounded render means.
 
 An `ArrayBuffer` or `SharedArrayBuffer` - the backing store rather than a view over one -
 is always named with its size, whatever the allowance. There is no decode to skip: a buffer
-has no useful string form at any size, and it previously rendered as `[ArrayBuffer]`, which
-said nothing about how much of it there was. Nothing is dropped, so it is not counted as a
-truncation.
+has no useful string form at any size. The summary identifies its kind and byte length.
+Nothing is dropped, so it is not counted as a truncation.
 
 Every view type is recognized by its own name - `Uint8Array`, `Int16Array`, `DataView`,
 Node's `Buffer` - and the size is always in bytes, not elements. Recognition uses the
@@ -267,7 +265,7 @@ redactValue({ err: new Error('boom') }, { redactedKeys: ['err.message'] });
 
 This is what keeps the guarantee that **redacted output differs from unredacted output only where a value was masked**. Descending into such a value instead would rebuild it as a plain object, and the renderer would then print its fields rather than its string form - so redacting one field would expose every other field beside it, which is the opposite of what was asked for.
 
-A `toJSON` method is **not** called. `JSON.stringify` honours it, but this does not. It was honoured for a plain object and ignored for a class instance, which is an arbitrary split, and it is caller code on the logging path - free to throw, to be slow, or to return something different each call. Everything is walked by this library instead, so what prints is what the value actually holds, and an object with a `toJSON` redacts like any other. To keep a field out of a log line, name it in `redactedKeys`.
+A `toJSON` method is **not** called. `JSON.stringify` honours it, but this does not. Invoking it would run caller code on the logging path, where it is free to throw, to be slow, or to return something different each call. Everything is walked by this library instead, so what prints is what the value actually holds, and an object with a `toJSON` redacts like any other. To keep a field out of a log line, name it in `redactedKeys`.
 
 Masking a value the renderer prints whole replaces it with a **string** - nothing is rebuilt for it. That is what keeps the shape stable: `"[Map]"` before, `"***REDACTED***"` after. Only plain objects and arrays are ever rebuilt, because they are the only things either walk enters.
 

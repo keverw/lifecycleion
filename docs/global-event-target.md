@@ -31,7 +31,7 @@ typeof globalThis.removeEventListener; // 'undefined'
 
 Lifecycleion supplies the missing global event methods, backing them with a single shared `EventTarget`. Node 25+ is the supported floor (see `engines.node`), so `ErrorEvent` itself is never polyfilled.
 
-Nothing needs to be wired up by hand: importing `lifecycleion/safe-handle-callback` or `lifecycleion/logger` installs it. Both are listed in the package's `sideEffects`, so a bundler will not drop that installation, including for a bare `import 'lifecycleion/safe-handle-callback'`. Other utility subpaths remain eligible for tree shaking. Reporting also re-runs the install on its own error path, so a failure cannot be swallowed solely because a bundler removed the top-level installation call.
+Nothing needs to be wired up by hand: importing `lifecycleion/safe-handle-callback` or `lifecycleion/logger` installs it. Both are listed in the package's `sideEffects`, so a bundler will not drop that installation, including for a bare `import 'lifecycleion/safe-handle-callback'`. Other utility subpaths remain eligible for tree shaking. Reporting also runs the installation on its own error path so callback failures can still reach listeners when module initialization is elided.
 
 This module is exported for the cases where you want to inspect or control installation explicitly.
 
@@ -107,4 +107,4 @@ if (isGlobalEventTargetAvailable()) {
 
 - **Non-enumerable.** Installed properties are defined with `Object.defineProperty` and do not show up in `Object.keys(globalThis)`.
 - **Bound.** Installed methods are bound to the backing target, so they work when destructured or passed around.
-- **Browser and Bun behavior is unchanged.**
+- **Native environments are left alone.** In browsers and Bun, installation is a no-op when all three global event methods are already present.

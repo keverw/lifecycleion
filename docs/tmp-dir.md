@@ -132,7 +132,7 @@ Notes:
 - `random12chars` uses upper/lowercase letters and digits.
 - Unknown option keys are ignored. `mode` is strictly validated when supplied, while other options ignore values of the wrong type. Invalid `baseDirectory`, `maxTries`, `prefix`, or `postfix` values of the expected type throw a configuration error.
 - `mode` is applied to the leaf, subject to the process umask. Newly created parents use `mode | 0o700` so the owner can create and traverse the temporary directory. Existing directories are not chmodded. Permission-bit behavior is platform-dependent on Windows. This option does not configure Windows ACLs.
-- `prefix` and `postfix` are refused if they carry a path separator or a control character, so the directory always sits directly inside `baseDirectory`. A `prefix` of `'../escape'` used to create, and with `unsafeCleanup` delete, a directory outside it.
+- `prefix` and `postfix` are refused if they carry a path separator or a control character, so the directory always sits directly inside `baseDirectory`. For example, `'../escape'` is rejected rather than interpreted as a path.
 
 ### Error Classes
 

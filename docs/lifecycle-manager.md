@@ -2518,7 +2518,7 @@ const shutdownResult = await lifecycle.stopAllComponents();
 if (shutdownResult.stalledComponents.length > 0) {
   console.error('Stalled components:', shutdownResult.stalledComponents);
 
-  // Option 0: Retry via force phase (escalation — does NOT re-run stop())
+  // Option 0: Retry via force phase (escalation - does NOT re-run stop())
   // If the component implements onShutdownForce(), that is called.
   // If not, the component stalls again immediately.
   await lifecycle.stopAllComponents({ retryStalled: true });

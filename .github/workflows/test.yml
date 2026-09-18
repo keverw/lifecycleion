@@ -1,0 +1,101 @@
+name: Test
+
+# Every update to an open pull request targeting main runs through
+# `pull_request`. Restricting `push` to main avoids running the same matrix a
+# second time for branches in this repository, while still testing the merged
+# result and direct pushes to main. `workflow_dispatch` keeps a manual run
+# available from the default branch.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# A new push to the same branch cancels the run it supersedes.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      # Every platform reports, rather than the first failure canceling the
+      # rest. The point of the matrix is knowing which ones are broken.
+      fail-fast: false
+      matrix:
+        # Linux and macOS only. The library targets POSIX runtimes: the named
+        # pipe sink is built on FIFOs and the temp-directory permission work is
+        # written against POSIX modes, neither of which has a Windows meaning.
+        os: [ubuntu-latest, macos-latest]
+
+    # The suite is large and launches a real browser, so it is slower than a
+    # plain unit-test run, and the default six hours is no bound at all for a
+    # job that has hung.
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v5
+
+      # Pinned, not `latest`. CI ran Bun 1.4.2 against a lockfile and a suite
+      # developed on 1.4.0, which makes "passes locally" a claim about a
+      # different runtime than the one reporting. `.bun-version` is the single
+      # place both sides read, so a Bun upgrade is a deliberate commit.
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: .bun-version
+
+      # Bun runs the suite, but `global-event-target-node.test.ts` is the one
+      # file that cannot: under Bun the global event methods are native, so only
+      # the real `node` binary can prove the module does its job on Node. The
+      # fixtures are bundled with `Bun.build({ target: 'node' })` and executed by
+      # `node`, and the package requires Node >= 25 — which the runner images do
+      # not ship (ubuntu had 22, macOS 24), so it is installed rather than
+      # assumed.
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+
+      # The lockfile is the point: a resolution that drifts per platform would
+      # make a failure here a question about the install rather than the code.
+      - name: Install
+        run: bun install --frozen-lockfile
+
+      - name: Type check
+        run: bun run type-check
+
+      - name: Lint
+        run: bun run lint
+
+      # Formatting is checked rather than assumed. `update-docs` reformats only
+      # the docs, so a Prettier upgrade can leave the source behind and nothing
+      # says so until somebody runs `bun run format` and finds unrelated files
+      # in their diff.
+      #
+      # One platform only, unlike the two steps above: formatting is a property
+      # of the files rather than of the machine.
+      - name: Format check
+        if: runner.os == 'Linux'
+        run: bun run format:check
+
+      # The xhr-adapter suite launches a real headless browser, which is a
+      # separate download from the npm package. Deliberately not cached: the
+      # binary is keyed to the Playwright version, and a cache that serves a
+      # stale shell after a version bump fails in exactly the way this step
+      # exists to prevent. `bun run test` guards on it anyway via
+      # scripts/check-playwright.ts, so a miss here is a clear message rather
+      # than a confusing test failure.
+      - name: Install Playwright Chromium
+        run: bun run playwright:install
+
+      # `--bail=5` via test:ci, where `bun run test` stays unbounded for local
+      # work. A single failure in the named-pipe suite has been followed by
+      # every later test in the file failing on a hook timeout, 30 seconds
+      # each, which turned one red test into a 15-minute job that reported
+      # almost nothing. Five failures is enough to see a pattern without
+      # paying for the tail.
+      - name: Test
+        run: bun run test:ci
