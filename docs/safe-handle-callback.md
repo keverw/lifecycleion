@@ -102,6 +102,8 @@ function runCallbackSafely(
 
 Runs a callback without awaiting it, forwarding a synchronous throw, a returned promise's rejection, or a synthesized non-function error to `onError`. The `onError` callback runs on the final failure path and must not throw.
 
+This is the lower-level invocation helper used by `safeHandleCallback()`. Choose `safeHandleCallback()` for the standard global error reporting and fallback chain. Choose `runCallbackSafely()` when you need to route failures yourself, such as to logger diagnostics or a local fallback. It does not report failures globally unless your `onError` handler does so. Keep that handler synchronous and non-throwing, because its own returned promise is not followed. Use `safeHandleCallbackAndWait()` when you need to await completion and receive a result.
+
 ## The Reporting Pattern
 
 Use `reportCallbackError()` when reporting a callback failure. If you need a different wrapper, the outline below shows the dispatch and fallback order. Lifecycleion's implementation additionally guards reads of mutable globals, event construction, dispatch, host reporting, rendering, and console output so the reporting path cannot throw. Include equivalent guards when your caller requires that guarantee.

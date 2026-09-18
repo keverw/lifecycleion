@@ -1387,10 +1387,14 @@ Both queueing sinks, `FileSink` and `NamedPipeSink`, answer a failed write the s
 
 - the entry goes back on the queue and is retried up to `maxRetries` (default 3)
 - the queue holds up to `maxQueueSize` entries (default 10,000). Pass `-1` to hold
-  everything, which is what both did before the default existed)
-- over the cap, the **oldest** entry is dropped, counted
-  (both sinks report `getHealth().droppedEntries`) and the first
-  drop is reported through `onError`
+  everything, matching the previous unbounded default
+- over the cap, the **oldest** entry is dropped and counted in
+  `getHealth().droppedEntries` and `getHealth().droppedByKind.queue_full`. The first
+  drop in each overflow episode is reported through `onError` with
+  `kind: 'queue_full'` and `disposition: 'lost'`. Further overflow reports are
+  suppressed until the queue drains. The callback carries a dropped entry as a sample,
+  not every lost entry. Without an `onError` handler, the report goes to guarded
+  `console.error`
 - `getHealth().droppedEntries` means "lines this sink did not deliver": evicted at the
   cap, out of retries, unrenderable, still queued when `close()` gave up on them, or
   failed by a write still in flight when `close()` finished. `droppedByKind` splits the
