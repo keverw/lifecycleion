@@ -1783,18 +1783,24 @@ describe('NamedPipeSink', () => {
 
       const health = sink.getHealth();
 
-      // TEMPORARY CI DIAGNOSTIC - revert with the commit that follows.
-      // Linux reports queueSize 0 here where macOS reports 10, and the run
-      // stops at the assertion below without ever printing the rest of the
-      // snapshot. This says which of "nothing was queued" and "everything was
-      // dropped" actually happened.
-      console.log(
-        `[backpressure-probe] platform=${process.platform} health=${JSON.stringify(health)}`,
-      );
-
       // Held under the cap rather than handed to a buffer nothing bounds.
-      expect(health.queueSize).toBe(10);
+      //
+      // The eviction count is the assertion that means something, not the queue
+      // depth. `queueSize` is a reading taken at one instant of a queue that is
+      // draining the whole time, so what is left in it at 200ms is a fact about
+      // how fast the FIFO accepted the last few entries. Linux and macOS agree
+      // exactly on the part that matters - 473 entries evicted, every one of
+      // them `queue_full` - and disagree only on whether the final 10 had left
+      // the queue by the time it was read. Asserting `toBe(10)` pinned the
+      // reading rather than the bound, and failed on Linux for draining sooner.
+      //
+      // The regression this guards is still caught: the bug was 500 entries
+      // going into a buffer with no cap, which reported an empty queue *and no
+      // drops at all*. An eviction count above zero is what that state cannot
+      // produce.
+      expect(health.queueSize).toBeLessThanOrEqual(10);
       expect(health.droppedEntries).toBeGreaterThan(0);
+      expect(health.droppedByKind.queue_full).toBeGreaterThan(0);
     } finally {
       await sink.close();
       fs.closeSync(readerFd);
