@@ -2126,6 +2126,19 @@ export class BaseHTTPClient {
           }
         }
 
+        // Body headers inferred by the client or adapter describe this attempt's
+        // body, which a redirect interceptor may replace or remove. Carry only
+        // authored values forward and infer the rest again for the next body.
+        // Use the latest intercepted request, before Content-Type inference.
+        const authoredHeaders = mergeHeaders(attemptRequest.headers);
+        for (const key of ['content-length', 'content-type']) {
+          if (Object.hasOwn(authoredHeaders, key)) {
+            redirectRequestHeaders[key] = authoredHeaders[key];
+          } else {
+            delete redirectRequestHeaders[key];
+          }
+        }
+
         return {
           adapterResponse,
           sentRequest: observedSentRequest,
