@@ -226,6 +226,7 @@
     "prepublishOnly": "bun audit && bun run lint && bun run type-check && bun run build && bun test",
     "dev": "tsup --watch",
     "test": "bun run scripts/check-playwright.ts && bun test",
+    "test:ci": "bun run scripts/check-playwright.ts && bun test --bail=5",
     "playwright:install": "bunx playwright install chromium",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
