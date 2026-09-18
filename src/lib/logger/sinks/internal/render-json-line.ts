@@ -167,5 +167,8 @@ function spliceRenderedObject(
     ? rendered.slice(1)
     : `${JSON.stringify(fallbackKey)}:${JSON.stringify(rendered)}}`;
 
-  return `${envelope.slice(0, -1)},${params}`;
+  // Runtime entries may omit every envelope field, leaving no preceding member.
+  const separator = envelope === '{}' ? '' : ',';
+
+  return `${envelope.slice(0, -1)}${separator}${params}`;
 }

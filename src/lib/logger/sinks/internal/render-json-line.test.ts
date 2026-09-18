@@ -49,6 +49,27 @@ describe('renderJSONLine', () => {
     });
   });
 
+  test.each([undefined, { userID: 7 }])(
+    'keeps an entry with no envelope fields parseable (params: %j)',
+    (params) => {
+      // JavaScript callers can pass an incomplete entry directly to a sink.
+      const entry = { message: 'hi', params } as LogEntry;
+      const reports: Error[] = [];
+      const line = renderJSONLine(entry, (error) => reports.push(error));
+
+      expect(JSON.parse(line)).toEqual(
+        params === undefined ? { message: 'hi' } : { message: 'hi', params },
+      );
+      expect(reports).toHaveLength(0);
+    },
+  );
+
+  test('splices a fallback marker into an empty envelope as valid JSON', () => {
+    expect(JSON.parse(spliceRenderedParams('{}', '[unrenderable]'))).toEqual({
+      params: '[unrenderable]',
+    });
+  });
+
   test('omits params when the entry has none, as the old envelope did', () => {
     expect(JSON.parse(renderJSONLine(base, () => {}))).not.toHaveProperty(
       'params',

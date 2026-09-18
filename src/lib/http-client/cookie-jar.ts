@@ -781,12 +781,12 @@ export class CookieJar {
             break;
           }
           case 'path': {
-            // RFC 6265 §5.2.4 — a Path that is empty or does not start with `/` is
-            // ignored (default-path applies). `Path=foo` used to be stored as written;
-            // no request path matches it, so the cookie was never sent, but it was held
-            // and counted for the life of the jar.
+            // The last Path attribute wins. An invalid value resets any earlier
+            // path so resolvedCookiePath applies the request's default (RFC 6265 §5.2.4).
             if (attrValue.startsWith('/')) {
               cookie.path = attrValue;
+            } else {
+              delete cookie.path;
             }
             break;
           }

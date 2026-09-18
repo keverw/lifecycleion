@@ -819,6 +819,63 @@ describe('CookieJar', () => {
       );
     });
 
+    test.each(['bad', ''])(
+      'a trailing Path=%s replaces an earlier path with the request default',
+      (lastPath) => {
+        jar.parseSetCookieHeader(
+          `sid=1; Path=/admin; Path=${lastPath}`,
+          'https://example.com/app/page',
+        );
+
+        expect(jar.getCookieFor('sid', 'https://example.com/app/x')?.path).toBe(
+          '/app',
+        );
+        expect(
+          jar.getCookieFor('sid', 'https://example.com/admin'),
+        ).toBeUndefined();
+      },
+    );
+
+    test.each(['bad', ''])(
+      'a trailing Path=%s deletes only the cookie at the request default path',
+      (lastPath) => {
+        jar.parseSetCookieHeader(
+          'session=root; Path=/',
+          'https://example.com/',
+        );
+        jar.parseSetCookieHeader(
+          'session=admin; Path=/admin',
+          'https://example.com/',
+        );
+
+        jar.parseSetCookieHeader(
+          `session=; Path=/admin; Path=${lastPath}; Max-Age=0`,
+          'https://example.com/logout',
+        );
+
+        expect(
+          jar.getCookieFor('session', 'https://example.com/'),
+        ).toBeUndefined();
+        expect(jar.getAllCookies()).toMatchObject([
+          { name: 'session', value: 'admin', path: '/admin' },
+        ]);
+      },
+    );
+
+    test('a valid trailing Path overrides an earlier invalid path', () => {
+      jar.parseSetCookieHeader(
+        'sid=1; Path=bad; Path=/admin',
+        'https://example.com/app/page',
+      );
+
+      expect(jar.getCookieFor('sid', 'https://example.com/admin')?.path).toBe(
+        '/admin',
+      );
+      expect(
+        jar.getCookieFor('sid', 'https://example.com/app/x'),
+      ).toBeUndefined();
+    });
+
     test('RFC 6265 §5.2.2 — a Max-Age that is not digits is ignored', () => {
       // `parseInt` read a prefix: `60abc` was a minute and `1e9` was one second.
       jar.parseSetCookieHeader('a=1; Max-Age=60abc', 'https://example.com');
