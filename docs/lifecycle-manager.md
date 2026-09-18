@@ -993,6 +993,10 @@ interface ComponentOperationResult {
 
 **Failure codes:** See the centralized list in [Failure Codes](#failure-codes).
 
+**Overlapping operations:** `startComponent()` refuses to run alongside the same component's other lifecycle work. A start already underway returns `component_already_starting`; a stop still in flight returns `component_already_stopping`. This holds even after a global shutdown timeout has already returned: `stopAllComponents()` settles at its deadline while a component's `stop()` or `onShutdownForce()` may still be running, and per-component state keeps the overlap blocked until that work finishes.
+
+These codes are a refusal, not a join - the call returns immediately instead of awaiting the in-flight operation. To wait for a component to become startable again, poll `getComponentStatus(name).state` until it leaves `stopping` / `force-stopping`, then start it. To make concurrent callers of your own `start()` / `stop()` implementations share a single in-flight promise, see [Best Practice #7](#7-make-component-startup-idempotent-and-coordinate-with-shutdown). The manager only guards its own invocations, so that pattern is still required for the force phase, where `onShutdownForce()` runs concurrently with an unfinished `stop()` by design.
+
 ### Component Messaging
 
 Message, health, and value result code `stopped` means unavailable and not stalled. It does not identify the exact lifecycle state. Use `getComponentStatus(name).state` to distinguish registered, starting, failed, and stopped components. `includeStopped` permits handlers on inactive components, but never during active startup, a timed-out startup, or teardown.
