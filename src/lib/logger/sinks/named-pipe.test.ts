@@ -1783,6 +1783,15 @@ describe('NamedPipeSink', () => {
 
       const health = sink.getHealth();
 
+      // TEMPORARY CI DIAGNOSTIC - revert with the commit that follows.
+      // Linux reports queueSize 0 here where macOS reports 10, and the run
+      // stops at the assertion below without ever printing the rest of the
+      // snapshot. This says which of "nothing was queued" and "everything was
+      // dropped" actually happened.
+      console.log(
+        `[backpressure-probe] platform=${process.platform} health=${JSON.stringify(health)}`,
+      );
+
       // Held under the cap rather than handed to a buffer nothing bounds.
       expect(health.queueSize).toBe(10);
       expect(health.droppedEntries).toBeGreaterThan(0);
