@@ -214,6 +214,61 @@ describe('XHRAdapter', () => {
     });
   });
 
+  test('withholds URL userinfo on a cross-origin hop', async () => {
+    const promise = new XHRAdapter().send({
+      requestURL: 'https://user:hunter2@evil.test/collect',
+      initialURL: 'https://api.example.test/start',
+      method: 'GET',
+      headers: {},
+    });
+
+    lastXHR.status = 204;
+    lastXHR.responseURL = 'https://evil.test/collect';
+    lastXHR.simulateLoad();
+    const response = await promise;
+
+    expect(lastXHR.openArgs?.url).toBe('https://evil.test/collect');
+    expect(response.wasRedirectDetected).toBeUndefined();
+  });
+
+  test('keeps URL userinfo when the initial and request origins match', async () => {
+    const promise = new XHRAdapter().send({
+      requestURL: 'https://user:hunter2@api.example.test/next',
+      initialURL: 'https://api.example.test/start',
+      method: 'GET',
+      headers: {},
+    });
+
+    lastXHR.status = 204;
+    lastXHR.responseURL = 'https://api.example.test/next';
+    lastXHR.simulateLoad();
+    const response = await promise;
+
+    expect(response.status).toBe(204);
+    expect(response.wasRedirectDetected).toBeUndefined();
+
+    expect(lastXHR.openArgs?.url).toBe(
+      'https://user:hunter2@api.example.test/next',
+    );
+  });
+
+  test('withholds userinfo from a protocol-relative cross-origin URL', async () => {
+    const promise = new XHRAdapter().send({
+      requestURL: '//user:hunter2@evil.test/collect',
+      initialURL: 'https://api.example.test/start',
+      method: 'GET',
+      headers: {},
+    });
+
+    lastXHR.status = 204;
+    lastXHR.responseURL = 'https://evil.test/collect';
+    lastXHR.simulateLoad();
+    const response = await promise;
+
+    expect(lastXHR.openArgs?.url).toBe('//evil.test/collect');
+    expect(response.wasRedirectDetected).toBeUndefined();
+  });
+
   test('sets responseType to arraybuffer', async () => {
     const adapter = new XHRAdapter();
     const promise = adapter.send({

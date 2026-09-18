@@ -44,6 +44,7 @@ With options:
 
 ```typescript
 const tmpDir = await createTempDir({
+  mode: 0o750, // optional: allow group read/traverse; private 0o700 by default
   prefix: 'myapp',
   postfix: 'test',
   unsafeCleanup: true,
@@ -69,7 +70,7 @@ await tmpDir.cleanup();
 Getter that returns the full absolute path to the temporary directory.
 
 - Throws `ErrTmpDirNotInitialized` if `initialize()` has not been called.
-- Throws `ErrTmpDirWasCleanedUp` if `cleanup()` has already run.
+- Throws `ErrTmpDirWasCleanedUp` after successful removal. If cleanup failed because the directory is non-empty, the initialized path remains readable so you can empty it and retry cleanup.
 
 ```typescript
 tmpDir.path; // "/tmp/tmp-12345-A1B2C3D4E5F6"
@@ -81,7 +82,7 @@ Creates the temporary directory on disk.
 
 - Retries up to `maxTries` times to find a unique name.
 - Safe to call more than once. After the first successful call, subsequent calls are no-ops.
-- Once cleaned up, the instance remains in that state and will not recreate the directory.
+- After any call to `cleanup()`, initialization rejects with `ErrTmpDirWasCleanedUp`. Concurrent initialization calls share one exclusive directory creation. If cleanup starts during that creation, initialization rejects and cleanup waits for the creation before removing it.
 
 ```typescript
 await tmpDir.initialize();
@@ -94,9 +95,14 @@ Throws `ErrTmpDirInitializeMaxTriesExceeded` if a unique directory cannot be cre
 Removes the temporary directory.
 
 - Safe to call more than once. Calls after successful cleanup are no-ops.
-- If called before `initialize()`, it is also a no-op.
+- **`cleanup()` is terminal for the instance, even when it removes nothing.** Calling it
+  before `initialize()` touches no filesystem - there is nothing to remove - but the
+  instance is finished either way: a later `initialize()` throws `ErrTmpDirWasCleanedUp`
+  rather than creating a directory. Construct a new `TmpDir` instead of reusing one past
+  its `cleanup()`.
+- It waits for any `initialize()` still in flight before removing the directory. A failed creation leaves nothing to remove.
 - With `unsafeCleanup: true`, cleanup uses recursive removal and can delete non-empty directories.
-- With `unsafeCleanup: false` (default), cleanup of non-empty directories throws.
+- With `unsafeCleanup: false` (default), cleanup removes an empty directory and refuses a non-empty one. An already-removed directory counts as successfully cleaned up.
 
 ```typescript
 await tmpDir.cleanup();
@@ -113,9 +119,10 @@ Options object accepted by `new TmpDir(options)` and `createTempDir(options)`.
 | --------------- | --------- | ------------- | ---------------------------------------------------------------------------------------------------------- |
 | `unsafeCleanup` | `boolean` | `false`       | Allow deleting a non-empty directory during cleanup                                                        |
 | `baseDirectory` | `string`  | `os.tmpdir()` | Absolute path in which to create the temp dir                                                              |
+| `mode`          | `number`  | `0o700`       | Integer permission bits from `0o000` through `0o777` for newly created directories                         |
 | `maxTries`      | `number`  | `3`           | Maximum attempts to find a unique directory name. Values are floored to an integer and must be at least 1. |
-| `prefix`        | `string`  | `'tmp'`       | Prepended to the directory name (separator `-` is added automatically)                                     |
-| `postfix`       | `string`  | `''`          | Appended to the directory name (separator `-` is added automatically)                                      |
+| `prefix`        | `string`  | `'tmp'`       | Prepended to the directory name (separator `-` is added automatically). No `/`, `\`, or control characters |
+| `postfix`       | `string`  | `''`          | Appended to the directory name (separator `-` is added automatically). No `/`, `\`, or control characters  |
 
 Directory names follow the pattern: `<prefix>-<pid>-<random12chars>[-<postfix>]`
 
@@ -123,16 +130,20 @@ Notes:
 
 - `baseDirectory` is trimmed before validation and must be an absolute path.
 - `random12chars` uses upper/lowercase letters and digits.
-- Unknown option keys and invalid option value types are ignored. Invalid `baseDirectory` or `maxTries` values throw a configuration error.
+- Unknown option keys are ignored. `mode` is strictly validated when supplied, while other options ignore values of the wrong type. Invalid `baseDirectory`, `maxTries`, `prefix`, or `postfix` values of the expected type throw a configuration error.
+- `mode` is applied to the leaf, subject to the process umask. Newly created parents use `mode | 0o700` so the owner can create and traverse the temporary directory. Existing directories are not chmodded. Permission-bit behavior is platform-dependent on Windows. This option does not configure Windows ACLs.
+- `prefix` and `postfix` are refused if they carry a path separator or a control character, so the directory always sits directly inside `baseDirectory`. A `prefix` of `'../escape'` used to create, and with `unsafeCleanup` delete, a directory outside it.
 
 ### Error Classes
 
 | Class                                 | When it is thrown                                                                                 |
 | ------------------------------------- | ------------------------------------------------------------------------------------------------- |
 | `ErrTmpDirNotInitialized`             | Reading `.path` before `initialize()`                                                             |
-| `ErrTmpDirWasCleanedUp`               | Reading `.path` after successful `cleanup()`                                                      |
+| `ErrTmpDirWasCleanedUp`               | Reading `.path` after successful `cleanup()`, or calling `initialize()` after any `cleanup()`     |
 | `ErrTmpDirConfigErrorBaseDirectory`   | `baseDirectory` is not an absolute path                                                           |
+| `ErrTmpDirConfigErrorMode`            | `mode` is not an integer from `0o000` through `0o777`                                             |
 | `ErrTmpDirConfigErrorMaxTries`        | `maxTries` floors to a value that is not a positive integer (e.g. `0`, negative, `Infinity`)      |
+| `ErrTmpDirConfigErrorNamePart`        | `prefix` or `postfix` contains a path separator or control character. `option` names which one    |
 | `ErrTmpDirInitializeMaxTriesExceeded` | A unique directory could not be created within `maxTries` attempts                                |
 | `ErrTmpDirCleanupFailedNotEmpty`      | Cleanup encountered a non-empty directory while `unsafeCleanup` is `false`                        |
 | `ErrTmpDirCleanupUnexpectedError`     | Any other cleanup filesystem error. Original error is available on `additionalInfo.originalError` |

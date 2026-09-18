@@ -1,11 +1,16 @@
 import { XHR_BROWSER_TIMEOUT_FLAG } from '../consts';
+import { guardProgressCallback } from '../internal/progress';
 import type {
   HTTPAdapter,
   AdapterRequest,
   AdapterResponse,
   AdapterType,
 } from '../types';
-import { resolveAbsoluteURLForRuntime } from '../utils';
+import {
+  resolveAbsoluteURLForRuntime,
+  stripCrossOriginURLCredentials,
+  stripURLCredentials,
+} from '../utils';
 
 /**
  * XHR-based adapter for environments that expose `XMLHttpRequest`. Primary
@@ -27,12 +32,30 @@ export class XHRAdapter implements HTTPAdapter {
   }
 
   public send(request: AdapterRequest): Promise<AdapterResponse> {
+    // Guarded once, at the boundary, so every call site below is covered - including the
+    // ones handed to `streamResponseBody`, `writeRequestBodyChunked` and
+    // `serializeMultipartFormData`. Progress reporting is advisory and must not be able to
+    // change whether a request succeeded; a throwing callback used to propagate out and be
+    // classified as a transport failure. See `guardProgressCallback`.
+    const guardedUploadProgress = guardProgressCallback(
+      request.onUploadProgress,
+      'onUploadProgress',
+    );
+    const guardedDownloadProgress = guardProgressCallback(
+      request.onDownloadProgress,
+      'onDownloadProgress',
+    );
+    const dispatchedURL = stripCrossOriginURLCredentials(
+      request.requestURL,
+      request.initialURL,
+    );
+
     return new Promise((resolve, reject) => {
       const xhr = new XMLHttpRequest();
 
       // responseType 'arraybuffer' gives us a raw ArrayBuffer on load,
       // consistent with how FetchAdapter and NodeAdapter deliver body bytes.
-      xhr.open(request.method, request.requestURL);
+      xhr.open(request.method, dispatchedURL);
       xhr.responseType = 'arraybuffer';
 
       // Timeout is managed by the client via the abort signal — the client's
@@ -71,15 +94,27 @@ export class XHRAdapter implements HTTPAdapter {
           return;
         }
 
-        request.signal.addEventListener(
+        const signal = request.signal;
+        const onAbort = (): void => {
+          xhr.abort();
+        };
+
+        signal.addEventListener(
           'abort',
-          () => {
-            xhr.abort();
-          },
+          onAbort,
           // once: true — the XHR is already done after the first abort, no
           // need to keep the listener alive and risk a second call.
           { once: true },
         );
+
+        // And removed when the request ends any other way. `once` only fires on
+        // abort, so on a long-lived shared signal - one controller over a whole
+        // page session - every completed request left its listener behind, one
+        // per request, until the signal finally aborted or was collected.
+        // `loadend` fires after load, error, timeout and abort alike.
+        xhr.addEventListener('loadend', () => {
+          signal.removeEventListener('abort', onAbort);
+        });
       }
 
       // --- Upload progress ---
@@ -87,7 +122,7 @@ export class XHRAdapter implements HTTPAdapter {
       // Fire initial 0% upload progress before any bytes leave the browser,
       // mirroring the FetchAdapter pattern so callers see a consistent first
       // event regardless of adapter.
-      request.onUploadProgress?.({ loaded: 0, total: 0, progress: 0 });
+      guardedUploadProgress?.({ loaded: 0, total: 0, progress: 0 });
 
       // Real per-chunk upload progress — the main advantage over FetchAdapter,
       // which has no streaming upload and can only fire 0% then 100%.
@@ -109,7 +144,7 @@ export class XHRAdapter implements HTTPAdapter {
         uploadedBytes = Math.max(uploadedBytes, event.loaded);
         uploadTotalBytes = Math.max(uploadTotalBytes, event.total);
 
-        request.onUploadProgress?.({
+        guardedUploadProgress?.({
           loaded: event.loaded,
           total: event.total || 0,
           progress,
@@ -134,7 +169,7 @@ export class XHRAdapter implements HTTPAdapter {
         if (!didFireUpload100) {
           const finalLoaded = uploadedBytes > 0 ? uploadedBytes : 1;
           const finalTotal = uploadTotalBytes > 0 ? uploadTotalBytes : 1;
-          request.onUploadProgress?.({
+          guardedUploadProgress?.({
             loaded: finalLoaded,
             total: finalTotal,
             progress: 1,
@@ -165,7 +200,7 @@ export class XHRAdapter implements HTTPAdapter {
         downloadedBytes = Math.max(downloadedBytes, event.loaded);
         downloadTotalBytes = Math.max(downloadTotalBytes, event.total);
 
-        request.onDownloadProgress?.({
+        guardedDownloadProgress?.({
           loaded: event.loaded,
           total: event.total || 0,
           progress,
@@ -189,14 +224,14 @@ export class XHRAdapter implements HTTPAdapter {
         // response regardless of adapter.
         if (
           xhr.responseURL &&
-          didBrowserFollowRedirect(xhr.responseURL, request.requestURL)
+          didBrowserFollowRedirect(xhr.responseURL, dispatchedURL)
         ) {
           // The browser completed the transport and surfaced the final URL even
           // though the client will treat the result as redirect_disabled, so
           // emit terminal progress before returning the synthetic redirect
           // response.
           if (!didUploadComplete && !didFireUpload100) {
-            request.onUploadProgress?.({
+            guardedUploadProgress?.({
               loaded: uploadedBytes,
               total: uploadTotalBytes,
               progress: 1,
@@ -204,7 +239,7 @@ export class XHRAdapter implements HTTPAdapter {
           }
 
           if (!didFireDownload100) {
-            request.onDownloadProgress?.({
+            guardedDownloadProgress?.({
               loaded: downloadedBytes,
               total: downloadTotalBytes,
               progress: 1,
@@ -228,7 +263,7 @@ export class XHRAdapter implements HTTPAdapter {
         // skipped the event). Ensure callers always see a 100% upload event,
         // unless upload.progress already reported it.
         if (!didUploadComplete && !didFireUpload100) {
-          request.onUploadProgress?.({
+          guardedUploadProgress?.({
             loaded: uploadedBytes,
             total: uploadTotalBytes,
             progress: 1,
@@ -240,7 +275,7 @@ export class XHRAdapter implements HTTPAdapter {
         // Final 100% download progress — skip if a progress event already
         // fired exactly 100% (Content-Length known and final chunk completed it).
         if (!didFireDownload100) {
-          request.onDownloadProgress?.({
+          guardedDownloadProgress?.({
             loaded: body?.length ?? 0,
             total: body?.length ?? 0,
             progress: 1,
@@ -407,7 +442,7 @@ function parseXHRResponseHeaders(
 
 /**
  * Compares URLs as browsers evaluate request destinations:
- * - strips hash fragments (not sent over HTTP)
+ * - strips userinfo (omitted by responseURL) and hash fragments (not sent over HTTP)
  * - relies on URL normalization for equivalent forms
  *   (default ports, dot segments, encoding normalization, etc.)
  */
@@ -425,7 +460,10 @@ function didBrowserFollowRedirect(
     );
     normalizedRequest.hash = '';
 
-    return normalizedResponse.href !== normalizedRequest.href;
+    return (
+      stripURLCredentials(normalizedResponse.href) !==
+      stripURLCredentials(normalizedRequest.href)
+    );
   } catch {
     // Fallback for non-URL inputs: preserve prior behavior.
     return responseURL !== requestURL;

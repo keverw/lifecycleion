@@ -9,7 +9,7 @@
  * Only inspecting what `bind` returned catches it. Skipping that check installs
  * a non-callable on `globalThis` and reports `'installed'` — strictly worse than
  * doing nothing, because these methods started out absent, and every
- * `reportError` dispatch would then throw `TypeError`. The install should treat
+ * Error dispatch would then throw `TypeError`. The install should treat
  * the target as unusable and fall back to a fresh one.
  */
 

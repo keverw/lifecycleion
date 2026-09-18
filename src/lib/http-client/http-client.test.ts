@@ -4,17 +4,25 @@ import {
   beforeAll,
   describe,
   expect,
+  spyOn,
   test,
 } from 'bun:test';
 import { HTTPClient } from './http-client';
+import {
+  muteConsoleError,
+  restoreConsoleError,
+} from '../internal/console-test-utils';
 import { CookieJar } from './cookie-jar';
 import { startTestServer, type TestServer } from './test-helpers/test-server';
 import { scalarHeader } from './utils';
 import {
   DEFAULT_REQUEST_ATTEMPT_HEADER,
   DEFAULT_REQUEST_ID_HEADER,
+  DEFAULT_TIMEOUT_MS,
   DEFAULT_USER_AGENT,
+  MAX_TIMER_MS,
   NON_RETRYABLE_HTTP_CLIENT_CALLBACK_ERROR_FLAG,
+  REQUEST_BODY_SETTLED_KEY,
   RESPONSE_STREAM_ABORT_FLAG,
   STREAM_FACTORY_CANCEL_KEY,
   STREAM_FACTORY_ERROR_FLAG,
@@ -486,6 +494,893 @@ describe('HTTPClient — basic HTTP methods', () => {
     expect(() => new HTTPClient({ cookieJar: new CookieJar() })).toThrow(
       /cookieJar is not supported with FetchAdapter in browser environments/i,
     );
+  });
+
+  test('carries `requestBodySettled` through without failing the response', async () => {
+    // The upload outcome is advisory: it reaches the caller on an otherwise ordinary
+    // success, and touches nothing the client decides. Carried on the response as a
+    // transport failure instead, a `413` that stopped reading mid-upload would have
+    // arrived as a network error with the server's own explanation dropped.
+    const settled = Promise.resolve(new Error('upload cut short'));
+
+    const adapter: HTTPAdapter = {
+      getType: () => 'node',
+      send: (_request: AdapterRequest): Promise<AdapterResponse> =>
+        Promise.resolve({
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+          body: new TextEncoder().encode('{"ok":true}'),
+          requestBodySettled: settled,
+        }),
+    };
+
+    const response = await new HTTPClient({
+      adapter,
+      baseURL: 'http://example.test',
+    })
+      .post('/upload')
+      .send<{ ok: boolean }>();
+
+    expect(response.status).toBe(200);
+    expect(response.isFailed).toBe(false);
+    expect(response.isNetworkError).toBe(false);
+    expect(response.body).toEqual({ ok: true });
+    expect(await response.requestBodySettled).toBeInstanceOf(Error);
+  });
+
+  test('adopts a rejecting `requestBodySettled` from an adapter that resolves', async () => {
+    // `HTTPAdapter` is a public extension point, and the resolve path handed the adapter's
+    // promise straight through with none of the normalization the throw path gets. An
+    // adapter answering with a rejecting promise therefore put it on a field documented
+    // never to reject: an unhandled rejection for a caller that ignores the field, and a
+    // throw for one that awaits it as the docs say to.
+    const adapter: HTTPAdapter = {
+      getType: () => 'node',
+      send: (_request: AdapterRequest): Promise<AdapterResponse> =>
+        Promise.resolve({
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+          body: new TextEncoder().encode('{"ok":true}'),
+          requestBodySettled: Promise.reject(new Error('upload blew up')),
+        }),
+    };
+
+    const response = await new HTTPClient({
+      adapter,
+      baseURL: 'http://example.test',
+    })
+      .post('/upload')
+      .send<{ ok: boolean }>();
+
+    expect(response.status).toBe(200);
+
+    const settled = await response.requestBodySettled;
+
+    expect(settled).toBeInstanceOf(Error);
+    expect((settled as Error).message).toContain('upload blew up');
+  });
+
+  test('a cancelled bodied request carries the upload outcome, not a silent success', async () => {
+    // The hole this closes: a cancel settles with no adapter response, so the field was
+    // omitted - and `await undefined` is `undefined`, which is the documented value for an
+    // upload that went out *in full*. A caller following the docs concluded its upload
+    // completed for a body that was cut off mid-flight, on the one path where it would
+    // think to ask. The adapter tags the throw instead; the client reads it off there.
+    const uploadFailure = new Error('upload cut short');
+    const controller = new AbortController();
+
+    const adapter: HTTPAdapter = {
+      getType: () => 'node',
+      send: (_request: AdapterRequest): Promise<AdapterResponse> => {
+        // Aborted from inside the adapter: aborting first returns before `send` is ever
+        // called, which is not the shape this is about.
+        controller.abort();
+
+        const abortErr = new Error('Request aborted');
+
+        abortErr.name = 'AbortError';
+        Object.assign(abortErr, {
+          [REQUEST_BODY_SETTLED_KEY]: Promise.resolve(uploadFailure),
+        });
+
+        return Promise.reject(abortErr);
+      },
+    };
+
+    const response = await new HTTPClient({
+      adapter,
+      baseURL: 'http://example.test',
+    })
+      .post('/upload')
+      .json({ a: 1 })
+      .signal(controller.signal)
+      .send();
+
+    expect(response.isCancelled).toBe(true);
+    expect(response.status).toBe(0);
+
+    // Presence first: the documented contract is that a bodied request has the field, and
+    // an absent one answers `undefined` through `await` without ever being missing.
+    expect(response.requestBodySettled).toBeDefined();
+    expect(await response.requestBodySettled).toBe(uploadFailure);
+  });
+
+  test('a followed redirect keeps the upload outcome from the hop that had the body', async () => {
+    // A followed `302` rewrites a `POST` to a bodiless `GET`, and the outcome was
+    // recomputed per hop off the final hop's own response - which has no writer and
+    // nothing to report. `await response.requestBodySettled` then answered `undefined`,
+    // the documented "the body went out" value, for exactly the early-ack
+    // `POST` -> `302` -> `GET` shape the field exists to expose.
+    const uploadFailure = new Error('server answered before the body finished');
+    const sent: Array<{ method: string; hasBody: boolean }> = [];
+
+    const adapter: HTTPAdapter = {
+      getType: () => 'node',
+      send: (request: AdapterRequest): Promise<AdapterResponse> => {
+        sent.push({
+          method: request.method,
+          hasBody: request.body !== undefined && request.body !== null,
+        });
+
+        if (sent.length === 1) {
+          return Promise.resolve({
+            status: 302,
+            headers: { location: '/done' },
+            body: null,
+            requestBodySettled: Promise.resolve(uploadFailure),
+          });
+        }
+
+        return Promise.resolve({
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+          body: new TextEncoder().encode('{"ok":true}'),
+        });
+      },
+    };
+
+    const response = await new HTTPClient({
+      adapter,
+      baseURL: 'http://example.test',
+      followRedirects: true,
+    })
+      .post('/upload')
+      .json({ a: 1 })
+      .send<{ ok: boolean }>();
+
+    expect(sent).toEqual([
+      { method: 'POST', hasBody: true },
+      { method: 'GET', hasBody: false },
+    ]);
+    expect(response.status).toBe(200);
+    expect(response.wasRedirectFollowed).toBe(true);
+    expect(response.requestBodySettled).toBeDefined();
+    expect(await response.requestBodySettled).toBe(uploadFailure);
+  });
+
+  test('a terminal 3xx with no Location after a bodied hop still carries the upload outcome', async () => {
+    // The one terminal redirect branch that built from the hop's own response and passed
+    // nothing explicit. After `POST` -> `302` -> `GET` -> `302` with no `Location`, the
+    // last hop is bodiless, so the response had nothing to adopt and `await
+    // response.requestBodySettled` answered `undefined` for the upload hop one cut short.
+    const uploadFailure = new Error('cut short on hop one');
+    let hop = 0;
+
+    const adapter: HTTPAdapter = {
+      getType: () => 'node',
+      send: (_request: AdapterRequest): Promise<AdapterResponse> => {
+        hop++;
+
+        if (hop === 1) {
+          return Promise.resolve({
+            status: 302,
+            headers: { location: '/next' },
+            body: null,
+            requestBodySettled: Promise.resolve(uploadFailure),
+          });
+        }
+
+        return Promise.resolve({
+          status: 302,
+          headers: {},
+          body: null,
+        });
+      },
+    };
+
+    const response = await new HTTPClient({
+      adapter,
+      baseURL: 'http://example.test',
+      followRedirects: true,
+    })
+      .post('/upload')
+      .json({ a: 1 })
+      .send();
+
+    expect(hop).toBe(2);
+    expect(response.status).toBe(302);
+    expect(response.wasRedirectFollowed).toBe(true);
+    expect(response.requestBodySettled).toBeDefined();
+    expect(await response.requestBodySettled).toBe(uploadFailure);
+  });
+
+  test('a throw between hops still carries the upload outcome', async () => {
+    // The `catch` around the whole of `send()` was the one terminal path that built with
+    // nothing. A cookie jar that throws while the redirect request is being prepared
+    // lands there after a hop that had a body, and the response it built answered
+    // `undefined` - the documented success value - for an upload that was cut short.
+    const uploadFailure = new Error('cut short');
+
+    const adapter: HTTPAdapter = {
+      getType: () => 'node',
+      send: (_request: AdapterRequest): Promise<AdapterResponse> =>
+        Promise.resolve({
+          status: 302,
+          headers: { location: '/next' },
+          body: null,
+          requestBodySettled: Promise.resolve(uploadFailure),
+        }),
+    };
+
+    const jar = new CookieJar();
+
+    jar.getCookieHeaderString = (url: string): string => {
+      if (url.includes('/next')) {
+        throw new Error('jar refused');
+      }
+
+      return '';
+    };
+
+    const response = await new HTTPClient({
+      adapter,
+      baseURL: 'http://example.test',
+      followRedirects: true,
+      cookieJar: jar,
+    })
+      .post('/upload')
+      .json({ a: 1 })
+      .send();
+
+    expect(response.isFailed).toBe(true);
+    expect(response.status).toBe(0);
+    expect(await response.requestBodySettled).toBe(uploadFailure);
+  });
+
+  test("a followed redirect waits for the hop's upload to settle first", async () => {
+    // `NodeAdapter.send()` resolves when the response is consumed, so an early `3xx`
+    // arrives with the writer still running - and the next hop went out beside it. A
+    // `307` then uploaded the same body twice at once. The hop's upload settles first.
+    let settledAt = 0;
+    let secondHopStartedAt = 0;
+    let hop = 0;
+
+    const adapter: HTTPAdapter = {
+      getType: () => 'node',
+      send: (_request: AdapterRequest): Promise<AdapterResponse> => {
+        hop++;
+
+        if (hop === 1) {
+          return Promise.resolve({
+            status: 307,
+            headers: { location: '/again' },
+            body: null,
+            requestBodySettled: new Promise((resolve) => {
+              setTimeout(() => {
+                settledAt = Date.now();
+                resolve(undefined);
+              }, 60);
+            }),
+          });
+        }
+
+        secondHopStartedAt = Date.now();
+
+        return Promise.resolve({ status: 200, headers: {}, body: null });
+      },
+    };
+
+    const response = await new HTTPClient({
+      adapter,
+      baseURL: 'http://example.test',
+      followRedirects: true,
+    })
+      .post('/upload')
+      .json({ a: 1 })
+      .send();
+
+    expect(response.status).toBe(200);
+    expect(hop).toBe(2);
+    expect(settledAt).toBeGreaterThan(0);
+    expect(secondHopStartedAt).toBeGreaterThanOrEqual(settledAt);
+  });
+
+  test('a cancel during that wait is not held for the upload', async () => {
+    const controller = new AbortController();
+    let hop = 0;
+
+    const adapter: HTTPAdapter = {
+      getType: () => 'node',
+      send: (_request: AdapterRequest): Promise<AdapterResponse> => {
+        hop++;
+
+        return Promise.resolve({
+          status: 307,
+          headers: { location: '/again' },
+          body: null,
+          // Never settles on its own: the wait must end with the cancel.
+          requestBodySettled: new Promise(() => {}),
+        });
+      },
+    };
+
+    const pending = new HTTPClient({
+      adapter,
+      baseURL: 'http://example.test',
+      followRedirects: true,
+    })
+      .post('/upload')
+      .json({ a: 1 })
+      .signal(controller.signal)
+      .send();
+
+    setTimeout(() => controller.abort('gave up waiting'), 30);
+
+    const startedAt = Date.now();
+    const response = await pending;
+
+    expect(Date.now() - startedAt).toBeLessThan(2000);
+    expect(response.isCancelled).toBe(true);
+    expect(hop).toBe(1);
+    // Carried off the hop the cancel interrupted: the upload was still going out, and
+    // `undefined` here would read as "the body went out in full".
+    expect(response.requestBodySettled).toBeDefined();
+  });
+
+  test("a cancel during that wait keeps the caller's abort reason", async () => {
+    // Every other abort path reads the signal's reason onto the error; this one built
+    // the cancelled response and broke to the failure block with the reason unset.
+    const controller = new AbortController();
+
+    const adapter: HTTPAdapter = {
+      getType: () => 'node',
+      send: (_request: AdapterRequest): Promise<AdapterResponse> =>
+        Promise.resolve({
+          status: 307,
+          headers: { location: '/again' },
+          body: null,
+          requestBodySettled: new Promise(() => {}),
+        }),
+    };
+
+    const builder = new HTTPClient({
+      adapter,
+      baseURL: 'http://example.test',
+      followRedirects: true,
+    })
+      .post('/upload')
+      .json({ a: 1 })
+      .signal(controller.signal);
+
+    const pending = builder.send();
+
+    setTimeout(() => controller.abort('gave up waiting'), 30);
+
+    const response = await pending;
+
+    expect(response.isCancelled).toBe(true);
+    expect(builder.error?.cancelReason).toBe('gave up waiting');
+  });
+
+  test('an adapter whose requestBodySettled never settles fails the redirect as a timeout at the request timeout', async () => {
+    // `NodeAdapter` bounds its own promise through the upload stall watchdog. A custom
+    // adapter is a public extension point, and one that set the field and never settled
+    // it held a followed `307`/`308` until the caller aborted - no timeout, no error,
+    // nothing on any channel. Bounded now by the caller's own `timeout`, and what
+    // happens at the bound is a failed request, not a second hop: dispatching the body
+    // again beside an upload nobody can say has finished is the double-send the wait
+    // exists to prevent.
+    let hop = 0;
+
+    const signals: AbortSignal[] = [];
+
+    const adapter: HTTPAdapter = {
+      getType: () => 'fetch',
+      send: (request: AdapterRequest): Promise<AdapterResponse> => {
+        hop++;
+
+        if (request.signal) {
+          signals.push(request.signal);
+        }
+
+        return Promise.resolve({
+          status: 307,
+          headers: { location: '/again' },
+          body: null,
+          requestBodySettled: new Promise(() => {}),
+        });
+      },
+    };
+
+    const reports: ErrorEvent[] = [];
+    const onGlobalError = (event: Event): void => {
+      reports.push(event as ErrorEvent);
+      event.preventDefault();
+    };
+
+    globalThis.addEventListener('error', onGlobalError);
+
+    try {
+      const startedAt = Date.now();
+      const response = await new HTTPClient({
+        adapter,
+        baseURL: 'http://example.test',
+        followRedirects: true,
+        timeout: 100,
+      })
+        .post('/upload')
+        .json({ a: 1 })
+        .send();
+
+      expect(Date.now() - startedAt).toBeLessThan(2000);
+      expect(hop).toBe(1);
+      expect(response.isTimeout).toBe(true);
+      expect(response.isCancelled).toBe(false);
+      // Still carried, so the caller can await the adapter's word if it ever comes.
+      expect(response.requestBodySettled).toBeDefined();
+      // And the hop given up on is torn down, as a per-attempt timeout tears one down:
+      // the request has been reported as timed out, so its upload must not go on
+      // putting bytes on the wire. `NodeAdapter` answers this signal by destroying the
+      // request; a custom adapter is expected to.
+      expect(signals).toHaveLength(1);
+      expect(signals[0]?.aborted).toBe(true);
+
+      // The timeout error cannot say why; this does, and names the adapter.
+      expect(reports).toHaveLength(1);
+      expect((reports[0]?.error as Error).message).toContain(
+        "'fetch' adapter's requestBodySettled must settle in bounded time",
+      );
+      expect((reports[0]?.error as Error).message).toContain('redirect');
+    } finally {
+      globalThis.removeEventListener('error', onGlobalError);
+    }
+  });
+
+  test('an adapter whose requestBodySettled never settles fails the retry as a timeout at the request timeout', async () => {
+    // The retry path waits the same way, after the backoff, and is bounded the same
+    // way: a `503` answered mid-upload must not have its next attempt dispatched beside
+    // the first attempt's body.
+    let attempts = 0;
+    const signals: AbortSignal[] = [];
+
+    const adapter: HTTPAdapter = {
+      getType: () => 'fetch',
+      send: (request: AdapterRequest): Promise<AdapterResponse> => {
+        attempts++;
+
+        if (request.signal) {
+          signals.push(request.signal);
+        }
+
+        return Promise.resolve({
+          status: 503,
+          headers: {},
+          body: null,
+          requestBodySettled: new Promise(() => {}),
+        });
+      },
+    };
+
+    const reports: ErrorEvent[] = [];
+    const onGlobalError = (event: Event): void => {
+      reports.push(event as ErrorEvent);
+      event.preventDefault();
+    };
+
+    globalThis.addEventListener('error', onGlobalError);
+
+    try {
+      const response = await new HTTPClient({
+        adapter,
+        baseURL: 'http://example.test',
+        timeout: 100,
+        retryPolicy: { strategy: 'fixed', maxRetryAttempts: 2, delayMS: 0 },
+      })
+        .put('/upload')
+        .json({ a: 1 })
+        .send();
+
+      expect(attempts).toBe(1);
+      expect(response.isTimeout).toBe(true);
+      expect(response.requestBodySettled).toBeDefined();
+      expect(reports).toHaveLength(1);
+      expect((reports[0]?.error as Error).message).toContain('retry');
+      // The attempt given up on is torn down with the request; see the redirect test.
+      expect(signals[0]?.aborted).toBe(true);
+    } finally {
+      globalThis.removeEventListener('error', onGlobalError);
+    }
+  });
+
+  test('silence before the wait began counts toward the stall bound', async () => {
+    // The first arm always slept for the whole bound, so an upload that had gone quiet
+    // long before the early response arrived was given a further full bound from the
+    // moment the wait began. The clock is read on entry now: a hop that answers 200ms
+    // after dispatch and never reports progress has 200ms of silence already, and the
+    // wait under a 300ms bound expires about 100ms later, not 300ms. The margins are
+    // wide because a loaded runner adds latency; the old behaviour lands near 500ms.
+    let hop = 0;
+
+    const adapter: HTTPAdapter = {
+      getType: () => 'fetch',
+      send: async (_request: AdapterRequest): Promise<AdapterResponse> => {
+        hop++;
+        await new Promise((resolve) => setTimeout(resolve, 200));
+
+        return {
+          status: 307,
+          headers: { location: '/again' },
+          body: null,
+          requestBodySettled: new Promise(() => {}),
+        };
+      },
+    };
+
+    const onGlobalError = (event: Event): void => {
+      event.preventDefault();
+    };
+
+    globalThis.addEventListener('error', onGlobalError);
+
+    try {
+      const startedAt = Date.now();
+      const response = await new HTTPClient({
+        adapter,
+        baseURL: 'http://example.test',
+        followRedirects: true,
+        timeout: 300,
+      })
+        .post('/upload')
+        .json({ a: 1 })
+        .send();
+
+      const elapsed = Date.now() - startedAt;
+
+      expect(hop).toBe(1);
+      expect(response.isTimeout).toBe(true);
+      // One bound from dispatch, not one bound from the response: ~300ms, not ~500ms.
+      expect(elapsed).toBeGreaterThanOrEqual(280);
+      expect(elapsed).toBeLessThan(450);
+    } finally {
+      globalThis.removeEventListener('error', onGlobalError);
+    }
+  });
+
+  test('an upload still reporting progress past the request timeout is not cut', async () => {
+    // A stall bound, not a deadline. The adapter here keeps reporting progress every
+    // 30ms for 250ms after answering the `307`, against a `timeout` of 100ms, and only
+    // then settles: the wait must follow it to the end and dispatch the second hop, not
+    // fail at 100ms with the body still moving.
+    let hop = 0;
+    let settleFirst!: () => void;
+
+    const adapter: HTTPAdapter = {
+      getType: () => 'fetch',
+      send: (request: AdapterRequest): Promise<AdapterResponse> => {
+        hop++;
+
+        if (hop === 2) {
+          return Promise.resolve({ status: 200, headers: {}, body: null });
+        }
+
+        const settled = new Promise<Error | undefined>((resolve) => {
+          settleFirst = () => resolve(undefined);
+        });
+
+        let ticks = 0;
+        const ticker = setInterval(() => {
+          ticks++;
+          request.onUploadProgress?.({
+            loaded: ticks,
+            total: 10,
+            progress: ticks / 10,
+          });
+
+          if (ticks >= 8) {
+            clearInterval(ticker);
+            settleFirst();
+          }
+        }, 30);
+
+        return Promise.resolve({
+          status: 307,
+          headers: { location: '/again' },
+          body: null,
+          requestBodySettled: settled,
+        });
+      },
+    };
+
+    const response = await new HTTPClient({
+      adapter,
+      baseURL: 'http://example.test',
+      followRedirects: true,
+      timeout: 100,
+    })
+      .post('/upload')
+      .json({ a: 1 })
+      .send();
+
+    expect(hop).toBe(2);
+    expect(response.status).toBe(200);
+    expect(response.isTimeout).toBe(false);
+  });
+
+  test('a timeout of 0 leaves the wait unbounded, as it leaves the per-attempt timer', async () => {
+    const controller = new AbortController();
+    let hop = 0;
+
+    const adapter: HTTPAdapter = {
+      getType: () => 'fetch',
+      send: (_request: AdapterRequest): Promise<AdapterResponse> => {
+        hop++;
+
+        return Promise.resolve({
+          status: 307,
+          headers: { location: '/again' },
+          body: null,
+          requestBodySettled: new Promise(() => {}),
+        });
+      },
+    };
+
+    const pending = new HTTPClient({
+      adapter,
+      baseURL: 'http://example.test',
+      followRedirects: true,
+      timeout: 0,
+    })
+      .post('/upload')
+      .json({ a: 1 })
+      .signal(controller.signal)
+      .send();
+
+    const stillWaiting = Symbol('still waiting');
+    const outcome = await Promise.race([
+      pending,
+      new Promise<typeof stillWaiting>((resolve) => {
+        setTimeout(() => resolve(stillWaiting), 150);
+      }),
+    ]);
+
+    expect(outcome).toBe(stillWaiting);
+    expect(hop).toBe(1);
+
+    controller.abort('gave up');
+
+    const response = await pending;
+
+    expect(response.isCancelled).toBe(true);
+    expect(response.isTimeout).toBe(false);
+  });
+
+  test('a 307 that resends the body reports the resent upload, not the first', async () => {
+    // The latest hop that had a body is the answer: a `307` puts the body on the wire
+    // again, and its outcome is the one behind the final response.
+    const firstFailure = new Error('first hop cut short');
+    let hop = 0;
+
+    const adapter: HTTPAdapter = {
+      getType: () => 'node',
+      send: (_request: AdapterRequest): Promise<AdapterResponse> => {
+        hop++;
+
+        if (hop === 1) {
+          return Promise.resolve({
+            status: 307,
+            headers: { location: '/again' },
+            body: null,
+            requestBodySettled: Promise.resolve(firstFailure),
+          });
+        }
+
+        return Promise.resolve({
+          status: 200,
+          headers: {},
+          body: null,
+          requestBodySettled: Promise.resolve(undefined),
+        });
+      },
+    };
+
+    const response = await new HTTPClient({
+      adapter,
+      baseURL: 'http://example.test',
+      followRedirects: true,
+    })
+      .post('/upload')
+      .json({ a: 1 })
+      .send();
+
+    expect(hop).toBe(2);
+    expect(response.requestBodySettled).toBeDefined();
+    expect(await response.requestBodySettled).toBeUndefined();
+  });
+
+  test('a redirect loop after a bodied hop still carries the upload outcome', async () => {
+    const uploadFailure = new Error('cut short');
+
+    const adapter: HTTPAdapter = {
+      getType: () => 'node',
+      send: (_request: AdapterRequest): Promise<AdapterResponse> =>
+        Promise.resolve({
+          status: 307,
+          headers: { location: '/loop' },
+          body: null,
+          requestBodySettled: Promise.resolve(uploadFailure),
+        }),
+    };
+
+    const response = await new HTTPClient({
+      adapter,
+      baseURL: 'http://example.test',
+      followRedirects: true,
+      maxRedirects: 2,
+    })
+      .post('/upload')
+      .json({ a: 1 })
+      .send();
+
+    expect(response.isFailed).toBe(true);
+    expect(await response.requestBodySettled).toBe(uploadFailure);
+  });
+
+  test('a timed-out bodied request carries the upload outcome', async () => {
+    const uploadFailure = new Error('upload never finished');
+
+    const adapter: HTTPAdapter = {
+      getType: () => 'node',
+      send: (request: AdapterRequest): Promise<AdapterResponse> =>
+        new Promise((_resolve, reject) => {
+          request.signal?.addEventListener('abort', () => {
+            const abortErr = new Error('Request aborted');
+
+            abortErr.name = 'AbortError';
+            Object.assign(abortErr, {
+              [REQUEST_BODY_SETTLED_KEY]: Promise.resolve(uploadFailure),
+            });
+
+            reject(abortErr);
+          });
+        }),
+    };
+
+    const response = await new HTTPClient({
+      adapter,
+      baseURL: 'http://example.test',
+      timeout: 20,
+    })
+      .post('/upload')
+      .json({ a: 1 })
+      .send();
+
+    expect(response.isTimeout).toBe(true);
+    expect(response.requestBodySettled).toBeDefined();
+    expect(await response.requestBodySettled).toBe(uploadFailure);
+  });
+
+  test('a requestBodySettled whose thenable check throws does not fail the response', async () => {
+    // Deciding whether the field is a thenable reads `.then` on a value the adapter made.
+    // A `Proxy` that throws on that read threw out of `_buildResponse`, after the request
+    // had already succeeded - a `200` turned into a synthetic failed status-0 response
+    // over a field documented as advisory. Unusable is treated as absent.
+    const hostile = new Proxy(
+      {},
+      {
+        get: () => {
+          throw new Error('no then for you');
+        },
+      },
+    );
+
+    const adapter: HTTPAdapter = {
+      getType: () => 'node',
+      send: (_request: AdapterRequest): Promise<AdapterResponse> =>
+        Promise.resolve({
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+          body: new TextEncoder().encode('{"ok":true}'),
+          requestBodySettled: hostile as unknown as Promise<Error | undefined>,
+        }),
+    };
+
+    const response = await new HTTPClient({
+      adapter,
+      baseURL: 'http://example.test',
+    })
+      .post('/upload')
+      .json({ a: 1 })
+      .send<{ ok: boolean }>();
+
+    expect(response.status).toBe(200);
+    expect(response.isFailed).toBe(false);
+    expect(response.body).toEqual({ ok: true });
+    expect(response.requestBodySettled).toBeUndefined();
+  });
+
+  test('a tagged value whose thenable check throws is ignored on the throw path too', async () => {
+    // The same read on the tag an adapter puts on the error it throws.
+    const hostile = new Proxy(
+      {},
+      {
+        get: () => {
+          throw new Error('no then for you');
+        },
+      },
+    );
+    const controller = new AbortController();
+
+    const adapter: HTTPAdapter = {
+      getType: () => 'node',
+      send: (_request: AdapterRequest): Promise<AdapterResponse> => {
+        controller.abort();
+
+        const abortErr = new Error('Request aborted');
+
+        abortErr.name = 'AbortError';
+        Object.assign(abortErr, { [REQUEST_BODY_SETTLED_KEY]: hostile });
+
+        return Promise.reject(abortErr);
+      },
+    };
+
+    const response = await new HTTPClient({
+      adapter,
+      baseURL: 'http://example.test',
+    })
+      .post('/upload')
+      .json({ a: 1 })
+      .signal(controller.signal)
+      .send();
+
+    expect(response.isCancelled).toBe(true);
+    expect(response.requestBodySettled).toBeUndefined();
+  });
+
+  test('a tagged value that is not a promise is ignored rather than awaited', async () => {
+    // The tag is an ordinary property on an object this client did not create. `await` on
+    // a non-thenable resolves to the value itself, so trusting it would report the tag as
+    // the upload's own outcome - a string, or anything else a caller's `Error` subclass
+    // happens to carry under that name.
+    const controller = new AbortController();
+
+    const adapter: HTTPAdapter = {
+      getType: () => 'node',
+      send: (_request: AdapterRequest): Promise<AdapterResponse> => {
+        controller.abort();
+
+        const abortErr = new Error('Request aborted');
+
+        abortErr.name = 'AbortError';
+        Object.assign(abortErr, {
+          [REQUEST_BODY_SETTLED_KEY]: 'not a promise',
+        });
+
+        return Promise.reject(abortErr);
+      },
+    };
+
+    const response = await new HTTPClient({
+      adapter,
+      baseURL: 'http://example.test',
+    })
+      .post('/upload')
+      .json({ a: 1 })
+      .signal(controller.signal)
+      .send();
+
+    expect(response.isCancelled).toBe(true);
+    expect(response.requestBodySettled).toBeUndefined();
   });
 
   test('rejects browser XHR redirect handling when explicitly enabled', () => {
@@ -1352,6 +2247,379 @@ describe('HTTPClient — cancel reason via AbortError-throwing adapters', () => 
     }
   });
 
+  test('a caller signal reused across sends is left with no abort listener when AbortSignal.any is unavailable', async () => {
+    // The fallback composition used to add a `{ once: true }` listener to the caller's
+    // signal per `send()`, and never remove it on success - so a signal reused for the
+    // life of a page or a worker accumulated one listener per request until the
+    // runtime's listener-count warning fired. Every request now releases the listeners
+    // it added when it ends, so the count is measured net of removals.
+    const adapter: HTTPAdapter = {
+      getType: () => 'mock',
+      send: async (request: AdapterRequest): Promise<AdapterResponse> => {
+        if (request.requestURL.endsWith('/slow')) {
+          await new Promise<void>((resolve) => {
+            request.signal?.addEventListener('abort', () => resolve(), {
+              once: true,
+            });
+          });
+
+          const error = new Error('Aborted');
+          error.name = 'AbortError';
+          throw error;
+        }
+
+        return { status: 200, headers: {}, body: null };
+      },
+    };
+    const client = new HTTPClient({ adapter });
+    const controller = new AbortController();
+    const originalAnyDescriptor = Object.getOwnPropertyDescriptor(
+      AbortSignal,
+      'any',
+    );
+    const addEventListenerSpy = spyOn(controller.signal, 'addEventListener');
+    const removeEventListenerSpy = spyOn(
+      controller.signal,
+      'removeEventListener',
+    );
+    const countAbortCalls = (calls: unknown[][]): number =>
+      calls.filter((call) => call[0] === 'abort').length;
+    const abortListenersAdded = (): number =>
+      countAbortCalls(addEventListenerSpy.mock.calls);
+    const abortListenersOutstanding = (): number =>
+      abortListenersAdded() -
+      countAbortCalls(removeEventListenerSpy.mock.calls);
+
+    Object.defineProperty(AbortSignal, 'any', {
+      value: undefined,
+      configurable: true,
+    });
+
+    try {
+      for (let i = 0; i < 25; i += 1) {
+        const res = await client
+          .get(`https://example.com/ok/${i}`)
+          .signal(controller.signal)
+          .send();
+
+        expect(res.status).toBe(200);
+      }
+
+      // One per request while it ran, none left behind after.
+      expect(abortListenersAdded()).toBe(25);
+      expect(abortListenersOutstanding()).toBe(0);
+
+      // And the next request still hears the abort, with the caller's reason intact.
+      const builder = client
+        .get('https://example.com/slow')
+        .signal(controller.signal);
+      const promise = builder.send();
+      setTimeout(() => controller.abort('user_navigated_away'), 10);
+      const res = await promise;
+
+      expect(res.isCancelled).toBe(true);
+      expect(builder.error?.cancelReason).toBe('user_navigated_away');
+      expect(abortListenersOutstanding()).toBe(0);
+    } finally {
+      addEventListenerSpy.mockRestore();
+      removeEventListenerSpy.mockRestore();
+
+      if (originalAnyDescriptor) {
+        Object.defineProperty(AbortSignal, 'any', originalAnyDescriptor);
+      }
+    }
+  });
+
+  test('a retry chain leaves no abort listener on any signal when AbortSignal.any is unavailable', async () => {
+    // The same release covers the per-attempt composition: every attempt composes the
+    // request's cancel signal - itself a composition, so the caller's signal never sees
+    // these - with its own timeout signal, and used to leave one listener per attempt
+    // on that cancel signal for as long as the signal lived. Counted per signal across
+    // the whole send, at the prototype, since the cancel signal is internal, and net of
+    // removals: the old code left fifteen on it, and the request now takes every one
+    // of them off when it ends. Within a request the count still grows by one per
+    // attempt, which is the bounded case this accepts.
+    let attempts = 0;
+    const adapter: HTTPAdapter = {
+      getType: () => 'mock',
+      send: (): Promise<AdapterResponse> => {
+        attempts += 1;
+
+        return Promise.resolve({
+          status: attempts < 15 ? 503 : 200,
+          headers: {},
+          body: null,
+        });
+      },
+    };
+    const client = new HTTPClient({ adapter });
+    const controller = new AbortController();
+    const originalAnyDescriptor = Object.getOwnPropertyDescriptor(
+      AbortSignal,
+      'any',
+    );
+    const addDescriptor = Object.getOwnPropertyDescriptor(
+      EventTarget.prototype,
+      'addEventListener',
+    );
+    const removeDescriptor = Object.getOwnPropertyDescriptor(
+      EventTarget.prototype,
+      'removeEventListener',
+    );
+
+    if (addDescriptor === undefined || removeDescriptor === undefined) {
+      throw new Error('EventTarget.prototype listener methods are missing');
+    }
+
+    const abortListenersPerSignal = new Map<AbortSignal, number>();
+    const originalAdd = addDescriptor.value as (
+      this: EventTarget,
+      ...args: Parameters<EventTarget['addEventListener']>
+    ) => void;
+    const originalRemove = removeDescriptor.value as (
+      this: EventTarget,
+      ...args: Parameters<EventTarget['removeEventListener']>
+    ) => void;
+    const count = (signal: EventTarget, delta: number): void => {
+      if (signal instanceof AbortSignal) {
+        abortListenersPerSignal.set(
+          signal,
+          (abortListenersPerSignal.get(signal) ?? 0) + delta,
+        );
+      }
+    };
+
+    Object.defineProperty(EventTarget.prototype, 'addEventListener', {
+      ...addDescriptor,
+      value: function countingAddEventListener(
+        this: EventTarget,
+        ...args: Parameters<EventTarget['addEventListener']>
+      ): void {
+        if (args[0] === 'abort') {
+          count(this, 1);
+        }
+
+        Reflect.apply(originalAdd, this, args);
+      },
+    });
+    Object.defineProperty(EventTarget.prototype, 'removeEventListener', {
+      ...removeDescriptor,
+      value: function countingRemoveEventListener(
+        this: EventTarget,
+        ...args: Parameters<EventTarget['removeEventListener']>
+      ): void {
+        if (args[0] === 'abort') {
+          count(this, -1);
+        }
+
+        Reflect.apply(originalRemove, this, args);
+      },
+    });
+
+    Object.defineProperty(AbortSignal, 'any', {
+      value: undefined,
+      configurable: true,
+    });
+
+    try {
+      const res = await client
+        .get('https://example.com/flaky')
+        .signal(controller.signal)
+        .retryPolicy({ strategy: 'fixed', maxRetryAttempts: 20, delayMS: 0 })
+        .send();
+
+      expect(res.status).toBe(200);
+      expect(attempts).toBe(15);
+      // Some signal was composed into every attempt, so the release was exercised.
+      expect(abortListenersPerSignal.size).toBeGreaterThanOrEqual(15);
+      expect(Math.max(...abortListenersPerSignal.values())).toBe(0);
+    } finally {
+      Object.defineProperty(
+        EventTarget.prototype,
+        'addEventListener',
+        addDescriptor,
+      );
+      Object.defineProperty(
+        EventTarget.prototype,
+        'removeEventListener',
+        removeDescriptor,
+      );
+
+      if (originalAnyDescriptor) {
+        Object.defineProperty(AbortSignal, 'any', originalAnyDescriptor);
+      }
+    }
+  });
+
+  test('a caller signal that outlives hundreds of requests still delivers an abort', async () => {
+    // A source that outlives hundreds of finished requests, each of which released
+    // its listener, with a full collection forced in between where the runtime offers
+    // one: the request still in flight must still be cancelled, with the caller's
+    // reason, and nothing released earlier may interfere.
+    const adapter: HTTPAdapter = {
+      getType: () => 'mock',
+      send: async (request: AdapterRequest): Promise<AdapterResponse> => {
+        if (request.requestURL.endsWith('/slow')) {
+          await new Promise<void>((resolve) => {
+            request.signal?.addEventListener('abort', () => resolve(), {
+              once: true,
+            });
+          });
+
+          const error = new Error('Aborted');
+          error.name = 'AbortError';
+          throw error;
+        }
+
+        return { status: 200, headers: {}, body: null };
+      },
+    };
+    const client = new HTTPClient({ adapter });
+    const controller = new AbortController();
+    const originalAnyDescriptor = Object.getOwnPropertyDescriptor(
+      AbortSignal,
+      'any',
+    );
+
+    Object.defineProperty(AbortSignal, 'any', {
+      value: undefined,
+      configurable: true,
+    });
+
+    try {
+      for (let i = 0; i < 300; i += 1) {
+        await client
+          .get(`https://example.com/ok/${i}`)
+          .signal(controller.signal)
+          .send();
+      }
+
+      const bun = (globalThis as { Bun?: { gc?: (force: boolean) => void } })
+        .Bun;
+
+      bun?.gc?.(true);
+
+      const builder = client
+        .get('https://example.com/slow')
+        .signal(controller.signal);
+      const promise = builder.send();
+
+      setTimeout(() => controller.abort('after_gc'), 10);
+
+      const res = await promise;
+
+      expect(res.isCancelled).toBe(true);
+      expect(builder.error?.cancelReason).toBe('after_gc');
+    } finally {
+      if (originalAnyDescriptor) {
+        Object.defineProperty(AbortSignal, 'any', originalAnyDescriptor);
+      }
+    }
+  });
+
+  test('a caller signal whose listener registration throws leaves nothing attached when AbortSignal.any is unavailable', async () => {
+    // Two gaps the release list had: the caller's signal was composed before the `try`
+    // whose `finally` runs the releasers, and the releaser was pushed only after both
+    // listeners were attached. A signal that accepts the first listener and throws on
+    // the second - here the internal controller's signal is the second - therefore left
+    // the first attached forever. The throw itself surfaces to the caller - a signal
+    // that refuses listeners is not something the client papers over - and the caller's
+    // signal is left exactly as it was found.
+    const adapter: HTTPAdapter = {
+      getType: () => 'mock',
+      send: (): Promise<AdapterResponse> =>
+        Promise.resolve({ status: 200, headers: {}, body: null }),
+    };
+    const client = new HTTPClient({ adapter });
+    const controller = new AbortController();
+    const originalAnyDescriptor = Object.getOwnPropertyDescriptor(
+      AbortSignal,
+      'any',
+    );
+    const addDescriptor = Object.getOwnPropertyDescriptor(
+      EventTarget.prototype,
+      'addEventListener',
+    );
+
+    if (addDescriptor === undefined) {
+      throw new Error('EventTarget.prototype.addEventListener is missing');
+    }
+
+    const originalAdd = addDescriptor.value as (
+      this: EventTarget,
+      ...args: Parameters<EventTarget['addEventListener']>
+    ) => void;
+    const addSpy = spyOn(controller.signal, 'addEventListener');
+    const removeSpy = spyOn(controller.signal, 'removeEventListener');
+    let abortListenersAttachedElsewhere = 0;
+
+    // Every signal other than the caller's refuses an abort listener, so the second
+    // attach inside `_composeSignals` throws after the first has landed on the caller's.
+    Object.defineProperty(EventTarget.prototype, 'addEventListener', {
+      ...addDescriptor,
+      value: function refusingAddEventListener(
+        this: EventTarget,
+        ...args: Parameters<EventTarget['addEventListener']>
+      ): void {
+        if (
+          args[0] === 'abort' &&
+          this instanceof AbortSignal &&
+          this !== controller.signal
+        ) {
+          abortListenersAttachedElsewhere += 1;
+          throw new Error('no listeners here');
+        }
+
+        Reflect.apply(originalAdd, this, args);
+      },
+    });
+
+    Object.defineProperty(AbortSignal, 'any', {
+      value: undefined,
+      configurable: true,
+    });
+
+    try {
+      let thrown: unknown;
+
+      try {
+        await client
+          .get('https://example.com/ok')
+          .signal(controller.signal)
+          .send();
+      } catch (error) {
+        thrown = error;
+      }
+
+      expect(thrown).toBeInstanceOf(Error);
+      expect((thrown as Error).message).toBe('no listeners here');
+
+      expect(abortListenersAttachedElsewhere).toBeGreaterThan(0);
+
+      const added = addSpy.mock.calls.filter((call) => call[0] === 'abort');
+      const removed = removeSpy.mock.calls.filter(
+        (call) => call[0] === 'abort',
+      );
+
+      expect(added.length).toBe(1);
+      expect(removed.length).toBe(added.length);
+      // The listener taken off is the one put on.
+      expect(removed[0]?.[1]).toBe(added[0]?.[1]);
+    } finally {
+      Object.defineProperty(
+        EventTarget.prototype,
+        'addEventListener',
+        addDescriptor,
+      );
+      addSpy.mockRestore();
+      removeSpy.mockRestore();
+
+      if (originalAnyDescriptor) {
+        Object.defineProperty(AbortSignal, 'any', originalAnyDescriptor);
+      }
+    }
+  });
+
   test('no cancelReason when cancel called without reason via AbortError-throwing adapter', async () => {
     const { adapter } = makeAbortErrorAdapter();
     const client = new HTTPClient({ adapter });
@@ -1474,7 +2742,9 @@ describe('HTTPClient — adapter marker flags', () => {
 
     expect(response.isCancelled).toBe(false);
     expect(builder.error?.code).toBe('adapter_error');
-    expect(builder.error?.cause?.message).toBe('Unknown error');
+    expect(builder.error?.cause?.message).toBe(
+      'Non-error value thrown: unknown value',
+    );
   });
 
   test('throwing stream metadata getters cannot replace a caller cancellation', async () => {
@@ -2155,6 +3425,145 @@ describe('HTTPClient — cookies', () => {
   });
 });
 
+describe('HTTPClient — cookies across a scheme-crossing redirect', () => {
+  test('an http hop in the chain cannot replace the Secure cookie the https hop set', async () => {
+    // The real-world shape of the jar's store-time rule, driven through the client's
+    // redirect loop rather than the jar alone: `https://` logs in and sets a Secure
+    // session, redirects to an `http://` page that tries to plant its own `session`,
+    // which redirects back to `https://`. MockAdapter matches routes by path, so one
+    // adapter serves both schemes.
+    const adapter = new MockAdapter();
+    const seenCookies: Array<{ path: string; cookie: string | undefined }> = [];
+    const record = (req: {
+      path: string;
+      headers: Record<string, string>;
+    }): void => {
+      seenCookies.push({ path: req.path, cookie: req.headers['cookie'] });
+    };
+
+    adapter.routes.get('/login', (req) => {
+      record(req);
+
+      return {
+        status: 302,
+        headers: {
+          location: 'http://api.test/plain',
+          'set-cookie': 'session=real; Secure; Path=/',
+        },
+      };
+    });
+    adapter.routes.get('/plain', (req) => {
+      record(req);
+
+      return {
+        status: 302,
+        headers: {
+          location: 'https://api.test/me',
+          'set-cookie': ['session=evil; Path=/', 'session=; Max-Age=0; Path=/'],
+        },
+      };
+    });
+    adapter.routes.get('/me', (req) => {
+      record(req);
+
+      return { status: 200, body: { ok: true } };
+    });
+
+    const jar = new CookieJar();
+    const client = new HTTPClient({
+      adapter,
+      baseURL: 'https://api.test',
+      cookieJar: jar,
+      followRedirects: true,
+    });
+
+    const res = await client.get('/login').send();
+
+    expect(res.status).toBe(200);
+    expect(res.redirectHistory).toEqual([
+      'http://api.test/plain',
+      'https://api.test/me',
+    ]);
+    expect(seenCookies.map((entry) => entry.path)).toEqual([
+      '/login',
+      '/plain',
+      '/me',
+    ]);
+    // Nothing went to the plain-text hop, and the https hop got the real session only.
+    expect(seenCookies[1]?.cookie).toBeUndefined();
+    expect(seenCookies[2]?.cookie).toBe('session=real');
+    expect(jar.getAllCookies()).toHaveLength(1);
+    expect(jar.getCookieFor('session', 'https://api.test/')?.value).toBe(
+      'real',
+    );
+  });
+});
+
+describe('HTTPClient — redirect scheme downgrade', () => {
+  test('a 307 from https to http resends the body, with credentials stripped', async () => {
+    // Pinned as policy rather than found as a bug: curl and Node's clients follow a
+    // downgrade with the body intact, and this client matches them. What it must not do
+    // is carry credentials across: the hop is cross-origin, so `Authorization` and the
+    // jar's Secure cookie stay behind. See the redirect docs.
+    const adapter = new MockAdapter();
+    const seen: Array<{
+      path: string;
+      body: unknown;
+      authorization: string | undefined;
+      cookie: string | undefined;
+    }> = [];
+
+    adapter.routes.post('/upload', (req) => {
+      seen.push({
+        path: req.path,
+        body: req.body,
+        authorization: req.headers['authorization'],
+        cookie: req.headers['cookie'],
+      });
+
+      return {
+        status: 307,
+        headers: { location: 'http://api.test/upload-plain' },
+      };
+    });
+    adapter.routes.post('/upload-plain', (req) => {
+      seen.push({
+        path: req.path,
+        body: req.body,
+        authorization: req.headers['authorization'],
+        cookie: req.headers['cookie'],
+      });
+
+      return { status: 200, body: { ok: true } };
+    });
+
+    const jar = new CookieJar();
+    jar.parseSetCookieHeader('session=real; Secure', 'https://api.test/');
+
+    const res = await new HTTPClient({
+      adapter,
+      baseURL: 'https://api.test',
+      cookieJar: jar,
+      followRedirects: true,
+    })
+      .post('/upload')
+      .headers({ authorization: 'Bearer token' })
+      .json({ a: 1 })
+      .send();
+
+    expect(res.status).toBe(200);
+    expect(seen.map((entry) => entry.path)).toEqual([
+      '/upload',
+      '/upload-plain',
+    ]);
+    expect(seen[0]?.authorization).toBe('Bearer token');
+    expect(seen[0]?.cookie).toBe('session=real');
+    expect(seen[1]?.body).toEqual({ a: 1 });
+    expect(seen[1]?.authorization).toBeUndefined();
+    expect(seen[1]?.cookie).toBeUndefined();
+  });
+});
+
 describe('HTTPClient — interceptors', () => {
   test('request interceptor runs before request', async () => {
     const client = makeClient({ followRedirects: true });
@@ -2476,6 +3885,126 @@ describe('HTTPClient — FormData upload', () => {
     expect(res.body.received).toBe(true);
     expect(res.body.fields.username).toBe('alice');
   });
+
+  test('removes an inherited Content-Type so the adapter can add the multipart boundary', async () => {
+    const client = makeClient({
+      followRedirects: true,
+      defaultHeaders: { 'Content-Type': 'application/json' },
+    });
+    const fd = new FormData();
+    fd.append('username', 'alice');
+    let contentType: string | string[] | undefined;
+
+    client.addResponseObserver((_response, request) => {
+      contentType = request.headers['content-type'];
+    });
+
+    await client.post('/api/upload').formData(fd).send();
+
+    expect(contentType).toBeUndefined();
+  });
+});
+
+describe('HTTPClient — timeout resolution', () => {
+  // `Number(process.env.UNSET)` is `NaN`, and taken literally it passed the `> 0` check
+  // that arms the per-attempt timer *and* the `<= 0` check that disables the
+  // upload-settle wait: no timer on the attempt, and a wait that re-armed a `NaN` timer
+  // every millisecond and could never expire. `Infinity` fired the attempt timer after
+  // 1 ms, since the timer coerces anything past 2^31 - 1 to 1. `NaN` now takes the
+  // default and `Infinity` disables the timer, on the config and the per-request override.
+  const observed = async (
+    config: { timeout?: number },
+    perRequest?: number,
+  ): Promise<number | undefined> => {
+    const client = makeClient(config);
+    let seen: number | undefined;
+
+    client.addResponseObserver((_res, req) => {
+      seen = req.timeout;
+    });
+
+    const builder = client.get('/api/users/1');
+
+    if (perRequest !== undefined) {
+      builder.timeout(perRequest);
+    }
+
+    await builder.send();
+
+    return seen;
+  };
+
+  test('NaN takes the default, on the config and per request', async () => {
+    expect(await observed({ timeout: Number.NaN })).toBe(DEFAULT_TIMEOUT_MS);
+    expect(await observed({ timeout: 4_321 }, Number.NaN)).toBe(4_321);
+  });
+
+  test('Infinity means no timeout, the same as 0', async () => {
+    expect(await observed({ timeout: Number.POSITIVE_INFINITY })).toBe(0);
+    expect(await observed({}, Number.POSITIVE_INFINITY)).toBe(0);
+  });
+
+  test('a finite value past the timer ceiling is clamped to it', async () => {
+    expect(await observed({ timeout: MAX_TIMER_MS + 1 })).toBe(MAX_TIMER_MS);
+  });
+
+  test('zero and a negative value still disable the per-attempt timer', async () => {
+    expect(await observed({ timeout: 0 })).toBe(0);
+    expect(await observed({ timeout: -5 })).toBe(0);
+    expect(await observed({ timeout: 4_321 }, 0)).toBe(0);
+  });
+
+  test('a NaN timeout no longer leaves a never-settling upload wait spinning', async () => {
+    // The redirect variant of the settle-wait test above, under the misconfiguration.
+    // `NaN` is the per-request value here, over a 100ms client default, so the number the
+    // wait runs under is the one `NaN` resolved to: taken literally it re-armed a `NaN`
+    // timer every millisecond and never failed, and this test would hang at its own
+    // deadline rather than fail at 100ms.
+    let hop = 0;
+
+    const adapter: HTTPAdapter = {
+      getType: () => 'fetch',
+      send: (_request: AdapterRequest): Promise<AdapterResponse> => {
+        hop++;
+
+        return Promise.resolve({
+          status: 307,
+          headers: { location: '/again' },
+          body: null,
+          requestBodySettled: new Promise(() => {}),
+        });
+      },
+    };
+
+    const reports: ErrorEvent[] = [];
+    const onGlobalError = (event: Event): void => {
+      reports.push(event as ErrorEvent);
+      event.preventDefault();
+    };
+
+    globalThis.addEventListener('error', onGlobalError);
+
+    try {
+      const startedAt = Date.now();
+      const response = await new HTTPClient({
+        adapter,
+        baseURL: 'http://example.test',
+        followRedirects: true,
+        timeout: 100,
+      })
+        .post('/upload')
+        .json({ a: 1 })
+        .timeout(Number.NaN)
+        .send();
+
+      expect(Date.now() - startedAt).toBeLessThan(2000);
+      expect(hop).toBe(1);
+      expect(response.isTimeout).toBe(true);
+      expect(reports).toHaveLength(1);
+    } finally {
+      globalThis.removeEventListener('error', onGlobalError);
+    }
+  });
 });
 
 describe('HTTPClient — redirect', () => {
@@ -2505,31 +4034,34 @@ describe('HTTPClient — redirect', () => {
     expect(builder.error?.detectedRedirectURL).toBe('https://example.com/next');
   });
 
-  test('passes through detectedRedirectURL for absolute redirect targets', async () => {
-    const adapter: HTTPAdapter = {
-      getType: () => 'node',
-      send: (_request: AdapterRequest): Promise<AdapterResponse> =>
-        Promise.resolve({
-          status: 302,
-          detectedRedirectURL: 'https://other.test/next',
-          headers: { location: 'https://other.test/next' },
-          body: null,
-        }),
-    };
+  test.each(['https://other.test/next', 'https://user:pass@other.test/next'])(
+    'preserves an unfollowed absolute redirect target %s in the response and error',
+    async (target) => {
+      const adapter: HTTPAdapter = {
+        getType: () => 'node',
+        send: (_request: AdapterRequest): Promise<AdapterResponse> =>
+          Promise.resolve({
+            status: 302,
+            detectedRedirectURL: target,
+            headers: { location: target },
+            body: null,
+          }),
+      };
 
-    const client = new HTTPClient({
-      adapter,
-      baseURL: 'https://example.com',
-      followRedirects: false,
-    });
+      const client = new HTTPClient({
+        adapter,
+        baseURL: 'https://example.com',
+        followRedirects: false,
+      });
 
-    const builder = client.get('/start');
-    const res = await builder.send();
+      const builder = client.get('/start');
+      const res = await builder.send();
 
-    expect(res.requestURL).toBe('https://example.com/start');
-    expect(res.detectedRedirectURL).toBe('https://other.test/next');
-    expect(builder.error?.detectedRedirectURL).toBe('https://other.test/next');
-  });
+      expect(res.requestURL).toBe('https://example.com/start');
+      expect(res.detectedRedirectURL).toBe(target);
+      expect(builder.error?.detectedRedirectURL).toBe(target);
+    },
+  );
 
   test('does not retain detectedRedirectURL on the final followed response', async () => {
     let callCount = 0;
@@ -2768,6 +4300,173 @@ describe('HTTPClient — redirect', () => {
     expect(h[DEFAULT_REQUEST_ID_HEADER]).toBe(res.requestID);
   });
 
+  test('cross-origin redirect strips userinfo from the Location URL', async () => {
+    // `user:pass@` in a URL is `Authorization: Basic` by another name - `NodeAdapter`
+    // copies it onto `options.auth` and `fetch` sends it. A hop that has the caller's
+    // `Authorization` stripped for crossing origins must not get credentials handed back
+    // by the very response that redirected it.
+    const followUps: string[] = [];
+
+    const adapter: HTTPAdapter = {
+      getType: () => 'mock',
+      send: (request: AdapterRequest): Promise<AdapterResponse> => {
+        if (request.requestURL === 'https://api.example/start') {
+          return Promise.resolve({
+            status: 302,
+            headers: { location: 'https://admin:secret@internal.other/admin' },
+            body: null,
+          });
+        }
+
+        followUps.push(request.requestURL);
+        return Promise.resolve({
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+          body: new TextEncoder().encode('{}'),
+        });
+      },
+    };
+
+    const client = new HTTPClient({ adapter, followRedirects: true });
+
+    const res = await client
+      .get('https://api.example/start', {
+        headers: { authorization: 'Bearer caller-token' },
+      })
+      .send();
+
+    expect(followUps).toEqual(['https://internal.other/admin']);
+    // The hop is recorded without the credentials too: observers and errors read this.
+    expect(res.redirectHistory).toEqual(['https://internal.other/admin']);
+    expect(JSON.stringify(res.redirectHistory)).not.toContain('secret');
+  });
+
+  test('same-origin redirect keeps userinfo in the Location URL', async () => {
+    // Same origin is the one the caller addressed, and may already have been carrying
+    // credentials; only a *cross-origin* hop has them taken away.
+    const followUps: string[] = [];
+
+    const adapter: HTTPAdapter = {
+      getType: () => 'mock',
+      send: (request: AdapterRequest): Promise<AdapterResponse> => {
+        if (request.requestURL === 'https://api.example/start') {
+          return Promise.resolve({
+            status: 302,
+            headers: { location: 'https://admin:secret@api.example/next' },
+            body: null,
+          });
+        }
+
+        followUps.push(request.requestURL);
+        return Promise.resolve({
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+          body: new TextEncoder().encode('{}'),
+        });
+      },
+    };
+
+    const client = new HTTPClient({ adapter, followRedirects: true });
+
+    await client.get('https://api.example/start').send();
+
+    expect(followUps).toEqual(['https://admin:secret@api.example/next']);
+  });
+
+  test('a non-http(s) Location is a request_setup_error, not an interceptor_error', async () => {
+    // No interceptor ran, so a message saying one rewrote the URL - and a code monitors
+    // key on for *their own* interceptors - named the wrong thing entirely.
+    const adapter: HTTPAdapter = {
+      getType: () => 'mock',
+      send: (): Promise<AdapterResponse> =>
+        Promise.resolve({
+          status: 302,
+          headers: { location: 'file:///etc/passwd' },
+          body: null,
+        }),
+    };
+
+    const client = new HTTPClient({ adapter, followRedirects: true });
+
+    const builder = client.get('https://api.example/start');
+    const res = await builder.send();
+
+    expect(res.isFailed).toBe(true);
+    expect(builder.error?.code).toBe('request_setup_error');
+    expect(builder.error?.cause?.message).toContain('file:///etc/passwd');
+  });
+
+  test('a redirect interceptor still sees a non-http(s) Location and can rescue it', async () => {
+    // Refusing the scheme *before* the interceptors would take the hop away from them
+    // entirely - and rewriting `requestURL` in the redirect phase is the documented way
+    // to steer or reject a hop. The refusal happens after they run, so an interceptor
+    // that fixes the target still gets to.
+    const seen: string[] = [];
+    const followUps: string[] = [];
+
+    const adapter: HTTPAdapter = {
+      getType: () => 'mock',
+      send: (request: AdapterRequest): Promise<AdapterResponse> => {
+        if (request.requestURL === 'https://api.example/start') {
+          return Promise.resolve({
+            status: 302,
+            headers: { location: 'ftp://files.example/dump' },
+            body: null,
+          });
+        }
+
+        followUps.push(request.requestURL);
+        return Promise.resolve({
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+          body: new TextEncoder().encode('{}'),
+        });
+      },
+    };
+
+    const client = new HTTPClient({ adapter, followRedirects: true });
+
+    client.addRequestInterceptor(
+      (req) => {
+        seen.push(req.requestURL);
+
+        return { ...req, requestURL: 'https://api.example/rescued' };
+      },
+      { phases: ['redirect'] },
+    );
+
+    const res = await client.get('https://api.example/start').send();
+
+    expect(seen).toEqual(['ftp://files.example/dump']);
+    expect(followUps).toEqual(['https://api.example/rescued']);
+    expect(res.status).toBe(200);
+  });
+
+  test('a redirect interceptor can cancel a non-http(s) Location as a cancel', async () => {
+    const adapter: HTTPAdapter = {
+      getType: () => 'mock',
+      send: (): Promise<AdapterResponse> =>
+        Promise.resolve({
+          status: 302,
+          headers: { location: 'file:///etc/passwd' },
+          body: null,
+        }),
+    };
+
+    const client = new HTTPClient({ adapter, followRedirects: true });
+
+    client.addRequestInterceptor(
+      () => ({ cancel: true, reason: 'bad scheme' }),
+      {
+        phases: ['redirect'],
+      },
+    );
+
+    const res = await client.get('https://api.example/start').send();
+
+    expect(res.isCancelled).toBe(true);
+  });
+
   test('same-origin redirect preserves caller-supplied Cookie header without a jar', async () => {
     const followUpHeaders: Array<Record<string, string | string[]>> = [];
 
@@ -2801,6 +4500,76 @@ describe('HTTPClient — redirect', () => {
 
     expect(followUpHeaders).toHaveLength(1);
     expect(followUpHeaders[0].cookie).toBe('sid=123');
+  });
+
+  test('cross-host redirects store response cookies at the source and send only target cookies', async () => {
+    const jar = new CookieJar();
+    jar.parseSetCookieHeader('target=2; Secure', 'https://other.example/');
+    const seen: Array<Record<string, string | string[]>> = [];
+    const adapter: HTTPAdapter = {
+      getType: () => 'mock',
+      send: (request): Promise<AdapterResponse> => {
+        seen.push({ ...request.headers });
+        if (request.requestURL === 'https://example.com/start') {
+          return Promise.resolve({
+            status: 302,
+            headers: {
+              location: 'https://other.example/dest',
+              'set-cookie': ['source=1; Secure; Path=/'],
+            },
+            body: null,
+          });
+        }
+        return Promise.resolve({ status: 200, headers: {}, body: null });
+      },
+    };
+    const client = new HTTPClient({
+      adapter,
+      cookieJar: jar,
+      followRedirects: true,
+    });
+    await client.get('https://example.com/start').send();
+    expect(seen).toHaveLength(2);
+    expect(seen[1].cookie).toBe('target=2');
+    expect(jar.getCookieHeaderString('https://example.com/')).toBe('source=1');
+    expect(jar.getCookieHeaderString('https://other.example/')).toBe(
+      'target=2',
+    );
+  });
+
+  test('cross-origin redirect strips caller-supplied Cookie without a jar or interceptor', async () => {
+    const followUpHeaders: Array<Record<string, string | string[]>> = [];
+
+    const adapter: HTTPAdapter = {
+      getType: () => 'mock',
+      send: (request: AdapterRequest): Promise<AdapterResponse> => {
+        if (request.requestURL === 'https://example.com/start') {
+          return Promise.resolve({
+            status: 302,
+            headers: { location: 'https://other.example/dest' },
+            body: null,
+          });
+        }
+
+        followUpHeaders.push({ ...request.headers });
+        return Promise.resolve({
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+          body: new TextEncoder().encode('{}'),
+        });
+      },
+    };
+
+    const client = new HTTPClient({ adapter, followRedirects: true });
+
+    await client
+      .get('https://example.com/start', {
+        headers: { cookie: 'sid=123' },
+      })
+      .send();
+
+    expect(followUpHeaders).toHaveLength(1);
+    expect(followUpHeaders[0].cookie).toBeUndefined();
   });
 
   test('redirect interceptor cannot leak sensitive headers after rewriting to a cross-origin target', async () => {
@@ -4062,6 +5831,401 @@ describe('HTTPClient — builder state', () => {
     expect(elapsed).toBeLessThan(1000);
   });
 
+  test('cancel during retry delay keeps requestBodySettled from the retried response', async () => {
+    // The resolved-response retry path nulled `adapterResponse` on a cancel during the
+    // backoff and carried no upload promise of its own, so the hop loop had nowhere to
+    // read it: a bodied `POST` early-acked with a `503` and cancelled while waiting to
+    // retry answered `undefined` - the documented "the body went out" - for an upload the
+    // adapter had torn down. The throw path already carried it; this is the other half.
+    const uploadFailure = new Error('upload torn down');
+
+    const adapter: HTTPAdapter = {
+      getType: () => 'node',
+      send: (_request: AdapterRequest): Promise<AdapterResponse> =>
+        Promise.resolve({
+          status: 503,
+          headers: {},
+          body: null,
+          requestBodySettled: Promise.resolve(uploadFailure),
+        }),
+    };
+
+    const client = new HTTPClient({ adapter });
+    // `PUT`, not `POST`: a non-idempotent method is never replayed on a real response,
+    // so a `POST` would not have entered the retry wait at all.
+    const builder = client
+      .put('https://example.com/always-503')
+      .json({ payload: 'x' })
+      .retryPolicy({ strategy: 'fixed', maxRetryAttempts: 3, delayMS: 5000 })
+      .onAttemptEnd((e) => {
+        if (e.willRetry) {
+          builder.cancel();
+        }
+      });
+
+    const res = await builder.send();
+
+    expect(res.isCancelled).toBe(true);
+    expect(res.requestBodySettled).toBeDefined();
+    expect(await res.requestBodySettled).toBe(uploadFailure);
+  });
+
+  for (const outcome of ['response', 'throw'] as const) {
+    for (const isCompleted of [true, false]) {
+      test(`${outcome} retry after long backoff ${isCompleted ? 'accepts a completed upload' : 'times out a stalled upload'}`, async () => {
+        let attempts = 0;
+        const signals: AbortSignal[] = [];
+        const reports: ErrorEvent[] = [];
+        const onGlobalError = (event: Event): void => {
+          reports.push(event as ErrorEvent);
+          event.preventDefault();
+        };
+        const upload = isCompleted
+          ? Promise.resolve(undefined)
+          : new Promise<Error | undefined>(() => {});
+        const adapter: HTTPAdapter = {
+          getType: () => 'node',
+          send: (request: AdapterRequest): Promise<AdapterResponse> => {
+            attempts++;
+            if (request.signal) {
+              signals.push(request.signal);
+            }
+            if (attempts > 1) {
+              return Promise.resolve({ status: 200, headers: {}, body: null });
+            }
+            if (outcome === 'throw') {
+              return Promise.reject(
+                Object.assign(new Error('connection closed'), {
+                  [REQUEST_BODY_SETTLED_KEY]: upload,
+                }),
+              );
+            }
+            return Promise.resolve({
+              status: 503,
+              headers: {},
+              body: null,
+              requestBodySettled: upload,
+            });
+          },
+        };
+
+        globalThis.addEventListener('error', onGlobalError);
+        try {
+          // Backoff outlasts the stall window even though send() answers immediately.
+          const response = await new HTTPClient({
+            adapter,
+            timeout: 20,
+            retryPolicy: {
+              strategy: 'fixed',
+              maxRetryAttempts: 1,
+              delayMS: 60,
+            },
+          })
+            .put('https://example.com/upload')
+            .json({ a: 1 })
+            .send();
+
+          expect(attempts).toBe(isCompleted ? 2 : 1);
+          expect(response.status).toBe(isCompleted ? 200 : 0);
+          expect(response.isTimeout).toBe(!isCompleted);
+          expect(response.isCancelled).toBe(false);
+          expect(signals[0]?.aborted).toBe(!isCompleted);
+          expect(reports).toHaveLength(isCompleted ? 0 : 1);
+        } finally {
+          globalThis.removeEventListener('error', onGlobalError);
+        }
+      });
+    }
+  }
+
+  test("a retry waits for the previous attempt's upload to settle first", async () => {
+    // The redirect loop waits on `requestBodySettled` before the next hop; the retry
+    // loop did not. `NodeAdapter.send()` resolves when the response is consumed, so an
+    // early `503` to a bodied `PUT` arrives with the writer still running, the backoff
+    // elapsed, and attempt two was dispatched beside attempt one's upload - the same
+    // double-send the redirect wait exists to prevent.
+    let settledAt = 0;
+    let secondAttemptStartedAt = 0;
+    let attempt = 0;
+
+    const adapter: HTTPAdapter = {
+      getType: () => 'node',
+      send: (_request: AdapterRequest): Promise<AdapterResponse> => {
+        attempt++;
+
+        if (attempt === 1) {
+          return Promise.resolve({
+            status: 503,
+            headers: {},
+            body: null,
+            requestBodySettled: new Promise((resolve) => {
+              setTimeout(() => {
+                settledAt = Date.now();
+                resolve(undefined);
+              }, 80);
+            }),
+          });
+        }
+
+        secondAttemptStartedAt = Date.now();
+
+        return Promise.resolve({ status: 200, headers: {}, body: null });
+      },
+    };
+
+    const response = await new HTTPClient({ adapter })
+      .put('https://example.com/upload')
+      .json({ a: 1 })
+      .retryPolicy({ strategy: 'fixed', maxRetryAttempts: 2, delayMS: 10 })
+      .send();
+
+    expect(response.status).toBe(200);
+    expect(attempt).toBe(2);
+    expect(settledAt).toBeGreaterThan(0);
+    expect(secondAttemptStartedAt).toBeGreaterThanOrEqual(settledAt);
+  });
+
+  test("a retry after a thrown attempt waits for that attempt's upload to settle first", async () => {
+    // The resolve path waits; the throw path did not, on the grounds that a hop that
+    // threw has no socket left. True of `NodeAdapter`, not of a custom adapter that
+    // rejects `send()` while its upload is still going out and tags the error with the
+    // still-open outcome - the backoff elapsed and attempt two was dispatched beside
+    // attempt one's body.
+    let settledAt = 0;
+    let secondAttemptStartedAt = 0;
+    let attempt = 0;
+
+    const adapter: HTTPAdapter = {
+      getType: () => 'node',
+      send: (_request: AdapterRequest): Promise<AdapterResponse> => {
+        attempt++;
+
+        if (attempt === 1) {
+          const failure = new Error('socket reset mid-upload');
+
+          Object.assign(failure, {
+            [REQUEST_BODY_SETTLED_KEY]: new Promise<Error | undefined>(
+              (resolve) => {
+                setTimeout(() => {
+                  settledAt = Date.now();
+                  resolve(failure);
+                }, 80);
+              },
+            ),
+          });
+
+          return Promise.reject(failure);
+        }
+
+        secondAttemptStartedAt = Date.now();
+
+        return Promise.resolve({ status: 200, headers: {}, body: null });
+      },
+    };
+
+    const response = await new HTTPClient({ adapter })
+      .put('https://example.com/upload')
+      .json({ a: 1 })
+      .retryPolicy({ strategy: 'fixed', maxRetryAttempts: 2, delayMS: 10 })
+      .send();
+
+    expect(response.status).toBe(200);
+    expect(attempt).toBe(2);
+    expect(settledAt).toBeGreaterThan(0);
+    expect(secondAttemptStartedAt).toBeGreaterThanOrEqual(settledAt);
+  });
+
+  test('a cancel during the throw-path retry upload wait is not held for the upload', async () => {
+    const controller = new AbortController();
+    let attempt = 0;
+
+    const adapter: HTTPAdapter = {
+      getType: () => 'node',
+      send: (_request: AdapterRequest): Promise<AdapterResponse> => {
+        attempt++;
+
+        const failure = new Error('socket reset mid-upload');
+
+        Object.assign(failure, {
+          // Never settles: the wait must end on the cancel alone.
+          [REQUEST_BODY_SETTLED_KEY]: new Promise(() => {}),
+        });
+
+        return Promise.reject(failure);
+      },
+    };
+
+    const builder = new HTTPClient({ adapter })
+      .put('https://example.com/upload')
+      .json({ a: 1 })
+      .signal(controller.signal)
+      .retryPolicy({ strategy: 'fixed', maxRetryAttempts: 2, delayMS: 10 })
+      .onAttemptEnd((e) => {
+        if (e.willRetry) {
+          setTimeout(() => controller.abort('gave up'), 30);
+        }
+      });
+
+    const start = Date.now();
+    const res = await builder.send();
+
+    expect(res.isCancelled).toBe(true);
+    expect(builder.error?.cancelReason).toBe('gave up');
+    expect(attempt).toBe(1);
+    expect(Date.now() - start).toBeLessThan(2000);
+    expect(res.requestBodySettled).toBeDefined();
+  });
+
+  test('a cancel during the retry upload wait is not held for the upload', async () => {
+    const controller = new AbortController();
+    let attempt = 0;
+
+    const adapter: HTTPAdapter = {
+      getType: () => 'node',
+      send: (_request: AdapterRequest): Promise<AdapterResponse> => {
+        attempt++;
+
+        return Promise.resolve({
+          status: 503,
+          headers: {},
+          body: null,
+          // Never settles: the wait must end on the cancel alone.
+          requestBodySettled: new Promise(() => {}),
+        });
+      },
+    };
+
+    const client = new HTTPClient({ adapter });
+    const builder = client
+      .put('https://example.com/upload')
+      .json({ a: 1 })
+      .signal(controller.signal)
+      .retryPolicy({ strategy: 'fixed', maxRetryAttempts: 2, delayMS: 10 })
+      .onAttemptEnd((e) => {
+        if (e.willRetry) {
+          // After the backoff, during the upload wait.
+          setTimeout(() => controller.abort('gave up'), 30);
+        }
+      });
+
+    const start = Date.now();
+    const res = await builder.send();
+
+    expect(res.isCancelled).toBe(true);
+    expect(builder.error?.cancelReason).toBe('gave up');
+    expect(attempt).toBe(1);
+    expect(Date.now() - start).toBeLessThan(2000);
+    // Carried off the response the attempt did get, as the cancel-during-delay exit
+    // carries it.
+    expect(res.requestBodySettled).toBeDefined();
+  });
+
+  test('a retry-phase interceptor cancel carries the previous upload outcome', async () => {
+    // The interceptor runs at the top of the next attempt, where the previous
+    // attempt's response was already out of scope, so its exit carried no upload
+    // outcome: an early-acked `503` whose upload the adapter tore down reported the
+    // documented "the body went out in full".
+    const uploadFailure = new Error('upload torn down');
+
+    const adapter: HTTPAdapter = {
+      getType: () => 'node',
+      send: (_request: AdapterRequest): Promise<AdapterResponse> =>
+        Promise.resolve({
+          status: 503,
+          headers: {},
+          body: null,
+          requestBodySettled: Promise.resolve(uploadFailure),
+        }),
+    };
+
+    const client = new HTTPClient({ adapter });
+
+    client.addRequestInterceptor(
+      () => ({ cancel: true as const, reason: 'no more retries' }),
+      { phases: ['retry'] },
+    );
+
+    const res = await client
+      .put('https://example.com/upload')
+      .json({ a: 1 })
+      .retryPolicy({ strategy: 'fixed', maxRetryAttempts: 3, delayMS: 10 })
+      .send();
+
+    expect(res.isCancelled).toBe(true);
+    expect(res.requestBodySettled).toBeDefined();
+    expect(await res.requestBodySettled).toBe(uploadFailure);
+  });
+
+  test('a retry-phase interceptor throw carries the previous upload outcome', async () => {
+    const uploadFailure = new Error('upload torn down');
+
+    const adapter: HTTPAdapter = {
+      getType: () => 'node',
+      send: (_request: AdapterRequest): Promise<AdapterResponse> =>
+        Promise.resolve({
+          status: 503,
+          headers: {},
+          body: null,
+          requestBodySettled: Promise.resolve(uploadFailure),
+        }),
+    };
+
+    const client = new HTTPClient({ adapter });
+
+    client.addRequestInterceptor(
+      () => {
+        throw new Error('retry interceptor failed');
+      },
+      { phases: ['retry'] },
+    );
+
+    const res = await client
+      .put('https://example.com/upload')
+      .json({ a: 1 })
+      .retryPolicy({ strategy: 'fixed', maxRetryAttempts: 3, delayMS: 10 })
+      .send();
+
+    expect(res.isFailed).toBe(true);
+    expect(res.requestBodySettled).toBeDefined();
+    expect(await res.requestBodySettled).toBe(uploadFailure);
+  });
+
+  test('a response with no upload outcome has no requestBodySettled property at all', async () => {
+    // Absence is the documented signal for "no adapter reported an upload outcome". The
+    // buffered, streamed, and failure branches of `_buildResponse` assigned the field
+    // unconditionally, so a bodiless `GET` carried an own property holding `undefined`:
+    // `'requestBodySettled' in response` said an outcome was reported where none was.
+    const adapter: HTTPAdapter = {
+      getType: () => 'node',
+      send: (_request: AdapterRequest): Promise<AdapterResponse> =>
+        Promise.resolve({
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+          body: new TextEncoder().encode('{"ok":true}'),
+        }),
+    };
+
+    const ok = await new HTTPClient({ adapter })
+      .get('https://example.com/plain')
+      .send();
+
+    expect(ok.status).toBe(200);
+    expect('requestBodySettled' in ok).toBe(false);
+
+    const failing: HTTPAdapter = {
+      getType: () => 'node',
+      send: (_request: AdapterRequest): Promise<AdapterResponse> =>
+        Promise.resolve({ status: 0, headers: {}, body: null }),
+    };
+
+    const failed = await new HTTPClient({ adapter: failing })
+      .get('https://example.com/down')
+      .send();
+
+    expect(failed.isFailed).toBe(true);
+    expect('requestBodySettled' in failed).toBe(false);
+  });
+
   test('cancel after retry delay begins resolves via the abort listener', async () => {
     const adapter: HTTPAdapter = {
       getType: () => 'mock',
@@ -4898,7 +7062,7 @@ describe('HTTPClient — phase-aware interceptors', () => {
         }
 
         phaseLog.push(
-          `request:${phase.type}:${req.requestURL}:attempt:${phase.attempt}`,
+          `request:${phase.type}:${req.requestURL}:attempt:${phase.attempt}/${phase.maxAttempts}`,
         );
         return {
           ...req,
@@ -4926,7 +7090,7 @@ describe('HTTPClient — phase-aware interceptors', () => {
         }
 
         phaseLog.push(
-          `response:${phase.type}:${res.status}:attempt:${phase.attempt}`,
+          `response:${phase.type}:${res.status}:attempt:${phase.attempt}/${phase.maxAttempts}`,
         );
       },
       { phases: ['retry'] },
@@ -4952,8 +7116,8 @@ describe('HTTPClient — phase-aware interceptors', () => {
       `request:initial:${start}`,
       'response:redirect:302:hop:1',
       `request:redirect:${target}`,
-      'response:retry:503:attempt:2',
-      `request:retry:${target}:attempt:3`,
+      'response:retry:503:attempt:2/3',
+      `request:retry:${target}:attempt:3/3`,
       `response:final:200:${target}`,
     ]);
 
@@ -4979,6 +7143,75 @@ describe('HTTPClient — phase-aware interceptors', () => {
           'x-retry-phase': '3',
         }),
       },
+    ]);
+  });
+
+  test('retry phase numbering accounts for retries spent before a redirect', async () => {
+    const start = 'https://example.com/start';
+    const target = 'https://example.com/target';
+    let startCalls = 0;
+    let targetCalls = 0;
+    const phases: string[] = [];
+
+    const adapter: HTTPAdapter = {
+      getType: () => 'mock',
+      send: (request: AdapterRequest): Promise<AdapterResponse> => {
+        if (request.requestURL === start) {
+          startCalls++;
+
+          if (startCalls === 1) {
+            return Promise.resolve({ status: 503, headers: {}, body: null });
+          }
+
+          return Promise.resolve({
+            status: 302,
+            headers: { location: target },
+            body: null,
+          });
+        }
+
+        targetCalls++;
+
+        if (targetCalls === 1) {
+          return Promise.resolve({ status: 503, headers: {}, body: null });
+        }
+
+        return Promise.resolve({ status: 200, headers: {}, body: null });
+      },
+    };
+
+    const client = new HTTPClient({ adapter, followRedirects: true });
+
+    client.addRequestInterceptor(
+      (request, phase) => {
+        if (phase.type === 'retry') {
+          phases.push(`request:${phase.attempt}/${phase.maxAttempts}`);
+        }
+
+        return request;
+      },
+      { phases: ['retry'] },
+    );
+    client.addResponseObserver(
+      (_response, _request, phase) => {
+        if (phase.type === 'retry') {
+          phases.push(`response:${phase.attempt}/${phase.maxAttempts}`);
+        }
+      },
+      { phases: ['retry'] },
+    );
+
+    const response = await client
+      .get(start)
+      .retryPolicy({ strategy: 'fixed', maxRetryAttempts: 2, delayMS: 1 })
+      .send();
+
+    expect(response.status).toBe(200);
+    expect(phases).toEqual([
+      'response:1/3',
+      'request:2/3',
+      'response:3/4',
+      'request:4/4',
     ]);
   });
 
@@ -5918,6 +8151,70 @@ describe('HTTPClient — phase-aware interceptors', () => {
     expect(res.body).toEqual({ ok: true });
   });
 
+  test('a response or error observer that throws or rejects does not reject send()', async () => {
+    // Observers run through `safeHandleCallbackAndWait`, so a throw is reported and the
+    // request outcome stands. Progress and attempt hooks have this integration test;
+    // observers did not, and a regression here turns a 200 into a rejected `send()`.
+    // The console is muted only to keep the output clean: the failures go out on the
+    // global `'error'` channel, and where they land depends on what else is listening.
+    muteConsoleError();
+    const adapter = new MockAdapter();
+
+    adapter.routes.get('/ok', () => ({ status: 200, body: { ok: true } }));
+
+    const client = new HTTPClient({ adapter });
+    let responseObserverCalls = 0;
+    let errorObserverCalls = 0;
+
+    client.addResponseObserver(() => {
+      responseObserverCalls++;
+
+      throw new Error('response observer boom');
+    });
+    client.addResponseObserver(async () => {
+      responseObserverCalls++;
+      await Promise.resolve();
+
+      throw new Error('response observer rejected');
+    });
+    try {
+      const ok = await client.get('/ok').send<{ ok: boolean }>();
+
+      expect(ok.status).toBe(200);
+      expect(ok.body).toEqual({ ok: true });
+      expect(responseObserverCalls).toBe(2);
+
+      // Error observers run on a transport failure, not on a status: an adapter that
+      // rejects `send()`.
+      const failing: HTTPAdapter = {
+        getType: () => 'node',
+        send: () => Promise.reject(new Error('socket hang up')),
+      };
+      const failingClient = new HTTPClient({ adapter: failing });
+
+      failingClient.addErrorObserver(() => {
+        errorObserverCalls++;
+
+        throw new Error('error observer boom');
+      });
+      failingClient.addErrorObserver(async () => {
+        errorObserverCalls++;
+        await Promise.resolve();
+
+        throw new Error('error observer rejected');
+      });
+
+      const broken = await failingClient
+        .get('https://example.com/broken')
+        .send();
+
+      expect(broken.isFailed).toBe(true);
+      expect(errorObserverCalls).toBe(2);
+    } finally {
+      restoreConsoleError();
+    }
+  });
+
   test('MockAdapter without baseURL resolves slashless relative requests to http://localhost', async () => {
     const adapter = new MockAdapter();
     let interceptedURL: string | undefined;
@@ -6104,3 +8401,447 @@ describe('HTTPClient — phase-aware interceptors', () => {
     expect(builder.error).toBeNull();
   });
 });
+describe('observational callbacks never change the outcome', () => {
+  // The rule, in one place. `onUploadProgress`, `onDownloadProgress`, `onAttemptStart` and
+  // `onAttemptEnd` exist to *describe* a request, so a bug in one must not be able to
+  // decide whether that request succeeded. Two of them could: called bare, a throw from
+  // `onAttemptStart`/`onAttemptEnd` escaped into the attempt loop and came back as
+  // `status: 0`, and a throwing progress callback was classified as `isNetworkError`. A
+  // caller's telemetry bug was reported to them as a network problem, which is worse than
+  // silence - silence leaves you looking at your own code.
+  //
+  // Rejections are covered as well as throws: an `async` hook that rejects slips past any
+  // local `try`/`catch`, which is why these go through `safeHandleCallback` rather than a
+  // hand-rolled guard.
+  const hooks = [
+    'onUploadProgress',
+    'onDownloadProgress',
+    'onAttemptStart',
+    'onAttemptEnd',
+  ] as const;
+
+  const failures = [
+    [
+      'throws',
+      () => {
+        throw new Error('telemetry bug');
+      },
+    ],
+    ['rejects', () => Promise.reject(new Error('telemetry bug'))],
+  ] as const;
+
+  for (const hook of hooks) {
+    for (const [how, misbehave] of failures) {
+      test(`a ${hook} that ${how} leaves the response untouched`, async () => {
+        const adapter = new MockAdapter();
+
+        adapter.routes.get('/x', () => ({ status: 200, body: { ok: true } }));
+
+        const client = new HTTPClient({
+          adapter,
+          baseURL: 'https://x.test',
+        });
+
+        const builder = client.get('/x');
+
+        (builder as unknown as Record<string, (fn: unknown) => unknown>)[hook](
+          misbehave,
+        );
+
+        const response = await builder.send();
+
+        expect(response.status).toBe(200);
+        expect(response.isNetworkError).toBe(false);
+      });
+    }
+  }
+});
+
+test('303 redirect preserves HEAD', async () => {
+  const methods: string[] = [];
+  const adapter: HTTPAdapter = {
+    getType: () => 'node',
+    send: (request): Promise<AdapterResponse> => {
+      methods.push(request.method);
+      return Promise.resolve<AdapterResponse>(
+        methods.length === 1
+          ? { status: 303, headers: { location: '/done' }, body: null }
+          : { status: 200, headers: {}, body: null },
+      );
+    },
+  };
+  const response = await new HTTPClient({
+    adapter,
+    baseURL: 'http://example.test',
+    followRedirects: true,
+  })
+    .head('/start')
+    .send();
+  expect(response.status).toBe(200);
+  expect(methods).toEqual(['HEAD', 'HEAD']);
+});
+
+test('retry interceptor destinations are caller-authorized but redirect destinations remain guarded', async () => {
+  const requests: AdapterRequest[] = [];
+  const adapter: HTTPAdapter = {
+    getType: () => 'node',
+    send: (request): Promise<AdapterResponse> => {
+      requests.push(request);
+      if (requests.length === 1) {
+        return Promise.resolve({ status: 503, headers: {}, body: null });
+      }
+      if (requests.length === 2 || requests.length === 3) {
+        return Promise.resolve({
+          status: 302,
+          headers: {
+            location:
+              requests.length === 2
+                ? 'https://retry.example/next'
+                : 'https://redirect.example/',
+          },
+          body: null,
+        });
+      }
+      return Promise.resolve({ status: 200, headers: {}, body: null });
+    },
+  };
+  const client = new HTTPClient({ adapter, followRedirects: true });
+  client.addRequestInterceptor(
+    (request) => ({ ...request, requestURL: 'https://retry.example/' }),
+    { phases: ['retry'] },
+  );
+  const response = await client
+    .get('https://original.example/')
+    .retryPolicy({ strategy: 'fixed', maxRetryAttempts: 1, delayMS: 1 })
+    .send();
+  expect(response.status).toBe(200);
+  expect(requests[1].initialURL).toBe('https://retry.example/');
+  expect(requests[2].requestURL).toBe('https://retry.example/next');
+  expect(requests[2].initialURL).toBe('https://retry.example/');
+  expect(requests[3].requestURL).toBe('https://redirect.example/');
+  expect(requests[3].initialURL).toBe('https://retry.example/');
+});
+
+test.each(['query', 'path', 'fragment', 'origin'] as const)(
+  'a %s rewrite on a redirected retry only authorizes a new origin when explicitly changed',
+  async (rewrite) => {
+    const requests: AdapterRequest[] = [];
+    const adapter: HTTPAdapter = {
+      getType: () => 'node',
+      send: (request): Promise<AdapterResponse> => {
+        requests.push(request);
+        if (requests.length === 1) {
+          return Promise.resolve({
+            status: 302,
+            headers: { location: 'https://attacker.example/resource' },
+            body: null,
+          });
+        }
+        return Promise.resolve({
+          status: requests.length === 2 ? 503 : 200,
+          headers: {},
+          body: null,
+        });
+      },
+    };
+    const client = new HTTPClient({ adapter, followRedirects: true });
+    client.addRequestInterceptor(
+      (request) => {
+        const url = new URL(request.requestURL);
+        if (rewrite === 'query') {
+          url.searchParams.set('retry', '2');
+        } else if (rewrite === 'path') {
+          url.pathname = '/retry';
+        } else if (rewrite === 'fragment') {
+          url.hash = 'retry';
+        } else {
+          url.hostname = 'caller-selected.example';
+        }
+        return { ...request, requestURL: url.href };
+      },
+      { phases: ['retry'] },
+    );
+    const response = await client
+      .get('https://original.example/')
+      .retryPolicy({ strategy: 'fixed', maxRetryAttempts: 1, delayMS: 1 })
+      .send();
+    expect(response.status).toBe(200);
+    expect(requests).toHaveLength(3);
+    expect(requests[1].initialURL).toBe('https://original.example/');
+    expect(requests[2].requestURL).not.toBe(requests[1].requestURL);
+    expect(requests[2].initialURL).toBe(
+      rewrite === 'origin'
+        ? 'https://caller-selected.example/resource'
+        : 'https://original.example/',
+    );
+  },
+);
+
+test('redirected GET removes body headers in every casing', async () => {
+  const requests: AdapterRequest[] = [];
+  const adapter: HTTPAdapter = {
+    getType: () => 'node',
+    send: (request): Promise<AdapterResponse> => {
+      requests.push(request);
+      return Promise.resolve<AdapterResponse>(
+        requests.length === 1
+          ? { status: 302, headers: { location: '/done' }, body: null }
+          : { status: 200, headers: {}, body: null },
+      );
+    },
+  };
+  const client = new HTTPClient({
+    adapter,
+    baseURL: 'http://example.test',
+    followRedirects: true,
+  });
+  client.addRequestInterceptor((request) =>
+    request.method === 'POST'
+      ? {
+          ...request,
+          headers: {
+            ...request.headers,
+            'Content-Length': '4',
+            'CONTENT-TYPE': 'text/plain',
+          },
+        }
+      : request,
+  );
+  await client
+    .post('/start', {
+      headers: { 'Content-Length': '4', 'CONTENT-TYPE': 'text/plain' },
+    })
+    .text('body')
+    .send();
+  expect(requests[1].method).toBe('GET');
+  expect(
+    Object.keys(requests[1].headers).map((key) => key.toLowerCase()),
+  ).not.toContain('content-length');
+  expect(
+    Object.keys(requests[1].headers).map((key) => key.toLowerCase()),
+  ).not.toContain('content-type');
+});
+
+test('redirects inherit the actual retry request, including credentials and method', async () => {
+  const sent: AdapterRequest[] = [];
+  const adapter: HTTPAdapter = {
+    getType: () => 'mock',
+    send: (request): Promise<AdapterResponse> => {
+      sent.push(request);
+      return Promise.resolve<AdapterResponse>(
+        sent.length === 1
+          ? { status: 503, headers: {}, body: null }
+          : sent.length === 2
+            ? { status: 307, headers: { location: '/next' }, body: null }
+            : { status: 200, headers: {}, body: null },
+      );
+    },
+  };
+  const client = new HTTPClient({ adapter, followRedirects: true });
+  client.addRequestInterceptor(
+    (request) => ({
+      ...request,
+      headers: { ...request.headers, authorization: 'host-a-secret' },
+    }),
+    { phases: ['initial'] },
+  );
+  client.addRequestInterceptor(
+    (request) => ({
+      ...request,
+      requestURL: 'https://b.example/retry',
+      method: 'POST',
+      body: 'retry-body',
+      headers: { ...request.headers, authorization: 'host-b-secret' },
+    }),
+    { phases: ['retry'] },
+  );
+  await client
+    .get('https://a.example/start')
+    .retryPolicy({ strategy: 'fixed', maxRetryAttempts: 1, delayMS: 1 })
+    .send();
+  expect(sent).toHaveLength(3);
+  expect(sent[2].requestURL).toBe('https://b.example/next');
+  expect(sent[2].headers.authorization).toBe('host-b-secret');
+  expect(sent[2].method).toBe('POST');
+  expect(sent[2].body).toBe('retry-body');
+});
+
+test.each([false, true])(
+  'review regression: redirected retry clears inherited wire headers (shouldRefresh=%s)',
+  async (shouldRefresh) => {
+    const requests: AdapterRequest[] = [];
+    const adapter: HTTPAdapter = {
+      getType: () => 'node',
+      send: (request): Promise<AdapterResponse> => {
+        requests.push(request);
+        return Promise.resolve<AdapterResponse>(
+          requests.length === 1
+            ? {
+                status: 302,
+                body: null,
+                headers: { location: '/next' },
+                effectiveRequestHeaders: {
+                  ...request.headers,
+                  host: 'original.example',
+                  authorization: 'Basic ORIGINAL_SECRET',
+                },
+              }
+            : {
+                status: requests.length === 2 ? 503 : 200,
+                headers: {},
+                body: null,
+              },
+        );
+      },
+    };
+    const client = new HTTPClient({ adapter, followRedirects: true });
+    client.addRequestInterceptor(
+      (request) => ({
+        ...request,
+        requestURL: 'https://other.example/retry',
+        headers: shouldRefresh
+          ? { ...request.headers, authorization: 'Bearer refreshed' }
+          : request.headers,
+      }),
+      { phases: ['retry'] },
+    );
+    const response = await client
+      .get('https://user:password@original.example/')
+      .retryPolicy({ strategy: 'fixed', maxRetryAttempts: 1, delayMS: 1 })
+      .send();
+    expect(response.status).toBe(200);
+    expect(requests).toHaveLength(3);
+    expect(requests[1].headers.authorization).toBeUndefined();
+    expect(requests[2].headers.host).toBeUndefined();
+    if (shouldRefresh) {
+      expect(requests[2].headers.authorization).toBe('Bearer refreshed');
+    } else {
+      expect(requests[2].headers.authorization).toBeUndefined();
+    }
+  },
+);
+
+test.each([false, true])(
+  'failover retry preserves caller credentials (redirected=%s)',
+  async (isRedirected) => {
+    const requests: AdapterRequest[] = [];
+    const client = new HTTPClient({
+      followRedirects: true,
+      adapter: {
+        getType: () => 'node',
+        send: (request): Promise<AdapterResponse> => {
+          requests.push(request);
+          return Promise.resolve<AdapterResponse>(
+            isRedirected && requests.length === 1
+              ? {
+                  status: 302,
+                  headers: { location: '/next' },
+                  body: null,
+                  effectiveRequestHeaders: {
+                    ...request.headers,
+                    host: 'api.example',
+                  },
+                }
+              : {
+                  status:
+                    requests.length === (isRedirected ? 2 : 1) ? 503 : 200,
+                  headers: {},
+                  body: null,
+                },
+          );
+        },
+      },
+    });
+    client.addRequestInterceptor(
+      (request) => ({ ...request, requestURL: 'https://mirror.example/x' }),
+      { phases: ['retry'] },
+    );
+    const response = await client
+      .get('https://api.example/x')
+      .headers({ Authorization: 'Bearer tok', 'X-Api-Key': 'k' })
+      .retryPolicy({ strategy: 'fixed', maxRetryAttempts: 1, delayMS: 1 })
+      .send();
+    expect(response.status).toBe(200);
+    expect(requests.at(-1)?.headers).toMatchObject({
+      authorization: 'Bearer tok',
+      'x-api-key': 'k',
+    });
+    expect(requests.at(-1)?.headers.host).toBeUndefined();
+  },
+);
+
+test.each([false, true])(
+  'Node redirect retry regenerates Host and follows URL Basic auth scope (absolute=%s)',
+  async (isAbsolute) => {
+    const { NodeAdapter } = await import('./adapters/node-adapter');
+    const received: Array<{ host: string | null; auth: string | null }> = [];
+    const observed: Array<string | string[] | undefined> = [];
+    const mirror = Bun.serve({
+      port: 0,
+      fetch: (request) => {
+        received.push({
+          host: request.headers.get('host'),
+          auth: request.headers.get('authorization'),
+        });
+        return new Response('ok');
+      },
+    });
+    const origin = Bun.serve({
+      port: 0,
+      fetch: (request) => {
+        received.push({
+          host: request.headers.get('host'),
+          auth: request.headers.get('authorization'),
+        });
+        return new URL(request.url).pathname === '/start'
+          ? new Response(null, {
+              status: 302,
+              headers: {
+                location: isAbsolute
+                  ? `${new URL(request.url).origin}/next`
+                  : '/next',
+              },
+            })
+          : new Response(null, { status: 503 });
+      },
+    });
+    try {
+      const client = new HTTPClient({
+        adapter: new NodeAdapter(),
+        followRedirects: true,
+      });
+      client.addRequestInterceptor(
+        (request) => ({ ...request, requestURL: mirror.url.href }),
+        { phases: ['retry'] },
+      );
+      client.addResponseObserver(
+        (_response, request) => {
+          observed.push(request.headers.authorization);
+        },
+        { phases: ['redirect', 'retry', 'final'] },
+      );
+      const url = new URL('/start', origin.url);
+      url.username = 'user';
+      url.password = 'password';
+      const response = await client
+        .get(url.href)
+        .retryPolicy({ strategy: 'fixed', maxRetryAttempts: 1, delayMS: 1 })
+        .send();
+      expect(response.status).toBe(200);
+      const basic = `Basic ${btoa('user:password')}`;
+      expect(received).toEqual([
+        { host: origin.url.host, auth: basic },
+        { host: origin.url.host, auth: isAbsolute ? null : basic },
+        { host: mirror.url.host, auth: null },
+      ]);
+      expect(observed).toEqual([
+        basic,
+        isAbsolute ? undefined : basic,
+        undefined,
+      ]);
+    } finally {
+      await origin.stop(true);
+      await mirror.stop(true);
+    }
+  },
+);

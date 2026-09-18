@@ -10,11 +10,16 @@ import {
 import type { RetryPolicyOptionsStrategyFixed } from './types';
 import { sleep } from '../../sleep';
 import {
+  muteConsoleError,
+  restoreConsoleError,
+} from '../../internal/console-test-utils';
+import {
   RetryUtilsErrRunnerAlreadyCompleted,
   RetryUtilsErrRunnerAlreadyRunning,
   RetryUtilsErrRunnerNotPaused,
   RetryUtilsErrRunnerNotRunning,
 } from './retry-utils-errors';
+import { MAX_TIMER_MS } from '../../internal/timer-limits';
 
 interface CustomResult {
   message: string;
@@ -71,6 +76,9 @@ describe('RetryRunner', () => {
 
     runner.overrideGraceCancelPeriodMS(-1);
     expect(runner.graceCancelPeriodMS).toBe(1000);
+
+    runner.overrideGraceCancelPeriodMS(3e9);
+    expect(runner.graceCancelPeriodMS).toBe(MAX_TIMER_MS);
   });
 
   describe('run', () => {
@@ -596,6 +604,246 @@ describe('RetryRunner', () => {
 
       expect(result.status).toBe('attempt_success');
       expect(attemptCount).toBe(2); // Original was aborted, forced attempt ran
+    });
+
+    test('an aborted attempt reporting its abort is not called a double report', async () => {
+      // `reportResult` discards a result whose context is no longer current, and the
+      // discard is reported on the global `'error'` channel so a genuine double report is
+      // not left to be inferred from a missing event. But the id no longer matching *is*
+      // this API's documented abort flow: `forceTry({ shouldAbortRunning: true })` aborts
+      // the running context and moves on, and the contract tells the operation to call
+      // `reportResult('skip', 'aborted')` when it notices `signal.aborted`. Doing exactly
+      // what it was asked dispatched a synthetic uncaught error - which in a browser also
+      // reaches `window.onerror` and any monitoring attached to it.
+      const captured = muteConsoleError();
+      const events: unknown[] = [];
+      const onGlobalError = (event: unknown): void => {
+        events.push(event);
+      };
+
+      globalThis.addEventListener?.('error', onGlobalError);
+
+      try {
+        const operation = async (
+          reportResult: ReportResult,
+          signal: AbortSignal,
+        ): Promise<void> => {
+          await sleep(50);
+
+          if (signal.aborted) {
+            reportResult('skip', 'aborted');
+          } else {
+            reportResult('success', 'completed');
+          }
+        };
+
+        const runner = new RetryRunner(policy, operation);
+        void runner.run(false);
+
+        await sleep(10);
+
+        await runner.forceTry({
+          shouldWaitForCompletion: true,
+          shouldAbortRunning: true,
+        });
+
+        // Long enough for the aborted attempt's own `reportResult` to land.
+        await sleep(100);
+
+        expect(
+          captured.filter((line) => line.includes('already settled')),
+        ).toEqual([]);
+        expect(events).toEqual([]);
+      } finally {
+        globalThis.removeEventListener?.('error', onGlobalError);
+        restoreConsoleError();
+      }
+    });
+
+    test('a throw of undefined after reportResult(success) is still reported', async () => {
+      // The rethrow guard compared the thrown value to whatever was last reported, and a
+      // no-arg `reportResult('success')` stores `undefined` - so `throw undefined`, or a
+      // bare `Promise.reject()` from a cleanup step, compared equal and was dropped. The
+      // runner stayed `completed`/`success` and the `'error'` channel never heard of it,
+      // which is the post-success failure `handleReportResult` exists to keep.
+      const captured = muteConsoleError();
+      const events: unknown[] = [];
+      const onGlobalError = (event: unknown): void => {
+        events.push(event);
+      };
+
+      globalThis.addEventListener?.('error', onGlobalError);
+
+      try {
+        const operation = async (reportResult: ReportResult): Promise<void> => {
+          reportResult('success');
+          // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- the bare rejection is the case
+          await Promise.reject();
+        };
+
+        const runner = new RetryRunner(policy, operation);
+
+        await runner.run(true);
+        await sleep(10);
+
+        const didSurface =
+          captured.some((line) => line.includes('already settled')) ||
+          events.length > 0;
+
+        expect(didSurface).toBe(true);
+      } finally {
+        globalThis.removeEventListener?.('error', onGlobalError);
+        restoreConsoleError();
+      }
+    });
+
+    test('a throw of undefined after reportResult(skip) is still reported', async () => {
+      const captured = muteConsoleError();
+      const events: unknown[] = [];
+      const onGlobalError = (event: unknown): void => {
+        events.push(event);
+      };
+
+      globalThis.addEventListener?.('error', onGlobalError);
+
+      try {
+        // A skip is retried and never counts as a failure, so a second attempt succeeds
+        // to let the run finish; the throw under test is on the first.
+        let attempt = 0;
+
+        const operation = (reportResult: ReportResult): void => {
+          attempt++;
+
+          if (attempt > 1) {
+            reportResult('success');
+
+            return;
+          }
+
+          reportResult('skip');
+          // eslint-disable-next-line @typescript-eslint/only-throw-error -- `throw undefined` is the case
+          throw undefined;
+        };
+
+        const runner = new RetryRunner(policy, operation);
+
+        await runner.run(true);
+        await sleep(10);
+
+        const didSurface =
+          captured.some((line) => line.includes('already settled')) ||
+          events.length > 0;
+
+        expect(didSurface).toBe(true);
+      } finally {
+        globalThis.removeEventListener?.('error', onGlobalError);
+        restoreConsoleError();
+      }
+    });
+
+    test('a rethrow of the error already reported is not a second outcome', async () => {
+      // The shape the guard exists for: `catch (e) { reportResult('error', e); throw e; }`
+      // is one outcome recorded once, not a double report.
+      const captured = muteConsoleError();
+      const events: unknown[] = [];
+      const onGlobalError = (event: unknown): void => {
+        events.push(event);
+      };
+
+      globalThis.addEventListener?.('error', onGlobalError);
+
+      try {
+        const failure = new Error('once');
+
+        const operation = (reportResult: ReportResult): void => {
+          reportResult('error', failure);
+          throw failure;
+        };
+
+        const runner = new RetryRunner(
+          { ...policy, maxRetryAttempts: 1 },
+          operation,
+        );
+
+        await runner.run(true);
+        await sleep(10);
+
+        expect(
+          captured.filter((line) => line.includes('already settled')),
+        ).toEqual([]);
+        expect(events).toEqual([]);
+      } finally {
+        globalThis.removeEventListener?.('error', onGlobalError);
+        restoreConsoleError();
+      }
+    });
+
+    test('a rethrow of the error reported as fatal is not a second outcome either', async () => {
+      // `catch (e) { reportResult('fatal', e); throw e; }` is the same shape with the
+      // other error status, and was still dispatched as a late throw.
+      const captured = muteConsoleError();
+      const events: unknown[] = [];
+      const onGlobalError = (event: unknown): void => {
+        events.push(event);
+      };
+
+      globalThis.addEventListener?.('error', onGlobalError);
+
+      try {
+        const failure = new Error('fatal once');
+
+        const operation = (reportResult: ReportResult): void => {
+          reportResult('fatal', failure);
+          throw failure;
+        };
+
+        const runner = new RetryRunner(policy, operation);
+        const result = await runner.run(true);
+
+        await sleep(10);
+
+        expect(result.status).toBe('attempt_fatal');
+        expect(
+          captured.filter((line) => line.includes('already settled')),
+        ).toEqual([]);
+        expect(events).toEqual([]);
+      } finally {
+        globalThis.removeEventListener?.('error', onGlobalError);
+        restoreConsoleError();
+      }
+    });
+
+    test('a genuine double report on an unaborted attempt is still surfaced', async () => {
+      // The other half of the same rule: nothing here was aborted, so a second
+      // `reportResult` is the caller bug this diagnostic exists for.
+      const captured = muteConsoleError();
+      const events: unknown[] = [];
+      const onGlobalError = (event: unknown): void => {
+        events.push(event);
+      };
+
+      globalThis.addEventListener?.('error', onGlobalError);
+
+      try {
+        const operation = (reportResult: ReportResult): void => {
+          reportResult('success', 'first');
+          reportResult('success', 'second');
+        };
+
+        const runner = new RetryRunner(policy, operation);
+
+        await runner.run(true);
+        await sleep(10);
+
+        const didSurface =
+          captured.some((line) => line.includes('already settled')) ||
+          events.length > 0;
+
+        expect(didSurface).toBe(true);
+      } finally {
+        globalThis.removeEventListener?.('error', onGlobalError);
+        restoreConsoleError();
+      }
     });
 
     test('should throw error if already completed', async () => {

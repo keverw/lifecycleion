@@ -50,7 +50,13 @@ export type {
   StreamResponseFactory,
 } from './types';
 
-export type { Cookie, CookieInput, CookieJarJSON } from './cookie-jar';
+export type {
+  Cookie,
+  CookieInput,
+  CookieJarJSON,
+  CookieJarOptions,
+} from './cookie-jar';
+export type { PublicSuffixOverrides } from './public-suffix';
 export type { RequestInfo } from './request-tracker';
 
 export {

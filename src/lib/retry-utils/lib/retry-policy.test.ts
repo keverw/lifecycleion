@@ -1,6 +1,137 @@
 import { describe, expect, test } from 'bun:test';
 import { RetryPolicy } from './retry-policy';
 
+describe('RetryPolicy - durations that are not finite', () => {
+  // `clamp` is `Math.max`/`Math.min`, and both pass `NaN` through, so `maxTimeoutMS: NaN`
+  // survived validation and made every computed delay `NaN`. `RetryRunner` reads
+  // `delayMS > 0` as false and retries on the same stack, so a config asking for a longer
+  // wait removed the wait entirely and busy-retried until the stack overflowed.
+  test('a NaN timeout falls back to the default rather than poisoning every delay', () => {
+    const policy = new RetryPolicy({
+      strategy: 'exponential',
+      maxTimeoutMS: NaN,
+      minTimeoutMS: NaN,
+    });
+
+    const info = policy.policyInfo;
+
+    expect(info.strategy).toBe('exponential');
+
+    if (info.strategy === 'exponential') {
+      expect(Number.isFinite(info.minTimeoutMS)).toBe(true);
+      expect(Number.isFinite(info.maxTimeoutMS)).toBe(true);
+    }
+
+    policy.shouldDoFirstTry();
+
+    const query = policy.shouldRetry(new Error('boom'));
+
+    expect(Number.isFinite(query.delayMS)).toBe(true);
+    expect(query.delayMS).toBeGreaterThan(0);
+  });
+
+  test('an Infinity timeout is refused too', () => {
+    // `setTimeout(Infinity)` fires on the next tick, so "wait forever" is really
+    // "wait not at all".
+    const policy = new RetryPolicy({
+      strategy: 'exponential',
+      maxTimeoutMS: Infinity,
+    });
+
+    const info = policy.policyInfo;
+
+    expect(info.strategy).toBe('exponential');
+
+    if (info.strategy === 'exponential') {
+      expect(Number.isFinite(info.maxTimeoutMS)).toBe(true);
+    }
+  });
+
+  test('a delay past the 32-bit timer ceiling is clamped, not left to fire at once', () => {
+    // `setTimeout` keeps its delay in a signed 32-bit int and reads anything past
+    // 2^31-1 ms as 1 ms, so `delayMS: 3e9` is the `Infinity` bug in slower clothing: it
+    // passes every finite check, reads as "wait 34 days", and retries every millisecond.
+    const MAX_TIMER_MS = 2_147_483_647;
+
+    const fixed = new RetryPolicy({ strategy: 'fixed', delayMS: 3e9 });
+
+    fixed.shouldDoFirstTry();
+
+    const fixedQuery = fixed.shouldRetry(new Error('boom'));
+
+    expect(fixedQuery.delayMS).toBeLessThanOrEqual(MAX_TIMER_MS);
+    expect(fixedQuery.delayMS).toBeGreaterThan(0);
+
+    const exponential = new RetryPolicy({
+      strategy: 'exponential',
+      minTimeoutMS: 3e9,
+      maxTimeoutMS: 9e9,
+      maxRetryAttempts: 5,
+    });
+
+    const info = exponential.policyInfo;
+
+    if (info.strategy === 'exponential') {
+      expect(info.minTimeoutMS).toBeLessThanOrEqual(MAX_TIMER_MS);
+      expect(info.maxTimeoutMS).toBeLessThanOrEqual(MAX_TIMER_MS);
+    }
+
+    exponential.shouldDoFirstTry();
+
+    for (let attempt = 0; attempt < 4; attempt++) {
+      const query = exponential.shouldRetry(new Error('boom'));
+
+      expect(query.delayMS).toBeLessThanOrEqual(MAX_TIMER_MS);
+      expect(query.delayMS).toBeGreaterThan(0);
+    }
+  });
+
+  test('a NaN fixed delay falls back to the default', () => {
+    const policy = new RetryPolicy({ strategy: 'fixed', delayMS: NaN });
+
+    policy.shouldDoFirstTry();
+
+    const query = policy.shouldRetry(new Error('boom'));
+
+    expect(Number.isFinite(query.delayMS)).toBe(true);
+    expect(query.delayMS).toBeGreaterThan(0);
+  });
+
+  test('a NaN dispersion or factor does not reach the delay', () => {
+    const policy = new RetryPolicy({
+      strategy: 'exponential',
+      dispersion: NaN,
+      factor: NaN,
+    });
+
+    policy.shouldDoFirstTry();
+
+    expect(Number.isFinite(policy.shouldRetry(new Error('boom')).delayMS)).toBe(
+      true,
+    );
+  });
+
+  test('maxRetryAttempts: Infinity is still allowed', () => {
+    // A count, not a duration: nothing turns it into a timer, and "retry until told to
+    // stop" is a supported answer.
+    const policy = new RetryPolicy({
+      strategy: 'exponential',
+      maxRetryAttempts: Infinity,
+    });
+
+    expect(policy.policyInfo.maxRetryAttempts).toBe(Infinity);
+  });
+
+  test('maxRetryAttempts: NaN falls back to the default', () => {
+    const policy = new RetryPolicy({
+      strategy: 'exponential',
+      maxRetryAttempts: NaN,
+    });
+
+    expect(Number.isNaN(policy.policyInfo.maxRetryAttempts)).toBe(false);
+  });
+});
+
 describe('RetryPolicy', () => {
   test('should have the correct defaults for fixed strategy', () => {
     const policy = new RetryPolicy({ strategy: 'fixed' });
@@ -159,4 +290,13 @@ describe('RetryPolicy', () => {
     expect(policy.mostCommonError).toBe(null);
     expect(policy.lastError).toBe(null);
   });
+});
+
+test('policyInfo is a snapshot that cannot bypass delay validation', () => {
+  const policy = new RetryPolicy({ strategy: 'fixed', delayMS: 100 });
+  const info = policy.policyInfo;
+  if (info.strategy === 'fixed') {
+    info.delayMS = NaN;
+  }
+  expect(policy.shouldRetry(new Error('retry')).delayMS).toBe(100);
 });

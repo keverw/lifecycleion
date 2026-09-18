@@ -1,10 +1,9 @@
 /**
- * Node-runtime fixture: exercises Lifecycleion's `'reportError'` convention end to end.
+ * Node-runtime fixture: exercises error reporting on the `'error'` channel end to end.
  *
  * Bundled by `global-event-target.node.test.ts` and executed by the real `node` binary,
  * where `globalThis` is not an EventTarget. Results are written to stdout as JSON.
  */
-
 import {
   safeHandleCallback,
   safeHandleCallbackAndWait,
@@ -14,6 +13,13 @@ import {
   installGlobalEventTarget,
   isGlobalEventTargetPolyfilled,
 } from '../global-event-target';
+
+import { captureConsoleError } from './capture-console-error';
+import { reportedMessage } from './reported-message';
+
+// `safe-handle-callback` writes an unclaimed report to `console.error`; the harness
+// treats any stderr output as a crash, so it is collected and reported instead.
+const consoleErrors = captureConsoleError();
 
 const uncaught: string[] = [];
 const unhandled: string[] = [];
@@ -57,14 +63,14 @@ const listener = (event: Event): void => {
   reported.push({
     isErrorEvent: errorEvent instanceof ErrorEvent,
     type: errorEvent.type,
-    message: errorEvent.error instanceof Error ? errorEvent.error.message : '',
+    message: reportedMessage(errorEvent.error),
     originalStack:
       errorEvent.error instanceof Error &&
       typeof errorEvent.error.stack === 'string',
   });
 };
 
-globalThis.addEventListener('reportError', listener);
+globalThis.addEventListener('error', listener);
 
 // 1. Synchronous throw through the fire-and-forget helper.
 safeHandleCallback('syncCallbackWithError', () => {
@@ -104,18 +110,19 @@ const targetAfter = getGlobalEventTarget();
 const reportedCountBeforeFinalDispatch = reported.length;
 
 globalThis.dispatchEvent(
-  new ErrorEvent('reportError', { error: new Error('After reinstall') }),
+  new ErrorEvent('error', { error: new Error('After reinstall') }),
 );
 
-globalThis.removeEventListener('reportError', listener);
+globalThis.removeEventListener('error', listener);
 
 // After removal nothing further should be recorded.
 globalThis.dispatchEvent(
-  new ErrorEvent('reportError', { error: new Error('After removal') }),
+  new ErrorEvent('error', { error: new Error('After removal') }),
 );
 
 process.stdout.write(
   JSON.stringify({
+    consoleErrors,
     nodeVersion: process.versions.node,
     globalsAfterImport,
     reported,

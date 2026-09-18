@@ -1,6 +1,6 @@
 import { describe, test, expect, beforeEach, afterEach, spyOn } from 'bun:test';
 import { ConsoleSink } from './console';
-import type { LogEntry } from '../types';
+import type { LoggerDiagnostic, LogEntry } from '../types';
 import { LogLevel } from '../types';
 
 describe('ConsoleSink', () => {
@@ -264,6 +264,28 @@ describe('ConsoleSink', () => {
 
     // Should not have been called
     expect(consoleInfoSpy).not.toHaveBeenCalled();
+  });
+
+  test('should honor mute and close for diagnostics', () => {
+    const diagnostic: LoggerDiagnostic = {
+      timestamp: Date.now(),
+      kind: 'sink',
+      error: new Error('diagnostic failure'),
+      message: 'Diagnostic failure',
+    };
+    const sink = new ConsoleSink();
+
+    sink.writeDiagnostic(diagnostic);
+    expect(consoleErrorSpy).toHaveBeenCalledTimes(1);
+
+    sink.mute();
+    sink.writeDiagnostic(diagnostic);
+    expect(consoleErrorSpy).toHaveBeenCalledTimes(1);
+
+    sink.unmute();
+    sink.close();
+    sink.writeDiagnostic(diagnostic);
+    expect(consoleErrorSpy).toHaveBeenCalledTimes(1);
   });
 
   test('should handle all log types correctly', () => {

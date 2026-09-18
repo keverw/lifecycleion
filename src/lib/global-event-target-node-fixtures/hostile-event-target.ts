@@ -4,9 +4,14 @@
  * The constructor is a global like any other, so it needs the same guarded read as the
  * event methods — otherwise the import dies before any of them is even reached.
  */
+import { captureConsoleError } from './capture-console-error';
 
 // Only dynamic imports below (the globals must be set up first), so make this a module.
 export {};
+
+// `safe-handle-callback` writes an unclaimed report to `console.error`; the harness
+// treats any stderr output as a crash, so it is collected and reported instead.
+const consoleErrors = captureConsoleError();
 
 let getterCallCount = 0;
 
@@ -59,6 +64,7 @@ try {
 
 process.stdout.write(
   JSON.stringify({
+    consoleErrors,
     didImportThrow,
     installResult,
     isPolyfilled,

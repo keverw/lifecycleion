@@ -24,7 +24,7 @@ export interface ComponentOptions {
   /** Time to wait for force shutdown in milliseconds (default: 2000, minimum: 500) */
   shutdownForceTimeoutMS?: number;
 
-  /** Time to wait for healthCheck() in milliseconds (default: 5000) */
+  /** Time to wait for healthCheck() in milliseconds (default: 5000, 0 = disabled) */
   healthCheckTimeoutMS?: number;
 
   /** Time to wait for onReload/onInfo/onDebug in milliseconds (default: 5000, 0 = disabled) */
@@ -61,7 +61,14 @@ export interface ComponentStatus {
   /** Unix timestamp (ms) when stop() completed */
   stoppedAt: number | null;
 
-  /** Last error from start/stop/message */
+  /**
+   * Last error from start/stop/message.
+   *
+   * Kept across a restart until the new run reaches `running`: while a component is
+   * `starting` again after a failure, `lastError` still names that failure, and it is
+   * cleared when the start succeeds - or by a clean stop. A reader that treats a
+   * non-null `lastError` as "failed" should read it together with `state`.
+   */
   lastError: Error | null;
 
   /** If stalled, details about why */
@@ -264,7 +271,10 @@ export interface StartupResult {
   /** True if all required components started */
   success: boolean;
 
-  /** Names of components that started successfully */
+  /**
+   * Names of components that started successfully. When shutdown interrupts startup,
+   * includes only components from this pass still running when the result is returned.
+   */
   startedComponents: string[];
 
   /** Optional components that failed (app continues) */
@@ -415,7 +425,8 @@ export interface SendMessageOptions {
 }
 
 /**
- * Options for requesting a value from a component
+ * Options for requesting a value from a component. Neither option permits
+ * invoking a component during stopping or force-stopping.
  */
 export interface GetValueOptions {
   /**
@@ -573,7 +584,7 @@ export interface ComponentSignalResult {
   timedOut: boolean;
 
   /** Machine-readable outcome code */
-  code: 'called' | 'no_handler' | 'timeout' | 'error';
+  code: 'called' | 'no_handler' | 'unavailable' | 'timeout' | 'error';
 }
 
 /**
@@ -804,7 +815,7 @@ export interface UnregisterOptions {
 export interface StartupOptions {
   /** Allow bulk startup to proceed by skipping stalled components (default: false) */
   ignoreStalledComponents?: boolean;
-  /** Global timeout for entire startup process in milliseconds (default: constructor's startupTimeoutMS) */
+  /** Startup time budget in milliseconds, excluding failure rollback (default: constructor's startupTimeoutMS) */
   timeoutMS?: number;
 }
 
@@ -1144,6 +1155,7 @@ export interface RepeatedShutdownRequestPolicy {
   /**
    * How long escalation should remain armed after an unsuccessful shutdown
    * returns. When omitted, the manager derives it as `withinMS * forceAfterCount`.
+   * The effective duration is capped at 2,147,483,647 ms (the timer limit).
    * Set to `0` to disable post-failure arming entirely — the escalation window
    * will not persist once a shutdown attempt returns, and each new request will
    * start a fresh escalation cycle. (Note: `withinMS = 0` is a separate option

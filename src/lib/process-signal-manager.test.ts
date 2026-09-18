@@ -1,6 +1,29 @@
-import { describe, test, expect, mock, beforeEach, afterEach } from 'bun:test';
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  mock,
+  spyOn,
+  test,
+} from 'bun:test';
+import {
+  muteConsoleError,
+  restoreConsoleError,
+} from './internal/console-test-utils';
 import { ProcessSignalManager } from './process-signal-manager';
 import { sleep } from './sleep';
+
+// These suites deliberately drive the paths that fall through to `console.error` when
+// nothing claims the report. Captured rather than printed so a real failure in the run
+// output still stands out; flip `DEBUG` in the helper to see them.
+beforeEach(() => {
+  muteConsoleError();
+});
+
+afterEach(() => {
+  restoreConsoleError();
+});
 
 describe('ProcessSignalManager', () => {
   let manager: ProcessSignalManager;
@@ -23,6 +46,21 @@ describe('ProcessSignalManager', () => {
   });
 
   describe('constructor', () => {
+    test('normalizes non-finite keypress throttles to the default window', () => {
+      for (const keypressThrottleMS of [Infinity, NaN]) {
+        manager = new ProcessSignalManager({ keypressThrottleMS });
+        const internal = manager as unknown as {
+          keypressThrottleMS: number;
+          lastActionTimes: { reload: number };
+          shouldThrottle(action: 'reload'): boolean;
+        };
+
+        expect(internal.keypressThrottleMS).toBe(200);
+        internal.lastActionTimes.reload = Date.now() - 201;
+        expect(internal.shouldThrottle('reload')).toBe(false);
+      }
+    });
+
     test('creates instance with no callbacks', () => {
       manager = new ProcessSignalManager({});
 
@@ -959,6 +997,48 @@ describe('ProcessSignalManager', () => {
   });
 
   describe('keyboard event handling', () => {
+    test('non-finite throttles still allow a second keypress after the default window', async () => {
+      const wasOriginallyTTY = process.stdin.isTTY;
+      // eslint-disable-next-line @typescript-eslint/unbound-method
+      const savedSetRawMode = process.stdin.setRawMode;
+      // eslint-disable-next-line @typescript-eslint/unbound-method
+      const savedPause = process.stdin.pause;
+
+      (process.stdin as any).isTTY = true;
+      (process.stdin as any).setRawMode = mock(() => {});
+      (process.stdin as any).pause = mock(() => {});
+
+      try {
+        let expectedCalls = 0;
+
+        for (const keypressThrottleMS of [Infinity, NaN]) {
+          manager = new ProcessSignalManager({
+            onReloadRequested: reloadCallback,
+            keypressThrottleMS,
+          });
+          manager.attach();
+
+          process.stdin.emit('keypress', 'r', { name: 'r' });
+          expectedCalls++;
+          const internal = manager as unknown as {
+            lastActionTimes: { reload: number };
+          };
+          internal.lastActionTimes.reload = Date.now() - 201;
+          process.stdin.emit('keypress', 'r', { name: 'r' });
+          expectedCalls++;
+          await sleep(1);
+
+          expect(reloadCallback).toHaveBeenCalledTimes(expectedCalls);
+          manager.detach();
+        }
+      } finally {
+        manager.detach();
+        (process.stdin as any).isTTY = wasOriginallyTTY;
+        (process.stdin as any).setRawMode = savedSetRawMode;
+        (process.stdin as any).pause = savedPause;
+      }
+    });
+
     test('handles Ctrl+C keypress', async () => {
       // Mock TTY mode
       const wasOriginallyTTY = process.stdin.isTTY;
@@ -992,6 +1072,116 @@ describe('ProcessSignalManager', () => {
         (process.stdin as any).pause = savedPause;
       }
     });
+
+    test('forwards Ctrl+C to SIGINT when a TTY manager has no shutdown callback', () => {
+      const wasOriginallyTTY = process.stdin.isTTY;
+      // eslint-disable-next-line @typescript-eslint/unbound-method
+      const savedSetRawMode = process.stdin.setRawMode;
+      // eslint-disable-next-line @typescript-eslint/unbound-method
+      const savedPause = process.stdin.pause;
+      (process.stdin as any).isTTY = true;
+      (process.stdin as any).setRawMode = mock(() => {});
+      (process.stdin as any).pause = mock(() => {});
+      const killSpy = spyOn(process, 'kill').mockImplementation(() => true);
+
+      try {
+        manager = new ProcessSignalManager({ onReloadRequested: () => {} });
+        manager.attach();
+
+        process.stdin.emit('keypress', '', { ctrl: true, name: 'c' });
+
+        expect(killSpy).toHaveBeenCalledWith(process.pid, 'SIGINT');
+      } finally {
+        manager.detach();
+        killSpy.mockRestore();
+        (process.stdin as any).isTTY = wasOriginallyTTY;
+        (process.stdin as any).setRawMode = savedSetRawMode;
+        (process.stdin as any).pause = savedPause;
+      }
+    });
+
+    test.each([true, false])(
+      'coordinates Ctrl+C with legacy copies (legacy first=%p)',
+      (isLegacyFirst) => {
+        const wasTTY = process.stdin.isTTY;
+        // eslint-disable-next-line @typescript-eslint/unbound-method
+        const savedSetRawMode = process.stdin.setRawMode;
+        // eslint-disable-next-line @typescript-eslint/unbound-method
+        const savedPause = process.stdin.pause;
+        const stateKey = Symbol.for('lifecycleion.ProcessSignalManager.v1');
+        const globals = globalThis as any;
+        const savedState = globals[stateKey];
+        // The exact old shared-state shape deliberately has no forwarding capability set.
+        const shared = {
+          keypressEventsEmittedOnStdin: true,
+          attachedInstances: new Set<string>(),
+          rawModeOwner: null,
+          rawModeEnabledByManager: false,
+        };
+        globals[stateKey] = shared;
+        (process.stdin as any).isTTY = true;
+        (process.stdin as any).setRawMode = mock(() => {});
+        (process.stdin as any).pause = mock(() => {});
+        const oldShutdown = mock(() => {});
+        const oldKeypress = (_text: string, key: any) => {
+          if (key.ctrl && key.name === 'c') {
+            oldShutdown();
+          }
+        };
+        const external = mock(() => {});
+        const currentShutdown = mock(() => {});
+        const secondShutdown = mock(() => {});
+        manager = new ProcessSignalManager({
+          onShutdownRequested: currentShutdown,
+          keypressThrottleMS: 0,
+        });
+        const second = new ProcessSignalManager({
+          onShutdownRequested: secondShutdown,
+          keypressThrottleMS: 0,
+        });
+        const attachOld = () => {
+          shared.attachedInstances.add('legacy-instance');
+          process.on('SIGINT', oldShutdown);
+          process.stdin.on('keypress', oldKeypress);
+        };
+        try {
+          if (isLegacyFirst) {
+            attachOld();
+          }
+          manager.attach();
+          if (!isLegacyFirst) {
+            attachOld();
+          }
+          second.attach();
+          process.on('SIGINT', external);
+          process.stdin.emit('keypress', '', { ctrl: true, name: 'c' });
+          expect(oldShutdown).toHaveBeenCalledTimes(1);
+          expect(currentShutdown).toHaveBeenCalledTimes(1);
+          expect(secondShutdown).toHaveBeenCalledTimes(1);
+          expect(external).not.toHaveBeenCalled();
+
+          shared.attachedInstances.delete('legacy-instance');
+          process.off('SIGINT', oldShutdown);
+          process.stdin.off('keypress', oldKeypress);
+          process.stdin.emit('keypress', '', { ctrl: true, name: 'c' });
+          expect(currentShutdown).toHaveBeenCalledTimes(2);
+          expect(secondShutdown).toHaveBeenCalledTimes(2);
+          expect(external).toHaveBeenCalledTimes(1);
+        } finally {
+          shared.attachedInstances.delete('legacy-instance');
+          process.off('SIGINT', oldShutdown);
+          process.off('SIGINT', external);
+          process.stdin.off('keypress', oldKeypress);
+          manager.detach();
+          second.detach();
+          expect((shared as any).sigintForwardingInstances.size).toBe(0);
+          globals[stateKey] = savedState;
+          (process.stdin as any).isTTY = wasTTY;
+          (process.stdin as any).setRawMode = savedSetRawMode;
+          (process.stdin as any).pause = savedPause;
+        }
+      },
+    );
 
     test('handles Escape keypress', async () => {
       // Mock TTY mode
@@ -1235,6 +1425,322 @@ describe('ProcessSignalManager', () => {
     });
   });
 
+  describe('raw mode restore failure', () => {
+    const SHARED_STATE_KEY = Symbol.for('lifecycleion.ProcessSignalManager.v1');
+
+    interface SharedState {
+      attachedInstances: Set<string>;
+      rawModeOwner: string | null;
+      rawModeEnabledByManager: boolean;
+    }
+
+    function readShared(): SharedState | undefined {
+      return (globalThis as unknown as Record<symbol, SharedState | undefined>)[
+        SHARED_STATE_KEY
+      ];
+    }
+
+    function resetShared(): void {
+      const shared = readShared();
+
+      // Created lazily by the first manager, so there is nothing to reset before one.
+      if (shared === undefined) {
+        return;
+      }
+
+      shared.attachedInstances.clear();
+      shared.rawModeOwner = null;
+      shared.rawModeEnabledByManager = false;
+    }
+
+    test('a detach whose setRawMode(false) throws reports it and keeps ownership so a later instance can retry', () => {
+      // A terminal left in raw mode is the user's shell broken, and this said nothing
+      // about it. Reported on the global `'error'` channel, with the shared state left in
+      // the shape a later `attach()` can adopt and repair from.
+      const wasOriginallyTTY = process.stdin.isTTY;
+      const wasOriginallyRaw = (process.stdin as any).isRaw;
+      // eslint-disable-next-line @typescript-eslint/unbound-method
+      const savedSetRawMode = process.stdin.setRawMode;
+      // eslint-disable-next-line @typescript-eslint/unbound-method
+      const savedPause = process.stdin.pause;
+      // eslint-disable-next-line @typescript-eslint/unbound-method
+      const savedResume = process.stdin.resume;
+
+      let isRaw = false;
+      let shouldFailDisable = true;
+
+      (process.stdin as any).isTTY = true;
+      Object.defineProperty(process.stdin, 'isRaw', {
+        configurable: true,
+        get: () => isRaw,
+      });
+      (process.stdin as any).setRawMode = mock((enableRaw: boolean) => {
+        if (!enableRaw && shouldFailDisable) {
+          throw new Error('tty refused');
+        }
+
+        isRaw = enableRaw;
+      });
+      (process.stdin as any).pause = mock(() => {});
+      (process.stdin as any).resume = mock(() => {});
+
+      const events: ErrorEvent[] = [];
+      const onGlobalError = (event: Event): void => {
+        events.push(event as ErrorEvent);
+        event.preventDefault();
+      };
+
+      globalThis.addEventListener('error', onGlobalError);
+
+      try {
+        resetShared();
+
+        manager = new ProcessSignalManager({
+          onShutdownRequested: shutdownCallback,
+        });
+        manager.attach();
+
+        expect(isRaw).toBe(true);
+
+        manager.detach();
+
+        expect(events).toHaveLength(1);
+        expect((events[0]?.error as Error).message).toContain(
+          'stdin raw mode restore',
+        );
+        expect(((events[0]?.error as Error).cause as Error).message).toBe(
+          'tty refused',
+        );
+
+        // Nothing attached, raw mode still ours, and an owner left on record: exactly
+        // what a later instance needs to adopt ownership and try again.
+        const shared = readShared();
+
+        expect(shared?.attachedInstances.size).toBe(0);
+        expect(shared?.rawModeEnabledByManager).toBe(true);
+        expect(shared?.rawModeOwner).not.toBeNull();
+        expect(isRaw).toBe(true);
+
+        // A later instance adopts and, with a working tty, restores the terminal.
+        shouldFailDisable = false;
+
+        const later = new ProcessSignalManager({
+          onShutdownRequested: shutdownCallback,
+        });
+
+        later.attach();
+        later.detach();
+
+        expect(isRaw).toBe(false);
+        expect(readShared()?.rawModeEnabledByManager).toBe(false);
+        expect(readShared()?.rawModeOwner).toBeNull();
+        expect(events).toHaveLength(1);
+      } finally {
+        globalThis.removeEventListener('error', onGlobalError);
+        resetShared();
+        (process.stdin as any).isTTY = wasOriginallyTTY;
+        Object.defineProperty(process.stdin, 'isRaw', {
+          configurable: true,
+          writable: true,
+          value: wasOriginallyRaw,
+        });
+        (process.stdin as any).setRawMode = savedSetRawMode;
+        (process.stdin as any).pause = savedPause;
+        (process.stdin as any).resume = savedResume;
+      }
+    });
+
+    test('an attach() from inside the restore report does not have stdin paused under it by the detach that raised it', () => {
+      // `reportCallbackError` dispatches the global `'error'` synchronously, so a listener
+      // that answers a broken restore by attaching a fresh instance returns into the
+      // middle of `restoreStdin`. The stale `isLastInstance` read then paused stdin under
+      // the new instance, whose keypress handler was registered and silent. The pause is
+      // gated on the live set, and this is the path that pins it.
+      const wasOriginallyTTY = process.stdin.isTTY;
+      const wasOriginallyRaw = (process.stdin as any).isRaw;
+      // eslint-disable-next-line @typescript-eslint/unbound-method
+      const savedSetRawMode = process.stdin.setRawMode;
+      // eslint-disable-next-line @typescript-eslint/unbound-method
+      const savedPause = process.stdin.pause;
+      // eslint-disable-next-line @typescript-eslint/unbound-method
+      const savedResume = process.stdin.resume;
+
+      let isRaw = false;
+      let shouldFailDisable = true;
+
+      (process.stdin as any).isTTY = true;
+      Object.defineProperty(process.stdin, 'isRaw', {
+        configurable: true,
+        get: () => isRaw,
+      });
+      (process.stdin as any).setRawMode = mock((enableRaw: boolean) => {
+        if (!enableRaw && shouldFailDisable) {
+          throw new Error('tty refused');
+        }
+
+        isRaw = enableRaw;
+      });
+      const pause = mock(() => {});
+      (process.stdin as any).pause = pause;
+      (process.stdin as any).resume = mock(() => {});
+
+      let replacement: ProcessSignalManager | undefined;
+      const events: ErrorEvent[] = [];
+      const onGlobalError = (event: Event): void => {
+        events.push(event as ErrorEvent);
+        event.preventDefault();
+
+        if (
+          replacement === undefined &&
+          ((event as ErrorEvent).error as Error).message.includes(
+            'stdin raw mode restore',
+          )
+        ) {
+          replacement = new ProcessSignalManager({
+            onShutdownRequested: shutdownCallback,
+          });
+          replacement.attach();
+        }
+      };
+
+      globalThis.addEventListener('error', onGlobalError);
+
+      try {
+        resetShared();
+
+        manager = new ProcessSignalManager({
+          onShutdownRequested: shutdownCallback,
+        });
+        manager.attach();
+        manager.detach();
+
+        expect(events).toHaveLength(1);
+        expect(replacement?.getStatus().isAttached).toBe(true);
+        expect(readShared()?.attachedInstances.size).toBe(1);
+        // The whole point: stdin was left running for the instance now on it.
+        expect(pause).not.toHaveBeenCalled();
+        // And the replacement adopted the raw-mode ownership the failed restore left.
+        expect(readShared()?.rawModeEnabledByManager).toBe(true);
+        expect(
+          readShared()?.attachedInstances.has(readShared()?.rawModeOwner ?? ''),
+        ).toBe(true);
+
+        shouldFailDisable = false;
+        replacement?.detach();
+
+        expect(isRaw).toBe(false);
+        expect(pause).toHaveBeenCalledTimes(1);
+        expect(readShared()?.attachedInstances.size).toBe(0);
+        expect(events).toHaveLength(1);
+      } finally {
+        globalThis.removeEventListener('error', onGlobalError);
+        resetShared();
+        (process.stdin as any).isTTY = wasOriginallyTTY;
+        Object.defineProperty(process.stdin, 'isRaw', {
+          configurable: true,
+          writable: true,
+          value: wasOriginallyRaw,
+        });
+        (process.stdin as any).setRawMode = savedSetRawMode;
+        (process.stdin as any).pause = savedPause;
+        (process.stdin as any).resume = savedResume;
+      }
+    });
+
+    test('a failed attach whose raw-mode rollback also fails reports after the shared state is repaired', () => {
+      // `setRawMode(true)` can throw after actually enabling raw mode, and the rollback's
+      // own `setRawMode(false)` can fail too. The report runs a global `'error'` listener
+      // synchronously, and a listener that reads the shared state from there must see it
+      // already repaired - an owner on record and the manager flag set - rather than the
+      // half-way shape where nothing is attached and nothing can be adopted.
+      const wasOriginallyTTY = process.stdin.isTTY;
+      const wasOriginallyRaw = (process.stdin as any).isRaw;
+      // eslint-disable-next-line @typescript-eslint/unbound-method
+      const savedSetRawMode = process.stdin.setRawMode;
+      // eslint-disable-next-line @typescript-eslint/unbound-method
+      const savedPause = process.stdin.pause;
+      // eslint-disable-next-line @typescript-eslint/unbound-method
+      const savedResume = process.stdin.resume;
+
+      let isRaw = false;
+
+      (process.stdin as any).isTTY = true;
+      Object.defineProperty(process.stdin, 'isRaw', {
+        configurable: true,
+        get: () => isRaw,
+      });
+      (process.stdin as any).setRawMode = mock((enableRaw: boolean) => {
+        if (enableRaw) {
+          // Enabled, then threw.
+          isRaw = true;
+          throw new Error('enable threw late');
+        }
+
+        throw new Error('disable refused');
+      });
+      (process.stdin as any).pause = mock(() => {});
+      (process.stdin as any).resume = mock(() => {});
+
+      const seenDuringReport: Array<{
+        message: string;
+        owner: string | null;
+        enabled: boolean;
+        attached: number;
+      }> = [];
+      const onGlobalError = (event: Event): void => {
+        const shared = readShared();
+
+        seenDuringReport.push({
+          message: String(((event as ErrorEvent).error as Error)?.message),
+          owner: shared?.rawModeOwner ?? null,
+          enabled: shared?.rawModeEnabledByManager ?? false,
+          attached: shared?.attachedInstances.size ?? -1,
+        });
+        event.preventDefault();
+      };
+
+      globalThis.addEventListener('error', onGlobalError);
+
+      try {
+        resetShared();
+
+        const failing = new ProcessSignalManager({
+          onShutdownRequested: shutdownCallback,
+        });
+
+        expect(() => failing.attach()).toThrow('enable threw late');
+        expect(failing.isAttached).toBe(false);
+
+        // Two reports, not one: the rollback inside `listenForKeyPresses` tries the
+        // restore and fails, and `attach`'s own catch runs `restoreStdin`, which retries
+        // it - a second genuine attempt, reported when it fails too. Each must be
+        // dispatched only after the shared state was repaired.
+        expect(seenDuringReport.map((entry) => entry.message)).toEqual([
+          'Error in a callback ProcessSignalManager stdin raw mode restore',
+          'Error in a callback ProcessSignalManager stdin raw mode restore',
+        ]);
+
+        for (const seen of seenDuringReport) {
+          expect(seen.attached).toBe(0);
+          expect(seen.enabled).toBe(true);
+          expect(seen.owner).not.toBeNull();
+        }
+      } finally {
+        globalThis.removeEventListener('error', onGlobalError);
+        resetShared();
+        (process.stdin as any).isTTY = wasOriginallyTTY;
+        Object.defineProperty(process.stdin, 'isRaw', {
+          configurable: true,
+          writable: true,
+          value: wasOriginallyRaw,
+        });
+        (process.stdin as any).setRawMode = savedSetRawMode;
+        (process.stdin as any).pause = savedPause;
+        (process.stdin as any).resume = savedResume;
+      }
+    });
+  });
+
   describe('error handling', () => {
     test('handles error in shutdown callback gracefully', () => {
       const errorCallback = mock(() => {
@@ -1358,4 +1864,165 @@ describe('ProcessSignalManager', () => {
       await sleep(10);
     });
   });
+});
+
+describe('ProcessSignalManager - piped stdin ownership', () => {
+  test.each([false, true])(
+    'leaves non-TTY input isFlowing (attach failure=%p)',
+    (shouldFailAttach) => {
+      const descriptor = Object.getOwnPropertyDescriptor(
+        process.stdin,
+        'isTTY',
+      );
+      const resume = spyOn(process.stdin, 'resume').mockImplementation(
+        () => process.stdin,
+      );
+      const pause = spyOn(process.stdin, 'pause').mockImplementation(
+        () => process.stdin,
+      );
+      const manager = new ProcessSignalManager({ onReloadRequested() {} });
+      const on = process.on.bind(process);
+      const registration = spyOn(process, 'on').mockImplementation(((
+        event: string,
+        listener: (...args: unknown[]) => void,
+      ) => {
+        if (shouldFailAttach && event === 'SIGHUP') {
+          throw new Error('registration refused');
+        }
+        return on(event, listener);
+      }) as typeof process.on);
+      Object.defineProperty(process.stdin, 'isTTY', {
+        configurable: true,
+        value: false,
+      });
+      try {
+        if (shouldFailAttach) {
+          expect(() => manager.attach()).toThrow('registration refused');
+        } else {
+          manager.attach();
+          manager.detach();
+        }
+        expect(resume).not.toHaveBeenCalled();
+        expect(pause).not.toHaveBeenCalled();
+      } finally {
+        manager.detach();
+        registration.mockRestore();
+        resume.mockRestore();
+        pause.mockRestore();
+        if (descriptor) {
+          Object.defineProperty(process.stdin, 'isTTY', descriptor);
+        } else {
+          delete (process.stdin as { isTTY?: boolean }).isTTY;
+        }
+      }
+    },
+  );
+});
+
+test.each([
+  [false, false],
+  [true, false],
+  [false, true],
+])(
+  'throwing resume preserves prior flow (isFlowing=%p, doesChangeBeforeThrow=%p)',
+  (wasFlowing, doesChangeBeforeThrow) => {
+    const keys = ['isTTY', 'isRaw', 'readableFlowing', 'setRawMode'] as const;
+    const descriptors = keys.map(
+      (key) =>
+        [key, Object.getOwnPropertyDescriptor(process.stdin, key)] as const,
+    );
+    let isFlowing = wasFlowing;
+    Object.defineProperty(process.stdin, 'isTTY', {
+      configurable: true,
+      value: true,
+    });
+    Object.defineProperty(process.stdin, 'isRaw', {
+      configurable: true,
+      writable: true,
+      value: false,
+    });
+    Object.defineProperty(process.stdin, 'readableFlowing', {
+      configurable: true,
+      get: () => isFlowing,
+    });
+    Object.defineProperty(process.stdin, 'setRawMode', {
+      configurable: true,
+      writable: true,
+      value: (isRaw: boolean) => {
+        process.stdin.isRaw = isRaw;
+        return process.stdin;
+      },
+    });
+    const on = process.stdin.on.bind(process.stdin);
+    const register = spyOn(process.stdin, 'on').mockImplementation(((
+      event: string,
+      listener: (...args: unknown[]) => void,
+    ) =>
+      event === 'keypress'
+        ? process.stdin
+        : on(event, listener)) as typeof process.stdin.on);
+    const resume = spyOn(process.stdin, 'resume').mockImplementation(() => {
+      if (doesChangeBeforeThrow) {
+        isFlowing = true;
+      }
+      throw new Error('resume refused');
+    });
+    const pause = spyOn(process.stdin, 'pause').mockImplementation(() => {
+      isFlowing = false;
+      return process.stdin;
+    });
+    const manager = new ProcessSignalManager({ onReloadRequested() {} });
+    try {
+      expect(() => manager.attach()).toThrow('resume refused');
+      expect(pause).toHaveBeenCalledTimes(
+        doesChangeBeforeThrow && !wasFlowing ? 1 : 0,
+      );
+      expect(isFlowing).toBe(wasFlowing);
+      expect(manager.isAttached).toBe(false);
+    } finally {
+      manager.detach();
+      register.mockRestore();
+      resume.mockRestore();
+      pause.mockRestore();
+      for (const [key, descriptor] of descriptors) {
+        if (descriptor) {
+          Object.defineProperty(process.stdin, key, descriptor);
+        } else {
+          Reflect.deleteProperty(process.stdin, key);
+        }
+      }
+    }
+  },
+);
+
+test('one Ctrl+C is forwarded once when its leader detaches during SIGINT', () => {
+  const wasTTY = process.stdin.isTTY;
+  // eslint-disable-next-line @typescript-eslint/unbound-method
+  const raw = process.stdin.setRawMode;
+  (process.stdin as any).isTTY = true;
+  process.stdin.setRawMode = mock(() => process.stdin);
+  const callback = mock(() => {});
+  const first: ProcessSignalManager = new ProcessSignalManager({
+    onShutdownRequested: () => {
+      first.detach();
+    },
+    keypressThrottleMS: 0,
+  });
+  const second = new ProcessSignalManager({
+    onShutdownRequested: callback,
+    keypressThrottleMS: 0,
+  });
+  try {
+    first.attach();
+    second.attach();
+    process.stdin.emit('keypress', '\u0003', { name: 'c', ctrl: true });
+    expect(callback).toHaveBeenCalledTimes(1);
+    process.stdin.emit('keypress', '\u0003', { name: 'c', ctrl: true });
+    expect(callback).toHaveBeenCalledTimes(2);
+  } finally {
+    first.detach();
+    second.detach();
+    (process.stdin as any).isTTY = wasTTY;
+    process.stdin.setRawMode = raw;
+  }
 });

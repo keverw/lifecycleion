@@ -1,5 +1,20 @@
-import { describe, expect, it, mock } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
+import {
+  muteConsoleError,
+  restoreConsoleError,
+} from './internal/console-test-utils';
 import { PromiseProtectedResolver } from './promise-protected-resolver';
+
+// These suites deliberately drive the paths that fall through to `console.error` when
+// nothing claims the report. Captured rather than printed so a real failure in the run
+// output still stands out; flip `DEBUG` in the helper to see them.
+beforeEach(() => {
+  muteConsoleError();
+});
+
+afterEach(() => {
+  restoreConsoleError();
+});
 
 describe('PromiseProtectedResolver regular', () => {
   it('should resolve a value once', () => {

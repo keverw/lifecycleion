@@ -6,7 +6,7 @@
  * This provides basic event handling functionality with type safety and memory management.
  */
 
-import { safeHandleCallback } from './safe-handle-callback';
+import { reportCallbackError, runCallbackSafely } from './safe-handle-callback';
 
 type EventCallback<T = unknown> = (data: T) => void | Promise<void>;
 
@@ -59,7 +59,13 @@ export class EventEmitterProtected {
     event: string,
     callback: EventCallback<T>,
   ): () => void {
+    let hasFired = false;
     const unsubscribe = this.on(event, (data: T) => {
+      // A nested emission may fire this listener while an outer snapshot still holds it.
+      if (hasFired) {
+        return;
+      }
+      hasFired = true;
       unsubscribe();
       return callback(data);
     });
@@ -124,11 +130,55 @@ export class EventEmitterProtected {
    */
   protected emit<T = unknown>(event: string, data?: T): void {
     const callbacks = this.events.get(event);
-    if (callbacks) {
-      for (const callback of callbacks) {
-        safeHandleCallback(`event handler for ${event}`, callback, data);
-      }
+
+    if (!callbacks) {
+      return;
     }
+
+    // Loop-invariant: the reporter depends on the event, not on which handler failed.
+    const handleFailure = (error: unknown): void => {
+      this.handleEventHandlerFailure(event, error, data);
+    };
+
+    // Snapshot at the start of this emission. Listener changes affect later (including
+    // nested) emissions, but cannot skip a sibling or add another callback midway
+    // through this one. This matches the dispatch semantics consumers expect from
+    // Node's EventEmitter.
+    for (const callback of [...callbacks]) {
+      // The same invocation helper `safeHandleCallback` uses, with this emitter's
+      // overridable reporter in place of the global `'error'` channel. The callback name
+      // matches what `safeHandleCallback` produced before, so the "is not a function"
+      // message is unchanged for consumers matching on it.
+      runCallbackSafely(
+        `event handler for ${event}`,
+        callback,
+        [data],
+        handleFailure,
+      );
+    }
+  }
+
+  /**
+   * Report a failure thrown (or rejected) by one of this emitter's handlers.
+   *
+   * The default reports it on the standard global `'error'` channel, exactly as
+   * `safeHandleCallback` would. It is overridable because that channel is not always safe
+   * to use: an emitter whose own events are logged can feed its handler failures back into
+   * itself. `Logger` overrides this for that reason.
+   *
+   * @param event The event whose handler failed.
+   * @param error The error thrown or the rejection reason. Typed `unknown` because
+   *              `throw` and promise rejection both accept any value, so an override
+   *              must not assume an `Error`.
+   * @param data  The value emitted to the failing handler. Optional so existing overrides
+   *              that only need the event and error remain valid.
+   */
+  protected handleEventHandlerFailure(
+    event: string,
+    error: unknown,
+    _data?: unknown,
+  ): void {
+    reportCallbackError(`event handler for ${event}`, error);
   }
 }
 

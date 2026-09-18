@@ -1,6 +1,6 @@
 # global-event-target
 
-Conservative polyfill that gives `globalThis` the `EventTarget` methods on Node.js, so Lifecycleion's `'reportError'` reporting convention works there.
+Conservative polyfill that gives `globalThis` the `EventTarget` methods on Node.js, so error reporting on the standard `'error'` event channel works there.
 
 <!-- toc -->
 
@@ -17,7 +17,7 @@ Conservative polyfill that gives `globalThis` the `EventTarget` methods on Node.
 
 ## Why This Exists
 
-`safe-handle-callback` and `logger` report errors with Lifecycleion's `'reportError'` convention: an `ErrorEvent` dispatched through `globalThis.dispatchEvent()`, observed with `globalThis.addEventListener('reportError', handler)`. The `ErrorEvent` constructor and the `EventTarget` methods are web-standard primitives. The `'reportError'` event type itself is Lifecycleion's own convention, not a web standard.
+`safe-handle-callback` and `logger` report errors as an `ErrorEvent` of the standard `'error'` type, dispatched through `globalThis.dispatchEvent()` and observed with `globalThis.addEventListener('error', handler)`. See [the reporting pattern](./safe-handle-callback.md#the-reporting-pattern) for the full fall-back order and the details that are easy to get wrong.
 
 Browsers, Bun, and Deno expose all of these on the global object. Node.js does not. As of Node 25 the `ErrorEvent` constructor **is** a global, but `globalThis` is still **not** an `EventTarget`:
 
@@ -31,7 +31,7 @@ typeof globalThis.removeEventListener; // 'undefined'
 
 Lifecycleion supplies the missing global event methods, backing them with a single shared `EventTarget`. Node 25+ is the supported floor (see `engines.node`), so `ErrorEvent` itself is never polyfilled.
 
-Nothing needs to be wired up by hand: importing `lifecycleion/safe-handle-callback` or `lifecycleion/logger` installs it. Both are listed in the package's `sideEffects`, so a bundler will not drop that installation, including for a bare `import 'lifecycleion/safe-handle-callback'`. Everything else in the package stays side-effect-free and fully tree-shakeable. Reporting also re-runs the install on its own error path, so a failure can never be swallowed for a packaging reason.
+Nothing needs to be wired up by hand: importing `lifecycleion/safe-handle-callback` or `lifecycleion/logger` installs it. Both are listed in the package's `sideEffects`, so a bundler will not drop that installation, including for a bare `import 'lifecycleion/safe-handle-callback'`. Other utility subpaths remain eligible for tree shaking. Reporting also re-runs the install on its own error path, so a failure cannot be swallowed solely because a bundler removed the top-level installation call.
 
 This module is exported for the cases where you want to inspect or control installation explicitly.
 
@@ -87,11 +87,11 @@ if (isGlobalEventTargetPolyfilled()) {
 
 ### isGlobalEventTargetAvailable
 
-Whether `globalThis` exposes everything the `'reportError'` convention needs: the three `EventTarget` methods plus the `ErrorEvent` constructor. This is what `logger.isReportErrorAvailable()` reports.
+Whether `globalThis` exposes everything error reporting needs: the three `EventTarget` methods plus the `ErrorEvent` constructor. This is what `logger.isReportErrorAvailable()` reports.
 
 ```typescript
 if (isGlobalEventTargetAvailable()) {
-  globalThis.addEventListener('reportError', handler);
+  globalThis.addEventListener('error', handler);
 }
 ```
 

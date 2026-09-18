@@ -131,6 +131,110 @@ export function resolveAbsoluteURL(url: string, baseURL?: string): string {
 }
 
 /**
+ * The same URL with any `user:pass@` userinfo removed.
+ *
+ * Userinfo in a URL is `Authorization: Basic` by another name: `NodeAdapter` copies it
+ * onto `options.auth` and `fetch` sends it for us. A redirect target is chosen by the
+ * remote server, so a `Location` carrying credentials must not be able to authenticate
+ * this client to a host the caller never named - see `_sanitizeRedirectRequest`.
+ *
+ * A string that does not parse is returned unchanged: there is no userinfo to find in it,
+ * and this is on the redirect path, which already tolerates a `Location` it cannot parse.
+ *
+ * @param url - The URL to strip.
+ * @returns The URL without userinfo, or `url` unchanged when it cannot be parsed.
+ */
+export function stripURLCredentials(url: string): string {
+  try {
+    const parsed = new URL(url);
+
+    if (!parsed.username && !parsed.password) {
+      return url;
+    }
+
+    parsed.username = '';
+    parsed.password = '';
+
+    return parsed.href;
+  } catch {
+    return url;
+  }
+}
+
+/**
+ * Withhold URL userinfo when an adapter is dispatching a hop to an origin other than
+ * the one the caller addressed.
+ *
+ * HTTPClient sanitizes its own redirect requests, but adapters are public and can be
+ * driven directly. `initialURL` is the adapter-level trust boundary for that path. An
+ * unparseable initial URL fails closed: it cannot prove that the credentials belong to
+ * the target origin, so they are stripped.
+ */
+export function stripCrossOriginURLCredentials(
+  requestURL: string,
+  initialURL: string | undefined,
+): string {
+  if (initialURL === undefined) {
+    return requestURL;
+  }
+
+  let initial: URL;
+
+  try {
+    initial = new URL(initialURL);
+  } catch {
+    // The initial origin cannot be trusted. An absolute URL can be handled by the
+    // ordinary helper; a network-path reference needs a base merely to expose its
+    // authority to URL parsing.
+    if (requestURL.startsWith('//')) {
+      try {
+        const target = new URL(
+          requestURL,
+          'http://credential-sanitizer.invalid',
+        );
+
+        if (!target.username && !target.password) {
+          return requestURL;
+        }
+
+        target.username = '';
+        target.password = '';
+
+        return target.href.slice(target.protocol.length);
+      } catch {
+        return requestURL;
+      }
+    }
+
+    return stripURLCredentials(requestURL);
+  }
+
+  try {
+    const target = new URL(requestURL, initial);
+
+    if (initial.origin === target.origin) {
+      return requestURL;
+    }
+
+    if (!target.username && !target.password) {
+      return requestURL;
+    }
+
+    target.username = '';
+    target.password = '';
+
+    // Keep the caller's network-path form; both browser adapters support relative URLs.
+    return requestURL.startsWith('//')
+      ? target.href.slice(target.protocol.length)
+      : target.href;
+  } catch {
+    // The origins cannot be shown to match, so fail closed below.
+  }
+
+  return stripURLCredentials(requestURL);
+}
+
+/**
  * Browser-aware absolute URL resolution used by HTTPClient before interceptors
  * and adapter dispatch. Starts with normal baseURL resolution, then falls back
  * to the current page/worker location when running in a browser-like runtime.
@@ -314,10 +418,10 @@ export function assertSupportedAdapterRuntimeAndConfig(
   if (
     config.followRedirects === true &&
     config.maxRedirects !== undefined &&
-    config.maxRedirects < 1
+    (!Number.isFinite(config.maxRedirects) || config.maxRedirects < 1)
   ) {
     throw new Error(
-      'HTTPClient maxRedirects must be greater than or equal to 1 when followRedirects is true.',
+      'HTTPClient maxRedirects must be greater than or equal to 1 when followRedirects is true. It must also be finite.',
     );
   }
 
@@ -415,11 +519,16 @@ export function extractFetchHeaders(
       result['set-cookie'] = setCookies;
     }
   } else {
-    // Fallback: headers.get() comma-joins — split on ', ' is unreliable for
-    // cookies but better than nothing on older runtimes
+    // Legacy Headers implementations can combine cookie lines. A comma before
+    // another name=value may be a cookie boundary, a valid part of a Path or
+    // extension attribute, or an invalid cookie-value octet accepted by a
+    // permissive server. Reject that ambiguous header: splitting can invent
+    // cookies or broaden their scope, and keeping it can apply one cookie's
+    // attributes to another. Ordinary Expires date commas do not contain an '='
+    // before the next delimiter and remain intact.
     const raw = headers.get('set-cookie');
 
-    if (raw) {
+    if (raw && !/,[^;,]*=/.test(raw)) {
       result['set-cookie'] = [raw];
     }
   }

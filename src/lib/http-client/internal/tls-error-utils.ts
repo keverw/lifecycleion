@@ -1,3 +1,17 @@
+// The shared brand check, for the reason the adapters use it: a local `instanceof` misses
+// an error built in another realm - a `vm` context, an iframe - and the value tested here
+// is exactly that case. Node wraps a TLS failure as `TypeError: fetch failed` and hangs
+// the real error off `cause`, so a cross-realm cause failed the check and its certificate
+// error was classified as a generic transport failure and retried, though a rejected
+// certificate fails identically every time.
+import { isErrorValue } from '../../to-error';
+// Every field is read through this, since the error is whatever a runtime, a library, or
+// a caller's mocked `fetch` rejected with. This classifier runs inside adapter error
+// handling, where a throwing getter would replace a normalized `status: 0` transport
+// response with the getter's own error, so unreadable is treated as absent on every
+// field rather than only on `cause`.
+import { readMember } from '../../internal/read-member';
+
 const CERT_ERROR_CODES = new Set([
   'UNABLE_TO_VERIFY_LEAF_SIGNATURE',
   'CERT_HAS_EXPIRED',
@@ -66,15 +80,6 @@ export function isTLSCertificateError(error: Error): boolean {
   return isErrorValue(cause) ? isTLSCertificateErrorSelf(cause) : false;
 }
 
-/** Check Error identity without trusting a Proxy's prototype trap. */
-function isErrorValue(value: unknown): value is Error {
-  try {
-    return value instanceof Error;
-  } catch {
-    return false;
-  }
-}
-
 /**
  * Classify a single error, without consulting its `cause`. Every field is read
  * through {@link readMember}, since the error is whatever a runtime, a library,
@@ -138,20 +143,4 @@ function isTLSCertificateErrorSelf(error: Error): boolean {
   return typeof message === 'string'
     ? /certificate|self signed|unable to verify|altname/i.test(message)
     : false;
-}
-
-/**
- * Read a field off an error without trusting it.
- *
- * This classifier runs inside adapter error handling, where a throwing getter
- * would replace a normalized `status: 0` transport response with the getter's own
- * error. Unreadable is treated as absent, on every field rather than only on
- * `cause` — the outer error is no more this module's own than the nested one.
- */
-function readMember(error: object, key: string): unknown {
-  try {
-    return (error as Record<string, unknown>)[key];
-  } catch {
-    return undefined;
-  }
 }

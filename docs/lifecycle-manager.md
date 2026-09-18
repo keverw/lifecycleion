@@ -112,7 +112,7 @@ npm install lifecycleion
 bun add lifecycleion
 ```
 
-**Note on Logger:** The LifecycleManager requires a Logger instance from the lifecycleion logger. The Logger provides structured logging with sinks, service scoping, and lifecycle integration. The exact import path will be provided in a future release, but the Logger is part of the lifecycleion package.
+**Note on Logger:** The LifecycleManager requires a `Logger` from `lifecycleion/logger`. The logger provides sinks, service scoping, and lifecycle integration.
 
 ## Quick Start
 
@@ -258,13 +258,28 @@ registered → starting → running → stopping → stopped
 
 **Note:** Required components that timeout enter `starting-timed-out` and trigger rollback. Optional components that fail enter `failed` state and startup continues.
 
+Once a required startup failure begins rollback, the bulk startup timer is cleared.
+Rollback uses the component shutdown timeouts, and startup returns the original failure
+after cleanup finishes. A concurrent shutdown also cancels the remaining bulk starts,
+even if shutdown finishes before startup resumes. Shutdown owns cleanup in this case, so
+startup does not launch a second rollback that could bypass `haltOnStall`. The aborted
+startup result lists components from that startup pass that are still running when it
+returns. Consult the shutdown result for stalls and incomplete stops.
+
 **Starting-Timed-Out State Definition:**
 A component enters "starting-timed-out" when:
 
 1. `start()` exceeds `startupTimeoutMS`
 2. The manager marks the component `starting-timed-out` and treats it as not running
 
-This state is for observability only. It behaves like `registered`: the component can be started again, unregistered normally, and will not be stopped during shutdown because it's not running. The state is cleared automatically on a successful start.
+After an individual component timeout, this state behaves like `registered`: the component can be started again, unregistered normally, and will not be stopped during shutdown because it is not running. The state is cleared automatically on a successful start. Bulk startup deadlines follow the same recovery rules described below.
+
+After a bulk startup deadline, restart and unregistration are allowed even if the
+abandoned `start()` never settles. A late successful start is stopped automatically
+only if its attempt still owns the registered component. A retry or replacement makes
+the old completion stale, so it cannot stop the new run. Once automatic late cleanup
+actually starts, restart and unregistration are blocked until that cleanup finishes.
+These cleanup protections also apply to individual component timeouts.
 
 Use `getStartTimedOutComponentNames()` to inspect components currently in this state.
 For accounting purposes, `getStoppedComponentNames()` and `getStoppedComponentCount()` include
@@ -693,7 +708,7 @@ startAllComponents(options?: StartupOptions): Promise<StartupResult>
 ```typescript
 interface StartupOptions {
   ignoreStalledComponents?: boolean; // Allow bulk startup to proceed by skipping stalled components
-  timeoutMS?: number; // Total time budget for startup process (default: constructor's startupTimeoutMS)
+  timeoutMS?: number; // Startup time budget, excluding failure rollback (default: constructor's startupTimeoutMS)
 }
 ```
 
@@ -727,10 +742,21 @@ interface StartupResult {
 
 Timeouts operate at **two independent levels** - they don't compete, they're layered:
 
+Lifecycle timer delays are capped at 2,147,483,647 ms. Constructor `startupTimeoutMS`,
+`messageTimeoutMS`, and `shutdownWarningTimeoutMS` use their defaults for `NaN` and
+cap positive `Infinity` at that ceiling. At component/per-call timer boundaries,
+non-finite or negative delays also use the ceiling rather than firing immediately.
+Use the documented `0` setting to disable a timeout where supported. The warning
+phase separately supports `-1` for fire-and-forget notifications.
+
 **1. Global Timeout (Bulk Operation)**
 
-- `startAllComponents({ timeoutMS })` sets a total time budget for the entire operation
-- If exceeded: manager stops initiating new components and returns partial results with `timedOut: true`
+- `startAllComponents({ timeoutMS })` sets a time budget for starting components. Failure rollback uses its own shutdown timeouts
+- If exceeded: manager stops initiating new components and promptly returns a snapshot of partial results with `timedOut: true` and `code: 'startup_timeout'`.
+- The remaining bulk budget also bounds the current component start, even when its own timeout is disabled. Previously started components remain running unless rollback had already begun for a separate failure.
+- A start still in flight receives `onStartupAborted()` when implemented. Restart and unregistration are allowed while the abandoned start remains pending. If it later resolves and still owns the component, automatic cleanup stops it. Recovery is blocked only while that cleanup runs. A stale completion cannot stop a retry or replacement.
+- Once a required failure starts rollback, the startup timer is cleared. Startup waits for rollback and returns the original failure. Another bulk startup is blocked until rollback finishes.
+- Timeouts cannot preempt synchronous JavaScript that blocks the event loop.
 - Constructor option sets the default: `new LifecycleManager({ startupTimeoutMS: 60000 })`
 - Method parameter overrides: `await lifecycle.startAllComponents({ timeoutMS: 30000 })`
 
@@ -823,9 +849,9 @@ Timeouts operate at **two independent levels** - they don't compete, they're lay
 **1. Global Timeout (Bulk Operation)**
 
 - `stopAllComponents({ timeoutMS })` sets a total time budget for the entire shutdown operation
-- If exceeded: the manager **halts further stop attempts** after the current component completes and returns partial results
-- Components not yet processed are left in their current state
-- Constructor option sets the default: `new LifecycleManager({ shutdownOptions: { timeoutMS: 30000 } })`
+- If exceeded: the public call promptly returns partial results and releases the bulk shutdown latch. A stop already in flight continues under its component timeouts. The timed-out shutdown pass initiates no further stops. Deferred logger exits can proceed, so components are not guaranteed to finish before process exit.
+- Components not yet processed are left in their current state. A later shutdown attempt will not overlap an unfinished stop or stop its dependencies while that stop remains in flight.
+- Constructor option sets the default: `new LifecycleManager({ shutdownOptions: { timeoutMS: 30000 } })`. Constructor `timeoutMS: NaN` uses that 30,000ms default. A per-call `timeoutMS: NaN` retains the safety-timer maximum delay (2,147,483,647ms). Use a finite duration to bound a shutdown explicitly.
 - Method parameter overrides: `await lifecycle.stopAllComponents({ timeoutMS: 5000 })`
 
 **2. Per-Component Timeouts (Individual Component)**
@@ -969,10 +995,12 @@ interface ComponentOperationResult {
 
 ### Component Messaging
 
+Message, health, and value result code `stopped` means unavailable and not stalled. It does not identify the exact lifecycle state. Use `getComponentStatus(name).state` to distinguish registered, starting, failed, and stopped components. `includeStopped` permits handlers on inactive components, but never during active startup, a timed-out startup, or teardown.
+
 #### `sendMessageToComponent(componentName, payload, options?)`
 
 Send a message to a specific component.
-By default, only running components receive messages, so use `includeStopped`/`includeStalled` to override.
+By default, only running components receive messages, so use `includeStopped`/`includeStalled` to override. During bulk shutdown, components still running can receive messages until their own teardown begins. Messages remain blocked during `starting`, `starting-timed-out`, `stopping`, and `force-stopping`, even with these overrides or after the bulk shutdown timeout. Messages refused during teardown return `code: 'stopped'` and `error: null`. Missing targets return `not_found`.
 
 ```typescript
 sendMessageToComponent<T = unknown>(
@@ -1063,7 +1091,7 @@ if (result.sent) {
 #### `broadcastMessage(payload, options?)`
 
 Broadcast a message to multiple components.
-By default, only running components receive messages, so use `includeStopped`/`includeStalled` to override.
+By default, only running components receive messages, so use `includeStopped`/`includeStalled` to override. During bulk shutdown, components still running can receive messages until their own teardown begins. Messages remain blocked during `starting`, `starting-timed-out`, `stopping`, and `force-stopping`, even with these overrides or after the bulk shutdown timeout. Messages refused during teardown return `code: 'stopped'` and `error: null`.
 When `componentNames` is provided, only those targets are considered, and stopped/stalled targets are reported but not sent unless explicitly included.
 
 ```typescript
@@ -1101,6 +1129,8 @@ interface BroadcastResult {
 ### Health Monitoring
 
 #### `checkComponentHealth(name)`
+
+Health hooks are skipped during `stopping` and `force-stopping`, and the result is unhealthy, including after a bulk shutdown timeout.
 
 Check the health of a specific component.
 
@@ -1160,7 +1190,7 @@ interface HealthReport {
 
 ### Value Sharing
 
-Components can share values with each other. **By default, only running components can provide values.** Use the `includeStopped` or `includeStalled` options to retrieve values from components in other states.
+Components can share values with each other. **By default, only running components can provide values.** Use the `includeStopped` or `includeStalled` options to retrieve values from components in other states. Value requests remain blocked during `starting`, `starting-timed-out`, `stopping`, and `force-stopping`, even with these overrides or after the bulk shutdown timeout.
 
 ```typescript
 class ConfigComponent extends BaseComponent {
@@ -1339,6 +1369,8 @@ if (escalation.configured && escalation.isArmed) {
 
 #### Manual Signal Triggers
 
+Reload/info/debug broadcasts check that each component is still running immediately before invoking its handler. Components that begin teardown during an earlier callback are skipped. A synchronous signal-started event that makes its target unavailable produces a per-component `unavailable` result. An already-running signal handler is not cancelled by teardown.
+
 ```typescript
 triggerReload(): Promise<SignalBroadcastResult>
 triggerInfo(): Promise<SignalBroadcastResult>
@@ -1438,7 +1470,7 @@ const lifecycle = new LifecycleManager({
 - The repeated-request counter belongs to one active escalation state
 - If shutdown completes successfully, the repeated-request state resets immediately
 - If shutdown completes unsuccessfully, times out, or leaves stalled components behind, escalation stays armed briefly so follow-up shutdown requests can continue the same force count
-- That post-failure armed period defaults to `withinMS * forceAfterCount`, or uses `armedAfterFailureMS` when explicitly configured
+- That post-failure armed period defaults to `withinMS * forceAfterCount`, or uses `armedAfterFailureMS` when explicitly configured. The effective duration is capped at 2,147,483,647 ms to match the timer limit
 - A shutdown request received during that armed period continues the same escalation state and starts a fresh shutdown attempt
 - While that retry is running, the armed timer is no longer active because shutdown is in progress again
 - If the retry also finishes unsuccessfully, the manager re-arms the post-failure window so follow-up requests can continue the same escalation state
@@ -1566,8 +1598,7 @@ const lifecycle = new LifecycleManager({
 
 // If shutdown takes longer than 5s, warning is logged and exit proceeds
 logger.exit(0);
-// Output if timeout exceeded:
-// Shutdown timeout exceeded, proceeding with exit (timeoutMS: 5000)
+// The shutdown-completed payload has timedOut: true, then exit proceeds.
 ```
 
 **Important Notes:**
@@ -1576,7 +1607,7 @@ logger.exit(0);
 - Overwrites any existing `beforeExit` callback on the logger
 - If you need custom exit logic, set it up manually with `logger.setBeforeExitCallback()`
 - If `logger.exit()` is called while shutdown is already in progress, that exit call returns `{ action: 'wait' }` instead of exiting immediately.
-- The first such `logger.exit()` call is kept pending and allowed to proceed after the in-flight shutdown finishes.
+- The first such `logger.exit()` call is kept pending and allowed to proceed when the in-flight shutdown completes or reaches its global timeout.
 - Later duplicate `logger.exit()` calls during the same shutdown also return `{ action: 'wait' }`, but are otherwise ignored so they cannot override the pending exit code or exit early.
 
 #### Process Exit Design & Rationale
@@ -1611,7 +1642,6 @@ The Logger class is part of the Lifecycleion package. Basic usage:
 ```typescript
 import { Logger } from 'lifecycleion/logger';
 
-// Create logger (exact constructor options to be documented with logger export)
 const logger = new Logger({
   // Logger configuration options
 });
@@ -1643,7 +1673,7 @@ async start() {
   try {
     await this.db.connect();
   } catch (error) {
-    const err = error instanceof Error ? error : new Error(String(error));
+    const err = toError(error);
 
     this.logger.error('Failed to connect: {{error.message}}', {
       params: { error: err },
@@ -1653,7 +1683,9 @@ async start() {
 }
 ```
 
-Normalizing the caught value (`error instanceof Error ? error : new Error(String(error))`) ensures `{{error.message}}` always resolves to a string - without it, a thrown string or plain object would produce `(null)` in the output. Libraries and native APIs occasionally throw non-`Error` values.
+Normalizing the caught value with [`toError`](./to-error.md) ensures `{{error.message}}` always resolves to a string - without it, a thrown string or plain object would produce `(null)` in the output. Libraries and native APIs occasionally throw non-`Error` values.
+
+Use `toError` rather than hand-rolling `error instanceof Error ? error : new Error(String(error))`: both halves of that idiom can throw. `instanceof` walks a prototype chain, which a revoked `Proxy` refuses, and `String()` invokes `toString`/`Symbol.toPrimitive` - on a value created with `Object.create(null)` it raises a `TypeError` of its own, from the line that was only trying to normalize an error. `toError` guards both and keeps the original on `cause`.
 
 The normalized `err` is also captured in `params` for structured sinks that need the full error object or stack trace. Because the pattern only wraps non-`Error` values, original `Error` stack traces are preserved when the thrown value was already an `Error`.
 
@@ -1976,7 +2008,7 @@ interface ComponentOptions {
   // Values below 1000ms are silently raised to 1000ms to ensure reasonable cleanup time
   shutdownForceTimeoutMS?: number; // Force shutdown timeout in ms (default: 2000, minimum: 500)
   // Values below 500ms are silently raised to 500ms to prevent abrupt termination
-  healthCheckTimeoutMS?: number; // Health check timeout in milliseconds (default: 5000)
+  healthCheckTimeoutMS?: number; // Health check timeout in milliseconds (default: 5000, 0 = disabled)
   signalTimeoutMS?: number; // Signal handler timeout in milliseconds (default: 5000, 0 = disabled)
 }
 ```
@@ -2219,7 +2251,7 @@ lifecycle.on('lifecycle-manager:shutdown-completed', (data) => {
 - `lifecycle-manager:shutdown-warning` - Global warning phase started
 - `lifecycle-manager:shutdown-warning-completed` - Warning phase completed
 - `lifecycle-manager:shutdown-warning-timeout` - Warning phase timed out
-- `lifecycle-manager:shutdown-completed` - Shutdown attempt completed, includes the `ShutdownResult` fields at the top level plus `method` / `duringStartup`. This is the best single event for centralized logging or follow-up policy when shutdown times out or leaves stalled components. If the global shutdown timeout was hit, the payload reflects the result at the moment the manager stopped waiting
+- `lifecycle-manager:shutdown-completed` - Shutdown attempt completed, includes the `ShutdownResult` fields at the top level plus `method` / `duringStartup`. This is the best single event for centralized logging or follow-up policy when shutdown times out or leaves stalled components. If the global shutdown timeout was hit, the payload reflects the result at the moment the public call stopped waiting. A component stop already in flight is not cancelled: its per-component state continues to reject an overlapping start or stop, while the process-wide shutdown latch is released so exit handling and later shutdown/escalation attempts can proceed.
 
 **Component Registration:**
 
@@ -2282,19 +2314,24 @@ lifecycle.on('lifecycle-manager:shutdown-completed', (data) => {
 
 Event handlers are **fire-and-forget** - they do not block lifecycle operations.
 
-**Event Handler Error Handling:** The LifecycleManager automatically catches errors thrown by event handlers via `safeHandleCallback`, preventing them from breaking lifecycle operations. Errors are dispatched as `ErrorEvent` objects using the standard `reportError` event API:
+**Event Handler Error Handling:** The LifecycleManager automatically catches errors thrown by event handlers via `safeHandleCallback`, preventing them from breaking lifecycle operations. Errors are dispatched as `ErrorEvent` objects on the standard global `'error'` event channel:
 
 ```typescript
 // Listen for event handler errors
-globalThis.addEventListener('reportError', (event) => {
+globalThis.addEventListener('error', (event) => {
   if (event instanceof ErrorEvent) {
+    // Claim the report, so it is not written to the console as well
+    event.preventDefault();
+
     console.error('Event handler error:', event.error.message);
-    // error.message includes context: "Error in a callback event handler for component:started"
+    // error.message names the callback: "Error in a callback event handler for component:started"
+    // The error the handler actually threw is on `event.error.cause`, so you can render it
+    // with your own settings - or use `errorToString(event.error)`, which renders both.
   }
 });
 ```
 
-Available in Node.js 25+, Bun, Deno, and modern browsers. **Note:** Errors are NOT logged to the LifecycleManager's logger - use the `reportError` listener for custom logging/monitoring.
+Available in Node.js 25+, Bun, Deno, and modern browsers. **Note:** Errors are NOT logged to the LifecycleManager's logger - use an `'error'` listener, or `logger.registerReportErrorListener()`, for custom logging/monitoring.
 
 However, it's still best practice to handle errors explicitly in your handlers for better control over error logging and recovery.
 
@@ -2694,6 +2731,10 @@ For servers and long-running services, make `start()` idempotent by tracking an 
 
 This prevents race conditions such as a shutdown request arriving mid-boot, multiple callers starting the same server concurrently, or a force restart trying to reuse a server that is still shutting down. Starting while stopping should be treated as an error: the existing runtime is being torn down, so a new start attempt must wait until shutdown settles and can create a fresh runtime.
 
+If the component is already ready, `start()` can return successfully without creating another resource. If initialization is still pending, return its existing promise or reject the duplicate call explicitly. Do not return successfully before the component is ready, because the manager treats a fulfilled startup promise as readiness. The example below keeps the successful startup promise until shutdown, so subsequent calls reuse it.
+
+A startup timeout does not automatically retry `start()`. If your application requests another start after a timeout, the original work may still be running. The manager uses attempt tokens to prevent an old late-completion handler from changing the newer run's state or stopping it. Those tokens do not prevent your original `start()` from assigning to component fields or creating resources. Reuse the pending promise, or cancel and settle the old work before creating a replacement. If overlapping attempts are intentional, the component needs its own attempt checks before publishing resources and must dispose of resources created by superseded attempts.
+
 ```typescript
 class ServerComponent extends BaseComponent {
   private server: Server | null = null;
@@ -2783,7 +2824,7 @@ class ServerComponent extends BaseComponent {
 }
 ```
 
-**Cooperative Cancellation during Startup:** If your component's startup logic consists of multiple sequential async steps or supports native cancellation (like `AbortSignal`), you can manage cooperative cancellation yourself. To do this, create an `AbortController` for each startup attempt, store it as an instance property on your component, pass its `signal` to your startup operations (like database connections or fetch requests), and call `this.abortController.abort()` at the very beginning of your `stop()` method (or in `onStartupAborted()`). Because an aborted signal stays aborted permanently, create a fresh controller before each retry or restart. Because `stop()` is protected by the `stopPromise` guard, this abort will only ever be triggered once for each stop attempt. Awaiting the in-flight `startPromise` immediately after will then settle quickly due to the cancellation, preventing unnecessary shutdown delays. However, for standard single-step operations (like binding an HTTP server via `listen()`), awaiting the in-flight promise to settle and then immediately shutting it down remains the simplest and safest path.
+**Cooperative Cancellation during Startup:** If your component's startup logic consists of multiple sequential async steps or supports native cancellation (like `AbortSignal`), you can manage cooperative cancellation yourself. To do this, create an `AbortController` for each startup attempt, store it as an instance property on your component, pass its `signal` to your startup operations (like database connections or fetch requests), and call `this.abortController.abort()` at the very beginning of your `stop()` method (or in `onStartupAborted()`). Because an aborted signal stays aborted permanently, create a fresh controller before each retry or restart. Because `stop()` is protected by the `stopPromise` guard, this abort will only ever be triggered once for each stop attempt. If the underlying operations honor cancellation, awaiting the in-flight `startPromise` immediately after allows shutdown to proceed once they settle. Aborting the signal alone does not guarantee prompt completion. However, for standard single-step operations (like binding an HTTP server via `listen()`), awaiting the in-flight promise to settle and then immediately shutting it down remains the simplest and safest path.
 
 **Force-Closing Connections on Shutdown:** For servers using raw Node.js `http.Server`, active keep-alive connections will prevent the server from fully closing, causing `stop()` to stall. To handle this gracefully, you can implement either hook to run `this.server?.closeAllConnections?.()`:
 
@@ -3321,7 +3362,7 @@ export class DatabaseHelper {
       typeof error === 'object' && error !== null && 'code' in error
         ? String(error.code)
         : null;
-    const message = error instanceof Error ? error.message : String(error);
+    const message = describeError(error);
 
     return (
       (code !== null && retryableCodes.has(code)) ||
@@ -3470,7 +3511,7 @@ export class DatabaseHelper {
         value: result,
       };
     } catch (error) {
-      const err = error instanceof Error ? error : new Error(String(error));
+      const err = toError(error);
 
       // If not finalized yet, auto-rollback
       if (!tx.isCompleted()) {
@@ -3502,7 +3543,7 @@ When `start()` or `stop()` times out:
 - The manager calls `onStartupAborted()` or `onGracefulStopTimeout()` (if implemented)
 - The manager proceeds with next steps (rollback for startup, force phase for shutdown)
 - **Non-cooperative code continues running in the background** until completion or process exit
-- If `start()` times out and there is no `onStartupAborted()`, the manager will stop the component automatically if that delayed startup eventually completes
+- If `start()` times out and there is no `onStartupAborted()`, the manager will stop the component automatically if that delayed startup eventually completes. Bulk startup deadlines perform this late cleanup even when an abort hook is implemented.
 - If shutdown begins while `start()` is still in flight, the manager waits for that startup attempt to settle and then stops the component automatically if it finishes starting
 
 How to avoid surprises:

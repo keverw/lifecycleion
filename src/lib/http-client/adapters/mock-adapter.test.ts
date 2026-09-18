@@ -237,9 +237,9 @@ describe('MockAdapter via HTTPClient', () => {
     expect(res.status).toBe(500);
   });
 
-  test('onError handler overrides default 500', async () => {
+  test('onHandlerError handler overrides default 500', async () => {
     const errorAdapter = new MockAdapter({
-      onError: (_req, error) => ({
+      onHandlerError: (_req, error) => ({
         status: 422,
         body: { message: (error as Error).message },
       }),
@@ -255,9 +255,9 @@ describe('MockAdapter via HTTPClient', () => {
     expect(res.body.message).toBe('validation failed');
   });
 
-  test('onError handler falling back to 500 when it also throws', async () => {
+  test('onHandlerError handler falling back to 500 when it also throws', async () => {
     const errorAdapter = new MockAdapter({
-      onError: () => {
+      onHandlerError: () => {
         throw new Error('error handler exploded');
       },
     });
@@ -757,11 +757,11 @@ describe('MockAdapter.send() — low-level contract', () => {
     expect(Date.now() - start).toBeLessThan(150);
   });
 
-  test('does not invoke onError when signal fires while async handler is pending', async () => {
-    let onErrorCalls = 0;
+  test('does not invoke onHandlerError when signal fires while async handler is pending', async () => {
+    let onHandlerErrorCalls = 0;
     const errorAdapter = new MockAdapter({
-      onError: () => {
-        onErrorCalls++;
+      onHandlerError: () => {
+        onHandlerErrorCalls++;
         return { status: 500 };
       },
     });
@@ -787,7 +787,7 @@ describe('MockAdapter.send() — low-level contract', () => {
     }
 
     expect(caught?.message).toMatch(/aborted/i);
-    expect(onErrorCalls).toBe(0);
+    expect(onHandlerErrorCalls).toBe(0);
   });
 
   test('handles path-only URL without host', async () => {

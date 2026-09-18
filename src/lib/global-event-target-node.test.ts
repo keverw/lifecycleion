@@ -184,7 +184,7 @@ describe('global event target on the Node runtime', () => {
 
     for (const entry of result.reported) {
       expect(entry.isErrorEvent).toBe(true);
-      expect(entry.type).toBe('reportError');
+      expect(entry.type).toBe('error');
       expect(entry.originalStack).toBe(true);
     }
 
@@ -215,6 +215,33 @@ describe('global event target on the Node runtime', () => {
     // Removal works too: the event dispatched after removeEventListener is absent.
     expect(messages).not.toContain('After removal');
     expect(messages[messages.length - 1]).toBe('After reinstall');
+  }, 30_000);
+
+  test('falls back to reportError, then the console, when dispatch is unavailable', async () => {
+    interface RungFixtureResult {
+      installResult: string;
+      reportedToHost: string[];
+      consoleErrorsAfterReportError: number;
+      consoleErrors: string[];
+    }
+
+    const result =
+      await runFixtureJSON<RungFixtureResult>('report-error-rungs');
+
+    // An occupied `dispatchEvent` is left alone, so there is no dispatch rung at all.
+    expect(result.installResult).toBe('partial');
+
+    // Rung 2: the host reporting function receives the error...
+    expect(result.reportedToHost.length).toBe(1);
+    expect(result.reportedToHost[0]).toContain('Reported to the host');
+    expect(result.reportedToHost[0]).toContain('reportErrorRungCallback');
+
+    // ...and nothing is written to the console while that rung is available.
+    expect(result.consoleErrorsAfterReportError).toBe(0);
+
+    // Rung 3: with no reporting function left, the console is the last resort.
+    expect(result.consoleErrors.length).toBe(1);
+    expect(result.consoleErrors[0]).toContain('Reported to the console');
   }, 30_000);
 
   test('existing global implementations are never overwritten', async () => {

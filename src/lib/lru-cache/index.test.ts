@@ -861,14 +861,14 @@ describe('LRUCache', () => {
     });
 
     test('should report synchronous onChange errors without breaking cache operations', () => {
-      const errorHandler = mock(() => {});
+      const errorHandler = mock((event: Event) => event.preventDefault());
       const cache = new LRUCache<string, string>(3, {
         onChange: () => {
           throw new Error('onChange sync failure');
         },
       });
 
-      globalThis.addEventListener('reportError', errorHandler);
+      globalThis.addEventListener('error', errorHandler);
 
       cache.set('key1', 'value1');
 
@@ -877,18 +877,20 @@ describe('LRUCache', () => {
 
       const errorEvent = getFirstReportedError(errorHandler);
       expect(errorEvent.error.message).toContain('LRUCache onChange');
-      expect(errorEvent.error.message).toContain('onChange sync failure');
+      expect((errorEvent.error.cause as Error).message).toBe(
+        'onChange sync failure',
+      );
 
-      globalThis.removeEventListener('reportError', errorHandler);
+      globalThis.removeEventListener('error', errorHandler);
     });
 
     test('should report async onChange rejections without breaking cache operations', async () => {
-      const errorHandler = mock(() => {});
+      const errorHandler = mock((event: Event) => event.preventDefault());
       const cache = new LRUCache<string, string>(3, {
         onChange: () => Promise.reject(new Error('onChange async failure')),
       });
 
-      globalThis.addEventListener('reportError', errorHandler);
+      globalThis.addEventListener('error', errorHandler);
 
       cache.set('key1', 'value1');
 
@@ -898,9 +900,11 @@ describe('LRUCache', () => {
 
       const errorEvent = getFirstReportedError(errorHandler);
       expect(errorEvent.error.message).toContain('LRUCache onChange');
-      expect(errorEvent.error.message).toContain('onChange async failure');
+      expect((errorEvent.error.cause as Error).message).toBe(
+        'onChange async failure',
+      );
 
-      globalThis.removeEventListener('reportError', errorHandler);
+      globalThis.removeEventListener('error', errorHandler);
     });
   });
 

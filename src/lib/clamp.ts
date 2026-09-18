@@ -3,6 +3,35 @@ export function clamp(value: number, min: number, max: number): number {
 }
 
 /**
+ * {@link clamp}, for a value that has to come out finite.
+ *
+ * `clamp` is `Math.max`/`Math.min`, and both launder `NaN`: `clamp(NaN, 1, Infinity)` is
+ * `NaN`, not `1`. Every caller that turns the result into a duration then inherits it -
+ * a `NaN` delay reads as "not greater than zero", which callers spell as *now*, so a
+ * bound meant to slow something down removed the wait entirely. `Infinity` is refused for
+ * the same reason from the other end: `setTimeout(Infinity)` fires on the next tick.
+ *
+ * @param value - The value to clamp.
+ * @param min - Lower bound. Must itself be finite for the result to be.
+ * @param max - Upper bound.
+ * @param defaultValue - Returned when `value` is not finite.
+ * @returns `value` clamped to `[min, max]`, or `defaultValue` when `value` is `NaN`,
+ *          `Infinity` or `-Infinity`.
+ */
+export function finiteClamp(
+  value: number,
+  min: number,
+  max: number,
+  defaultValue: number,
+): number {
+  if (!Number.isFinite(value)) {
+    return defaultValue;
+  }
+
+  return clamp(value, min, max);
+}
+
+/**
  * Clamps a value to a minimum, returning a default if the value is not finite or is undefined/null.
  *
  * Useful for config/settings validation where you want to:

@@ -1,14 +1,17 @@
-# Lifecycleion v0.0.21
+# Lifecycleion v1.0.0
 
 [![npm version](https://badge.fury.io/js/lifecycleion.svg)](https://badge.fury.io/js/lifecycleion)
 
 A collection of foundational TypeScript utilities for managing application lifecycle, logging, retries, events, and common programming patterns.
+
+> ⚠️ **Pre-1.0.0:** Lifecycleion is maturing and usable, but still pre-1.0. The core APIs are stabilizing yet may still change before 1.0.0. Pin a version and review release notes when upgrading.
 
 <!-- toc -->
 
 - [Why Lifecycleion?](#why-lifecycleion)
   - [Key Features](#key-features)
 - [Installation](#installation)
+  - [Peer Dependency: `tldts`](#peer-dependency-tldts)
 - [Quick Example](#quick-example)
 - [Available Libraries](#available-libraries)
 - [Change Log](#change-log)
@@ -19,7 +22,7 @@ A collection of foundational TypeScript utilities for managing application lifec
 
 ## Why Lifecycleion?
 
-Lifecycleion provides battle-tested, production-ready utilities that handle the complex orchestration of modern applications. Whether you need graceful shutdowns, robust retry logic, flexible logging, or just reliable helper functions, Lifecycleion has you covered.
+Lifecycleion provides TypeScript utilities for application lifecycle orchestration, logging, retries, events, HTTP requests, and common programming patterns.
 
 ### Key Features
 
@@ -31,7 +34,7 @@ Lifecycleion provides battle-tested, production-ready utilities that handle the 
 - 🛡️ **Error Handling** - Serialize errors for IPC/RPC, format them as readable tables, and handle callbacks safely
 - 🔧 **Common Utilities** - ID generation (UUID, ULID, ObjectID), string manipulation, deep cloning, and more
 - 📦 **Tree-shakeable** - Import only what you need via subpath exports
-- 💪 **TypeScript-first** - Full type safety with comprehensive TypeScript definitions
+- 💪 **TypeScript-first** - TypeScript definitions for every published entry point
 
 ## Installation
 
@@ -43,7 +46,30 @@ yarn add lifecycleion
 bun add lifecycleion
 ```
 
-For Node.js runtimes, Lifecycleion currently targets `Node >=25`. Some libraries, including `safe-handle-callback`, `logger`'s `reportError` listener, and `lru-cache`'s `onChange`, report errors using Lifecycleion's `'reportError'` convention: an `ErrorEvent` dispatched through the global `EventTarget` methods. Those are web-standard primitives (the `'reportError'` event type itself is Lifecycleion's convention, not a web standard), and browsers, Bun, and Deno expose them on `globalThis` natively.
+### Peer Dependency: `tldts`
+
+Lifecycleion declares [`tldts`](https://github.com/remusao/tldts) as a required peer
+dependency. It carries the compiled Public Suffix List that `http-client`'s `CookieJar`
+scopes cookies with and that `domain-utils` re-exports, and it is a peer rather than a
+direct dependency for two reasons: a compatible shared installation avoids duplicate PSL snapshots, and you can refresh the list by upgrading `tldts` within its
+supported range without waiting on a Lifecycleion release.
+
+Ensure your installation includes a version of `tldts` satisfying `^7.4.10`. If your
+package manager does not install peers automatically, or that behavior is disabled,
+install it explicitly:
+
+```bash
+npm install 'tldts@^7.4.10'
+```
+
+`tldts` is imported at module load by `lifecycleion/http-client` and
+`lifecycleion/domain-utils`. A missing peer prevents those entry points from loading.
+The peer allows consumers to update the PSL within the supported range, but does not
+itself guarantee that a dependency tree contains only one version.
+
+For Node.js runtimes, Lifecycleion currently targets `Node >=25`. Some libraries, including `safe-handle-callback`, `logger`'s error listener, and `lru-cache`'s `onChange`, report errors on the standard global `'error'` event channel: an `ErrorEvent` dispatched through the global `EventTarget` methods. Those are web-standard primitives, and browsers, Bun, and Deno expose them on `globalThis` natively.
+
+Standalone rendering and redaction failures use that same channel when you have not set a handler, so a `logger.registerReportErrorListener()` records them like any other reported failure. Failures raised by the logger itself use a separate asynchronous diagnostic channel: its `'diagnostic'` event, then `diagnosticSinks` (or the regular sinks when none were configured), then guarded `console.error`. Diagnostic writes do not run through the logger again. See [Where Failures Go](./docs/logger.md#where-failures-go).
 
 Node.js is a partial case: `ErrorEvent` is native in Node 25+, but `globalThis` is still not an `EventTarget`, so Lifecycleion automatically supplies the missing global event methods without overwriting native or user-installed implementations. See [global-event-target](./docs/global-event-target.md).
 
@@ -54,11 +80,11 @@ import {
   LifecycleManager,
   BaseComponent,
 } from 'lifecycleion/lifecycle-manager';
-import { createLogger } from 'lifecycleion/logger';
+import { ConsoleSink, Logger } from 'lifecycleion/logger';
 import { RetryRunner } from 'lifecycleion/retry-utils';
 
 // Create a logger
-const logger = createLogger({ service: 'my-app' });
+const logger = new Logger({ sinks: [new ConsoleSink()] });
 
 // Set up retry logic
 const runner = new RetryRunner(
@@ -73,6 +99,10 @@ await runner.run(true);
 
 // Manage component lifecycle
 class MyComponent extends BaseComponent {
+  constructor() {
+    super(logger, { name: 'my-component' });
+  }
+
   async start() {
     logger.info('Starting component');
   }
@@ -82,52 +112,65 @@ class MyComponent extends BaseComponent {
   }
 }
 
-const manager = new LifecycleManager();
-manager.registerComponent(new MyComponent('my-component'));
-await manager.startAllComponents();
+const manager = new LifecycleManager({ logger });
+await manager.registerComponent(new MyComponent());
+
+const startup = await manager.startAllComponents();
+
+if (!startup.success) {
+  await logger.close();
+  throw new Error(startup.reason);
+}
+
+// Run the application, then release component and logger resources.
+await manager.stopAllComponents();
+await logger.close();
 ```
 
-Tip: listen for `lifecycle-manager:shutdown-completed` when you want one place to react to shutdown results from manual stops, signals like `SIGINT` / `SIGTERM`, or logger-exit hooks. This is the centralized hook for logging or follow-up policy when `timedOut` is `true` or `stalledComponents` is non-empty. If `timedOut` is `true`, the payload reflects the result when the manager stopped waiting. Use repeated shutdown escalation separately when you want additional shutdown requests to retry or force behavior.
+Tip: listen for `lifecycle-manager:shutdown-completed` when you want one place to react to shutdown results from manual stops, signals like `SIGINT` / `SIGTERM`, or logger-exit hooks. This is the centralized hook for logging or follow-up policy when `timedOut` is `true` or `stalledComponents` is non-empty. If `timedOut` is `true`, the payload reflects the result when the manager stopped waiting. A stop already in flight remains protected against per-component overlap, while exit handling and later shutdown/escalation attempts may proceed. Use repeated shutdown escalation separately when you want additional shutdown requests to retry or force behavior.
 
 ## Available Libraries
 
-Each library has comprehensive documentation in the [docs](./docs) folder. Click on any library name in the table below to view detailed usage examples, API references, and best practices.
+Each library has reference documentation in the [docs](./docs) folder. Click a library name below for its API notes and examples.
 
-| Library                                                            | Import Path                                             | Description                                                                                                                                    |
-| ------------------------------------------------------------------ | ------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
-| [arrays](./docs/arrays.md)                                         | `lifecycleion/arrays`                                   | Array utility functions for filtering, comparison, deduplication, and string manipulation                                                      |
-| [ascii-tables](./docs/ascii-tables.md)                             | `lifecycleion/ascii-tables`                             | Key-value and multi-column ASCII tables with word wrapping, nesting, and emoji support                                                         |
-| [clamp](./docs/clamp.md)                                           | `lifecycleion/clamp`                                    | Number clamping utilities with safe handling for non-finite values and nullish inputs                                                          |
-| [constants](./docs/constants.md)                                   | `lifecycleion/constants`                                | Common string constants including whitespace helpers and Python-style character sets                                                           |
-| [curly-brackets](./docs/curly-brackets.md)                         | `lifecycleion/curly-brackets`                           | String templating with `{{placeholders}}`, fallbacks, escaping, and compiled templates                                                         |
-| [deep-clone](./docs/deep-clone.md)                                 | `lifecycleion/deep-clone`                               | Deep clone utility with circular reference detection for objects, arrays, Maps, Sets, and more                                                 |
-| [dev-mode](./docs/dev-mode.md)                                     | `lifecycleion/dev-mode`                                 | Runtime-settable dev/production mode flag with auto-detection from CLI args or NODE_ENV                                                        |
-| [domain-utils](./docs/domain-utils.md)                             | `lifecycleion/domain-utils`                             | Hardened helpers for normalizing and matching domains and origins for CORS and routing, with IDNA/TR46, IPv6, and wildcard semantics           |
-| [error-to-string](./docs/error-to-string.md)                       | `lifecycleion/error-to-string`                          | Format errors into readable ASCII tables with support for nested info and sensitive field masking                                              |
-| [event-emitter](./docs/event-emitter.md)                           | `lifecycleion/event-emitter`                            | Lightweight event emitter with protected and public variants, type safety, and memory management                                               |
-| [global-event-target](./docs/global-event-target.md)               | `lifecycleion/global-event-target`                      | Conservative polyfill giving `globalThis` the `EventTarget` methods on Node.js, so `'reportError'` dispatch works there                        |
-| [http-client](./docs/http-client.md)                               | `lifecycleion/http-client` (+ `-node`, `-xhr`, `-mock`) | Fluent HTTP client with Fetch, Node.js native, XHR, and Mock adapters, interceptors, observers, retries, cookies, and redirect control         |
-| [id-helpers](./docs/id-helpers.md)                                 | `lifecycleion/id-helpers`                               | Unified ID generation and validation for ObjectID, UUID v4, UUID v7, and ULID                                                                  |
-| [is-boolean](./docs/is-boolean.md)                                 | `lifecycleion/is-boolean`                               | Type guard to check if a value is a boolean                                                                                                    |
-| [is-function](./docs/is-function.md)                               | `lifecycleion/is-function`                              | Check whether a value is a function                                                                                                            |
-| [is-number](./docs/is-number.md)                                   | `lifecycleion/is-number`                                | Type guards to check whether a value is a valid number, with and without finite enforcement                                                    |
-| [is-plain-object](./docs/is-plain-object.md)                       | `lifecycleion/is-plain-object`                          | Type guard to check if a value is a plain object (not null, not an array)                                                                      |
-| [is-promise](./docs/is-promise.md)                                 | `lifecycleion/is-promise`                               | Thenable/promise detection following the Promises/A+ specification                                                                             |
-| [json-helpers](./docs/json-helpers.md)                             | `lifecycleion/json-helpers`                             | JSON formatting utilities                                                                                                                      |
-| [lru-cache](./docs/lru-cache.md)                                   | `lifecycleion/lru-cache`                                | TTL-aware LRU cache with entry-count and size-based eviction, custom size calculators, and per-entry TTL overrides                             |
-| [lifecycle-manager](./docs/lifecycle-manager.md)                   | `lifecycleion/lifecycle-manager`                        | Lifecycle orchestration for managing startup, shutdown, and runtime control of application components                                          |
-| [logger](./docs/logger.md)                                         | `lifecycleion/logger`                                   | Flexible sink-based logger with log levels, redaction, template strings, and service scoping                                                   |
-| [padding-utils](./docs/padding-utils.md)                           | `lifecycleion/padding-utils`                            | String padding utilities for left, right, and center alignment with a configurable pad character                                               |
-| [process-signal-manager](./docs/process-signal-manager.md)         | `lifecycleion/process-signal-manager`                   | Unified handler for process signals (SIGINT, SIGTERM, SIGHUP, etc.) and keyboard shortcuts with graceful shutdown and hot-reload support       |
-| [promise-protected-resolver](./docs/promise-protected-resolver.md) | `lifecycleion/promise-protected-resolver`               | Promise wrapper with `resolveOnce` and `rejectOnce` that guarantee a promise is only settled once                                              |
-| [retry-utils](./docs/retry-utils.md)                               | `lifecycleion/retry-utils`                              | Retry logic with fixed and exponential backoff via `RetryPolicy` (low-level) and `RetryRunner` (high-level with events and cancellation)       |
-| [safe-handle-callback](./docs/safe-handle-callback.md)             | `lifecycleion/safe-handle-callback`                     | Safely execute sync or async callbacks with automatic error reporting via the `'reportError'` convention (`ErrorEvent` + global `EventTarget`) |
-| [serialize-error](./docs/serialize-error.md)                       | `lifecycleion/serialize-error`                          | Convert any `Error` into a plain JSON-serializable object and back again for IPC, RPCs, and database storage                                   |
-| [single-event-observer](./docs/single-event-observer.md)           | `lifecycleion/single-event-observer`                    | Lightweight type-safe observer pattern for a single event type, with public and protected notify variants                                      |
-| [sleep](./docs/sleep.md)                                           | `lifecycleion/sleep`                                    | Pause async execution for a given number of milliseconds                                                                                       |
-| [strings](./docs/strings.md)                                       | `lifecycleion/strings`                                  | String type guard, case conversion (PascalCase, camelCase, CONSTANT_CASE), grapheme splitting, character filtering, and chopping helpers       |
-| [tmp-dir](./docs/tmp-dir.md)                                       | `lifecycleion/tmp-dir`                                  | Create and automatically clean up uniquely-named temporary directories with configurable prefix, postfix, and unsafe cleanup support           |
-| [unix-time-helpers](./docs/unix-time-helpers.md)                   | `lifecycleion/unix-time-helpers`                        | Unix timestamp utilities for seconds, milliseconds, high-resolution timing, and unit conversion                                                |
+| Library                                                            | Import Path                                             | Description                                                                                                                                   |
+| ------------------------------------------------------------------ | ------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| [arrays](./docs/arrays.md)                                         | `lifecycleion/arrays`                                   | Array utility functions for filtering, comparison, deduplication, and string manipulation                                                     |
+| [ascii-tables](./docs/ascii-tables.md)                             | `lifecycleion/ascii-tables`                             | Key-value and multi-column ASCII tables with word wrapping, nesting, and emoji support                                                        |
+| [clamp](./docs/clamp.md)                                           | `lifecycleion/clamp`                                    | Number clamping utilities with safe handling for non-finite values and nullish inputs                                                         |
+| [constants](./docs/constants.md)                                   | `lifecycleion/constants`                                | Common string constants including whitespace helpers and Python-style character sets                                                          |
+| [curly-brackets](./docs/curly-brackets.md)                         | `lifecycleion/curly-brackets`                           | String templating with `{{placeholders}}`, fallbacks, escaping, and compiled templates                                                        |
+| [datamask](./docs/datamask.md)                                     | `lifecycleion/datamask`                                 | Mask emails, domains, and strings by proportion, counting in characters so a cut never splits an emoji                                        |
+| [deep-clone](./docs/deep-clone.md)                                 | `lifecycleion/deep-clone`                               | Deep clone utility with circular reference detection for objects, arrays, Maps, Sets, and more                                                |
+| [dev-mode](./docs/dev-mode.md)                                     | `lifecycleion/dev-mode`                                 | Runtime-settable dev/production mode flag with auto-detection from CLI args or NODE_ENV                                                       |
+| [domain-utils](./docs/domain-utils.md)                             | `lifecycleion/domain-utils`                             | Hardened helpers for normalizing and matching domains and origins for CORS and routing, with IDNA/TR46, IPv6, and wildcard semantics          |
+| [error-to-string](./docs/error-to-string.md)                       | `lifecycleion/error-to-string`                          | Format errors into readable ASCII tables with support for nested info and sensitive field masking                                             |
+| [event-emitter](./docs/event-emitter.md)                           | `lifecycleion/event-emitter`                            | Lightweight event emitter with protected and public variants, type safety, and memory management                                              |
+| [global-event-target](./docs/global-event-target.md)               | `lifecycleion/global-event-target`                      | Conservative polyfill giving `globalThis` the `EventTarget` methods on Node.js, so `'error'` event dispatch works there                       |
+| [http-client](./docs/http-client.md)                               | `lifecycleion/http-client` (+ `-node`, `-xhr`, `-mock`) | Fluent HTTP client with Fetch, Node.js native, XHR, and Mock adapters, interceptors, observers, retries, cookies, and redirect control        |
+| [id-helpers](./docs/id-helpers.md)                                 | `lifecycleion/id-helpers`                               | Unified ID generation and validation for ObjectID, UUID v4, UUID v7, and ULID                                                                 |
+| [is-boolean](./docs/is-boolean.md)                                 | `lifecycleion/is-boolean`                               | Type guard to check if a value is a boolean                                                                                                   |
+| [is-function](./docs/is-function.md)                               | `lifecycleion/is-function`                              | Check whether a value is a function                                                                                                           |
+| [is-number](./docs/is-number.md)                                   | `lifecycleion/is-number`                                | Type guards to check whether a value is a valid number, with and without finite enforcement                                                   |
+| [is-plain-object](./docs/is-plain-object.md)                       | `lifecycleion/is-plain-object`                          | Type guard to check if a value is a plain object (not null, not an array)                                                                     |
+| [is-promise](./docs/is-promise.md)                                 | `lifecycleion/is-promise`                               | Thenable/promise detection following the Promises/A+ specification                                                                            |
+| [json-helpers](./docs/json-helpers.md)                             | `lifecycleion/json-helpers`                             | JSON formatting utilities                                                                                                                     |
+| [lru-cache](./docs/lru-cache.md)                                   | `lifecycleion/lru-cache`                                | TTL-aware LRU cache with entry-count and size-based eviction, custom size calculators, and per-entry TTL overrides                            |
+| [lifecycle-manager](./docs/lifecycle-manager.md)                   | `lifecycleion/lifecycle-manager`                        | Lifecycle orchestration for managing startup, shutdown, and runtime control of application components                                         |
+| [logger](./docs/logger.md)                                         | `lifecycleion/logger`                                   | Flexible sink-based logger with log levels, redaction, template strings, and service scoping                                                  |
+| [padding-utils](./docs/padding-utils.md)                           | `lifecycleion/padding-utils`                            | String padding utilities for left, right, and center alignment with a configurable pad character                                              |
+| [process-signal-manager](./docs/process-signal-manager.md)         | `lifecycleion/process-signal-manager`                   | Unified handler for process signals (SIGINT, SIGTERM, SIGHUP, etc.) and keyboard shortcuts with graceful shutdown and hot-reload support      |
+| [promise-protected-resolver](./docs/promise-protected-resolver.md) | `lifecycleion/promise-protected-resolver`               | Promise wrapper with `resolveOnce` and `rejectOnce` that guarantee a promise is only settled once                                             |
+| [retry-utils](./docs/retry-utils.md)                               | `lifecycleion/retry-utils`                              | Retry logic with fixed and exponential backoff via `RetryPolicy` (low-level) and `RetryRunner` (high-level with events and cancellation)      |
+| [safe-handle-callback](./docs/safe-handle-callback.md)             | `lifecycleion/safe-handle-callback`                     | Safely execute sync or async callbacks with automatic error reporting on the standard `'error'` channel (`ErrorEvent` + global `EventTarget`) |
+| [serialize-error](./docs/serialize-error.md)                       | `lifecycleion/serialize-error`                          | Convert any `Error` into a plain JSON-serializable object and back again for IPC, RPCs, and database storage                                  |
+| [single-event-observer](./docs/single-event-observer.md)           | `lifecycleion/single-event-observer`                    | Lightweight type-safe observer pattern for a single event type, with public and protected notify variants                                     |
+| [sleep](./docs/sleep.md)                                           | `lifecycleion/sleep`                                    | Pause async execution for a given number of milliseconds                                                                                      |
+| [strings](./docs/strings.md)                                       | `lifecycleion/strings`                                  | String type guard, case conversion (PascalCase, camelCase, CONSTANT_CASE), grapheme splitting, character filtering, and chopping helpers      |
+| [tmp-dir](./docs/tmp-dir.md)                                       | `lifecycleion/tmp-dir`                                  | Create uniquely named temporary directories with explicit cleanup, configurable prefix, postfix, and unsafe cleanup support                   |
+| [stringify-value](./docs/stringify-value.md)                       | `lifecycleion/stringify-value`                          | Render any value as a display string, or return it with parts redacted                                                                        |
+| [to-error](./docs/to-error.md)                                     | `lifecycleion/to-error`                                 | Coerce any thrown or rejected value into an `Error` (`toError`), or describe it as a string that is always safe to read (`describeError`)     |
+| [unix-time-helpers](./docs/unix-time-helpers.md)                   | `lifecycleion/unix-time-helpers`                        | Unix timestamp utilities for seconds, milliseconds, high-resolution timing, and unit conversion                                               |
 
 ## Change Log
 

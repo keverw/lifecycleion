@@ -135,6 +135,51 @@ describe('writeRequestBodyChunked', () => {
     expect(caught?.message).toBe('Simulated write error');
   });
 
+  test('leaves no listeners behind when a write callback errors synchronously', async () => {
+    // `write` answering `false` *and* invoking its callback with an error in the same turn
+    // settled the write before any listener existed, then attached `drain`, `close` and
+    // `error` anyway - once per failing chunk, with nothing left to take them off, because
+    // the `req.destroyed` guard's `onClose()` returns early on a settled write. The same
+    // defect `serializeMultipartFormData` carried, and this one had no `isSettled` mark on
+    // the error branch at all.
+    const attached: string[] = [];
+    const removed: string[] = [];
+    let writeCount = 0;
+    const req: RequestBodyWritable = {
+      get destroyed() {
+        return writeCount > 0;
+      },
+      setHeader() {},
+      write(_data, callback) {
+        writeCount++;
+        callback?.(new Error('write refused'));
+
+        return false;
+      },
+      once(event: string) {
+        attached.push(event);
+
+        return this;
+      },
+      off(event: string) {
+        removed.push(event);
+
+        return this;
+      },
+    };
+
+    let caught: Error | undefined;
+
+    try {
+      await writeRequestBodyChunked(Buffer.from('some data'), req);
+    } catch (error) {
+      caught = error as Error;
+    }
+
+    expect(caught?.message).toBe('write refused');
+    expect(attached).toEqual([]);
+  });
+
   test('stops writing if req.destroyed becomes true mid-loop', async () => {
     const data = Buffer.alloc(REQUEST_BODY_CHUNK_SIZE * 3, 0x00);
     let writeCalls = 0;
@@ -157,8 +202,19 @@ describe('writeRequestBodyChunked', () => {
       },
     };
 
-    await writeRequestBodyChunked(data, req);
+    let caught: Error | undefined;
+    try {
+      await writeRequestBodyChunked(data, req);
+    } catch (error) {
+      caught = error as Error;
+    }
+
+    // Stops writing, and says so. Only one of three chunks was accepted, so resolving
+    // would report a body that was never sent as a successful write.
     expect(writeCalls).toBe(1);
+    expect(caught?.message).toBe(
+      'Request stream closed before the body was fully written',
+    );
   });
 
   test('each write waits for callback before proceeding (sequential writes)', async () => {
@@ -198,7 +254,14 @@ describe('writeRequestBodyChunked', () => {
     expect(callbackOrder).toEqual([0, 1]);
   });
 
-  test('resolves if req emits close while waiting for drain', async () => {
+  test('rejects if req emits close while waiting for drain', async () => {
+    // It used to resolve, and that reported an upload that had not happened. Even here -
+    // where the first chunk's callback fired, so those bytes were accepted - the second
+    // chunk is never written, and `node-adapter` follows a resolve with `req.end()`, so a
+    // truncated body is finalized as though it were complete. A truncated write is a
+    // failed write; the adapter's `.catch` already turns it into a transport error and
+    // deliberately declines to veto a retry, on the grounds that delivery is unproven
+    // rather than disproven.
     const data = Buffer.alloc(REQUEST_BODY_CHUNK_SIZE * 2, 0xaa);
     const req = new EventEmitter() as EventEmitter &
       RequestBodyWritable & { destroyed: boolean };
@@ -217,7 +280,61 @@ describe('writeRequestBodyChunked', () => {
     await Promise.resolve();
 
     req.emit('close');
-    await writePromise;
+
+    let caught: Error | undefined;
+
+    try {
+      await writePromise;
+    } catch (error) {
+      caught = error as Error;
+    }
+
+    expect(caught?.message).toBe(
+      'Request stream closed before the body was fully written',
+    );
+  });
+
+  test('rejects when the socket dies under a write that was never backpressured', async () => {
+    // The hang this used to be. `'close'` and `'error'` were armed only when `write()`
+    // asked for a drain, so a chunk the buffer took outright - callback pending, no
+    // backpressure - had nothing listening when the socket died. Nothing rejected and
+    // nothing resolved: the promise stayed pending for good, and it is the same promise
+    // `node-adapter` hands the caller as `requestBodySettled`, so `await` on it never
+    // returned. Measured against a real server that answers early and then resets: the
+    // response arrived in 112 ms and the upload outcome never came at all.
+    const data = Buffer.alloc(REQUEST_BODY_CHUNK_SIZE * 2, 0xaa);
+    const req = new EventEmitter() as EventEmitter &
+      RequestBodyWritable & { destroyed: boolean };
+    req.destroyed = false;
+    req.setHeader = () => {};
+
+    // Accepted without backpressure, and the callback never comes - which is exactly what
+    // a `ClientRequest` does with a chunk still in its buffer when the connection drops.
+    req.write = () => true;
+
+    const writePromise = writeRequestBodyChunked(data, req);
+    await Promise.resolve();
+
+    req.destroyed = true;
+    req.emit('close');
+
+    let caught: Error | undefined;
+
+    try {
+      await writePromise;
+    } catch (error) {
+      caught = error as Error;
+    }
+
+    expect(caught?.message).toBe(
+      'Request stream closed before the body was fully written',
+    );
+
+    // And nothing left on the request: the listeners come off on the way out, whether or
+    // not the write that armed them was backpressured.
+    expect(req.listenerCount('close')).toBe(0);
+    expect(req.listenerCount('error')).toBe(0);
+    expect(req.listenerCount('drain')).toBe(0);
   });
 
   test('rejects if req emits error while waiting for drain', async () => {

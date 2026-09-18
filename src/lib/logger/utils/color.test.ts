@@ -111,5 +111,23 @@ describe('colorize', () => {
       expect(result.coloredText).toBe('%cDebug message');
       expect(result.style).toBe('color: #808080;');
     });
+
+    test('escapes format specifiers in the message', () => {
+      // This is the one branch that hands the console a *format string* plus an argument,
+      // so every `%s`/`%c` left in the message was a specifier the console filled: `%s`
+      // spliced the CSS string into the visible text, and a second `%c` let message
+      // content restyle the rest of the line.
+      const result = colorize('info', 'progress 50% done %s and %c restyled');
+
+      expect(result.coloredText).toBe(
+        '%cprogress 50%% done %%s and %%c restyled',
+      );
+    });
+
+    test('leaves a message without percent signs alone', () => {
+      expect(colorize('info', 'plain message').coloredText).toBe(
+        '%cplain message',
+      );
+    });
   });
 });

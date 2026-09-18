@@ -164,7 +164,7 @@ function formatFieldName(name: string): string {
  * inject extra headers into the multipart part. Stripping line breaks
  * eliminates that risk while still forwarding the intended media type.
  */
-function sanitizeContentType(raw: string): string {
+export function sanitizeContentType(raw: string): string {
   return raw.replace(/\r\n|\r|\n/g, '');
 }
 
@@ -172,13 +172,16 @@ function sanitizeContentType(raw: string): string {
  * Generates a random boundary string for use as the multipart delimiter.
  *
  * The boundary must not appear anywhere in the body content (RFC 7578 §4.1).
- * The "----" prefix and random suffix make accidental collision essentially
- * impossible for normal payloads. For adversarial inputs (a file that happens
- * to contain the boundary string) you would need boundary detection — we don't
- * do that here, matching browser FormData behavior.
+ * A fresh 128-bit cryptographic suffix makes collisions impractical without
+ * scanning or buffering streamed file contents. Content is not collision-checked.
  */
 export function generateMultipartBoundary(): string {
-  return `----NodeAdapterFormBoundary${Math.random().toString(36).slice(2)}`;
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  const suffix = Array.from(bytes, (byte) =>
+    byte.toString(16).padStart(2, '0'),
+  ).join('');
+
+  return `----NodeAdapterFormBoundary${suffix}`;
 }
 
 /**
@@ -197,7 +200,15 @@ export function calculateMultipartFormDataSize(
   formData: FormData,
   boundary: string,
 ): number {
+  return measureMultipartFormData(formData, boundary).totalSize;
+}
+
+function measureMultipartFormData(
+  formData: FormData,
+  boundary: string,
+): { totalSize: number; partSizes: number[] } {
   let size = 0;
+  const partSizes: number[] = [];
 
   for (const [name, value] of formData.entries()) {
     const fieldName = formatFieldName(name);
@@ -229,14 +240,16 @@ export function calculateMultipartFormDataSize(
         `Content-Disposition: form-data; name="${fieldName}"; ${formatFilename(filename)}\r\nContent-Type: ${contentType}\r\n\r\n`,
       );
       // Blob.size is already the exact byte length of the binary payload.
-      size += (value as Blob).size;
+      const partSize = (value as Blob).size;
+      partSizes.push(partSize);
+      size += partSize;
       size += Buffer.byteLength('\r\n');
     }
   }
 
   // Final terminating boundary line — note the extra trailing `--`.
   size += Buffer.byteLength(`--${boundary}--\r\n`);
-  return size;
+  return { totalSize: size, partSizes };
 }
 
 /**
@@ -253,8 +266,16 @@ export async function serializeMultipartFormData(
   req: RequestBodyWritable,
   boundary: string,
   onProgress?: (e: AdapterProgressEvent) => void,
+  /**
+   * Told when the writer is parked waiting on the *source* - a `Blob.stream()` read that
+   * has not answered - rather than on the socket, and again when the read comes back.
+   * A stall watchdog reads byte progress, and a slow disk makes none; without this it
+   * could not tell a file still being read from a receiver that stopped accepting.
+   */
+  onSourceWait?: (isWaiting: boolean) => void,
 ): Promise<void> {
-  const totalSize = calculateMultipartFormDataSize(formData, boundary);
+  const { totalSize, partSizes } = measureMultipartFormData(formData, boundary);
+  let partIndex = 0;
 
   // Servers need the boundary to parse the multipart body. We set an exact
   // Content-Length too, so upload progress is based on known total bytes
@@ -269,6 +290,16 @@ export async function serializeMultipartFormData(
       let hasWriteReturned = false;
       let isWriteCallbackDone = false;
       let isDrainDone = true;
+      // The same guard `writeRequestBodyChunked` keeps, and for the same reason. Every
+      // path here settles the one promise, and a settled promise ignores a second call -
+      // but `maybeResolve` does more than resolve: it advances `uploadedBytes` and fires
+      // `onProgress`. Now that `onClose` *rejects*, the two can both run. Under
+      // backpressure a `'drain'` may arrive before the write callback, so `cleanup` has not
+      // run and the listeners are still attached; `req` then emits `'close'` and the upload
+      // rejects; the write callback lands afterwards and `maybeResolve` fires an
+      // upload-progress event for a request already reported as a transport error, having
+      // counted bytes the stream never accepted.
+      let isSettled = false;
 
       const cleanup = (): void => {
         req.off('drain', onDrain);
@@ -277,17 +308,20 @@ export async function serializeMultipartFormData(
       };
 
       const maybeResolve = (): void => {
-        if (isWriteCallbackDone && isDrainDone) {
-          cleanup();
-          uploadedBytes += Buffer.byteLength(data);
-
-          onProgress?.({
-            loaded: uploadedBytes,
-            total: totalSize,
-            progress: uploadedBytes / totalSize,
-          });
-          resolve();
+        if (isSettled || !isWriteCallbackDone || !isDrainDone) {
+          return;
         }
+
+        isSettled = true;
+        cleanup();
+        uploadedBytes += Buffer.byteLength(data);
+
+        onProgress?.({
+          loaded: uploadedBytes,
+          total: totalSize,
+          progress: uploadedBytes / totalSize,
+        });
+        resolve();
       };
 
       const onDrain = (): void => {
@@ -296,17 +330,41 @@ export async function serializeMultipartFormData(
       };
 
       const onClose = (): void => {
+        if (isSettled) {
+          return;
+        }
+
+        isSettled = true;
         cleanup();
-        resolve();
+
+        // Rejects, for the reason `writeRequestBodyChunked`'s does: a stream that closes
+        // mid-write has not accepted what it was given, and resolving reported a part as
+        // written when it was not. Worse here than there, because the body is assembled
+        // across many writes - a close partway through leaves the multipart payload
+        // without its closing `--boundary--` delimiter, and the server is handed a body it
+        // will read as truncated while this side called it a success.
+        reject(
+          new Error('Request stream closed before the body was fully written'),
+        );
       };
 
       const onError = (error: Error): void => {
+        if (isSettled) {
+          return;
+        }
+
+        isSettled = true;
         cleanup();
         reject(error);
       };
 
       const canContinue = req.write(data, (error: Error | null | undefined) => {
         if (error) {
+          if (isSettled) {
+            return;
+          }
+
+          isSettled = true;
           cleanup();
           reject(error);
           return;
@@ -319,9 +377,29 @@ export async function serializeMultipartFormData(
       });
       hasWriteReturned = true;
 
-      if (!canContinue) {
-        isDrainDone = false;
-        req.once('drain', onDrain);
+      // Armed whether or not the write was backpressured. A chunk the buffer took without
+      // asking for a drain still has a callback that only Node will call, and a socket that dies
+      // while it sits there never calls it: with the listeners attached only under backpressure,
+      // nothing rejected and nothing resolved, so the writer's promise stayed pending for good.
+      // That is the promise `requestBodySettled` hands the caller - an early-ack `200` whose
+      // connection then dropped left an `await` on it hanging forever - and the adapter's own
+      // upload-stall watchdog could not help: it destroys the request, which is precisely the
+      // event nothing was listening for.
+      //
+      // `'drain'` stays conditional: only a backpressured write has one coming.
+      //
+      // `!isSettled` throughout. The write callback can run synchronously with an error - a
+      // `ClientRequest` already destroyed answers that way - settling the write and running
+      // `cleanup()` before any listener exists. Attaching listeners afterwards armed nothing that
+      // could take them off again: the `req.destroyed` guard calls `onClose`, which returns on
+      // `isSettled`, so they stayed on `req` for the life of the request - once per chunk, which
+      // is the `MaxListenersExceededWarning` path.
+      if (!isSettled) {
+        if (!canContinue) {
+          isDrainDone = false;
+          req.once('drain', onDrain);
+        }
+
         req.once('close', onClose);
         req.once('error', onError);
 
@@ -358,6 +436,15 @@ export async function serializeMultipartFormData(
         `Content-Disposition: form-data; name="${fieldName}"; ${formatFilename(filename)}\r\nContent-Type: ${contentType}\r\n\r\n`,
       );
 
+      // Compare against the sizing pass, even if the source's size later changes.
+      const partSize = partSizes[partIndex++];
+      if (partSize === undefined) {
+        throw new Error(
+          'Multipart body changed after Content-Length was calculated',
+        );
+      }
+      let partBytes = 0;
+
       // Blob.stream() lets us forward large files piece-by-piece instead of
       // concatenating the whole payload into a single upload buffer.
       const reader = (value as Blob)
@@ -371,7 +458,16 @@ export async function serializeMultipartFormData(
             break;
           }
 
-          const { done: isDone, value: chunk } = await reader.read();
+          onSourceWait?.(true);
+
+          let isDone: boolean;
+          let chunk: Uint8Array | undefined;
+
+          try {
+            ({ done: isDone, value: chunk } = await reader.read());
+          } finally {
+            onSourceWait?.(false);
+          }
 
           if (isDone) {
             break;
@@ -383,14 +479,50 @@ export async function serializeMultipartFormData(
           }
 
           if (chunk) {
+            // Refused *before* the write, not counted after it. The check below this
+            // function catches the same overrun, but only once the whole body has been
+            // written: a `File` that grew after the sizing pass had its surplus already on
+            // the wire past a `Content-Length` the server reads as the start of the next
+            // request, and throwing afterwards could not take those bytes back. The
+            // shortfall check has no equivalent problem - bytes that were never written
+            // need no undoing - which is why only this side needs the early exit.
+            if (
+              partBytes + chunk.byteLength > partSize ||
+              uploadedBytes + chunk.byteLength > totalSize
+            ) {
+              await cancelReaderQuietly(reader);
+
+              // What actually went on the wire, and the chunk that was refused, kept
+              // apart. Counting the refused chunk into the written total named ~64 KiB
+              // that never left this process - a `File` that grew ten bytes after the
+              // sizing pass reported tens of thousands - which sends a reader looking for
+              // a write that did not happen. The post-write check below says
+              // `uploadedBytes` for the same reason.
+              throw new Error(
+                `Request body source produced more than its Content-Length of ${String(totalSize)}: ${String(uploadedBytes)} bytes written and a further ${String(chunk.byteLength)} refused`,
+              );
+            }
+
             // Each chunk contributes to upload progress immediately after write.
             await write(chunk);
+            partBytes += chunk.byteLength;
           }
         }
       } finally {
-        if (req.destroyed) {
-          await cancelReaderQuietly(reader);
-        }
+        // Unconditionally, not only when the stream was destroyed. `await write(chunk)`
+        // above can reject without anything being destroyed - the write callback delivers
+        // an error, or an `'error'` event fires - and that rejection leaves this block
+        // with the reader still locked and the blob's underlying stream never cancelled,
+        // which for a disk-backed `File` is a handle held for the life of the process.
+        // Cancelling a reader whose stream has already closed is a no-op, so the ordinary
+        // `isDone` exit costs nothing by coming through here too.
+        await cancelReaderQuietly(reader);
+      }
+
+      if (!req.destroyed && partBytes !== partSize) {
+        throw new Error(
+          `Request body source did not match its Content-Length: part expected ${String(partSize)} bytes, received ${String(partBytes)}`,
+        );
       }
 
       if (!req.destroyed) {
@@ -400,9 +532,42 @@ export async function serializeMultipartFormData(
     }
   }
 
-  if (!req.destroyed) {
-    // Closing delimiter that tells the server there are no more parts.
-    await write(`--${boundary}--\r\n`);
+  // The other exit, and the one every `req.destroyed` break above arrives at. `onClose`
+  // rejects a write that was waiting for its callback or its drain, but a stream destroyed
+  // between writes - with nothing under backpressure, so no `'close'` listener was ever
+  // attached - used to fall through here and resolve. That is worse than the same gap in
+  // `writeRequestBodyChunked`: the body is assembled across many writes, so what is
+  // finalized by `node-adapter`'s following `req.end()` is a payload missing its closing
+  // `--boundary--` delimiter, against an exact `Content-Length`. The server reads it as
+  // truncated while this side called it a success.
+  if (req.destroyed) {
+    throw new Error('Request stream closed before the body was fully written');
+  }
+
+  // Closing delimiter that tells the server there are no more parts.
+  await write(`--${boundary}--\r\n`);
+
+  // Bytes, not just `req.destroyed`, matching what `writeRequestBodyChunked` checks.
+  // `Content-Length` is computed in the sizing pass from each `Blob.size`, but this pass
+  // writes whatever `Blob.stream()` actually yields - and a `File` backed by a file
+  // another process is rotating can yield fewer. The inner loop then exits through
+  // `isDone` with nothing destroyed, every delimiter is written, and the body goes out
+  // short of the length already on the wire. Node does not check a `ClientRequest` for a
+  // Content-Length shortfall, so the server simply waits for bytes that never arrive and
+  // the caller hangs until its own timeout rather than seeing the transport error it
+  // should have.
+  if (uploadedBytes < totalSize) {
+    throw new Error('Request stream closed before the body was fully written');
+  }
+
+  // The same mismatch from the other side, and it is not the same failure: a `Blob` that
+  // yields *more* than its `.size` overran a `Content-Length` already on the wire, so the
+  // server reads the tail as the start of another message. Worth its own text - the one
+  // above says the body stopped short, which points at exactly the wrong end of it.
+  if (uploadedBytes > totalSize) {
+    throw new Error(
+      `Request body wrote ${String(uploadedBytes)} bytes against a Content-Length of ${String(totalSize)}`,
+    );
   }
 }
 

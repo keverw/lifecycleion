@@ -49,12 +49,28 @@ export class ErrTmpDirConfigErrorBaseDirectory extends Error {
   }
 }
 
+export class ErrTmpDirConfigErrorMode extends Error {
+  constructor() {
+    super('`mode` must be an integer permission mask between 0o000 and 0o777.');
+    this.name = 'ErrTmpDirConfigErrorMode';
+  }
+}
+
 export class ErrTmpDirConfigErrorMaxTries extends Error {
   constructor() {
     super(
       'An error occurred with the configuration. `maxTries` must be a positive integer.',
     );
     this.name = 'ErrTmpDirConfigErrorMaxTries';
+  }
+}
+
+export class ErrTmpDirConfigErrorNamePart extends Error {
+  constructor(public readonly option: 'prefix' | 'postfix') {
+    super(
+      `An error occurred with the configuration. \`${option}\` must not contain path separators or control characters.`,
+    );
+    this.name = 'ErrTmpDirConfigErrorNamePart';
   }
 }
 
@@ -84,7 +100,9 @@ export class ErrTmpDirCleanupUnexpectedError extends Error {
   }
 }
 
-interface TmpDirOptions {
+export interface TmpDirOptions {
+  /** Permission bits for new directories, before process.umask(); default 0o700. Existing parents are unchanged. */
+  mode?: number;
   unsafeCleanup?: boolean; // allow cleaning up a directory that is not empty, default: false
   baseDirectory?: string; // the directory in which the temporary directory should be created, default: os.tmpdir()
   maxTries?: number; // max number of attempts to create a unique directory, default: 3
@@ -110,11 +128,34 @@ export class TmpDir {
   private isInitialized = false;
   private wasCleanedUp = false;
   private fullTempDirPath = '';
+  /**
+   * The `initialize()` in flight, shared by every caller that arrives while it runs.
+   *
+   * The exclusive create closes the race between two *processes*. Two calls on one
+   * instance raced each other instead: both read `isInitialized` as false, both created a
+   * leaf of their own, and the loser's path was overwritten and never cleaned up - an
+   * orphan a safe-mode `cleanup()` could not have removed even had it known about it.
+   */
+  private initializing: Promise<void> | null = null;
+
+  /**
+   * Set the moment `cleanup()` is entered, and never cleared.
+   *
+   * `wasCleanedUp` cannot do this job: it is only set once a directory has actually been
+   * removed, so a `cleanup()` that found nothing to remove left the object looking
+   * untouched. That is precisely the window a failed-then-retried create lands in -
+   * `initialize().catch(() => initialize())` racing a `cleanup()` - and the retry's
+   * directory was then created *after* the only call that would ever have removed it had
+   * returned. Waiting for the in-flight create cannot close that on its own, because the
+   * retry has not started yet when the wait ends; refusing the retry can.
+   */
+  private cleanupRequested = false;
 
   // configuration properties
   private allowUnsafeCleanup = false;
   private baseDirectory = '';
   private maxTries = 3;
+  private mode = 0o700;
   private prefix = 'tmp';
   private postfix = '';
 
@@ -130,6 +171,17 @@ export class TmpDir {
 
   constructor(options?: TmpDirOptions) {
     if (isPlainObject(options)) {
+      if (options.mode !== undefined) {
+        if (
+          typeof options.mode !== 'number' ||
+          !Number.isInteger(options.mode) ||
+          options.mode < 0 ||
+          options.mode > 0o777
+        ) {
+          throw new ErrTmpDirConfigErrorMode();
+        }
+        this.mode = options.mode;
+      }
       if (isBoolean(options.unsafeCleanup)) {
         this.allowUnsafeCleanup = options.unsafeCleanup;
       }
@@ -156,11 +208,25 @@ export class TmpDir {
         }
       }
 
+      // Refused at construction, as `baseDirectory` is. Both are joined into the leaf
+      // name, and `path.join` normalizes, so `prefix: '../escape'` created and later
+      // cleaned up a directory *outside* `baseDirectory` - with `unsafeCleanup`, a
+      // recursive delete outside the one directory this class promises to stay in. A
+      // `NUL` is refused with the separators because `fs` refuses it later, from
+      // `initialize()`, after the constructor that checks configuration has returned.
       if (isString(options.prefix)) {
+        if (!isValidNamePart(options.prefix)) {
+          throw new ErrTmpDirConfigErrorNamePart('prefix');
+        }
+
         this.prefix = options.prefix;
       }
 
       if (isString(options.postfix)) {
+        if (!isValidNamePart(options.postfix)) {
+          throw new ErrTmpDirConfigErrorNamePart('postfix');
+        }
+
         this.postfix = options.postfix;
       }
     }
@@ -172,64 +238,107 @@ export class TmpDir {
   }
 
   public async initialize(): Promise<void> {
-    if (!this.isInitialized) {
-      let attemptsMade = 0;
+    // `cleanup()` is terminal for the instance - `path` already throws after one - so a
+    // create started afterwards could only ever produce a directory nothing can name and
+    // nothing will remove. Refused loudly rather than leaked quietly.
+    if (this.cleanupRequested) {
+      throw new ErrTmpDirWasCleanedUp();
+    }
 
-      // attempt this while the attemptsMade is less than the maxTries
-      while (attemptsMade < this.maxTries) {
-        attemptsMade++; // increment the attempts made
+    if (this.isInitialized) {
+      return;
+    }
 
-        // generate a temporary directory name
-        const name = this.generateTempDirName();
+    if (this.initializing === null) {
+      this.initializing = this.createTempDir().finally(() => {
+        this.initializing = null;
+      });
+    }
 
-        // check if the path exists
-        const fullPath = path.join(this.baseDirectory, name);
+    await this.initializing;
 
-        let doesPathExist = false;
-        try {
-          await fs.stat(fullPath);
-          doesPathExist = true;
-        } catch {
-          // Path doesn't exist, which is what we want
-          doesPathExist = false;
-        }
-
-        // only proceed if path doesn't exist
-        if (!doesPathExist) {
-          // create the directory
-          await fs.mkdir(fullPath, { recursive: true });
-
-          // set isInitialized to true and return
-          this.fullTempDirPath = fullPath;
-          this.isInitialized = true;
-
-          return;
-        }
-      }
-
-      // if the loop completes without finding a unique directory, throw an error
-      throw new ErrTmpDirInitializeMaxTriesExceeded();
+    // `cleanup()` may have joined the create while it was in flight. The directory is
+    // removed by that cleanup, so the initializer must not report that it successfully
+    // produced a usable path after the instance became terminal.
+    if (this.cleanupRequested) {
+      throw new ErrTmpDirWasCleanedUp();
     }
   }
 
   public async cleanup(): Promise<void> {
+    this.cleanupRequested = true;
+
+    // An `initialize()` still in flight is waited for first, and its failure ignored.
+    //
+    // `isInitialized` is set at the *end* of `createTempDir`, so for the whole of that
+    // call both flags below are false and `cleanup()` was a no-op that removed nothing -
+    // and then the directory appeared, with nothing left to remove it. `cleanup()` before
+    // `await initialize()`, or `Promise.all([initialize(), cleanup()])`, leaked a temp
+    // directory every time; with `unsafeCleanup` that is a recursive-delete target the
+    // object believes it has already dealt with.
+    //
+    // The failure is swallowed rather than rethrown because it is `initialize()`'s to
+    // report to whoever called it: a create that failed leaves nothing to clean up, which
+    // is the state `cleanup()` was asked to reach.
+    // A loop rather than a single `await`, because the slot is cleared by `initialize()`'s
+    // own `.finally` *before* control returns here. A create that fails and is retried -
+    // `initialize().catch(() => initialize())` racing a `cleanup()` - resolved this await
+    // with `initializing` back to `null` and `isInitialized` still `false`, so the check
+    // below saw a fresh jar in flight as nothing to do and no-opped; the retry then
+    // succeeded and left a directory behind that this object believed it had handled.
+    // Re-reading the slot each time round is what makes "wait for initialization" mean the
+    // last one rather than the first.
+    while (this.initializing !== null) {
+      try {
+        await this.initializing;
+      } catch {
+        // Nothing was created, so there is nothing to remove.
+      }
+    }
+
     if (this.isInitialized && !this.wasCleanedUp) {
       try {
-        await fs.rm(this.fullTempDirPath, {
-          recursive: this.allowUnsafeCleanup,
-          force: this.allowUnsafeCleanup,
-        });
+        if (this.allowUnsafeCleanup) {
+          await fs.rm(this.fullTempDirPath, { recursive: true, force: true });
+        } else {
+          // `rmdir`, not `rm`. `fs.rm` without `recursive` refuses a directory outright
+          // and reports `ERR_FS_EISDIR` whether or not it is empty, so it can never
+          // complete a safe cleanup and cannot tell "not empty" from "removed fine".
+          // `rmdir` is the call that means what this wants: remove it if it is empty,
+          // and report `ENOTEMPTY` if it is not.
+          await fs.rmdir(this.fullTempDirPath);
+        }
 
         this.wasCleanedUp = true;
       } catch (error) {
-        // Check if directory is not empty
-        // Different runtimes may return different error codes:
-        // - ENOTEMPTY: directory not empty (Node.js)
-        // - EFAULT: bad address (Bun when trying to delete non-empty dir without recursive)
-        // - ENOENT: doesn't exist (already cleaned up, this shouldn't happen but handle it)
+        // Gone already is the state this was asked to reach, so it counts as done rather
+        // than as a failure: an OS tmp reaper, a parent removed with `unsafeCleanup`, or a
+        // second `cleanup()` after a first threw all leave nothing to remove. Reported as
+        // `ErrTmpDirCleanupUnexpectedError`, it also never set `wasCleanedUp`, so every
+        // later `cleanup()` threw again and the object could not reach a terminal state.
+        if (
+          error instanceof Error &&
+          (error as NodeJS.ErrnoException).code === 'ENOENT'
+        ) {
+          this.wasCleanedUp = true;
+
+          return;
+        }
+
+        // Different runtimes report a non-empty directory differently:
+        // - ENOTEMPTY: the standard code, from `rmdir` on Node and Bun
+        // - EEXIST: some platforms use this for the same condition
+        // - EFAULT: older Bun, from the `fs.rm` path this no longer takes
+        // - ERR_FS_EISDIR: `fs.rm` refusing a directory, kept in case a runtime routes
+        //   `rmdir` through the same error
         if (error instanceof Error) {
           const code = (error as NodeJS.ErrnoException).code;
-          if (code === 'ENOTEMPTY' || code === 'EFAULT') {
+          if (
+            code === 'ENOTEMPTY' ||
+            code === 'EEXIST' ||
+            code === 'EFAULT' ||
+            code === 'ERR_FS_EISDIR'
+          ) {
             throw new ErrTmpDirCleanupFailedNotEmpty();
           }
         }
@@ -238,6 +347,57 @@ export class TmpDir {
           originalError: error as Error,
         });
       }
+    }
+  }
+
+  private async createTempDir(): Promise<void> {
+    if (!this.isInitialized) {
+      // The parent once, so each attempt below can be an *exclusive* create of the leaf.
+      // `mkdir` with `recursive: true` succeeds on a directory that already exists, which
+      // is why the old stat-then-mkdir could not be made exclusive by itself.
+      await fs.mkdir(this.baseDirectory, {
+        recursive: true,
+        mode: this.mode | 0o700,
+      });
+
+      let attemptsMade = 0;
+
+      // attempt this while the attemptsMade is less than the maxTries
+      while (attemptsMade < this.maxTries) {
+        attemptsMade++; // increment the attempts made
+
+        // generate a temporary directory name
+        const name = this.generateTempDirName();
+        const fullPath = path.join(this.baseDirectory, name);
+
+        // Created, not checked and then created. A `stat` that found nothing followed by
+        // a `mkdir` left a window in which another process - or another instance in this
+        // one, given the same random name - could create the same path first, and the
+        // `recursive` create then adopted their directory as this one's. A plain `mkdir`
+        // fails with `EEXIST` on a path that is already there, which is the answer the
+        // check was trying to get, only without the window.
+        try {
+          await fs.mkdir(fullPath, { mode: this.mode });
+        } catch (error) {
+          if (
+            error instanceof Error &&
+            (error as NodeJS.ErrnoException).code === 'EEXIST'
+          ) {
+            continue;
+          }
+
+          throw error;
+        }
+
+        // set isInitialized to true and return
+        this.fullTempDirPath = fullPath;
+        this.isInitialized = true;
+
+        return;
+      }
+
+      // if the loop completes without finding a unique directory, throw an error
+      throw new ErrTmpDirInitializeMaxTriesExceeded();
     }
   }
 
@@ -250,6 +410,30 @@ export class TmpDir {
       this.postfix.length > 0 ? '-' + this.postfix : '',
     ].join('');
   }
+}
+
+/**
+ * Whether a `prefix` or `postfix` stays inside one path segment.
+ *
+ * Separators are what let it leave `baseDirectory`; control characters are refused with
+ * them because `fs` refuses a `NUL` and nothing lists a name holding a newline cleanly.
+ * `..` on its own is fine: it is only ever joined with `-` and the pid, never a segment.
+ */
+function isValidNamePart(part: string): boolean {
+  for (const character of part) {
+    const code = character.codePointAt(0) ?? 0;
+
+    if (
+      character === '/' ||
+      character === '\\' ||
+      code < 0x20 ||
+      code === 0x7f
+    ) {
+      return false;
+    }
+  }
+
+  return true;
 }
 
 export async function createTempDir(options?: TmpDirOptions): Promise<TmpDir> {

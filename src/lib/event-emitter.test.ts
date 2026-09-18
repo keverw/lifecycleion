@@ -43,6 +43,25 @@ describe('EventEmitter', () => {
     expect(callback).toHaveBeenCalledWith('first');
   });
 
+  test('once subscription runs only once across nested emission snapshots', () => {
+    const emitter = new EventEmitter();
+    const callback = mock((_value: string) => {});
+
+    emitter.on<string>('test', (value) => {
+      if (value === 'outer') {
+        emitter.emit('test', 'inner');
+      }
+    });
+    emitter.once('test', callback);
+
+    emitter.emit('test', 'outer');
+    emitter.emit('test', 'later');
+
+    expect(callback).toHaveBeenCalledTimes(1);
+    expect(callback).toHaveBeenCalledWith('inner');
+    expect(emitter.listenerCount('test')).toBe(1);
+  });
+
   test('multiple subscribers', () => {
     const emitter = new EventEmitter();
     const callback1 = mock(() => {});
@@ -54,6 +73,72 @@ describe('EventEmitter', () => {
 
     expect(callback1).toHaveBeenCalledWith('hello');
     expect(callback2).toHaveBeenCalledWith('hello');
+  });
+
+  test('unsubscribing a sibling does not skip it during the current emission', () => {
+    const emitter = new EventEmitter();
+    const calls: string[] = [];
+    let unsubscribeSecond = (): void => {};
+
+    emitter.on('test', () => {
+      calls.push('first');
+      unsubscribeSecond();
+    });
+    unsubscribeSecond = emitter.on('test', () => {
+      calls.push('second');
+    });
+
+    emitter.emit('test');
+    emitter.emit('test');
+
+    expect(calls).toEqual(['first', 'second', 'first']);
+  });
+
+  test('clearing listeners does not stop the current emission', () => {
+    const emitter = new EventEmitter();
+    const calls: string[] = [];
+
+    emitter.on('test', () => {
+      calls.push('first');
+      emitter.clear('test');
+    });
+    emitter.on('test', () => {
+      calls.push('second');
+    });
+
+    emitter.emit('test');
+    emitter.emit('test');
+
+    expect(calls).toEqual(['first', 'second']);
+  });
+
+  test('a nested emission snapshots the listeners present when it starts', () => {
+    const emitter = new EventEmitter();
+    const calls: string[] = [];
+
+    emitter.on<string>('test', (value) => {
+      calls.push(`first:${value}`);
+
+      if (value === 'outer') {
+        emitter.on<string>('test', (nestedValue) => {
+          calls.push(`added:${nestedValue}`);
+        });
+        emitter.emit('test', 'inner');
+      }
+    });
+    emitter.on<string>('test', (value) => {
+      calls.push(`second:${value}`);
+    });
+
+    emitter.emit('test', 'outer');
+
+    expect(calls).toEqual([
+      'first:outer',
+      'first:inner',
+      'second:inner',
+      'added:inner',
+      'second:outer',
+    ]);
   });
 
   test('hasListeners and listenerCount', () => {
@@ -118,9 +203,9 @@ describe('EventEmitter', () => {
 
   test('error handling in event handlers', () => {
     const emitter = new EventEmitter();
-    const errorHandler = mock(() => {});
+    const errorHandler = mock((event: Event) => event.preventDefault());
 
-    globalThis.addEventListener('reportError', errorHandler);
+    globalThis.addEventListener('error', errorHandler);
 
     emitter.on('test', () => {
       throw new Error('Test error');
@@ -131,16 +216,16 @@ describe('EventEmitter', () => {
     expect(errorHandler).toHaveBeenCalled();
     const errorEvent = getFirstReportedError(errorHandler);
     expect(errorEvent.error.message).toContain('event handler for test');
-    expect(errorEvent.error.message).toContain('Test error');
+    expect((errorEvent.error.cause as Error).message).toBe('Test error');
 
-    globalThis.removeEventListener('reportError', errorHandler);
+    globalThis.removeEventListener('error', errorHandler);
   });
 
   test('error handling in async event handlers', async () => {
     const emitter = new EventEmitter();
-    const errorHandler = mock(() => {});
+    const errorHandler = mock((event: Event) => event.preventDefault());
 
-    globalThis.addEventListener('reportError', errorHandler);
+    globalThis.addEventListener('error', errorHandler);
 
     emitter.on('test', () => {
       return Promise.reject(new Error('Test error'));
@@ -152,9 +237,9 @@ describe('EventEmitter', () => {
     expect(errorHandler).toHaveBeenCalled();
     const errorEvent = getFirstReportedError(errorHandler);
     expect(errorEvent.error.message).toContain('event handler for test');
-    expect(errorEvent.error.message).toContain('Test error');
+    expect((errorEvent.error.cause as Error).message).toBe('Test error');
 
-    globalThis.removeEventListener('reportError', errorHandler);
+    globalThis.removeEventListener('error', errorHandler);
   });
 
   test('hasListener with regular subscription', () => {
@@ -212,9 +297,9 @@ describe('EventEmitterProtected', () => {
     }
 
     const emitter = new MyEmitter();
-    const errorHandler = mock(() => {});
+    const errorHandler = mock((event: Event) => event.preventDefault());
 
-    globalThis.addEventListener('reportError', errorHandler);
+    globalThis.addEventListener('error', errorHandler);
 
     emitter.on('test', () => {
       throw new Error('Protected error');
@@ -225,9 +310,71 @@ describe('EventEmitterProtected', () => {
     expect(errorHandler).toHaveBeenCalled();
     const errorEvent = getFirstReportedError(errorHandler);
     expect(errorEvent.error.message).toContain('event handler for test');
-    expect(errorEvent.error.message).toContain('Protected error');
+    expect((errorEvent.error.cause as Error).message).toBe('Protected error');
 
-    globalThis.removeEventListener('reportError', errorHandler);
+    globalThis.removeEventListener('error', errorHandler);
+  });
+
+  test('handleEventHandlerFailure override keeps failures off the global channel and siblings running', async () => {
+    // The hook exists so an emitter whose own events are logged can keep its handler
+    // failures out of the global `'error'` channel. An override must see every failure -
+    // a sync throw and a rejection alike - the handlers after a failing one must still
+    // run, and nothing may reach the global listener.
+    const seen: Array<{ event: string; error: unknown; data: unknown }> = [];
+
+    class QuietEmitter extends EventEmitterProtected {
+      public triggerEvent(): void {
+        this.emit('test', 'payload');
+      }
+
+      protected override handleEventHandlerFailure(
+        event: string,
+        error: unknown,
+        data?: unknown,
+      ): void {
+        seen.push({ event, error, data });
+      }
+    }
+
+    const emitter = new QuietEmitter();
+    const globalHandler = mock((event: Event) => event.preventDefault());
+    const sibling = mock(() => {});
+    const syncFailure = new Error('sync');
+    const asyncFailure = new Error('async');
+
+    globalThis.addEventListener('error', globalHandler);
+
+    try {
+      emitter.on('test', () => {
+        throw syncFailure;
+      });
+      emitter.on('test', sibling);
+      emitter.on('test', () => Promise.reject(asyncFailure));
+      emitter.on('test', 'not a function' as unknown as () => void);
+
+      emitter.triggerEvent();
+
+      // The rejection lands on a later tick.
+      await new Promise((resolve) => setTimeout(resolve, 1));
+
+      expect(sibling).toHaveBeenCalledWith('payload');
+      expect(globalHandler).not.toHaveBeenCalled();
+      expect(seen.map((entry) => entry.event)).toEqual([
+        'test',
+        'test',
+        'test',
+      ]);
+      expect(seen.map((entry) => entry.data)).toEqual([
+        'payload',
+        'payload',
+        'payload',
+      ]);
+      expect(seen[0]?.error).toBe(syncFailure);
+      expect((seen[1]?.error as Error).message).toContain('is not a function');
+      expect(seen[2]?.error).toBe(asyncFailure);
+    } finally {
+      globalThis.removeEventListener('error', globalHandler);
+    }
   });
 
   test('all subscription methods work with protected emitter', () => {

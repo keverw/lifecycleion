@@ -1,10 +1,12 @@
 import { PromiseProtectedResolver } from '../../promise-protected-resolver';
+import { reportCallbackError } from '../../safe-handle-callback';
 import { generateID } from '../../id-helpers';
 import { isPromise } from '../../is-promise';
 import { isString } from '../../strings';
 import { isPlainObject } from '../../is-plain-object';
 import { isFunction } from '../../is-function';
 import { RetryPolicy } from './retry-policy';
+import { MAX_TIMER_MS } from '../../internal/timer-limits';
 import type {
   RetryPolicyOptions,
   RetryPolicyValidated,
@@ -365,14 +367,15 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
    * Set the grace period for cancellation in milliseconds
    *
    * Overrides the default grace period of 1000ms
-   * Non-finite or negative values default to 1000ms. Use 0 for immediate force-cancel.
+   * Non-finite or negative values default to 1000ms. Finite values are capped at the
+   * runtime timer ceiling. Use 0 for immediate force-cancel.
    */
 
   public overrideGraceCancelPeriodMS(value: number): void {
     if (!isFinite(value) || value < 0) {
       this._gracePeriodMS = 1000;
     } else {
-      this._gracePeriodMS = value;
+      this._gracePeriodMS = Math.min(value, MAX_TIMER_MS);
     }
   }
 
@@ -974,6 +977,14 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
       data?: T;
       error?: unknown;
     },
+    // Set only by the `catch` around `this.operation`, which routes a thrown error here
+    // as `'error'`. It changes nothing about how a live attempt is handled and only names
+    // the already-settled case correctly: an operation that reports its outcome and *then*
+    // throws never called `reportResult` twice, so telling its author that a second report
+    // "arrived after the attempt was settled" points at code they did not write. The
+    // throw is still reported - a failure after a successful report is exactly the kind
+    // that otherwise disappears - it is simply reported as what it is.
+    didOperationThrow: boolean = false,
   ): void {
     // Guard against multiple calls to reportResult
     if (
@@ -983,6 +994,50 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
       // Ensure the result hasn't already been handled
       context.handled
     ) {
+      // Discarding is right - the attempt is over and its outcome is already recorded -
+      // but it used to be silent, and `ReportResult` returns `void`, so an operation that
+      // reported twice, or reported its real failure after the runner had moved on, had no
+      // way to learn its outcome went nowhere. A double report is a caller bug that should
+      // not have to be inferred from a missing event.
+      //
+      // Reported on the global `'error'` channel rather than through this runner's own
+      // events, deliberately: the attempt this belongs to has been settled, so emitting
+      // `attempt:handled` for it now would be inventing a lifecycle event out of order.
+      //
+      // Only for an attempt that was *not* aborted, which is what separates a caller bug
+      // from this API's own documented flow. `forceTry({ shouldAbortRunning: true })` and
+      // `cancel()`'s grace period both abort the running context and then move on, and the
+      // contract tells the operation to call `reportResult('skip', 'aborted')` when it
+      // notices `signal.aborted` - so the ordinary, correct, documented response to being
+      // aborted was dispatching a global `'error'` `ErrorEvent` and printing a full console
+      // table. In a browser that also reaches `window.onerror` and any error monitoring
+      // attached to it, as a synthetic uncaught error, for an operation that did exactly
+      // what it was asked. The runner's own suite reports it: "should abort running attempt
+      // when shouldAbortRunning is true".
+      let wasAborted = false;
+
+      try {
+        wasAborted = context.abortController.signal.aborted;
+      } catch {
+        // A context whose controller cannot be read is not one this can clear, so it falls
+        // through to being reported - the safe direction, since a genuine double report is
+        // what this exists to surface.
+      }
+
+      if (!wasAborted) {
+        reportCallbackError(
+          didOperationThrow
+            ? 'RetryRunner operation threw after the attempt was settled'
+            : 'RetryRunner reportResult (attempt already settled)',
+          valueInfo.error ??
+            new Error(
+              didOperationThrow
+                ? 'the operation threw after the attempt was settled'
+                : `reportResult('${status}') arrived after the attempt was settled`,
+            ),
+        );
+      }
+
       return; // Ensures we only handle the result once per context
     }
 
@@ -1062,14 +1117,22 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
       } else {
         if (shouldRetryQuery.shouldRetry) {
           if (shouldRetryQuery.delayMS > 0) {
+            // Bounded again here, not only in `RetryPolicy`. The delay can also arrive
+            // from a caller-built policy object or an exported delay calculator given its
+            // own bounds, and a `setTimeout` past `MAX_TIMER_MS` fires on the next tick -
+            // so an unbounded number reaching this line turns "wait a month" into a busy
+            // retry loop. The same clamped value is recorded, so the remaining-time
+            // bookkeeping describes the timer that actually exists.
+            const delayMS = Math.min(shouldRetryQuery.delayMS, MAX_TIMER_MS);
+
             this.currentState.retryTimeoutStartTime = Date.now();
-            this.currentState.retryTimeoutDelayMS = shouldRetryQuery.delayMS;
+            this.currentState.retryTimeoutDelayMS = delayMS;
             this.currentState.retryTimeoutHandle = setTimeout(() => {
               this.currentState.retryTimeoutHandle = null;
               this.currentState.retryTimeoutStartTime = null;
               this.currentState.retryTimeoutDelayMS = null;
               void this.attemptOperation(false);
-            }, shouldRetryQuery.delayMS);
+            }, delayMS);
           } else {
             void this.attemptOperation(false);
           }
@@ -1149,7 +1212,19 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
 
       // reportResult is how the operation communicates outcome of this attempt.
       // Route the value to `data` for success/skip, or `error` for error/fatal.
+      // What the operation last handed `reportResult`, so the `catch` below can tell the
+      // ordinary `catch (e) { reportResult('error', e); throw e; }` shape - which is a
+      // rethrow of an outcome already recorded, not a second one - from a genuine throw
+      // after a settled attempt.
+      let didReport = false;
+      let reportedStatus: ReportResultStatus | undefined;
+      let reportedValue: unknown;
+
       const reportResult: ReportResult = (status, value) => {
+        didReport = true;
+        reportedStatus = status;
+        reportedValue = value;
+
         if (status === 'success' || status === 'skip') {
           this.handleReportResult(context, status, {
             data: value as T,
@@ -1171,10 +1246,40 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
           await result;
         }
       } catch (error) {
+        // A rethrow of what was already reported is not a second outcome, and reporting it
+        // as one dispatched a synthetic global `'error'` `ErrorEvent` per attempt - falling
+        // through to a full rendered error table on the console with nothing listening, and
+        // to `window.onerror` and any error monitoring behind it in a browser - for the
+        // most ordinary shape an operation can have:
+        // `catch (e) { reportResult('error', e); throw e; }`. That is precisely the harm
+        // the aborted case above is excluded for. A throw carrying anything else still
+        // reports, which is the failure that would otherwise disappear.
+        //
+        // Only a rethrow of a reported *error* - `'error'` or `'fatal'` - is that shape.
+        // Comparing against whatever was reported matched a throw against success data
+        // too: `reportResult('success')` and `reportResult('skip')` store `undefined`, so
+        // a later `throw undefined` or a bare `Promise.reject()` from a cleanup step
+        // compared equal and was dropped - the runner stayed `completed`/`success` and the
+        // `'error'` channel never heard of it, which is precisely the post-success failure
+        // `handleReportResult` exists to keep.
+        if (
+          didReport &&
+          context.handled &&
+          (reportedStatus === 'error' || reportedStatus === 'fatal') &&
+          error === reportedValue
+        ) {
+          return;
+        }
+
         // Treat thrown errors as retryable errors by default.
-        this.handleReportResult(context, 'error', {
-          error: error,
-        });
+        this.handleReportResult(
+          context,
+          'error',
+          {
+            error: error,
+          },
+          true,
+        );
       }
     }
   }

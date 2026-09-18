@@ -107,6 +107,8 @@ finalDelay = clamp(delay + randomOffset, minTimeoutMS, maxTimeoutMS);
 
 > All numeric options are clamped to their documented ranges. Values outside the allowed range are silently adjusted. `maxRetryAttempts` is additionally floored to an integer after clamping. Additionally, if `maxTimeoutMS < minTimeoutMS`, the values are automatically swapped to ensure `maxTimeoutMS >= minTimeoutMS`.
 
+> **Delays are capped at 2,147,483,647 ms (about 24.8 days).** `delayMS`, `minTimeoutMS` and `maxTimeoutMS` are each bounded there, and so is every delay computed from them. `setTimeout` keeps its delay in a signed 32-bit integer and reads anything larger as `1` ms, so an uncapped `delayMS: 3e9` would read as "wait 34 days" and retry roughly every millisecond instead. `NaN` falls back to the documented default and `Infinity` is refused for the same reason. `maxRetryAttempts` is not a duration and `Infinity` remains a supported value there.
+
 ## RetryPolicy
 
 The `RetryPolicy` class provides low-level control over retry behavior. It tracks retry attempts, calculates delays, and decides whether to retry - but doesn't execute anything itself.
@@ -170,7 +172,7 @@ Resets the policy to its initial state, clearing all errors and attempt tracking
 
 | Property                 | Type                   | Description                                                                                                  |
 | ------------------------ | ---------------------- | ------------------------------------------------------------------------------------------------------------ |
-| `policyInfo`             | `RetryPolicyValidated` | The validated policy settings                                                                                |
+| `policyInfo`             | `RetryPolicyValidated` | A fresh snapshot of the validated policy settings                                                            |
 | `attempts`               | `number`               | Total attempts made (initial + retries)                                                                      |
 | `retryCount`             | `number`               | Number of retries (excluding initial attempt)                                                                |
 | `maxRetryAttempts`       | `number`               | Maximum retry attempts allowed                                                                               |
@@ -264,7 +266,7 @@ type ReportResult<T> = {
 - **`'skip'`** - Skip this attempt (e.g., when device knows it's offline for sure). Does not count against the retry budget, and does not increment `attempts` or `retryCount`. The `value` is available as `data` in the `attempt-handled` event payload. A retry is still scheduled using the policy delay, but since the skip does not advance the error count, the delay is the same as it would have been before the skip (i.e., exponential backoff does not advance). However, if prior `'error'` results have already exhausted the retry budget, a `'skip'` will still result in `'exhausted'` because the policy's retry count has already reached its limit.
   - **Note:** After the very first skip, `attempts` will be `1` because the initial attempt is considered taken as soon as the operation starts, even if it was skipped. Subsequent skips do not increase `attempts` or `retryCount`.
 
-> **CRITICAL:** `reportResult` **MUST** be called exactly once per attempt. If your operation completes without calling `reportResult` and without throwing an error, the attempt will hang indefinitely (it will wait forever, blocking any retry logic). The only exception is throwing an error, which is automatically treated as `reportResult('error', thrownError)`. If called more than once, subsequent calls are silently ignored.
+> **CRITICAL:** `reportResult` **MUST** be called exactly once per attempt. If your operation completes without calling `reportResult` and without throwing an error, the attempt will hang indefinitely (it will wait forever, blocking any retry logic). The only exception is throwing an error, which is automatically treated as `reportResult('error', thrownError)`. A genuine second or late call is ignored by the runner and reported on the global `'error'` channel. An aborted attempt may still acknowledge cancellation with `reportResult('skip', ...)` without producing that report.
 
 > **Important:** When `cancel()` is called, the operation receives an abort signal via the `signal` parameter. If the operation doesn't call `reportResult` within the `graceCancelPeriodMS` (default 1000ms, configurable via `overrideGraceCancelPeriodMS()`), the cancellation is forced. Always check `signal.aborted` in long-running operations to respond to cancellation requests.
 >
@@ -312,7 +314,7 @@ const operation = async (reportResult, signal) => {
 | `retryTimeRemaining`     | `number`               | MS until next retry, or `-1` if none pending                                                                                                                                                                                                          |
 | `timeTakenMS`            | `number`               | Total operation time (includes all retries and delays). Resets when calling `run()`, `resume()`, or `forceTry()` from terminal states. Does NOT reset when `forceTry()` accelerates a pending retry. Freezes when operation ends. `-1` if not started |
 | `attemptTimeTakenMS`     | `number`               | Current attempt duration in MS. While an attempt is running, shows elapsed time. When no attempt is running, shows the duration of the last completed attempt. `-1` if no attempt has run yet                                                         |
-| `policyInfo`             | `RetryPolicyValidated` | The validated policy settings (all options resolved to their defaults)                                                                                                                                                                                |
+| `policyInfo`             | `RetryPolicyValidated` | A fresh snapshot of the validated policy settings (all options resolved to their defaults)                                                                                                                                                            |
 | `graceCancelPeriodMS`    | `number`               | How long `cancel()` waits for the operation to respond before force-stopping (default: 1000ms)                                                                                                                                                        |
 
 ### Methods
@@ -371,6 +373,8 @@ const result = await runner.waitForCompletion();
 ```
 
 #### `cancel()`
+
+Pending retry delays keep the Node process alive so awaited retries can finish. Call `cancel()` or `reset()` when abandoning a runner.
 
 Cancels the current operation and any scheduled retries.
 
@@ -472,7 +476,7 @@ Overrides the default 1000ms cancellation grace period. Non-finite or negative v
 
 Subscribe using the `on` method or provide handlers in the constructor.
 
-> **Note:** Event handlers should not return values. Any returned values are ignored. Both sync and async handlers are supported. Errors from either are caught and dispatched as `ErrorEvent` objects via `globalThis.dispatchEvent()` (listen with `globalThis.addEventListener('reportError', handler)`). This reporting path is supported in Node.js 25+, Bun, Deno, and modern browsers. Errors do not propagate to the runner or interrupt its operation.
+> **Note:** Event handlers should not return values. Any returned values are ignored. Both sync and async handlers are supported. Errors from either are caught and dispatched as `ErrorEvent` objects of type `'error'` via `globalThis.dispatchEvent()` (listen with `globalThis.addEventListener('error', handler)`). This reporting path is supported in Node.js 25+, Bun, Deno, and modern browsers. Errors do not propagate to the runner or interrupt its operation.
 
 | Event               | Constant            | Payload                                                                                                                                                |
 | ------------------- | ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |

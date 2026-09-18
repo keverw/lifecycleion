@@ -1,4 +1,6 @@
 import { generateID } from '../id-helpers';
+import { safeHandleCallback } from '../safe-handle-callback';
+import { reportToHost } from '../internal/report-to-host';
 import { deepClone } from '../deep-clone';
 import { RetryPolicy } from '../retry-utils';
 import { FetchAdapter } from './adapters/fetch-adapter';
@@ -22,13 +24,15 @@ import {
   resolveDetectedRedirectURL,
   scalarHeader,
   serializeBody,
+  stripURLCredentials,
 } from './utils';
 import {
-  DEFAULT_TIMEOUT_MS,
+  resolveRequestTimeoutMS,
   DEFAULT_REQUEST_ID_HEADER,
   DEFAULT_REQUEST_ATTEMPT_HEADER,
   DEFAULT_USER_AGENT,
   NON_RETRYABLE_HTTP_CLIENT_CALLBACK_ERROR_FLAG,
+  REQUEST_BODY_SETTLED_KEY,
   RESPONSE_STREAM_ABORT_FLAG,
   STREAM_FACTORY_CANCEL_KEY,
   STREAM_FACTORY_ERROR_FLAG,
@@ -37,6 +41,7 @@ import {
   NON_IDEMPOTENT_METHODS,
   REDIRECT_STATUS_CODES,
   DEFAULT_MAX_REDIRECTS,
+  MAX_TIMER_MS,
 } from './consts';
 import type {
   AttemptEndEvent,
@@ -70,6 +75,21 @@ import type {
 } from './http-request-builder';
 import type { RetryPolicyOptions } from '../retry-utils';
 import type { CookieJar } from './cookie-jar';
+// The shared coercion, not a fourth copy of it. Each adapter carried a near-identical
+// body, on the grounds that the HTTP client should not import across module boundaries -
+// which it already does for `sleep`, `deep-clone` and `retry-utils`. Aliased so the call
+// sites read unchanged.
+//
+// The *message* is not unchanged, and that is deliberate. The local copies produced
+// `new Error(String(value))`; `toError` produces
+// `new Error('Non-error value thrown: <description>', { cause: value })`. So a non-`Error`
+// rejection - `throw 'socket hang up'` - now reaches `AdapterResponse.errorCause` with the
+// prefix on `message` and the original value on `cause`, where before it carried only the
+// coerced text. See the 1.0.0 changelog entry: "HTTP adapters preserve non-`Error`
+// rejection values on `cause`."
+import { isErrorValue, toError as normalizeError } from '../to-error';
+import { readUnknownMember as readObjectMember } from '../internal/read-member';
+import { isPromise } from '../is-promise';
 
 type RemoveFn = () => void;
 
@@ -123,7 +143,7 @@ export class BaseHTTPClient {
       adapter: this._adapter,
       baseURL: config.baseURL,
       defaultHeaders: config.defaultHeaders ?? {},
-      timeout: config.timeout ?? DEFAULT_TIMEOUT_MS,
+      timeout: resolveRequestTimeoutMS(config.timeout),
       cookieJar: config.cookieJar,
       retryPolicy: config.retryPolicy,
       retryNonIdempotentMethods: config.retryNonIdempotentMethods ?? false,
@@ -241,24 +261,36 @@ export class BaseHTTPClient {
 
   // --- Cancellation ---
 
-  public cancel(requestID: string, reason?: string): void {
-    this._tracker.cancel(requestID, reason);
+  /**
+   * Cancel one in-flight request by id.
+   *
+   * @returns How many requests were cancelled - `1`, or `0` when no request with that id
+   *          was in flight. The tracker has always known this and these wrappers used to
+   *          throw the answer away, so `cancel('typo')` was a silent no-op a caller could
+   *          only detect by calling `listRequests()` first.
+   */
+  public cancel(requestID: string, reason?: string): number {
+    return this._tracker.cancel(requestID, reason);
   }
 
-  public cancelAll(reason?: string): void {
-    this._tracker.cancelAll(reason);
+  /** @returns How many requests were cancelled. */
+  public cancelAll(reason?: string): number {
+    return this._tracker.cancelAll(reason);
   }
 
-  public cancelOwn(reason?: string): void {
-    this._tracker.cancelOwn(this._clientID, reason);
+  /** @returns How many requests were cancelled. */
+  public cancelOwn(reason?: string): number {
+    return this._tracker.cancelOwn(this._clientID, reason);
   }
 
-  public cancelAllWithLabel(label: string, reason?: string): void {
-    this._tracker.cancelAllWithLabel(label, reason);
+  /** @returns How many requests were cancelled. */
+  public cancelAllWithLabel(label: string, reason?: string): number {
+    return this._tracker.cancelAllWithLabel(label, reason);
   }
 
-  public cancelOwnWithLabel(label: string, reason?: string): void {
-    this._tracker.cancelOwnWithLabel(this._clientID, label, reason);
+  /** @returns How many requests were cancelled. */
+  public cancelOwnWithLabel(label: string, reason?: string): number {
+    return this._tracker.cancelOwnWithLabel(this._clientID, label, reason);
   }
 
   // --- Request inspection ---
@@ -376,7 +408,18 @@ export class BaseHTTPClient {
       effectiveBaseURL,
       this._isBrowserRuntime,
     );
-    const timeout = options.timeout ?? this._config.timeout;
+    // Resolved here as well as in the constructor: a per-request `.timeout(n)` is the
+    // caller's number too, and `NaN` or `Infinity` from it broke the same two timers.
+    const timeout = resolveRequestTimeoutMS(
+      options.timeout,
+      this._config.timeout,
+    );
+
+    // When the request's upload last reported progress, across every hop and attempt.
+    // Stamped by the upload-progress wrapper each attempt hands the adapter, and read by
+    // the wait on `requestBodySettled` before the next dispatch: the bound on that wait
+    // is a *stall* bound, not a deadline, so an upload that is still moving is never cut.
+    const uploadActivity: UploadActivity = { at: Date.now() };
 
     // Merge headers
     const baseHeaders = mergeHeaders(
@@ -479,17 +522,24 @@ export class BaseHTTPClient {
       abortController.abort(reason);
     });
 
-    // Compose user signal with our internal abort controller
+    // Compose user signal with our internal abort controller. Every composition made
+    // for this request - this one and one per attempt - registers how to release its
+    // listeners here, and the request's `finally` runs them; see `_composeSignals`.
+    const signalReleasers: Array<() => void> = [];
     let cancelSignal: AbortSignal = abortController.signal;
 
-    if (options.signal) {
-      cancelSignal = this._composeSignals(
-        options.signal,
-        abortController.signal,
-      );
-    }
-
     try {
+      // Composed inside the `try`, so a caller's signal whose `addEventListener` throws
+      // still reaches the `finally` that releases whatever was attached before the
+      // throw. Composed before it, the release list was built and never run.
+      if (options.signal) {
+        cancelSignal = this._composeSignals(
+          options.signal,
+          abortController.signal,
+          signalReleasers,
+        );
+      }
+
       let finalRequest = interceptedRequest;
       let response: HTTPResponse<T>;
       let observerRequest = this._bestEffortAttemptRequestFromPending(
@@ -502,6 +552,13 @@ export class BaseHTTPClient {
       let cancelReason: string | undefined;
       let isRetriesExhausted = false;
       let completedAttemptCount = 0;
+
+      /**
+       * The upload's outcome from the latest hop that had a body. Set inside the redirect
+       * loop below; declared here so the `catch` around the whole of `send()` can carry it
+       * too, which is the one terminal path that could not see it.
+       */
+      let uploadOutcome: Promise<Error | undefined> | undefined;
 
       try {
         // streamResponse is NodeAdapter-only. Validate it inside the normal
@@ -659,6 +716,7 @@ export class BaseHTTPClient {
         //     on each attempt of that hop, so this stays in sync with Set-Cookie from prior responses)
         //  5. Runs redirect-phase interceptors and observers
         //  6. Continues the loop with the updated request state
+        const credentialScope = { url: finalRequest.requestURL };
         let currentInterceptedRequest: InterceptedRequest = finalRequest;
         let redirectHistory: string[] = [];
         let hopCount = 0;
@@ -673,8 +731,11 @@ export class BaseHTTPClient {
           // its own call; the shared retryPolicy tracks budget across all hops.
           const attemptResult = await this._dispatchRequestAttempts({
             request: currentInterceptedRequest,
+            credentialScope,
             timeout,
             cancelSignal,
+            signalReleasers,
+            uploadActivity,
             retryPolicy,
             requestID,
             options,
@@ -689,6 +750,31 @@ export class BaseHTTPClient {
           });
 
           const { adapterResponse, wasCancelled, wasTimeout } = attemptResult;
+
+          /**
+           * This attempt's upload outcome, wherever it ended up.
+           *
+           * Two sources because there are two shapes: an attempt that *threw* carries it
+           * on the result, and one that resolved carries it on the adapter response. The
+           * terminal redirect branches below build their `HTTPResponse` with
+           * `adapterResponse: null` - a redirect the caller disabled, a loop, an
+           * interceptor that threw, a cancel between hops - so they cannot read the
+           * response's own field and dropped it. An early `3xx` mid-upload is exactly the
+           * shape where it is not empty.
+           */
+          //
+          // Carried across hops, not recomputed per hop. A followed `301`/`302`/`303`
+          // rewrites a `POST` to a bodiless `GET`, so the final hop has no writer and
+          // nothing of its own to report - and reading only that hop answered
+          // `undefined`, the documented "the body went out" value, for exactly the
+          // early-ack `POST` -> `302` -> `GET` shape this field exists for. The latest
+          // hop that had a body is the answer: a `307`/`308` resends the body and its
+          // own outcome is the one that reached the final response, while a bodiless
+          // hop after it changes nothing about what the upload did.
+          uploadOutcome =
+            attemptResult.requestBodySettled ??
+            adapterResponse?.requestBodySettled ??
+            uploadOutcome;
           lastAttemptNumber = attemptResult.attemptCount;
           isRetriesExhausted = attemptResult.isRetriesExhausted;
           completedAttemptCount = attemptResult.attemptCount;
@@ -724,6 +810,9 @@ export class BaseHTTPClient {
                 detectedRedirectURL: adapterResponse.detectedRedirectURL,
                 headers: {},
                 body: null,
+                // Carried onto the rebuilt response: the real one is discarded here, and
+                // with it the upload outcome the adapter had already attached.
+                ...(uploadOutcome ? { requestBodySettled: uploadOutcome } : {}),
               },
               requestID,
               // Provably false: a cancel settles with no adapter response, and
@@ -771,6 +860,7 @@ export class BaseHTTPClient {
                 initialURL: finalRequest.requestURL,
                 requestURL: attemptResult.sentRequest.requestURL,
                 redirectHistory,
+                ...(uploadOutcome ? { requestBodySettled: uploadOutcome } : {}),
               });
               errorCode = 'redirect_loop';
               break;
@@ -791,6 +881,11 @@ export class BaseHTTPClient {
                 initialURL: finalRequest.requestURL,
                 requestURL: attemptResult.sentRequest.requestURL,
                 redirectHistory,
+                // The one terminal branch that built from the hop's own response and
+                // passed nothing: after `POST` -> `302` -> `GET` -> `302` with no
+                // `Location`, the last hop is bodiless and had nothing to adopt, so the
+                // upload from hop one read as having gone out in full.
+                ...(uploadOutcome ? { requestBodySettled: uploadOutcome } : {}),
               });
 
               break;
@@ -809,17 +904,33 @@ export class BaseHTTPClient {
 
             redirectURL = resolveAbsoluteURL(redirectURL, this._config.baseURL);
 
+            // Stripped here, before the hop is recorded, rather than only on the request:
+            // `hopInfo`, `redirectHistory` and every observer and error built from them
+            // carry this string, so a `Location` password left on it long enough to reach
+            // `_sanitizeRedirectRequest` had already been handed to the caller's observers
+            // and written into the redirect history. See `stripURLCredentials`.
+            if (
+              this._isCrossOriginRedirect(
+                attemptResult.sentRequest.requestURL,
+                redirectURL,
+              )
+            ) {
+              redirectURL = stripURLCredentials(redirectURL);
+            }
+
             // Method rewriting per HTTP spec (matches browser/fetch behavior):
-            //  - 303 (See Other) always becomes GET
+            //  - 303 (See Other) becomes GET except for GET and HEAD
             //  - 301 (Moved Permanently) / 302 (Found) rewrite POST to GET
             //  - 307 (Temporary Redirect) / 308 (Permanent Redirect) preserve method/body
-            let redirectMethod: HTTPMethod = currentInterceptedRequest.method;
+            let redirectMethod: HTTPMethod = attemptResult.sentRequest.method;
 
             if (
-              adapterResponse.status === 303 ||
+              (adapterResponse.status === 303 &&
+                attemptResult.sentRequest.method !== 'GET' &&
+                attemptResult.sentRequest.method !== 'HEAD') ||
               ((adapterResponse.status === 301 ||
                 adapterResponse.status === 302) &&
-                currentInterceptedRequest.method === 'POST')
+                attemptResult.sentRequest.method === 'POST')
             ) {
               redirectMethod = 'GET';
             }
@@ -856,15 +967,39 @@ export class BaseHTTPClient {
             // are re-attached below as needed.
             const nextRedirectHistory = [...redirectHistory, redirectURL];
 
+            // Whether the *server's* `Location` was already unusable, remembered before
+            // the interceptors run and answered after them.
+            //
+            // Both this and `_assertInterceptorResolvedURL` refuse the hop, so
+            // `Location: file:///etc/passwd` never reached an adapter either way - but it
+            // was reported as `interceptor_error`, with a message saying an interceptor
+            // rewrote the URL, on requests with no redirect interceptors registered at
+            // all. A caller alerting on `interceptor_error` paged for the remote server's
+            // `Location`, and the code that names what actually happened was already in
+            // use for the same failure on the initial URL: `request_setup_error`.
+            //
+            // Asked here but acted on below the interceptor run, because *refusing early*
+            // would take the hop away from the redirect-phase interceptors entirely - and
+            // rewriting `requestURL` there is the documented way to steer or reject a hop,
+            // which the scheme-downgrade guidance in the HTTP client docs points at by
+            // name. An interceptor that rescues a bad `Location` still gets to; one that
+            // only observes still sees the hop; a `cancel` still reports as a cancel. Only
+            // a `Location` nobody fixed fails, and it fails as the server's fault.
+            const wasLocationUnsupported =
+              !this._isSupportedRequestURL(redirectURL);
+
             const redirectRequest = this._sanitizeRedirectRequest(
               {
-                ...currentInterceptedRequest,
+                ...attemptResult.sentRequest,
+                headers:
+                  attemptResult.redirectRequestHeaders ??
+                  attemptResult.sentRequest.headers,
                 requestURL: redirectURL,
                 method: redirectMethod,
                 body:
                   redirectMethod === 'GET'
                     ? undefined
-                    : currentInterceptedRequest.body,
+                    : attemptResult.sentRequest.rawBody,
               },
               {
                 fromURL: attemptResult.sentRequest.requestURL,
@@ -893,9 +1028,20 @@ export class BaseHTTPClient {
               if (!('cancel' in redirectIntercept)) {
                 failedRedirectRequest = redirectIntercept;
                 this._assertRequestIsSupported(redirectIntercept);
-                this._assertInterceptorResolvedURL(
-                  redirectIntercept.requestURL,
-                );
+
+                // Skipped when the `Location` arrived unusable and is still unusable: the
+                // assertion's message and its `interceptor_error` code both name an
+                // interceptor, which is the wrong story for a URL no interceptor touched.
+                // That case is answered below instead. An interceptor that rewrote a good
+                // URL into a bad one is still this assertion's, and still its own fault.
+                if (
+                  !wasLocationUnsupported ||
+                  redirectIntercept.requestURL !== redirectURL
+                ) {
+                  this._assertInterceptorResolvedURL(
+                    redirectIntercept.requestURL,
+                  );
+                }
               }
             } catch (error) {
               observerRequest = this._bestEffortAttemptRequestFromPending(
@@ -913,6 +1059,7 @@ export class BaseHTTPClient {
                 requestURL: failedRedirectRequest.requestURL,
                 redirectHistory: nextRedirectHistory,
                 isNetworkErrorOverride: false,
+                ...(uploadOutcome ? { requestBodySettled: uploadOutcome } : {}),
               });
 
               errorCode = 'interceptor_error';
@@ -941,7 +1088,39 @@ export class BaseHTTPClient {
                 initialURL: finalRequest.requestURL,
                 requestURL: cancelledRequestURL,
                 redirectHistory: [...redirectHistory, cancelledRequestURL],
+                ...(uploadOutcome ? { requestBodySettled: uploadOutcome } : {}),
               });
+
+              break;
+            }
+
+            // The `Location` was unusable and no interceptor fixed it, so the hop fails
+            // as the server's doing: `request_setup_error`, not `interceptor_error`. See
+            // `wasLocationUnsupported` above. Nothing has been dispatched - the adapter
+            // never sees a `file:` or `data:` URL either way.
+            if (!this._isSupportedRequestURL(redirectIntercept.requestURL)) {
+              observerRequest = this._bestEffortAttemptRequestFromPending(
+                redirectIntercept,
+                timeout,
+                requestID,
+              );
+              response = this._buildResponse<T>({
+                adapterResponse: null,
+                requestID,
+                wasCancelled: false,
+                wasTimeout: false,
+                adapterType: this._adapter.getType(),
+                initialURL: finalRequest.requestURL,
+                requestURL: redirectIntercept.requestURL,
+                redirectHistory: nextRedirectHistory,
+                isNetworkErrorOverride: false,
+                ...(uploadOutcome ? { requestBodySettled: uploadOutcome } : {}),
+              });
+
+              errorCode = 'request_setup_error';
+              adapterCause = new Error(
+                `[HTTPClient] Redirect Location could not be resolved to an absolute http(s) URL: "${redirectIntercept.requestURL}".`,
+              );
 
               break;
             }
@@ -972,6 +1151,73 @@ export class BaseHTTPClient {
               to: redirectedRequestURL,
             };
 
+            // Followed only once this hop's upload has settled. `NodeAdapter.send()`
+            // resolves when the response is consumed, and an early `3xx` arrives while the
+            // writer is still running - so the next hop was dispatched with the previous
+            // one's body still going out on its own socket, and a `307`/`308` started a
+            // second upload of the same body beside the first. The outcome never rejects
+            // and always settles (the adapter's stall watchdog sees to that), so this is a
+            // wait, not a hazard; raced against the cancel signal so a caller who gives up
+            // is not held for it. Only the adapter's word is waited on: a hop that threw
+            // has no socket left to wait for.
+            if (adapterResponse.requestBodySettled !== undefined) {
+              const wait = await settleUploadBeforeNextDispatch(
+                adapterResponse.requestBodySettled,
+                cancelSignal,
+                timeout,
+                () => uploadActivity.at,
+              );
+
+              // A cancel that ended the wait ends the request here, before another hop
+              // is dispatched, exactly as a redirect interceptor's cancel does above.
+              // The caller's own reason is kept, as every other abort path keeps it.
+              //
+              // A deadline ends it the same way, as a timeout: the next hop would resend
+              // the body beside an upload nobody can say has finished, which is the
+              // double-send this wait exists to prevent, and a hop that cannot be
+              // dispatched safely is a failed request rather than a risky one.
+              if (wait !== 'settled') {
+                if (wait === 'cancelled') {
+                  const signalReason = getSignalCancelReason(cancelSignal);
+
+                  if (signalReason !== undefined) {
+                    cancelReason = signalReason;
+                  }
+                } else {
+                  reportUploadSettleDeadline(
+                    this._adapter.getType(),
+                    timeout,
+                    'redirect',
+                  );
+                  // The hop whose upload was given up on is torn down with the request,
+                  // as a per-attempt timeout tears one down. See `abortAttempt`.
+                  attemptResult.abortAttempt?.();
+                }
+
+                observerRequest = this._bestEffortAttemptRequestFromPending(
+                  sanitizedRedirectRequest,
+                  timeout,
+                  requestID,
+                );
+
+                response = this._buildResponse<T>({
+                  adapterResponse: null,
+                  requestID,
+                  wasCancelled: wait === 'cancelled',
+                  wasTimeout: wait === 'deadline',
+                  adapterType: this._adapter.getType(),
+                  initialURL: finalRequest.requestURL,
+                  requestURL: redirectedRequestURL,
+                  redirectHistory,
+                  ...(uploadOutcome
+                    ? { requestBodySettled: uploadOutcome }
+                    : {}),
+                });
+
+                break;
+              }
+            }
+
             continue;
           }
 
@@ -985,6 +1231,11 @@ export class BaseHTTPClient {
             initialURL: finalRequest.requestURL,
             requestURL: attemptResult.sentRequest.requestURL,
             redirectHistory,
+            // From the attempt result when it threw - the shape that leaves
+            // `adapterResponse` null - and otherwise straight off the response,
+            // which the branches above reach with `adapterResponse: null` and so
+            // cannot read for themselves.
+            ...(uploadOutcome ? { requestBodySettled: uploadOutcome } : {}),
             ...(attemptResult.errorCode === 'interceptor_error' ||
             attemptResult.errorCode === 'stream_setup_error' ||
             attemptResult.errorCode === 'redirect_disabled'
@@ -1005,6 +1256,11 @@ export class BaseHTTPClient {
           requestURL: interceptedRequest.requestURL,
           redirectHistory: [],
           isNetworkErrorOverride: false,
+          // The one terminal path that dropped it: a throw *between* hops - a hostile
+          // header read on a redirect, say - lands here after a hop that had a body, and
+          // `await response.requestBodySettled` then answered the documented success value
+          // for an upload that may have been cut short.
+          ...(uploadOutcome ? { requestBodySettled: uploadOutcome } : {}),
         });
 
         const normalizedError = this._makeError(
@@ -1079,6 +1335,10 @@ export class BaseHTTPClient {
       return finalResponse;
     } finally {
       this._tracker.remove(requestID);
+
+      for (const release of signalReleasers) {
+        release();
+      }
     }
   }
 
@@ -1094,6 +1354,24 @@ export class BaseHTTPClient {
       fromURL,
       request.requestURL,
     );
+
+    // Credentials in the target URL itself, stripped on the same rule `Authorization` is.
+    //
+    // `Location: https://admin:secret@other.host/` is the remote server's choice, not the
+    // caller's, and `user:pass@` in a URL *is* an `Authorization: Basic` header by another
+    // name - `NodeAdapter` copies it onto `options.auth` and `fetch` sends it for us. So a
+    // hop that has the caller's `Authorization` header stripped for crossing origins used
+    // to get credentials back, from the very response that redirected it, and authenticate
+    // to a host the caller never named. Fetch treats the same shape as fatal (a
+    // cross-origin `locationURL` that includes credentials is a network error); stripping
+    // rather than failing the hop keeps the redirect followable and is the same answer this
+    // method already gives every other credential on a cross-origin hop.
+    //
+    // Same-origin userinfo is left alone: it is the origin the caller addressed, which is
+    // also the one that may already have been carrying it.
+    const requestURL = isCrossOrigin
+      ? stripURLCredentials(request.requestURL)
+      : request.requestURL;
 
     let headers: Record<string, string | string[]>;
 
@@ -1130,14 +1408,17 @@ export class BaseHTTPClient {
 
     if (request.method === 'GET') {
       // Drop body-related headers when method was rewritten to GET.
-      delete headers['content-type'];
-      delete headers['content-length'];
+      for (const key of Object.keys(headers)) {
+        if (['content-type', 'content-length'].includes(key.toLowerCase())) {
+          delete headers[key];
+        }
+      }
     }
 
     if (cookieJar) {
       // Cookie for the new URL before the next hop is dispatched; each send on
       // this hop still refreshes from the jar inside _dispatchRequestAttempts.
-      const cookieStr = cookieJar.getCookieHeaderString(request.requestURL);
+      const cookieStr = cookieJar.getCookieHeaderString(requestURL);
 
       if (cookieStr) {
         headers.cookie = cookieStr;
@@ -1152,6 +1433,7 @@ export class BaseHTTPClient {
 
     return {
       ...request,
+      requestURL,
       headers,
     };
   }
@@ -1179,16 +1461,22 @@ export class BaseHTTPClient {
    */
   private async _dispatchRequestAttempts<T>(params: {
     request: InterceptedRequest;
+    /** Latest destination explicitly selected by the caller or a retry interceptor. */
+    credentialScope: { url: string };
     /** Per-attempt timeout in ms. Each attempt gets its own independent timer — NOT a total deadline across all retries. */
     timeout: number;
     /** Cancellation signal from user cancel / cancelAll / external AbortSignal — NOT timeout. Also used to abort retry delays. */
     cancelSignal: AbortSignal;
+    /** Where each attempt's signal composition registers its release; see `_composeSignals`. */
+    signalReleasers: Array<() => void>;
     retryPolicy: RetryPolicy | null;
     requestID: string;
     options: ResolvedBuilderOptions;
     callbacks: BuilderCallbacks<T>;
     /** The original URL before any redirects — used in callbacks so consumers can correlate attempts across hops. */
     initialURL: string;
+    /** See the declaration in `_execute`: stamped on every upload-progress report. */
+    uploadActivity: UploadActivity;
     /** First attempt number for this dispatch (continues from previous hops). Defaults to 1. */
     startAttemptNumber?: number;
     /** Accumulated redirect history — passed to interceptor context. */
@@ -1203,6 +1491,8 @@ export class BaseHTTPClient {
   }): Promise<{
     adapterResponse: AdapterResponse | null;
     sentRequest: AttemptRequest;
+    /** Headers for following a redirect, excluding adapter-generated origin headers. */
+    redirectRequestHeaders?: Record<string, string | string[]>;
     attemptCount: number;
     wasCancelled: boolean;
     wasTimeout: boolean;
@@ -1210,11 +1500,29 @@ export class BaseHTTPClient {
     errorCode?: HTTPClientError['code'];
     adapterCause?: Error;
     cancelReason?: string;
+    /**
+     * Tears down the attempt that produced `adapterResponse`, as a per-attempt timeout
+     * would have: fires the attempt's own abort signal, which `NodeAdapter` answers by
+     * destroying the request and settling its upload outcome. For the redirect loop,
+     * which gives up on that attempt's upload at the settle deadline - the per-attempt
+     * timer is cleared once `send()` resolves, so nothing else would end an upload the
+     * client has already reported as timed out.
+     */
+    abortAttempt?: () => void;
+    /**
+     * The request body's outcome for an attempt that *threw*, where there is no
+     * adapter response to carry it. Read off the tagged error; absent when the
+     * request had no body writer at all. See {@link REQUEST_BODY_SETTLED_KEY}.
+     */
+    requestBodySettled?: Promise<Error | undefined>;
   }> {
     const {
       request: baseRequest,
+      credentialScope,
       timeout,
       cancelSignal,
+      signalReleasers,
+      uploadActivity,
       retryPolicy: policy,
       requestID,
       options,
@@ -1223,6 +1531,14 @@ export class BaseHTTPClient {
       hopContext,
     } = params;
     const startAttempt = params.startAttemptNumber ?? 1;
+    // Attempt numbers count every adapter dispatch, including redirect hops. Keep the
+    // retry ceiling in that same global numbering space: on a hop beginning at attempt
+    // 2 with one retry, the retry phase is attempt 2/3 followed by attempt 3/3, never
+    // attempt 3/2.
+    const retriesRemaining = policy
+      ? Math.max(policy.maxRetryAttempts - policy.errors.length, 0)
+      : 0;
+    const maxAttemptNumber = startAttempt + retriesRemaining;
     const redirectHistory = params.redirectHistory ?? [];
     const cookieJar = params.cookieJar ?? null;
     /**
@@ -1243,6 +1559,20 @@ export class BaseHTTPClient {
     let attemptNumber = startAttempt - 1;
     let isRetriesExhausted = false;
 
+    /**
+     * The upload outcome of the attempt a retry is replacing.
+     *
+     * `adapterResponse` is scoped to one iteration, so at the top of the next - where the
+     * retry-phase interceptors run - the previous attempt's `requestBodySettled` was out
+     * of reach, and an interceptor that cancelled or threw there returned a result with
+     * no upload outcome at all. Absent reads as the documented "the body went out in
+     * full", for an upload the adapter may have early-acked and then torn down. Kept
+     * here, as the cancel-during-delay exits already keep it, so every terminal exit
+     * carries it. Cleared once a fresh attempt is dispatched: its own outcome then
+     * supersedes it.
+     */
+    let previousUploadOutcome: Promise<Error | undefined> | undefined;
+
     while (true) {
       attemptNumber++;
       const isRetry = attemptNumber > startAttempt;
@@ -1259,7 +1589,28 @@ export class BaseHTTPClient {
         nextRetryAt?: number;
         retrySuppressedReason?: AttemptEndEvent['retrySuppressedReason'];
       }): void => {
-        options.onAttemptEnd?.({
+        // Through `safeHandleCallback`, because this hook is purely observational and
+        // must not be able to change the outcome it is describing. Called bare, a throw
+        // from it escaped into the attempt loop and came back to the caller as
+        // `status: 0` - a request killed by its own telemetry - with nothing reported
+        // anywhere. It also covers a hook that returns a rejected promise, which no local
+        // `try`/`catch` would.
+        // Only when one was supplied. `safeHandleCallback` reports a non-function as a
+        // failure - correctly, for a caller who meant to pass one - but an absent optional
+        // hook is not a mistake, and reporting it would put two spurious lines on the
+        // global channel for every request anyone ever makes.
+        // `== null`, so an explicit `null` is treated as "none supplied" exactly as
+        // `guardProgressCallback` treats it. A caller passing `onAttemptStart: null`
+        // otherwise got a "is not a function" report on the global channel for every
+        // attempt of every request.
+        if (
+          options.onAttemptEnd === undefined ||
+          options.onAttemptEnd === null
+        ) {
+          return;
+        }
+
+        safeHandleCallback('onAttemptEnd', options.onAttemptEnd, {
           attemptNumber,
           isRetry,
           nextRetryDelayMS: undefined,
@@ -1287,15 +1638,22 @@ export class BaseHTTPClient {
       callbacks.setAttemptCount(attemptNumber);
       callbacks.setNextRetryDelayMS(null);
       callbacks.setNextRetryAt(null);
-      options.onAttemptStart?.({
-        attemptNumber,
-        isRetry,
-        requestID,
-        initialURL,
-        ...(hopContext
-          ? { hopNumber: hopContext.hopNumber, redirect: hopContext.redirect }
-          : {}),
-      });
+      // Observational only; see `onAttemptEnd` above for why it is guarded, and why an
+      // absent hook is skipped rather than handed over.
+      if (
+        options.onAttemptStart !== undefined &&
+        options.onAttemptStart !== null
+      ) {
+        safeHandleCallback('onAttemptStart', options.onAttemptStart, {
+          attemptNumber,
+          isRetry,
+          requestID,
+          initialURL,
+          ...(hopContext
+            ? { hopNumber: hopContext.hopNumber, redirect: hopContext.redirect }
+            : {}),
+        });
+      }
 
       // RetryPolicy only tracks exhaustion after the initial try is registered (retry-utils).
       if (attemptNumber === 1 && policy) {
@@ -1317,10 +1675,24 @@ export class BaseHTTPClient {
         }, timeout);
       }
 
+      // The settle deadline's teardown. Giving up on this attempt's upload at that
+      // deadline fails the request as a timeout, and a timeout that left the upload
+      // running was only half of one: the per-attempt timer is cleared once `send()`
+      // resolves, so a `NodeAdapter` writer parked on a slow source - given a minute by
+      // its own watchdog - went on putting bytes on a socket the caller had been told was
+      // finished, and a custom adapter that ignores `requestBodySettled` had no end at
+      // all. Fired through the attempt's own controller, which `NodeAdapter` answers by
+      // destroying the request and settling the outcome; the flag is not set, since the
+      // attempt is already classified by the time this runs.
+      const abortAttempt = (): void => {
+        timeoutController.abort();
+      };
+
       // Final signal: cancel OR timeout
       const attemptSignal = this._composeSignals(
         cancelSignal,
         timeoutController.signal,
+        signalReleasers,
       );
 
       // Set internal headers unconditionally on every attempt — this is
@@ -1336,7 +1708,7 @@ export class BaseHTTPClient {
         const retryPhase: InterceptorPhase = {
           type: 'retry',
           attempt: attemptNumber,
-          maxAttempts: policy ? policy.maxRetryAttempts + 1 : attemptNumber,
+          maxAttempts: maxAttemptNumber,
           ...(hopContext?.redirect ? { redirect: hopContext.redirect } : {}),
         };
         let retryIntercept: InterceptedRequest | InterceptorCancel;
@@ -1374,6 +1746,9 @@ export class BaseHTTPClient {
           // with phase `final` (same as all settled errors), not `retry`.
           return {
             adapterResponse: null,
+            ...(previousUploadOutcome
+              ? { requestBodySettled: previousUploadOutcome }
+              : {}),
             sentRequest: this._bestEffortAttemptRequestFromPending(
               failedRetryRequest,
               timeout,
@@ -1400,6 +1775,9 @@ export class BaseHTTPClient {
 
           return {
             adapterResponse: null,
+            ...(previousUploadOutcome
+              ? { requestBodySettled: previousUploadOutcome }
+              : {}),
             sentRequest: this._bestEffortAttemptRequestFromPending(
               baseRequest,
               timeout,
@@ -1418,6 +1796,20 @@ export class BaseHTTPClient {
         attemptRequest = retryIntercept;
       }
 
+      // Only an origin change explicitly selects a new credential destination.
+      // Editing a redirected URL's path, query or fragment must not authorize the
+      // server-selected origin. Preserve this scope without changing observer URLs.
+      if (
+        !hopContext ||
+        (isRetry &&
+          this._isCrossOriginRedirect(
+            baseRequest.requestURL,
+            attemptRequest.requestURL,
+          ))
+      ) {
+        credentialScope.url = attemptRequest.requestURL;
+      }
+
       const sentRequest = this._buildAttemptRequest(attemptRequest, {
         requestID,
         timeout,
@@ -1425,10 +1817,21 @@ export class BaseHTTPClient {
         cookieJar,
       });
 
+      // This attempt's own outcome takes over from here; see the declaration.
+      previousUploadOutcome = undefined;
+
       const onUploadProgress = options.onUploadProgress;
       const onDownloadProgress = options.onDownloadProgress;
 
       let observedSentRequest: AttemptRequest = sentRequest;
+
+      // Dispatch counts as activity, so the settle wait's stall clock starts from the
+      // moment this attempt's upload could have begun rather than from a report on some
+      // earlier hop - or, for an adapter that never reports progress, from the start of
+      // the request. The wait checks the clock on entry (see
+      // `settleUploadBeforeNextDispatch`), and without this stamp a progress-less
+      // adapter's second hop was already "quiet" for the whole of the first.
+      uploadActivity.at = Date.now();
 
       try {
         const rawAdapterResponse = await this._adapter.send({
@@ -1446,14 +1849,28 @@ export class BaseHTTPClient {
           // itself.
           attemptNumber,
           requestID: requestID,
-          onUploadProgress: onUploadProgress
-            ? (e) =>
-                onUploadProgress({
-                  ...e,
-                  attemptNumber,
-                  ...(hopContext ? { hopNumber: hopContext.hopNumber } : {}),
-                })
-            : undefined,
+          // The origin the caller addressed, so an adapter can tell a redirect hop to
+          // another host from the request it was configured for. See
+          // `AdapterRequest.initialURL`.
+          initialURL: credentialScope.url,
+          // Always handed over for a bodied request, whether or not the caller asked for
+          // progress: the stamp is what lets the wait on `requestBodySettled` tell an
+          // upload that is still moving from one that has stalled. A bodiless request
+          // has no upload to watch, so the adapter is told nothing it was not told before.
+          onUploadProgress:
+            onUploadProgress || (sentRequest.body ?? null) !== null
+              ? (e) => {
+                  uploadActivity.at = Date.now();
+
+                  // Returned, so a caller's `async` hook that rejects still reaches the
+                  // adapter's guard as a promise and is reported, not dropped here.
+                  return onUploadProgress?.({
+                    ...e,
+                    attemptNumber,
+                    ...(hopContext ? { hopNumber: hopContext.hopNumber } : {}),
+                  });
+                }
+              : undefined,
           onDownloadProgress: onDownloadProgress
             ? (e) =>
                 onDownloadProgress({
@@ -1599,7 +2016,7 @@ export class BaseHTTPClient {
               retryHTTPResponse,
               observedSentRequest,
               this._retryOutcomePhase(
-                policy,
+                maxAttemptNumber,
                 attemptNumber,
                 hopContext?.redirect,
               ),
@@ -1607,14 +2024,63 @@ export class BaseHTTPClient {
 
             await this._cancellableDelay(delayMS, cancelSignal);
 
-            if (cancelSignal.aborted) {
-              const signalReason = getSignalCancelReason(cancelSignal);
+            // Retried only once this attempt's upload has settled, for the reason the
+            // redirect loop waits before its next hop: `NodeAdapter.send()` resolves
+            // when the response is consumed, and an early `503` to a bodied `PUT`
+            // arrives while the writer is still running. Without this, the backoff
+            // elapsed and attempt two was dispatched with attempt one's body still going
+            // out on its own socket - a second upload of the same body beside the first,
+            // the double-send the redirect wait was added to prevent. The outcome never
+            // rejects, and it settles on every path the adapter can take: the writer's
+            // own end, the stall watchdog once a response has arrived, and - for a
+            // request that failed before any response, where no watchdog is ever armed -
+            // the transport-error handler, which answers it rather than leaving a parked
+            // writer to. The wait is also raced against the cancel signal, so a caller
+            // who gives up during it is not held. After the delay rather than before it, since an upload that
+            // finishes during the backoff costs nothing extra to wait for.
+            const wait = await settleUploadBeforeNextDispatch(
+              adapterResponse.requestBodySettled,
+              cancelSignal,
+              timeout,
+              () => uploadActivity.at,
+            );
+            previousUploadOutcome = adoptRequestBodySettled(
+              adapterResponse.requestBodySettled,
+            );
+
+            // A deadline fails the request as a timeout, for the reason the redirect
+            // path gives: the retry would put the body on the wire beside an upload
+            // nobody can say has finished.
+            if (wait !== 'settled') {
+              const signalReason =
+                wait === 'cancelled'
+                  ? getSignalCancelReason(cancelSignal)
+                  : undefined;
+
+              if (wait === 'deadline') {
+                reportUploadSettleDeadline(
+                  this._adapter.getType(),
+                  timeout,
+                  'retry',
+                );
+                abortAttempt();
+              }
+
               return {
                 adapterResponse: null,
+                // Carried off the response this attempt did get, as the throw path
+                // below carries it off the error. With `adapterResponse` nulled, the hop
+                // loop has nowhere else to read it, and a bodied request cancelled while
+                // waiting to retry a `503` answered `undefined` - the documented "the
+                // body went out" - for an upload the adapter may have early-acked and
+                // then torn down.
+                ...(adapterResponse.requestBodySettled
+                  ? { requestBodySettled: adapterResponse.requestBodySettled }
+                  : {}),
                 sentRequest: observedSentRequest,
                 attemptCount: attemptNumber,
-                wasCancelled: true,
-                wasTimeout: false,
+                wasCancelled: wait === 'cancelled',
+                wasTimeout: wait === 'deadline',
                 isRetriesExhausted: false,
                 ...(signalReason !== undefined
                   ? { cancelReason: signalReason }
@@ -1637,7 +2103,7 @@ export class BaseHTTPClient {
         }
 
         const responseCauseValue = adapterResponse.errorCause;
-        const responseCause: Error | undefined = asErrorValue(
+        const responseCause: Error | undefined = isErrorValue(
           responseCauseValue,
         )
           ? responseCauseValue
@@ -1647,18 +2113,57 @@ export class BaseHTTPClient {
           ? (adapterResponse.streamErrorCode ?? 'stream_write_error')
           : undefined;
 
+        // Observers retain the wire snapshot, but Node-generated Host and URL
+        // Basic auth must not become caller headers on the next hop. The adapter
+        // will regenerate them for that hop; explicit caller headers still carry
+        // through same-origin redirects and caller-directed failover retries.
+        const redirectRequestHeaders = { ...observedSentRequest.headers };
+        for (const key of ['host', 'authorization']) {
+          if (Object.hasOwn(sentRequest.headers, key)) {
+            redirectRequestHeaders[key] = sentRequest.headers[key];
+          } else {
+            delete redirectRequestHeaders[key];
+          }
+        }
+
+        // Body headers inferred by the client or adapter describe this attempt's
+        // body, which a redirect interceptor may replace or remove. Carry only
+        // authored values forward and infer the rest again for the next body.
+        // Use the latest intercepted request, before Content-Type inference.
+        const authoredHeaders = mergeHeaders(attemptRequest.headers);
+        for (const key of ['content-length', 'content-type']) {
+          if (Object.hasOwn(authoredHeaders, key)) {
+            redirectRequestHeaders[key] = authoredHeaders[key];
+          } else {
+            delete redirectRequestHeaders[key];
+          }
+        }
+
         return {
           adapterResponse,
           sentRequest: observedSentRequest,
+          redirectRequestHeaders,
           attemptCount: attemptNumber,
           wasCancelled: false,
           wasTimeout: false,
           isRetriesExhausted,
           errorCode: streamErrorCode,
           adapterCause: responseCause,
+          abortAttempt,
         };
       } catch (error) {
         clearTimeout(timeoutID);
+        /**
+         * The upload's own outcome, carried on the throw.
+         *
+         * `requestBodySettled` rides on the response object on every path the adapter
+         * resolves. A throw has no response object, so the adapter tags the error
+         * instead and every failure result below carries it through - a cancel, a
+         * timeout and a transport failure are exactly when a caller asks whether its
+         * body made it, and an absent field answers `undefined`, which is what a
+         * *completed* upload resolves with.
+         */
+        const uploadOutcome = getRequestBodySettled(error);
 
         // Before any classification: if the adapter attached the response it had
         // already received, the Set-Cookie on those headers belongs in the jar.
@@ -1692,6 +2197,7 @@ export class BaseHTTPClient {
 
           return {
             adapterResponse: null,
+            ...(uploadOutcome ? { requestBodySettled: uploadOutcome } : {}),
             sentRequest,
             attemptCount: attemptNumber,
             wasCancelled: true,
@@ -1763,6 +2269,7 @@ export class BaseHTTPClient {
             const signalReason = getSignalCancelReason(cancelSignal);
             return {
               adapterResponse: null,
+              ...(uploadOutcome ? { requestBodySettled: uploadOutcome } : {}),
               sentRequest: sentRequestForObservedAdapterError(
                 sentRequest,
                 error,
@@ -1795,6 +2302,7 @@ export class BaseHTTPClient {
 
             return {
               adapterResponse: {
+                ...(uploadOutcome ? { requestBodySettled: uploadOutcome } : {}),
                 status: abortedResponse.status,
                 ...redirectFieldsFor(
                   abortedResponse.status,
@@ -1841,6 +2349,7 @@ export class BaseHTTPClient {
 
           return {
             adapterResponse: {
+              ...(uploadOutcome ? { requestBodySettled: uploadOutcome } : {}),
               status: fallbackStatus,
               ...redirectFieldsFor(fallbackStatus, fallbackHeaders),
               headers: fallbackHeaders,
@@ -1878,6 +2387,7 @@ export class BaseHTTPClient {
             const signalReason = getSignalCancelReason(cancelSignal);
             return {
               adapterResponse: null,
+              ...(uploadOutcome ? { requestBodySettled: uploadOutcome } : {}),
               sentRequest,
               attemptCount: attemptNumber,
               wasCancelled: true,
@@ -1918,6 +2428,7 @@ export class BaseHTTPClient {
 
               return {
                 adapterResponse: null,
+                ...(uploadOutcome ? { requestBodySettled: uploadOutcome } : {}),
                 sentRequest,
                 attemptCount: attemptNumber,
                 wasCancelled: true,
@@ -1948,6 +2459,7 @@ export class BaseHTTPClient {
 
           return {
             adapterResponse: null,
+            ...(uploadOutcome ? { requestBodySettled: uploadOutcome } : {}),
             sentRequest: sentRequestForNonRetryableAdapterCallbackError(
               sentRequest,
               error,
@@ -2002,6 +2514,7 @@ export class BaseHTTPClient {
               requestURL: sentRequest.requestURL,
               redirectHistory,
               isNetworkErrorOverride: false,
+              ...(uploadOutcome ? { requestBodySettled: uploadOutcome } : {}),
             });
 
             const retryError = this._makeError(
@@ -2016,7 +2529,7 @@ export class BaseHTTPClient {
               retryError,
               sentRequest,
               this._retryOutcomePhase(
-                policy,
+                maxAttemptNumber,
                 attemptNumber,
                 hopContext?.redirect,
               ),
@@ -2024,14 +2537,45 @@ export class BaseHTTPClient {
 
             await this._cancellableDelay(delayMS, cancelSignal);
 
-            if (cancelSignal.aborted) {
-              const signalReason = getSignalCancelReason(cancelSignal);
+            // Waited on as the resolve path above waits, and for the same reason. This
+            // used to skip the wait on the grounds that a hop that threw has no socket
+            // left: true of `NodeAdapter`, which destroys the request on an abort or a
+            // per-attempt timeout and settles the outcome at once, so the wait costs
+            // nothing there. Not true of a custom adapter that rejects `send()` while
+            // its upload is still going out - the outcome it tagged the error with is
+            // still open, and without this the backoff elapsed and the next attempt was
+            // dispatched beside it: the double-send the wait exists to prevent. Raced
+            // against the cancel signal, so a caller who gives up during it is not held.
+            const wait = await settleUploadBeforeNextDispatch(
+              uploadOutcome,
+              cancelSignal,
+              timeout,
+              () => uploadActivity.at,
+            );
+            previousUploadOutcome = uploadOutcome;
+
+            if (wait !== 'settled') {
+              const signalReason =
+                wait === 'cancelled'
+                  ? getSignalCancelReason(cancelSignal)
+                  : undefined;
+
+              if (wait === 'deadline') {
+                reportUploadSettleDeadline(
+                  this._adapter.getType(),
+                  timeout,
+                  'retry',
+                );
+                abortAttempt();
+              }
+
               return {
                 adapterResponse: null,
+                ...(uploadOutcome ? { requestBodySettled: uploadOutcome } : {}),
                 sentRequest,
                 attemptCount: attemptNumber,
-                wasCancelled: true,
-                wasTimeout: false,
+                wasCancelled: wait === 'cancelled',
+                wasTimeout: wait === 'deadline',
                 isRetriesExhausted: false,
                 ...(signalReason !== undefined
                   ? { cancelReason: signalReason }
@@ -2065,6 +2609,7 @@ export class BaseHTTPClient {
 
         return {
           adapterResponse: null,
+          ...(uploadOutcome ? { requestBodySettled: uploadOutcome } : {}),
           sentRequest,
           attemptCount: attemptNumber,
           wasCancelled: false,
@@ -2094,10 +2639,15 @@ export class BaseHTTPClient {
         resolve();
       };
 
-      const id = setTimeout(() => {
-        signal.removeEventListener('abort', onAbort);
-        resolve();
-      }, ms);
+      // `MAX_TIMER_MS` or the timer would read a longer wait as 1ms and resolve at once,
+      // which on the retry path is a retry storm rather than a long pause.
+      const id = setTimeout(
+        () => {
+          signal.removeEventListener('abort', onAbort);
+          resolve();
+        },
+        Math.min(ms, MAX_TIMER_MS),
+      );
 
       signal.addEventListener('abort', onAbort, { once: true });
     });
@@ -2113,6 +2663,12 @@ export class BaseHTTPClient {
     requestURL: string;
     redirectHistory: string[];
     isNetworkErrorOverride?: boolean;
+    /**
+     * The upload's outcome when there is no `adapterResponse` to carry it - a
+     * cancel, a timeout, or any other attempt that threw. Read off the tagged
+     * error by the attempt runner; see {@link REQUEST_BODY_SETTLED_KEY}.
+     */
+    requestBodySettled?: Promise<Error | undefined>;
   }): HTTPResponse<T> {
     const {
       adapterResponse,
@@ -2124,12 +2680,25 @@ export class BaseHTTPClient {
       requestURL,
       redirectHistory,
       isNetworkErrorOverride,
+      requestBodySettled,
     } = params;
 
     const wasRedirectFollowed = redirectHistory.length > 0;
     const wasRedirectDetected =
       wasRedirectFollowed || (adapterResponse?.wasRedirectDetected ?? false);
     const detectedRedirectURL = adapterResponse?.detectedRedirectURL;
+
+    // The caller's word first, on every branch below. The explicit parameter was
+    // honoured only on the no-response branch and the others read the adapter
+    // response's own field, which is right for a single hop and wrong after a
+    // followed redirect: the final hop's response is usually a bodiless `GET` with
+    // nothing on it, while the parameter carries the outcome from the hop that
+    // actually uploaded. Adopted either way, for the reason `getRequestBodySettled`
+    // gives: the field came from an adapter and may not be a promise this client
+    // can trust.
+    const settled = adoptRequestBodySettled(
+      requestBodySettled ?? adapterResponse?.requestBodySettled,
+    );
 
     if (!adapterResponse) {
       return {
@@ -2155,6 +2724,16 @@ export class BaseHTTPClient {
         redirectHistory,
         requestID,
         adapterType,
+        // No adapter response means the attempt threw, so the promise arrives
+        // separately rather than on a response object. Omitting it here reported
+        // the documented *success* value - `await undefined` is `undefined` - for
+        // a cancelled or timed-out upload, which is the one case where a caller
+        // most needs the real answer. Absent only when there was no body writer -
+        // and genuinely absent, on every branch below too: `requestBodySettled:
+        // settled` with `settled` undefined put an own property on a bodiless `GET`,
+        // so `'requestBodySettled' in response` said an outcome had been reported
+        // where the docs say absence means none was.
+        ...(settled ? { requestBodySettled: settled } : {}),
       };
     }
 
@@ -2184,6 +2763,7 @@ export class BaseHTTPClient {
         redirectHistory,
         requestID,
         adapterType,
+        ...(settled ? { requestBodySettled: settled } : {}),
       };
     }
 
@@ -2216,6 +2796,7 @@ export class BaseHTTPClient {
         redirectHistory,
         requestID,
         adapterType,
+        ...(settled ? { requestBodySettled: settled } : {}),
       };
     }
 
@@ -2247,6 +2828,7 @@ export class BaseHTTPClient {
         redirectHistory,
         requestID,
         adapterType,
+        ...(settled ? { requestBodySettled: settled } : {}),
       };
     }
 
@@ -2304,6 +2886,7 @@ export class BaseHTTPClient {
       redirectHistory,
       requestID,
       adapterType,
+      ...(settled ? { requestBodySettled: settled } : {}),
     };
   }
 
@@ -2417,14 +3000,10 @@ export class BaseHTTPClient {
    * `attempt` matches `onAttemptEnd.attemptNumber` for that outcome.
    */
   private _retryOutcomePhase(
-    policy: RetryPolicy | null,
+    maxAttempts: number,
     completedAttemptNumber: number,
     redirect?: RedirectHopInfo,
   ): Extract<ResponseObserverPhase, { type: 'retry' }> {
-    const maxAttempts = policy
-      ? policy.maxRetryAttempts + 1
-      : completedAttemptNumber;
-
     return redirect !== undefined
       ? {
           type: 'retry',
@@ -2479,9 +3058,12 @@ export class BaseHTTPClient {
       attemptNumber,
     );
 
-    // Preserve an explicit content-type from interceptors/callers; otherwise
-    // infer one from the serialized body shape.
-    if (contentType && headers['content-type'] === undefined) {
+    // A native FormData body owns its Content-Type: Fetch/XHR install the multipart
+    // boundary, and NodeAdapter replaces it with the boundary used by its serializer.
+    if (observedBodies.body instanceof FormData) {
+      delete headers['content-type'];
+    } else if (contentType && headers['content-type'] === undefined) {
+      // Preserve an explicit content-type for every other body; otherwise infer it.
       headers['content-type'] = contentType;
     }
 
@@ -2567,7 +3149,31 @@ export class BaseHTTPClient {
     await this._errorObservers.run(error, request, phase);
   }
 
-  private _composeSignals(a: AbortSignal, b: AbortSignal): AbortSignal {
+  /**
+   * Compose two abort signals into one that aborts when either does.
+   *
+   * On a runtime with `AbortSignal.any` that is all this is. The fallback for older
+   * runtimes listens on both sources and mirrors the first abort, and the listeners it
+   * adds are released through `releasers` - run by `_execute` once the request has
+   * ended, since a listener on the caller's own signal, or on the request's cancel
+   * signal, otherwise outlives the request it was added for: nothing ever aborts on the
+   * success path, so a `{ once: true }` listener never fires and is never removed. A
+   * caller's signal reused across requests accumulated one listener per request until
+   * the runtime warned of a leak.
+   *
+   * Released when the request ends rather than when the attempt does: an attempt's
+   * signal stays in an adapter's hands after `send()` resolves - `NodeAdapter` listens
+   * on it for the settle-deadline teardown of an early-ack upload - and the attempt loop
+   * has several exits, where the request has one. What the fallback gives up by that is
+   * only a cancel arriving *after* the response was handed back, which would no longer
+   * reach an upload still trailing on that attempt's socket; the adapter's own stall
+   * watchdog ends such an upload regardless.
+   */
+  private _composeSignals(
+    a: AbortSignal,
+    b: AbortSignal,
+    releasers: Array<() => void>,
+  ): AbortSignal {
     if (typeof AbortSignal.any === 'function') {
       return AbortSignal.any([a, b]);
     }
@@ -2589,8 +3195,20 @@ export class BaseHTTPClient {
     } else if (b.aborted) {
       abort(b);
     } else {
-      a.addEventListener('abort', () => abort(a), { once: true });
-      b.addEventListener('abort', () => abort(b), { once: true });
+      const onAbortA = () => abort(a);
+      const onAbortB = () => abort(b);
+
+      // Registered before either listener is attached, so a second `addEventListener`
+      // that throws - a caller's own `AbortSignal` subclass, a `Proxy` - does not leave
+      // the first listener attached with nothing recorded to remove it. Removing a
+      // listener that was never added is a no-op.
+      releasers.push(() => {
+        a.removeEventListener('abort', onAbortA);
+        b.removeEventListener('abort', onAbortB);
+      });
+
+      a.addEventListener('abort', onAbortA, { once: true });
+      b.addEventListener('abort', onAbortB, { once: true });
     }
 
     return controller.signal;
@@ -2704,29 +3322,7 @@ function cloneBodyValue(body: unknown): unknown {
 }
 
 function isAbortError(err: unknown): err is Error {
-  return asErrorValue(err) && readObjectMember(err, 'name') === 'AbortError';
-}
-
-/** Check Error identity without trusting a Proxy's prototype trap. */
-function asErrorValue(value: unknown): value is Error {
-  try {
-    return value instanceof Error;
-  } catch {
-    return false;
-  }
-}
-
-/** Normalize any rejected/thrown value without allowing its coercion to throw. */
-function normalizeError(value: unknown): Error {
-  if (asErrorValue(value)) {
-    return value;
-  }
-
-  try {
-    return new Error(String(value));
-  } catch {
-    return new Error('Unknown error');
-  }
+  return isErrorValue(err) && readObjectMember(err, 'name') === 'AbortError';
 }
 
 /**
@@ -2780,28 +3376,6 @@ function getEffectiveRequestHeadersFromError(
   return snapshotHeaderRecord(
     readObjectMember(error, 'effectiveRequestHeaders'),
   );
-}
-
-/**
- * Read a member from a value supplied by an adapter or runtime.
- *
- * Rejected values may be proxies, abort reasons, or decorated errors, and both a
- * getter and a Proxy trap can throw. An unreadable member is treated as absent so
- * that second error cannot replace the one being normalized.
- */
-function readObjectMember(source: unknown, key: string): unknown {
-  if (
-    (typeof source !== 'object' && typeof source !== 'function') ||
-    source === null
-  ) {
-    return undefined;
-  }
-
-  try {
-    return (source as Record<string, unknown>)[key];
-  } catch {
-    return undefined;
-  }
 }
 
 /**
@@ -2888,6 +3462,199 @@ function getResponseStreamAbortInfo(
     status,
     headers,
   };
+}
+
+/**
+ * The request body's settlement promise off an error an adapter threw.
+ *
+ * The mirror of `AdapterResponse.requestBodySettled` for the failure paths: the promise
+ * lives in the adapter's closure, and a throw has no response object to hang it on, so it
+ * arrives tagged on the error instead.
+ *
+ * Validated as a thenable rather than trusted. The tag is an ordinary property on an
+ * object this client did not create - a caller's own `Error` subclass, or a rejection
+ * value from a third-party adapter - and handing a non-promise to `await` downstream
+ * resolves it to itself, which would report the tag's own value as the upload's outcome.
+ */
+function getRequestBodySettled(
+  err: unknown,
+): Promise<Error | undefined> | undefined {
+  const settled = readObjectMember(err, REQUEST_BODY_SETTLED_KEY);
+
+  // Adopted rather than handed over as it arrived, and the thenable check made there,
+  // guarded: `readObjectMember` guards the read of the tag, but an `isPromise` on what
+  // came back read `.then` on it unguarded, so a tag that throws on that read escaped.
+  // `isPromise` accepts any object with a callable `then`, and `HTTPAdapter` is a public
+  // extension point: a custom adapter that tags `Promise.reject(...)` would otherwise put
+  // a rejecting promise on `HTTPResponse.requestBodySettled`, which is documented never
+  // to reject - so a caller following the docs and awaiting it without a `try` would
+  // throw, and one that ignores the field would get an unhandled rejection against the
+  // response object. A rejection becomes the failure it is; `Promise.resolve` also
+  // flattens a foreign thenable.
+  return adoptRequestBodySettled(settled);
+}
+
+/**
+ * Adopt whatever an adapter put on `requestBodySettled` onto a promise this client owns.
+ *
+ * The same treatment on the resolve path as {@link getRequestBodySettled} gives the throw
+ * path, because the hazard is the adapter and not which way it answered: `HTTPAdapter` is
+ * a public extension point, and an adapter resolving with a rejecting promise - or with a
+ * foreign thenable, or with something that is not a promise at all - put it straight onto
+ * a field documented never to reject. A caller following the docs and awaiting it without
+ * a `try` then throws, and one that ignores the field gets an unhandled rejection.
+ */
+function adoptRequestBodySettled(
+  settled: unknown,
+): Promise<Error | undefined> | undefined {
+  // Guarded, because deciding whether it is a thenable reads `.then` on a value the
+  // adapter made. A `Proxy` or an accessor that throws there threw out of
+  // `_buildResponse` - and out of a request that had already succeeded - turning a `200`
+  // into a synthetic failed status-0 response over a field documented as advisory.
+  // An unusable value is treated as absent, which is what "no adapter reported an upload
+  // outcome" already means. `Promise.resolve` reads `.then` once more below, but the
+  // specification has it reject the promise on a throwing read rather than throw.
+  let isThenable = false;
+
+  try {
+    isThenable = isPromise(settled);
+  } catch {
+    return undefined;
+  }
+
+  if (!isThenable) {
+    return undefined;
+  }
+
+  return Promise.resolve(settled).then(
+    (value) => (value === undefined ? undefined : normalizeError(value)),
+    (error: unknown) => normalizeError(error),
+  );
+}
+
+/** How a wait on the previous attempt's upload ended. */
+type UploadSettleWait = 'settled' | 'cancelled' | 'deadline';
+
+/** When a request's upload last reported progress, as epoch ms. One per request. */
+interface UploadActivity {
+  at: number;
+}
+
+/**
+ * Wait for an attempt's upload to settle before the next dispatch - the next redirect hop,
+ * or the retry that replaces it.
+ *
+ * Never throws and never rejects, whatever the adapter handed over: the outcome is adopted
+ * first, and a cancel ends the wait rather than the request - the dispatch that follows
+ * sees the signal for itself.
+ *
+ * Bounded by `stallMS`, the request's own per-attempt timeout, as a *stall* bound: the
+ * clock restarts every time the upload reports progress, so what fails is an upload that
+ * has gone silent for that long, never one that is still moving however long it takes.
+ * `requestBodySettled` is documented as settling in bounded time, and `NodeAdapter`'s does
+ * - its stall watchdog sees to that - but `HTTPAdapter` is a public extension point, and
+ * a custom adapter that set the field and never settled it held a followed `307`/`308`,
+ * or a retry, until the caller aborted: no timeout, no error, nothing on any channel. An
+ * adapter that reports no progress at all gets the bound from dispatch. `0` disables
+ * it exactly as it disables the per-attempt timer. What happens at
+ * the bound is decided at each site - the request fails as a timeout rather than
+ * dispatching a second upload beside one that may still be going out.
+ */
+async function settleUploadBeforeNextDispatch(
+  settled: unknown,
+  cancelSignal: AbortSignal,
+  stallMS: number,
+  lastActivityAt: () => number,
+): Promise<UploadSettleWait> {
+  // The cancel is answered first, before there is any promise to wait on. Both retry
+  // sites reach here straight after the backoff delay, and a cancel that landed during
+  // that delay is read off this answer - a response with no upload outcome to wait on
+  // still has to report it, or the cancel is missed and the next attempt is dispatched.
+  if (cancelSignal.aborted) {
+    return 'cancelled';
+  }
+
+  const adopted = adoptRequestBodySettled(settled);
+
+  if (adopted === undefined) {
+    return 'settled';
+  }
+
+  let onAbort: (() => void) | undefined;
+  let deadlineID: ReturnType<typeof setTimeout> | undefined;
+
+  const cancelled = new Promise<UploadSettleWait>((resolve) => {
+    onAbort = () => resolve('cancelled');
+    cancelSignal.addEventListener('abort', onAbort, { once: true });
+  });
+
+  const expired = new Promise<UploadSettleWait>((resolve) => {
+    if (stallMS <= 0) {
+      return;
+    }
+
+    // Re-armed rather than reset on every report: a timer touched from inside a progress
+    // callback would run on the adapter's cadence. When it fires, the question is only
+    // whether anything moved since the wait was last armed - if so, the stall is
+    // measured from that report, and the timer sleeps for the remainder.
+    const arm = (sinceMS: number): void => {
+      deadlineID = setTimeout(
+        () => {
+          const quietForMS = Date.now() - lastActivityAt();
+
+          if (quietForMS >= stallMS) {
+            resolve('deadline');
+
+            return;
+          }
+
+          arm(stallMS - quietForMS);
+        },
+        Math.min(Math.max(0, sinceMS), MAX_TIMER_MS),
+      );
+    };
+
+    // Count silence before this wait, including retry backoff. Even an overdue check
+    // runs through the timer: an already-completed upload must get its promise callbacks
+    // processed before we declare it stalled. A pending upload is checked next tick,
+    // without granting it another full stall window.
+    const quietOnEntryMS = Date.now() - lastActivityAt();
+    arm(stallMS - Math.max(0, quietOnEntryMS));
+  });
+
+  try {
+    return await Promise.race([
+      adopted.then((): UploadSettleWait => 'settled'),
+      cancelled,
+      expired,
+    ]);
+  } finally {
+    if (onAbort !== undefined) {
+      cancelSignal.removeEventListener('abort', onAbort);
+    }
+
+    if (deadlineID !== undefined) {
+      clearTimeout(deadlineID);
+    }
+  }
+}
+
+/**
+ * Say, on the global `'error'` channel, that an adapter broke the `requestBodySettled`
+ * contract. The request itself fails as a timeout; this names the cause, which the
+ * timeout error cannot, and lands where every other library-consumer bug - a throwing
+ * callback, a non-function hook - is already reported.
+ */
+function reportUploadSettleDeadline(
+  adapterType: AdapterType,
+  deadlineMS: number,
+  nextDispatch: 'redirect' | 'retry',
+): void {
+  reportToHost(
+    new Error(
+      `HTTPClient waited for the previous attempt's upload to settle before the next ${nextDispatch}, and it reported no progress for ${String(deadlineMS)}ms without settling; the '${adapterType}' adapter's requestBodySettled must settle in bounded time. The request failed as a timeout rather than dispatching a second upload beside the first.`,
+    ),
+  );
 }
 
 /**
