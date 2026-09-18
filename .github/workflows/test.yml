@@ -1,0 +1,80 @@
+name: Test
+
+# Every update to an open pull request targeting main runs through
+# `pull_request`. Restricting `push` to main avoids running the same matrix a
+# second time for branches in this repository, while still testing the merged
+# result and direct pushes to main. `workflow_dispatch` keeps a manual run
+# available from the default branch.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# A new push to the same branch cancels the run it supersedes.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      # Every platform reports, rather than the first failure canceling the
+      # rest. The point of the matrix is knowing which ones are broken.
+      fail-fast: false
+      matrix:
+        # Linux and macOS only. The library targets POSIX runtimes: the named
+        # pipe sink is built on FIFOs and the temp-directory permission work is
+        # written against POSIX modes, neither of which has a Windows meaning.
+        os: [ubuntu-latest, macos-latest]
+
+    # The suite is large and launches a real browser, so it is slower than a
+    # plain unit-test run, and the default six hours is no bound at all for a
+    # job that has hung.
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      # The lockfile is the point: a resolution that drifts per platform would
+      # make a failure here a question about the install rather than the code.
+      - name: Install
+        run: bun install --frozen-lockfile
+
+      - name: Type check
+        run: bun run type-check
+
+      - name: Lint
+        run: bun run lint
+
+      # Formatting is checked rather than assumed. `update-docs` reformats only
+      # the docs, so a Prettier upgrade can leave the source behind and nothing
+      # says so until somebody runs `bun run format` and finds unrelated files
+      # in their diff.
+      #
+      # One platform only, unlike the two steps above: formatting is a property
+      # of the files rather than of the machine.
+      - name: Format check
+        if: runner.os == 'Linux'
+        run: bun run format:check
+
+      # The xhr-adapter suite launches a real headless browser, which is a
+      # separate download from the npm package. Deliberately not cached: the
+      # binary is keyed to the Playwright version, and a cache that serves a
+      # stale shell after a version bump fails in exactly the way this step
+      # exists to prevent. `bun run test` guards on it anyway via
+      # scripts/check-playwright.ts, so a miss here is a clear message rather
+      # than a confusing test failure.
+      - name: Install Playwright Chromium
+        run: bun run playwright:install
+
+      - name: Test
+        run: bun run test
