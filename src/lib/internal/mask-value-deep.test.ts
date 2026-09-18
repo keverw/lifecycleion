@@ -151,6 +151,71 @@ describe('maskValueDeep named array properties', () => {
     expect(masked.meta).toEqual({ token: '****' });
   });
 
+  test('does not mark truncation when the last element exactly spends the budget', () => {
+    const budget = createRenderBudget(6);
+    const masked = maskValueDeep(
+      'items',
+      ['a', 'b', 'c'],
+      maskLeaf,
+      undefined,
+      undefined,
+      undefined,
+      budget,
+    );
+
+    expect(masked).toEqual(['*', '*', '*']);
+    expect(budget.remaining).toBe(0);
+    expect(budget.truncations).toBe(0);
+  });
+
+  test('marks named properties omitted after the last element spends the budget', () => {
+    const items = ['a', 'b', 'c'] as unknown[] & { note?: string };
+    items.note = 'request-42';
+    const budget = createRenderBudget(6);
+
+    const masked = maskValueDeep(
+      'items',
+      items,
+      maskLeaf,
+      undefined,
+      undefined,
+      undefined,
+      budget,
+    ) as unknown[] & { note?: string };
+
+    expect(masked).toEqual(['*', '*', '*', REDACTED_PLACEHOLDER]);
+    expect(masked.note).toBeUndefined();
+    expect(budget.truncations).toBe(1);
+  });
+
+  test('reuses the child marker without enumerating at the entry-budget boundary', () => {
+    let enumerations = 0;
+    const target = ['', '', ''] as unknown[] & { note?: string };
+    target.note = 'request-42';
+    const items = new Proxy(target, {
+      ownKeys: (target) => {
+        enumerations++;
+
+        return Reflect.ownKeys(target);
+      },
+    });
+    const budget = createRenderBudget(items.length);
+
+    const masked = maskValueDeep(
+      'items',
+      items,
+      maskLeaf,
+      undefined,
+      undefined,
+      undefined,
+      budget,
+    );
+
+    expect(enumerations).toBe(0);
+    expect(masked).toEqual(['', '', REDACTED_PLACEHOLDER]);
+    expect(budget.truncations).toBe(1);
+  });
+
   test('marks the truncation rather than dropping named keys silently', () => {
     // Every other stopping point in both walks leaves a marker. A key that was never
     // enumerated cannot be named, so this one goes in as a trailing element.

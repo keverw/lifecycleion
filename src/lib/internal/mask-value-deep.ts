@@ -193,8 +193,10 @@ export function maskValueDeep(
 
   try {
     // The shared enumeration, so this walk and the rendering walks cannot disagree about
-    // what a container holds or about a read that refused.
-    const shape = describeContainer(value, budget.remaining);
+    // what a container holds or about a read that refused. Keep the entry allowance so
+    // the array branch can reuse `describeContainer`'s enumeration boundary.
+    const entryBudget = budget.remaining;
+    const shape = describeContainer(value, entryBudget);
 
     if (shape.kind === 'unreadable') {
       // Nothing can be enumerated, so nothing of the original may survive - and there is
@@ -247,6 +249,8 @@ export function maskValueDeep(
         // perfectly well everywhere else lost its shape, and the two walks disagreed
         // about a value they are meant to treat identically.
         try {
+          const truncationsBeforeElement = budget.truncations;
+
           chargeUnits(budget, 1);
 
           masked.push(
@@ -261,6 +265,15 @@ export function maskValueDeep(
               reportRender,
             ),
           );
+
+          // A child can spend the final unit and install its own marker. Treat that as
+          // this budget's marker too, so the named-property pass does not add a duplicate.
+          if (
+            budget.remaining <= 0 &&
+            budget.truncations > truncationsBeforeElement
+          ) {
+            didMarkTruncation = true;
+          }
         } catch (error) {
           report(error, key);
           masked.push(REDACTION_FAILED_MARKER);
@@ -280,21 +293,22 @@ export function maskValueDeep(
       // cap it sits next to.
       //
       // Truncation is marked rather than left silent, which is what every other stopping
-      // point in both walks does. A key that was never enumerated cannot be named, so the
-      // marker goes in as a trailing element - the same one the index loop writes - rather
-      // than under a key this cannot invent. Without it an array whose budget ran out on
-      // its *last element* came back with its named properties simply missing and nothing
-      // anywhere saying so: the index loop exits normally in that case, having written no
-      // marker at all.
-      if (budget.remaining <= 0) {
-        if (!didMarkTruncation) {
-          noteTruncation(budget, 'length');
-          masked.push(REDACTED_PLACEHOLDER);
-          didMarkTruncation = true;
-        }
-      } else {
-        let namedKeys: string[] = [];
+      // point in both walks does. A key that cannot safely be enumerated cannot be named,
+      // so the marker goes in as a trailing element - the same one the index loop writes -
+      // rather than under a key this cannot invent.
+      //
+      // A spent budget does not prove anything was omitted when the final index consumed
+      // it. Reuse the exact predicate under which `describeContainer` already enumerates
+      // the array; at or above that boundary, keep refusing enumeration and retain the
+      // conservative marker.
+      let namedKeys: string[] = [];
+      const didCompleteIndexes =
+        !didMarkTruncation && masked.length === shape.length;
+      const canEnumerateNamedKeys =
+        budget.remaining > 0 ||
+        (didCompleteIndexes && shape.length < entryBudget);
 
+      if (canEnumerateNamedKeys) {
         try {
           namedKeys = namedArrayKeys(source);
         } catch (error) {
@@ -304,43 +318,47 @@ export function maskValueDeep(
           report(error, key);
           masked.push(REDACTION_FAILED_MARKER);
         }
+      } else if (!didMarkTruncation) {
+        noteTruncation(budget, 'length');
+        masked.push(REDACTED_PLACEHOLDER);
+        didMarkTruncation = true;
+      }
 
-        for (const namedKey of namedKeys) {
-          if (budget.remaining <= 0) {
-            if (!didMarkTruncation) {
-              noteTruncation(budget, 'length');
-              masked.push(REDACTED_PLACEHOLDER);
-              didMarkTruncation = true;
-            }
-
-            break;
+      for (const namedKey of namedKeys) {
+        if (budget.remaining <= 0) {
+          if (!didMarkTruncation) {
+            noteTruncation(budget, 'length');
+            masked.push(REDACTED_PLACEHOLDER);
+            didMarkTruncation = true;
           }
 
-          try {
-            charge(budget, namedKey);
+          break;
+        }
 
-            defineEntry(
-              masked as unknown as Record<string, unknown>,
-              namedKey,
-              maskValueDeep(
-                key,
-                (source as unknown as Record<string, unknown>)[namedKey],
-                mask,
-                seen,
-                report,
-                depth + 1,
-                budget,
-                reportRender,
-              ),
-            );
-          } catch (error) {
-            report(error, key);
-            defineEntry(
-              masked as unknown as Record<string, unknown>,
-              namedKey,
-              REDACTION_FAILED_MARKER,
-            );
-          }
+        try {
+          charge(budget, namedKey);
+
+          defineEntry(
+            masked as unknown as Record<string, unknown>,
+            namedKey,
+            maskValueDeep(
+              key,
+              (source as unknown as Record<string, unknown>)[namedKey],
+              mask,
+              seen,
+              report,
+              depth + 1,
+              budget,
+              reportRender,
+            ),
+          );
+        } catch (error) {
+          report(error, key);
+          defineEntry(
+            masked as unknown as Record<string, unknown>,
+            namedKey,
+            REDACTION_FAILED_MARKER,
+          );
         }
       }
 

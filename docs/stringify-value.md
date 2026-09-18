@@ -37,6 +37,11 @@ function stringifyValue(
 
 Never throws. A value that resists rendering degrades to a placeholder rather than raising an error out of whatever was trying to describe it.
 
+`stringifyValue` is intended for display, logging, and diagnostic output. Its output is
+lossy and may contain descriptive markers, so do not use it as an API payload, persistence
+format, or round-trip serialization format. Use JSON—or a format such as BSON or CBOR when
+JSON's data model is insufficient—for structured data interchange.
+
 ### Options
 
 Both functions take the same options.
