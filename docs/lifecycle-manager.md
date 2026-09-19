@@ -1404,7 +1404,7 @@ The acknowledgement says only that the request was accepted. It does not report 
 
 **Prefer this over `void stopAllComponents()`.** A floating shutdown promise with no rejection handler becomes an unhandled rejection if the logger throws while the shutdown is being logged, which is fatal under Node's default `--unhandled-rejections=throw` - taking the process down before the components it was about to stop have stopped. `triggerShutdown()` attaches that handler and reports through the global error channel instead. The same applies to `void stopComponent(name)`: attach a `.catch()` if you use it.
 
-Repeated calls feed the same [`repeatedShutdownRequestPolicy`](#repeated-shutdown-request-policy) escalation that repeated signals do. Because `signal:shutdown` describes a real OS signal, a manual request does not emit it; observe `lifecycle-manager:shutdown-initiated` instead.
+Repeated calls do **not** count toward [`repeatedShutdownRequestPolicy`](#repeated-shutdown-request-policy) escalation unless `countManualRetriesTowardEscalation` is enabled, matching `stopAllComponents()` and the documented default. Escalation represents an operator pressing Ctrl+C again; concurrent callers of this method are not expressing that, so a burst of overlapping requests can never force-kill the process on its own. Because `signal:shutdown` describes a real OS signal, a manual request does not emit it; observe `lifecycle-manager:shutdown-initiated` instead.
 
 #### Custom Signal Handlers
 

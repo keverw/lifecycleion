@@ -708,6 +708,7 @@ export interface LifecycleCommon
   detachSignals(): void;
   getSignalStatus(): LifecycleSignalStatus;
   getShutdownEscalationStatus(): ShutdownEscalationStatus;
+  triggerShutdown(): Promise<ShutdownTriggerResult>;
   triggerReload(): Promise<SignalBroadcastResult>;
   triggerInfo(): Promise<SignalBroadcastResult>;
   triggerDebug(): Promise<SignalBroadcastResult>;

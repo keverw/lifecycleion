@@ -132,3 +132,75 @@ describe('LifecycleManager - triggerShutdown()', () => {
     expect(manager.getComponentStatus('hanging')?.state).toBe('stopping');
   });
 });
+
+describe('LifecycleManager - triggerShutdown() escalation', () => {
+  test('manual requests do not count toward escalation by default', async () => {
+    const logger = new Logger({
+      sinks: [new ArraySink()],
+      callProcessExit: false,
+    });
+    let forceShutdownCalls = 0;
+    const manager = new LifecycleManager({
+      logger,
+      shutdownWarningTimeoutMS: -1,
+      repeatedShutdownRequestPolicy: {
+        forceAfterCount: 2,
+        withinMS: 1000,
+        onForceShutdown: () => {
+          forceShutdownCalls++;
+        },
+      },
+    });
+
+    await manager.registerComponent(new SlowStop(logger, 'slow', 150));
+    await manager.startAllComponents();
+
+    // `countManualRetriesTowardEscalation` defaults to false, so hammering this from
+    // concurrent handlers must never reach the force handler.
+    const acks = [
+      await manager.triggerShutdown(),
+      await manager.triggerShutdown(),
+      await manager.triggerShutdown(),
+      await manager.triggerShutdown(),
+    ];
+
+    expect(acks[0].initiated).toBe(true);
+    expect(acks.slice(1).every((ack) => ack.code === 'already_in_progress')).toBe(
+      true,
+    );
+    expect(forceShutdownCalls).toBe(0);
+
+    await sleep(250);
+    expect(manager.getLastShutdownResult()?.success).toBe(true);
+  });
+
+  test('manual requests count toward escalation when opted in', async () => {
+    const logger = new Logger({
+      sinks: [new ArraySink()],
+      callProcessExit: false,
+    });
+    let forceShutdownCalls = 0;
+    const manager = new LifecycleManager({
+      logger,
+      shutdownWarningTimeoutMS: -1,
+      repeatedShutdownRequestPolicy: {
+        forceAfterCount: 2,
+        withinMS: 1000,
+        countManualRetriesTowardEscalation: true,
+        onForceShutdown: () => {
+          forceShutdownCalls++;
+        },
+      },
+    });
+
+    await manager.registerComponent(new SlowStop(logger, 'slow', 150));
+    await manager.startAllComponents();
+
+    await manager.triggerShutdown();
+    await manager.triggerShutdown();
+    await manager.triggerShutdown();
+
+    expect(forceShutdownCalls).toBe(1);
+    await sleep(250);
+  });
+});

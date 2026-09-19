@@ -2001,8 +2001,10 @@ export class LifecycleManager
    * throws while the shutdown is being logged, which is fatal under Node's
    * default `--unhandled-rejections=throw`. This path attaches that handler.
    *
-   * Repeated calls feed the same `repeatedShutdownRequestPolicy` escalation
-   * that repeated signals do.
+   * Repeated calls do NOT count toward `repeatedShutdownRequestPolicy` escalation unless
+   * `countManualRetriesTowardEscalation` is enabled, matching `stopAllComponents()`.
+   * Escalation means an operator pressing Ctrl+C again; concurrent callers of this method
+   * are not expressing that, and must not be able to force-kill the process by volume.
    *
    * @returns Acknowledgement that the request was accepted, not the result of the shutdown
    */
@@ -6098,8 +6100,32 @@ export class LifecycleManager
       return true;
     };
 
+    // Escalation represents an operator pressing Ctrl+C again because the first one did
+    // not take. A programmatic `'manual'` request carries no such intent - and
+    // `triggerShutdown()` is built for concurrent callers, so a handful of overlapping
+    // HTTP handlers must not add up to a force kill. `stopAllComponentsInternal` gates
+    // manual retries the same way, on the same flag, which defaults to false.
+    const shouldCountTowardEscalation =
+      method !== 'manual' ||
+      this.repeatedShutdownRequestPolicy?.countManualRetriesTowardEscalation ===
+        true;
+
     if (this.isShuttingDown) {
       signalShutdown(true);
+
+      if (!shouldCountTowardEscalation) {
+        this.logger.warn(
+          'Shutdown already in progress, ignoring manual request',
+          { params: { method } },
+        );
+
+        return {
+          initiated: false,
+          code: 'already_in_progress',
+          reason: LIFECYCLE_MANAGER_MESSAGE_SHUTDOWN_IN_PROGRESS,
+        };
+      }
+
       if (this.handleRepeatedShutdownRequest(method)) {
         return {
           initiated: false,
@@ -6124,7 +6150,14 @@ export class LifecycleManager
     ) {
       didEmitShutdownSignal = signalShutdown(false);
       shouldSeedRepeatedShutdownState = false;
-      this.handleRepeatedShutdownRequest(method);
+
+      // Same split as `stopAllComponentsInternal`: a manual retry that does not count
+      // starts a fresh cycle rather than continuing the armed one.
+      if (shouldCountTowardEscalation) {
+        this.handleRepeatedShutdownRequest(method);
+      } else {
+        this.resetRepeatedShutdownRequestState();
+      }
     }
 
     if (shouldSeedRepeatedShutdownState) {
