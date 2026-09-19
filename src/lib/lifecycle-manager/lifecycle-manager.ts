@@ -31,6 +31,7 @@ import type {
   RestartAllOptions,
   DependencyValidationResult,
   ShutdownMethod,
+  ShutdownTriggerResult,
   SignalBroadcastResult,
   ComponentSignalResult,
   LifecycleSignalStatus,
@@ -1979,6 +1980,34 @@ export class LifecycleManager
     this.logger.debug('Logger exit hook enabled', {
       params: { timeoutMS: this.shutdownOptions?.timeoutMS },
     });
+  }
+
+  /**
+   * Manually request shutdown without waiting for it to finish.
+   *
+   * Runs the same path as a `SIGINT`/`SIGTERM` handler: components stop in the
+   * background while this resolves as soon as the request has been accepted.
+   * Use it when a caller needs to start shutdown from application code and
+   * cannot block, such as inside an HTTP handler or an event listener.
+   *
+   * The returned acknowledgement reports whether this call started a new
+   * shutdown pass (`initiated: true`) or joined one already running
+   * (`already_in_progress`). It does NOT report whether components stopped
+   * cleanly - subscribe to `lifecycle-manager:shutdown-completed`, or call
+   * `getLastShutdownResult()`, for the outcome.
+   *
+   * Prefer this over `void stopAllComponents()`: a floating shutdown promise
+   * with no rejection handler becomes an unhandled rejection if the logger
+   * throws while the shutdown is being logged, which is fatal under Node's
+   * default `--unhandled-rejections=throw`. This path attaches that handler.
+   *
+   * Repeated calls feed the same `repeatedShutdownRequestPolicy` escalation
+   * that repeated signals do.
+   *
+   * @returns Acknowledgement that the request was accepted, not the result of the shutdown
+   */
+  public triggerShutdown(): Promise<ShutdownTriggerResult> {
+    return Promise.resolve(this.requestShutdown('manual', false));
   }
 
   /**
@@ -6039,10 +6068,44 @@ export class LifecycleManager
    * In all cases `signal:shutdown` is emitted exactly once.
    */
   private handleShutdownRequest(method: ShutdownSignal): void {
+    // Signal handlers cannot consume a return value. The acknowledgement only
+    // matters to the programmatic `triggerShutdown()` caller.
+    void this.requestShutdown(method, true);
+  }
+
+  /**
+   * Shared shutdown-request path behind signal handling and `triggerShutdown()`.
+   *
+   * Runs the same escalation bookkeeping either way and returns an
+   * acknowledgement saying whether this request started a new shutdown pass.
+   * The shutdown itself continues in the background - the returned value never
+   * waits for components to stop.
+   *
+   * `signal:shutdown` carries a `ShutdownSignal`, so it is emitted only for real
+   * signals. A `'manual'` request skips it and stays observable through
+   * `lifecycle-manager:shutdown-initiated` like any other shutdown.
+   */
+  private requestShutdown(
+    method: ShutdownMethod,
+    shouldEmitSignalEvent: boolean,
+  ): ShutdownTriggerResult {
+    const signalShutdown = (isAlreadyShuttingDown: boolean): boolean => {
+      if (!shouldEmitSignalEvent || method === 'manual') {
+        return false;
+      }
+
+      this.lifecycleEvents.signalShutdown(method, isAlreadyShuttingDown);
+      return true;
+    };
+
     if (this.isShuttingDown) {
-      this.lifecycleEvents.signalShutdown(method, true);
+      signalShutdown(true);
       if (this.handleRepeatedShutdownRequest(method)) {
-        return;
+        return {
+          initiated: false,
+          code: 'already_in_progress',
+          reason: LIFECYCLE_MANAGER_MESSAGE_SHUTDOWN_IN_PROGRESS,
+        };
       }
     }
 
@@ -6059,8 +6122,7 @@ export class LifecycleManager
       this.repeatedShutdownRequestState.firstRequestAt !== null &&
       this.normalizeRepeatedShutdownRequestStateArmedStatus()
     ) {
-      this.lifecycleEvents.signalShutdown(method, false);
-      didEmitShutdownSignal = true;
+      didEmitShutdownSignal = signalShutdown(false);
       shouldSeedRepeatedShutdownState = false;
       this.handleRepeatedShutdownRequest(method);
     }
@@ -6075,7 +6137,7 @@ export class LifecycleManager
       reportCallbackError(`shutdown notification after ${method}`, error);
     }
     if (!didEmitShutdownSignal) {
-      this.lifecycleEvents.signalShutdown(method, false);
+      signalShutdown(false);
     }
 
     // Initiate shutdown asynchronously (don't await in signal handler). With a handler
@@ -6091,6 +6153,12 @@ export class LifecycleManager
     }).catch((error: unknown) => {
       reportCallbackError(`shutdown after ${method}`, error);
     });
+
+    return {
+      initiated: true,
+      code: 'initiated',
+      reason: 'Shutdown initiated',
+    };
   }
 
   /**

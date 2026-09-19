@@ -29,6 +29,7 @@ export type {
   ComponentStatus,
   ComponentStallInfo,
   ShutdownMethod,
+  ShutdownTriggerResult,
   BaseOperationResult,
   ComponentOperationResult,
   ComponentOperationFailureCode,

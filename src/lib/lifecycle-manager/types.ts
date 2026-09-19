@@ -104,6 +104,25 @@ export interface ComponentStallInfo {
 export type ShutdownMethod = 'manual' | 'SIGINT' | 'SIGTERM' | 'SIGTRAP';
 
 /**
+ * Acknowledgement returned by `triggerShutdown()`.
+ *
+ * Reports whether the request started a new shutdown pass. The shutdown runs
+ * in the background, so this never describes how components actually stopped -
+ * use the `lifecycle-manager:shutdown-completed` event or
+ * `getLastShutdownResult()` for that.
+ */
+export interface ShutdownTriggerResult {
+  /** True when this request started a new shutdown pass */
+  initiated: boolean;
+
+  /** Machine-readable outcome code */
+  code: 'initiated' | 'already_in_progress';
+
+  /** Human-readable explanation of the outcome */
+  reason: string;
+}
+
+/**
  * Base interface for all operation results
  *
  * Provides consistent structure across all operations with common fields

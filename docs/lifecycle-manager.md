@@ -39,6 +39,7 @@ A comprehensive lifecycle orchestration system that manages startup, shutdown, a
     - [`getSignalStatus()`](#getsignalstatus)
     - [`getShutdownEscalationStatus()`](#getshutdownescalationstatus)
     - [Manual Signal Triggers](#manual-signal-triggers)
+    - [Background Shutdown](#background-shutdown)
     - [Custom Signal Handlers](#custom-signal-handlers)
     - [Repeated Shutdown Request Policy](#repeated-shutdown-request-policy)
   - [Logger Integration](#logger-integration)
@@ -995,7 +996,7 @@ interface ComponentOperationResult {
 
 **Overlapping operations:** `startComponent()` refuses to run alongside the same component's other lifecycle work. A start already underway returns `component_already_starting`; a stop still in flight returns `component_already_stopping`. This holds even after a global shutdown timeout has already returned: `stopAllComponents()` settles at its deadline while a component's `stop()` or `onShutdownForce()` may still be running, and per-component state keeps the overlap blocked until that work finishes.
 
-Both codes are an immediate refusal: the call returns `success: false` without waiting for the in-flight operation to settle, and it does not start the component once that work finishes. To wait for a component to become startable again, poll `getComponentStatus(name).state` until it leaves `stopping` / `force-stopping`, then start it. To make concurrent callers of your own `start()` / `stop()` implementations share a single in-flight promise, see [Best Practice #7](#7-make-component-startup-idempotent-and-coordinate-with-shutdown). The manager only guards its own invocations, so that pattern is still required for the force phase, where `onShutdownForce()` runs concurrently with an unfinished `stop()` by design.
+Both codes are an immediate refusal: the call returns `success: false` without waiting for the in-flight operation to settle, and it does not start the component once that work finishes. To act when the component becomes startable again, subscribe rather than poll - `component:stopped` fires when the stop settles, and `component:stalled` fires if it exceeds the component's own `shutdownGracefulTimeoutMS` / `shutdownForceTimeoutMS` instead (recoverable with `forceStalled: true`, and followed by `component:stalled-resolved` if the original stop completes later). The `stopping` window is bounded by those per-component timeouts, not by the global shutdown timeout, so one of the two always arrives. To make concurrent callers of your own `start()` / `stop()` implementations share a single in-flight promise, see [Best Practice #7](#7-make-component-startup-idempotent-and-coordinate-with-shutdown). The manager only guards its own invocations, so that pattern is still required for the force phase, where `onShutdownForce()` runs concurrently with an unfinished `stop()` by design.
 
 ### Component Messaging
 
@@ -1381,7 +1382,29 @@ triggerInfo(): Promise<SignalBroadcastResult>
 triggerDebug(): Promise<SignalBroadcastResult>
 ```
 
-**Note:** For programmatic shutdown, use [`stopAllComponents()`](#stopallcomponentsoptions) which returns a `ShutdownResult`.
+**Note:** For programmatic shutdown that waits for the outcome, use [`stopAllComponents()`](#stopallcomponentsoptions), which returns a `ShutdownResult`.
+
+#### Background Shutdown
+
+```typescript
+triggerShutdown(): Promise<ShutdownTriggerResult>
+```
+
+Starts shutdown without waiting for it to finish, on the same path a `SIGINT`/`SIGTERM` handler uses. It resolves as soon as the request is accepted, so it suits callers that cannot block - an HTTP handler, or an event listener.
+
+```typescript
+interface ShutdownTriggerResult {
+  initiated: boolean; // True when this request started a new shutdown pass
+  code: 'initiated' | 'already_in_progress';
+  reason: string;
+}
+```
+
+The acknowledgement says only that the request was accepted. It does not report whether components stopped cleanly - subscribe to `lifecycle-manager:shutdown-completed`, or call `getLastShutdownResult()`, for that.
+
+**Prefer this over `void stopAllComponents()`.** A floating shutdown promise with no rejection handler becomes an unhandled rejection if the logger throws while the shutdown is being logged, which is fatal under Node's default `--unhandled-rejections=throw` - taking the process down before the components it was about to stop have stopped. `triggerShutdown()` attaches that handler and reports through the global error channel instead. The same applies to `void stopComponent(name)`: attach a `.catch()` if you use it.
+
+Repeated calls feed the same [`repeatedShutdownRequestPolicy`](#repeated-shutdown-request-policy) escalation that repeated signals do. Because `signal:shutdown` describes a real OS signal, a manual request does not emit it; observe `lifecycle-manager:shutdown-initiated` instead.
 
 #### Custom Signal Handlers
 
@@ -2217,7 +2240,7 @@ class ApiComponent extends BaseComponent {
 - **Messaging**: `sendMessageToComponent()`, `broadcastMessage()`
 - **Value sharing**: `getValue()`
 - **Health checks**: `checkComponentHealth()`, `checkAllHealth()`
-- **Signal management**: `attachSignals()`, `detachSignals()`, `getSignalStatus()`, `triggerReload()`, `triggerInfo()`, `triggerDebug()`
+- **Signal management**: `attachSignals()`, `detachSignals()`, `getSignalStatus()`, `triggerShutdown()`, `triggerReload()`, `triggerInfo()`, `triggerDebug()`
 
 **Note:** While lifecycle control methods are available through the lifecycle reference, use them with caution. For startup/shutdown ordering, prefer declaring dependencies in your component's configuration rather than manually controlling other components' lifecycles.
 
