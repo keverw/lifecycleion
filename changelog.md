@@ -24,6 +24,7 @@
 - [0.0.20 (Aug 21, 2026)](#0020-aug-21-2026)
 - [0.0.21 (Aug 25, 2026)](#0021-aug-25-2026)
 - [0.1.0 (Sep 18, 2026)](#010-sep-18-2026)
+- [Unreleased](#unreleased)
 
 <!-- tocstop -->
 
@@ -207,3 +208,7 @@
 - Retry policies normalize invalid numeric settings and cap delays/cancellation grace periods at 2,147,483,647 ms. Exponential overflow no longer causes immediate retry loops. `maxRetryAttempts: Infinity` remains supported. `policyInfo` returns a snapshot, and late/duplicate results and secondary operation failures are reported without treating normal cancellation acknowledgements as errors. Added `finiteClamp()` in `lifecycleion/clamp`.
 - `TmpDir` creates directories exclusively, shares concurrent initialization, and waits for initialization during cleanup. Safe cleanup removes empty directories, treats already-removed directories as cleaned up, and still refuses non-empty directories. `TmpDirOptions` is now exported. Existing parent permissions are preserved.
 - Updated dependencies, raising the `qs` (`^6.16.0`) and `find-my-way` (`^9.9.0`) floors to pick up upstream fixes, including the `qs` array-limit bypass and `isBuffer` denial-of-service advisories.
+
+## Unreleased
+
+- Added `triggerShutdown()`, which starts shutdown without waiting for it to finish and resolves once the request is accepted. It returns a `ShutdownTriggerResult` reporting whether the call started a new shutdown pass or joined one already running, never whether components stopped cleanly - use the `lifecycle-manager:shutdown-completed` event or `getLastShutdownResult()` for the outcome. Prefer it over `void stopAllComponents()`, which leaves a floating promise that becomes an unhandled rejection if the logger throws while the shutdown is being logged. Repeated calls feed the same `repeatedShutdownRequestPolicy` escalation as repeated signals. A manual request does not emit `signal:shutdown`, whose payload describes a real OS signal; `lifecycle-manager:shutdown-initiated` still fires.
