@@ -24,6 +24,7 @@
 - [0.0.20 (Aug 21, 2026)](#0020-aug-21-2026)
 - [0.0.21 (Aug 25, 2026)](#0021-aug-25-2026)
 - [0.1.0 (Sep 18, 2026)](#010-sep-18-2026)
+- [Unreleased](#unreleased)
 
 <!-- tocstop -->
 
@@ -207,3 +208,10 @@
 - Retry policies normalize invalid numeric settings and cap delays/cancellation grace periods at 2,147,483,647 ms. Exponential overflow no longer causes immediate retry loops. `maxRetryAttempts: Infinity` remains supported. `policyInfo` returns a snapshot, and late/duplicate results and secondary operation failures are reported without treating normal cancellation acknowledgements as errors. Added `finiteClamp()` in `lifecycleion/clamp`.
 - `TmpDir` creates directories exclusively, shares concurrent initialization, and waits for initialization during cleanup. Safe cleanup removes empty directories, treats already-removed directories as cleaned up, and still refuses non-empty directories. `TmpDirOptions` is now exported. Existing parent permissions are preserved.
 - Updated dependencies, raising the `qs` (`^6.16.0`) and `find-my-way` (`^9.9.0`) floors to pick up upstream fixes, including the `qs` array-limit bypass and `isBuffer` denial-of-service advisories.
+
+## Unreleased
+
+- `runCallbackSafely()` no longer lets a throwing `onError` escape. A synchronous throw previously surfaced at an unrelated call site, and one from the promise rung became an unhandled rejection - fatal under Node's default `--unhandled-rejections=throw`, which is the outcome the helper exists to prevent. Both are now caught and sent to the guarded console rung.
+- `runCallbackSafely()` accepts an optional `thisArg`. The callback is invoked with the receiver you supply, so an extracted method such as `logger.info` can keep using `args` instead of a wrapping closure. Passing one without a receiver still loses `this`, which arrives as an ordinary callback failure rather than a `TypeError` at the call site; the docstrings for all four exports now say so.
+- `reportToHost()` is public through `lifecycleion/safe-handle-callback`. Use it when you already hold a well-formed `Error` and want listeners to see exactly that. `reportCallbackError()` remains the normalizer for a raw thrown value, which it wraps in an `Error` naming the callback.
+- `CallbackResult<T>` is exported and is now a discriminated union, so `if (result.success)` narrows without a non-null assertion on `value` or `error`. Each branch still declares the other's field as optional `undefined`, so reading either without narrowing keeps compiling. `T` defaults to `unknown`, since it can never be inferred from a `callback` typed `unknown`.

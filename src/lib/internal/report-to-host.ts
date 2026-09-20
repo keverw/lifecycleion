@@ -315,6 +315,19 @@ function dispatchErrorEvent(error: Error): DispatchOutcome {
  *
  * An unclaimed dispatch still falls through to `console.error`, mirroring the console
  * output a native `reportError()` produces when no listener cancels the event.
+ *
+ * Public through `lifecycleion/safe-handle-callback`. Reach for it when you already hold a
+ * well-formed `Error` - its own `cause` chain, its own `additionalInfo` - and want
+ * listeners to see exactly that. `reportCallbackError` is the normalizer for the other
+ * case: a raw thrown value (`throw 'boom'`, `throw 42`, a rejected promise carrying a
+ * string), which it wraps in an `Error` whose message names the callback. Passing an
+ * already-structured `Error` through that wrapper only adds a nesting level and a message
+ * describing the caller's callback name rather than what actually failed.
+ *
+ * @param error The report to publish. Already an `Error`; normalize with `toError` first
+ *              if what you hold might not be.
+ * @param renderForConsole Consulted only if the report reaches the console rung
+ *                         uncancelled, so a caller can control that rendering.
  */
 export function reportToHost(
   error: Error,

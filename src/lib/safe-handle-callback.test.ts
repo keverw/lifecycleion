@@ -796,3 +796,174 @@ describe('safeHandleCallback error channel', () => {
     expect(captured.length).toBe(0);
   });
 });
+
+describe('runCallbackSafely - thisArg', () => {
+  class Greeter {
+    public readonly prefix = '[app] ';
+    public seen: string[] = [];
+
+    public record(message: string): void {
+      // Throws with no receiver, which is exactly the silent-degradation case.
+      this.seen.push(this.prefix + message);
+    }
+  }
+
+  it('invokes an extracted method with the supplied receiver', () => {
+    const greeter = new Greeter();
+    const errors: unknown[] = [];
+
+    runCallbackSafely(
+      'greeter.record',
+      // Deliberately unbound: supplying `thisArg` is what makes this work, and is the
+      // behaviour under test. `unbound-method` is flagging the very hazard being covered.
+      // eslint-disable-next-line @typescript-eslint/unbound-method
+      greeter.record,
+      ['hello'],
+      (error) => errors.push(error),
+      greeter,
+    );
+
+    expect(errors).toEqual([]);
+    expect(greeter.seen).toEqual(['[app] hello']);
+  });
+
+  it('reports the failure when an extracted method is passed without a receiver', () => {
+    const greeter = new Greeter();
+    const errors: unknown[] = [];
+
+    runCallbackSafely(
+      'greeter.record',
+      // Deliberately unbound and with no `thisArg`, so the call fails the way an
+      // integrator's would.
+      // eslint-disable-next-line @typescript-eslint/unbound-method
+      greeter.record,
+      ['hello'],
+      (error) => errors.push(error),
+    );
+
+    expect(errors.length).toBe(1);
+    expect(greeter.seen).toEqual([]);
+  });
+
+  it('leaves a plain function unaffected when thisArg is omitted', () => {
+    const calls: unknown[][] = [];
+
+    runCallbackSafely(
+      'plain',
+      (...args: unknown[]) => calls.push(args),
+      [1, 2],
+      () => {
+        throw new Error('should not be reached');
+      },
+    );
+
+    expect(calls).toEqual([[1, 2]]);
+  });
+});
+
+describe('runCallbackSafely - a throwing onError is contained', () => {
+  function withCapturedConsoleError<T>(run: (captured: unknown[][]) => T): T {
+    const captured: unknown[][] = [];
+    const original = console.error;
+
+    console.error = (...args: unknown[]): void => {
+      captured.push(args);
+    };
+
+    try {
+      return run(captured);
+    } finally {
+      console.error = original;
+    }
+  }
+
+  it('does not let a synchronous onError throw escape to the caller', () => {
+    const captured = withCapturedConsoleError((entries) => {
+      expect(() => {
+        runCallbackSafely(
+          'cb',
+          () => {
+            throw new Error('original failure');
+          },
+          [],
+          () => {
+            throw new Error('reporter failure');
+          },
+        );
+      }).not.toThrow();
+
+      return entries;
+    });
+
+    expect(captured.length).toBe(1);
+    // Both the reporter's failure and the original are handed to the console rung.
+    expect(String(captured[0][0])).toContain('cb');
+  });
+
+  it('does not let a rejected-promise onError throw become an unhandled rejection', async () => {
+    // The sync helper restores `console.error` as soon as `run` returns, so an async body
+    // would finish reporting after the swap was undone. Captured inline instead.
+    const captured: unknown[][] = [];
+    const original = console.error;
+    console.error = (...args: unknown[]): void => {
+      captured.push(args);
+    };
+
+    try {
+      runCallbackSafely(
+        'cb',
+        () => Promise.reject(new Error('original failure')),
+        [],
+        () => {
+          throw new Error('reporter failure');
+        },
+      );
+
+      await sleep(20);
+    } finally {
+      console.error = original;
+    }
+
+    expect(captured.length).toBe(1);
+    expect(String(captured[0][0])).toContain('cb');
+  });
+
+  it('contains a throwing onError on the not-a-function path', () => {
+    const captured = withCapturedConsoleError((entries) => {
+      expect(() => {
+        runCallbackSafely('cb', 'not callable', [], () => {
+          throw new Error('reporter failure');
+        });
+      }).not.toThrow();
+
+      return entries;
+    });
+
+    expect(captured.length).toBe(1);
+  });
+});
+
+describe('CallbackResult narrowing', () => {
+  it('narrows to value on success and error on failure', async () => {
+    const ok = await safeHandleCallbackAndWait<number>('ok', () => 42);
+
+    if (ok.success) {
+      // No non-null assertion needed here.
+      const value: number = ok.value;
+      expect(value).toBe(42);
+    } else {
+      throw new Error('expected success');
+    }
+
+    const failed = await safeHandleCallbackAndWait<number>('bad', () => {
+      throw new Error('boom');
+    });
+
+    if (failed.success) {
+      throw new Error('expected failure');
+    } else {
+      const error: Error = failed.error;
+      expect(error.message).toBe('boom');
+    }
+  });
+});
