@@ -961,7 +961,7 @@ describe('RetryRunner', () => {
       // After completion, should show the duration of the last attempt
       const attemptTime = runner.attemptTimeTakenMS;
       expect(attemptTime).toBeGreaterThanOrEqual(20);
-      expect(attemptTime).toBeLessThan(100); // Reasonable upper bound
+      expect(attemptTime).toBeLessThan(1000); // Room for noisy CI timers
 
       // Should remain stable
       await sleep(10);

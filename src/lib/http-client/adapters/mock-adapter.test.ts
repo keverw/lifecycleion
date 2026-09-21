@@ -727,13 +727,13 @@ describe('MockAdapter.send() — low-level contract', () => {
     }
 
     expect(caught?.name).toBe('AbortError');
-    // Should have thrown well before the 200ms delay completed
-    expect(Date.now() - start).toBeLessThan(150);
+    // Should have thrown well before the 1000ms delay completed
+    expect(Date.now() - start).toBeLessThan(400);
   });
 
   test('throws AbortError when signal fires while async handler is still pending', async () => {
     adapter.routes.get('/slow-handler', async () => {
-      await new Promise((resolve) => setTimeout(resolve, 200));
+      await new Promise((resolve) => setTimeout(resolve, 1000));
       return { status: 200 };
     });
 
@@ -754,7 +754,7 @@ describe('MockAdapter.send() — low-level contract', () => {
     }
 
     expect(caught?.name).toBe('AbortError');
-    expect(Date.now() - start).toBeLessThan(150);
+    expect(Date.now() - start).toBeLessThan(400);
   });
 
   test('does not invoke onHandlerError when signal fires while async handler is pending', async () => {
