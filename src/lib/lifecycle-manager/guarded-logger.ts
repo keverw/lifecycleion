@@ -98,7 +98,23 @@ export function createGuardedLoggerService(
       // assigns the captured wrapper back. A wrapper that re-read `target.warn` when
       // called would then find itself and recurse forever; one that closed over what it
       // read calls the real method.
-      const method: unknown = Reflect.get(target, property, target);
+      //
+      // Contained, because the read itself runs code the caller owns: a logger whose
+      // `warn` is a getter that throws would otherwise escape every guard below, the
+      // read happening before there is a wrapper to route through.
+      let method: unknown;
+
+      try {
+        method = Reflect.get(target, property, target);
+      } catch (error) {
+        reportCallbackError(`${GUARDED_LOGGER_LABEL}.${property}`, error);
+
+        // Same fallbacks the call-time failures use: a no-op for a log method, and for
+        // `entity` something the rest of the chain can still call.
+        return property === 'entity'
+          ? (): LoggerService => guarded
+          : (): void => {};
+      }
 
       if (property === 'entity') {
         return (entityName: string): LoggerService =>
@@ -157,6 +173,10 @@ function guardEntity(
 ): LoggerService {
   const label = `${GUARDED_LOGGER_LABEL}.entity`;
   let child: unknown;
+  // Tracked explicitly rather than inferred from an `undefined` child: an `entity()`
+  // that simply *returns* `undefined` is a logger handing back a non-logger, and reading
+  // it as "it threw, already reported" swallowed it silently.
+  let didFail = false;
 
   runCallbackSafely(
     label,
@@ -169,6 +189,8 @@ function guardEntity(
     },
     [],
     (error) => {
+      didFail = true;
+
       reportCallbackError(label, error);
     },
   );
@@ -180,9 +202,9 @@ function guardEntity(
   }
 
   if (child === null || typeof child !== 'object') {
-    // `undefined` is the shape of "it threw", which was reported above. Anything else is
-    // a logger handing back a non-logger, which nothing else would surface.
-    if (child !== undefined) {
+    // A failure was already reported above; anything else is a logger handing back a
+    // non-logger, which nothing else would surface.
+    if (!didFail) {
       reportCallbackError(label, new Error(`${label} did not return a logger`));
     }
 

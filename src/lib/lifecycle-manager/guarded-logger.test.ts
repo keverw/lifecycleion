@@ -224,6 +224,85 @@ describe('createGuardedLoggerService', () => {
     expect(sink.logs[0]?.message).toBe('still logged');
   });
 
+  test('entity() that returns undefined is reported and falls back', async () => {
+    const sink = new ArraySink();
+    const logger = new Logger({ sinks: [sink], callProcessExit: false });
+    const service = logger.service('svc');
+
+    // Indistinguishable from a throw by the returned value alone, which is how it used
+    // to go unreported: returning nothing is still a logger handing back a non-logger.
+    service.entity = (): LoggerService => undefined as unknown as LoggerService;
+
+    const guarded = createGuardedLoggerService(service);
+
+    const reports = await collectReports(() => {
+      guarded.entity('ent').info('still logged');
+    });
+
+    expect(reports.length).toBe(1);
+    expect((reports[0]?.cause as Error).message).toBe(
+      'lifecycle-manager logger.entity did not return a logger',
+    );
+    expect(sink.logs[0]?.message).toBe('still logged');
+  });
+
+  test('a method behind a throwing getter is contained and reported', async () => {
+    const sink = new ArraySink();
+    const logger = new Logger({ sinks: [sink], callProcessExit: false });
+    const service = logger.service('svc');
+
+    // The read happens before there is a wrapper to route the call through, so the
+    // guard has to contain it itself.
+    Object.defineProperty(service, 'warn', {
+      configurable: true,
+      get: (): never => {
+        throw new Error('getter exploded');
+      },
+    });
+
+    const guarded = createGuardedLoggerService(service);
+
+    const reports = await collectReports(() => {
+      expect(() => {
+        guarded.warn('dropped');
+      }).not.toThrow();
+    });
+
+    expect(reports.length).toBe(1);
+    expect(reports[0]?.message).toContain('lifecycle-manager logger.warn');
+    expect((reports[0]?.cause as Error).message).toBe('getter exploded');
+    expect(sink.logs).toEqual([]);
+  });
+
+  test('an entity() behind a throwing getter still hands back something callable', async () => {
+    const sink = new ArraySink();
+    const logger = new Logger({ sinks: [sink], callProcessExit: false });
+    const service = logger.service('svc');
+
+    Object.defineProperty(service, 'entity', {
+      configurable: true,
+      get: (): never => {
+        throw new Error('getter exploded');
+      },
+    });
+
+    const guarded = createGuardedLoggerService(service);
+
+    const reports = await collectReports(() => {
+      expect(() => {
+        guarded.entity('ent').info('still logged');
+      }).not.toThrow();
+    });
+
+    expect(reports.length).toBe(1);
+    expect(reports[0]?.message).toContain('lifecycle-manager logger.entity');
+    expect((reports[0]?.cause as Error).message).toBe('getter exploded');
+
+    // Falls back to the parent, exactly as a throwing `entity()` call does.
+    expect(sink.logs[0]?.message).toBe('still logged');
+    expect(sink.logs[0]?.entityName).toBeUndefined();
+  });
+
   test('a swapped-in method is picked up, and swapping the original back does not recurse', async () => {
     const sink = new ArraySink();
     const logger = new Logger({ sinks: [sink], callProcessExit: false });
