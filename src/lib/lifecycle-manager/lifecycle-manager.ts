@@ -2120,20 +2120,19 @@ export class LifecycleManager
    * site, and a logger failure alone never rejects the acknowledgement. Those
    * failures are reported on the global error channel instead.
    *
-   * The promise does reject when the request failed before a shutdown pass could
-   * start and nothing else is shutting down, which leaves no acknowledgement to
-   * give; the cause is reported on the global error channel and no shutdown is left
-   * running, so the call can be retried. Attach a `.catch()` rather than voiding
-   * the call.
+   * The promise never rejects: every request either starts a pass or joins one, and a
+   * pass that dies reports itself through `lifecycle-manager:shutdown-completed` and
+   * the global error channel rather than through the acknowledgement. `void
+   * triggerShutdown()` is safe.
    *
    * @returns Acknowledgement that the request was accepted, not the result of the shutdown
    */
   public triggerShutdown(): Promise<ShutdownTriggerResult> {
-    // The executor turns a synchronous throw on the request path into a rejection, so
-    // it cannot escape `triggerShutdown()` itself and bypass the caller's `.catch()`.
-    return new Promise((resolve) => {
-      resolve(this.requestManualShutdown());
-    });
+    // The request path is synchronous and cannot throw: it is field reads, guarded
+    // logger lines, and one call into `stopAllComponentsInternal`, whose own throws
+    // become a rejection it reports itself. The executor that used to turn a
+    // synchronous throw here into a rejection has nothing left to catch.
+    return Promise.resolve(this.requestManualShutdown());
   }
 
   /**
@@ -3511,9 +3510,6 @@ export class LifecycleManager
 
     this.normalizeRepeatedShutdownRequestStateArmedStatus();
 
-    // Copied before this pass touches it, so a pass that dies unannounced can put it back.
-    const escalationStateBeforePass = { ...this.repeatedShutdownRequestState };
-
     const repeatedShutdownPolicy = this.repeatedShutdownRequestPolicy;
     const isManualRetryWhileArmed =
       repeatedShutdownPolicy !== undefined &&
@@ -3538,10 +3534,7 @@ export class LifecycleManager
     let timeoutHandle: NodeJS.Timeout | undefined;
     let pendingShutdownOperation: Promise<void> | null = null;
     let isDuringStartup = false;
-    let didEmitShutdownInitiated = false;
     let didEmitShutdownCompleted = false;
-    const shutdownMethodBeforePass = this.shutdownMethod;
-    const shutdownTokenBeforePass = this.shutdownToken;
     // Declared out here so a pass that dies mid-flight can still report what it stopped.
     const stoppedComponents = new Set<string>();
 
@@ -3551,6 +3544,11 @@ export class LifecycleManager
     // it, so nothing in the setup below - component getters included - can wedge the
     // manager in `shutting-down`.
     try {
+      // Announced before anything else in the pass, so the requester is told a pass
+      // started and the `catch` below owes it a `shutdown-completed` however the pass
+      // dies from here on - including on the emit a few lines down, which would leave
+      // that pairing without its `shutdown-initiated` half.
+      onPassStarted?.();
       this.shutdownToken = ulid();
       this.shutdownMethod = method;
       if (
@@ -3564,12 +3562,6 @@ export class LifecycleManager
       this.logger.info('Stopping all components', {
         params: { method },
       });
-      // Both marked before the emit, like the completed flag below: if emitting throws
-      // once listeners have already run, they are still owed a `shutdown-completed`.
-      // Together, so the two can never disagree - the `catch` below owes that event
-      // exactly when the requester was told a pass started.
-      didEmitShutdownInitiated = true;
-      onPassStarted?.();
       this.lifecycleEvents.lifecycleManagerShutdownInitiated(
         method,
         isDuringStartup,
@@ -3841,30 +3833,13 @@ export class LifecycleManager
       // The rejection still reaches `stopAllComponents()`, but it is the only place a
       // dead pass would otherwise show up: `startShutdownPass()` drops it on the global
       // error channel, so nothing on the event side would ever learn the pass is over.
-      if (!didEmitShutdownInitiated) {
-        // Nothing observed this pass - it died before its first `await`, without calling
-        // `onPassStarted`, so `triggerShutdown()` rejects. Put back what the setup wrote
-        // so the manager does not describe a shutdown that never started. The token
-        // especially: a bulk startup and an in-flight `startComponent()` both read a
-        // changed token as "shutdown began", and would abort or immediately stop a
-        // component for a pass that never existed.
-        this.shutdownMethod = shutdownMethodBeforePass;
-        this.shutdownToken = shutdownTokenBeforePass;
-
-        // Escalation tracking too, but only an armed window: an earlier failed shutdown
-        // may still be counting presses, and that is not this pass's to forget. The
-        // setup cleared its timer, so re-arm it - from now, exactly as a repeated
-        // request refreshes it. Anything else the state holds was seeded for this
-        // request, by the signal path or by the setup above, so it goes with the pass.
-        if (escalationStateBeforePass.remainsArmedUntil === null) {
-          this.resetRepeatedShutdownRequestState();
-        } else {
-          this.repeatedShutdownRequestState = escalationStateBeforePass;
-          this.refreshRepeatedShutdownArmedWindow();
-        }
-      } else if (!didEmitShutdownCompleted) {
-        // `shutdown-initiated` is already out and callers block on its pair, so a pass
-        // that dies mid-flight still owes them a result - otherwise they wait forever.
+      if (!didEmitShutdownCompleted) {
+        // The pass announced itself first thing, and callers block on that
+        // announcement's pair, so a pass that dies anywhere in here still owes them a
+        // result - otherwise they wait forever. In the one case where the
+        // `shutdown-initiated` emit is itself what threw, this is a `shutdown-completed`
+        // without its opening half; a listener that never ran is still better served by
+        // an event it can ignore than by a pass that reports nothing.
         const result: ShutdownResult = {
           success: false,
           stoppedComponents: Array.from(stoppedComponents),
@@ -6349,15 +6324,7 @@ export class LifecycleManager
       params: { method: 'manual' },
     });
 
-    const result = this.startShutdownPass('manual');
-
-    if (result === null) {
-      throw new Error(
-        'Shutdown request failed before a shutdown pass could start; the cause is reported on the global error channel',
-      );
-    }
-
-    return result;
+    return this.startShutdownPass('manual');
   }
 
   /**
@@ -6365,12 +6332,10 @@ export class LifecycleManager
    * background and says whether this request started a new shutdown pass - it never
    * waits for components to stop.
    *
-   * @returns the acknowledgement, or `null` when the pass failed before it could start
-   * and no other pass is running (the failure is reported on the global channel)
+   * @returns the acknowledgement: `initiated` when this request started the pass,
+   * `already_in_progress` when one was already running
    */
-  private startShutdownPass(
-    method: ShutdownMethod,
-  ): ShutdownTriggerResult | null {
+  private startShutdownPass(method: ShutdownMethod): ShutdownTriggerResult {
     // Initiate shutdown asynchronously (don't await in signal handler). With a handler
     // on the rejection: `stopAllComponentsInternal` rethrows from its `catch`, so any
     // failure inside the pass rejects this floating promise with nothing attached. On
@@ -6380,9 +6345,9 @@ export class LifecycleManager
     // through the logger, which is where every other failure in this file goes.
     //
     // `stopAllComponentsInternal` runs synchronously up to its first `await`, which is
-    // past the point where it either refuses the pass or announces it, and it reports
-    // the announcement through `onPassStarted`. A started pass means
-    // `shutdown-initiated` is out and a `shutdown-completed` is still owed.
+    // past the point where it either refuses the pass or announces it through
+    // `onPassStarted`. A started pass always reports a `shutdown-completed`, however it
+    // ends.
     let didStartPass = false;
 
     this.stopAllComponentsInternal(
@@ -6405,9 +6370,11 @@ export class LifecycleManager
       };
     }
 
-    // No pass started and nothing is shutting down, so this is not a refusal: the pass
-    // threw before it could announce itself, so claiming `already_in_progress` would be a lie.
-    return this.isShuttingDown ? this.shutdownAlreadyInProgressResult() : null;
+    // No pass started means the pass was refused because one is already running. The
+    // only code between that refusal and the announcement is field writes, timer
+    // clears, guarded logger lines and guarded callbacks, so there is no third outcome
+    // left to report.
+    return this.shutdownAlreadyInProgressResult();
   }
 
   /**

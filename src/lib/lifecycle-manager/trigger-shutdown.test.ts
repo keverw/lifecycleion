@@ -32,44 +32,6 @@ function shutdownCompleted(manager: LifecycleManager): Promise<void> {
   });
 }
 
-/**
- * Make the next shutdown pass die in its setup, before `onPassStarted()` announces it.
- *
- * The first statement inside that setup is `this.shutdownToken = ulid()`, so a setter
- * that throws puts the failure exactly where these tests need it. It used to be a stub
- * of `logShutdownRequestSafely` throwing on the "Stopping all components" line; the
- * manager's logger is guarded now, so no log line can derail a pass any more.
- *
- * One shot only: the rollback in the pass's `catch` writes the token back, and that
- * write has to succeed.
- */
-function throwOnNextShutdownTokenWrite(manager: LifecycleManager): () => void {
-  let value = (manager as unknown as { shutdownToken: unknown }).shutdownToken;
-  let hasThrown = false;
-
-  Object.defineProperty(manager, 'shutdownToken', {
-    configurable: true,
-    get: () => value,
-    set: (next: unknown) => {
-      if (!hasThrown) {
-        hasThrown = true;
-        throw new Error('setup exploded');
-      }
-
-      value = next;
-    },
-  });
-
-  return (): void => {
-    Object.defineProperty(manager, 'shutdownToken', {
-      configurable: true,
-      enumerable: true,
-      writable: true,
-      value,
-    });
-  };
-}
-
 class SlowStop extends BaseComponent {
   public stopEntered = false;
   constructor(
@@ -644,7 +606,7 @@ describe('LifecycleManager - triggerShutdown() hardening', () => {
     expect(manager.getSystemState()).not.toBe('shutting-down');
   });
 
-  test('a pass that dies before it is announced rejects instead of acknowledging', async () => {
+  test('a throw at the very start of the pass still reports a failed result', async () => {
     const logger = new Logger({
       sinks: [new ArraySink()],
       callProcessExit: false,
@@ -670,14 +632,17 @@ describe('LifecycleManager - triggerShutdown() hardening', () => {
       events.push('completed');
     });
 
+    const reports: unknown[] = [];
     const onError = (event: Event): void => {
+      reports.push((event as ErrorEvent).error);
       event.preventDefault();
     };
 
     globalThis.addEventListener('error', onError);
 
-    // Escalation seeding runs after the token is minted but before the pass announces
-    // itself, so nothing has observed it yet and there is no acknowledgement to give.
+    // Escalation seeding is the earliest thing in the pass that could plausibly throw:
+    // it runs after the pass has announced itself to the requester but before the
+    // `shutdown-initiated` emit.
     const internals = manager as unknown as {
       seedRepeatedShutdownRequestState: (method: string) => void;
     };
@@ -686,144 +651,44 @@ describe('LifecycleManager - triggerShutdown() hardening', () => {
       throw new Error('seed exploded');
     };
 
-    const tokenBeforeRequest = (manager as unknown as { shutdownToken: string })
-      .shutdownToken;
+    const done = shutdownCompleted(manager);
+    let ack;
 
     try {
-      // eslint-disable-next-line @typescript-eslint/await-thenable
-      await expect(manager.triggerShutdown()).rejects.toThrow(
-        'failed before a shutdown pass could start',
-      );
+      ack = await manager.triggerShutdown();
+      await done;
     } finally {
       internals.seedRepeatedShutdownRequestState = original;
       globalThis.removeEventListener('error', onError);
     }
 
-    // No half-announced pass: neither event fired, nothing the setup wrote is left
-    // behind, and the retry starts a clean one.
-    expect(events).toEqual([]);
-    expect(manager.getLastShutdownResult()).toBe(null);
+    // The pass started, so the acknowledgement is `initiated` and the request never
+    // rejects - the outcome arrives on the completed event instead.
+    expect(ack.code).toBe('initiated');
+
+    // `shutdown-initiated` never made it out, but the pass still owes a result: a
+    // listener with nothing to pair the completion to beats a pass that reports nothing.
+    expect(events).toEqual(['completed']);
+
+    const failed = manager.getLastShutdownResult();
+    expect(failed?.success).toBe(false);
+    expect(failed?.code).toBe('unknown_error');
+    expect(failed?.reason).toContain('seed exploded');
+
+    // An internal crash is not a stall, so nothing is left counting toward escalation.
     expect(manager.getShutdownEscalationStatus().firstRequestAt).toBe(null);
     expect(
-      (manager as unknown as { shutdownMethod: string | null }).shutdownMethod,
-    ).toBe(null);
-    // A changed token reads as "shutdown began" to a concurrent startup.
-    expect(
-      (manager as unknown as { shutdownToken: string }).shutdownToken,
-    ).toBe(tokenBeforeRequest);
+      reports.some((report) =>
+        (report as Error).message.includes('shutdown after manual'),
+      ),
+    ).toBe(true);
+
+    // The latch is released, so the retry runs a clean pass.
+    expect(manager.getSystemState()).not.toBe('shutting-down');
 
     const retry = await manager.stopAllComponents();
     expect(retry.success).toBe(true);
-    expect(events).toEqual(['initiated', 'completed']);
-  });
-
-  test('a pass that dies before it is announced keeps an armed escalation window', async () => {
-    const logger = new Logger({
-      sinks: [new ArraySink()],
-      callProcessExit: false,
-    });
-    const manager = new LifecycleManager({
-      logger,
-      shutdownWarningTimeoutMS: -1,
-      shutdownOptions: { timeoutMS: 100, retryStalled: false },
-      repeatedShutdownRequestPolicy: {
-        forceAfterCount: 5,
-        withinMS: 2000,
-        countManualRetriesTowardEscalation: true,
-        onForceShutdown: (): void => {},
-      },
-    });
-
-    class Hanging extends BaseComponent {
-      public async start(): Promise<void> {}
-      public stop(): Promise<void> {
-        return new Promise<void>(() => {});
-      }
-    }
-
-    await manager.registerComponent(
-      new Hanging(logger, { name: 'hanging', dependencies: [] }),
-    );
-    await manager.startAllComponents();
-
-    // Fail one pass so escalation is armed, with an earlier request on record.
-    const failed = await manager.stopAllComponents();
-    expect(failed.success).toBe(false);
-
-    const before = manager.getShutdownEscalationStatus();
-    expect(before.isArmed).toBe(true);
-
-    const onError = (event: Event): void => {
-      event.preventDefault();
-    };
-
-    globalThis.addEventListener('error', onError);
-
-    const restoreShutdownToken = throwOnNextShutdownTokenWrite(manager);
-
-    try {
-      // eslint-disable-next-line @typescript-eslint/await-thenable
-      await expect(manager.triggerShutdown()).rejects.toThrow(
-        'failed before a shutdown pass could start',
-      );
-    } finally {
-      restoreShutdownToken();
-      globalThis.removeEventListener('error', onError);
-    }
-
-    // The earlier failed shutdown is still unresolved, so its window and the requests
-    // already counted toward it must survive a pass that never started.
-    const after = manager.getShutdownEscalationStatus();
-    expect(after.isArmed).toBe(true);
-    expect(after.firstRequestAt).toBe(before.firstRequestAt);
-    expect(after.requestCount).toBe(before.requestCount);
-  });
-
-  test('a signal pass that dies before it is announced leaves no escalation state behind', async () => {
-    const logger = new Logger({
-      sinks: [new ArraySink()],
-      callProcessExit: false,
-    });
-    const manager = new LifecycleManager({
-      logger,
-      shutdownWarningTimeoutMS: -1,
-      repeatedShutdownRequestPolicy: {
-        forceAfterCount: 2,
-        withinMS: 2000,
-        onForceShutdown: (): void => {},
-      },
-    });
-
-    await manager.registerComponent(new SlowStop(logger, 'slow', 10));
-    await manager.startAllComponents();
-
-    const onError = (event: Event): void => {
-      event.preventDefault();
-    };
-
-    globalThis.addEventListener('error', onError);
-
-    // The signal path seeds escalation before the pass starts, so the rollback's
-    // snapshot holds a state belonging to this dead pass and to nothing else: keeping
-    // it would leave the next pass inheriting a `firstMethod` and `firstRequestAt`
-    // from a shutdown that never happened, and skipping its own seeding.
-    const internals = manager as unknown as {
-      handleShutdownRequest: (method: string) => void;
-    };
-    const restoreShutdownToken = throwOnNextShutdownTokenWrite(manager);
-
-    try {
-      internals.handleShutdownRequest('SIGTERM');
-    } finally {
-      restoreShutdownToken();
-      globalThis.removeEventListener('error', onError);
-    }
-
-    const after = manager.getShutdownEscalationStatus();
-    expect(after.isArmed).toBe(false);
-    expect(after.firstRequestAt).toBe(null);
-    expect(after.requestCount).toBe(0);
-    expect(manager.getSystemState()).not.toBe('shutting-down');
+    expect(events).toEqual(['completed', 'initiated', 'completed']);
   });
 
   test('a pass that dies mid-flight reports what it stopped and drops its escalation state', async () => {
