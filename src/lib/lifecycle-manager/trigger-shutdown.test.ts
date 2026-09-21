@@ -363,3 +363,138 @@ describe('LifecycleManager - triggerShutdown() escalation', () => {
     expect(forceShutdownCalls).toBe(0);
   });
 });
+
+describe('LifecycleManager - triggerShutdown() hardening', () => {
+  test('a throwing logger does not block a request after the armed window lapsed', async () => {
+    const logger = new Logger({
+      sinks: [new ArraySink()],
+      callProcessExit: false,
+    });
+    const manager = new LifecycleManager({
+      logger,
+      shutdownWarningTimeoutMS: -1,
+      repeatedShutdownRequestPolicy: {
+        forceAfterCount: 5,
+        withinMS: 1000,
+        armedAfterFailureMS: 60_000,
+        onForceShutdown: () => {},
+      },
+    });
+
+    class Hanging extends BaseComponent {
+      public async start(): Promise<void> {}
+      public stop(): Promise<void> {
+        return new Promise<void>(() => {});
+      }
+    }
+
+    await manager.registerComponent(
+      new Hanging(logger, { name: 'hanging', dependencies: [] }),
+    );
+    await manager.startAllComponents();
+
+    const failed = await manager.stopAllComponents({
+      timeoutMS: 100,
+      retryStalled: false,
+    });
+    expect(failed.success).toBe(false);
+    expect(manager.getShutdownEscalationStatus().isArmed).toBe(true);
+
+    // Lapse the window without letting the timer fire, as on a delayed event loop, so
+    // the request path is what expires it - through the `warn` that used to be bare.
+    (
+      manager as unknown as {
+        repeatedShutdownRequestState: { remainsArmedUntil: number };
+      }
+    ).repeatedShutdownRequestState.remainsArmedUntil = Date.now() - 1;
+
+    const service = (manager as unknown as { logger: { warn: unknown } })
+      .logger;
+    const originalWarn = service.warn;
+    service.warn = (): never => {
+      throw new Error('logger exploded');
+    };
+
+    const reports: unknown[] = [];
+    const onError = (event: Event): void => {
+      reports.push((event as ErrorEvent).error);
+      event.preventDefault();
+    };
+
+    globalThis.addEventListener('error', onError);
+
+    let ack;
+
+    try {
+      ack = await manager.triggerShutdown();
+    } finally {
+      service.warn = originalWarn;
+      globalThis.removeEventListener('error', onError);
+    }
+
+    expect(ack.initiated).toBe(true);
+    expect(manager.getShutdownEscalationStatus().isArmed).toBe(false);
+    expect(
+      reports.some((report) =>
+        (report as Error).message.includes('shutdown notification after'),
+      ),
+    ).toBe(true);
+  });
+
+  test('a logger that rejects asynchronously is reported, not left floating', async () => {
+    const { logger, manager } = setup();
+    await manager.registerComponent(new SlowStop(logger, 'slow', 10));
+    await manager.startAllComponents();
+
+    const service = (manager as unknown as { logger: { info: unknown } })
+      .logger;
+    const originalInfo = service.info;
+    service.info = (): Promise<never> =>
+      Promise.reject(new Error('async logger exploded'));
+
+    const reports: unknown[] = [];
+    const onError = (event: Event): void => {
+      reports.push((event as ErrorEvent).error);
+      event.preventDefault();
+    };
+
+    globalThis.addEventListener('error', onError);
+
+    let ack;
+
+    try {
+      ack = await manager.triggerShutdown();
+      await sleep(150);
+    } finally {
+      service.info = originalInfo;
+      globalThis.removeEventListener('error', onError);
+    }
+
+    expect(ack.initiated).toBe(true);
+    expect(
+      reports.some((report) =>
+        (report as Error).message.includes(
+          'shutdown notification after manual',
+        ),
+      ),
+    ).toBe(true);
+  });
+
+  test('a component can trigger shutdown through its lifecycle reference', async () => {
+    const { logger, manager } = setup();
+    const component = new SlowStop(logger, 'slow', 10);
+    await manager.registerComponent(component);
+    await manager.startAllComponents();
+
+    const lifecycle = (
+      component as unknown as {
+        lifecycle: { triggerShutdown(): Promise<{ code: string }> };
+      }
+    ).lifecycle;
+    const ack = await lifecycle.triggerShutdown();
+
+    expect(ack.code).toBe('initiated');
+    await sleep(100);
+    expect(manager.getComponentStatus('slow')?.state).toBe('stopped');
+  });
+});
