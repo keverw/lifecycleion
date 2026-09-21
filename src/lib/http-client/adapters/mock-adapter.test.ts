@@ -709,7 +709,7 @@ describe('MockAdapter.send() — low-level contract', () => {
   });
 
   test('throws AbortError when signal fires during delay and resolves early', async () => {
-    adapter.routes.get('/slow', () => ({ status: 200, delay: 200 }));
+    adapter.routes.get('/slow', () => ({ status: 200, delay: 1000 }));
     const controller = new AbortController();
     const start = Date.now();
     setTimeout(() => controller.abort(), 30);
