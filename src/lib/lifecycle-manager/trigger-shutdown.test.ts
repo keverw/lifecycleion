@@ -179,8 +179,8 @@ describe('LifecycleManager - triggerShutdown()', () => {
 
     // `this.logger` is a caller-supplied `LoggerService`. The escalation warns inside
     // `handleRepeatedShutdownRequest` sit between advancing `requestCount` and invoking
-    // the force handler, so a throw there must not reject the acknowledgement or
-    // swallow the escalation.
+    // the force handler, so a throw there must not escape the signal handler or swallow
+    // the escalation. Only a signal counts mid-shutdown, so the repeat is a SIGTERM.
     const service = (manager as unknown as { logger: { warn: unknown } })
       .logger;
     const originalWarn = service.warn;
@@ -198,22 +198,22 @@ describe('LifecycleManager - triggerShutdown()', () => {
 
     globalThis.addEventListener('error', onError);
 
-    let ack;
-
     try {
-      ack = await manager.triggerShutdown();
+      (
+        manager as unknown as {
+          handleShutdownRequest: (method: string) => void;
+        }
+      ).handleShutdownRequest('SIGTERM');
     } finally {
       service.warn = originalWarn;
       globalThis.removeEventListener('error', onError);
     }
 
-    expect(ack.initiated).toBe(false);
-    expect(ack.code).toBe('already_in_progress');
     expect(forceShutdownCalls).toBe(1);
     expect(
       reports.some((report) =>
         (report as Error).message.includes(
-          'shutdown notification after manual',
+          'shutdown notification after SIGTERM',
         ),
       ),
     ).toBe(true);
@@ -308,7 +308,7 @@ describe('LifecycleManager - triggerShutdown() escalation', () => {
     expect(manager.getLastShutdownResult()?.success).toBe(true);
   });
 
-  test('manual requests count toward escalation when opted in', async () => {
+  test('manual requests never count while a shutdown is running, even when opted in', async () => {
     const logger = new Logger({
       sinks: [new ArraySink()],
       callProcessExit: false,
@@ -331,11 +331,14 @@ describe('LifecycleManager - triggerShutdown() escalation', () => {
     await manager.startAllComponents();
 
     const done = shutdownCompleted(manager);
+    // The flag covers a deliberate retry after a failed pass, not overlapping callers:
+    // the same as `stopAllComponents()`, which refuses in this window.
     await manager.triggerShutdown();
     await manager.triggerShutdown();
     await manager.triggerShutdown();
 
-    expect(forceShutdownCalls).toBe(1);
+    expect(forceShutdownCalls).toBe(0);
+    expect(manager.getShutdownEscalationStatus().requestCount).toBe(0);
     await done;
   });
 

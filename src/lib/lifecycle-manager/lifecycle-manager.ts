@@ -2011,12 +2011,12 @@ export class LifecycleManager
    * throws while the shutdown is being logged, which is fatal under Node's
    * default `--unhandled-rejections=throw`. This path attaches that handler.
    *
-   * Repeated calls do NOT count toward `repeatedShutdownRequestPolicy` escalation unless
-   * `countManualRetriesTowardEscalation` is enabled. With it enabled, calls made while a
-   * shutdown is running count like repeated signals do - unlike `stopAllComponents()`,
-   * which only counts a retry while escalation is armed after a failed shutdown.
-   * Escalation means an operator pressing Ctrl+C again; concurrent callers of this method
-   * are not expressing that, so by default they cannot force-kill the process by volume.
+   * Escalation matches `stopAllComponents()`. Calls made while a shutdown is running
+   * never count toward `repeatedShutdownRequestPolicy`: escalation means an operator
+   * pressing Ctrl+C again, and concurrent callers of this method are not expressing
+   * that, so they cannot force-kill the process by volume. Only a retry made while
+   * escalation is still armed after a failed shutdown counts, once, and only when
+   * `countManualRetriesTowardEscalation` is enabled.
    *
    * A caller-supplied `LoggerService` that throws while the request is being logged
    * does not fail the request: every log line on this path is guarded and reported
@@ -6230,23 +6230,18 @@ export class LifecycleManager
    */
   private requestManualShutdown(): ShutdownTriggerResult {
     if (this.isShuttingDown) {
+      // Never counted toward escalation, whatever `countManualRetriesTowardEscalation`
+      // says - the same as `stopAllComponents()`, which refuses in this window.
       // Escalation represents an operator pressing Ctrl+C again because the first one
       // did not take. A programmatic request carries no such intent - and
       // `triggerShutdown()` is built for concurrent callers, so a handful of overlapping
-      // HTTP handlers must not add up to a force kill. `stopAllComponentsInternal` gates
-      // manual retries on the same flag, which defaults to false.
-      if (
-        this.repeatedShutdownRequestPolicy
-          ?.countManualRetriesTowardEscalation === true
-      ) {
-        this.handleRepeatedShutdownRequest('manual');
-      } else {
-        this.logShutdownRequestSafely(
-          'warn',
-          'Shutdown already in progress, ignoring manual request',
-          { method: 'manual' },
-        );
-      }
+      // HTTP handlers must not add up to a force kill. The flag covers a deliberate
+      // retry after a failed pass, which `stopAllComponentsInternal` owns.
+      this.logShutdownRequestSafely(
+        'warn',
+        'Shutdown already in progress, ignoring manual request',
+        { method: 'manual' },
+      );
 
       return this.shutdownAlreadyInProgressResult();
     }
@@ -6278,9 +6273,9 @@ export class LifecycleManager
     method: ShutdownMethod,
   ): ShutdownTriggerResult | null {
     // Initiate shutdown asynchronously (don't await in signal handler). With a handler
-    // on the rejection: `stopAllComponentsInternal` is `try`/`finally` with no `catch`,
-    // and `this.logger` is the caller's own object, so a logger that throws while the
-    // shutdown is being logged rejected this floating promise with nothing attached.
+    // on the rejection: `stopAllComponentsInternal` rethrows from its `catch`, and
+    // `this.logger` is the caller's own object, so a logger that throws while the
+    // shutdown is being logged rejects this floating promise with nothing attached.
     // On `SIGINT`/`SIGTERM` that is an unhandled rejection - fatal under Node's default
     // `--unhandled-rejections=throw`, taking the process down before the components
     // it was about to stop were stopped. Reported on the global channel rather than
@@ -6386,10 +6381,9 @@ export class LifecycleManager
     // able to skip the force-shutdown handler below or escape an OS signal handler.
     this.logShutdownRequestSafely(
       'warn',
+      // Only signals reach here mid-shutdown; a `'manual'` request is never counted then.
       this.isShuttingDown
-        ? method === 'manual'
-          ? 'Shutdown already in progress, tracking repeated manual request'
-          : 'Shutdown already in progress, tracking repeated signal'
+        ? 'Shutdown already in progress, tracking repeated signal'
         : 'Previous shutdown attempt finished with stalled components or timeout, escalation window still armed, tracking repeated request',
       {
         method,
