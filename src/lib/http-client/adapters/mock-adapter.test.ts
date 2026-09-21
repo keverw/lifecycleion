@@ -732,8 +732,14 @@ describe('MockAdapter.send() — low-level contract', () => {
   });
 
   test('throws AbortError when signal fires while async handler is still pending', async () => {
+    // The handler stays pending until the test releases it - no dangling
+    // timer is left behind once the abort wins the race.
+    let releaseHandler!: () => void;
+    const handlerGate = new Promise<void>((resolve) => {
+      releaseHandler = resolve;
+    });
     adapter.routes.get('/slow-handler', async () => {
-      await new Promise((resolve) => setTimeout(resolve, 1000));
+      await handlerGate;
       return { status: 200 };
     });
 
@@ -755,6 +761,9 @@ describe('MockAdapter.send() — low-level contract', () => {
 
     expect(caught?.name).toBe('AbortError');
     expect(Date.now() - start).toBeLessThan(400);
+
+    // Let the abandoned handler finish so nothing stays pending after the test.
+    releaseHandler();
   });
 
   test('does not invoke onHandlerError when signal fires while async handler is pending', async () => {
