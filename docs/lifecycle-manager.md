@@ -1390,7 +1390,7 @@ triggerDebug(): Promise<SignalBroadcastResult>
 triggerShutdown(): Promise<ShutdownTriggerResult>
 ```
 
-Starts shutdown without waiting for it to finish, on the same path a `SIGINT`/`SIGTERM` handler uses. It resolves as soon as the request is accepted, so it suits callers that cannot block - an HTTP handler, or an event listener.
+Starts shutdown without waiting for it to finish - the same background shutdown pass a `SIGINT`/`SIGTERM` handler starts, without the signal bookkeeping. It resolves as soon as the request is accepted, so it suits callers that cannot block - an HTTP handler, or an event listener.
 
 ```typescript
 interface ShutdownTriggerResult {
@@ -1400,13 +1400,13 @@ interface ShutdownTriggerResult {
 }
 ```
 
-The acknowledgement says only that the request was accepted. It does not report whether components stopped cleanly - subscribe to `lifecycle-manager:shutdown-completed`, or call `getLastShutdownResult()`, for that.
+The acknowledgement says only that the request was accepted. It does not report whether components stopped cleanly - subscribe to `lifecycle-manager:shutdown-completed`, or call `getLastShutdownResult()`, for that. An `initiated` acknowledgement is safe to wait on: once a pass announces itself with `lifecycle-manager:shutdown-initiated` it always reports a result, even if the pass itself fails outright.
 
 **Prefer this over `void stopAllComponents()`.** A floating shutdown promise with no rejection handler becomes an unhandled rejection if the logger throws while the shutdown is being logged, which is fatal under Node's default `--unhandled-rejections=throw` - taking the process down before the components it was about to stop have stopped. `triggerShutdown()` attaches that handler and reports through the global error channel instead. The same applies to `void stopComponent(name)`: attach a `.catch()` if you use it.
 
-A `LoggerService` that throws while the request is being logged does not fail the request either: every log line on the request path is guarded and reported through the global error channel, escalation bookkeeping still runs, and the acknowledgement still resolves. The promise does reject when the request fails before a shutdown pass could start and nothing else is shutting down - there is no acknowledgement to give, the cause is reported on the global error channel, and the manager is left untouched so the call can be retried. Attach a `.catch()` rather than voiding the call.
+A `LoggerService` that throws while the request is being logged does not fail the request either: every log line on the request path is guarded and reported through the global error channel, escalation bookkeeping still runs, and the acknowledgement still resolves. The promise does reject when the request fails before a shutdown pass could start and nothing else is shutting down - there is no acknowledgement to give, the cause is reported on the global error channel, and no shutdown is left running, so the call can be retried. Attach a `.catch()` rather than voiding the call.
 
-Repeated calls do **not** count toward [`repeatedShutdownRequestPolicy`](#repeated-shutdown-request-policy) escalation unless `countManualRetriesTowardEscalation` is enabled, matching `stopAllComponents()` and the documented default. Escalation represents an operator pressing Ctrl+C again; concurrent callers of this method are not expressing that, so a burst of overlapping requests can never force-kill the process on its own. Because `signal:shutdown` describes a real OS signal, a manual request does not emit it; observe `lifecycle-manager:shutdown-initiated` instead.
+Repeated calls do **not** count toward [`repeatedShutdownRequestPolicy`](#repeated-shutdown-request-policy) escalation unless `countManualRetriesTowardEscalation` is enabled, matching `stopAllComponents()` and the documented default. Escalation represents an operator pressing Ctrl+C again; concurrent callers of this method are not expressing that, so a burst of overlapping requests can never force-kill the process on its own. With the flag enabled, a request made while escalation is still armed after a failed shutdown counts once and can reach `forceAfterCount`: `onForceShutdown` runs, and because the retry pass still starts, the acknowledgement is `initiated` - the same behavior as `stopAllComponents()`. Because `signal:shutdown` describes a real OS signal, a manual request does not emit it; observe `lifecycle-manager:shutdown-initiated` instead.
 
 #### Custom Signal Handlers
 
@@ -2280,7 +2280,7 @@ lifecycle.on('lifecycle-manager:shutdown-completed', (data) => {
 - `lifecycle-manager:shutdown-warning` - Global warning phase started
 - `lifecycle-manager:shutdown-warning-completed` - Warning phase completed
 - `lifecycle-manager:shutdown-warning-timeout` - Warning phase timed out
-- `lifecycle-manager:shutdown-completed` - Shutdown attempt completed, includes the `ShutdownResult` fields at the top level plus `method` / `duringStartup`. This is the best single event for centralized logging or follow-up policy when shutdown times out or leaves stalled components. If the global shutdown timeout was hit, the payload reflects the result at the moment the public call stopped waiting. A component stop already in flight is not cancelled: its per-component state continues to reject an overlapping start or stop, while the process-wide shutdown latch is released so exit handling and later shutdown/escalation attempts can proceed.
+- `lifecycle-manager:shutdown-completed` - Shutdown attempt completed, includes the `ShutdownResult` fields at the top level plus `method` / `duringStartup`. This is the best single event for centralized logging or follow-up policy when shutdown times out or leaves stalled components. If the global shutdown timeout was hit, the payload reflects the result at the moment the public call stopped waiting. A component stop already in flight is not cancelled: its per-component state continues to reject an overlapping start or stop, while the process-wide shutdown latch is released so exit handling and later shutdown/escalation attempts can proceed. It always pairs with `lifecycle-manager:shutdown-initiated`: a pass that throws outright - which also rejects `stopAllComponents()` - still emits it with `success: false` and a `reason` naming the cause, so a caller waiting on it is never left hanging.
 
 **Component Registration:**
 
