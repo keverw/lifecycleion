@@ -918,7 +918,7 @@ interface ShutdownResult {
   durationMS: number;
   timedOut?: boolean;
   reason?: string;
-  code?: 'already_in_progress' | 'shutdown_timeout';
+  code?: 'already_in_progress' | 'shutdown_timeout' | 'unknown_error';
 }
 ```
 
@@ -1402,11 +1402,13 @@ interface ShutdownTriggerResult {
 
 The acknowledgement says only that the request was accepted. It does not report whether components stopped cleanly - subscribe to `lifecycle-manager:shutdown-completed`, or call `getLastShutdownResult()`, for that. An `initiated` acknowledgement is safe to wait on: once a pass announces itself with `lifecycle-manager:shutdown-initiated` it always reports a result, even if the pass itself fails outright.
 
+**During `restartAllComponents()`:** the restart's stop phase counts as a shutdown in progress, so a request made in that window is acknowledged as `already_in_progress` and the restart then starts every component again - the same applies to a shutdown signal. If a shutdown must win over a restart, wait for the restart to finish and request it again.
+
 **Prefer this over `void stopAllComponents()`.** A floating shutdown promise with no rejection handler becomes an unhandled rejection if the logger throws while the shutdown is being logged, which is fatal under Node's default `--unhandled-rejections=throw` - taking the process down before the components it was about to stop have stopped. `triggerShutdown()` attaches that handler and reports through the global error channel instead. The same applies to `void stopComponent(name)`: attach a `.catch()` if you use it.
 
 A `LoggerService` that throws while the request is being logged does not fail the request either: every log line on the request path is guarded and reported through the global error channel, escalation bookkeeping still runs, and the acknowledgement still resolves. The promise does reject when the request fails before a shutdown pass could start and nothing else is shutting down - there is no acknowledgement to give, the cause is reported on the global error channel, and no shutdown is left running, so the call can be retried. Attach a `.catch()` rather than voiding the call.
 
-Repeated calls do **not** count toward [`repeatedShutdownRequestPolicy`](#repeated-shutdown-request-policy) escalation unless `countManualRetriesTowardEscalation` is enabled, which the documented default leaves off. With it enabled, calls made while a shutdown is running count the way repeated signals do - unlike `stopAllComponents()`, which refuses with `already_in_progress` and only counts a retry while escalation is armed after a failed shutdown - so leave it off if overlapping callers are possible. Escalation represents an operator pressing Ctrl+C again; concurrent callers of this method are not expressing that, so by default a burst of overlapping requests can never force-kill the process on its own. With the flag enabled, a request made while escalation is still armed after a failed shutdown counts once and can reach `forceAfterCount`: `onForceShutdown` runs, and because the retry pass still starts, the acknowledgement is `initiated` - the same behavior as `stopAllComponents()`. Because `signal:shutdown` describes a real OS signal, a manual request does not emit it; observe `lifecycle-manager:shutdown-initiated` instead.
+Escalation matches `stopAllComponents()`. Calls made while a shutdown is running **never** count toward [`repeatedShutdownRequestPolicy`](#repeated-shutdown-request-policy), whatever `countManualRetriesTowardEscalation` says: escalation represents an operator pressing Ctrl+C again, concurrent callers of this method are not expressing that, and so a burst of overlapping requests can never force-kill the process on its own. The flag only covers a deliberate retry after a failed pass. With it enabled, a request made while escalation is still armed after a failed shutdown counts once and can reach `forceAfterCount`: `onForceShutdown` runs, and because the retry pass still starts, the acknowledgement is `initiated` - the same behavior as `stopAllComponents()`. Because `signal:shutdown` describes a real OS signal, a manual request does not emit it; observe `lifecycle-manager:shutdown-initiated` instead.
 
 #### Custom Signal Handlers
 
