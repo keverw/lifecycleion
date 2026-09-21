@@ -733,6 +733,7 @@ interface StartupResult {
     | 'stalled_components_exist'
     | 'partial_state' // Some components already running
     | 'required_component_failed' // Required component failed to start
+    | 'shutdown_requested_during_restart' // restartAllComponents() skipped its startup phase
     | 'startup_timeout'
     | 'unknown_error';
   error?: Error; // Error object (when success is false due to dependency cycle or unknown error)
@@ -938,7 +939,31 @@ interface RestartAllOptions {
 }
 ```
 
+**Returns:**
+
+```typescript
+interface RestartResult {
+  shutdownResult: ShutdownResult;
+  startupResult: StartupResult;
+  startupSkippedByShutdownRequest?: boolean; // Present and true when a shutdown request canceled the startup phase
+  success: boolean; // True only if both phases succeeded
+}
+```
+
 **Important:** `restartAllComponents` hardcodes `retryStalled: true` and `haltOnStall: true` for the shutdown phase to ensure clean restart. Only `shutdownTimeoutMS` can be customized.
+
+**A shutdown request during the shutdown phase wins.** A [`triggerShutdown()`](#background-shutdown) call, a `SIGINT`/`SIGTERM`, or a direct `stopAllComponents()` call made while the restart is stopping asks the process to stay down, so the restart skips its startup phase instead of bringing every component back up. The result then carries `startupSkippedByShutdownRequest: true`, `startupResult.code` is `shutdown_requested_during_restart`, and `success` is `false` - the restart did not complete. This is checked before the shutdown phase's own outcome, so a stalled or failed stop phase paired with a request still reports the request. `getLastShutdownResult()` is left in place (a completed restart clears it), so the shutdown phase's outcome is still readable afterwards.
+
+```typescript
+const result = await lifecycle.restartAllComponents();
+
+if (result.startupSkippedByShutdownRequest) {
+  // Something asked us to shut down mid-restart. Everything is stopped; do not restart.
+  return;
+}
+```
+
+A request that arrives during the restart's _startup_ phase aborts that startup instead: the request starts a real shutdown pass, and `startupResult.code` is `shutdown_in_progress`.
 
 #### Individual Component Operations
 
@@ -1402,7 +1427,7 @@ interface ShutdownTriggerResult {
 
 The acknowledgement says only that the request was accepted. It does not report whether components stopped cleanly - subscribe to `lifecycle-manager:shutdown-completed`, or call `getLastShutdownResult()`, for that. An `initiated` acknowledgement is safe to wait on: once a pass announces itself with `lifecycle-manager:shutdown-initiated` it always reports a result, even if the pass itself fails outright.
 
-**During `restartAllComponents()`:** the restart's stop phase counts as a shutdown in progress, so a request made in that window is acknowledged as `already_in_progress` and the restart then starts every component again - the same applies to a shutdown signal. If a shutdown must win over a restart, wait for the restart to finish and request it again.
+**During `restartAllComponents()`:** a request made while the restart's stop phase is running wins - the restart skips its startup phase and the components stay stopped. The acknowledgement is still `already_in_progress`: that running stop phase _is_ the shutdown the caller asked for, so there is no second pass to start. The restart resolves with `startupSkippedByShutdownRequest: true`; see [`restartAllComponents()`](#restartallcomponentsoptions). A shutdown signal and a direct `stopAllComponents()` call behave the same way in that window. A request that lands during the restart's startup phase instead starts a pass of its own, which aborts the startup - `startupResult.code` is then `shutdown_in_progress`.
 
 **Prefer this over `void stopAllComponents()`.** A floating shutdown promise with no rejection handler becomes an unhandled rejection if the logger throws while the shutdown is being logged, which is fatal under Node's default `--unhandled-rejections=throw` - taking the process down before the components it was about to stop have stopped. `triggerShutdown()` attaches that handler and reports through the global error channel instead. The same applies to `void stopComponent(name)`: attach a `.catch()` if you use it.
 
