@@ -743,8 +743,58 @@ describe('LifecycleManager - triggerShutdown() hardening', () => {
     expect(result?.code).toBe('unknown_error');
     expect(result?.stoppedComponents.length).toBe(1);
 
+    // Scoped to this pass's own stop list, exactly as a pass that finishes scopes it.
+    expect(result?.stalledComponents).toEqual([]);
+
     // Otherwise the next manual request would skip seeding and inherit this cycle.
     expect(manager.getShutdownEscalationStatus().firstRequestAt).toBe(null);
+  });
+
+  test('a pass that dies before it has a stop list reports no stalls of its own', async () => {
+    const { logger, manager } = setup();
+
+    class StallOnStop extends BaseComponent {
+      public async start(): Promise<void> {}
+      public stop(): Promise<void> {
+        return Promise.reject(new Error('stop failed'));
+      }
+    }
+
+    await manager.registerComponent(
+      new StallOnStop(logger, { name: 'stalled', dependencies: [] }),
+    );
+    await manager.startAllComponents();
+
+    // Leave a stall on record from a pass that has already reported it.
+    const first = await manager.stopAllComponents();
+    expect(first.success).toBe(false);
+    expect(manager.getStalledComponents().length).toBe(1);
+
+    // Kill the next pass while it is still working out what to stop, so it never has a
+    // stop list to scope its result to.
+    const internals = manager as unknown as {
+      isComponentRunning: (name: string) => boolean;
+    };
+    const original = internals.isComponentRunning;
+    internals.isComponentRunning = (): never => {
+      throw new Error('setup exploded');
+    };
+
+    try {
+      // eslint-disable-next-line @typescript-eslint/await-thenable
+      await expect(manager.stopAllComponents()).rejects.toThrow(
+        'setup exploded',
+      );
+    } finally {
+      internals.isComponentRunning = original;
+    }
+
+    // The stall predates this pass and was never in its view, so it stays with the
+    // result that did report it rather than being restated as this crash's doing.
+    const crashed = manager.getLastShutdownResult();
+    expect(crashed?.code).toBe('unknown_error');
+    expect(crashed?.stalledComponents).toEqual([]);
+    expect(manager.getStalledComponents().length).toBe(1);
   });
 
   test('a logger that throws on the final log line does not fail a clean shutdown', async () => {

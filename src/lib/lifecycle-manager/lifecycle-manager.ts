@@ -3537,6 +3537,19 @@ export class LifecycleManager
     let didEmitShutdownCompleted = false;
     // Declared out here so a pass that dies mid-flight can still report what it stopped.
     const stoppedComponents = new Set<string>();
+    // Every component this pass could end up reporting as stalled, filled in once the
+    // stop list is known. Out here so the `catch` reports the same scope the normal path
+    // does rather than every stall the manager happens to be holding; `null` until then,
+    // because a pass that died earlier than that had nothing in view.
+    let stallCandidateNames: Set<string> | null = null;
+    // Shared by both paths so they cannot drift: a candidate that is no longer stalled
+    // has no stall info and drops out.
+    const collectStalledComponents = (
+      candidates: Set<string> | null,
+    ): ComponentStallInfo[] =>
+      Array.from(candidates ?? [])
+        .map((name) => this.stalledComponents.get(name))
+        .filter((stallInfo): stallInfo is ComponentStallInfo => !!stallInfo);
 
     this.isShuttingDown = true;
 
@@ -3593,6 +3606,17 @@ export class LifecycleManager
           this.isComponentRunning(name) ||
           (shouldRetryStalled && stalledComponentNames.has(name)),
       );
+
+      // The pass's stop list, plus the stalls it is leaving alone: with `retryStalled`
+      // off those are not this pass's to clear, but they are still part of the state it
+      // reports. With it on they are already in the stop list.
+      stallCandidateNames = new Set(runningComponentsToStop);
+
+      if (!shouldRetryStalled) {
+        for (const name of stalledComponentNames) {
+          stallCandidateNames.add(name);
+        }
+      }
 
       const stoppingComponents = new Set<string>();
       const protectedDependencies = new Set<string>();
@@ -3729,21 +3753,10 @@ export class LifecycleManager
         await pendingShutdownOperation;
       }
 
-      const finalStalledNames = new Set<string>();
-
-      for (const name of runningComponentsToStop) {
-        if (this.stalledComponents.has(name)) {
-          finalStalledNames.add(name);
-        }
-      }
-
-      if (!shouldRetryStalled) {
-        for (const name of stalledComponentNames) {
-          if (this.stalledComponents.has(name)) {
-            finalStalledNames.add(name);
-          }
-        }
-      }
+      const stalledComponents = collectStalledComponents(stallCandidateNames);
+      const finalStalledNames = new Set(
+        stalledComponents.map((stallInfo) => stallInfo.name),
+      );
 
       for (const name of runningComponentsToStop) {
         if (
@@ -3754,10 +3767,6 @@ export class LifecycleManager
           stoppingComponents.delete(name);
         }
       }
-
-      const stalledComponents = Array.from(finalStalledNames)
-        .map((name) => this.stalledComponents.get(name))
-        .filter((stallInfo): stallInfo is ComponentStallInfo => !!stallInfo);
 
       const durationMS = Date.now() - startTime;
       const isSuccess =
@@ -3843,7 +3852,10 @@ export class LifecycleManager
         const result: ShutdownResult = {
           success: false,
           stoppedComponents: Array.from(stoppedComponents),
-          stalledComponents: Array.from(this.stalledComponents.values()),
+          // Scoped exactly as the normal path scopes it, and empty for a pass that died
+          // before it had a stop list: a stall this pass never had in view belongs to
+          // whatever left it behind, not to this failure.
+          stalledComponents: collectStalledComponents(stallCandidateNames),
           durationMS: Date.now() - startTime,
           reason: `Shutdown failed before it could report a result: ${describeError(error)}`,
           // Not a stall or a timeout: the pass itself threw, which points at a bug in
