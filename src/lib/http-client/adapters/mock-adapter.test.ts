@@ -709,7 +709,7 @@ describe('MockAdapter.send() — low-level contract', () => {
   });
 
   test('throws AbortError when signal fires during delay and resolves early', async () => {
-    adapter.routes.get('/slow', () => ({ status: 200, delay: 200 }));
+    adapter.routes.get('/slow', () => ({ status: 200, delay: 1000 }));
     const controller = new AbortController();
     const start = Date.now();
     setTimeout(() => controller.abort(), 30);
@@ -727,13 +727,19 @@ describe('MockAdapter.send() — low-level contract', () => {
     }
 
     expect(caught?.name).toBe('AbortError');
-    // Should have thrown well before the 200ms delay completed
-    expect(Date.now() - start).toBeLessThan(150);
+    // Should have thrown well before the 1000ms delay completed
+    expect(Date.now() - start).toBeLessThan(400);
   });
 
   test('throws AbortError when signal fires while async handler is still pending', async () => {
+    // The handler stays pending until the test releases it - no dangling
+    // timer is left behind once the abort wins the race.
+    let releaseHandler!: () => void;
+    const handlerGate = new Promise<void>((resolve) => {
+      releaseHandler = resolve;
+    });
     adapter.routes.get('/slow-handler', async () => {
-      await new Promise((resolve) => setTimeout(resolve, 200));
+      await handlerGate;
       return { status: 200 };
     });
 
@@ -754,7 +760,10 @@ describe('MockAdapter.send() — low-level contract', () => {
     }
 
     expect(caught?.name).toBe('AbortError');
-    expect(Date.now() - start).toBeLessThan(150);
+    expect(Date.now() - start).toBeLessThan(400);
+
+    // Let the abandoned handler finish so nothing stays pending after the test.
+    releaseHandler();
   });
 
   test('does not invoke onHandlerError when signal fires while async handler is pending', async () => {
@@ -766,27 +775,56 @@ describe('MockAdapter.send() — low-level contract', () => {
       },
     });
 
-    errorAdapter.routes.get('/slow-handler', async () => {
-      await new Promise((resolve) => setTimeout(resolve, 200));
-      return { status: 200 };
+    // The handler stays pending until the test releases it, so the abort is
+    // guaranteed to land while it is in flight - no timers, no sleeps.
+    let handlerStarted!: () => void;
+    const handlerRunning = new Promise<void>((resolve) => {
+      handlerStarted = resolve;
+    });
+
+    let failHandler!: (error: Error) => void;
+    const handlerResult = new Promise<never>((_resolve, reject) => {
+      failHandler = reject;
+    });
+    // Nothing else awaits this rejection once the adapter has abandoned it.
+    const handlerSettled = handlerResult.catch((error: Error) => error);
+
+    errorAdapter.routes.get('/slow-handler', () => {
+      handlerStarted();
+      return handlerResult;
     });
 
     const controller = new AbortController();
-    setTimeout(() => controller.abort(), 30);
+    const sent = errorAdapter.send(
+      makeAdapterRequest({
+        requestURL: '/slow-handler',
+        signal: controller.signal,
+      }),
+    );
+
+    await handlerRunning;
+    controller.abort();
 
     let caught: Error | undefined;
     try {
-      await errorAdapter.send(
-        makeAdapterRequest({
-          requestURL: '/slow-handler',
-          signal: controller.signal,
-        }),
-      );
+      await sent;
     } catch (error) {
       caught = error as Error;
     }
 
+    expect(caught?.name).toBe('AbortError');
     expect(caught?.message).toMatch(/aborted/i);
+
+    // The handler fails *after* the abort already rejected the send. The
+    // adapter must not route that late failure into onHandlerError.
+    const lateFailure = new Error('late handler failure');
+    failHandler(lateFailure);
+    expect(await handlerSettled).toBe(lateFailure);
+
+    // Drain any continuations the late rejection could have scheduled.
+    await Promise.resolve();
+    await Promise.resolve();
+
     expect(onHandlerErrorCalls).toBe(0);
   });
 

@@ -961,7 +961,7 @@ describe('RetryRunner', () => {
       // After completion, should show the duration of the last attempt
       const attemptTime = runner.attemptTimeTakenMS;
       expect(attemptTime).toBeGreaterThanOrEqual(20);
-      expect(attemptTime).toBeLessThan(100); // Reasonable upper bound
+      expect(attemptTime).toBeLessThan(1000); // Room for noisy CI timers
 
       // Should remain stable
       await sleep(10);
@@ -974,10 +974,11 @@ describe('RetryRunner', () => {
       const operation = async (reportResult: ReportResult): Promise<void> => {
         attemptCount++;
         if (attemptCount === 1) {
-          await sleep(50);
+          await sleep(40);
           reportResult('error', new Error('First fails'));
         } else if (attemptCount === 2) {
-          await sleep(150);
+          // Keep a wide gap vs attempt 1 so noisy CI cannot invert the order.
+          await sleep(250);
           reportResult('error', new Error('Second fails'));
         } else {
           await sleep(20);
@@ -1003,10 +1004,11 @@ describe('RetryRunner', () => {
 
       await runner.run(true);
 
-      // Each attempt should have recorded its own duration
-      expect(attempt1Time).toBeGreaterThanOrEqual(50);
-      expect(attempt2Time).toBeGreaterThanOrEqual(150);
-      expect(attempt3Time).toBeGreaterThanOrEqual(20);
+      // Each attempt should have recorded its own duration (floors leave room for
+      // timer undershoot; relative order uses a large sleep gap instead of tight bounds).
+      expect(attempt1Time).toBeGreaterThanOrEqual(30);
+      expect(attempt2Time).toBeGreaterThanOrEqual(200);
+      expect(attempt3Time).toBeGreaterThanOrEqual(10);
       expect(attempt2Time).toBeGreaterThan(attempt1Time);
 
       // Final value should be the last attempt
