@@ -131,6 +131,59 @@ describe('LifecycleManager - triggerShutdown()', () => {
     // still stopping at this point.
     expect(manager.getComponentStatus('hanging')?.state).toBe('stopping');
   });
+
+  test('rejects rather than throwing synchronously when the logger throws', async () => {
+    const logger = new Logger({
+      sinks: [new ArraySink()],
+      callProcessExit: false,
+    });
+    const manager = new LifecycleManager({
+      logger,
+      shutdownWarningTimeoutMS: -1,
+      repeatedShutdownRequestPolicy: {
+        // High enough that the retry below tracks without escalating.
+        forceAfterCount: 99,
+        withinMS: 1000,
+        countManualRetriesTowardEscalation: true,
+        onForceShutdown: () => {},
+      },
+    });
+
+    await manager.registerComponent(new SlowStop(logger, 'slow', 120));
+    await manager.startAllComponents();
+    await manager.triggerShutdown();
+
+    // The escalation warn inside `handleRepeatedShutdownRequest` is not guarded, and
+    // `this.logger` is a caller-supplied `LoggerService`. A throw from there used to
+    // leave `triggerShutdown()` synchronously, past the caller's `.catch()`.
+    const service = (manager as unknown as { logger: { warn: unknown } })
+      .logger;
+    const originalWarn = service.warn;
+    const failure = new Error('logger exploded');
+    service.warn = (): never => {
+      throw failure;
+    };
+
+    let didThrowSynchronously = false;
+    let rejection: unknown;
+
+    try {
+      await manager.triggerShutdown().catch((error: unknown) => {
+        rejection = error;
+      });
+    } catch {
+      didThrowSynchronously = true;
+    } finally {
+      service.warn = originalWarn;
+    }
+
+    expect(didThrowSynchronously).toBe(false);
+    // `toError` returns an `Error` unchanged, so the caller still sees the original
+    // failure rather than a wrapper.
+    expect(rejection).toBe(failure);
+
+    await sleep(250);
+  });
 });
 
 describe('LifecycleManager - triggerShutdown() escalation', () => {
@@ -165,9 +218,9 @@ describe('LifecycleManager - triggerShutdown() escalation', () => {
     ];
 
     expect(acks[0].initiated).toBe(true);
-    expect(acks.slice(1).every((ack) => ack.code === 'already_in_progress')).toBe(
-      true,
-    );
+    expect(
+      acks.slice(1).every((ack) => ack.code === 'already_in_progress'),
+    ).toBe(true);
     expect(forceShutdownCalls).toBe(0);
 
     await sleep(250);
@@ -202,5 +255,54 @@ describe('LifecycleManager - triggerShutdown() escalation', () => {
 
     expect(forceShutdownCalls).toBe(1);
     await sleep(250);
+  });
+
+  test('counts a manual retry once while armed after a failed shutdown', async () => {
+    const logger = new Logger({
+      sinks: [new ArraySink()],
+      callProcessExit: false,
+    });
+    let forceShutdownCalls = 0;
+    const manager = new LifecycleManager({
+      logger,
+      shutdownWarningTimeoutMS: -1,
+      repeatedShutdownRequestPolicy: {
+        forceAfterCount: 2,
+        withinMS: 2000,
+        countManualRetriesTowardEscalation: true,
+        onForceShutdown: () => {
+          forceShutdownCalls++;
+        },
+      },
+    });
+
+    class Hanging extends BaseComponent {
+      public async start(): Promise<void> {}
+      public stop(): Promise<void> {
+        return new Promise<void>(() => {});
+      }
+    }
+
+    await manager.registerComponent(
+      new Hanging(logger, { name: 'hanging', dependencies: [] }),
+    );
+    await manager.startAllComponents();
+
+    // Fail the first attempt so post-failure escalation is armed.
+    const failed = await manager.stopAllComponents({
+      timeoutMS: 100,
+      retryStalled: false,
+    });
+    expect(failed.success).toBe(false);
+    expect(manager.getShutdownEscalationStatus().isArmed).toBe(true);
+
+    // `stopAllComponentsInternal` owns the manual-retry-while-armed split, so this
+    // must advance the count by exactly one - the same as `stopAllComponents()`.
+    // Counting it in the request path too would reach forceAfterCount on this one
+    // call and force-kill from a single programmatic request.
+    await manager.triggerShutdown();
+
+    expect(manager.getShutdownEscalationStatus().requestCount).toBe(1);
+    expect(forceShutdownCalls).toBe(0);
   });
 });

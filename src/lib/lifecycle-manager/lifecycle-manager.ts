@@ -2006,10 +2006,24 @@ export class LifecycleManager
    * Escalation means an operator pressing Ctrl+C again; concurrent callers of this method
    * are not expressing that, and must not be able to force-kill the process by volume.
    *
+   * The returned promise rejects only when the request itself could not be recorded,
+   * which in practice means a caller-supplied `LoggerService` threw out of one of the
+   * escalation log lines. `await` it or attach a `.catch()`: a bare
+   * `void triggerShutdown()` turns that rejection into an unhandled one, which is the
+   * same hazard this method exists to spare callers of `void stopAllComponents()`.
+   *
    * @returns Acknowledgement that the request was accepted, not the result of the shutdown
    */
   public triggerShutdown(): Promise<ShutdownTriggerResult> {
-    return Promise.resolve(this.requestShutdown('manual', false));
+    // A bare `Promise.resolve(this.requestShutdown(...))` evaluates the call first, so a
+    // synchronous throw escapes `triggerShutdown()` itself and bypasses the caller's
+    // `.catch()`. Converting it to a rejection keeps the failure on the promise, where
+    // the documented contract says it belongs.
+    try {
+      return Promise.resolve(this.requestShutdown('manual', false));
+    } catch (error) {
+      return Promise.reject(toError(error));
+    }
   }
 
   /**
@@ -6114,10 +6128,18 @@ export class LifecycleManager
       signalShutdown(true);
 
       if (!shouldCountTowardEscalation) {
-        this.logger.warn(
-          'Shutdown already in progress, ignoring manual request',
-          { params: { method } },
-        );
+        // `this.logger` is a caller-supplied `LoggerService`. A throw here would
+        // escape `triggerShutdown()` synchronously, past any `.catch()` the caller
+        // attached - the exact failure this method exists to prevent - so it is
+        // guarded like the `'Shutdown signal received'` log below.
+        try {
+          this.logger.warn(
+            'Shutdown already in progress, ignoring manual request',
+            { params: { method } },
+          );
+        } catch (error) {
+          reportCallbackError(`shutdown notification after ${method}`, error);
+        }
 
         return {
           initiated: false,
@@ -6151,12 +6173,13 @@ export class LifecycleManager
       didEmitShutdownSignal = signalShutdown(false);
       shouldSeedRepeatedShutdownState = false;
 
-      // Same split as `stopAllComponentsInternal`: a manual retry that does not count
-      // starts a fresh cycle rather than continuing the armed one.
-      if (shouldCountTowardEscalation) {
+      // Only signals are counted here. `stopAllComponentsInternal` already owns the
+      // manual-retry-while-armed split - same flag, same continue-or-reset choice - and
+      // it runs on the call below, so counting a `'manual'` request in both places would
+      // advance `requestCount` twice for one `triggerShutdown()`, halving the effective
+      // `forceAfterCount` and letting a single programmatic request force-kill.
+      if (method !== 'manual') {
         this.handleRepeatedShutdownRequest(method);
-      } else {
-        this.resetRepeatedShutdownRequestState();
       }
     }
 
