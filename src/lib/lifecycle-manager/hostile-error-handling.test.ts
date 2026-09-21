@@ -165,9 +165,9 @@ describe('LifecycleManager - hostile thrown values', () => {
   test('a logger that throws during a signal-driven shutdown is not fatal', async () => {
     // The signal handler starts `stopAllComponentsInternal` and lets it float, and that
     // method is `try`/`finally` with no `catch`. A logger that threw while the shutdown
-    // was being logged - the caller's own object, so their guarantee, not this file's -
-    // rejected the floating promise with nothing attached: an unhandled rejection on
-    // `SIGTERM`, fatal under Node's default, before any component was stopped.
+    // was being logged rejected the floating promise with nothing attached: an unhandled
+    // rejection on `SIGTERM`, fatal under Node's default, before any component was
+    // stopped. The manager guards its own logger at construction, so it cannot.
     const throwingLogger = new Logger({
       sinks: [arraySink],
       callProcessExit: false,
@@ -218,10 +218,11 @@ describe('LifecycleManager - hostile thrown values', () => {
 
       expect(rejections).toEqual([]);
       expect(reports.length).toBe(1);
-      // The log line is guarded where it is written, so the shutdown pass carries on
-      // instead of rejecting with `isShuttingDown` already latched.
+      // The manager's logger is guarded, so the shutdown pass carries on instead of
+      // rejecting with `isShuttingDown` already latched. The report is labelled by the
+      // logger method rather than by the operation, which the guard cannot see.
       expect((reports[0] as Error).message).toContain(
-        'shutdown notification after SIGTERM',
+        'lifecycle-manager logger.info',
       );
       expect(((reports[0] as Error).cause as Error).message).toBe(
         'the logger itself is broken',
@@ -340,43 +341,21 @@ describe('LifecycleManager - hostile thrown values', () => {
   }
 
   /**
-   * A logger whose `entity(name).<level>(message)` throws for exactly one message, so a
-   * detached chain's *body* fails while the handler that reports the failure still works.
+   * Make one private step of the manager throw, so a detached chain's *body* fails while
+   * the handler that reports the failure still works.
+   *
+   * These used to inject the failure through a logger that refused one message. The
+   * manager guards its own logger now, so no log line can fail a chain body; the step
+   * has to be one that does real work.
    */
-  function loggerThatRefuses(
-    sink: ArraySink,
-    level: 'info' | 'warn',
-    refusedMessage: string,
-  ): Logger {
-    const refusing = new Logger({ sinks: [sink], callProcessExit: false });
-    const realService = refusing.service.bind(refusing);
-
-    refusing.service = (serviceName: string): LoggerService => {
-      const service = realService(serviceName);
-      const realEntity = service.entity.bind(service);
-
-      service.entity = (entityName: string): LoggerService => {
-        const entity = realEntity(entityName);
-        const realLog = entity[level].bind(entity);
-
-        entity[level] = (
-          message: string,
-          ...rest: unknown[]
-        ): ReturnType<LoggerService[typeof level]> => {
-          if (message === refusedMessage) {
-            throw new Error(`the logger refused: ${message}`);
-          }
-
-          return (realLog as (...args: unknown[]) => void)(message, ...rest);
-        };
-
-        return entity;
-      };
-
-      return service;
+  function internalStepThatThrows(
+    lifecycle: LifecycleManager,
+    step: string,
+    message: string,
+  ): void {
+    (lifecycle as unknown as Record<string, () => never>)[step] = (): never => {
+      throw new Error(message);
     };
-
-    return refusing;
   }
 
   test('a late stop resolution that fails is logged as such, not dropped or fatal', async () => {
@@ -384,12 +363,15 @@ describe('LifecycleManager - hostile thrown values', () => {
     // component half-transitioned. The chain that runs it reports that through
     // `'Late stop resolution failed'`; without that report the only trace was a stuck
     // state read much later, and without the terminal `.catch` an unhandled rejection.
-    const refusing = loggerThatRefuses(
-      arraySink,
-      'info',
-      'Stalled component completed stop late, stall cleared',
+    const lifecycle = new LifecycleManager({ logger });
+
+    // Called from the middle of that sequence, after the state writes and before the
+    // late-resolution log line and its events.
+    internalStepThatThrows(
+      lifecycle,
+      'resolvePendingForceStopWaiters',
+      'late stop resolution exploded',
     );
-    const lifecycle = new LifecycleManager({ logger: refusing });
 
     class SlowStop extends BaseComponent {
       constructor() {
@@ -431,7 +413,7 @@ describe('LifecycleManager - hostile thrown values', () => {
 
       expect(report?.type).toBe('warn');
       expect((report?.params?.['error'] as Error).message).toBe(
-        'the logger refused: Stalled component completed stop late, stall cleared',
+        'late stop resolution exploded',
       );
       expect(rejections).toEqual([]);
     } finally {
@@ -525,12 +507,13 @@ describe('LifecycleManager - hostile thrown values', () => {
     // The recovery body stops a component that finished starting after the manager gave
     // up on it. A failure there means that stop silently did not happen, which is what
     // `'Late startup completion handling ended in a failure'` exists to say.
-    const refusing = loggerThatRefuses(
-      arraySink,
-      'warn',
-      'Component completed startup after timeout, stopping automatically',
+    const lifecycle = new LifecycleManager({ logger });
+
+    internalStepThatThrows(
+      lifecycle,
+      'stopComponentInternal',
+      'automatic stop exploded',
     );
-    const lifecycle = new LifecycleManager({ logger: refusing });
 
     class LateStart extends BaseComponent {
       constructor() {
@@ -564,7 +547,7 @@ describe('LifecycleManager - hostile thrown values', () => {
 
       expect(report?.type).toBe('debug');
       expect((report?.params?.['error'] as Error).message).toBe(
-        'the logger refused: Component completed startup after timeout, stopping automatically',
+        'automatic stop exploded',
       );
       expect(rejections).toEqual([]);
     } finally {

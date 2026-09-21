@@ -32,6 +32,44 @@ function shutdownCompleted(manager: LifecycleManager): Promise<void> {
   });
 }
 
+/**
+ * Make the next shutdown pass die in its setup, before `onPassStarted()` announces it.
+ *
+ * The first statement inside that setup is `this.shutdownToken = ulid()`, so a setter
+ * that throws puts the failure exactly where these tests need it. It used to be a stub
+ * of `logShutdownRequestSafely` throwing on the "Stopping all components" line; the
+ * manager's logger is guarded now, so no log line can derail a pass any more.
+ *
+ * One shot only: the rollback in the pass's `catch` writes the token back, and that
+ * write has to succeed.
+ */
+function throwOnNextShutdownTokenWrite(manager: LifecycleManager): () => void {
+  let value = (manager as unknown as { shutdownToken: unknown }).shutdownToken;
+  let hasThrown = false;
+
+  Object.defineProperty(manager, 'shutdownToken', {
+    configurable: true,
+    get: () => value,
+    set: (next: unknown) => {
+      if (!hasThrown) {
+        hasThrown = true;
+        throw new Error('setup exploded');
+      }
+
+      value = next;
+    },
+  });
+
+  return (): void => {
+    Object.defineProperty(manager, 'shutdownToken', {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value,
+    });
+  };
+}
+
 class SlowStop extends BaseComponent {
   public stopEntered = false;
   constructor(
@@ -177,10 +215,12 @@ describe('LifecycleManager - triggerShutdown()', () => {
     const done = shutdownCompleted(manager);
     await manager.triggerShutdown();
 
-    // `this.logger` is a caller-supplied `LoggerService`. The escalation warns inside
+    // The manager's logger is guarded, and the escalation warns inside
     // `handleRepeatedShutdownRequest` sit between advancing `requestCount` and invoking
     // the force handler, so a throw there must not escape the signal handler or swallow
     // the escalation. Only a signal counts mid-shutdown, so the repeat is a SIGTERM.
+    // Assigning through the guard lands on the underlying service, so this really does
+    // install a throwing logger.
     const service = (manager as unknown as { logger: { warn: unknown } })
       .logger;
     const originalWarn = service.warn;
@@ -212,9 +252,7 @@ describe('LifecycleManager - triggerShutdown()', () => {
     expect(forceShutdownCalls).toBe(1);
     expect(
       reports.some((report) =>
-        (report as Error).message.includes(
-          'shutdown notification after SIGTERM',
-        ),
+        (report as Error).message.includes('lifecycle-manager logger.warn'),
       ),
     ).toBe(true);
 
@@ -254,9 +292,7 @@ describe('LifecycleManager - triggerShutdown()', () => {
     expect(ack.initiated).toBe(true);
     expect(
       reports.some((report) =>
-        (report as Error).message.includes(
-          'shutdown notification after manual',
-        ),
+        (report as Error).message.includes('lifecycle-manager logger.info'),
       ),
     ).toBe(true);
 
@@ -480,9 +516,7 @@ describe('LifecycleManager - triggerShutdown() hardening', () => {
     expect(manager.getShutdownEscalationStatus().isArmed).toBe(false);
     expect(
       reports.some((report) =>
-        (report as Error).message.includes(
-          'shutdown escalation expiry notification',
-        ),
+        (report as Error).message.includes('lifecycle-manager logger.warn'),
       ),
     ).toBe(true);
 
@@ -522,9 +556,7 @@ describe('LifecycleManager - triggerShutdown() hardening', () => {
     expect(ack.initiated).toBe(true);
     expect(
       reports.some((report) =>
-        (report as Error).message.includes(
-          'shutdown notification after manual',
-        ),
+        (report as Error).message.includes('lifecycle-manager logger.info'),
       ),
     ).toBe(true);
   });
@@ -727,21 +759,7 @@ describe('LifecycleManager - triggerShutdown() hardening', () => {
 
     globalThis.addEventListener('error', onError);
 
-    // The "Stopping all components" line runs before the pass announces itself.
-    const internals = manager as unknown as {
-      logShutdownRequestSafely: (...args: unknown[]) => void;
-    };
-    const original = internals.logShutdownRequestSafely;
-    internals.logShutdownRequestSafely = function (
-      this: unknown,
-      ...args: unknown[]
-    ): void {
-      if (args[1] === 'Stopping all components') {
-        throw new Error('setup exploded');
-      }
-
-      original.apply(this, args);
-    };
+    const restoreShutdownToken = throwOnNextShutdownTokenWrite(manager);
 
     try {
       // eslint-disable-next-line @typescript-eslint/await-thenable
@@ -749,7 +767,7 @@ describe('LifecycleManager - triggerShutdown() hardening', () => {
         'failed before a shutdown pass could start',
       );
     } finally {
-      internals.logShutdownRequestSafely = original;
+      restoreShutdownToken();
       globalThis.removeEventListener('error', onError);
     }
 
@@ -790,25 +808,14 @@ describe('LifecycleManager - triggerShutdown() hardening', () => {
     // it would leave the next pass inheriting a `firstMethod` and `firstRequestAt`
     // from a shutdown that never happened, and skipping its own seeding.
     const internals = manager as unknown as {
-      logShutdownRequestSafely: (...args: unknown[]) => void;
       handleShutdownRequest: (method: string) => void;
     };
-    const original = internals.logShutdownRequestSafely;
-    internals.logShutdownRequestSafely = function (
-      this: unknown,
-      ...args: unknown[]
-    ): void {
-      if (args[1] === 'Stopping all components') {
-        throw new Error('setup exploded');
-      }
-
-      original.apply(this, args);
-    };
+    const restoreShutdownToken = throwOnNextShutdownTokenWrite(manager);
 
     try {
       internals.handleShutdownRequest('SIGTERM');
     } finally {
-      internals.logShutdownRequestSafely = original;
+      restoreShutdownToken();
       globalThis.removeEventListener('error', onError);
     }
 

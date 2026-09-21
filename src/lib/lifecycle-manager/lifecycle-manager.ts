@@ -88,9 +88,9 @@ import {
 import { isPromise } from '../is-promise';
 import {
   reportCallbackError,
-  runCallbackSafely,
   safeHandleCallback,
 } from '../safe-handle-callback';
+import { createGuardedLoggerService } from './guarded-logger';
 import { describeError, isErrorValue, toError } from '../to-error';
 import { finiteClamp, finiteClampMin } from '../clamp';
 import { MAX_TIMER_MS } from '../internal/timer-limits';
@@ -143,7 +143,17 @@ export class LifecycleManager
 {
   // Configuration
   private readonly name: string;
+  /**
+   * The manager's own logging surface: guarded, so no line in this file can throw or
+   * reject at its call site. See {@link createGuardedLoggerService}.
+   */
   private readonly logger: LoggerService;
+  /**
+   * The caller's own `Logger`, never wrapped. `enableLoggerExitHook` registers a
+   * `beforeExit` callback on it, and components build their own service loggers from the
+   * instance the caller handed them, so the object identity and behaviour here stay the
+   * caller's.
+   */
   private readonly rootLogger: Logger;
   private readonly shutdownWarningTimeoutMS: number;
   private readonly messageTimeoutMS: number;
@@ -253,7 +263,12 @@ export class LifecycleManager
 
     this.name = options.name ?? 'lifecycle-manager';
     this.rootLogger = options.logger;
-    this.logger = this.rootLogger.service(this.name);
+    // Guarded once, here, rather than at the ~140 call sites that log: the logger is
+    // caller-supplied, and a method that throws or rejects would otherwise propagate
+    // into whatever lifecycle operation happened to be logging at the time.
+    this.logger = createGuardedLoggerService(
+      this.rootLogger.service(this.name),
+    );
     // Floored at `-1`, not at `0`: a negative value is the documented way to skip the
     // warning phase entirely, so clamping it up to zero would silently turn the opt-out
     // into a zero-length warning. Every negative means the same thing to the check that
@@ -1108,14 +1123,9 @@ export class LifecycleManager
         return;
       }
       hasTimedOut = true;
-      try {
-        this.logger.warn(
-          'Startup timeout exceeded, returning partial results',
-          { params: { timeoutMS: effectiveTimeout } },
-        );
-      } catch (error) {
-        reportCallbackError('bulk startup timeout notification', error);
-      }
+      this.logger.warn('Startup timeout exceeded, returning partial results', {
+        params: { timeoutMS: effectiveTimeout },
+      });
     };
     // The startup deadline bounds starts. Rollback has its own stop timeouts.
     if (bulkDelay > 0) {
@@ -2079,9 +2089,10 @@ export class LifecycleManager
    * `countManualRetriesTowardEscalation` is enabled.
    *
    * A caller-supplied `LoggerService` that throws while the request is being logged
-   * does not fail the request: every log line on this path is guarded and reported
-   * through the global error channel, so a logger failure alone never rejects the
-   * acknowledgement.
+   * does not fail the request: the manager guards its own logger at construction, so
+   * no log line anywhere in a lifecycle operation can throw or reject at its call
+   * site, and a logger failure alone never rejects the acknowledgement. Those
+   * failures are reported on the global error channel instead.
    *
    * The promise does reject when the request failed before a shutdown pass could
    * start and nothing else is shutting down, which leaves no acknowledgement to
@@ -2283,9 +2294,8 @@ export class LifecycleManager
           // Terminal, for the reason the shutdown-warning chain carries one: nothing
           // retains this chain, so a throw out of the reporting handler above becomes an
           // unhandled rejection mid-lifecycle - fatal under Node's default
-          // `--unhandled-rejections=throw`. `this.logger` is the caller's own object, so
-          // "logging does not throw" is their guarantee to keep, not this file's to
-          // assume.
+          // `--unhandled-rejections=throw`. Logging is guarded, but a floating chain
+          // should not have to rely on that.
           .catch(() => {
             // Nothing left to report with.
           });
@@ -2586,9 +2596,8 @@ export class LifecycleManager
           // Terminal, for the reason the shutdown-warning chain carries one: nothing
           // retains this chain, so a throw out of the reporting handler above becomes an
           // unhandled rejection mid-lifecycle - fatal under Node's default
-          // `--unhandled-rejections=throw`. `this.logger` is the caller's own object, so
-          // "logging does not throw" is their guarantee to keep, not this file's to
-          // assume.
+          // `--unhandled-rejections=throw`. Logging is guarded, but a floating chain
+          // should not have to rely on that.
           .catch(() => {
             // Nothing left to report with.
           });
@@ -3459,11 +3468,11 @@ export class LifecycleManager
     if (this.isShuttingDown) {
       this.noteShutdownRequestDuringRestartStopPhase();
 
-      // Guarded so a throwing logger cannot turn this refusal into a rejection.
-      this.logShutdownRequestSafely(
-        'warn',
+      this.logger.warn(
         'Cannot stop all components: shutdown already in progress',
-        { method },
+        {
+          params: { method },
+        },
       );
 
       return {
@@ -3528,8 +3537,8 @@ export class LifecycleManager
       }
       isDuringStartup = this.isStarting;
 
-      this.logShutdownRequestSafely('info', 'Stopping all components', {
-        method,
+      this.logger.info('Stopping all components', {
+        params: { method },
       });
       // Both marked before the emit, like the completed flag below: if emitting throws
       // once listeners have already run, they are still owed a `shutdown-completed`.
@@ -3552,10 +3561,9 @@ export class LifecycleManager
         // If we can't resolve order due to cycle, fall back to reverse registration order
         const err = toError(error);
 
-        this.logShutdownRequestSafely(
-          'warn',
+        this.logger.warn(
           'Could not resolve shutdown order, using registration order: {{error.message}}',
-          { error: err, method },
+          { params: { error: err, method } },
         );
 
         shutdownOrder = this.components.map((c) => c.getName()).reverse();
@@ -3589,14 +3597,10 @@ export class LifecycleManager
                 hasTimedOut = true;
 
                 resolve('timeout');
-                try {
-                  this.logger.warn(
-                    'Shutdown timeout exceeded, halting further stop attempts',
-                    { params: { timeoutMS: effectiveTimeout } },
-                  );
-                } catch (error) {
-                  reportCallbackError('shutdown timeout notification', error);
-                }
+                this.logger.warn(
+                  'Shutdown timeout exceeded, halting further stop attempts',
+                  { params: { timeoutMS: effectiveTimeout } },
+                );
               }, toTimerDelayMS(effectiveTimeout));
             })
           : null;
@@ -3745,18 +3749,20 @@ export class LifecycleManager
         stalledComponents.length === 0 &&
         stoppingComponents.size === 0;
 
-      // Guarded: a logger that throws here would otherwise land in the `catch` below and
-      // replace the result of a pass that finished - even a clean one - with a failure.
-      this.logShutdownRequestSafely(
-        isSuccess ? 'success' : 'warn',
+      // The guard matters here: a logger that threw would otherwise land in the `catch`
+      // below and replace the result of a pass that finished - even a clean one - with
+      // a failure.
+      this.logger[isSuccess ? 'success' : 'warn'](
         isSuccess
           ? 'Shutdown completed successfully'
           : 'Shutdown attempt completed with stalled components or timeout',
         {
-          method,
-          stopped: stoppedComponents.size,
-          stalled: stalledComponents.length,
-          durationMS,
+          params: {
+            method,
+            stopped: stoppedComponents.size,
+            stalled: stalledComponents.length,
+            durationMS,
+          },
         },
       );
 
@@ -3880,15 +3886,10 @@ export class LifecycleManager
         // the process-wide shutdown latch must be released so logger.exit() and a later
         // shutdown/escalation are not held forever by a stop() that never settles.
         void pendingShutdownOperation.catch((error: unknown) => {
-          try {
-            this.logger.warn(
-              'Shutdown operation failed after the global timeout: {{error.message}}',
-              { params: { error: toError(error) } },
-            );
-          } catch {
-            // This is the terminal rejection handler; a reporting failure must not
-            // turn the late shutdown failure into an unhandled rejection.
-          }
+          this.logger.warn(
+            'Shutdown operation failed after the global timeout: {{error.message}}',
+            { params: { error: toError(error) } },
+          );
         });
       }
 
@@ -4232,9 +4233,8 @@ export class LifecycleManager
               // Terminal, for the reason the shutdown-warning chain carries one: nothing
               // retains this chain, so a throw out of the reporting handler above becomes an
               // unhandled rejection mid-lifecycle - fatal under Node's default
-              // `--unhandled-rejections=throw`. `this.logger` is the caller's own object, so
-              // "logging does not throw" is their guarantee to keep, not this file's to
-              // assume.
+              // `--unhandled-rejections=throw`. Logging is guarded, but a floating chain
+              // should not have to rely on that.
               .catch(() => {
                 // Nothing left to report with.
               });
@@ -4854,9 +4854,8 @@ export class LifecycleManager
               // Terminal, for the reason the shutdown-warning chain carries one: nothing
               // retains this chain, so a throw out of the reporting handler above becomes an
               // unhandled rejection mid-lifecycle - fatal under Node's default
-              // `--unhandled-rejections=throw`. `this.logger` is the caller's own object, so
-              // "logging does not throw" is their guarantee to keep, not this file's to
-              // assume.
+              // `--unhandled-rejections=throw`. Logging is guarded, but a floating chain
+              // should not have to rely on that.
               .catch(() => {
                 // Nothing left to report with.
               });
@@ -5051,15 +5050,11 @@ export class LifecycleManager
       this.createPendingForceStopWaiter(name);
     let timeoutHandle: NodeJS.Timeout | undefined;
     const reportFailureAfterGracefulStop = (error: unknown): void => {
-      try {
-        this.logger
-          .entity(name)
-          .warn('Force shutdown failed after graceful stop completed', {
-            params: { error: toError(error) },
-          });
-      } catch {
-        // A caller-supplied logger must not turn a completed stop into a rejection.
-      }
+      this.logger
+        .entity(name)
+        .warn('Force shutdown failed after graceful stop completed', {
+          params: { error: toError(error) },
+        });
     };
 
     try {
@@ -5137,9 +5132,8 @@ export class LifecycleManager
               // Terminal, for the reason the shutdown-warning chain carries one: nothing
               // retains this chain, so a throw out of the reporting handler above becomes an
               // unhandled rejection mid-lifecycle - fatal under Node's default
-              // `--unhandled-rejections=throw`. `this.logger` is the caller's own object, so
-              // "logging does not throw" is their guarantee to keep, not this file's to
-              // assume.
+              // `--unhandled-rejections=throw`. Logging is guarded, but a floating chain
+              // should not have to rely on that.
               .catch(() => {
                 // Nothing left to report with.
               });
@@ -5426,15 +5420,9 @@ export class LifecycleManager
     startPromise: Promise<void> | void,
     startAttemptToken: string,
   ): void {
-    try {
-      this.logger
-        .entity(name)
-        .warn(
-          'Startup timed out, stopping component if startup completes later',
-        );
-    } catch (error) {
-      reportCallbackError('late startup cleanup notification', error);
-    }
+    this.logger
+      .entity(name)
+      .warn('Startup timed out, stopping component if startup completes later');
 
     Promise.resolve(startPromise)
       .then(async () => {
@@ -5508,9 +5496,8 @@ export class LifecycleManager
       // Terminal, for the reason the shutdown-warning chain carries one: nothing
       // retains this chain, so a throw out of the reporting handler above becomes an
       // unhandled rejection mid-lifecycle - fatal under Node's default
-      // `--unhandled-rejections=throw`. `this.logger` is the caller's own object, so
-      // "logging does not throw" is their guarantee to keep, not this file's to
-      // assume.
+      // `--unhandled-rejections=throw`. Logging is guarded, but a floating chain
+      // should not have to rely on that.
       .catch(() => {
         // Nothing left to report with.
       })
@@ -6292,8 +6279,8 @@ export class LifecycleManager
       this.seedRepeatedShutdownRequestState(method);
     }
 
-    this.logShutdownRequestSafely('info', 'Shutdown signal received', {
-      method,
+    this.logger.info('Shutdown signal received', {
+      params: { method },
     });
 
     if (!didEmitShutdownSignal) {
@@ -6324,17 +6311,18 @@ export class LifecycleManager
       // `triggerShutdown()` is built for concurrent callers, so a handful of overlapping
       // HTTP handlers must not add up to a force kill. The flag covers a deliberate
       // retry after a failed pass, which `stopAllComponentsInternal` owns.
-      this.logShutdownRequestSafely(
-        'warn',
+      this.logger.warn(
         'Shutdown already in progress, ignoring manual request',
-        { method: 'manual' },
+        {
+          params: { method: 'manual' },
+        },
       );
 
       return this.shutdownAlreadyInProgressResult();
     }
 
-    this.logShutdownRequestSafely('info', 'Manual shutdown requested', {
-      method: 'manual',
+    this.logger.info('Manual shutdown requested', {
+      params: { method: 'manual' },
     });
 
     const result = this.startShutdownPass('manual');
@@ -6360,13 +6348,12 @@ export class LifecycleManager
     method: ShutdownMethod,
   ): ShutdownTriggerResult | null {
     // Initiate shutdown asynchronously (don't await in signal handler). With a handler
-    // on the rejection: `stopAllComponentsInternal` rethrows from its `catch`, and
-    // `this.logger` is the caller's own object, so a logger that throws while the
-    // shutdown is being logged rejects this floating promise with nothing attached.
-    // On `SIGINT`/`SIGTERM` that is an unhandled rejection - fatal under Node's default
+    // on the rejection: `stopAllComponentsInternal` rethrows from its `catch`, so any
+    // failure inside the pass rejects this floating promise with nothing attached. On
+    // `SIGINT`/`SIGTERM` that is an unhandled rejection - fatal under Node's default
     // `--unhandled-rejections=throw`, taking the process down before the components
     // it was about to stop were stopped. Reported on the global channel rather than
-    // through the logger, since the logger is the likeliest thing to have thrown.
+    // through the logger, which is where every other failure in this file goes.
     //
     // `stopAllComponentsInternal` runs synchronously up to its first `await`, which is
     // past the point where it either refuses the pass or announces it, and it reports
@@ -6436,11 +6423,9 @@ export class LifecycleManager
 
     if (!policy) {
       // Signals only: a `'manual'` request never reaches here without a policy.
-      this.logShutdownRequestSafely(
-        'warn',
-        'Shutdown already in progress, ignoring signal',
-        { method },
-      );
+      this.logger.warn('Shutdown already in progress, ignoring signal', {
+        params: { method },
+      });
       return true;
     }
 
@@ -6481,25 +6466,27 @@ export class LifecycleManager
     state.latestMethod = method;
     state.latestRequestAt = now;
 
-    // Guarded: `requestCount` has already advanced, so a throwing logger must not be
-    // able to skip the force-shutdown handler below or escape an OS signal handler.
-    this.logShutdownRequestSafely(
-      'warn',
+    // The guard matters here: `requestCount` has already advanced, so a logger that
+    // threw would otherwise skip the force-shutdown handler below or escape an OS
+    // signal handler.
+    this.logger.warn(
       // Only signals reach here mid-shutdown; a `'manual'` request is never counted then.
       this.isShuttingDown
         ? 'Shutdown already in progress, tracking repeated signal'
         : 'Previous shutdown attempt finished with stalled components or timeout, escalation window still armed, tracking repeated request',
       {
-        method,
-        requestCount: state.requestCount,
-        firstMethod: state.firstMethod,
-        latestMethod: state.latestMethod,
-        firstRequestAt: state.firstRequestAt,
-        latestRequestAt: state.latestRequestAt,
-        repeatedWindowStartedAt: state.repeatedWindowStartedAt,
-        remainsArmedUntil: state.remainsArmedUntil,
-        withinMS: policy.withinMS,
-        forceAfterCount: policy.forceAfterCount,
+        params: {
+          method,
+          requestCount: state.requestCount,
+          firstMethod: state.firstMethod,
+          latestMethod: state.latestMethod,
+          firstRequestAt: state.firstRequestAt,
+          latestRequestAt: state.latestRequestAt,
+          repeatedWindowStartedAt: state.repeatedWindowStartedAt,
+          remainsArmedUntil: state.remainsArmedUntil,
+          withinMS: policy.withinMS,
+          forceAfterCount: policy.forceAfterCount,
+        },
       },
     );
 
@@ -6530,20 +6517,21 @@ export class LifecycleManager
       wasArmedAfterFailure: state.remainsArmedUntil !== null,
     };
 
-    this.logShutdownRequestSafely(
-      'warn',
+    this.logger.warn(
       'Repeated shutdown request threshold reached, invoking force shutdown handler',
       {
-        method,
-        requestCount: context.requestCount,
-        firstMethod: context.firstMethod,
-        latestMethod: context.latestMethod,
-        firstRequestAt: context.firstRequestAt,
-        latestRequestAt: context.latestRequestAt,
-        repeatedWindowStartedAt: state.repeatedWindowStartedAt,
-        remainsArmedUntil: state.remainsArmedUntil,
-        withinMS: policy.withinMS,
-        forceAfterCount: policy.forceAfterCount,
+        params: {
+          method,
+          requestCount: context.requestCount,
+          firstMethod: context.firstMethod,
+          latestMethod: context.latestMethod,
+          firstRequestAt: context.firstRequestAt,
+          latestRequestAt: context.latestRequestAt,
+          repeatedWindowStartedAt: state.repeatedWindowStartedAt,
+          remainsArmedUntil: state.remainsArmedUntil,
+          withinMS: policy.withinMS,
+          forceAfterCount: policy.forceAfterCount,
+        },
       },
     );
     safeHandleCallback(
@@ -6560,55 +6548,6 @@ export class LifecycleManager
       wasArmedAfterFailure: context.wasArmedAfterFailure,
     });
     return true;
-  }
-
-  /**
-   * Log on the shutdown-request path without letting the logger fail the request.
-   *
-   * `this.logger` is a caller-supplied `LoggerService`. These lines run inside OS
-   * signal handlers, behind `triggerShutdown()`, and between escalation bookkeeping
-   * and the force-shutdown handler, so a throw is reported on the global channel
-   * instead of propagating.
-   */
-  private logShutdownRequestSafely(
-    level: 'info' | 'warn' | 'success',
-    message: string,
-    // `method` is required by the type, so a call site cannot forget it and end up
-    // reported under the wrong label.
-    params: { method: ShutdownMethod } & Record<string, unknown>,
-  ): void {
-    this.logSafely(
-      level,
-      message,
-      params,
-      `shutdown notification after ${params.method}`,
-    );
-  }
-
-  /**
-   * Guarded logger call behind `logShutdownRequestSafely()`. Called directly only by the
-   * escalation-expiry line, which also runs from its timer, where no request - and so
-   * no `method` - exists to name in the report.
-   */
-  private logSafely(
-    level: 'info' | 'warn' | 'success',
-    message: string,
-    params: Record<string, unknown>,
-    callbackName: string,
-  ): void {
-    // `runCallbackSafely` also covers a logger method that returns a rejecting promise.
-    //
-    // TODO: the closure only exists to keep `this.logger` bound. Once `runCallbackSafely`
-    // accepts a `thisArg` (PR #28), pass `this.logger[level]` with its args and
-    // `this.logger` as `thisArg` instead.
-    runCallbackSafely(
-      'logger',
-      () => this.logger[level](message, { params }),
-      [],
-      (error) => {
-        reportCallbackError(callbackName, error);
-      },
-    );
   }
 
   /**
@@ -6688,17 +6627,18 @@ export class LifecycleManager
       armedUntil,
     };
 
-    // Guarded: this runs on the shutdown-request path and in the expiry timer, ahead of
-    // the reset below, so a throwing logger would otherwise leave the stale state armed.
-    this.logSafely(
-      'warn',
+    // The guard matters here: this runs on the shutdown-request path and in the expiry
+    // timer, ahead of the reset below, so a logger that threw would otherwise leave the
+    // stale state armed.
+    this.logger.warn(
       'Repeated shutdown escalation window expired, clearing previous shutdown state',
       {
-        remainsArmedUntil: armedUntil,
-        withinMS: policy.withinMS,
-        forceAfterCount: policy.forceAfterCount,
+        params: {
+          remainsArmedUntil: armedUntil,
+          withinMS: policy.withinMS,
+          forceAfterCount: policy.forceAfterCount,
+        },
       },
-      'shutdown escalation expiry notification',
     );
 
     if (expiredState.firstMethod !== null) {
@@ -6982,9 +6922,8 @@ export class LifecycleManager
             // Terminal, for the reason the shutdown-warning chain carries one: nothing
             // retains this chain, so a throw out of the reporting handler above becomes an
             // unhandled rejection mid-lifecycle - fatal under Node's default
-            // `--unhandled-rejections=throw`. `this.logger` is the caller's own object, so
-            // "logging does not throw" is their guarantee to keep, not this file's to
-            // assume.
+            // `--unhandled-rejections=throw`. Logging is guarded, but a floating chain
+            // should not have to rely on that.
             .catch(() => {
               // Nothing left to report with.
             });
