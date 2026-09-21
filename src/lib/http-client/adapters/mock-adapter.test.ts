@@ -766,27 +766,56 @@ describe('MockAdapter.send() — low-level contract', () => {
       },
     });
 
-    errorAdapter.routes.get('/slow-handler', async () => {
-      await new Promise((resolve) => setTimeout(resolve, 200));
-      return { status: 200 };
+    // The handler stays pending until the test releases it, so the abort is
+    // guaranteed to land while it is in flight - no timers, no sleeps.
+    let handlerStarted!: () => void;
+    const handlerRunning = new Promise<void>((resolve) => {
+      handlerStarted = resolve;
+    });
+
+    let failHandler!: (error: Error) => void;
+    const handlerResult = new Promise<never>((_resolve, reject) => {
+      failHandler = reject;
+    });
+    // Nothing else awaits this rejection once the adapter has abandoned it.
+    const handlerSettled = handlerResult.catch((error: Error) => error);
+
+    errorAdapter.routes.get('/slow-handler', () => {
+      handlerStarted();
+      return handlerResult;
     });
 
     const controller = new AbortController();
-    setTimeout(() => controller.abort(), 30);
+    const sent = errorAdapter.send(
+      makeAdapterRequest({
+        requestURL: '/slow-handler',
+        signal: controller.signal,
+      }),
+    );
+
+    await handlerRunning;
+    controller.abort();
 
     let caught: Error | undefined;
     try {
-      await errorAdapter.send(
-        makeAdapterRequest({
-          requestURL: '/slow-handler',
-          signal: controller.signal,
-        }),
-      );
+      await sent;
     } catch (error) {
       caught = error as Error;
     }
 
+    expect(caught?.name).toBe('AbortError');
     expect(caught?.message).toMatch(/aborted/i);
+
+    // The handler fails *after* the abort already rejected the send. The
+    // adapter must not route that late failure into onHandlerError.
+    const lateFailure = new Error('late handler failure');
+    failHandler(lateFailure);
+    expect(await handlerSettled).toBe(lateFailure);
+
+    // Drain any continuations the late rejection could have scheduled.
+    await Promise.resolve();
+    await Promise.resolve();
+
     expect(onHandlerErrorCalls).toBe(0);
   });
 
