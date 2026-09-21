@@ -200,6 +200,11 @@ export class LifecycleManager
   private isShuttingDown = false;
   // Unique token used to detect shutdowns that happened during async start().
   private shutdownToken = ulid();
+  // True only while restartAllComponents() is inside its stop phase, where
+  // `isShuttingDown` hides an incoming shutdown request behind "already in progress".
+  private isRestartStopPhase = false;
+  // Set when such a request lands, so the restart skips its startup phase.
+  private shutdownRequestedDuringRestart = false;
   // Resolver for the first logger.exit() deferred during an already-running shutdown.
   private pendingLoggerExitResolve:
     ((result: BeforeExitResult) => void) | null = null;
@@ -1588,6 +1593,10 @@ export class LifecycleManager
    * `lifecycle-manager:shutdown-completed` and updates `getLastShutdownResult()`, so
    * listeners are never left waiting on a pass that has already died.
    *
+   * Called during a `restartAllComponents()` stop phase this still refuses with
+   * `already_in_progress`, but it cancels the restart's startup phase - the intent is
+   * the same one `triggerShutdown()` expresses there.
+   *
    * @param options - Optional shutdown options
    */
 
@@ -1603,41 +1612,88 @@ export class LifecycleManager
 
   /**
    * Restart all components (stop then start)
+   *
+   * A shutdown request that arrives while the stop phase is running wins: the startup
+   * phase is skipped and the result says so through
+   * `startupSkippedByShutdownRequest`. See `isRestartStopPhase`.
    */
   public async restartAllComponents(
     options?: RestartAllOptions,
   ): Promise<RestartResult> {
     this.logger.info('Restarting all components');
 
-    // Phase 1: Stop all components (explicit defaults for restart semantics)
-    const shutdownResult = await this.stopAllComponentsInternal('manual', {
-      ...this.shutdownOptions,
-      timeoutMS:
-        options?.shutdownTimeoutMS ?? this.shutdownOptions?.timeoutMS ?? 30000,
-      // Always retry/halt during restart for deterministic shutdown behavior.
-      retryStalled: true,
-      haltOnStall: true,
-    });
+    this.isRestartStopPhase = true;
+    this.shutdownRequestedDuringRestart = false;
 
-    // Phase 2: Start all components
-    const startupResult = await this.startAllComponents(
-      options?.startupOptions,
-    );
+    try {
+      // Phase 1: Stop all components (explicit defaults for restart semantics)
+      const shutdownResult = await this.stopAllComponentsInternal('manual', {
+        ...this.shutdownOptions,
+        timeoutMS:
+          options?.shutdownTimeoutMS ??
+          this.shutdownOptions?.timeoutMS ??
+          30000,
+        // Always retry/halt during restart for deterministic shutdown behavior.
+        retryStalled: true,
+        haltOnStall: true,
+      });
 
-    const isSuccess = shutdownResult.success && startupResult.success;
+      // Requests only reach the window below through a fresh shutdown pass, which
+      // `startAllComponents()` aborts on its own via `shutdownToken`.
+      this.isRestartStopPhase = false;
 
-    this.logger[isSuccess ? 'success' : 'warn']('Restart completed', {
-      params: {
-        shutdownSuccess: shutdownResult.success,
-        startupSuccess: startupResult.success,
-      },
-    });
+      // Phase 2: Start all components - unless something asked us to stay down while
+      // phase 1 ran. Checked ahead of a stalled/failed stop phase: the request is the
+      // stronger statement, and reporting it beats reporting whatever startup would
+      // have refused for instead.
+      if (this.shutdownRequestedDuringRestart) {
+        const startupResult: StartupResult = {
+          success: false,
+          startedComponents: [],
+          failedOptionalComponents: [],
+          skippedDueToDependency: [],
+          reason:
+            'Shutdown requested during the restart shutdown phase; startup skipped',
+          code: 'shutdown_requested_during_restart',
+          durationMS: 0,
+        };
 
-    return {
-      shutdownResult,
-      startupResult,
-      success: isSuccess,
-    };
+        this.logger.warn('Restart canceled by shutdown request', {
+          params: { shutdownSuccess: shutdownResult.success },
+        });
+
+        return {
+          shutdownResult,
+          startupResult,
+          startupSkippedByShutdownRequest: true,
+          success: false,
+        };
+      }
+
+      const startupResult = await this.startAllComponents(
+        options?.startupOptions,
+      );
+
+      const isSuccess = shutdownResult.success && startupResult.success;
+
+      this.logger[isSuccess ? 'success' : 'warn']('Restart completed', {
+        params: {
+          shutdownSuccess: shutdownResult.success,
+          startupSuccess: startupResult.success,
+        },
+      });
+
+      return {
+        shutdownResult,
+        startupResult,
+        success: isSuccess,
+      };
+    } finally {
+      // Cleared here as well as above so a stop phase that throws cannot leak either
+      // flag into the next restart.
+      this.isRestartStopPhase = false;
+      this.shutdownRequestedDuringRestart = false;
+    }
   }
 
   // ============================================================================
@@ -2005,6 +2061,10 @@ export class LifecycleManager
    * safe to wait on: once a pass announces itself with
    * `lifecycle-manager:shutdown-initiated`, it always reports a result, even when it
    * fails outright.
+   *
+   * During a `restartAllComponents()` stop phase the acknowledgement is
+   * `already_in_progress` - that running pass is the shutdown this caller asked for -
+   * and the restart's startup phase is cancelled, so the components stay stopped.
    *
    * Prefer this over `void stopAllComponents()`: a floating shutdown promise
    * with no rejection handler becomes an unhandled rejection if the logger
@@ -3397,6 +3457,8 @@ export class LifecycleManager
 
     // Reject if already shutting down
     if (this.isShuttingDown) {
+      this.noteShutdownRequestDuringRestartStopPhase();
+
       // Guarded so a throwing logger cannot turn this refusal into a rejection.
       this.logShutdownRequestSafely(
         'warn',
@@ -6179,7 +6241,8 @@ export class LifecycleManager
    * 1. **Active shutdown** (`isShuttingDown = true`): escalate through the
    *    repeated-shutdown policy if configured, otherwise log and discard.
    *    Emits `signal:shutdown` with `isAlreadyShuttingDown: true` and returns
-   *    without starting another shutdown.
+   *    without starting another shutdown. When that shutdown is a restart's stop
+   *    phase, the request also cancels the restart's startup phase.
    *
    * 2. **Armed post-failure** (previous shutdown finished, armed window still
    *    open): count the request toward the escalation window, emit
@@ -6198,6 +6261,7 @@ export class LifecycleManager
    */
   private handleShutdownRequest(method: ShutdownSignal): void {
     if (this.isShuttingDown) {
+      this.noteShutdownRequestDuringRestartStopPhase();
       this.lifecycleEvents.signalShutdown(method, true);
 
       if (this.handleRepeatedShutdownRequest(method)) {
@@ -6251,6 +6315,8 @@ export class LifecycleManager
    */
   private requestManualShutdown(): ShutdownTriggerResult {
     if (this.isShuttingDown) {
+      this.noteShutdownRequestDuringRestartStopPhase();
+
       // Never counted toward escalation, whatever `countManualRetriesTowardEscalation`
       // says - the same as `stopAllComponents()`, which refuses in this window.
       // Escalation represents an operator pressing Ctrl+C again because the first one
@@ -6331,6 +6397,23 @@ export class LifecycleManager
     // No pass started and nothing is shutting down, so this is not a refusal: the pass
     // threw before it could announce itself, so claiming `already_in_progress` would be a lie.
     return this.isShuttingDown ? this.shutdownAlreadyInProgressResult() : null;
+  }
+
+  /**
+   * Records a shutdown request that landed while `restartAllComponents()` was stopping.
+   *
+   * Such a request is still refused as "already in progress" - the restart's own stop
+   * phase is the shutdown the requester gets, and starting a second pass on top of it
+   * would be wrong. What must not happen is the restart starting everything back up
+   * afterwards, so the request is remembered and phase 2 is skipped instead.
+   *
+   * Called from every "already shutting down" refusal, `stopAllComponents()` included:
+   * a direct stop call in that window expresses the same intent as a signal.
+   */
+  private noteShutdownRequestDuringRestartStopPhase(): void {
+    if (this.isRestartStopPhase) {
+      this.shutdownRequestedDuringRestart = true;
+    }
   }
 
   private shutdownAlreadyInProgressResult(): ShutdownTriggerResult {

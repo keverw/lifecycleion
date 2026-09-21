@@ -321,6 +321,7 @@ export interface StartupResult {
     | 'stalled_components_exist'
     | 'partial_state'
     | 'required_component_failed'
+    | 'shutdown_requested_during_restart'
     | 'startup_timeout'
     | 'unknown_error';
 
@@ -381,6 +382,13 @@ export interface RestartResult {
 
   /** Startup phase result */
   startupResult: StartupResult;
+
+  /**
+   * Present and `true` when a shutdown request arrived during the shutdown phase and
+   * the startup phase was skipped, leaving every component stopped. `startupResult`
+   * then carries the `shutdown_requested_during_restart` code and `success` is false.
+   */
+  startupSkippedByShutdownRequest?: boolean;
 
   /** True only if both shutdown and startup succeeded */
   success: boolean;
