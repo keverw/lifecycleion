@@ -2006,21 +2006,19 @@ export class LifecycleManager
    * Escalation means an operator pressing Ctrl+C again; concurrent callers of this method
    * are not expressing that, and must not be able to force-kill the process by volume.
    *
-   * The returned promise rejects only when the request itself could not be recorded,
-   * which in practice means a caller-supplied `LoggerService` threw out of one of the
-   * escalation log lines. `await` it or attach a `.catch()`: a bare
-   * `void triggerShutdown()` turns that rejection into an unhandled one, which is the
-   * same hazard this method exists to spare callers of `void stopAllComponents()`.
+   * A caller-supplied `LoggerService` that throws while the request is being logged
+   * does not fail the request: every log line on this path is guarded and reported
+   * through the global error channel, so `void triggerShutdown()` is safe.
    *
    * @returns Acknowledgement that the request was accepted, not the result of the shutdown
    */
   public triggerShutdown(): Promise<ShutdownTriggerResult> {
-    // A bare `Promise.resolve(this.requestShutdown(...))` evaluates the call first, so a
-    // synchronous throw escapes `triggerShutdown()` itself and bypasses the caller's
-    // `.catch()`. Converting it to a rejection keeps the failure on the promise, where
-    // the documented contract says it belongs.
+    // Nothing on the request path is expected to throw, but a bare
+    // `Promise.resolve(this.requestShutdown(...))` evaluates the call first, so any
+    // synchronous throw would escape `triggerShutdown()` itself and bypass the caller's
+    // `.catch()`. Converting it to a rejection keeps a failure on the promise.
     try {
-      return Promise.resolve(this.requestShutdown('manual', false));
+      return Promise.resolve(this.requestShutdown('manual'));
     } catch (error) {
       return Promise.reject(toError(error));
     }
@@ -3427,7 +3425,12 @@ export class LifecycleManager
       this.seedRepeatedShutdownRequestState(method);
     }
     const isDuringStartup = this.isStarting;
-    this.logger.info('Stopping all components', { params: { method } });
+
+    // `isShuttingDown` is already set and the `try`/`finally` that releases it has not
+    // started yet, so a caller-supplied logger that throws here would wedge the latch.
+    this.logShutdownRequestSafely('info', method, 'Stopping all components', {
+      method,
+    });
     this.lifecycleEvents.lifecycleManagerShutdownInitiated(
       method,
       isDuringStartup,
@@ -3443,11 +3446,11 @@ export class LifecycleManager
       // If we can't resolve order due to cycle, fall back to reverse registration order
       const err = toError(error);
 
-      this.logger.warn(
+      this.logShutdownRequestSafely(
+        'warn',
+        method,
         'Could not resolve shutdown order, using registration order: {{error.message}}',
-        {
-          params: { error: err },
-        },
+        { error: err },
       );
 
       shutdownOrder = this.components.map((c) => c.getName()).reverse();
@@ -6059,19 +6062,34 @@ export class LifecycleManager
   }
 
   /**
-   * Handle shutdown signal - initiates stopAllComponents().
+   * Handle a shutdown signal. Signal handlers cannot consume a return value, so the
+   * acknowledgement from `requestShutdown()` is dropped; it only matters to the
+   * programmatic `triggerShutdown()` caller.
+   */
+  private handleShutdownRequest(method: ShutdownSignal): void {
+    void this.requestShutdown(method);
+  }
+
+  /**
+   * Shared shutdown-request path behind signal handling and `triggerShutdown()`.
+   * Initiates `stopAllComponents()` in the background and returns an acknowledgement
+   * saying whether this request started a new shutdown pass - it never waits for
+   * components to stop.
    *
    * Four cases depending on the current shutdown state:
    *
    * 1. **Active shutdown** (`isShuttingDown = true`): escalate through the
    *    repeated-shutdown policy if configured, otherwise log and discard.
    *    Emits `signal:shutdown` with `isAlreadyShuttingDown: true` and returns
-   *    without starting another shutdown.
+   *    without starting another shutdown. A `'manual'` request only escalates when
+   *    `countManualRetriesTowardEscalation` is enabled.
    *
    * 2. **Armed post-failure** (previous shutdown finished, armed window still
    *    open): count the request toward the escalation window, emit
    *    `signal:shutdown` with `isAlreadyShuttingDown: false`, then start a
-   *    new `stopAllComponents()` run to retry.
+   *    new `stopAllComponents()` run to retry. A `'manual'` request is not counted
+   *    here: `stopAllComponentsInternal` owns the manual-retry-while-armed
+   *    continue-or-reset choice, and runs on the same call.
    *
    * 3. **Armed post-failure expired** (armed window opened but has since
    *    elapsed): expire the stale state, treat the request as a fresh
@@ -6081,32 +6099,13 @@ export class LifecycleManager
    *    if policy is configured, emit `signal:shutdown` with
    *    `isAlreadyShuttingDown: false`, and start `stopAllComponents()`.
    *
-   * In all cases `signal:shutdown` is emitted exactly once.
+   * For a real signal `signal:shutdown` is emitted exactly once in every case. Its
+   * payload carries a `ShutdownSignal`, so a `'manual'` request never emits it and
+   * stays observable through `lifecycle-manager:shutdown-initiated` instead.
    */
-  private handleShutdownRequest(method: ShutdownSignal): void {
-    // Signal handlers cannot consume a return value. The acknowledgement only
-    // matters to the programmatic `triggerShutdown()` caller.
-    void this.requestShutdown(method, true);
-  }
-
-  /**
-   * Shared shutdown-request path behind signal handling and `triggerShutdown()`.
-   *
-   * Runs the same escalation bookkeeping either way and returns an
-   * acknowledgement saying whether this request started a new shutdown pass.
-   * The shutdown itself continues in the background - the returned value never
-   * waits for components to stop.
-   *
-   * `signal:shutdown` carries a `ShutdownSignal`, so it is emitted only for real
-   * signals. A `'manual'` request skips it and stays observable through
-   * `lifecycle-manager:shutdown-initiated` like any other shutdown.
-   */
-  private requestShutdown(
-    method: ShutdownMethod,
-    shouldEmitSignalEvent: boolean,
-  ): ShutdownTriggerResult {
+  private requestShutdown(method: ShutdownMethod): ShutdownTriggerResult {
     const signalShutdown = (isAlreadyShuttingDown: boolean): boolean => {
-      if (!shouldEmitSignalEvent || method === 'manual') {
+      if (method === 'manual') {
         return false;
       }
 
@@ -6128,18 +6127,12 @@ export class LifecycleManager
       signalShutdown(true);
 
       if (!shouldCountTowardEscalation) {
-        // `this.logger` is a caller-supplied `LoggerService`. A throw here would
-        // escape `triggerShutdown()` synchronously, past any `.catch()` the caller
-        // attached - the exact failure this method exists to prevent - so it is
-        // guarded like the `'Shutdown signal received'` log below.
-        try {
-          this.logger.warn(
-            'Shutdown already in progress, ignoring manual request',
-            { params: { method } },
-          );
-        } catch (error) {
-          reportCallbackError(`shutdown notification after ${method}`, error);
-        }
+        this.logShutdownRequestSafely(
+          'warn',
+          method,
+          'Shutdown already in progress, ignoring manual request',
+          { method },
+        );
 
         return {
           initiated: false,
@@ -6187,11 +6180,15 @@ export class LifecycleManager
       this.seedRepeatedShutdownRequestState(method);
     }
 
-    try {
-      this.logger.info('Shutdown signal received', { params: { method } });
-    } catch (error) {
-      reportCallbackError(`shutdown notification after ${method}`, error);
-    }
+    this.logShutdownRequestSafely(
+      'info',
+      method,
+      method === 'manual'
+        ? 'Manual shutdown requested'
+        : 'Shutdown signal received',
+      { method },
+    );
+
     if (!didEmitShutdownSignal) {
       signalShutdown(false);
     }
@@ -6204,11 +6201,25 @@ export class LifecycleManager
     // `--unhandled-rejections=throw`, taking the process down before the components
     // it was about to stop were stopped. Reported on the global channel rather than
     // through the logger, since the logger is the likeliest thing to have thrown.
+    //
+    // `stopAllComponentsInternal` runs synchronously up to its first `await`, which is
+    // past the point where it either refuses the pass or mints a new `shutdownToken`,
+    // so the token tells us whether this request really started one.
+    const shutdownTokenBeforeRequest = this.shutdownToken;
+
     this.stopAllComponentsInternal(method, {
       ...this.shutdownOptions,
     }).catch((error: unknown) => {
       reportCallbackError(`shutdown after ${method}`, error);
     });
+
+    if (this.shutdownToken === shutdownTokenBeforeRequest) {
+      return {
+        initiated: false,
+        code: 'already_in_progress',
+        reason: LIFECYCLE_MANAGER_MESSAGE_SHUTDOWN_IN_PROGRESS,
+      };
+    }
 
     return {
       initiated: true,
@@ -6228,9 +6239,14 @@ export class LifecycleManager
     const policy = this.repeatedShutdownRequestPolicy;
 
     if (!policy) {
-      this.logger.warn('Shutdown already in progress, ignoring signal', {
-        params: { method },
-      });
+      this.logShutdownRequestSafely(
+        'warn',
+        method,
+        method === 'manual'
+          ? 'Shutdown already in progress, ignoring manual request'
+          : 'Shutdown already in progress, ignoring signal',
+        { method },
+      );
       return true;
     }
 
@@ -6271,23 +6287,27 @@ export class LifecycleManager
     state.latestMethod = method;
     state.latestRequestAt = now;
 
-    this.logger.warn(
+    // Guarded: `requestCount` has already advanced, so a throwing logger must not be
+    // able to skip the force-shutdown handler below or escape an OS signal handler.
+    this.logShutdownRequestSafely(
+      'warn',
+      method,
       this.isShuttingDown
-        ? 'Shutdown already in progress, tracking repeated signal'
+        ? method === 'manual'
+          ? 'Shutdown already in progress, tracking repeated manual request'
+          : 'Shutdown already in progress, tracking repeated signal'
         : 'Previous shutdown attempt finished with stalled components or timeout, escalation window still armed, tracking repeated request',
       {
-        params: {
-          method,
-          requestCount: state.requestCount,
-          firstMethod: state.firstMethod,
-          latestMethod: state.latestMethod,
-          firstRequestAt: state.firstRequestAt,
-          latestRequestAt: state.latestRequestAt,
-          repeatedWindowStartedAt: state.repeatedWindowStartedAt,
-          remainsArmedUntil: state.remainsArmedUntil,
-          withinMS: policy.withinMS,
-          forceAfterCount: policy.forceAfterCount,
-        },
+        method,
+        requestCount: state.requestCount,
+        firstMethod: state.firstMethod,
+        latestMethod: state.latestMethod,
+        firstRequestAt: state.firstRequestAt,
+        latestRequestAt: state.latestRequestAt,
+        repeatedWindowStartedAt: state.repeatedWindowStartedAt,
+        remainsArmedUntil: state.remainsArmedUntil,
+        withinMS: policy.withinMS,
+        forceAfterCount: policy.forceAfterCount,
       },
     );
 
@@ -6318,21 +6338,21 @@ export class LifecycleManager
       wasArmedAfterFailure: state.remainsArmedUntil !== null,
     };
 
-    this.logger.warn(
+    this.logShutdownRequestSafely(
+      'warn',
+      method,
       'Repeated shutdown request threshold reached, invoking force shutdown handler',
       {
-        params: {
-          method,
-          requestCount: context.requestCount,
-          firstMethod: context.firstMethod,
-          latestMethod: context.latestMethod,
-          firstRequestAt: context.firstRequestAt,
-          latestRequestAt: context.latestRequestAt,
-          repeatedWindowStartedAt: state.repeatedWindowStartedAt,
-          remainsArmedUntil: state.remainsArmedUntil,
-          withinMS: policy.withinMS,
-          forceAfterCount: policy.forceAfterCount,
-        },
+        method,
+        requestCount: context.requestCount,
+        firstMethod: context.firstMethod,
+        latestMethod: context.latestMethod,
+        firstRequestAt: context.firstRequestAt,
+        latestRequestAt: context.latestRequestAt,
+        repeatedWindowStartedAt: state.repeatedWindowStartedAt,
+        remainsArmedUntil: state.remainsArmedUntil,
+        withinMS: policy.withinMS,
+        forceAfterCount: policy.forceAfterCount,
       },
     );
     safeHandleCallback(
@@ -6349,6 +6369,27 @@ export class LifecycleManager
       wasArmedAfterFailure: context.wasArmedAfterFailure,
     });
     return true;
+  }
+
+  /**
+   * Log on the shutdown-request path without letting the logger fail the request.
+   *
+   * `this.logger` is a caller-supplied `LoggerService`. These lines run inside OS
+   * signal handlers, behind `triggerShutdown()`, and between escalation bookkeeping
+   * and the force-shutdown handler, so a throw is reported on the global channel
+   * instead of propagating.
+   */
+  private logShutdownRequestSafely(
+    level: 'info' | 'warn',
+    method: ShutdownMethod,
+    message: string,
+    params: Record<string, unknown>,
+  ): void {
+    try {
+      this.logger[level](message, { params });
+    } catch (error) {
+      reportCallbackError(`shutdown notification after ${method}`, error);
+    }
   }
 
   /**

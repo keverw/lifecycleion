@@ -132,20 +132,22 @@ describe('LifecycleManager - triggerShutdown()', () => {
     expect(manager.getComponentStatus('hanging')?.state).toBe('stopping');
   });
 
-  test('rejects rather than throwing synchronously when the logger throws', async () => {
+  test('a throwing logger neither fails the request nor skips the force handler', async () => {
     const logger = new Logger({
       sinks: [new ArraySink()],
       callProcessExit: false,
     });
+    let forceShutdownCalls = 0;
     const manager = new LifecycleManager({
       logger,
       shutdownWarningTimeoutMS: -1,
       repeatedShutdownRequestPolicy: {
-        // High enough that the retry below tracks without escalating.
-        forceAfterCount: 99,
+        forceAfterCount: 1,
         withinMS: 1000,
         countManualRetriesTowardEscalation: true,
-        onForceShutdown: () => {},
+        onForceShutdown: () => {
+          forceShutdownCalls++;
+        },
       },
     });
 
@@ -153,36 +155,91 @@ describe('LifecycleManager - triggerShutdown()', () => {
     await manager.startAllComponents();
     await manager.triggerShutdown();
 
-    // The escalation warn inside `handleRepeatedShutdownRequest` is not guarded, and
-    // `this.logger` is a caller-supplied `LoggerService`. A throw from there used to
-    // leave `triggerShutdown()` synchronously, past the caller's `.catch()`.
+    // `this.logger` is a caller-supplied `LoggerService`. The escalation warns inside
+    // `handleRepeatedShutdownRequest` sit between advancing `requestCount` and invoking
+    // the force handler, so a throw there must not reject the acknowledgement or
+    // swallow the escalation.
     const service = (manager as unknown as { logger: { warn: unknown } })
       .logger;
     const originalWarn = service.warn;
-    const failure = new Error('logger exploded');
     service.warn = (): never => {
-      throw failure;
+      throw new Error('logger exploded');
     };
 
-    let didThrowSynchronously = false;
-    let rejection: unknown;
+    // Claiming the report with `preventDefault()` both asserts the guard reported it
+    // and keeps the `console.error` fall-through out of the test output.
+    const reports: unknown[] = [];
+    const onError = (event: Event): void => {
+      reports.push((event as ErrorEvent).error);
+      event.preventDefault();
+    };
+
+    globalThis.addEventListener('error', onError);
+
+    let ack;
 
     try {
-      await manager.triggerShutdown().catch((error: unknown) => {
-        rejection = error;
-      });
-    } catch {
-      didThrowSynchronously = true;
+      ack = await manager.triggerShutdown();
     } finally {
       service.warn = originalWarn;
+      globalThis.removeEventListener('error', onError);
     }
 
-    expect(didThrowSynchronously).toBe(false);
-    // `toError` returns an `Error` unchanged, so the caller still sees the original
-    // failure rather than a wrapper.
-    expect(rejection).toBe(failure);
+    expect(ack.initiated).toBe(false);
+    expect(ack.code).toBe('already_in_progress');
+    expect(forceShutdownCalls).toBe(1);
+    expect(
+      reports.some((report) =>
+        (report as Error).message.includes(
+          'shutdown notification after manual',
+        ),
+      ),
+    ).toBe(true);
 
     await sleep(250);
+  });
+
+  test('a logger that throws on the first request does not wedge the shutdown latch', async () => {
+    const { logger, manager } = setup();
+    await manager.registerComponent(new SlowStop(logger, 'slow', 10));
+    await manager.startAllComponents();
+
+    const service = (manager as unknown as { logger: { info: unknown } })
+      .logger;
+    const originalInfo = service.info;
+    service.info = (): never => {
+      throw new Error('logger exploded');
+    };
+
+    const reports: unknown[] = [];
+    const onError = (event: Event): void => {
+      reports.push((event as ErrorEvent).error);
+      event.preventDefault();
+    };
+
+    globalThis.addEventListener('error', onError);
+
+    let ack;
+
+    try {
+      ack = await manager.triggerShutdown();
+    } finally {
+      service.info = originalInfo;
+      globalThis.removeEventListener('error', onError);
+    }
+
+    expect(ack.initiated).toBe(true);
+    expect(
+      reports.some((report) =>
+        (report as Error).message.includes(
+          'shutdown notification after manual',
+        ),
+      ),
+    ).toBe(true);
+
+    await sleep(150);
+    expect(manager.getComponentStatus('slow')?.state).toBe('stopped');
+    expect(manager.getSystemState()).not.toBe('shutting-down');
   });
 });
 

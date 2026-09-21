@@ -218,7 +218,11 @@ describe('LifecycleManager - hostile thrown values', () => {
 
       expect(rejections).toEqual([]);
       expect(reports.length).toBe(1);
-      expect((reports[0] as Error).message).toContain('shutdown after SIGTERM');
+      // The log line is guarded where it is written, so the shutdown pass carries on
+      // instead of rejecting with `isShuttingDown` already latched.
+      expect((reports[0] as Error).message).toContain(
+        'shutdown notification after SIGTERM',
+      );
       expect(((reports[0] as Error).cause as Error).message).toBe(
         'the logger itself is broken',
       );
