@@ -58,7 +58,7 @@ jobs:
       # `node`, and the package requires Node >= 25 — which the runner images do
       # not ship (ubuntu had 22, macOS 24), so it is installed rather than
       # assumed.
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version-file: .node-version
 
