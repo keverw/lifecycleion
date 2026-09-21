@@ -6475,15 +6475,29 @@ export class LifecycleManager
   private logShutdownRequestSafely(
     level: 'info' | 'warn' | 'success',
     message: string,
-    params: Record<string, unknown>,
+    // `method` is required by the type, so a call site cannot forget it and end up
+    // reported under the wrong label.
+    params: { method: ShutdownMethod } & Record<string, unknown>,
   ): void {
-    // Only the expiry line carries no `method`: it also runs from its timer, where no
-    // request is being made.
-    const callbackName =
-      typeof params.method === 'string'
-        ? `shutdown notification after ${params.method}`
-        : 'shutdown escalation expiry notification';
+    this.logSafely(
+      level,
+      message,
+      params,
+      `shutdown notification after ${params.method}`,
+    );
+  }
 
+  /**
+   * Guarded logger call behind `logShutdownRequestSafely()`. Called directly only by the
+   * escalation-expiry line, which also runs from its timer, where no request - and so
+   * no `method` - exists to name in the report.
+   */
+  private logSafely(
+    level: 'info' | 'warn' | 'success',
+    message: string,
+    params: Record<string, unknown>,
+    callbackName: string,
+  ): void {
     // `runCallbackSafely` also covers a logger method that returns a rejecting promise.
     //
     // TODO: the closure only exists to keep `this.logger` bound. Once `runCallbackSafely`
@@ -6578,7 +6592,7 @@ export class LifecycleManager
 
     // Guarded: this runs on the shutdown-request path and in the expiry timer, ahead of
     // the reset below, so a throwing logger would otherwise leave the stale state armed.
-    this.logShutdownRequestSafely(
+    this.logSafely(
       'warn',
       'Repeated shutdown escalation window expired, clearing previous shutdown state',
       {
@@ -6586,6 +6600,7 @@ export class LifecycleManager
         withinMS: policy.withinMS,
         forceAfterCount: policy.forceAfterCount,
       },
+      'shutdown escalation expiry notification',
     );
 
     if (expiredState.firstMethod !== null) {
