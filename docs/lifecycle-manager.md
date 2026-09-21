@@ -1431,7 +1431,7 @@ The acknowledgement says only that the request was accepted. It does not report 
 
 **Prefer this over `void stopAllComponents()`.** A floating shutdown promise with no rejection handler becomes an unhandled rejection if the logger throws while the shutdown is being logged, which is fatal under Node's default `--unhandled-rejections=throw` - taking the process down before the components it was about to stop have stopped. `triggerShutdown()` attaches that handler and reports through the global error channel instead. The same applies to `void stopComponent(name)`: attach a `.catch()` if you use it.
 
-A `LoggerService` that throws while the request is being logged does not fail the request either: every log line on the request path is guarded and reported through the global error channel, escalation bookkeeping still runs, and the acknowledgement still resolves. The promise does reject when the request fails before a shutdown pass could start and nothing else is shutting down - there is no acknowledgement to give, the cause is reported on the global error channel, and no shutdown is left running, so the call can be retried. Attach a `.catch()` rather than voiding the call.
+A `LoggerService` that throws while the request is being logged does not fail the request either: the manager guards its own logger, so escalation bookkeeping still runs and the acknowledgement still resolves, and the logger failure is reported on the global error channel. That guarantee is not specific to this path - see [Logger Requirements](#logger-requirements). The promise does reject when the request fails before a shutdown pass could start and nothing else is shutting down - there is no acknowledgement to give, the cause is reported on the global error channel, and no shutdown is left running, so the call can be retried. Attach a `.catch()` rather than voiding the call.
 
 Escalation matches `stopAllComponents()`. Calls made while a shutdown is running **never** count toward [`repeatedShutdownRequestPolicy`](#repeated-shutdown-request-policy), whatever `countManualRetriesTowardEscalation` says: escalation represents an operator pressing Ctrl+C again, concurrent callers of this method are not expressing that, and so a burst of overlapping requests can never force-kill the process on its own. The flag only covers a deliberate retry after a failed pass. With it enabled, a request made while escalation is still armed after a failed shutdown counts once and can reach `forceAfterCount`: `onForceShutdown` runs, and because the retry pass still starts, the acknowledgement is `initiated` - the same behavior as `stopAllComponents()`. Because `signal:shutdown` describes a real OS signal, a manual request does not emit it; observe `lifecycle-manager:shutdown-initiated` instead.
 
@@ -1746,6 +1746,17 @@ Use `toError` rather than hand-rolling `error instanceof Error ? error : new Err
 The normalized `err` is also captured in `params` for structured sinks that need the full error object or stack trace. Because the pattern only wraps non-`Error` values, original `Error` stack traces are preserved when the thrown value was already an `Error`.
 
 **Note:** The LifecycleManager itself logs `error.message` inline when component lifecycle methods fail (e.g., `start()` throwing, shutdown errors). Avoid including sensitive details like connection strings or credentials in error messages thrown from lifecycle methods, as they will appear in plain log output.
+
+**A logger that fails cannot fail a lifecycle operation.**
+
+The logger is yours, so every line the manager writes runs code it does not own - inside OS signal handlers, timer callbacks, floating promise chains, and the middle of a startup or shutdown pass. The manager wraps its own service logger once, at construction, so this holds for every operation, not just for a particular path:
+
+- **A log method that throws, or that returns a rejecting promise, cannot fail or derail the operation that was logging.** Startup, shutdown, restart, and every per-component operation carry on and return their normal result. Before this, a throw inside the shutdown stop loop rejected the pass, and the pass's handler then announced `lifecycle-manager:shutdown-completed` with `success: false` while the components were still running.
+- **`logger.entity(name)` is covered too.** If `entity()` itself throws, the chain still gets something callable back - the line lands under the service name, without the entity scope.
+- **Failures are reported on the global `'error'` channel**, never back through the logger that just failed. See [safe-handle-callback](./safe-handle-callback.md). The report names the logger method (for example `lifecycle-manager logger.warn`) and carries the original failure on `cause`. Listen with `globalThis.addEventListener('error', handler)` and call `event.preventDefault()` to claim it.
+- **Your logger object is never wrapped or modified.** `rootLogger` stays the exact instance you passed in: `enableLoggerExitHook()`, `logger.exit()`, and the scoped logger every component builds all go through your object unchanged. Only the manager's own internal logging is guarded.
+
+This is a containment guarantee, not a repair: a logger that throws still loses those lines. It is worth fixing the logger.
 
 ### Status and Query Methods
 
