@@ -2032,16 +2032,11 @@ export class LifecycleManager
    * @returns Acknowledgement that the request was accepted, not the result of the shutdown
    */
   public triggerShutdown(): Promise<ShutdownTriggerResult> {
-    // Nothing on the request path is expected to throw, but a bare
-    // `Promise.resolve(this.requestManualShutdown())` evaluates the call first, so any
-    // synchronous throw would escape `triggerShutdown()` itself and bypass the caller's
-    // `.catch()`. Converting it to a rejection keeps a failure on the promise. Not
-    // `async`: with nothing to await, `require-await` rejects it.
-    try {
-      return Promise.resolve(this.requestManualShutdown());
-    } catch (error) {
-      return Promise.reject(toError(error));
-    }
+    // The executor turns a synchronous throw on the request path into a rejection, so
+    // it cannot escape `triggerShutdown()` itself and bypass the caller's `.catch()`.
+    return new Promise((resolve) => {
+      resolve(this.requestManualShutdown());
+    });
   }
 
   /**
@@ -3389,7 +3384,7 @@ export class LifecycleManager
   private async stopAllComponentsInternal(
     method: ShutdownMethod,
     options?: StopAllOptions,
-    // Called synchronously once `shutdown-initiated` is out, so `startShutdownPass()` is
+    // Called synchronously as this pass announces itself, so `startShutdownPass()` is
     // told a pass started rather than inferring it.
     onPassStarted?: () => void,
   ): Promise<ShutdownResult> {
@@ -3420,6 +3415,9 @@ export class LifecycleManager
     }
 
     this.normalizeRepeatedShutdownRequestStateArmedStatus();
+
+    // Copied before this pass touches it, so a pass that dies unannounced can put it back.
+    const escalationStateBeforePass = { ...this.repeatedShutdownRequestState };
 
     const repeatedShutdownPolicy = this.repeatedShutdownRequestPolicy;
     const isManualRetryWhileArmed =
@@ -3471,12 +3469,16 @@ export class LifecycleManager
       this.logShutdownRequestSafely('info', 'Stopping all components', {
         method,
       });
+      // Both marked before the emit, like the completed flag below: if emitting throws
+      // once listeners have already run, they are still owed a `shutdown-completed`.
+      // Together, so the two can never disagree - the `catch` below owes that event
+      // exactly when the requester was told a pass started.
+      didEmitShutdownInitiated = true;
+      onPassStarted?.();
       this.lifecycleEvents.lifecycleManagerShutdownInitiated(
         method,
         isDuringStartup,
       );
-      didEmitShutdownInitiated = true;
-      onPassStarted?.();
 
       // Get shutdown order (reverse topological order)
       let shutdownOrder: string[];
@@ -3725,16 +3727,21 @@ export class LifecycleManager
       // Marked before the emit, not after: if emitting throws once listeners have
       // already run, the `catch` below must not hand them a second, contradictory result.
       didEmitShutdownCompleted = true;
-      this.lifecycleEvents.lifecycleManagerShutdownCompleted({
-        ...result,
-        method,
-        duringStartup: isDuringStartup,
-      });
 
-      if (isSuccess) {
-        this.resetRepeatedShutdownRequestState();
-      } else {
-        this.armRepeatedShutdownAfterFailure();
+      try {
+        this.lifecycleEvents.lifecycleManagerShutdownCompleted({
+          ...result,
+          method,
+          duringStartup: isDuringStartup,
+        });
+      } finally {
+        // Even if the emit throws: the `catch` below skips a pass that already completed,
+        // so nothing else would close out this cycle's escalation tracking.
+        if (isSuccess) {
+          this.resetRepeatedShutdownRequestState();
+        } else {
+          this.armRepeatedShutdownAfterFailure();
+        }
       }
 
       return result;
@@ -3751,7 +3758,18 @@ export class LifecycleManager
         // component for a pass that never existed.
         this.shutdownMethod = shutdownMethodBeforePass;
         this.shutdownToken = shutdownTokenBeforePass;
-        this.resetRepeatedShutdownRequestState();
+
+        // Escalation tracking too, but only an armed window: an earlier failed shutdown
+        // may still be counting presses, and that is not this pass's to forget. The
+        // setup cleared its timer, so re-arm it - from now, exactly as a repeated
+        // request refreshes it. Anything else the state holds was seeded for this
+        // request, by the signal path or by the setup above, so it goes with the pass.
+        if (escalationStateBeforePass.remainsArmedUntil === null) {
+          this.resetRepeatedShutdownRequestState();
+        } else {
+          this.repeatedShutdownRequestState = escalationStateBeforePass;
+          this.refreshRepeatedShutdownArmedWindow();
+        }
       } else if (!didEmitShutdownCompleted) {
         // `shutdown-initiated` is already out and callers block on its pair, so a pass
         // that dies mid-flight still owes them a result - otherwise they wait forever.
@@ -3761,6 +3779,9 @@ export class LifecycleManager
           stalledComponents: Array.from(this.stalledComponents.values()),
           durationMS: Date.now() - startTime,
           reason: `Shutdown failed before it could report a result: ${describeError(error)}`,
+          // Not a stall or a timeout: the pass itself threw, which points at a bug in
+          // the manager (or a hostile logger) rather than at a component.
+          code: 'unknown_error',
         };
 
         this.lastShutdownResult = result;

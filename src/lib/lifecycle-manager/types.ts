@@ -357,7 +357,7 @@ export interface ShutdownResult {
   reason?: string;
 
   /** Error code (when success is false) */
-  code?: 'already_in_progress' | 'shutdown_timeout';
+  code?: 'already_in_progress' | 'shutdown_timeout' | 'unknown_error';
 }
 
 /**
