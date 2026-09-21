@@ -1583,6 +1583,11 @@ export class LifecycleManager
    *
    * Components stop in reverse topological order (dependents before dependencies).
    *
+   * Stalls and timeouts are reported in the resolved `ShutdownResult`; the promise
+   * rejects only when the pass itself throws. Such a pass still emits a failed
+   * `lifecycle-manager:shutdown-completed` and updates `getLastShutdownResult()`, so
+   * listeners are never left waiting on a pass that has already died.
+   *
    * @param options - Optional shutdown options
    */
 
@@ -1986,8 +1991,9 @@ export class LifecycleManager
   /**
    * Manually request shutdown without waiting for it to finish.
    *
-   * Runs the same path as a `SIGINT`/`SIGTERM` handler: components stop in the
-   * background while this resolves as soon as the request has been accepted.
+   * Starts the same background shutdown pass a `SIGINT`/`SIGTERM` handler starts,
+   * without the signal bookkeeping (`signal:shutdown`, escalation counting): components
+   * stop in the background while this resolves as soon as the request has been accepted.
    * Use it when a caller needs to start shutdown from application code and
    * cannot block, such as inside an HTTP handler or an event listener.
    *
@@ -1995,7 +2001,10 @@ export class LifecycleManager
    * shutdown pass (`initiated: true`) or joined one already running
    * (`already_in_progress`). It does NOT report whether components stopped
    * cleanly - subscribe to `lifecycle-manager:shutdown-completed`, or call
-   * `getLastShutdownResult()`, for the outcome.
+   * `getLastShutdownResult()`, for the outcome. An `initiated` acknowledgement is
+   * safe to wait on: once a pass announces itself with
+   * `lifecycle-manager:shutdown-initiated`, it always reports a result, even when it
+   * fails outright.
    *
    * Prefer this over `void stopAllComponents()`: a floating shutdown promise
    * with no rejection handler becomes an unhandled rejection if the logger
@@ -2014,8 +2023,8 @@ export class LifecycleManager
    *
    * The promise does reject when the request failed before a shutdown pass could
    * start and nothing else is shutting down, which leaves no acknowledgement to
-   * give; the cause is reported on the global error channel and the manager is left
-   * untouched, so the call can be retried. Attach a `.catch()` rather than voiding
+   * give; the cause is reported on the global error channel and no shutdown is left
+   * running, so the call can be retried. Attach a `.catch()` rather than voiding
    * the call.
    *
    * @returns Acknowledgement that the request was accepted, not the result of the shutdown
@@ -2024,7 +2033,8 @@ export class LifecycleManager
     // Nothing on the request path is expected to throw, but a bare
     // `Promise.resolve(this.requestManualShutdown())` evaluates the call first, so any
     // synchronous throw would escape `triggerShutdown()` itself and bypass the caller's
-    // `.catch()`. Converting it to a rejection keeps a failure on the promise.
+    // `.catch()`. Converting it to a rejection keeps a failure on the promise. Not
+    // `async`: with nothing to await, `require-await` rejects it.
     try {
       return Promise.resolve(this.requestManualShutdown());
     } catch (error) {
@@ -3426,73 +3436,81 @@ export class LifecycleManager
       this.clearRepeatedShutdownExpiryTimer();
       this.repeatedShutdownRequestState.remainsArmedUntil = null;
     }
-    this.isShuttingDown = true;
-    this.shutdownToken = ulid();
-    this.shutdownMethod = method;
-    if (
-      this.repeatedShutdownRequestPolicy &&
-      this.repeatedShutdownRequestState.firstRequestAt === null
-    ) {
-      this.seedRepeatedShutdownRequestState(method);
-    }
-    const isDuringStartup = this.isStarting;
-
-    // `isShuttingDown` is already set and the `try`/`finally` that releases it has not
-    // started yet, so a caller-supplied logger that throws here would wedge the latch.
-    this.logShutdownRequestSafely('info', method, 'Stopping all components', {
-      method,
-    });
-    this.lifecycleEvents.lifecycleManagerShutdownInitiated(
-      method,
-      isDuringStartup,
-    );
-
-    // Get shutdown order (reverse topological order)
-    let shutdownOrder: string[];
-
-    try {
-      const startupOrder = this.getStartupOrderInternal();
-      shutdownOrder = [...startupOrder].reverse();
-    } catch (error) {
-      // If we can't resolve order due to cycle, fall back to reverse registration order
-      const err = toError(error);
-
-      this.logShutdownRequestSafely(
-        'warn',
-        method,
-        'Could not resolve shutdown order, using registration order: {{error.message}}',
-        { error: err },
-      );
-
-      shutdownOrder = this.components.map((c) => c.getName()).reverse();
-    }
-
-    const stalledComponentNames = new Set(this.stalledComponents.keys());
-
-    // Filter to running components, plus stalled ones if retrying
-    const runningComponentsToStop = shutdownOrder.filter(
-      (name) =>
-        this.isComponentRunning(name) ||
-        (shouldRetryStalled && stalledComponentNames.has(name)),
-    );
-
-    const stoppedComponents = new Set<string>();
-    const stoppingComponents = new Set<string>();
-    const protectedDependencies = new Set<string>();
-    const protectDependencies = (name: string): void => {
-      for (const dependency of this.getComponent(name)?.getDependencies() ??
-        []) {
-        if (!protectedDependencies.has(dependency)) {
-          protectedDependencies.add(dependency);
-          protectDependencies(dependency);
-        }
-      }
-    };
     let hasTimedOut = false;
     let timeoutHandle: NodeJS.Timeout | undefined;
     let pendingShutdownOperation: Promise<void> | null = null;
+    let isDuringStartup = false;
+    let didEmitShutdownInitiated = false;
+    let didEmitShutdownCompleted = false;
+    const shutdownTokenBeforeMint = this.shutdownToken;
 
+    this.isShuttingDown = true;
+
+    // Everything after the latch is set runs inside the `try`/`finally` that releases
+    // it, so nothing in the setup below - component getters included - can wedge the
+    // manager in `shutting-down`. `startShutdownPass()` relies on this too: it reads a
+    // new `shutdownToken` as "a pass started", which must never outlive a stuck latch.
     try {
+      this.shutdownToken = ulid();
+      this.shutdownMethod = method;
+      if (
+        this.repeatedShutdownRequestPolicy &&
+        this.repeatedShutdownRequestState.firstRequestAt === null
+      ) {
+        this.seedRepeatedShutdownRequestState(method);
+      }
+      isDuringStartup = this.isStarting;
+
+      this.logShutdownRequestSafely('info', method, 'Stopping all components', {
+        method,
+      });
+      this.lifecycleEvents.lifecycleManagerShutdownInitiated(
+        method,
+        isDuringStartup,
+      );
+      didEmitShutdownInitiated = true;
+
+      // Get shutdown order (reverse topological order)
+      let shutdownOrder: string[];
+
+      try {
+        const startupOrder = this.getStartupOrderInternal();
+        shutdownOrder = [...startupOrder].reverse();
+      } catch (error) {
+        // If we can't resolve order due to cycle, fall back to reverse registration order
+        const err = toError(error);
+
+        this.logShutdownRequestSafely(
+          'warn',
+          method,
+          'Could not resolve shutdown order, using registration order: {{error.message}}',
+          { error: err },
+        );
+
+        shutdownOrder = this.components.map((c) => c.getName()).reverse();
+      }
+
+      const stalledComponentNames = new Set(this.stalledComponents.keys());
+
+      // Filter to running components, plus stalled ones if retrying
+      const runningComponentsToStop = shutdownOrder.filter(
+        (name) =>
+          this.isComponentRunning(name) ||
+          (shouldRetryStalled && stalledComponentNames.has(name)),
+      );
+
+      const stoppedComponents = new Set<string>();
+      const stoppingComponents = new Set<string>();
+      const protectedDependencies = new Set<string>();
+      const protectDependencies = (name: string): void => {
+        for (const dependency of this.getComponent(name)?.getDependencies() ??
+          []) {
+          if (!protectedDependencies.has(dependency)) {
+            protectedDependencies.add(dependency);
+            protectDependencies(dependency);
+          }
+        }
+      };
       // Start global timeout clock (halts further stop attempts after it fires)
       const timeoutPromise =
         toTimerDelayMS(effectiveTimeout) > 0
@@ -3695,6 +3713,10 @@ export class LifecycleManager
       // snapshot exists, not necessarily that every component stopped cleanly.
       // Callers must inspect success / stalledComponents / timedOut to decide
       // what to do next.
+      //
+      // Marked before the emit, not after: if emitting throws once listeners have
+      // already run, the `catch` below must not hand them a second, contradictory result.
+      didEmitShutdownCompleted = true;
       this.lifecycleEvents.lifecycleManagerShutdownCompleted({
         ...result,
         method,
@@ -3708,6 +3730,36 @@ export class LifecycleManager
       }
 
       return result;
+    } catch (error) {
+      // The rejection still reaches `stopAllComponents()`, but it is the only place a
+      // dead pass would otherwise show up: `startShutdownPass()` drops it on the global
+      // error channel, so nothing on the event side would ever learn the pass is over.
+      if (!didEmitShutdownInitiated) {
+        // Nothing observed this pass - it died before its first `await`, in the same tick
+        // that minted the token. Give `startShutdownPass()` back the token it compares
+        // against so `triggerShutdown()` rejects instead of acknowledging `initiated` for
+        // a pass that no longer exists.
+        this.shutdownToken = shutdownTokenBeforeMint;
+      } else if (!didEmitShutdownCompleted) {
+        // `shutdown-initiated` is already out and callers block on its pair, so a pass
+        // that dies mid-flight still owes them a result - otherwise they wait forever.
+        const result: ShutdownResult = {
+          success: false,
+          stoppedComponents: [],
+          stalledComponents: [],
+          durationMS: Date.now() - startTime,
+          reason: `Shutdown failed before it could report a result: ${describeError(error)}`,
+        };
+
+        this.lastShutdownResult = result;
+        this.lifecycleEvents.lifecycleManagerShutdownCompleted({
+          ...result,
+          method,
+          duringStartup: isDuringStartup,
+        });
+      }
+
+      throw error;
     } finally {
       if (timeoutHandle) {
         clearTimeout(timeoutHandle);
@@ -6185,7 +6237,7 @@ export class LifecycleManager
 
     if (result === null) {
       throw new Error(
-        'Shutdown request failed before a shutdown pass could start; the cause was reported on the global error channel',
+        'Shutdown request failed before a shutdown pass could start; the cause is reported on the global error channel',
       );
     }
 
@@ -6214,7 +6266,9 @@ export class LifecycleManager
     //
     // `stopAllComponentsInternal` runs synchronously up to its first `await`, which is
     // past the point where it either refuses the pass or mints a new `shutdownToken`,
-    // so the token tells us whether this request really started one.
+    // so the token tells us whether this request really started one. A pass that throws
+    // before it announces itself puts the old token back, so a changed token means
+    // `shutdown-initiated` is out and a `shutdown-completed` is still owed.
     const shutdownTokenBeforeRequest = this.shutdownToken;
 
     this.stopAllComponentsInternal(method, {
@@ -6396,10 +6450,16 @@ export class LifecycleManager
    */
   private logShutdownRequestSafely(
     level: 'info' | 'warn',
-    method: ShutdownMethod,
+    method: ShutdownMethod | 'escalation-expiry',
     message: string,
     params?: Record<string, unknown>,
   ): void {
+    // The expiry line also runs from its timer, where no request is being made.
+    const callbackName =
+      method === 'escalation-expiry'
+        ? 'shutdown escalation expiry notification'
+        : `shutdown notification after ${method}`;
+
     // `runCallbackSafely` also covers a logger method that returns a rejecting promise.
     //
     // TODO: the closure only exists to keep `this.logger` bound. Once `runCallbackSafely`
@@ -6413,7 +6473,7 @@ export class LifecycleManager
           : this.logger[level](message, { params }),
       [],
       (error) => {
-        reportCallbackError(`shutdown notification after ${method}`, error);
+        reportCallbackError(callbackName, error);
       },
     );
   }
@@ -6499,7 +6559,7 @@ export class LifecycleManager
     // the reset below, so a throwing logger would otherwise leave the stale state armed.
     this.logShutdownRequestSafely(
       'warn',
-      state.latestMethod ?? 'manual',
+      'escalation-expiry',
       'Repeated shutdown escalation window expired, clearing previous shutdown state',
       {
         remainsArmedUntil: armedUntil,
