@@ -33,7 +33,7 @@ jobs:
         # Linux and macOS only. The library targets POSIX runtimes: the named
         # pipe sink is built on FIFOs and the temp-directory permission work is
         # written against POSIX modes, neither of which has a Windows meaning.
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-24.04, macos-latest]
 
     # The suite is large and launches a real browser, so it is slower than a
     # plain unit-test run, and the default six hours is no bound at all for a
