@@ -2012,9 +2012,11 @@ export class LifecycleManager
    * default `--unhandled-rejections=throw`. This path attaches that handler.
    *
    * Repeated calls do NOT count toward `repeatedShutdownRequestPolicy` escalation unless
-   * `countManualRetriesTowardEscalation` is enabled, matching `stopAllComponents()`.
+   * `countManualRetriesTowardEscalation` is enabled. With it enabled, calls made while a
+   * shutdown is running count like repeated signals do - unlike `stopAllComponents()`,
+   * which only counts a retry while escalation is armed after a failed shutdown.
    * Escalation means an operator pressing Ctrl+C again; concurrent callers of this method
-   * are not expressing that, and must not be able to force-kill the process by volume.
+   * are not expressing that, so by default they cannot force-kill the process by volume.
    *
    * A caller-supplied `LoggerService` that throws while the request is being logged
    * does not fail the request: every log line on this path is guarded and reported
@@ -3387,6 +3389,9 @@ export class LifecycleManager
   private async stopAllComponentsInternal(
     method: ShutdownMethod,
     options?: StopAllOptions,
+    // Called synchronously once `shutdown-initiated` is out, so `startShutdownPass()` is
+    // told a pass started rather than inferring it.
+    onPassStarted?: () => void,
   ): Promise<ShutdownResult> {
     const startTime = Date.now();
     const effectiveTimeout = toTimerDelayMS(
@@ -3400,8 +3405,8 @@ export class LifecycleManager
       // Guarded so a throwing logger cannot turn this refusal into a rejection.
       this.logShutdownRequestSafely(
         'warn',
-        method,
         'Cannot stop all components: shutdown already in progress',
+        { method },
       );
 
       return {
@@ -3442,14 +3447,16 @@ export class LifecycleManager
     let isDuringStartup = false;
     let didEmitShutdownInitiated = false;
     let didEmitShutdownCompleted = false;
-    const shutdownTokenBeforeMint = this.shutdownToken;
+    const shutdownMethodBeforePass = this.shutdownMethod;
+    const shutdownTokenBeforePass = this.shutdownToken;
+    // Declared out here so a pass that dies mid-flight can still report what it stopped.
+    const stoppedComponents = new Set<string>();
 
     this.isShuttingDown = true;
 
     // Everything after the latch is set runs inside the `try`/`finally` that releases
     // it, so nothing in the setup below - component getters included - can wedge the
-    // manager in `shutting-down`. `startShutdownPass()` relies on this too: it reads a
-    // new `shutdownToken` as "a pass started", which must never outlive a stuck latch.
+    // manager in `shutting-down`.
     try {
       this.shutdownToken = ulid();
       this.shutdownMethod = method;
@@ -3461,7 +3468,7 @@ export class LifecycleManager
       }
       isDuringStartup = this.isStarting;
 
-      this.logShutdownRequestSafely('info', method, 'Stopping all components', {
+      this.logShutdownRequestSafely('info', 'Stopping all components', {
         method,
       });
       this.lifecycleEvents.lifecycleManagerShutdownInitiated(
@@ -3469,6 +3476,7 @@ export class LifecycleManager
         isDuringStartup,
       );
       didEmitShutdownInitiated = true;
+      onPassStarted?.();
 
       // Get shutdown order (reverse topological order)
       let shutdownOrder: string[];
@@ -3482,9 +3490,8 @@ export class LifecycleManager
 
         this.logShutdownRequestSafely(
           'warn',
-          method,
           'Could not resolve shutdown order, using registration order: {{error.message}}',
-          { error: err },
+          { error: err, method },
         );
 
         shutdownOrder = this.components.map((c) => c.getName()).reverse();
@@ -3499,7 +3506,6 @@ export class LifecycleManager
           (shouldRetryStalled && stalledComponentNames.has(name)),
       );
 
-      const stoppedComponents = new Set<string>();
       const stoppingComponents = new Set<string>();
       const protectedDependencies = new Set<string>();
       const protectDependencies = (name: string): void => {
@@ -3675,16 +3681,18 @@ export class LifecycleManager
         stalledComponents.length === 0 &&
         stoppingComponents.size === 0;
 
-      this.logger[isSuccess ? 'success' : 'warn'](
+      // Guarded: a logger that throws here would otherwise land in the `catch` below and
+      // replace the result of a pass that finished - even a clean one - with a failure.
+      this.logShutdownRequestSafely(
+        isSuccess ? 'success' : 'warn',
         isSuccess
           ? 'Shutdown completed successfully'
           : 'Shutdown attempt completed with stalled components or timeout',
         {
-          params: {
-            stopped: stoppedComponents.size,
-            stalled: stalledComponents.length,
-            durationMS,
-          },
+          method,
+          stopped: stoppedComponents.size,
+          stalled: stalledComponents.length,
+          durationMS,
         },
       );
 
@@ -3735,28 +3743,46 @@ export class LifecycleManager
       // dead pass would otherwise show up: `startShutdownPass()` drops it on the global
       // error channel, so nothing on the event side would ever learn the pass is over.
       if (!didEmitShutdownInitiated) {
-        // Nothing observed this pass - it died before its first `await`, in the same tick
-        // that minted the token. Give `startShutdownPass()` back the token it compares
-        // against so `triggerShutdown()` rejects instead of acknowledging `initiated` for
-        // a pass that no longer exists.
-        this.shutdownToken = shutdownTokenBeforeMint;
+        // Nothing observed this pass - it died before its first `await`, without calling
+        // `onPassStarted`, so `triggerShutdown()` rejects. Put back what the setup wrote
+        // so the manager does not describe a shutdown that never started. The token
+        // especially: a bulk startup and an in-flight `startComponent()` both read a
+        // changed token as "shutdown began", and would abort or immediately stop a
+        // component for a pass that never existed.
+        this.shutdownMethod = shutdownMethodBeforePass;
+        this.shutdownToken = shutdownTokenBeforePass;
+        this.resetRepeatedShutdownRequestState();
       } else if (!didEmitShutdownCompleted) {
         // `shutdown-initiated` is already out and callers block on its pair, so a pass
         // that dies mid-flight still owes them a result - otherwise they wait forever.
         const result: ShutdownResult = {
           success: false,
-          stoppedComponents: [],
-          stalledComponents: [],
+          stoppedComponents: Array.from(stoppedComponents),
+          stalledComponents: Array.from(this.stalledComponents.values()),
           durationMS: Date.now() - startTime,
           reason: `Shutdown failed before it could report a result: ${describeError(error)}`,
         };
 
         this.lastShutdownResult = result;
-        this.lifecycleEvents.lifecycleManagerShutdownCompleted({
-          ...result,
-          method,
-          duringStartup: isDuringStartup,
-        });
+
+        // An internal crash is not a stall, so the escalation window is not armed; the
+        // cycle's tracking is dropped instead, or the next manual request would skip
+        // seeding and inherit this pass's `requestCount` and force-shutdown flag.
+        this.resetRepeatedShutdownRequestState();
+
+        try {
+          this.lifecycleEvents.lifecycleManagerShutdownCompleted({
+            ...result,
+            method,
+            duringStartup: isDuringStartup,
+          });
+        } catch (emitError) {
+          // Must not replace the original failure rethrown below.
+          reportCallbackError(
+            'lifecycle-manager:shutdown-completed',
+            emitError,
+          );
+        }
       }
 
       throw error;
@@ -6181,7 +6207,7 @@ export class LifecycleManager
       this.seedRepeatedShutdownRequestState(method);
     }
 
-    this.logShutdownRequestSafely('info', method, 'Shutdown signal received', {
+    this.logShutdownRequestSafely('info', 'Shutdown signal received', {
       method,
     });
 
@@ -6217,7 +6243,6 @@ export class LifecycleManager
       } else {
         this.logShutdownRequestSafely(
           'warn',
-          'manual',
           'Shutdown already in progress, ignoring manual request',
           { method: 'manual' },
         );
@@ -6226,12 +6251,9 @@ export class LifecycleManager
       return this.shutdownAlreadyInProgressResult();
     }
 
-    this.logShutdownRequestSafely(
-      'info',
-      'manual',
-      'Manual shutdown requested',
-      { method: 'manual' },
-    );
+    this.logShutdownRequestSafely('info', 'Manual shutdown requested', {
+      method: 'manual',
+    });
 
     const result = this.startShutdownPass('manual');
 
@@ -6265,19 +6287,24 @@ export class LifecycleManager
     // through the logger, since the logger is the likeliest thing to have thrown.
     //
     // `stopAllComponentsInternal` runs synchronously up to its first `await`, which is
-    // past the point where it either refuses the pass or mints a new `shutdownToken`,
-    // so the token tells us whether this request really started one. A pass that throws
-    // before it announces itself puts the old token back, so a changed token means
+    // past the point where it either refuses the pass or announces it, and it reports
+    // the announcement through `onPassStarted`. A started pass means
     // `shutdown-initiated` is out and a `shutdown-completed` is still owed.
-    const shutdownTokenBeforeRequest = this.shutdownToken;
+    let didStartPass = false;
 
-    this.stopAllComponentsInternal(method, {
-      ...this.shutdownOptions,
-    }).catch((error: unknown) => {
+    this.stopAllComponentsInternal(
+      method,
+      {
+        ...this.shutdownOptions,
+      },
+      () => {
+        didStartPass = true;
+      },
+    ).catch((error: unknown) => {
       reportCallbackError(`shutdown after ${method}`, error);
     });
 
-    if (this.shutdownToken !== shutdownTokenBeforeRequest) {
+    if (didStartPass) {
       return {
         initiated: true,
         code: 'initiated',
@@ -6285,8 +6312,8 @@ export class LifecycleManager
       };
     }
 
-    // An unchanged token with nothing shutting down is not a refusal: the pass threw
-    // before it could mint one, so claiming `already_in_progress` would be a lie.
+    // No pass started and nothing is shutting down, so this is not a refusal: the pass
+    // threw before it could announce itself, so claiming `already_in_progress` would be a lie.
     return this.isShuttingDown ? this.shutdownAlreadyInProgressResult() : null;
   }
 
@@ -6312,7 +6339,6 @@ export class LifecycleManager
       // Signals only: a `'manual'` request never reaches here without a policy.
       this.logShutdownRequestSafely(
         'warn',
-        method,
         'Shutdown already in progress, ignoring signal',
         { method },
       );
@@ -6360,7 +6386,6 @@ export class LifecycleManager
     // able to skip the force-shutdown handler below or escape an OS signal handler.
     this.logShutdownRequestSafely(
       'warn',
-      method,
       this.isShuttingDown
         ? method === 'manual'
           ? 'Shutdown already in progress, tracking repeated manual request'
@@ -6409,7 +6434,6 @@ export class LifecycleManager
 
     this.logShutdownRequestSafely(
       'warn',
-      method,
       'Repeated shutdown request threshold reached, invoking force shutdown handler',
       {
         method,
@@ -6449,16 +6473,16 @@ export class LifecycleManager
    * instead of propagating.
    */
   private logShutdownRequestSafely(
-    level: 'info' | 'warn',
-    method: ShutdownMethod | 'escalation-expiry',
+    level: 'info' | 'warn' | 'success',
     message: string,
-    params?: Record<string, unknown>,
+    params: Record<string, unknown>,
   ): void {
-    // The expiry line also runs from its timer, where no request is being made.
+    // Only the expiry line carries no `method`: it also runs from its timer, where no
+    // request is being made.
     const callbackName =
-      method === 'escalation-expiry'
-        ? 'shutdown escalation expiry notification'
-        : `shutdown notification after ${method}`;
+      typeof params.method === 'string'
+        ? `shutdown notification after ${params.method}`
+        : 'shutdown escalation expiry notification';
 
     // `runCallbackSafely` also covers a logger method that returns a rejecting promise.
     //
@@ -6467,10 +6491,7 @@ export class LifecycleManager
     // `this.logger` as `thisArg` instead.
     runCallbackSafely(
       'logger',
-      () =>
-        params === undefined
-          ? this.logger[level](message)
-          : this.logger[level](message, { params }),
+      () => this.logger[level](message, { params }),
       [],
       (error) => {
         reportCallbackError(callbackName, error);
@@ -6559,7 +6580,6 @@ export class LifecycleManager
     // the reset below, so a throwing logger would otherwise leave the stale state armed.
     this.logShutdownRequestSafely(
       'warn',
-      'escalation-expiry',
       'Repeated shutdown escalation window expired, clearing previous shutdown state',
       {
         remainsArmedUntil: armedUntil,

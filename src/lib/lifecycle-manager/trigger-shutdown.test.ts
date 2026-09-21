@@ -651,6 +651,9 @@ describe('LifecycleManager - triggerShutdown() hardening', () => {
       throw new Error('seed exploded');
     };
 
+    const tokenBeforeRequest = (manager as unknown as { shutdownToken: string })
+      .shutdownToken;
+
     try {
       // eslint-disable-next-line @typescript-eslint/await-thenable
       await expect(manager.triggerShutdown()).rejects.toThrow(
@@ -661,13 +664,108 @@ describe('LifecycleManager - triggerShutdown() hardening', () => {
       globalThis.removeEventListener('error', onError);
     }
 
-    // No half-announced pass: neither event fired, and the retry starts a clean one.
+    // No half-announced pass: neither event fired, nothing the setup wrote is left
+    // behind, and the retry starts a clean one.
     expect(events).toEqual([]);
     expect(manager.getLastShutdownResult()).toBe(null);
+    expect(manager.getShutdownEscalationStatus().firstRequestAt).toBe(null);
+    expect(
+      (manager as unknown as { shutdownMethod: string | null }).shutdownMethod,
+    ).toBe(null);
+    // A changed token reads as "shutdown began" to a concurrent startup.
+    expect(
+      (manager as unknown as { shutdownToken: string }).shutdownToken,
+    ).toBe(tokenBeforeRequest);
 
     const retry = await manager.stopAllComponents();
     expect(retry.success).toBe(true);
     expect(events).toEqual(['initiated', 'completed']);
+  });
+
+  test('a pass that dies mid-flight reports what it stopped and drops its escalation state', async () => {
+    const logger = new Logger({
+      sinks: [new ArraySink()],
+      callProcessExit: false,
+    });
+    const manager = new LifecycleManager({
+      logger,
+      shutdownWarningTimeoutMS: -1,
+      repeatedShutdownRequestPolicy: {
+        forceAfterCount: 3,
+        withinMS: 1000,
+        onForceShutdown: (): void => {},
+      },
+    });
+
+    await manager.registerComponent(new SlowStop(logger, 'first', 10));
+    await manager.registerComponent(new SlowStop(logger, 'second', 10));
+    await manager.startAllComponents();
+
+    // Let the first stop through, then blow up inside the stop loop.
+    const internals = manager as unknown as {
+      stopComponentInternal: (name: string) => Promise<unknown>;
+    };
+    const original = internals.stopComponentInternal;
+    let calls = 0;
+    internals.stopComponentInternal = function (
+      this: unknown,
+      name: string,
+    ): Promise<unknown> {
+      calls++;
+
+      if (calls > 1) {
+        throw new Error('stop loop exploded');
+      }
+
+      return original.call(this, name);
+    };
+
+    try {
+      // eslint-disable-next-line @typescript-eslint/await-thenable
+      await expect(manager.stopAllComponents()).rejects.toThrow(
+        'stop loop exploded',
+      );
+    } finally {
+      internals.stopComponentInternal = original;
+    }
+
+    const result = manager.getLastShutdownResult();
+    expect(result?.success).toBe(false);
+    expect(result?.stoppedComponents.length).toBe(1);
+
+    // Otherwise the next manual request would skip seeding and inherit this cycle.
+    expect(manager.getShutdownEscalationStatus().firstRequestAt).toBe(null);
+  });
+
+  test('a logger that throws on the final log line does not fail a clean shutdown', async () => {
+    const { logger, manager } = setup();
+    await manager.registerComponent(new SlowStop(logger, 'slow', 10));
+    await manager.startAllComponents();
+
+    const service = (manager as unknown as { logger: { success: unknown } })
+      .logger;
+    const originalSuccess = service.success;
+    service.success = (): never => {
+      throw new Error('logger exploded');
+    };
+
+    const onError = (event: Event): void => {
+      event.preventDefault();
+    };
+
+    globalThis.addEventListener('error', onError);
+
+    let result;
+
+    try {
+      result = await manager.stopAllComponents();
+    } finally {
+      service.success = originalSuccess;
+      globalThis.removeEventListener('error', onError);
+    }
+
+    expect(result.success).toBe(true);
+    expect(manager.getLastShutdownResult()?.success).toBe(true);
   });
 
   test('a component can trigger shutdown through its lifecycle reference', async () => {
