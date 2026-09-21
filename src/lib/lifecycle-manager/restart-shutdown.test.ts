@@ -3,6 +3,7 @@ import { Logger } from '../logger';
 import { ArraySink } from '../logger/sinks/array';
 import { BaseComponent } from './base-component';
 import { LifecycleManager } from './lifecycle-manager';
+import { sleep } from '../sleep';
 
 function setup(shutdownTimeoutMS?: number) {
   const logger = new Logger({
@@ -348,6 +349,130 @@ describe('LifecycleManager - shutdown during restartAllComponents()', () => {
     expect(second.startCount).toBe(1);
     expect(manager.isComponentRunning('second')).toBe(false);
     expect(manager.isComponentRunning('first')).toBe(false);
+  });
+
+  test('logger.exit() during the stop phase cancels the startup phase', async () => {
+    const { logger, manager } = setup();
+    const component = new GatedStop(logger, 'gated');
+    await manager.registerComponent(component);
+    await manager.startAllComponents();
+    manager.enableLoggerExitHook();
+
+    const restart = manager.restartAllComponents();
+    await component.stopping.promise;
+
+    // The exit hook refuses on its own "already shutting down" branch rather than going
+    // through `stopAllComponents()`, so it has to record the request itself - otherwise
+    // the restart starts everything back up behind a process that is on its way out.
+    logger.exit(3);
+
+    component.releaseStop();
+    const result = await restart;
+
+    expect(result.startupSkippedByShutdownRequest).toBe(true);
+    expect(result.startupResult.code).toBe('shutdown_requested_during_restart');
+    expect(component.startCount).toBe(1);
+    expect(manager.isComponentRunning('gated')).toBe(false);
+
+    // The deferred exit is released once the stop phase settles.
+    await sleep(5);
+    expect(logger.didExit).toBe(true);
+    expect(logger.exitCode).toBe(3);
+  });
+
+  test('a restart that starts during a plain shutdown is not reported as canceled', async () => {
+    const { logger, manager } = setup();
+    const component = new GatedStop(logger, 'gated');
+    await manager.registerComponent(component);
+    await manager.startAllComponents();
+
+    const stop = manager.stopAllComponents();
+    await component.stopping.promise;
+
+    // No restart owns a stop phase here, so this restart's own refused stop call must
+    // not be mistaken for somebody asking the process to stay down.
+    const restart = manager.restartAllComponents();
+
+    component.releaseStop();
+    const [stopResult, result] = await Promise.all([stop, restart]);
+
+    expect(stopResult.success).toBe(true);
+    expect(result.shutdownResult.code).toBe('already_in_progress');
+    expect(result.startupSkippedByShutdownRequest).toBeUndefined();
+    expect(result.startupResult.code).toBe('shutdown_in_progress');
+    expect(result.success).toBe(false);
+  });
+
+  test('a second restart during the first stop phase reports nothing of its own', async () => {
+    const { logger, manager } = setup();
+    const component = new GatedStop(logger, 'gated');
+    await manager.registerComponent(component);
+    await manager.startAllComponents();
+
+    const first = manager.restartAllComponents();
+    await component.stopping.promise;
+
+    // The first restart owns the window; this one is refused outright and behaves as a
+    // restart did before the window existed.
+    const second = await manager.restartAllComponents();
+
+    expect(second.shutdownResult.code).toBe('already_in_progress');
+    expect(second.startupSkippedByShutdownRequest).toBeUndefined();
+    expect(second.startupResult.code).toBe('shutdown_in_progress');
+
+    component.releaseStop();
+    const firstResult = await first;
+
+    expect(firstResult.startupSkippedByShutdownRequest).toBeUndefined();
+    expect(firstResult.success).toBe(true);
+    expect(component.startCount).toBe(2);
+    expect(manager.isComponentRunning('gated')).toBe(true);
+  });
+
+  test('a second restart does not clear the request recorded for the first', async () => {
+    const { logger, manager } = setup();
+    const component = new GatedStop(logger, 'gated');
+    await manager.registerComponent(component);
+    await manager.startAllComponents();
+
+    const first = manager.restartAllComponents();
+    await component.stopping.promise;
+
+    const ack = await manager.triggerShutdown();
+    expect(ack.code).toBe('already_in_progress');
+
+    await manager.restartAllComponents();
+
+    component.releaseStop();
+    const firstResult = await first;
+
+    expect(firstResult.startupSkippedByShutdownRequest).toBe(true);
+    expect(component.startCount).toBe(1);
+    expect(manager.isComponentRunning('gated')).toBe(false);
+  });
+
+  test('a second restart leaves the first stop-phase window armed', async () => {
+    const { logger, manager } = setup();
+    const component = new GatedStop(logger, 'gated');
+    await manager.registerComponent(component);
+    await manager.startAllComponents();
+
+    const first = manager.restartAllComponents();
+    await component.stopping.promise;
+
+    // The second restart has come and gone; the first is still stopping, so a request
+    // arriving now must still cancel its startup.
+    await manager.restartAllComponents();
+
+    const ack = await manager.triggerShutdown();
+    expect(ack.code).toBe('already_in_progress');
+
+    component.releaseStop();
+    const firstResult = await first;
+
+    expect(firstResult.startupSkippedByShutdownRequest).toBe(true);
+    expect(component.startCount).toBe(1);
+    expect(manager.isComponentRunning('gated')).toBe(false);
   });
 
   test('the recorded request does not leak into a later restart', async () => {
