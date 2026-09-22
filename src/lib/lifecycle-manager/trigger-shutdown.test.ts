@@ -3,7 +3,7 @@ import { Logger } from '../logger';
 import { ArraySink } from '../logger/sinks/array';
 import { BaseComponent } from './base-component';
 import { LifecycleManager } from './lifecycle-manager';
-import type { ForceShutdownContext } from './types';
+import type { ForceShutdownContext, ShutdownResult } from './types';
 import { sleep } from '../sleep';
 
 function setup(shutdownTimeoutMS?: number) {
@@ -475,6 +475,136 @@ describe('LifecycleManager - triggerShutdown() escalation', () => {
     expect(completedCount).toBe(1);
     expect(initiatedCount).toBe(1);
     expect(internals.isShuttingDown).toBe(false);
+  });
+
+  test('a shutdown request from inside the force handler is not counted again', async () => {
+    const logger = new Logger({
+      sinks: [new ArraySink()],
+      callProcessExit: false,
+    });
+    const nestedAcks: string[] = [];
+    let forceShutdownCalls = 0;
+    const manager = new LifecycleManager({
+      logger,
+      shutdownWarningTimeoutMS: -1,
+      shutdownOptions: { timeoutMS: 50, retryStalled: false },
+      repeatedShutdownRequestPolicy: {
+        forceAfterCount: 1,
+        withinMS: 5000,
+        armedAfterFailureMS: 60_000,
+        countManualRetriesTowardEscalation: true,
+        onForceShutdown: () => {
+          forceShutdownCalls++;
+          void manager.triggerShutdown().then((ack) => {
+            nestedAcks.push(ack.code);
+          });
+        },
+      },
+    });
+
+    class Hanging extends BaseComponent {
+      public async start(): Promise<void> {}
+      public stop(): Promise<void> {
+        return new Promise<void>(() => {});
+      }
+    }
+
+    await manager.registerComponent(
+      new Hanging(logger, { name: 'hanging', dependencies: [] }),
+    );
+    await manager.startAllComponents();
+
+    // Fail the first attempt so post-failure escalation is armed; the retry below is
+    // what reaches forceAfterCount.
+    const failed = await manager.stopAllComponents();
+    expect(failed.success).toBe(false);
+    expect(manager.getShutdownEscalationStatus().isArmed).toBe(true);
+
+    let initiatedCount = 0;
+    manager.on('lifecycle-manager:shutdown-initiated', () => {
+      initiatedCount++;
+    });
+
+    const done = shutdownCompleted(manager);
+    const outer = await manager.stopAllComponents();
+
+    expect(forceShutdownCalls).toBe(1);
+    expect(nestedAcks).toEqual(['initiated']);
+    expect(outer.code).toBe('already_in_progress');
+    expect(initiatedCount).toBe(1);
+
+    // One operator-level request, so one press: the retry consumed the armed window
+    // before the force handler ran, so the shutdown that handler started found no
+    // window left to count itself against.
+    expect(manager.getShutdownEscalationStatus().requestCount).toBe(1);
+
+    await done;
+
+    expect(manager.getShutdownEscalationStatus().requestCount).toBe(1);
+  });
+
+  test('a stopAllComponents() from inside the force handler is not counted again', async () => {
+    const logger = new Logger({
+      sinks: [new ArraySink()],
+      callProcessExit: false,
+    });
+    const nestedStops: Promise<ShutdownResult>[] = [];
+    let forceShutdownCalls = 0;
+    const manager = new LifecycleManager({
+      logger,
+      shutdownWarningTimeoutMS: -1,
+      shutdownOptions: { timeoutMS: 50, retryStalled: false },
+      repeatedShutdownRequestPolicy: {
+        forceAfterCount: 1,
+        withinMS: 5000,
+        armedAfterFailureMS: 60_000,
+        countManualRetriesTowardEscalation: true,
+        onForceShutdown: () => {
+          forceShutdownCalls++;
+          nestedStops.push(manager.stopAllComponents());
+        },
+      },
+    });
+
+    class Hanging extends BaseComponent {
+      public async start(): Promise<void> {}
+      public stop(): Promise<void> {
+        return new Promise<void>(() => {});
+      }
+    }
+
+    await manager.registerComponent(
+      new Hanging(logger, { name: 'hanging', dependencies: [] }),
+    );
+    await manager.startAllComponents();
+
+    const failed = await manager.stopAllComponents();
+    expect(failed.success).toBe(false);
+    expect(manager.getShutdownEscalationStatus().isArmed).toBe(true);
+
+    let initiatedCount = 0;
+    manager.on('lifecycle-manager:shutdown-initiated', () => {
+      initiatedCount++;
+    });
+
+    const done = shutdownCompleted(manager);
+    const outer = await manager.stopAllComponents();
+
+    expect(forceShutdownCalls).toBe(1);
+    expect(outer.code).toBe('already_in_progress');
+    expect(initiatedCount).toBe(1);
+    expect(manager.getShutdownEscalationStatus().requestCount).toBe(1);
+
+    await done;
+
+    // The nested call is the one that owned the pass, so it reports that pass's result
+    // rather than the refusal the outer call got.
+    const nestedResults = await Promise.all(nestedStops);
+    expect(nestedResults).toHaveLength(1);
+    expect(nestedResults[0]?.success).toBe(false);
+    expect(nestedResults[0]?.code).not.toBe('already_in_progress');
+    expect(nestedResults[0]?.reason).toContain('hanging');
+    expect(manager.getShutdownEscalationStatus().requestCount).toBe(1);
   });
 });
 

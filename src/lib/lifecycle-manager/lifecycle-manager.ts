@@ -3562,18 +3562,20 @@ export class LifecycleManager
       this.repeatedShutdownRequestState.firstRequestAt !== null &&
       this.repeatedShutdownRequestState.remainsArmedUntil !== null;
 
+    // Taken before the bookkeeping below, not after it, and unconditionally: this request
+    // is the one about to start a pass, so the window is spent on it either way. Doing it
+    // first is what makes the spending atomic - the counting a line down can reach
+    // `onForceShutdown`, and a shutdown request made from inside that callback must find
+    // no armed window to count itself against. It is a continuation of this request, not a
+    // second operator press.
+    const consumedArmedUntil = this.consumeRepeatedShutdownArmedWindow();
+
     if (isManualRetryWhileArmed) {
       if (repeatedShutdownPolicy.countManualRetriesTowardEscalation) {
-        this.handleRepeatedShutdownRequest(method);
+        this.handleRepeatedShutdownRequest(method, consumedArmedUntil);
       } else {
         this.resetRepeatedShutdownRequestState();
       }
-    }
-
-    // Set shutting down flag and track how shutdown was triggered
-    if (this.repeatedShutdownRequestState.remainsArmedUntil !== null) {
-      this.clearRepeatedShutdownExpiryTimer();
-      this.repeatedShutdownRequestState.remainsArmedUntil = null;
     }
 
     // The bookkeeping above runs user code before the latch is taken: an expiring armed
@@ -3583,10 +3585,11 @@ export class LifecycleManager
     // is the realistic case - gets a pass that finds no latch, announces itself and
     // starts stopping, and control then returns here. Refuse rather than run a second
     // pass concurrently with it: the nested pass is the shutdown this call asked for,
-    // which is exactly what `already_in_progress` says. The latch is deliberately not
-    // taken earlier instead - `handleRepeatedShutdownRequest()` reads `isShuttingDown`
-    // for its log line and for `ForceShutdownContext.isShuttingDown`, and both would
-    // then describe a pass that has not started.
+    // which is exactly what `already_in_progress` says. That nested acceptance counts
+    // nothing, because the armed window was consumed above before any of this ran. The
+    // latch is deliberately not taken earlier instead - `handleRepeatedShutdownRequest()`
+    // reads `isShuttingDown` for its log line and for `ForceShutdownContext.isShuttingDown`,
+    // and both would then describe a pass that has not started.
     if (this.isShuttingDown) {
       this.logger.warn(
         'Cannot stop all components: a shutdown started while this request was being processed',
@@ -6396,7 +6399,9 @@ export class LifecycleManager
       this.noteShutdownRequestDuringActivePass();
       this.lifecycleEvents.signalShutdown(method, true);
 
-      if (this.handleRepeatedShutdownRequest(method)) {
+      // No window to consume: `acceptShutdownPass()` spends it on the request that starts
+      // the pass, so a pass being in progress means there is none left to arm from.
+      if (this.handleRepeatedShutdownRequest(method, null)) {
         return;
       }
     }
@@ -6414,10 +6419,18 @@ export class LifecycleManager
       this.repeatedShutdownRequestState.firstRequestAt !== null &&
       this.normalizeRepeatedShutdownRequestStateArmedStatus()
     ) {
+      // Consumed first, ahead of every line below that can run user code - the emit's
+      // listeners as much as the force handler `handleRepeatedShutdownRequest()` can
+      // reach. The same ordering `acceptShutdownPass()` uses, and for the same reason: a
+      // shutdown request made from inside any of them continues this one rather than
+      // counting as a press of its own. The pass this request goes on to start would have
+      // cleared the window a moment later regardless.
+      const consumedArmedUntil = this.consumeRepeatedShutdownArmedWindow();
+
       this.lifecycleEvents.signalShutdown(method, false);
       didEmitShutdownSignal = true;
       shouldSeedRepeatedShutdownState = false;
-      this.handleRepeatedShutdownRequest(method);
+      this.handleRepeatedShutdownRequest(method, consumedArmedUntil);
     }
 
     if (shouldSeedRepeatedShutdownState) {
@@ -6609,10 +6622,19 @@ export class LifecycleManager
    * Tracks repeated shutdown requests during an active shutdown and optionally
    * invokes the configured force shutdown callback when the threshold is reached.
    *
+   * @param consumedArmedUntil the deadline of the post-failure armed window this request
+   * already took for itself through {@link consumeRepeatedShutdownArmedWindow}, or `null`
+   * when it took none. Passed in rather than read back off the state, because a caller
+   * that is about to start a pass consumes the window *before* calling this - the whole
+   * point being that the user code below finds none - and there would otherwise be
+   * nothing left here to tell an armed request apart from a fresh one.
    * @returns true when the request was consumed as part of the repeated-shutdown
    * escalation flow, false when the caller should treat it as a fresh shutdown request
    */
-  private handleRepeatedShutdownRequest(method: ShutdownMethod): boolean {
+  private handleRepeatedShutdownRequest(
+    method: ShutdownMethod,
+    consumedArmedUntil: number | null,
+  ): boolean {
     const policy = this.repeatedShutdownRequestPolicy;
 
     if (!policy) {
@@ -6626,7 +6648,10 @@ export class LifecycleManager
     const now = Date.now();
     const state = this.repeatedShutdownRequestState;
 
-    if (state.remainsArmedUntil !== null) {
+    // Skipped when this request consumed the window on its way in: the caller already
+    // checked the deadline before consuming, and refreshing a window that the pass it is
+    // about to start would clear again immediately says nothing.
+    if (consumedArmedUntil === null && state.remainsArmedUntil !== null) {
       if (now >= state.remainsArmedUntil) {
         this.expireRepeatedShutdownRequestState();
         return false;
@@ -6637,6 +6662,12 @@ export class LifecycleManager
       // when an operator is actively trying to force the process down.
       this.refreshRepeatedShutdownArmedWindow(now);
     }
+
+    // What the window looked like for this request, whether it is still on the state or
+    // this request took it. Both the log lines and `wasArmedAfterFailure` describe the
+    // request, so neither may go blind just because the window was consumed early.
+    const armedUntil = consumedArmedUntil ?? state.remainsArmedUntil;
+    const wasArmedAfterFailure = armedUntil !== null;
 
     // The initial shutdown request starts graceful shutdown but does not count
     // toward force escalation. Only follow-up escalation presses are windowed.
@@ -6677,7 +6708,7 @@ export class LifecycleManager
           firstRequestAt: state.firstRequestAt,
           latestRequestAt: state.latestRequestAt,
           repeatedWindowStartedAt: state.repeatedWindowStartedAt,
-          remainsArmedUntil: state.remainsArmedUntil,
+          remainsArmedUntil: armedUntil,
           withinMS: policy.withinMS,
           forceAfterCount: policy.forceAfterCount,
         },
@@ -6708,7 +6739,7 @@ export class LifecycleManager
       firstRequestAt: state.firstRequestAt,
       latestRequestAt: state.latestRequestAt,
       isShuttingDown: this.isShuttingDown,
-      wasArmedAfterFailure: state.remainsArmedUntil !== null,
+      wasArmedAfterFailure,
     };
 
     this.logger.warn(
@@ -6722,7 +6753,7 @@ export class LifecycleManager
           firstRequestAt: context.firstRequestAt,
           latestRequestAt: context.latestRequestAt,
           repeatedWindowStartedAt: state.repeatedWindowStartedAt,
-          remainsArmedUntil: state.remainsArmedUntil,
+          remainsArmedUntil: armedUntil,
           withinMS: policy.withinMS,
           forceAfterCount: policy.forceAfterCount,
         },
@@ -6759,6 +6790,34 @@ export class LifecycleManager
       hasTriggeredForceShutdown: false,
       remainsArmedUntil: null,
     };
+  }
+
+  /**
+   * Spends the post-failure escalation window on the request that is about to start a
+   * shutdown pass: clears it and its expiry timer, and hands back the deadline it carried
+   * so the caller can still describe the window it took.
+   *
+   * Every request that gets as far as starting a pass ends the window - the pass is the
+   * retry the window was held open for. What matters is that it ends *before* the
+   * escalation bookkeeping runs, because that bookkeeping calls `onForceShutdown` and
+   * emits `shutdown-escalation-forced`, and a shutdown request made from inside either
+   * one is a continuation of the request that fired it. Consuming first is what lets that
+   * nested request see a plain fresh start rather than a second press against a window
+   * its own caller has not got around to clearing yet.
+   *
+   * @returns the deadline of the window this call took, or `null` when none was armed
+   */
+  private consumeRepeatedShutdownArmedWindow(): number | null {
+    const armedUntil = this.repeatedShutdownRequestState.remainsArmedUntil;
+
+    if (armedUntil === null) {
+      return null;
+    }
+
+    this.clearRepeatedShutdownExpiryTimer();
+    this.repeatedShutdownRequestState.remainsArmedUntil = null;
+
+    return armedUntil;
   }
 
   /**
