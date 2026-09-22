@@ -272,7 +272,7 @@ describe('createGuardedLoggerService', () => {
     expect(sink.logs[0]?.entityName).toBeUndefined();
   });
 
-  test('entity() that returns a rejecting promise is reported once for each failure', async () => {
+  test('entity() that returns a rejecting promise is reported once, with the reason', async () => {
     const sink = new ArraySink();
     const logger = new Logger({ sinks: [sink], callProcessExit: false });
     const service = logger.service('svc');
@@ -286,13 +286,11 @@ describe('createGuardedLoggerService', () => {
       guarded.entity('ent').info('still logged');
     });
 
-    // Two separate failures: handing back a non-logger, and the rejection the guard
-    // adopted so it could not float.
-    expect(reports.length).toBe(2);
-    expect((reports[0]?.cause as Error).message).toBe(
-      'lifecycle-manager logger.entity did not return a logger',
-    );
-    expect((reports[1]?.cause as Error).message).toBe('entity rejected');
+    // One failure, one report - and the rejection reason is the useful half of it, so
+    // that is the one that travels rather than a generic "not a logger".
+    expect(reports.length).toBe(1);
+    expect(reports[0]?.message).toContain('lifecycle-manager logger.entity');
+    expect((reports[0]?.cause as Error).message).toBe('entity rejected');
     expect(sink.logs[0]?.message).toBe('still logged');
   });
 

@@ -165,7 +165,8 @@ function guardLogMethod(
  * threw, it returned a promise, or it returned something that is not an object - the
  * failure is reported and the guarded *parent* is returned. That loses the entity name
  * from the line, which is the smaller loss: the chain still logs and still cannot throw.
- * A promise is reported like any other non-logger return, whether it resolves or rejects.
+ * A promise is a non-logger like any other, reported once when it settles - with the
+ * rejection reason if it rejects, or as a non-logger return if it resolves.
  */
 function guardEntity(
   target: LoggerService,
@@ -185,9 +186,8 @@ function guardEntity(
     () => {
       child = (method as (name: string) => unknown).call(target, entityName);
 
-      // Returned so `runCallbackSafely` adopts a promise-returning `entity()` and
-      // reports its rejection instead of leaving it floating.
-      return child;
+      // Deliberately not returned: `runCallbackSafely` would adopt a promise and report
+      // its rejection, and the settle handler below would then report it a second time.
     },
     [],
     (error) => {
@@ -197,11 +197,27 @@ function guardEntity(
     },
   );
 
-  // A promise is checked first because it is an object, and it is a non-logger like any
-  // other: nothing in the chain can call it. `runCallbackSafely` adopted it above, so a
-  // rejection is reported as well - but only a rejection was, which left an `entity()`
-  // that returned a promise and resolved reported nowhere at all.
-  if (isPromise(child) || child === null || typeof child !== 'object') {
+  // A promise is an object, so it is checked first; it is a non-logger like any other,
+  // since nothing in the chain can call it. Reported once it settles rather than now: a
+  // rejection carries the reason, which is the more useful report, and one that
+  // resolves still says so. Nothing is left floating either way.
+  if (isPromise(child)) {
+    void Promise.resolve(child).then(
+      () => {
+        reportCallbackError(
+          label,
+          new Error(`${label} did not return a logger`),
+        );
+      },
+      (error: unknown) => {
+        reportCallbackError(label, error);
+      },
+    );
+
+    return parent;
+  }
+
+  if (child === null || typeof child !== 'object') {
     // A failure was already reported above; anything else is a logger handing back a
     // non-logger, which nothing else would surface.
     if (!didFail) {
