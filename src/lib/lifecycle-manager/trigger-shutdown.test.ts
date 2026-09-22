@@ -380,7 +380,7 @@ describe('LifecycleManager - triggerShutdown() escalation', () => {
     expect(failed.success).toBe(false);
     expect(manager.getShutdownEscalationStatus().isArmed).toBe(true);
 
-    // `stopAllComponentsInternal` owns the manual-retry-while-armed split, so this
+    // `acceptShutdownPass` owns the manual-retry-while-armed split, so this
     // must advance the count by exactly one - the same as `stopAllComponents()`.
     // Counting it in the request path too would reach forceAfterCount on this one
     // call and force-kill from a single programmatic request.

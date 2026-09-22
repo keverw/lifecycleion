@@ -3,6 +3,7 @@ import { Logger } from '../logger';
 import { ArraySink } from '../logger/sinks/array';
 import { BaseComponent } from './base-component';
 import { LifecycleManager } from './lifecycle-manager';
+import type { RestartResult, ShutdownTriggerResult } from './types';
 import { sleep } from '../sleep';
 
 function setup(shutdownTimeoutMS?: number) {
@@ -500,7 +501,7 @@ describe('LifecycleManager - shutdown during restartAllComponents()', () => {
     expect(component.startCount).toBe(2);
   });
 
-  test('a restart starting after the latch drops does not take over the open window', async () => {
+  test('a restart starting after the latch drops does not clear the request', async () => {
     const { logger, manager } = setup();
     const component = new GatedStop(logger, 'gated');
     await manager.registerComponent(component);
@@ -513,9 +514,9 @@ describe('LifecycleManager - shutdown during restartAllComponents()', () => {
     expect(ack.code).toBe('already_in_progress');
 
     // The narrow gap the latch does not cover: the stop pass releases `isShuttingDown`
-    // in its `finally`, and the first restart only closes its window once its own
+    // in its `finally`, and the first restart only reads its pass's flag once its own
     // `await` resumes. A microtask queued from a listener that ran inside the pass lands
-    // in between, with the latch already off and the window still open.
+    // in between, with the latch already off.
     const followUps: Array<Promise<unknown>> = [];
 
     manager.once('lifecycle-manager:shutdown-completed', () => {
@@ -527,24 +528,134 @@ describe('LifecycleManager - shutdown during restartAllComponents()', () => {
     component.releaseStop();
     const firstResult = await first;
 
-    // The request recorded above belongs to the first restart, and only the first
-    // restart may close the window it is recorded in.
+    // The request recorded above belongs to the first restart's pass, which nothing
+    // starting afterwards can touch.
     expect(firstResult.startupSkippedByShutdownRequest).toBe(true);
     expect(followUps.length).toBe(1);
     await Promise.all(followUps);
   });
 
-  test('a restart whose stop phase throws leaves no window behind', async () => {
+  test('a restart that starts after the latch drops can still be canceled', async () => {
+    const { logger, manager } = setup();
+    const component = new GatedStop(logger, 'gated');
+    await manager.registerComponent(component);
+    await manager.startAllComponents();
+
+    // The same gap as above, from the other side. The second restart runs a real stop
+    // pass - the latch is free by the time it starts - so a request landing in that pass
+    // has to cancel *that* restart. Recording the request against the first restart
+    // instead left the second one to start everything back up behind it.
+    const followUps: Array<Promise<RestartResult>> = [];
+
+    manager.once('lifecycle-manager:shutdown-completed', () => {
+      queueMicrotask(() => {
+        followUps.push(manager.restartAllComponents());
+      });
+    });
+
+    const acks: Array<Promise<ShutdownTriggerResult>> = [];
+    let passCount = 0;
+
+    manager.on('lifecycle-manager:shutdown-initiated', () => {
+      passCount++;
+
+      // The second pass is the follow-up restart's own stop phase.
+      if (passCount === 2) {
+        acks.push(manager.triggerShutdown());
+      }
+    });
+
+    const first = manager.restartAllComponents();
+    await component.stopping.promise;
+    component.releaseStop();
+
+    const firstResult = await first;
+
+    // Nothing asked the first restart to stay down: the request belongs to the pass the
+    // follow-up restart started, which is a pass the first restart does not own.
+    expect(firstResult.startupSkippedByShutdownRequest).toBeUndefined();
+    expect(followUps.length).toBe(1);
+
+    const followUpResult = await followUps[0];
+    const ack = await acks[0];
+
+    expect(ack.code).toBe('already_in_progress');
+    expect(followUpResult.startupSkippedByShutdownRequest).toBe(true);
+    expect(followUpResult.startupResult.code).toBe(
+      'shutdown_requested_during_restart',
+    );
+
+    // The point of the fix: nothing is running once both restarts have settled.
+    expect(component.startCount).toBe(1);
+    expect(manager.isComponentRunning('gated')).toBe(false);
+    expect(manager.getComponentStatus('gated')?.state).toBe('stopped');
+  });
+
+  test('a throw in the acceptance step starts no pass and leaves no latch', async () => {
+    const { logger, manager } = setup();
+    const component = new GatedStop(logger, 'gated');
+    await manager.registerComponent(component);
+    await manager.startAllComponents();
+
+    const events: string[] = [];
+
+    manager.on('lifecycle-manager:shutdown-initiated', () => {
+      events.push('initiated');
+    });
+    manager.on('lifecycle-manager:shutdown-completed', () => {
+      events.push('completed');
+    });
+
+    // The bookkeeping the acceptance step runs before it takes the latch. A throw there
+    // is a manager bug, and it reaches the caller as one rather than being reported as a
+    // pass that started or a refusal that did not happen.
+    const internals = manager as unknown as {
+      normalizeRepeatedShutdownRequestStateArmedStatus: () => boolean;
+      isShuttingDown: boolean;
+      activeShutdownPass: unknown;
+    };
+    const original = internals.normalizeRepeatedShutdownRequestStateArmedStatus;
+
+    internals.normalizeRepeatedShutdownRequestStateArmedStatus = (): never => {
+      throw new Error('acceptance exploded');
+    };
+
+    try {
+      // eslint-disable-next-line @typescript-eslint/await-thenable
+      await expect(manager.stopAllComponents()).rejects.toThrow(
+        'acceptance exploded',
+      );
+    } finally {
+      internals.normalizeRepeatedShutdownRequestStateArmedStatus = original;
+    }
+
+    // No pass was accepted, so there is nothing to announce, nothing that owes a result,
+    // and nothing latched.
+    expect(events).toEqual([]);
+    expect(internals.isShuttingDown).toBe(false);
+    expect(internals.activeShutdownPass).toBeNull();
+    expect(manager.getSystemState()).not.toBe('shutting-down');
+
+    component.releaseStop();
+
+    const retry = await manager.stopAllComponents();
+
+    expect(retry.success).toBe(true);
+    expect(events).toEqual(['initiated', 'completed']);
+  });
+
+  test('a restart whose stop phase throws leaves no pass behind', async () => {
     const { logger, manager } = setup();
     const component = new GatedStop(logger, 'gated');
     await manager.registerComponent(component);
     await manager.startAllComponents();
 
     // Kills the stop pass while it is still working out what to stop, so the restart
-    // never reaches the call that closes its window on the normal path.
+    // never reaches the point where it reads its pass's flag.
     const internals = manager as unknown as {
       isComponentRunning: (name: string) => boolean;
-      restartStopPhaseToken: string | null;
+      isShuttingDown: boolean;
+      activeShutdownPass: unknown;
     };
     const original = internals.isComponentRunning;
 
@@ -561,9 +672,10 @@ describe('LifecycleManager - shutdown during restartAllComponents()', () => {
       internals.isComponentRunning = original;
     }
 
-    // The `finally` closed it, so the next restart owns a window of its own rather than
-    // being refused by a leaked one.
-    expect(internals.restartStopPhaseToken).toBeNull();
+    // The pass's `finally` dropped it along with the latch, so the next restart runs a
+    // pass of its own rather than being refused by a leaked one.
+    expect(internals.isShuttingDown).toBe(false);
+    expect(internals.activeShutdownPass).toBeNull();
 
     // The throw landed before stop() was ever called, so open the gate for the pass that
     // does reach it.

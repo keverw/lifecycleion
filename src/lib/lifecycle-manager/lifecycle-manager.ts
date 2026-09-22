@@ -137,6 +137,49 @@ function toTimerDelayMS(requested: number): number {
   return Math.min(Math.max(requested, 0), MAX_TIMER_MS);
 }
 
+/**
+ * A shutdown pass's options, resolved against the manager's defaults.
+ *
+ * Resolved by the acceptance step rather than by the pass, so the reads that could throw
+ * happen on the side of the latch where a throw costs nothing.
+ */
+interface ShutdownPassOptions {
+  readonly timeoutMS: number;
+  readonly retryStalled: boolean;
+  readonly haltOnStall: boolean;
+}
+
+/**
+ * A shutdown pass that has been accepted and is running.
+ *
+ * "A shutdown was requested while this pass was running" is a property of the pass, not of
+ * the manager: a request path marks the pass that refused it, and a caller that owns a
+ * pass - a `restartAllComponents()` stop phase - reads its own. The two have the same
+ * lifetime by construction, so there is no window to open, close, or hand over.
+ */
+interface ShutdownPass {
+  /**
+   * Set when a shutdown request lands while this pass is running, so the restart that
+   * owns the pass skips its startup phase and the components stay stopped.
+   */
+  shutdownRequested: boolean;
+}
+
+/**
+ * What `acceptShutdownPass()` answers: either the refusal the caller reports as its own
+ * `ShutdownResult`, or the pass it started.
+ *
+ * Discriminated rather than inferred from whether a callback fired, so a caller can tell
+ * the two apart without depending on which statements in between can throw.
+ */
+type ShutdownPassAcceptance =
+  | { readonly accepted: false; readonly result: ShutdownResult }
+  | {
+      readonly accepted: true;
+      readonly pass: ShutdownPass;
+      readonly promise: Promise<ShutdownResult>;
+    };
+
 export class LifecycleManager
   extends EventEmitterProtected
   implements LifecycleCommon
@@ -210,15 +253,11 @@ export class LifecycleManager
   private isShuttingDown = false;
   // Unique token used to detect shutdowns that happened during async start().
   private shutdownToken = ulid();
-  // Identifies the restart that owns the stop phase currently running, the window where
-  // `isShuttingDown` hides an incoming shutdown request behind "already in progress".
-  // A token rather than a flag because restarts can overlap: only the restart that minted
-  // the current one may clear it, or a second restart would close a window the first one
-  // still has to act on. For the same reason a restart that finds one set mints none:
-  // an open window belongs to its owner until the owner closes it.
-  private restartStopPhaseToken: string | null = null;
-  // Set when such a request lands, so the owning restart skips its startup phase.
-  private shutdownRequestedDuringRestart = false;
+  // The shutdown pass currently running, or `null` when none is. Shares the latch's
+  // lifetime exactly - taken with it, cleared with it - so a request refused because
+  // `isShuttingDown` hid it behind "already in progress" can be recorded against the
+  // pass that refused it. See {@link ShutdownPass}.
+  private activeShutdownPass: ShutdownPass | null = null;
   // Resolver for the first logger.exit() deferred during an already-running shutdown.
   private pendingLoggerExitResolve:
     ((result: BeforeExitResult) => void) | null = null;
@@ -1617,18 +1656,19 @@ export class LifecycleManager
   public async stopAllComponents(
     options?: StopAllOptions,
   ): Promise<ShutdownResult> {
-    // Noted here rather than on the refusal inside, which a restart's own stop call also
-    // reaches: a restart that enters while a shutdown is already running would otherwise
-    // note its own refused stop call and report a cancellation nobody asked for.
-    if (this.isShuttingDown) {
-      this.noteShutdownRequestDuringRestartStopPhase();
-    }
+    // Noted here rather than on the refusal inside `acceptShutdownPass()`, which a
+    // restart's own stop phase also reaches: a restart that enters while a shutdown is
+    // already running would otherwise note its own refused stop call and report a
+    // cancellation nobody asked for. A no-op when no pass is running.
+    this.noteShutdownRequestDuringActivePass();
 
     // always use manual method for external public API as not from a signal
-    return this.stopAllComponentsInternal('manual', {
+    const acceptance = this.acceptShutdownPass('manual', {
       ...this.shutdownOptions,
       ...options,
     });
+
+    return acceptance.accepted ? acceptance.promise : acceptance.result;
   }
 
   /**
@@ -1636,107 +1676,85 @@ export class LifecycleManager
    *
    * A shutdown request that arrives while the stop phase is running wins: the startup
    * phase is skipped and the result says so through
-   * `startupSkippedByShutdownRequest`. See `restartStopPhaseToken`.
+   * `startupSkippedByShutdownRequest`. See {@link ShutdownPass}.
    *
-   * A restart that starts while a shutdown is already running, or while another restart's
-   * stop-phase window is still open, owns no window of its own, so it never reports a
-   * skipped startup; it gets whatever its stop phase and `startAllComponents()` answer.
+   * A restart that starts while a shutdown is already running has its stop phase refused
+   * and so owns no pass; it never reports a skipped startup, and gets whatever that
+   * refusal and `startAllComponents()` answer.
    */
   public async restartAllComponents(
     options?: RestartAllOptions,
   ): Promise<RestartResult> {
     this.logger.info('Restarting all components');
 
-    // Ownership is decided here, before the first `await`: the stop call below sets the
-    // latch synchronously, so a restart that finds it already set will be refused and
-    // owns no window to cancel. Only an owner may touch the two fields.
-    //
-    // An open window counts as well, and not only because the latch is set for most of
-    // one: the owning restart releases the latch in its stop pass's `finally` and only
-    // closes its window once its own `await` resumes, and anything scheduled in between -
-    // a `finalizePendingLoggerExit()` continuation, a microtask a `shutdown-completed`
-    // listener queued - runs in that gap. A restart starting there would otherwise take
-    // the window over and reset the flag, losing a request the owner still has to act on.
-    const stopPhaseToken =
-      this.isShuttingDown || this.restartStopPhaseToken !== null
-        ? null
-        : ulid();
+    // Phase 1: Stop all components (explicit defaults for restart semantics)
+    const stopPhase = this.acceptShutdownPass('manual', {
+      ...this.shutdownOptions,
+      timeoutMS:
+        options?.shutdownTimeoutMS ?? this.shutdownOptions?.timeoutMS ?? 30000,
+      // Always retry/halt during restart for deterministic shutdown behavior.
+      retryStalled: true,
+      haltOnStall: true,
+    });
 
-    if (stopPhaseToken !== null) {
-      this.restartStopPhaseToken = stopPhaseToken;
-      this.shutdownRequestedDuringRestart = false;
-    }
+    // A refused stop phase is somebody else's pass: this restart has nothing of its own
+    // for a request to cancel, so it behaves exactly as it did before cancellation
+    // existed. A pass that dies rejects here, as it always has.
+    const shutdownResult = stopPhase.accepted
+      ? await stopPhase.promise
+      : stopPhase.result;
 
-    try {
-      // Phase 1: Stop all components (explicit defaults for restart semantics)
-      const shutdownResult = await this.stopAllComponentsInternal('manual', {
-        ...this.shutdownOptions,
-        timeoutMS:
-          options?.shutdownTimeoutMS ??
-          this.shutdownOptions?.timeoutMS ??
-          30000,
-        // Always retry/halt during restart for deterministic shutdown behavior.
-        retryStalled: true,
-        haltOnStall: true,
-      });
+    // Requests that land after the pass ends reach a later pass instead, and one made
+    // during phase 2 aborts that startup on its own via `shutdownToken`.
+    const wasCanceledByShutdownRequest =
+      stopPhase.accepted && stopPhase.pass.shutdownRequested;
 
-      // Requests only reach the window below through a fresh shutdown pass, which
-      // `startAllComponents()` aborts on its own via `shutdownToken`.
-      const wasCanceledByShutdownRequest =
-        this.endRestartStopPhase(stopPhaseToken);
+    // Phase 2: Start all components - unless something asked us to stay down while
+    // phase 1 ran. Checked ahead of a stalled/failed stop phase: the request is the
+    // stronger statement, and reporting it beats reporting whatever startup would
+    // have refused for instead.
+    if (wasCanceledByShutdownRequest) {
+      const startupResult: StartupResult = {
+        success: false,
+        startedComponents: [],
+        failedOptionalComponents: [],
+        skippedDueToDependency: [],
+        reason:
+          'Shutdown requested during the restart shutdown phase; startup skipped',
+        code: 'shutdown_requested_during_restart',
+        durationMS: 0,
+      };
 
-      // Phase 2: Start all components - unless something asked us to stay down while
-      // phase 1 ran. Checked ahead of a stalled/failed stop phase: the request is the
-      // stronger statement, and reporting it beats reporting whatever startup would
-      // have refused for instead.
-      if (wasCanceledByShutdownRequest) {
-        const startupResult: StartupResult = {
-          success: false,
-          startedComponents: [],
-          failedOptionalComponents: [],
-          skippedDueToDependency: [],
-          reason:
-            'Shutdown requested during the restart shutdown phase; startup skipped',
-          code: 'shutdown_requested_during_restart',
-          durationMS: 0,
-        };
-
-        this.logger.warn('Restart canceled by shutdown request', {
-          params: { shutdownSuccess: shutdownResult.success },
-        });
-
-        return {
-          shutdownResult,
-          startupResult,
-          startupSkippedByShutdownRequest: true,
-          success: false,
-        };
-      }
-
-      const startupResult = await this.startAllComponents(
-        options?.startupOptions,
-      );
-
-      const isSuccess = shutdownResult.success && startupResult.success;
-
-      this.logger[isSuccess ? 'success' : 'warn']('Restart completed', {
-        params: {
-          shutdownSuccess: shutdownResult.success,
-          startupSuccess: startupResult.success,
-        },
+      this.logger.warn('Restart canceled by shutdown request', {
+        params: { shutdownSuccess: shutdownResult.success },
       });
 
       return {
         shutdownResult,
         startupResult,
-        success: isSuccess,
+        startupSkippedByShutdownRequest: true,
+        success: false,
       };
-    } finally {
-      // Called here as well as above so a stop phase that throws cannot leak the window
-      // into the next restart. A no-op once the call above has already closed it, and for
-      // a restart that never owned one.
-      this.endRestartStopPhase(stopPhaseToken);
     }
+
+    const startupResult = await this.startAllComponents(
+      options?.startupOptions,
+    );
+
+    const isSuccess = shutdownResult.success && startupResult.success;
+
+    this.logger[isSuccess ? 'success' : 'warn']('Restart completed', {
+      params: {
+        shutdownSuccess: shutdownResult.success,
+        startupSuccess: startupResult.success,
+      },
+    });
+
+    return {
+      shutdownResult,
+      startupResult,
+      success: isSuccess,
+    };
   }
 
   // ============================================================================
@@ -2048,7 +2066,7 @@ export class LifecycleManager
         if (this.isShuttingDown) {
           // The process is on its way out, so a restart stopping right now must not
           // start everything back up behind the exit.
-          this.noteShutdownRequestDuringRestartStopPhase();
+          this.noteShutdownRequestDuringActivePass();
 
           if (isFirstExit && this.pendingLoggerExitResolve === null) {
             this.logger.debug(
@@ -2139,10 +2157,14 @@ export class LifecycleManager
    * @returns Acknowledgement that the request was accepted, not the result of the shutdown
    */
   public triggerShutdown(): Promise<ShutdownTriggerResult> {
-    // The request path is synchronous and cannot throw: it is field reads, guarded
-    // logger lines, and one call into `stopAllComponentsInternal`, whose own throws
-    // become a rejection it reports itself. The executor that used to turn a
-    // synchronous throw here into a rejection has nothing left to catch.
+    // The request path is synchronous and cannot throw: field reads, guarded logger
+    // lines, and `acceptShutdownPass()`, whose own user-visible callbacks - the
+    // escalation events and `onForceShutdown` - are each guarded too, and whose pass
+    // reports its throws as a rejection of a promise this method does not return. The
+    // executor that used to turn a synchronous throw here into a rejection has nothing
+    // left to catch, and a throw that did escape would be a bug in the manager: it
+    // reaches the caller as one rather than being converted into an `already_in_progress`
+    // that never happened.
     return Promise.resolve(this.requestManualShutdown());
   }
 
@@ -3486,19 +3508,30 @@ export class LifecycleManager
     }
   }
 
-  private async stopAllComponentsInternal(
+  /**
+   * Decide whether a shutdown pass may start, and start it when it may.
+   *
+   * Synchronous, and split from the pass itself, because every caller has to know which
+   * of the two happened before it does anything else: the acknowledgement
+   * `triggerShutdown()` returns, the `ShutdownResult` a refused `stopAllComponents()`
+   * reports, and whether a `restartAllComponents()` owns a pass a request could cancel
+   * all fall out of this one answer rather than being inferred afterwards.
+   *
+   * Everything that can throw is on this side of the latch, so a throw is a synchronous
+   * throw to the caller with no pass started and nothing to release. The pass takes the
+   * latch itself, as the first statement inside its `try`.
+   */
+  private acceptShutdownPass(
     method: ShutdownMethod,
     options?: StopAllOptions,
-    // Called synchronously as this pass announces itself, so `startShutdownPass()` is
-    // told a pass started rather than inferring it.
-    onPassStarted?: () => void,
-  ): Promise<ShutdownResult> {
-    const startTime = Date.now();
-    const effectiveTimeout = toTimerDelayMS(
-      options?.timeoutMS ?? this.shutdownOptions?.timeoutMS ?? 30000,
-    );
-    const shouldRetryStalled = options?.retryStalled ?? true;
-    const shouldHaltOnStall = options?.haltOnStall ?? true;
+  ): ShutdownPassAcceptance {
+    const passOptions: ShutdownPassOptions = {
+      timeoutMS: toTimerDelayMS(
+        options?.timeoutMS ?? this.shutdownOptions?.timeoutMS ?? 30000,
+      ),
+      retryStalled: options?.retryStalled ?? true,
+      haltOnStall: options?.haltOnStall ?? true,
+    };
 
     // Reject if already shutting down
     if (this.isShuttingDown) {
@@ -3509,7 +3542,10 @@ export class LifecycleManager
         },
       );
 
-      return this.alreadyInProgressShutdownResult();
+      return {
+        accepted: false,
+        result: this.alreadyInProgressShutdownResult(),
+      };
     }
 
     this.normalizeRepeatedShutdownRequestStateArmedStatus();
@@ -3554,8 +3590,40 @@ export class LifecycleManager
         },
       );
 
-      return this.alreadyInProgressShutdownResult();
+      return {
+        accepted: false,
+        result: this.alreadyInProgressShutdownResult(),
+      };
     }
+
+    const pass: ShutdownPass = { shutdownRequested: false };
+
+    // An async method, but it runs synchronously up to its first `await`, which is well
+    // past the latch: the caller this returns to already sees a shutdown in progress.
+    return {
+      accepted: true,
+      pass,
+      promise: this.runShutdownPass(method, passOptions, pass),
+    };
+  }
+
+  /**
+   * The shutdown pass `acceptShutdownPass()` accepted, and its only caller.
+   *
+   * A started pass always reports a `lifecycle-manager:shutdown-completed`, however it
+   * ends, and always releases the latch.
+   */
+  private async runShutdownPass(
+    method: ShutdownMethod,
+    options: ShutdownPassOptions,
+    pass: ShutdownPass,
+  ): Promise<ShutdownResult> {
+    const startTime = Date.now();
+    const {
+      timeoutMS: effectiveTimeout,
+      retryStalled: shouldRetryStalled,
+      haltOnStall: shouldHaltOnStall,
+    } = options;
 
     let hasTimedOut = false;
     let timeoutHandle: NodeJS.Timeout | undefined;
@@ -3607,17 +3675,18 @@ export class LifecycleManager
       return Array.from(stoppedComponents);
     };
 
-    this.isShuttingDown = true;
-
-    // Everything after the latch is set runs inside the `try`/`finally` that releases
-    // it, so nothing in the setup below - component getters included - can wedge the
-    // manager in `shutting-down`.
+    // Nothing above this point can throw - literal initializers and closures - and
+    // everything from the latch on runs inside the `try`/`finally` that releases it, so
+    // nothing in the setup below - component getters included - can wedge the manager in
+    // `shutting-down`.
     try {
-      // Announced before anything else in the pass, so the requester is told a pass
-      // started and the `catch` below owes it a `shutdown-completed` however the pass
-      // dies from here on - including on the emit a few lines down, which would leave
-      // that pairing without its `shutdown-initiated` half.
-      onPassStarted?.();
+      // Taken as the pass's first act, so the `catch` below owes a `shutdown-completed`
+      // however the pass dies from here on - including on the emit a few lines down,
+      // which would leave that pairing without its `shutdown-initiated` half. The pass
+      // goes up with the latch: a request refused by it is recorded on it, and both are
+      // dropped together in the `finally`.
+      this.isShuttingDown = true;
+      this.activeShutdownPass = pass;
       this.shutdownToken = ulid();
       this.shutdownMethod = method;
       if (
@@ -3960,6 +4029,7 @@ export class LifecycleManager
       }
 
       this.isShuttingDown = false;
+      this.activeShutdownPass = null;
       this.updateStartedFlag();
       this.finalizePendingLoggerExit();
     }
@@ -6314,7 +6384,7 @@ export class LifecycleManager
    */
   private handleShutdownRequest(method: ShutdownSignal): void {
     if (this.isShuttingDown) {
-      this.noteShutdownRequestDuringRestartStopPhase();
+      this.noteShutdownRequestDuringActivePass();
       this.lifecycleEvents.signalShutdown(method, true);
 
       if (this.handleRepeatedShutdownRequest(method)) {
@@ -6362,13 +6432,13 @@ export class LifecycleManager
    * Manual front-end behind `triggerShutdown()`. Kept apart from the signal path:
    * `signal:shutdown` describes a real OS signal, so it is never emitted here, and a
    * request that starts a pass needs no escalation bookkeeping of its own because
-   * `stopAllComponentsInternal` already seeds the state and owns the
-   * manual-retry-while-armed continue-or-reset choice. Counting it here as well would
-   * advance `requestCount` twice for one `triggerShutdown()`.
+   * `acceptShutdownPass` already seeds the state and owns the manual-retry-while-armed
+   * continue-or-reset choice. Counting it here as well would advance `requestCount`
+   * twice for one `triggerShutdown()`.
    */
   private requestManualShutdown(): ShutdownTriggerResult {
     if (this.isShuttingDown) {
-      this.noteShutdownRequestDuringRestartStopPhase();
+      this.noteShutdownRequestDuringActivePass();
 
       // Never counted toward escalation, whatever `countManualRetriesTowardEscalation`
       // says - the same as `stopAllComponents()`, which refuses in this window.
@@ -6376,7 +6446,7 @@ export class LifecycleManager
       // did not take. A programmatic request carries no such intent - and
       // `triggerShutdown()` is built for concurrent callers, so a handful of overlapping
       // HTTP handlers must not add up to a force kill. The flag covers a deliberate
-      // retry after a failed pass, which `stopAllComponentsInternal` owns.
+      // retry after a failed pass, which `acceptShutdownPass` owns.
       this.logger.warn(
         'Shutdown already in progress, ignoring manual request',
         {
@@ -6403,91 +6473,54 @@ export class LifecycleManager
    * `already_in_progress` when one was already running
    */
   private startShutdownPass(method: ShutdownMethod): ShutdownTriggerResult {
+    const acceptance = this.acceptShutdownPass(method, {
+      ...this.shutdownOptions,
+    });
+
+    if (!acceptance.accepted) {
+      return this.shutdownAlreadyInProgressResult();
+    }
+
     // Initiate shutdown asynchronously (don't await in signal handler). With a handler
-    // on the rejection: `stopAllComponentsInternal` rethrows from its `catch`, so any
-    // failure inside the pass rejects this floating promise with nothing attached. On
+    // on the rejection: `runShutdownPass` rethrows from its `catch`, so any failure
+    // inside the pass rejects this floating promise with nothing attached. On
     // `SIGINT`/`SIGTERM` that is an unhandled rejection - fatal under Node's default
     // `--unhandled-rejections=throw`, taking the process down before the components
     // it was about to stop were stopped. Reported on the global channel rather than
     // through the logger, which is where every other failure in this file goes.
-    //
-    // `stopAllComponentsInternal` runs synchronously up to its first `await`, which is
-    // past the point where it either refuses the pass or announces it through
-    // `onPassStarted`. A started pass always reports a `shutdown-completed`, however it
-    // ends.
-    let didStartPass = false;
-
-    this.stopAllComponentsInternal(
-      method,
-      {
-        ...this.shutdownOptions,
-      },
-      () => {
-        didStartPass = true;
-      },
-    ).catch((error: unknown) => {
+    acceptance.promise.catch((error: unknown) => {
       reportCallbackError(`shutdown after ${method}`, error);
     });
 
-    if (didStartPass) {
-      return {
-        initiated: true,
-        code: 'initiated',
-        reason: 'Shutdown initiated',
-      };
-    }
-
-    // No pass started means the pass was refused because one is already running: either
-    // the latch was set on entry, or a shutdown one of the guarded callbacks between
-    // there and the announcement started took it first. Everything else in that stretch
-    // is field writes, timer clears and guarded logger lines, so there is no third
-    // outcome left to report.
-    return this.shutdownAlreadyInProgressResult();
+    return {
+      initiated: true,
+      code: 'initiated',
+      reason: 'Shutdown initiated',
+    };
   }
 
   /**
-   * Records a shutdown request that landed while `restartAllComponents()` was stopping.
+   * Records a shutdown request that landed while a shutdown pass was already running.
    *
-   * Such a request is still refused as "already in progress" - the restart's own stop
-   * phase is the shutdown the requester gets, and starting a second pass on top of it
-   * would be wrong. What must not happen is the restart starting everything back up
-   * afterwards, so the request is remembered and phase 2 is skipped instead.
+   * Such a request is still refused as "already in progress" - the running pass is the
+   * shutdown the requester gets, and starting a second pass on top of it would be wrong.
+   * What must not happen is a `restartAllComponents()` whose stop phase that pass is
+   * starting everything back up afterwards, so the request is recorded on the pass and
+   * phase 2 is skipped instead.
    *
    * Called from the four request paths on the branch where they are refused because a
    * shutdown is already running: `handleShutdownRequest()` for a signal,
    * `requestManualShutdown()` for `triggerShutdown()`, the public `stopAllComponents()`
    * - a direct stop call in that window expresses the same intent as a signal - and the
    * `enableLoggerExitHook()` callback, where `logger.exit()` says the process is going
-   * down. Deliberately not the refusal inside `stopAllComponentsInternal`, which a
-   * restart's own stop call also reaches.
+   * down. Deliberately not `acceptShutdownPass()`'s own refusal, which a restart's stop
+   * phase also reaches: a restart refused by somebody else's pass is not a request to
+   * stay down.
    */
-  private noteShutdownRequestDuringRestartStopPhase(): void {
-    if (this.restartStopPhaseToken !== null) {
-      this.shutdownRequestedDuringRestart = true;
+  private noteShutdownRequestDuringActivePass(): void {
+    if (this.activeShutdownPass !== null) {
+      this.activeShutdownPass.shutdownRequested = true;
     }
-  }
-
-  /**
-   * Close the restart stop-phase window `token` opened and report whether a shutdown
-   * request landed inside it.
-   *
-   * A no-op unless `token` is the window currently open: a restart that owns nothing, or
-   * whose window a later restart has already replaced, must not clear a request the
-   * owning restart still has to act on. Idempotent, so the caller can close the window
-   * on the normal path and again from its `finally`.
-   */
-  private endRestartStopPhase(token: string | null): boolean {
-    if (token === null || this.restartStopPhaseToken !== token) {
-      return false;
-    }
-
-    this.restartStopPhaseToken = null;
-
-    const wasRequested = this.shutdownRequestedDuringRestart;
-
-    this.shutdownRequestedDuringRestart = false;
-
-    return wasRequested;
   }
 
   private shutdownAlreadyInProgressResult(): ShutdownTriggerResult {
@@ -6499,10 +6532,10 @@ export class LifecycleManager
   }
 
   /**
-   * The refusal `stopAllComponentsInternal()` returns when it will not run a pass
-   * because one is already running - whether the latch was already set on entry or was
-   * taken by a nested request while this one was still being set up. Shared so the two
-   * refusals cannot drift into reporting different things for the same situation.
+   * The refusal `acceptShutdownPass()` returns when it will not run a pass because one
+   * is already running - whether the latch was already set on entry or was taken by a
+   * nested request while this one was still being set up. Shared so the two refusals
+   * cannot drift into reporting different things for the same situation.
    */
   private alreadyInProgressShutdownResult(): ShutdownResult {
     return {

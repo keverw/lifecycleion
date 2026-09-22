@@ -163,8 +163,8 @@ describe('LifecycleManager - hostile thrown values', () => {
   });
 
   test('a logger that throws during a signal-driven shutdown is not fatal', async () => {
-    // The signal handler starts `stopAllComponentsInternal` and lets it float, and that
-    // method is `try`/`finally` with no `catch`. A logger that threw while the shutdown
+    // The signal handler starts the shutdown pass and lets it float, and that pass was
+    // once `try`/`finally` with no `catch`. A logger that threw while the shutdown
     // was being logged rejected the floating promise with nothing attached: an unhandled
     // rejection on `SIGTERM`, fatal under Node's default, before any component was
     // stopped. The manager guards its own logger at construction, so it cannot.
