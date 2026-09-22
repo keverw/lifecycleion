@@ -39,6 +39,7 @@ describe('ComponentLifecycle Proxy Wrapper', () => {
       detachSignals: mock(() => {}),
       getSignalStatus: mock(() => ({}) as any),
       getShutdownEscalationStatus: mock(() => ({}) as any),
+      triggerShutdown: mock(() => Promise.resolve({} as any)),
       triggerReload: mock(() => Promise.resolve({} as any)),
       triggerInfo: mock(() => Promise.resolve({} as any)),
       triggerDebug: mock(() => Promise.resolve({} as any)),
@@ -174,6 +175,9 @@ describe('ComponentLifecycle Proxy Wrapper', () => {
 
     proxy.getShutdownEscalationStatus();
     expect(mockManager.getShutdownEscalationStatus).toHaveBeenCalled();
+
+    await proxy.triggerShutdown();
+    expect(mockManager.triggerShutdown).toHaveBeenCalled();
 
     await proxy.triggerReload();
     expect(mockManager.triggerReload).toHaveBeenCalled();

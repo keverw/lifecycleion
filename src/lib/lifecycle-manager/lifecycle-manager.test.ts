@@ -5800,7 +5800,9 @@ describe('LifecycleManager - Bulk Operations', () => {
       expect(result.durationMS).toBe(0);
       expect(result.code).toBe('already_in_progress');
       // The same wording `triggerShutdown()` refuses with: one situation, one string.
-      expect(result.reason).toBe(LIFECYCLE_MANAGER_MESSAGE_SHUTDOWN_IN_PROGRESS);
+      expect(result.reason).toBe(
+        LIFECYCLE_MANAGER_MESSAGE_SHUTDOWN_IN_PROGRESS,
+      );
 
       await firstStopPromise;
     });
