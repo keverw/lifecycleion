@@ -246,6 +246,56 @@ describe('createGuardedLoggerService', () => {
     expect(sink.logs[0]?.message).toBe('still logged');
   });
 
+  test('entity() that returns a resolving promise is reported and falls back', async () => {
+    const sink = new ArraySink();
+    const logger = new Logger({ sinks: [sink], callProcessExit: false });
+    const service = logger.service('svc');
+
+    // A rejection was already reported by the guard that adopted it; a promise that
+    // resolves reported nothing, so the chain silently lost its entity name.
+    service.entity = (): LoggerService =>
+      Promise.resolve({}) as unknown as LoggerService;
+
+    const guarded = createGuardedLoggerService(service);
+
+    const reports = await collectReports(() => {
+      guarded.entity('ent').info('still logged');
+    });
+
+    expect(reports.length).toBe(1);
+    expect((reports[0]?.cause as Error).message).toBe(
+      'lifecycle-manager logger.entity did not return a logger',
+    );
+
+    // Falls back to the parent, so the line lands without the entity name.
+    expect(sink.logs[0]?.message).toBe('still logged');
+    expect(sink.logs[0]?.entityName).toBeUndefined();
+  });
+
+  test('entity() that returns a rejecting promise is reported once for each failure', async () => {
+    const sink = new ArraySink();
+    const logger = new Logger({ sinks: [sink], callProcessExit: false });
+    const service = logger.service('svc');
+
+    service.entity = (): LoggerService =>
+      Promise.reject(new Error('entity rejected')) as unknown as LoggerService;
+
+    const guarded = createGuardedLoggerService(service);
+
+    const reports = await collectReports(() => {
+      guarded.entity('ent').info('still logged');
+    });
+
+    // Two separate failures: handing back a non-logger, and the rejection the guard
+    // adopted so it could not float.
+    expect(reports.length).toBe(2);
+    expect((reports[0]?.cause as Error).message).toBe(
+      'lifecycle-manager logger.entity did not return a logger',
+    );
+    expect((reports[1]?.cause as Error).message).toBe('entity rejected');
+    expect(sink.logs[0]?.message).toBe('still logged');
+  });
+
   test('a method behind a throwing getter is contained and reported', async () => {
     const sink = new ArraySink();
     const logger = new Logger({ sinks: [sink], callProcessExit: false });

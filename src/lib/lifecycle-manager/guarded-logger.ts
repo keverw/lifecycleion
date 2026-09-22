@@ -165,6 +165,7 @@ function guardLogMethod(
  * threw, it returned a promise, or it returned something that is not an object - the
  * failure is reported and the guarded *parent* is returned. That loses the entity name
  * from the line, which is the smaller loss: the chain still logs and still cannot throw.
+ * A promise is reported like any other non-logger return, whether it resolves or rejects.
  */
 function guardEntity(
   target: LoggerService,
@@ -196,13 +197,11 @@ function guardEntity(
     },
   );
 
-  if (isPromise(child)) {
-    // `runCallbackSafely` adopted it above, so a rejection is already reported. Either
-    // way a promise is not something the rest of the chain can call.
-    return parent;
-  }
-
-  if (child === null || typeof child !== 'object') {
+  // A promise is checked first because it is an object, and it is a non-logger like any
+  // other: nothing in the chain can call it. `runCallbackSafely` adopted it above, so a
+  // rejection is reported as well - but only a rejection was, which left an `entity()`
+  // that returned a promise and resolved reported nowhere at all.
+  if (isPromise(child) || child === null || typeof child !== 'object') {
     // A failure was already reported above; anything else is a logger handing back a
     // non-logger, which nothing else would surface.
     if (!didFail) {
