@@ -3989,10 +3989,14 @@ export class LifecycleManager
 
         this.lastShutdownResult = result;
 
-        // An internal crash is not a stall, so the escalation window is not armed; the
-        // cycle's tracking is dropped instead, or the next manual request would skip
-        // seeding and inherit this pass's `requestCount` and force-shutdown flag.
-        this.resetRepeatedShutdownRequestState();
+        // Armed exactly as a stalled or timed-out pass arms it. A crash is the worst way
+        // for a pass to end, so it is the last place to take the escape hatch away:
+        // dropping the cycle here would reseed the operator's next press as a fresh one,
+        // `requestCount` would never reach `forceAfterCount`, and `onForceShutdown` -
+        // the one thing left that can still get the process down - would be unreachable.
+        // Carrying the count and the force-shutdown flag over is this method's job, and
+        // it still declines when the window is disabled or force has already fired.
+        this.armRepeatedShutdownAfterFailure();
 
         try {
           this.lifecycleEvents.lifecycleManagerShutdownCompleted({

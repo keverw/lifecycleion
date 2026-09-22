@@ -3,6 +3,7 @@ import { Logger } from '../logger';
 import { ArraySink } from '../logger/sinks/array';
 import { BaseComponent } from './base-component';
 import { LifecycleManager } from './lifecycle-manager';
+import type { ForceShutdownContext } from './types';
 import { sleep } from '../sleep';
 
 function setup(shutdownTimeoutMS?: number) {
@@ -748,8 +749,10 @@ describe('LifecycleManager - triggerShutdown() hardening', () => {
     expect(failed?.code).toBe('unknown_error');
     expect(failed?.reason).toContain('seed exploded');
 
-    // An internal crash is not a stall, so nothing is left counting toward escalation.
+    // A failed pass normally arms the escalation window, but seeding is what threw here,
+    // so there is no cycle to carry over and nothing to arm.
     expect(manager.getShutdownEscalationStatus().firstRequestAt).toBe(null);
+    expect(manager.getShutdownEscalationStatus().isArmed).toBe(false);
     expect(
       reports.some((report) =>
         (report as Error).message.includes('shutdown after manual'),
@@ -764,7 +767,7 @@ describe('LifecycleManager - triggerShutdown() hardening', () => {
     expect(events).toEqual(['completed', 'initiated', 'completed']);
   });
 
-  test('a pass that dies mid-flight reports what it stopped and drops its escalation state', async () => {
+  test('a pass that dies mid-flight reports what it stopped and arms its escalation state', async () => {
     const logger = new Logger({
       sinks: [new ArraySink()],
       callProcessExit: false,
@@ -819,8 +822,101 @@ describe('LifecycleManager - triggerShutdown() hardening', () => {
     // Scoped to this pass's own stop list, exactly as a pass that finishes scopes it.
     expect(result?.stalledComponents).toEqual([]);
 
-    // Otherwise the next manual request would skip seeding and inherit this cycle.
-    expect(manager.getShutdownEscalationStatus().firstRequestAt).toBe(null);
+    // A crash ends the pass unsuccessfully, so the window is armed exactly as a stall or
+    // a timeout arms it: dropping the cycle here would reseed the operator's next press
+    // as a fresh one and put `forceAfterCount` out of reach.
+    const escalation = manager.getShutdownEscalationStatus();
+    expect(escalation.firstRequestAt).not.toBe(null);
+    expect(escalation.isArmed).toBe(true);
+  });
+
+  test('a crashed pass leaves escalation reachable for the presses that follow', async () => {
+    const logger = new Logger({
+      sinks: [new ArraySink()],
+      callProcessExit: false,
+    });
+    const forced: ForceShutdownContext[] = [];
+    const manager = new LifecycleManager({
+      logger,
+      shutdownWarningTimeoutMS: -1,
+      repeatedShutdownRequestPolicy: {
+        forceAfterCount: 2,
+        withinMS: 1000,
+        onForceShutdown: (context): void => {
+          forced.push(context);
+        },
+      },
+    });
+
+    await manager.registerComponent(new SlowStop(logger, 'slow', 10));
+    await manager.startAllComponents();
+
+    // Every pass from here on dies inside the stop loop, so the component never stops
+    // and each press has something left to ask for.
+    const internals = manager as unknown as {
+      stopComponentInternal: (name: string) => Promise<unknown>;
+      handleShutdownRequest: (method: string) => void;
+    };
+    const original = internals.stopComponentInternal;
+    internals.stopComponentInternal = (): never => {
+      throw new Error('stop loop exploded');
+    };
+
+    // Each dead pass rejects the floating promise `startShutdownPass()` holds, which
+    // reports it on the global channel; claiming the reports keeps them out of the
+    // test output and asserts they were made.
+    const reports: unknown[] = [];
+    const onError = (event: Event): void => {
+      reports.push((event as ErrorEvent).error);
+      event.preventDefault();
+    };
+
+    globalThis.addEventListener('error', onError);
+
+    try {
+      // The first press seeds the cycle and its pass crashes rather than stalling.
+      let done = shutdownCompleted(manager);
+      internals.handleShutdownRequest('SIGTERM');
+      await done;
+
+      expect(manager.getLastShutdownResult()?.code).toBe('unknown_error');
+      expect(manager.getShutdownEscalationStatus().isArmed).toBe(true);
+
+      // The second press opens the escalation window at 1 and retries; the third
+      // advances the same streak to `forceAfterCount`. When a crash dropped the cycle
+      // instead, every press reseeded at 0 and the force handler was unreachable - no
+      // escape hatch for the one failure that most needs one.
+      done = shutdownCompleted(manager);
+      internals.handleShutdownRequest('SIGTERM');
+      await done;
+
+      expect(forced.length).toBe(0);
+
+      done = shutdownCompleted(manager);
+      internals.handleShutdownRequest('SIGTERM');
+      await done;
+
+      // Each pass reports its rejection a microtask after the completed event, so let
+      // the last one land while the listener that claims it is still attached.
+      await sleep(5);
+    } finally {
+      internals.stopComponentInternal = original;
+      globalThis.removeEventListener('error', onError);
+    }
+
+    expect(forced.length).toBe(1);
+    expect(forced[0]?.requestCount).toBe(2);
+    expect(forced[0]?.firstMethod).toBe('SIGTERM');
+
+    // The threshold was crossed from the post-failure window, not from inside a running
+    // pass: the crash is what left that window open.
+    expect(forced[0]?.wasArmedAfterFailure).toBe(true);
+    expect(forced[0]?.isShuttingDown).toBe(false);
+    expect(
+      reports.some((report) =>
+        (report as Error).message.includes('shutdown after SIGTERM'),
+      ),
+    ).toBe(true);
   });
 
   test('a pass that dies before it has a stop list reports no stalls of its own', async () => {
