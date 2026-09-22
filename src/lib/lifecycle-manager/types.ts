@@ -110,17 +110,32 @@ export type ShutdownMethod = 'manual' | 'SIGINT' | 'SIGTERM' | 'SIGTRAP';
  * in the background, so this never describes how components actually stopped -
  * use the `lifecycle-manager:shutdown-completed` event or
  * `getLastShutdownResult()` for that.
+ *
+ * A union rather than one shape with two independent fields: `initiated` and `code` are
+ * the same answer said twice, so the type ties them together and a caller that checks
+ * either one has narrowed the other.
  */
-export interface ShutdownTriggerResult {
-  /** True when this request started a new shutdown pass */
-  initiated: boolean;
+export type ShutdownTriggerResult =
+  | {
+      /** True when this request started a new shutdown pass */
+      initiated: true;
 
-  /** Machine-readable outcome code */
-  code: 'initiated' | 'already_in_progress';
+      /** Machine-readable outcome code */
+      code: 'initiated';
 
-  /** Human-readable explanation of the outcome */
-  reason: string;
-}
+      /** Human-readable explanation of the outcome */
+      reason: string;
+    }
+  | {
+      /** False when this request joined a pass that was already running */
+      initiated: false;
+
+      /** Machine-readable outcome code */
+      code: 'already_in_progress';
+
+      /** Human-readable explanation of the outcome */
+      reason: string;
+    };
 
 /**
  * Base interface for all operation results

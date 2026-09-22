@@ -1039,29 +1039,22 @@ export class LifecycleManager
         'Cannot start all components: startup already in progress',
       );
 
-      return {
-        success: false,
-        startedComponents: [],
-        failedOptionalComponents: [],
-        skippedDueToDependency: [],
-        reason: 'Startup already in progress',
-        code: 'already_in_progress',
-        durationMS: Date.now() - startTime,
-      };
+      return this.refusedStartupResult(
+        'already_in_progress',
+        'Startup already in progress',
+        Date.now() - startTime,
+      );
     }
 
     // Reject if shutdown is in progress
     if (this.isShuttingDown) {
       this.logger.warn('Cannot start all components: shutdown in progress');
-      return {
-        success: false,
-        startedComponents: [],
-        failedOptionalComponents: [],
-        skippedDueToDependency: [],
-        reason: LIFECYCLE_MANAGER_MESSAGE_SHUTDOWN_IN_PROGRESS,
-        code: 'shutdown_in_progress',
-        durationMS: Date.now() - startTime,
-      };
+
+      return this.refusedStartupResult(
+        'shutdown_in_progress',
+        LIFECYCLE_MANAGER_MESSAGE_SHUTDOWN_IN_PROGRESS,
+        Date.now() - startTime,
+      );
     }
 
     const totalCount = this.getComponentCount();
@@ -1070,15 +1063,11 @@ export class LifecycleManager
     if (totalCount === 0) {
       this.logger.warn('Cannot start all components: none registered');
 
-      return {
-        success: false,
-        startedComponents: [],
-        failedOptionalComponents: [],
-        skippedDueToDependency: [],
-        reason: 'No components registered',
-        code: 'no_components_registered',
-        durationMS: Date.now() - startTime,
-      };
+      return this.refusedStartupResult(
+        'no_components_registered',
+        'No components registered',
+        Date.now() - startTime,
+      );
     }
 
     // Check for stalled components
@@ -1727,16 +1716,10 @@ export class LifecycleManager
     // stronger statement, and reporting it beats reporting whatever startup would
     // have refused for instead.
     if (wasCanceledByShutdownRequest) {
-      const startupResult: StartupResult = {
-        success: false,
-        startedComponents: [],
-        failedOptionalComponents: [],
-        skippedDueToDependency: [],
-        reason:
-          'Shutdown requested during the restart shutdown phase; startup skipped',
-        code: 'shutdown_requested_during_restart',
-        durationMS: 0,
-      };
+      const startupResult = this.refusedStartupResult(
+        'shutdown_requested_during_restart',
+        'Shutdown requested during the restart shutdown phase; startup skipped',
+      );
 
       this.logger.warn('Restart canceled by shutdown request', {
         params: { shutdownSuccess: shutdownResult.success },
@@ -6593,6 +6576,32 @@ export class LifecycleManager
       durationMS: 0,
       reason: LIFECYCLE_MANAGER_MESSAGE_SHUTDOWN_IN_PROGRESS,
       code: 'already_in_progress',
+    };
+  }
+
+  /**
+   * The `StartupResult` a startup path returns when it starts nothing at all: no
+   * component started, none failed, none skipped, and a code and reason saying why.
+   * Shared for the same reason as {@link refusedShutdownResult}, so the refusals cannot
+   * drift into reporting different shapes for the same kind of answer.
+   *
+   * Only for refusals that are exactly that. A refusal carrying more - the names a stall
+   * blocked startup with, or the components that were already running - builds its own
+   * literal rather than passing them through here.
+   */
+  private refusedStartupResult(
+    code: NonNullable<StartupResult['code']>,
+    reason: string,
+    durationMS = 0,
+  ): StartupResult {
+    return {
+      success: false,
+      startedComponents: [],
+      failedOptionalComponents: [],
+      skippedDueToDependency: [],
+      reason,
+      code,
+      durationMS,
     };
   }
 

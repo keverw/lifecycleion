@@ -1420,11 +1420,11 @@ triggerShutdown(): Promise<ShutdownTriggerResult>
 Starts shutdown without waiting for it to finish - the same background shutdown pass a `SIGINT`/`SIGTERM` handler starts, without the signal bookkeeping. It resolves as soon as the request is accepted, so it suits callers that cannot block - an HTTP handler, or an event listener.
 
 ```typescript
-interface ShutdownTriggerResult {
-  initiated: boolean; // True when this request started a new shutdown pass
-  code: 'initiated' | 'already_in_progress';
-  reason: string;
-}
+type ShutdownTriggerResult =
+  // This request started a new shutdown pass
+  | { initiated: true; code: 'initiated'; reason: string }
+  // This request joined a pass that was already running
+  | { initiated: false; code: 'already_in_progress'; reason: string };
 ```
 
 The acknowledgement says only that the request was accepted. It does not report whether components stopped cleanly - subscribe to `lifecycle-manager:shutdown-completed`, or call `getLastShutdownResult()`, for that. An `initiated` acknowledgement is safe to wait on: once a pass announces itself with `lifecycle-manager:shutdown-initiated` it always reports a result, even if the pass itself fails outright.
