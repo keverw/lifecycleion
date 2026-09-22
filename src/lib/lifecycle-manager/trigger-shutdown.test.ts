@@ -1038,6 +1038,72 @@ describe('LifecycleManager - triggerShutdown() hardening', () => {
     expect(manager.getComponentStatus('first')?.state).toBe('stopped');
   });
 
+  test('a throw on the request path rejects rather than escaping the promise', async () => {
+    const { logger, manager } = setup();
+    await manager.registerComponent(new SlowStop(logger, 'slow', 10));
+    await manager.startAllComponents();
+
+    const events: string[] = [];
+
+    manager.on('lifecycle-manager:shutdown-initiated', () => {
+      events.push('initiated');
+    });
+    manager.on('lifecycle-manager:shutdown-completed', () => {
+      events.push('completed');
+    });
+
+    // The pre-latch half of the request, where a manager bug - an option read that
+    // throws, say - would surface. The method is declared to return a promise, so the
+    // caller's `.catch()` has to be the thing that sees it.
+    const internals = manager as unknown as {
+      acceptShutdownPass: (method: string) => unknown;
+      isShuttingDown: boolean;
+      activeShutdownPass: unknown;
+    };
+    const original = internals.acceptShutdownPass;
+
+    internals.acceptShutdownPass = (): never => {
+      throw new Error('acceptance exploded');
+    };
+
+    let didThrowSynchronously = false;
+    let rejection: unknown;
+
+    try {
+      // Calling without awaiting: a synchronous throw would land here instead of on the
+      // promise, which is exactly the shape this guards against.
+      const pending = manager.triggerShutdown();
+      rejection = await pending.then(
+        () => null,
+        (error: unknown) => error,
+      );
+    } catch (error) {
+      didThrowSynchronously = true;
+      rejection = error;
+    } finally {
+      internals.acceptShutdownPass = original;
+    }
+
+    expect(didThrowSynchronously).toBe(false);
+    expect((rejection as Error).message).toBe('acceptance exploded');
+
+    // Fail-fast: the failure is reported as itself, never laundered into an
+    // `already_in_progress` acknowledgement for a pass that never existed.
+    expect(events).toEqual([]);
+    expect(internals.isShuttingDown).toBe(false);
+    expect(internals.activeShutdownPass).toBeNull();
+    expect(manager.getSystemState()).not.toBe('shutting-down');
+    expect(manager.getLastShutdownResult()).toBeNull();
+
+    // The manager is idle, not wedged: the next request runs a pass of its own.
+    const done = shutdownCompleted(manager);
+    const ack = await manager.triggerShutdown();
+
+    expect(ack.code).toBe('initiated');
+    await done;
+    expect(events).toEqual(['initiated', 'completed']);
+  });
+
   test('a logger that throws on the final log line does not fail a clean shutdown', async () => {
     const { logger, manager } = setup();
     await manager.registerComponent(new SlowStop(logger, 'slow', 10));

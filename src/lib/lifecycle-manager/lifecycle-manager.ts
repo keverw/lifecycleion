@@ -2162,23 +2162,32 @@ export class LifecycleManager
    * site, and a logger failure alone never rejects the acknowledgement. Those
    * failures are reported on the global error channel instead.
    *
-   * The promise never rejects: every request either starts a pass or joins one, and a
-   * pass that dies reports itself through `lifecycle-manager:shutdown-completed` and
-   * the global error channel rather than through the acknowledgement. `void
-   * triggerShutdown()` is safe.
+   * No shutdown outcome rejects the promise: every request either starts a pass or
+   * joins one, and a pass that dies reports itself through
+   * `lifecycle-manager:shutdown-completed` and the global error channel rather than
+   * through the acknowledgement. The request path itself does not throw either, so
+   * `void triggerShutdown()` is safe. Were a bug in the manager ever to make it throw,
+   * it surfaces as a rejection of this promise - reaching a `.catch()` rather than
+   * escaping past it - and never as an `already_in_progress` that never happened.
    *
    * @returns Acknowledgement that the request was accepted, not the result of the shutdown
    */
   public triggerShutdown(): Promise<ShutdownTriggerResult> {
-    // The request path is synchronous and cannot throw: field reads, guarded logger
-    // lines, and `acceptShutdownPass()`, whose own user-visible callbacks - the
-    // escalation events and `onForceShutdown` - are each guarded too, and whose pass
-    // reports its throws as a rejection of a promise this method does not return. The
-    // executor that used to turn a synchronous throw here into a rejection has nothing
-    // left to catch, and a throw that did escape would be a bug in the manager: it
-    // reaches the caller as one rather than being converted into an `already_in_progress`
-    // that never happened.
-    return Promise.resolve(this.requestManualShutdown());
+    // The request path is synchronous and, as written, cannot throw: field reads,
+    // guarded logger lines, and `acceptShutdownPass()`, whose own user-visible callbacks
+    // - the escalation events and `onForceShutdown` - are each guarded too, and whose
+    // pass reports its throws as a rejection of a promise this method does not return.
+    //
+    // The executor is kept anyway, because the declared return type is the contract the
+    // caller writes against: a bug in the manager - an unguarded option read before the
+    // latch, say - must arrive as a rejection this method's `.catch()` can see rather
+    // than as a synchronous throw past it. Still fail-fast either way: the failure is
+    // reported as itself, never laundered into an `already_in_progress` acknowledgement
+    // for a pass that never existed. An `async` method would do the same thing, but
+    // there is nothing here to await and `@typescript-eslint/require-await` says so.
+    return new Promise<ShutdownTriggerResult>((resolve) => {
+      resolve(this.requestManualShutdown());
+    });
   }
 
   /**
