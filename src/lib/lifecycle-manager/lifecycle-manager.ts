@@ -3498,14 +3498,7 @@ export class LifecycleManager
         },
       );
 
-      return {
-        success: false,
-        stoppedComponents: [],
-        stalledComponents: [],
-        durationMS: 0,
-        reason: 'Shutdown already in progress',
-        code: 'already_in_progress',
-      };
+      return this.alreadyInProgressShutdownResult();
     }
 
     this.normalizeRepeatedShutdownRequestStateArmedStatus();
@@ -3530,6 +3523,29 @@ export class LifecycleManager
       this.clearRepeatedShutdownExpiryTimer();
       this.repeatedShutdownRequestState.remainsArmedUntil = null;
     }
+
+    // The bookkeeping above runs user code before the latch is taken: an expiring armed
+    // window emits `shutdown-escalation-expired`, and a counted manual retry can reach
+    // `onForceShutdown` and `shutdown-escalation-forced`. A listener or callback that
+    // starts its own shutdown from there - `triggerShutdown()` inside `onForceShutdown`
+    // is the realistic case - gets a pass that finds no latch, announces itself and
+    // starts stopping, and control then returns here. Refuse rather than run a second
+    // pass concurrently with it: the nested pass is the shutdown this call asked for,
+    // which is exactly what `already_in_progress` says. The latch is deliberately not
+    // taken earlier instead - `handleRepeatedShutdownRequest()` reads `isShuttingDown`
+    // for its log line and for `ForceShutdownContext.isShuttingDown`, and both would
+    // then describe a pass that has not started.
+    if (this.isShuttingDown) {
+      this.logger.warn(
+        'Cannot stop all components: a shutdown started while this request was being processed',
+        {
+          params: { method },
+        },
+      );
+
+      return this.alreadyInProgressShutdownResult();
+    }
+
     let hasTimedOut = false;
     let timeoutHandle: NodeJS.Timeout | undefined;
     let pendingShutdownOperation: Promise<void> | null = null;
@@ -6382,10 +6398,11 @@ export class LifecycleManager
       };
     }
 
-    // No pass started means the pass was refused because one is already running. The
-    // only code between that refusal and the announcement is field writes, timer
-    // clears, guarded logger lines and guarded callbacks, so there is no third outcome
-    // left to report.
+    // No pass started means the pass was refused because one is already running: either
+    // the latch was set on entry, or a shutdown one of the guarded callbacks between
+    // there and the announcement started took it first. Everything else in that stretch
+    // is field writes, timer clears and guarded logger lines, so there is no third
+    // outcome left to report.
     return this.shutdownAlreadyInProgressResult();
   }
 
@@ -6439,6 +6456,23 @@ export class LifecycleManager
       initiated: false,
       code: 'already_in_progress',
       reason: LIFECYCLE_MANAGER_MESSAGE_SHUTDOWN_IN_PROGRESS,
+    };
+  }
+
+  /**
+   * The refusal `stopAllComponentsInternal()` returns when it will not run a pass
+   * because one is already running - whether the latch was already set on entry or was
+   * taken by a nested request while this one was still being set up. Shared so the two
+   * refusals cannot drift into reporting different things for the same situation.
+   */
+  private alreadyInProgressShutdownResult(): ShutdownResult {
+    return {
+      success: false,
+      stoppedComponents: [],
+      stalledComponents: [],
+      durationMS: 0,
+      reason: 'Shutdown already in progress',
+      code: 'already_in_progress',
     };
   }
 

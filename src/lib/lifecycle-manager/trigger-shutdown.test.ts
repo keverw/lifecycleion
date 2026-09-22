@@ -402,6 +402,79 @@ describe('LifecycleManager - triggerShutdown() escalation', () => {
     expect(ack.code).toBe('initiated');
     await done;
   });
+
+  test('a force handler that triggers shutdown does not get a second concurrent pass', async () => {
+    const logger = new Logger({
+      sinks: [new ArraySink()],
+      callProcessExit: false,
+    });
+    const nestedAcks: string[] = [];
+    const manager = new LifecycleManager({
+      logger,
+      shutdownWarningTimeoutMS: -1,
+      shutdownOptions: { timeoutMS: 100, retryStalled: false },
+      repeatedShutdownRequestPolicy: {
+        forceAfterCount: 1,
+        withinMS: 2000,
+        countManualRetriesTowardEscalation: true,
+        // Runs synchronously, from inside the retry's own pre-latch bookkeeping: the
+        // pass this starts finds no latch and really does begin stopping.
+        onForceShutdown: () => {
+          void manager.triggerShutdown().then((ack) => {
+            nestedAcks.push(ack.code);
+          });
+        },
+      },
+    });
+
+    class Hanging extends BaseComponent {
+      public async start(): Promise<void> {}
+      public stop(): Promise<void> {
+        return new Promise<void>(() => {});
+      }
+    }
+
+    await manager.registerComponent(
+      new Hanging(logger, { name: 'hanging', dependencies: [] }),
+    );
+    await manager.startAllComponents();
+
+    // Fail the first attempt so post-failure escalation is armed; the retry below is
+    // what reaches forceAfterCount.
+    const failed = await manager.stopAllComponents();
+    expect(failed.success).toBe(false);
+    expect(manager.getShutdownEscalationStatus().isArmed).toBe(true);
+
+    let initiatedCount = 0;
+    let completedCount = 0;
+    manager.on('lifecycle-manager:shutdown-initiated', () => {
+      initiatedCount++;
+    });
+    manager.on('lifecycle-manager:shutdown-completed', () => {
+      completedCount++;
+    });
+
+    const done = shutdownCompleted(manager);
+    const outer = await manager.stopAllComponents();
+
+    // The nested request is the one that owns the pass; the outer call is refused for
+    // the shutdown that request started, rather than running a second one alongside it.
+    expect(nestedAcks).toEqual(['initiated']);
+    expect(outer.code).toBe('already_in_progress');
+    expect(outer.stoppedComponents).toEqual([]);
+    expect(initiatedCount).toBe(1);
+
+    // Still held by the pass the force handler started, not released by the refusal.
+    const internals = manager as unknown as { isShuttingDown: boolean };
+    expect(internals.isShuttingDown).toBe(true);
+    expect(completedCount).toBe(0);
+
+    await done;
+
+    expect(completedCount).toBe(1);
+    expect(initiatedCount).toBe(1);
+    expect(internals.isShuttingDown).toBe(false);
+  });
 });
 
 describe('LifecycleManager - triggerShutdown() hardening', () => {
