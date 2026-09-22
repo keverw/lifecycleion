@@ -294,6 +294,69 @@ describe('createGuardedLoggerService', () => {
     expect(sink.logs[0]?.message).toBe('still logged');
   });
 
+  test('entity() that returns an object whose then getter throws is contained', async () => {
+    const sink = new ArraySink();
+    const logger = new Logger({ sinks: [sink], callProcessExit: false });
+    const service = logger.service('svc');
+
+    // Detecting a thenable reads `then`; that read is the logger's code to break.
+    service.entity = (): LoggerService =>
+      ({
+        get then(): never {
+          throw new Error('then getter exploded');
+        },
+      }) as unknown as LoggerService;
+
+    const guarded = createGuardedLoggerService(service);
+
+    const reports = await collectReports(() => {
+      expect(() => {
+        guarded.entity('ent').info('still logged');
+      }).not.toThrow();
+    });
+
+    expect(reports.length).toBe(1);
+    expect((reports[0]?.cause as Error).message).toBe('then getter exploded');
+    expect(sink.logs[0]?.message).toBe('still logged');
+    expect(sink.logs[0]?.entityName).toBeUndefined();
+  });
+
+  test('entity() that returns a thenable whose then getter throws on adoption is contained', async () => {
+    const sink = new ArraySink();
+    const logger = new Logger({ sinks: [sink], callProcessExit: false });
+    const service = logger.service('svc');
+
+    // The first read (detection) sees a function; the second (adoption by
+    // `Promise.resolve`) throws. Both reads happen synchronously.
+    let reads = 0;
+    service.entity = (): LoggerService =>
+      ({
+        get then(): unknown {
+          reads++;
+
+          if (reads > 1) {
+            throw new Error('then getter exploded on adoption');
+          }
+
+          return (): void => {};
+        },
+      }) as unknown as LoggerService;
+
+    const guarded = createGuardedLoggerService(service);
+
+    const reports = await collectReports(() => {
+      expect(() => {
+        guarded.entity('ent').info('still logged');
+      }).not.toThrow();
+    });
+
+    expect(reports.length).toBe(1);
+    expect((reports[0]?.cause as Error).message).toBe(
+      'then getter exploded on adoption',
+    );
+    expect(sink.logs[0]?.message).toBe('still logged');
+  });
+
   test('a method behind a throwing getter is contained and reported', async () => {
     const sink = new ArraySink();
     const logger = new Logger({ sinks: [sink], callProcessExit: false });

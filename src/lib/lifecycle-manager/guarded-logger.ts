@@ -201,8 +201,24 @@ function guardEntity(
   // since nothing in the chain can call it. Reported once it settles rather than now: a
   // rejection carries the reason, which is the more useful report, and one that
   // resolves still says so. Nothing is left floating either way.
-  if (isPromise(child)) {
-    void Promise.resolve(child).then(
+  //
+  // Contained, because detecting and adopting a thenable each read `child.then`, and
+  // that read runs code the logger owns: a `then` getter that throws would otherwise
+  // escape here, past every other guard.
+  let adopted: Promise<unknown> | null = null;
+
+  try {
+    if (isPromise(child)) {
+      adopted = Promise.resolve(child);
+    }
+  } catch (error) {
+    reportCallbackError(label, error);
+
+    return parent;
+  }
+
+  if (adopted !== null) {
+    void adopted.then(
       () => {
         reportCallbackError(
           label,
