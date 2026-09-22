@@ -960,6 +960,67 @@ describe('LifecycleManager - triggerShutdown() hardening', () => {
     expect(escalation.isArmed).toBe(true);
   });
 
+  test('a crashed pass arms escalation after its completed event, like a stalled one', async () => {
+    const logger = new Logger({
+      sinks: [new ArraySink()],
+      callProcessExit: false,
+    });
+    const manager = new LifecycleManager({
+      logger,
+      shutdownWarningTimeoutMS: -1,
+      repeatedShutdownRequestPolicy: {
+        forceAfterCount: 3,
+        withinMS: 1000,
+        armedAfterFailureMS: 60_000,
+        onForceShutdown: (): void => {},
+      },
+    });
+
+    await manager.registerComponent(new SlowStop(logger, 'slow', 10));
+    await manager.startAllComponents();
+
+    const order: string[] = [];
+    const armedStatesSeen: boolean[] = [];
+    manager.on('lifecycle-manager:shutdown-completed', () => {
+      order.push('completed');
+      armedStatesSeen.push(manager.getShutdownEscalationStatus().isArmed);
+    });
+    manager.on('lifecycle-manager:shutdown-escalation-armed', () => {
+      order.push('armed');
+    });
+
+    const internals = manager as unknown as {
+      isComponentRunning: (name: string) => boolean;
+    };
+    const original = internals.isComponentRunning;
+    internals.isComponentRunning = (): never => {
+      throw new Error('setup exploded');
+    };
+
+    const onError = (event: Event): void => {
+      event.preventDefault();
+    };
+
+    globalThis.addEventListener('error', onError);
+
+    try {
+      // eslint-disable-next-line @typescript-eslint/await-thenable
+      await expect(manager.stopAllComponents()).rejects.toThrow(
+        'setup exploded',
+      );
+    } finally {
+      internals.isComponentRunning = original;
+      globalThis.removeEventListener('error', onError);
+    }
+
+    // A stalled pass emits `shutdown-completed` and only then arms; a listener on the
+    // completed event must see the same not-yet-armed state whichever way the pass
+    // failed.
+    expect(order).toEqual(['completed', 'armed']);
+    expect(armedStatesSeen).toEqual([false]);
+    expect(manager.getShutdownEscalationStatus().isArmed).toBe(true);
+  });
+
   test('a crashed pass leaves escalation reachable for the presses that follow', async () => {
     const logger = new Logger({
       sinks: [new ArraySink()],
