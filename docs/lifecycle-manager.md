@@ -1519,6 +1519,7 @@ const lifecycle = new LifecycleManager({
 - Additional shutdown requests received while shutdown is still in progress are treated as escalation requests
 - By default, only signal-style shutdown requests count toward escalation
 - Manual `stopAllComponents()` retries start a fresh escalation cycle unless `countManualRetriesTowardEscalation` is enabled
+- A shutdown request made from inside `onForceShutdown()` or a `lifecycle-manager:shutdown-escalation-forced` listener is treated as a continuation of the request that fired it, not as a new one, so it is never counted again
 - Escalation requests are counted inside a `withinMS` window
 - If a new escalation request arrives more than `withinMS` after the first escalation request in the current window, a new escalation window starts
 - `onForceShutdown()` fires once per escalation state when the count reaches `forceAfterCount`
