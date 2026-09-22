@@ -46,9 +46,10 @@ const GUARDED_LOG_METHODS: Record<
  * promise handlers, and the middle of its own startup and shutdown passes. The logger is
  * caller-supplied, so a method that throws - or returns a rejecting promise - used to
  * propagate into whichever lifecycle operation happened to be logging: a throw in the
- * stop loop rejected the shutdown pass, whose `catch` then announced
- * `lifecycle-manager:shutdown-completed` with `success: false` while the components were
- * still running.
+ * stop loop rejected the shutdown pass, leaving the components it had not reached
+ * running and every `lifecycle-manager:shutdown-completed` listener waiting on a pass
+ * that was already over. The guard keeps a logger failure off that path entirely, rather
+ * than relying on the pass reporting its own death.
  *
  * Guarding at the logger rather than at each call site is what makes that impossible:
  * there is one wrapper, applied once in the constructor, instead of ~140 call sites that
