@@ -644,6 +644,114 @@ describe('LifecycleManager - shutdown during restartAllComponents()', () => {
     expect(events).toEqual(['initiated', 'completed']);
   });
 
+  test('a restart started by escalation bookkeeping still sees the request that caused it', async () => {
+    const logger = new Logger({
+      sinks: [new ArraySink()],
+      callProcessExit: false,
+    });
+    const restarts: Array<Promise<RestartResult>> = [];
+    const manager = new LifecycleManager({
+      logger,
+      shutdownWarningTimeoutMS: -1,
+      shutdownOptions: { timeoutMS: 50, retryStalled: false },
+      repeatedShutdownRequestPolicy: {
+        forceAfterCount: 1,
+        withinMS: 2000,
+        countManualRetriesTowardEscalation: true,
+        // Runs synchronously from inside the retry's own pre-latch bookkeeping, so the
+        // stop phase this restart starts is already latched by the time the retry
+        // reaches the second latch check and is refused by it.
+        onForceShutdown: (): void => {
+          restarts.push(manager.restartAllComponents());
+        },
+      },
+    });
+
+    const component = new GatedStop(logger, 'gated');
+    await manager.registerComponent(component);
+    await manager.startAllComponents();
+
+    // Time the first pass out so escalation arms, then let the stop finish: the
+    // component ends up cleanly stopped with no stall on record, so nothing but the
+    // recorded request can keep the restart below from starting it again.
+    const failed = await manager.stopAllComponents();
+
+    expect(failed.timedOut).toBe(true);
+    component.releaseStop();
+    await sleep(20);
+
+    expect(manager.getComponentStatus('gated')?.state).toBe('stopped');
+    expect(manager.getStalledComponents()).toEqual([]);
+    expect(manager.getShutdownEscalationStatus().isArmed).toBe(true);
+
+    // The manual retry reaches `forceAfterCount`, whose handler restarts. The retry is
+    // then refused by the restart's own stop phase - and that refusal is the request the
+    // restart has to hear, or it starts everything back up under an operator who is
+    // still asking for the process to go down.
+    const retry = await manager.stopAllComponents();
+
+    expect(retry.code).toBe('already_in_progress');
+    expect(restarts.length).toBe(1);
+
+    const restart = await restarts[0];
+
+    expect(restart.shutdownResult.success).toBe(true);
+    expect(restart.startupSkippedByShutdownRequest).toBe(true);
+    expect(restart.startupResult.code).toBe(
+      'shutdown_requested_during_restart',
+    );
+    expect(restart.success).toBe(false);
+
+    // Never started again, and still down.
+    expect(component.startCount).toBe(1);
+    expect(manager.isComponentRunning('gated')).toBe(false);
+  });
+
+  test('a signal refused by a restart the force handler started still cancels it', async () => {
+    const logger = new Logger({
+      sinks: [new ArraySink()],
+      callProcessExit: false,
+    });
+    const restarts: Array<Promise<RestartResult>> = [];
+    const manager = new LifecycleManager({
+      logger,
+      shutdownWarningTimeoutMS: -1,
+      shutdownOptions: { timeoutMS: 50, retryStalled: false },
+      repeatedShutdownRequestPolicy: {
+        forceAfterCount: 1,
+        withinMS: 2000,
+        onForceShutdown: (): void => {
+          restarts.push(manager.restartAllComponents());
+        },
+      },
+    });
+
+    const component = new GatedStop(logger, 'gated');
+    await manager.registerComponent(component);
+    await manager.startAllComponents();
+
+    // Same shape as the manual case above, reached through the signal path: the press
+    // that crosses the threshold is refused by the restart its own force handler
+    // started, and that refusal is the only place the request can be recorded.
+    const failed = await manager.stopAllComponents();
+
+    expect(failed.timedOut).toBe(true);
+    component.releaseStop();
+    await sleep(20);
+
+    expect(manager.getShutdownEscalationStatus().isArmed).toBe(true);
+
+    sendSignal(manager, 'SIGTERM');
+
+    expect(restarts.length).toBe(1);
+
+    const restart = await restarts[0];
+
+    expect(restart.startupSkippedByShutdownRequest).toBe(true);
+    expect(component.startCount).toBe(1);
+    expect(manager.isComponentRunning('gated')).toBe(false);
+  });
+
   test('a restart whose stop phase throws leaves no pass behind', async () => {
     const { logger, manager } = setup();
     const component = new GatedStop(logger, 'gated');

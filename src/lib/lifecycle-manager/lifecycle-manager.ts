@@ -1656,19 +1656,32 @@ export class LifecycleManager
   public async stopAllComponents(
     options?: StopAllOptions,
   ): Promise<ShutdownResult> {
-    // Noted here rather than on the refusal inside `acceptShutdownPass()`, which a
-    // restart's own stop phase also reaches: a restart that enters while a shutdown is
-    // already running would otherwise note its own refused stop call and report a
-    // cancellation nobody asked for. A no-op when no pass is running.
-    this.noteShutdownRequestDuringActivePass();
-
     // always use manual method for external public API as not from a signal
     const acceptance = this.acceptShutdownPass('manual', {
       ...this.shutdownOptions,
       ...options,
     });
 
-    return acceptance.accepted ? acceptance.promise : acceptance.result;
+    if (acceptance.accepted) {
+      return acceptance.promise;
+    }
+
+    // Noted here rather than inside `acceptShutdownPass()`, whose refusals a restart's
+    // own stop phase also reaches: a restart refused by somebody else's pass would then
+    // note that pass and cancel a startup nobody asked to skip. `restartAllComponents()`
+    // calls the acceptance step directly, so this placement cannot reach it.
+    //
+    // After the acceptance rather than before it, because the pass that refuses this
+    // call need not exist on entry: the acceptance step runs escalation bookkeeping
+    // before its second latch check, and a callback that starts a pass from there - an
+    // `onForceShutdown` that calls `restartAllComponents()` is the realistic case - is
+    // precisely the pass this request has to reach. Noting first would mark nothing at
+    // all, and that restart would bring everything back up under an operator who is
+    // still asking for the process to go down. Whichever of the two refusals answered,
+    // the latch is held, so `activeShutdownPass` is the pass that is running.
+    this.noteShutdownRequestDuringActivePass();
+
+    return acceptance.result;
   }
 
   /**
@@ -6482,6 +6495,14 @@ export class LifecycleManager
     });
 
     if (!acceptance.accepted) {
+      // The same late refusal `stopAllComponents()` notes, for the same reason: the
+      // caller checked the latch before the acceptance step, so a pass started from
+      // inside that step's escalation bookkeeping - an `onForceShutdown` that calls
+      // `restartAllComponents()` - was not there to be noted then. A signal and a
+      // `triggerShutdown()` both mean the process should stay down, and neither path is
+      // one a restart takes for its own stop phase.
+      this.noteShutdownRequestDuringActivePass();
+
       return this.refusedTriggerResult();
     }
 
@@ -6517,9 +6538,14 @@ export class LifecycleManager
    * `requestManualShutdown()` for `triggerShutdown()`, the public `stopAllComponents()`
    * - a direct stop call in that window expresses the same intent as a signal - and the
    * `enableLoggerExitHook()` callback, where `logger.exit()` says the process is going
-   * down. Deliberately not `acceptShutdownPass()`'s own refusal, which a restart's stop
-   * phase also reaches: a restart refused by somebody else's pass is not a request to
-   * stay down.
+   * down. The first two check the latch themselves and then reach the acceptance step,
+   * which can refuse them a second time over a pass its own escalation bookkeeping
+   * started; `startShutdownPass()` and `stopAllComponents()` call this again on that
+   * refusal, because on entry there was no pass to note.
+   *
+   * Deliberately not `acceptShutdownPass()`'s own refusal, which a restart's stop phase
+   * also reaches: a restart refused by somebody else's pass is not a request to stay
+   * down. Every call site above is one a restart never takes for its stop phase.
    */
   private noteShutdownRequestDuringActivePass(): void {
     if (this.activeShutdownPass !== null) {
