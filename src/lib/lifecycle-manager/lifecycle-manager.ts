@@ -3544,7 +3544,7 @@ export class LifecycleManager
 
       return {
         accepted: false,
-        result: this.alreadyInProgressShutdownResult(),
+        result: this.refusedShutdownResult(),
       };
     }
 
@@ -3592,7 +3592,7 @@ export class LifecycleManager
 
       return {
         accepted: false,
-        result: this.alreadyInProgressShutdownResult(),
+        result: this.refusedShutdownResult(),
       };
     }
 
@@ -6454,7 +6454,7 @@ export class LifecycleManager
         },
       );
 
-      return this.shutdownAlreadyInProgressResult();
+      return this.refusedTriggerResult();
     }
 
     this.logger.info('Manual shutdown requested', {
@@ -6478,7 +6478,7 @@ export class LifecycleManager
     });
 
     if (!acceptance.accepted) {
-      return this.shutdownAlreadyInProgressResult();
+      return this.refusedTriggerResult();
     }
 
     // Initiate shutdown asynchronously (don't await in signal handler). With a handler
@@ -6523,7 +6523,15 @@ export class LifecycleManager
     }
   }
 
-  private shutdownAlreadyInProgressResult(): ShutdownTriggerResult {
+  /**
+   * The acknowledgement a request gets when it did not start a pass because one is
+   * already running - the `ShutdownTriggerResult` half of the refusal.
+   *
+   * Named for what it returns rather than for the situation, because
+   * {@link refusedShutdownResult} describes the same situation in the other result
+   * type and the two were an anagram apart.
+   */
+  private refusedTriggerResult(): ShutdownTriggerResult {
     return {
       initiated: false,
       code: 'already_in_progress',
@@ -6535,15 +6543,16 @@ export class LifecycleManager
    * The refusal `acceptShutdownPass()` returns when it will not run a pass because one
    * is already running - whether the latch was already set on entry or was taken by a
    * nested request while this one was still being set up. Shared so the two refusals
-   * cannot drift into reporting different things for the same situation.
+   * cannot drift into reporting different things for the same situation, and worded from
+   * the same constant as {@link refusedTriggerResult} for the same reason.
    */
-  private alreadyInProgressShutdownResult(): ShutdownResult {
+  private refusedShutdownResult(): ShutdownResult {
     return {
       success: false,
       stoppedComponents: [],
       stalledComponents: [],
       durationMS: 0,
-      reason: 'Shutdown already in progress',
+      reason: LIFECYCLE_MANAGER_MESSAGE_SHUTDOWN_IN_PROGRESS,
       code: 'already_in_progress',
     };
   }

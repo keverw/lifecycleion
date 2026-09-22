@@ -16,6 +16,7 @@ import {
   lifecycleManagerErrCodes,
 } from './errors';
 import type { LifecycleManagerEventMap } from './events';
+import { LIFECYCLE_MANAGER_MESSAGE_SHUTDOWN_IN_PROGRESS } from './constants';
 import { sleep } from '../sleep';
 import {
   TestComponent,
@@ -5798,7 +5799,8 @@ describe('LifecycleManager - Bulk Operations', () => {
       expect(result.stoppedComponents).toEqual([]);
       expect(result.durationMS).toBe(0);
       expect(result.code).toBe('already_in_progress');
-      expect(result.reason).toBe('Shutdown already in progress');
+      // The same wording `triggerShutdown()` refuses with: one situation, one string.
+      expect(result.reason).toBe(LIFECYCLE_MANAGER_MESSAGE_SHUTDOWN_IN_PROGRESS);
 
       await firstStopPromise;
     });
