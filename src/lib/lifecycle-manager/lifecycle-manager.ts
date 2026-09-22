@@ -214,7 +214,8 @@ export class LifecycleManager
   // `isShuttingDown` hides an incoming shutdown request behind "already in progress".
   // A token rather than a flag because restarts can overlap: only the restart that minted
   // the current one may clear it, or a second restart would close a window the first one
-  // still has to act on.
+  // still has to act on. For the same reason a restart that finds one set mints none:
+  // an open window belongs to its owner until the owner closes it.
   private restartStopPhaseToken: string | null = null;
   // Set when such a request lands, so the owning restart skips its startup phase.
   private shutdownRequestedDuringRestart = false;
@@ -1637,9 +1638,9 @@ export class LifecycleManager
    * phase is skipped and the result says so through
    * `startupSkippedByShutdownRequest`. See `restartStopPhaseToken`.
    *
-   * A restart that starts while a shutdown is already running has no stop phase of its
-   * own - the call below is refused - so it never reports a skipped startup; it stops
-   * nothing and then gets whatever `startAllComponents()` answers.
+   * A restart that starts while a shutdown is already running, or while another restart's
+   * stop-phase window is still open, owns no window of its own, so it never reports a
+   * skipped startup; it gets whatever its stop phase and `startAllComponents()` answer.
    */
   public async restartAllComponents(
     options?: RestartAllOptions,
@@ -1649,7 +1650,17 @@ export class LifecycleManager
     // Ownership is decided here, before the first `await`: the stop call below sets the
     // latch synchronously, so a restart that finds it already set will be refused and
     // owns no window to cancel. Only an owner may touch the two fields.
-    const stopPhaseToken = this.isShuttingDown ? null : ulid();
+    //
+    // An open window counts as well, and not only because the latch is set for most of
+    // one: the owning restart releases the latch in its stop pass's `finally` and only
+    // closes its window once its own `await` resumes, and anything scheduled in between -
+    // a `finalizePendingLoggerExit()` continuation, a microtask a `shutdown-completed`
+    // listener queued - runs in that gap. A restart starting there would otherwise take
+    // the window over and reset the flag, losing a request the owner still has to act on.
+    const stopPhaseToken =
+      this.isShuttingDown || this.restartStopPhaseToken !== null
+        ? null
+        : ulid();
 
     if (stopPhaseToken !== null) {
       this.restartStopPhaseToken = stopPhaseToken;

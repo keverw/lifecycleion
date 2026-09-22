@@ -499,4 +499,80 @@ describe('LifecycleManager - shutdown during restartAllComponents()', () => {
     expect(manager.isComponentRunning('gated')).toBe(true);
     expect(component.startCount).toBe(2);
   });
+
+  test('a restart starting after the latch drops does not take over the open window', async () => {
+    const { logger, manager } = setup();
+    const component = new GatedStop(logger, 'gated');
+    await manager.registerComponent(component);
+    await manager.startAllComponents();
+
+    const first = manager.restartAllComponents();
+    await component.stopping.promise;
+
+    const ack = await manager.triggerShutdown();
+    expect(ack.code).toBe('already_in_progress');
+
+    // The narrow gap the latch does not cover: the stop pass releases `isShuttingDown`
+    // in its `finally`, and the first restart only closes its window once its own
+    // `await` resumes. A microtask queued from a listener that ran inside the pass lands
+    // in between, with the latch already off and the window still open.
+    const followUps: Array<Promise<unknown>> = [];
+
+    manager.once('lifecycle-manager:shutdown-completed', () => {
+      queueMicrotask(() => {
+        followUps.push(manager.restartAllComponents());
+      });
+    });
+
+    component.releaseStop();
+    const firstResult = await first;
+
+    // The request recorded above belongs to the first restart, and only the first
+    // restart may close the window it is recorded in.
+    expect(firstResult.startupSkippedByShutdownRequest).toBe(true);
+    expect(followUps.length).toBe(1);
+    await Promise.all(followUps);
+  });
+
+  test('a restart whose stop phase throws leaves no window behind', async () => {
+    const { logger, manager } = setup();
+    const component = new GatedStop(logger, 'gated');
+    await manager.registerComponent(component);
+    await manager.startAllComponents();
+
+    // Kills the stop pass while it is still working out what to stop, so the restart
+    // never reaches the call that closes its window on the normal path.
+    const internals = manager as unknown as {
+      isComponentRunning: (name: string) => boolean;
+      restartStopPhaseToken: string | null;
+    };
+    const original = internals.isComponentRunning;
+
+    internals.isComponentRunning = (): never => {
+      throw new Error('stop phase exploded');
+    };
+
+    try {
+      // eslint-disable-next-line @typescript-eslint/await-thenable
+      await expect(manager.restartAllComponents()).rejects.toThrow(
+        'stop phase exploded',
+      );
+    } finally {
+      internals.isComponentRunning = original;
+    }
+
+    // The `finally` closed it, so the next restart owns a window of its own rather than
+    // being refused by a leaked one.
+    expect(internals.restartStopPhaseToken).toBeNull();
+
+    // The throw landed before stop() was ever called, so open the gate for the pass that
+    // does reach it.
+    component.releaseStop();
+
+    const second = await manager.restartAllComponents();
+
+    expect(second.startupSkippedByShutdownRequest).toBeUndefined();
+    expect(second.success).toBe(true);
+    expect(manager.isComponentRunning('gated')).toBe(true);
+  });
 });
