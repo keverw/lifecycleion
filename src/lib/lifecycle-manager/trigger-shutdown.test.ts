@@ -870,6 +870,78 @@ describe('LifecycleManager - triggerShutdown() hardening', () => {
     expect(manager.getStalledComponents().length).toBe(1);
   });
 
+  test('a crashed pass still reports a component that stopped without it', async () => {
+    const logger = new Logger({
+      sinks: [new ArraySink()],
+      callProcessExit: false,
+    });
+    const manager = new LifecycleManager({
+      logger,
+      shutdownWarningTimeoutMS: 50,
+    });
+
+    let armThrow = (): void => {};
+
+    class SelfStopper extends BaseComponent {
+      public async start(): Promise<void> {}
+      public async stop(): Promise<void> {}
+      // The stop loop never records this one: it stops itself here, and the loop throws
+      // before it gets that far.
+      public onShutdownWarning(): void {
+        this.reportUnexpectedStop();
+        armThrow();
+      }
+    }
+
+    class Plain extends BaseComponent {
+      public async start(): Promise<void> {}
+      public async stop(): Promise<void> {}
+    }
+
+    await manager.registerComponent(
+      new SelfStopper(logger, { name: 'first', dependencies: [] }),
+    );
+    await manager.registerComponent(
+      new Plain(logger, { name: 'second', dependencies: [] }),
+    );
+    await manager.startAllComponents();
+
+    // Shutdown order is the reverse of startup order, so the loop reaches 'second'
+    // first and dies there, with 'first' already stopped but unrecorded.
+    const internals = manager as unknown as {
+      isComponentRunning: (name: string) => boolean;
+    };
+    const original = internals.isComponentRunning.bind(manager);
+    let isArmed = false;
+
+    armThrow = (): void => {
+      isArmed = true;
+    };
+    internals.isComponentRunning = (name: string): boolean => {
+      if (isArmed && name === 'second') {
+        throw new Error('stop loop exploded');
+      }
+
+      return original(name);
+    };
+
+    try {
+      // eslint-disable-next-line @typescript-eslint/await-thenable
+      await expect(manager.stopAllComponents()).rejects.toThrow(
+        'stop loop exploded',
+      );
+    } finally {
+      internals.isComponentRunning = original;
+    }
+
+    // Both paths run the same reconciliation sweep, so the crash reports what the
+    // manager actually has as stopped rather than only what the loop got to announce.
+    const crashed = manager.getLastShutdownResult();
+    expect(crashed?.code).toBe('unknown_error');
+    expect(crashed?.stoppedComponents).toEqual(['first']);
+    expect(manager.getComponentStatus('first')?.state).toBe('stopped');
+  });
+
   test('a logger that throws on the final log line does not fail a clean shutdown', async () => {
     const { logger, manager } = setup();
     await manager.registerComponent(new SlowStop(logger, 'slow', 10));
