@@ -1,76 +1,17 @@
 import { describe, test, expect } from 'bun:test';
-import { Logger } from '../logger';
-import { ArraySink } from '../logger/sinks/array';
 import { BaseComponent } from './base-component';
-import { LifecycleManager } from './lifecycle-manager';
-import type { LifecycleManagerOptions } from './types';
+import type { LifecycleManager } from './lifecycle-manager';
+import {
+  claimReports,
+  fakeAttachedSignals,
+  hasReport,
+  Plain,
+  setup,
+} from './test-helpers';
 
 // Every public async method answers with a result object rather than a rejection, so a
 // caller can fire one without awaiting it. These cover the paths that used to reject -
 // and, worse, the ones that rejected with manager state still held.
-
-function setup(options: Partial<LifecycleManagerOptions> = {}) {
-  const logger = new Logger({
-    sinks: [new ArraySink()],
-    callProcessExit: false,
-  });
-
-  return {
-    logger,
-    manager: new LifecycleManager({
-      logger,
-      shutdownWarningTimeoutMS: -1,
-      ...options,
-    }),
-  };
-}
-
-// Claims every report on the global `'error'` channel until `release()`: asserts they
-// were made, and keeps the `console.error` fall-through out of the test output.
-function claimReports(): { reports: unknown[]; release: () => void } {
-  const reports: unknown[] = [];
-  const onError = (event: Event): void => {
-    reports.push((event as ErrorEvent).error);
-    event.preventDefault();
-  };
-
-  globalThis.addEventListener('error', onError);
-
-  return {
-    reports,
-    release: () => {
-      globalThis.removeEventListener('error', onError);
-    },
-  };
-}
-
-function hasReport(reports: unknown[], text: string): boolean {
-  return reports.some((report) => (report as Error).message.includes(text));
-}
-
-class Plain extends BaseComponent {
-  public forceCalls = 0;
-
-  constructor(logger: Logger, name: string) {
-    super(logger, { name, dependencies: [] });
-  }
-
-  public async start(): Promise<void> {}
-  public async stop(): Promise<void> {}
-  public onShutdownForce(): void {
-    this.forceCalls++;
-  }
-}
-
-// Stands in for an attached `ProcessSignalManager`, so the auto-detach paths run without
-// touching the real process's signal handlers.
-function fakeAttachedSignals(manager: LifecycleManager): void {
-  (
-    manager as unknown as {
-      processSignalManager: { getStatus: () => { isAttached: boolean } };
-    }
-  ).processSignalManager = { getStatus: () => ({ isAttached: true }) };
-}
 
 describe('LifecycleManager - public methods never reject', () => {
   test('a signal attach that throws refuses bulk startup without wedging it', async () => {

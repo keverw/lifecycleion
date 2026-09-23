@@ -4061,10 +4061,15 @@ describe('LifecycleManager - Bulk Operations', () => {
       // Wait a bit for first component to start
       await sleep(25);
 
-      // Trigger shutdown during startup (simulate by setting the flag)
+      // Trigger shutdown during startup (simulate by holding the latch - the running
+      // pass - directly)
       // Note: This is a bit hacky for testing, but we're testing the internal behavior
-      (lifecycle as unknown as { isShuttingDown: boolean }).isShuttingDown =
-        true;
+      (
+        lifecycle as unknown as { activeShutdownPass: unknown }
+      ).activeShutdownPass = {
+        shutdownRequested: false,
+        isRestartStopPhase: false,
+      };
 
       const result = await startPromise;
 

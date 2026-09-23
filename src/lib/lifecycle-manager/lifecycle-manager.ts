@@ -271,13 +271,11 @@ export class LifecycleManager
   private isStarting = false;
   private autoAttachedSignalsDuringStartup = false;
   private isStarted = false;
-  private isShuttingDown = false;
   // Unique token used to detect shutdowns that happened during async start().
   private shutdownToken = ulid();
-  // The shutdown pass currently running, or `null` when none is. Shares the latch's
-  // lifetime exactly - taken with it, cleared with it - so a request refused because
-  // `isShuttingDown` hid it behind "already in progress" can be recorded against the
-  // pass that refused it. See {@link ShutdownPass}.
+  // The shutdown pass currently running, or `null` when none is. It is the shutdown
+  // latch - `isShuttingDown` reads it - so a request refused as "already in progress"
+  // can always be recorded against the pass that refused it. See {@link ShutdownPass}.
   private activeShutdownPass: ShutdownPass | null = null;
   // Each registered component's name, read once when it is committed to the registry.
   // See {@link nameOf}.
@@ -2105,28 +2103,12 @@ export class LifecycleManager
     progress: { wasStopped: boolean },
   ): Promise<UnregisterComponentResult> {
     // Block unregistration during bulk operations
-    if (
-      this.isStarting ||
-      this.isShuttingDown ||
-      this.pendingBulkStartupCleanup.has(name)
-    ) {
-      this.logger
-        .entity(name)
-        .warn(LIFECYCLE_MANAGER_MESSAGE_BULK_OPERATION_IN_PROGRESS, {
-          params: {
-            isStarting: this.isStarting,
-            isShuttingDown: this.isShuttingDown,
-          },
-        });
-
-      return {
-        success: false,
-        componentName: name,
-        reason: LIFECYCLE_MANAGER_MESSAGE_BULK_OPERATION_IN_PROGRESS,
-        code: 'bulk_operation_in_progress',
-        wasStopped: false,
-        wasRegistered: this.hasComponent(name),
-      };
+    if (this.isBulkOperationBlockingUnregister(name)) {
+      return this.refuseUnregisterForBulkOperation(
+        name,
+        false,
+        this.hasComponent(name),
+      );
     }
 
     const component = this.getComponent(name);
@@ -2216,7 +2198,6 @@ export class LifecycleManager
     }
 
     // If running and stopIfRunning is true (default), stop first
-    let wasStopped = false;
     if (isRunning && shouldStopIfRunning) {
       this.logger.entity(name).info('Stopping component before unregistering');
       const stopResult = await this.stopComponent(name, {
@@ -2258,7 +2239,6 @@ export class LifecycleManager
         };
       }
 
-      wasStopped = true;
       progress.wasStopped = true;
 
       // The stop's `await` let other code run. A `component:stopped` listener may have
@@ -2282,28 +2262,8 @@ export class LifecycleManager
       // while this component was stopping now owns the registry, and removing a
       // component from under it is what the guard at the top exists to prevent. The
       // component stays registered, stopped.
-      if (
-        this.isStarting ||
-        this.isShuttingDown ||
-        this.pendingBulkStartupCleanup.has(name)
-      ) {
-        this.logger
-          .entity(name)
-          .warn(LIFECYCLE_MANAGER_MESSAGE_BULK_OPERATION_IN_PROGRESS, {
-            params: {
-              isStarting: this.isStarting,
-              isShuttingDown: this.isShuttingDown,
-            },
-          });
-
-        return {
-          success: false,
-          componentName: name,
-          reason: LIFECYCLE_MANAGER_MESSAGE_BULK_OPERATION_IN_PROGRESS,
-          code: 'bulk_operation_in_progress',
-          wasStopped: true,
-          wasRegistered: true,
-        };
+      if (this.isBulkOperationBlockingUnregister(name)) {
+        return this.refuseUnregisterForBulkOperation(name, true, true);
       }
     }
 
@@ -2353,8 +2313,44 @@ export class LifecycleManager
     return {
       success: true,
       componentName: name,
-      wasStopped,
+      wasStopped: progress.wasStopped,
       wasRegistered: true,
+    };
+  }
+
+  /**
+   * Whether a bulk operation owns the registry, so a component must not be removed from
+   * under it: a startup or shutdown latch, or a late-startup cleanup for this component.
+   */
+  private isBulkOperationBlockingUnregister(name: string): boolean {
+    return (
+      this.isStarting ||
+      this.isShuttingDown ||
+      this.pendingBulkStartupCleanup.has(name)
+    );
+  }
+
+  private refuseUnregisterForBulkOperation(
+    name: string,
+    wasStopped: boolean,
+    wasRegistered: boolean,
+  ): UnregisterComponentResult {
+    this.logger
+      .entity(name)
+      .warn(LIFECYCLE_MANAGER_MESSAGE_BULK_OPERATION_IN_PROGRESS, {
+        params: {
+          isStarting: this.isStarting,
+          isShuttingDown: this.isShuttingDown,
+        },
+      });
+
+    return {
+      success: false,
+      componentName: name,
+      reason: LIFECYCLE_MANAGER_MESSAGE_BULK_OPERATION_IN_PROGRESS,
+      code: 'bulk_operation_in_progress',
+      wasStopped,
+      wasRegistered,
     };
   }
 
@@ -2467,7 +2463,9 @@ export class LifecycleManager
     this.isStarting = true;
     this.autoAttachedSignalsDuringStartup = false;
 
-    const shutdownTokenBeforeAttach = this.shutdownToken;
+    // This startup's baseline for every "did a shutdown start meanwhile" check below,
+    // including the one right after the attach.
+    const shutdownTokenAtBulkStart = this.shutdownToken;
 
     // Tracked so failure cleanup does not detach handlers that were attached earlier by
     // some other path.
@@ -2499,7 +2497,7 @@ export class LifecycleManager
     // shutdown is refused.
     if (
       this.isShuttingDown ||
-      this.shutdownToken !== shutdownTokenBeforeAttach
+      this.shutdownToken !== shutdownTokenAtBulkStart
     ) {
       this.isStarting = false;
 
@@ -2517,7 +2515,6 @@ export class LifecycleManager
     }
 
     // Clear previous shutdown state
-    const shutdownTokenAtBulkStart = this.shutdownToken;
     this.unexpectedStopsDuringStartup.clear();
     this.resetRepeatedShutdownRequestState();
     this.shutdownMethod = null; // Clear previous shutdown method on fresh start
@@ -4372,7 +4369,6 @@ export class LifecycleManager
       // which would leave that pairing without its `shutdown-initiated` half. The pass
       // goes up with the latch: a request refused by it is recorded on it, and both are
       // dropped together in the `finally`.
-      this.isShuttingDown = true;
       this.activeShutdownPass = pass;
       this.shutdownToken = ulid();
       this.shutdownMethod = method;
@@ -4753,7 +4749,6 @@ export class LifecycleManager
         });
       }
 
-      this.isShuttingDown = false;
       this.activeShutdownPass = null;
       this.updateStartedFlag();
 
@@ -7978,6 +7973,11 @@ export class LifecycleManager
     };
   }
 
+  /** The shutdown latch: set exactly while a shutdown pass is running. */
+  private get isShuttingDown(): boolean {
+    return this.activeShutdownPass !== null;
+  }
+
   /**
    * A component's name, as recorded when it was registered.
    *
@@ -8060,21 +8060,17 @@ export class LifecycleManager
    * when it took none. Passed in rather than read back off the state, because a caller
    * that is about to start a pass consumes the window *before* calling this - the whole
    * point being that the user code below finds none - and there would otherwise be
-   * nothing left here to tell an armed request apart from a fresh one.
-   * @returns true when the request was consumed as part of the repeated-shutdown
-   * escalation flow, false when the caller should treat it as a fresh shutdown request
+   * nothing left here to tell an armed request apart from a fresh one. A window found
+   * already lapsed is expired and the request is not counted.
    */
   private handleRepeatedShutdownRequest(
     method: ShutdownMethod,
     consumedArmedUntil: number | null,
-  ): boolean {
+  ): void {
     this.escalationHandlingDepth++;
 
     try {
-      return this.handleRepeatedShutdownRequestInner(
-        method,
-        consumedArmedUntil,
-      );
+      this.handleRepeatedShutdownRequestInner(method, consumedArmedUntil);
     } finally {
       this.escalationHandlingDepth--;
     }
@@ -8083,7 +8079,7 @@ export class LifecycleManager
   private handleRepeatedShutdownRequestInner(
     method: ShutdownMethod,
     consumedArmedUntil: number | null,
-  ): boolean {
+  ): void {
     const policy = this.repeatedShutdownRequestPolicy;
 
     if (!policy) {
@@ -8091,7 +8087,7 @@ export class LifecycleManager
       this.logger.warn('Shutdown already in progress, ignoring signal', {
         params: { method },
       });
-      return true;
+      return;
     }
 
     const now = Date.now();
@@ -8103,7 +8099,7 @@ export class LifecycleManager
     if (consumedArmedUntil === null && state.remainsArmedUntil !== null) {
       if (now >= state.remainsArmedUntil) {
         this.expireRepeatedShutdownRequestState();
-        return false;
+        return;
       }
 
       // Keep the post-failure escalation window alive while shutdown requests
@@ -8174,7 +8170,7 @@ export class LifecycleManager
       state.latestMethod === null ||
       state.latestRequestAt === null
     ) {
-      return true;
+      return;
     }
 
     state.hasTriggeredForceShutdown = true;
@@ -8221,7 +8217,6 @@ export class LifecycleManager
       latestRequestAt: context.latestRequestAt,
       wasArmedAfterFailure: context.wasArmedAfterFailure,
     });
-    return true;
   }
 
   /**

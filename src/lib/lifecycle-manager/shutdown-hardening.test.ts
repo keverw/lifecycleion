@@ -5,6 +5,7 @@ import { BaseComponent } from './base-component';
 import { LifecycleManager } from './lifecycle-manager';
 import type { ForceShutdownContext, ShutdownResult } from './types';
 import { sleep } from '../sleep';
+import { claimReports, hasReport } from './test-helpers';
 
 function setup(shutdownTimeoutMS?: number) {
   const logger = new Logger({
@@ -31,29 +32,6 @@ function shutdownCompleted(manager: LifecycleManager): Promise<void> {
       resolve();
     });
   });
-}
-
-// Claims every report on the global `'error'` channel until `release()`: asserts they
-// were made, and keeps the `console.error` fall-through out of the test output.
-function claimReports(): { reports: unknown[]; release: () => void } {
-  const reports: unknown[] = [];
-  const onError = (event: Event): void => {
-    reports.push((event as ErrorEvent).error);
-    event.preventDefault();
-  };
-
-  globalThis.addEventListener('error', onError);
-
-  return {
-    reports,
-    release: () => {
-      globalThis.removeEventListener('error', onError);
-    },
-  };
-}
-
-function hasReport(reports: unknown[], text: string): boolean {
-  return reports.some((report) => (report as Error).message.includes(text));
 }
 
 class SlowStop extends BaseComponent {
