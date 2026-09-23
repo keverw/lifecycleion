@@ -1786,6 +1786,92 @@ describe('LifecycleManager - public methods never reject', () => {
     expect(detachCalls).toBe(1);
   });
 
+  test('a failed shutdown during bulk startup keeps signals the startup attached', async () => {
+    const { logger, manager } = setup({
+      attachSignalsBeforeStartup: true,
+      detachSignalsOnStop: true,
+    });
+    const stalls = new Plain(logger, 'stalls');
+    stalls.stop = (): Promise<void> => Promise.reject(new Error('stop failed'));
+    stalls.onShutdownForce = (): void => {
+      throw new Error('force failed');
+    };
+    let finishStart = (): void => {};
+    const slow = new Plain(logger, 'slow');
+    slow.start = (): Promise<void> =>
+      new Promise<void>((resolve) => {
+        finishStart = resolve;
+      });
+    await manager.registerComponent(stalls);
+    await manager.registerComponent(slow);
+
+    // Attached by this startup, faked so no process-wide handlers are installed.
+    manager.attachSignals = (): void => {
+      fakeAttachedSignals(manager);
+    };
+    let detachCalls = 0;
+    manager.detachSignals = (): void => {
+      detachCalls++;
+    };
+
+    const startup = manager.startAllComponents();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    // The pass stalls `stalls` and ends while `slow` still holds the startup open.
+    const { release } = claimReports();
+    let passResult;
+
+    try {
+      passResult = await manager.stopAllComponents();
+      finishStart();
+      await startup;
+    } finally {
+      release();
+    }
+
+    // A stalled component is not counted as running, so the startup's idle check used
+    // to take the handlers off, leaving the armed escalation unreachable by Ctrl+C.
+    expect(passResult.success).toBe(false);
+    expect(manager.getComponentStatus('stalls')?.state).toBe('stalled');
+    expect(detachCalls).toBe(0);
+  });
+
+  test('signals kept for a stalled component come off once it is unregistered', async () => {
+    const { logger, manager } = setup({ detachSignalsOnStop: true });
+    const stalls = new Plain(logger, 'stalls');
+    stalls.stop = (): Promise<void> => Promise.reject(new Error('stop failed'));
+    stalls.onShutdownForce = (): void => {
+      throw new Error('force failed');
+    };
+    await manager.registerComponent(stalls);
+    await manager.startAllComponents();
+
+    fakeAttachedSignals(manager);
+    let detachCalls = 0;
+    manager.detachSignals = (): void => {
+      detachCalls++;
+    };
+
+    const { release } = claimReports();
+
+    try {
+      await manager.stopAllComponents();
+    } finally {
+      release();
+    }
+
+    expect(manager.getComponentStatus('stalls')?.state).toBe('stalled');
+    expect(detachCalls).toBe(0);
+
+    const result = await manager.unregisterComponent('stalls', {
+      stopIfRunning: false,
+    });
+
+    expect(result.success).toBe(true);
+
+    expect(detachCalls).toBe(1);
+  });
+
   test('getValue() resolves an unexpected failure as an error result', async () => {
     const { logger, manager } = setup();
     const component = new Plain(logger, 'a');

@@ -6508,10 +6508,14 @@ export class LifecycleManager
     // clean one. Mid-pass, the last running component stopping says nothing about the
     // components that stalled, and a failed pass must keep the handlers so the
     // operator's next Ctrl+C still reaches escalation.
+    //
+    // Nor while anything is stalled, whoever stops last: a stalled component is not
+    // counted as running, but Ctrl+C is how the operator retries or forces it.
     if (
       !this.detachSignalsOnStop ||
       this.isShuttingDown ||
       this.runningComponents.size > 0 ||
+      this.stalledComponents.size > 0 ||
       !this.processSignalManager
     ) {
       return;
@@ -6550,12 +6554,14 @@ export class LifecycleManager
     // Not while a shutdown pass is running: it still needs SIGINT/SIGTERM for
     // escalation, and a startup refused because a listener started that pass would
     // otherwise pull the handlers out from under it. The pass's own stops detach them
-    // once the last component is down.
+    // once the last component is down. Nor while anything is stalled, for the reason
+    // `detachSignalsAfterLastStop` gives.
     if (
       !this.detachSignalsOnStop ||
       this.isStarting ||
       this.isShuttingDown ||
       this.runningComponents.size > 0 ||
+      this.stalledComponents.size > 0 ||
       !this.processSignalManager?.getStatus().isAttached
     ) {
       return;

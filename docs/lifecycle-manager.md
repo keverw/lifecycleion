@@ -1310,7 +1310,10 @@ rolls it back, whether or not the component is optional.
 If `detachSignalsOnStop` is enabled, currently attached handlers are detached
 when the last running component stops, whether they were attached manually or
 automatically. If startup fails before anything is running, handlers attached
-via `attachSignalsBeforeStartup` are detached during startup cleanup.
+via `attachSignalsBeforeStartup` are detached during startup cleanup. Handlers
+stay attached while any component is stalled - a stalled component is not
+counted as running, but Ctrl+C is how the operator retries or forces it - and
+come off once the last stall clears, by a later stop or by unregistering it.
 
 #### `detachSignals()`
 
