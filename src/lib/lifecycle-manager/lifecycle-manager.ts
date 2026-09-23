@@ -7345,32 +7345,6 @@ export class LifecycleManager
   }
 
   /**
-   * Handle shutdown signal - initiates stopAllComponents().
-   *
-   * Four cases depending on the current shutdown state:
-   *
-   * 1. **Active shutdown** (`isShuttingDown = true`): escalate through the
-   *    repeated-shutdown policy if configured, otherwise log and discard.
-   *    Emits `signal:shutdown` with `isAlreadyShuttingDown: true` and returns
-   *    without starting another shutdown. When that shutdown is a restart's stop
-   *    phase, the request also cancels the restart's startup phase.
-   *
-   * 2. **Armed post-failure** (previous shutdown finished, armed window still
-   *    open): count the request toward the escalation window, emit
-   *    `signal:shutdown` with `isAlreadyShuttingDown: false`, then start a
-   *    new `stopAllComponents()` run to retry.
-   *
-   * 3. **Armed post-failure expired** (armed window opened but has since
-   *    elapsed): expire the stale state, treat the request as a fresh
-   *    shutdown - same outcome as case 4.
-   *
-   * 4. **Fresh shutdown** (no active or armed state): seed escalation tracking
-   *    if policy is configured, emit `signal:shutdown` with
-   *    `isAlreadyShuttingDown: false`, and start `stopAllComponents()`.
-   *
-   * In all cases `signal:shutdown` is emitted exactly once.
-   */
-  /**
    * Emit `signal:shutdown` for a signal that is about to start (or retry) a pass.
    *
    * The signal has already set up escalation for its cycle by now, and the emit runs
@@ -7428,6 +7402,32 @@ export class LifecycleManager
     this.handleRepeatedShutdownRequest(method, null);
   }
 
+  /**
+   * Handle shutdown signal - initiates stopAllComponents().
+   *
+   * Four cases depending on the current shutdown state:
+   *
+   * 1. **Active shutdown** (`isShuttingDown = true`): escalate through the
+   *    repeated-shutdown policy if configured, otherwise log and discard.
+   *    Emits `signal:shutdown` with `isAlreadyShuttingDown: true` and returns
+   *    without starting another shutdown. When that shutdown is a restart's stop
+   *    phase, the request also cancels the restart's startup phase.
+   *
+   * 2. **Armed post-failure** (previous shutdown finished, armed window still
+   *    open): count the request toward the escalation window, emit
+   *    `signal:shutdown` with `isAlreadyShuttingDown: false`, then start a
+   *    new `stopAllComponents()` run to retry.
+   *
+   * 3. **Armed post-failure expired** (armed window opened but has since
+   *    elapsed): expire the stale state, treat the request as a fresh
+   *    shutdown - same outcome as case 4.
+   *
+   * 4. **Fresh shutdown** (no active or armed state): seed escalation tracking
+   *    if policy is configured, emit `signal:shutdown` with
+   *    `isAlreadyShuttingDown: false`, and start `stopAllComponents()`.
+   *
+   * In all cases `signal:shutdown` is emitted exactly once.
+   */
   private handleShutdownRequest(method: ShutdownSignal): void {
     if (this.isShuttingDown) {
       this.answerShutdownSignalDuringPass(method);
