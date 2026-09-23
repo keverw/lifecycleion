@@ -806,6 +806,107 @@ describe('LifecycleManager - public methods never reject', () => {
     expect(signals).toHaveLength(1);
   });
 
+  test('a crashed start of an already-running component leaves it running', async () => {
+    const { logger, manager } = setup();
+    await manager.registerComponent(new Plain(logger, 'a'));
+    await manager.startComponent('a');
+
+    // The `component_already_running` refusal builds a status; make that throw once.
+    const originalGetStatus = manager.getComponentStatus.bind(manager);
+    let shouldThrow = true;
+    manager.getComponentStatus = (
+      name: string,
+    ): ReturnType<LifecycleManager['getComponentStatus']> => {
+      if (shouldThrow) {
+        shouldThrow = false;
+        throw new Error('status exploded');
+      }
+
+      return originalGetStatus(name);
+    };
+
+    const { release } = claimReports();
+    let result;
+
+    try {
+      result = await manager.startComponent('a');
+    } finally {
+      release();
+    }
+
+    expect(result.code).toBe('unknown_error');
+    // This attempt never ran the component, so it must not stop the run it found.
+    expect(manager.isComponentRunning('a')).toBe(true);
+  });
+
+  test('a crashed second stop does not stall a stop already in progress', async () => {
+    const { logger, manager } = setup();
+    const component = new Plain(logger, 'a');
+    let finishStop = (): void => {};
+    component.stop = (): Promise<void> =>
+      new Promise<void>((resolve) => {
+        finishStop = resolve;
+      });
+    await manager.registerComponent(component);
+    await manager.startComponent('a');
+
+    const firstStop = manager.stopComponent('a');
+    expect(manager.getComponentStatus('a')?.state).toBe('stopping');
+
+    // The second stop's `component_already_stopping` refusal builds a status.
+    const originalGetStatus = manager.getComponentStatus.bind(manager);
+    let shouldThrow = true;
+    manager.getComponentStatus = (
+      name: string,
+    ): ReturnType<LifecycleManager['getComponentStatus']> => {
+      if (shouldThrow) {
+        shouldThrow = false;
+        throw new Error('status exploded');
+      }
+
+      return originalGetStatus(name);
+    };
+
+    const { release } = claimReports();
+    let second;
+
+    try {
+      second = await manager.stopComponent('a');
+    } finally {
+      release();
+    }
+
+    expect(second.code).toBe('unknown_error');
+    expect(manager.getComponentStatus('a')?.state).toBe('stopping');
+
+    finishStop();
+    expect((await firstStop).success).toBe(true);
+    expect(manager.getComponentStatus('a')?.state).toBe('stopped');
+  });
+
+  test('the broadcast handed to a reload callback cannot reject', async () => {
+    let fired: Promise<{ code: string }> | undefined;
+    const { manager } = setup({
+      onReloadRequested: (broadcast): void => {
+        fired = broadcast();
+      },
+    });
+
+    (
+      manager as unknown as { broadcastReload: () => Promise<never> }
+    ).broadcastReload = (): Promise<never> =>
+      Promise.reject(new Error('broadcast exploded'));
+
+    const { release } = claimReports();
+
+    try {
+      await manager.triggerReload();
+      expect((await fired)?.code).toBe('error');
+    } finally {
+      release();
+    }
+  });
+
   test('a throwing reload callback resolves triggerReload with an error result', async () => {
     const { manager } = setup({
       onReloadRequested: (): never => {

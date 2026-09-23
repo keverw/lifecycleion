@@ -4445,15 +4445,18 @@ export class LifecycleManager
     },
   ): Promise<ComponentOperationResult> {
     const stateBeforeStart = this.componentStates.get(name);
+    const wasRunningBefore = this.runningComponents.has(name);
 
     try {
       return await this.startComponentAttempt(name, options, bulkStartup);
     } catch (error) {
-      // A crash after the component was already marked running - building its status
+      // A crash after this attempt marked the component running - building its status
       // for the result, say - still fails the start, so it is stopped again: a failed
       // start means a component that is not running, which is what every caller,
-      // bulk rollback included, acts on.
-      if (this.runningComponents.has(name)) {
+      // bulk rollback included, acts on. Only when this attempt is what put it there: a
+      // start of an already-running component that crashes before refusing must not
+      // stop the run it found.
+      if (!wasRunningBefore && this.runningComponents.has(name)) {
         reportCallbackError('lifecycle-manager component start', error);
 
         const stopResult = await this.stopComponentInternal(name);
@@ -5082,6 +5085,7 @@ export class LifecycleManager
     options?: StopComponentOptions,
   ): Promise<ComponentOperationResult> {
     const startedAt = Date.now();
+    const stateBeforeStop = this.componentStates.get(name);
 
     try {
       return await this.stopComponentAttempt(name, options);
@@ -5095,7 +5099,13 @@ export class LifecycleManager
       const err = toError(error);
       const state = this.componentStates.get(name);
 
-      if (state === 'stopping' || state === 'force-stopping') {
+      // Only a stop this attempt claimed: one already `stopping` belongs to a concurrent
+      // stop, and a second attempt that crashes before refusing must not stall it.
+      if (
+        (state === 'stopping' || state === 'force-stopping') &&
+        stateBeforeStop !== 'stopping' &&
+        stateBeforeStop !== 'force-stopping'
+      ) {
         const stallInfo: ComponentStallInfo = {
           name,
           phase: state === 'stopping' ? 'graceful' : 'force',
@@ -7633,10 +7643,19 @@ export class LifecycleManager
     if (descriptor.customCallback) {
       // Guarded: the callback is the caller's, and a throw or rejection from it rejected
       // `triggerReload()` and friends. It is reported, and the result says `error`.
+      // The broadcast handed to the callback is settled as well, so a callback that
+      // fires it without awaiting - `void broadcast()` - can never be left holding an
+      // unhandled rejection.
       const outcome = await safeHandleCallbackAndWait(
         `lifecycle-manager ${descriptor.signal} request callback`,
         descriptor.customCallback,
-        descriptor.broadcast,
+        (): Promise<SignalBroadcastResult> =>
+          this.settleOperation(
+            `${descriptor.signal} broadcast`,
+            descriptor.broadcast,
+            (error) =>
+              this.crashedSignalBroadcastResult(descriptor.signal, error),
+          ),
       );
 
       if (!outcome.success) {
