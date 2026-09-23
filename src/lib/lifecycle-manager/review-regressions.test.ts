@@ -3,6 +3,7 @@ import { sleep } from '../sleep';
 import {
   claimReports,
   deferred,
+  hasReport,
   fakeSignals,
   Plain,
   sendSignal,
@@ -999,5 +1000,46 @@ describe('LifecycleManager - review regressions', () => {
     }
 
     expect(internals.componentClaims.size).toBe(0);
+  });
+
+  test('a getDependencies() that throws while protecting a component in flight does not abort the pass', async () => {
+    const { logger, manager } = setup({ shutdownWarningTimeoutMS: 50 });
+    let isBroken = false;
+    const db = new Plain(logger, 'db');
+    // Ordering is done by the time the warning phase runs; break the read after it.
+    (db as unknown as { onShutdownWarning: () => void }).onShutdownWarning =
+      (): void => {
+        isBroken = true;
+      };
+    const stopGate = deferred();
+    const api = new Plain(logger, 'api', ['db']);
+    api.stop = (): Promise<void> => stopGate.promise;
+    const realGetDependencies = api.getDependencies.bind(api);
+    api.getDependencies = (): string[] => {
+      if (isBroken) {
+        throw new Error('getDependencies exploded');
+      }
+      return realGetDependencies();
+    };
+    await manager.registerComponent(db);
+    await manager.registerComponent(api);
+    await manager.startAllComponents();
+
+    // A concurrent stop owns `api`, so the pass protects its dependencies.
+    const apiStop = manager.stopComponent('api');
+
+    const { reports, release } = claimReports();
+    let result;
+
+    try {
+      result = await manager.stopAllComponents();
+    } finally {
+      stopGate.resolve();
+      await apiStop;
+      release();
+    }
+
+    expect(result.code).not.toBe('unknown_error');
+    expect(hasReport(reports, 'shutdown dependencies of api')).toBe(true);
   });
 });
