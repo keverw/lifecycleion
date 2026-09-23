@@ -83,7 +83,7 @@ export function reportCallbackError(
  * for the callback to complete and doesn't return any result or error. If you need
  * to handle the result or error of the callback, consider using the
  * `safeHandleCallbackAndWait` function instead.
- * *
+ *
  * **`this` is not preserved.** The callback is invoked without a receiver, so an extracted
  * method such as `logger.info` loses `logger` and any `this.x` inside it throws, arriving
  * as an ordinary callback failure rather than a `TypeError` at the call site. Pass
