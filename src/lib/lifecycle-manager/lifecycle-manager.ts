@@ -167,23 +167,12 @@ interface ShutdownPass {
   shutdownRequested: boolean;
 
   /**
-   * Set when this pass seeded the escalation state itself - it is the start of a fresh
-   * cycle rather than a retry inside one. A restart's stop phase seeds as `'manual'`;
-   * the first signal that asks it to stay down then takes over that seed as the cycle's
-   * initial request instead of being counted as a press. See `handleShutdownRequest()`.
+   * A `restartAllComponents()` stop phase, rather than a request to stay down. It does
+   * not seed escalation: nobody has asked the process to go down yet, so there is no
+   * operator cycle to start. The first signal that lands on it seeds one - see
+   * `answerShutdownSignalDuringPass()`.
    */
-  didSeedEscalation: boolean;
-
-  /** A `restartAllComponents()` stop phase, rather than a request to stay down. */
   readonly isRestartStopPhase: boolean;
-
-  /**
-   * Set once a signal has taken over a restart's `'manual'` seed as the cycle's initial
-   * request. Tracked apart from `shutdownRequested`, which a `stopAllComponents()` or
-   * `logger.exit()` sets too: those do not count as presses, so the first *signal* is
-   * still the one that starts the operator's cycle.
-   */
-  didSignalTakeOverSeed: boolean;
 }
 
 /**
@@ -260,6 +249,10 @@ export class LifecycleManager
   private componentUnexpectedStopHadError: Map<string, boolean> = new Map();
   private componentStartAttemptTokens: Map<string, string> = new Map();
   private pendingBulkStartupCleanup = new Map<string, string>();
+  // Set when a `detachSignalsOnStop` detach was due - nothing left running or stalled -
+  // but something transient was still in flight: a startup or shutdown latch, a start or
+  // stop, a late-startup cleanup. Whichever of those ends runs the check again.
+  private isSignalDetachDeferred = false;
   // Use per-stop ULIDs instead of incrementing counters because a stalled
   // component can be unregistered and replaced by a same-name instance before
   // the old floating stop promise settles.
@@ -1065,6 +1058,9 @@ export class LifecycleManager
    * Idempotent - calling multiple times has no effect.
    */
   public attachSignals(): void {
+    // A new attach supersedes a detach that was still waiting to run.
+    this.isSignalDetachDeferred = false;
+
     // Check if already attached (not just if instance exists)
     if (this.processSignalManager?.getStatus().isAttached) {
       return; // Already attached
@@ -2452,7 +2448,7 @@ export class LifecycleManager
       this.isStarting = false;
 
       if (didAutoAttachSignalsForBulkStartup) {
-        this.autoDetachSignalsIfIdle('refused bulk startup');
+        this.detachSignalsIfIdle('refused bulk startup');
       }
 
       this.autoAttachedSignalsDuringStartup = false;
@@ -3015,21 +3011,16 @@ export class LifecycleManager
 
         this.isStarting = false;
 
+        // Handlers this startup attached come off if it leaves nothing running. Any
+        // detach deferred while it held `isStarting` - a rollback's stops, a clean
+        // shutdown pass that ran during it - runs now.
         if (
           didAutoAttachSignalsForBulkStartup ||
           this.autoAttachedSignalsDuringStartup
         ) {
-          this.autoDetachSignalsIfIdle('failed bulk startup');
-        } else if (
-          this.shutdownToken !== shutdownTokenAtBulkStart &&
-          this.lastShutdownResult?.success === true
-        ) {
-          // A shutdown pass ran during this startup and ended cleanly. Its own stops
-          // skipped the detach while it ran, and its end skipped it too because this
-          // startup still held `isStarting` - so it falls to here, or handlers attached
-          // earlier stay up with nothing running. A failed pass keeps them, as it does
-          // anywhere else, for escalation.
-          this.autoDetachSignalsIfIdle('shutdown during bulk startup');
+          this.detachSignalsIfIdle('failed bulk startup');
+        } else {
+          this.runDeferredSignalDetach('bulk startup');
         }
 
         this.autoAttachedSignalsDuringStartup = false;
@@ -4186,9 +4177,7 @@ export class LifecycleManager
 
     const pass: ShutdownPass = {
       shutdownRequested: false,
-      didSeedEscalation: false,
       isRestartStopPhase: !isRequestToStayDown,
-      didSignalTakeOverSeed: false,
     };
 
     // An async method, but it runs synchronously up to its first `await`, which is well
@@ -4287,9 +4276,9 @@ export class LifecycleManager
       this.shutdownMethod = method;
       if (
         this.repeatedShutdownRequestPolicy &&
+        !pass.isRestartStopPhase &&
         this.repeatedShutdownRequestState.firstRequestAt === null
       ) {
-        pass.didSeedEscalation = true;
         this.seedRepeatedShutdownRequestState(method);
       }
       isDuringStartup = this.isStarting;
@@ -4397,7 +4386,7 @@ export class LifecycleManager
           // - If already stopped during this shutdown (for example, via
           //   reportUnexpectedStop() during the warning phase), count it as a
           //   successful stop for shutdown accounting
-          // - Otherwise: component_not_running
+          // - Otherwise: not running by some other path, skipped
           const isRunning = this.isComponentRunning(name);
           const isStalled = stalledComponentNames.has(name);
           const currentState = this.componentStates.get(name);
@@ -4407,25 +4396,25 @@ export class LifecycleManager
             continue;
           }
 
+          // No longer running by some other path, in whatever state that left it - a
+          // late-startup cleanup puts a component back to `starting-timed-out`, say.
+          // Nothing to stop and nothing that failed, so it must not halt the loop
+          // before the components after it; the settlement below agrees.
+          if (!isRunning && !isStalled) {
+            continue;
+          }
+
           const result: ComponentOperationResult = isRunning
             ? await this.stopComponentInternal(name)
-            : shouldRetryStalled && isStalled
+            : shouldRetryStalled
               ? await this.retryStalledComponent(name)
-              : isStalled
-                ? {
-                    success: false,
-                    componentName: name,
-                    reason: LIFECYCLE_MANAGER_MESSAGE_COMPONENT_STALLED,
-                    code: 'component_stalled',
-                    status: this.getComponentStatus(name),
-                  }
-                : {
-                    success: false,
-                    componentName: name,
-                    reason: LIFECYCLE_MANAGER_MESSAGE_COMPONENT_NOT_RUNNING,
-                    code: 'component_not_running',
-                    status: this.getComponentStatus(name),
-                  };
+              : {
+                  success: false,
+                  componentName: name,
+                  reason: LIFECYCLE_MANAGER_MESSAGE_COMPONENT_STALLED,
+                  code: 'component_stalled',
+                  status: this.getComponentStatus(name),
+                };
 
           if (result.success) {
             stoppedComponents.add(name);
@@ -4550,6 +4539,17 @@ export class LifecycleManager
       // what to do next.
       completedResult = result;
 
+      // Before the completed event, as the last component's stop detached them before
+      // this pass took the detach over: a listener there - one that calls
+      // `process.exit()`, say - finds stdin restored and `signals-detached` already
+      // emitted, and one that attaches again is not undone afterwards. Covers the detach
+      // this pass's own stops deferred, and one a refused or aborted startup left to it.
+      // Only after a clean pass: a failed one keeps them, so the operator's next Ctrl+C
+      // still reaches escalation.
+      if (isSuccess) {
+        this.detachSignalsIfIdle('shutdown', { isEndingShutdownPass: true });
+      }
+
       this.lifecycleEvents.lifecycleManagerShutdownCompleted({
         ...result,
         method,
@@ -4644,15 +4644,6 @@ export class LifecycleManager
       this.isShuttingDown = false;
       this.activeShutdownPass = null;
       this.updateStartedFlag();
-
-      // The detach a refused or aborted startup left to this pass - it skipped it while
-      // the pass was running. Per-component stops detach after the last one, but a pass
-      // with nothing left to stop never gets there, and without this the handlers - and
-      // raw-mode stdin - stayed attached for good. Only after a clean pass: a failed one
-      // keeps them, so the operator's next Ctrl+C still reaches escalation.
-      if (completedResult?.success === true) {
-        this.autoDetachSignalsIfIdle('shutdown');
-      }
 
       this.finalizePendingLoggerExit();
     }
@@ -5176,7 +5167,7 @@ export class LifecycleManager
       restoreStateBeforeStart();
 
       if (didAutoAttachSignalsForComponentStartup) {
-        this.autoDetachSignalsIfIdle('refused component startup');
+        this.detachSignalsIfIdle('refused component startup');
       }
 
       return {
@@ -5373,11 +5364,16 @@ export class LifecycleManager
       const status = this.getComponentStatus(name);
       this.lifecycleEvents.componentStarted(name, status);
 
-      // `attachSignalsOnStart` attaches once the first component is actually up, not
-      // before. A process configured to handle signals must not stay up without them, so
-      // a failed attach takes this component back down and fails the start - after its
-      // `started` event, so observers see an ordinary start followed by a stop.
-      if (this.attachSignalsOnStart && this.runningComponents.size === 1) {
+      // `attachSignalsOnStart` attaches once a component is actually up, not before. A
+      // process configured to handle signals must not stay up without them, so a failed
+      // attach takes this component back down and fails the start - after its `started`
+      // event, so observers see an ordinary start followed by a stop.
+      //
+      // Whenever handlers are not attached, not only for the first running component: a
+      // start rolled back for a failed attach is still counted as running while it is
+      // stopped again, and a start finishing in that window came up without handlers.
+      // `autoAttachSignals()` is a no-op when they are already attached.
+      if (this.attachSignalsOnStart) {
         const signalAttach = this.autoAttachSignals('first component start');
 
         if (signalAttach.outcome === 'failed') {
@@ -5514,7 +5510,9 @@ export class LifecycleManager
       }
 
       if (didAutoAttachSignalsForComponentStartup) {
-        this.autoDetachSignalsIfIdle('failed component startup');
+        this.detachSignalsIfIdle('failed component startup');
+      } else {
+        this.runDeferredSignalDetach('component startup');
       }
     }
   }
@@ -6504,25 +6502,80 @@ export class LifecycleManager
     trigger = 'last component stop',
     logMessage: string = LIFECYCLE_MANAGER_LOG_AUTO_DETACH_LAST_COMPONENT_STOP,
   ): void {
-    // Not during a shutdown pass: the pass decides once it ends, detaching only after a
-    // clean one. Mid-pass, the last running component stopping says nothing about the
-    // components that stalled, and a failed pass must keep the handlers so the
-    // operator's next Ctrl+C still reaches escalation.
-    //
-    // Nor while anything is stalled, whoever stops last: a stalled component is not
-    // counted as running, but Ctrl+C is how the operator retries or forces it.
+    this.detachSignalsIfIdle(trigger, { logMessage });
+  }
+
+  /**
+   * The one `detachSignalsOnStop` check: detach once the manager is idle.
+   *
+   * Not while anything is running or stalled. A stalled component is not counted as
+   * running, but Ctrl+C is how the operator retries or forces it; the stop or
+   * unregister that clears the last stall runs this again.
+   *
+   * Nor while anything transient is in flight - a startup or shutdown latch, a
+   * component starting or stopping, a late-startup cleanup - since each of those can
+   * still leave something running or stalled. A shutdown pass in particular still needs
+   * SIGINT/SIGTERM for escalation, and decides once it ends, detaching only after a
+   * clean pass. The detach is deferred rather than dropped, and whichever of those ends
+   * runs it again through {@link runDeferredSignalDetach}.
+   */
+  private detachSignalsIfIdle(
+    trigger: string,
+    options: { logMessage?: string; isEndingShutdownPass?: boolean } = {},
+  ): void {
     if (
       !this.detachSignalsOnStop ||
-      this.isShuttingDown ||
+      !this.processSignalManager?.getStatus().isAttached ||
       this.runningComponents.size > 0 ||
-      this.stalledComponents.size > 0 ||
-      !this.processSignalManager
+      this.stalledComponents.size > 0
     ) {
       return;
     }
 
-    this.logger.info(logMessage);
+    if (this.isSignalDetachWaitingOnTransient(options.isEndingShutdownPass)) {
+      this.isSignalDetachDeferred = true;
+      return;
+    }
+
+    this.isSignalDetachDeferred = false;
+    this.logger.info(
+      options.logMessage ?? `Auto-detaching process signals after ${trigger}`,
+    );
     this.autoDetachSignals(trigger);
+  }
+
+  /**
+   * Run a detach {@link detachSignalsIfIdle} deferred, once one of the transient
+   * operations that held it has ended.
+   */
+  private runDeferredSignalDetach(trigger: string): void {
+    if (this.isSignalDetachDeferred) {
+      this.detachSignalsIfIdle(trigger);
+    }
+  }
+
+  private isSignalDetachWaitingOnTransient(
+    isEndingShutdownPass = false,
+  ): boolean {
+    if (
+      this.isStarting ||
+      (this.isShuttingDown && !isEndingShutdownPass) ||
+      this.pendingBulkStartupCleanup.size > 0
+    ) {
+      return true;
+    }
+
+    for (const state of this.componentStates.values()) {
+      if (
+        state === 'starting' ||
+        state === 'stopping' ||
+        state === 'force-stopping'
+      ) {
+        return true;
+      }
+    }
+
+    return false;
   }
 
   /**
@@ -6548,27 +6601,6 @@ export class LifecycleManager
         error,
       );
     }
-  }
-
-  private autoDetachSignalsIfIdle(trigger: string): void {
-    // Not while a shutdown pass is running: it still needs SIGINT/SIGTERM for
-    // escalation, and a startup refused because a listener started that pass would
-    // otherwise pull the handlers out from under it. The pass's own stops detach them
-    // once the last component is down. Nor while anything is stalled, for the reason
-    // `detachSignalsAfterLastStop` gives.
-    if (
-      !this.detachSignalsOnStop ||
-      this.isStarting ||
-      this.isShuttingDown ||
-      this.runningComponents.size > 0 ||
-      this.stalledComponents.size > 0 ||
-      !this.processSignalManager?.getStatus().isAttached
-    ) {
-      return;
-    }
-
-    this.logger.info(`Auto-detaching process signals after ${trigger}`);
-    this.autoDetachSignals(trigger);
   }
 
   private monitorLateStartupCompletion(
@@ -6672,6 +6704,7 @@ export class LifecycleManager
       .finally(() => {
         if (this.pendingBulkStartupCleanup.get(name) === startAttemptToken) {
           this.pendingBulkStartupCleanup.delete(name);
+          this.runDeferredSignalDetach('late startup cleanup');
         }
       });
   }
@@ -6856,9 +6889,12 @@ export class LifecycleManager
     // Guard 2: once the component is no longer in the stalled state because a
     // newer lifecycle attempt changed its state, the old stop promise no longer
     // owns the component state. Clear the stale stall bookkeeping, but do not
-    // emit stopped or overwrite the newer state.
+    // emit stopped or overwrite the newer state. It may have been the last stall
+    // holding process signals attached, so the last-stop detach check still runs.
     if (stallInfo && currentState !== 'stalled') {
       this.stalledComponents.delete(name);
+      this.updateStartedFlag();
+      this.detachSignalsAfterLastStop();
       return;
     }
 
@@ -6974,11 +7010,9 @@ export class LifecycleManager
 
     // Mirror the normal stop path: if this was the last running component, the
     // manager should release process signal handlers instead of staying attached
-    // to an otherwise idle application.
-    // Not during bulk startup: the startup's own cleanup decides what to detach.
-    if (!this.isStarting) {
-      this.detachSignalsAfterLastStop();
-    }
+    // to an otherwise idle application. During a bulk startup the check defers to the
+    // startup's end.
+    this.detachSignalsAfterLastStop();
 
     const timestamps = this.componentTimestamps.get(name) ?? {
       startedAt: null,
@@ -7400,28 +7434,23 @@ export class LifecycleManager
 
   /**
    * A shutdown signal that lands while a pass is running: noted on the pass, emitted
-   * once as already-shutting-down, and counted - or, for a restart's first one, taken
-   * over as the cycle's initial request.
+   * once as already-shutting-down, and counted - or, when no cycle is running yet,
+   * made the cycle's initial request.
    */
   private answerShutdownSignalDuringPass(method: ShutdownSignal): void {
-    const pass = this.activeShutdownPass;
-    // The first signal asking a restart's stop phase to stay down is where the
-    // operator's shutdown actually begins: the restart only seeded escalation as a
-    // `'manual'` placeholder. It takes that seed over as the cycle's initial request -
-    // the same as a signal that starts a pass - rather than counting as press one,
-    // which fired force a press early and reported `firstMethod: 'manual'`. Only a
-    // seed this pass made itself: a restart that inherited a live cycle keeps it.
-    const isFirstStayDownForRestart =
-      pass !== null &&
-      pass.isRestartStopPhase &&
-      pass.didSeedEscalation &&
-      !pass.didSignalTakeOverSeed;
+    // Only a restart's stop phase runs without a cycle: it does not seed one. The first
+    // signal asking it to stay down is where the operator's shutdown actually begins, so
+    // it seeds the cycle - the same as a signal that starts a pass - rather than counting
+    // as press one. A restart that inherited a live cycle keeps it, and this signal
+    // counts against it.
+    const isFirstRequestOfCycle =
+      this.repeatedShutdownRequestPolicy !== undefined &&
+      this.repeatedShutdownRequestState.firstRequestAt === null;
 
     this.noteShutdownRequestDuringActivePass();
     this.lifecycleEvents.signalShutdown(method, true);
 
-    if (isFirstStayDownForRestart && this.repeatedShutdownRequestPolicy) {
-      pass.didSignalTakeOverSeed = true;
+    if (isFirstRequestOfCycle) {
       this.seedRepeatedShutdownRequestState(method);
       this.logger.info('Shutdown signal received during restart', {
         params: { method },
@@ -7472,8 +7501,14 @@ export class LifecycleManager
     }
 
     let didEmitShutdownSignal = false;
+    // Not from inside escalation handling - `onForceShutdown`, or a listener on
+    // `shutdown-escalation-forced` or `signal:shutdown`, raising a signal of its own. The
+    // armed window is already spent by then, so the request would otherwise look fresh
+    // and reseed, wiping `hasTriggeredForceShutdown` and the count: the next press
+    // forced again. It continues the request that fired it, as a manual stop does.
     let shouldSeedRepeatedShutdownState =
-      this.repeatedShutdownRequestPolicy !== undefined;
+      this.repeatedShutdownRequestPolicy !== undefined &&
+      this.escalationHandlingDepth === 0;
 
     // This branch is only for the post-failure "armed" state.
     // A previous shutdown request already happened, shutdown has already
