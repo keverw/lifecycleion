@@ -1684,6 +1684,14 @@ export class LifecycleManager
 
     const allowStopped = options?.includeStopped === true;
     const allowStalled = options?.includeStalled === true;
+    // A snapshot of what each message needs, read once with the rest: every target is
+    // sent the same values, and a getter on the caller's object runs once rather than
+    // once per component.
+    const messageOptions: SendMessageOptions = {
+      timeout: options?.timeout,
+      includeStopped: allowStopped,
+      includeStalled: allowStalled,
+    };
 
     // Filter by running/stalled/stopped state unless explicitly included
     if (!allowStopped && !allowStalled && !hasExplicitTargets) {
@@ -1745,7 +1753,7 @@ export class LifecycleManager
           name,
           payload,
           from,
-          options,
+          messageOptions,
         );
 
         results.push({
@@ -2209,7 +2217,7 @@ export class LifecycleManager
           reason: 'Component was unregistered while it was being stopped',
           code: 'component_not_found',
           wasStopped: true,
-          wasRegistered: true,
+          wasRegistered: this.hasComponent(name),
         };
       }
 
@@ -2761,6 +2769,10 @@ export class LifecycleManager
                 'signal_attach_failed',
                 result.reason ?? 'Could not attach process signals',
                 Date.now() - startTime,
+              ),
+              // Whatever the rollback could not stop, so the result matches the registry.
+              startedComponents: [...startedComponents, name].filter(
+                (startedName) => this.runningComponents.has(startedName),
               ),
               failedOptionalComponents,
               skippedDueToDependency: Array.from(skippedDueToDependency),
@@ -4471,11 +4483,22 @@ export class LifecycleManager
           !finalStalledNames.has(name) &&
           this.componentStates.get(name) !== 'stopped',
       );
+      // Anything in this pass's stop list still running that nothing above accounts for:
+      // components after a `haltOnStall` break the loop never reached, whose running
+      // dependents are gone by now. A halt used to report success over them.
+      const stillRunningComponents = runningComponentsToStop.filter(
+        (name) =>
+          this.runningComponents.has(name) &&
+          !stoppingComponents.has(name) &&
+          !finalStalledNames.has(name) &&
+          !unstoppedFailedComponents.includes(name),
+      );
       const isSuccess =
         !hasTimedOut &&
         stalledComponents.length === 0 &&
         stoppingComponents.size === 0 &&
-        unstoppedFailedComponents.length === 0;
+        unstoppedFailedComponents.length === 0 &&
+        stillRunningComponents.length === 0;
 
       // The guard matters here: a logger that threw would otherwise land in the `catch`
       // below and replace the result of a pass that finished - even a clean one - with
@@ -4513,7 +4536,11 @@ export class LifecycleManager
               ? {
                   reason: `Failed to stop: ${unstoppedFailedComponents.join(', ')}`,
                 }
-              : {}),
+              : stillRunningComponents.length > 0
+                ? {
+                    reason: `Shutdown halted before stopping: ${stillRunningComponents.join(', ')}`,
+                  }
+                : {}),
       };
 
       // Store for getLastShutdownResult() - useful for debugging and metrics
@@ -4619,6 +4646,16 @@ export class LifecycleManager
       this.isShuttingDown = false;
       this.activeShutdownPass = null;
       this.updateStartedFlag();
+
+      // The detach a refused or aborted startup left to this pass - it skipped it while
+      // the pass was running. Per-component stops detach after the last one, but a pass
+      // with nothing left to stop never gets there, and without this the handlers - and
+      // raw-mode stdin - stayed attached for good. Only after a clean pass: a failed one
+      // keeps them, so the operator's next Ctrl+C still reaches escalation.
+      if (completedResult?.success === true) {
+        this.autoDetachSignalsIfIdle('shutdown');
+      }
+
       this.finalizePendingLoggerExit();
     }
   }
@@ -5817,11 +5854,14 @@ export class LifecycleManager
     claim: symbol,
   ): Promise<ComponentOperationResult> {
     // Read before the stop claims the component: the timer that calls it runs outside
-    // every guard. See `invokeAbortHook()`.
+    // every guard (see `invokeAbortHook()`), and a timeout getter that threw after the
+    // claim got a component whose `stop()` never ran marked stalled.
     const onGracefulStopTimeout: unknown = Reflect.get(
       component,
       'onGracefulStopTimeout',
     );
+    // Use custom timeout if provided, otherwise use component's configured timeout
+    const timeoutMS = options?.timeout ?? component.shutdownGracefulTimeoutMS;
 
     // Set state to stopping — clear the unexpected-stop handler before any async
     // work so a concurrent reportUnexpectedStop() call has no effect from here on.
@@ -5832,8 +5872,6 @@ export class LifecycleManager
 
     const stopAttemptToken = this.issueStopAttemptToken(name);
 
-    // Use custom timeout if provided, otherwise use component's configured timeout
-    const timeoutMS = options?.timeout ?? component.shutdownGracefulTimeoutMS;
     let timeoutHandle: NodeJS.Timeout | undefined;
 
     try {
@@ -6002,6 +6040,7 @@ export class LifecycleManager
       component,
       'onShutdownForceAborted',
     );
+    const timeoutMS = component.shutdownForceTimeoutMS;
 
     this.claimComponent(name, 'force-stopping', claim);
     this.logger.entity(name).info('Force shutdown started', {
@@ -6071,7 +6110,6 @@ export class LifecycleManager
       };
     }
 
-    const timeoutMS = component.shutdownForceTimeoutMS;
     const { promise: stoppedDuringForcePromise, cleanup: cleanupForceWaiter } =
       this.createPendingForceStopWaiter(name);
     let timeoutHandle: NodeJS.Timeout | undefined;
@@ -7503,10 +7541,12 @@ export class LifecycleManager
       return;
     }
 
-    // `runShutdownPass()` resolves even when the pass dies, reporting the failure itself.
-    // The handler stays anyway: this promise floats, and on `SIGINT`/`SIGTERM` an
-    // unhandled rejection is fatal under Node's default `--unhandled-rejections=throw`,
-    // taking the process down before the components it was about to stop were stopped.
+    // Deliberate insurance, not dead code - keep it. `runShutdownPass()` resolves even
+    // when the pass dies, so today this never runs. But this promise floats inside an OS
+    // signal handler, where an unhandled rejection is fatal under Node's default
+    // `--unhandled-rejections=throw`: if a future bug ever made the pass reject, this
+    // handler is all that stands between it and a crash that takes the process down
+    // before the components it was about to stop were stopped.
     acceptance.promise.catch((error: unknown) => {
       reportCallbackError(`shutdown after ${method}`, error);
     });

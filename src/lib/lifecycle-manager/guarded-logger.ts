@@ -185,6 +185,9 @@ export function createGuardedLoggerService(
 
       if (property === 'entity') {
         if (entityCache === null || entityCache.method !== method) {
+          // The repo's own `LRUCache` rather than a hand-rolled capped `Map`: its
+          // per-hit bookkeeping is small next to the log write it guards, and one LRU
+          // implementation is easier to keep right than two.
           const children = new LRUCache<string, LoggerService>(
             MAX_CACHED_ENTITY_CHILDREN,
           );

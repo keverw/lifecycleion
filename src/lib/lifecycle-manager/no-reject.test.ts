@@ -486,12 +486,12 @@ describe('LifecycleManager - public methods never reject', () => {
     await manager.registerComponent(component);
     await manager.startComponent('a');
 
-    // Read once the component is already claimed as `stopping`, outside any `try`.
-    Object.defineProperty(component, 'shutdownGracefulTimeoutMS', {
-      get: (): never => {
-        throw new Error('getter exploded');
-      },
-    });
+    // A step that runs once the stop has claimed the component.
+    (
+      manager as unknown as { issueStopAttemptToken: () => string }
+    ).issueStopAttemptToken = (): never => {
+      throw new Error('step exploded');
+    };
 
     const { release } = claimReports();
     let result;
@@ -691,11 +691,12 @@ describe('LifecycleManager - public methods never reject', () => {
       detachCalls++;
     };
 
-    Object.defineProperty(component, 'shutdownGracefulTimeoutMS', {
-      get: (): never => {
-        throw new Error('getter exploded');
-      },
-    });
+    // A step that runs once the stop has claimed the component.
+    (
+      manager as unknown as { issueStopAttemptToken: () => string }
+    ).issueStopAttemptToken = (): never => {
+      throw new Error('step exploded');
+    };
 
     const { release } = claimReports();
 
@@ -1592,6 +1593,121 @@ describe('LifecycleManager - public methods never reject', () => {
 
     expect(result.code).toBe('unknown_error');
     expect(result.wasStopped).toBe(true);
+  });
+
+  test('a throwing stop timeout getter fails the stop before the component is claimed', async () => {
+    const { logger, manager } = setup();
+    let stopCalls = 0;
+    const component = new Plain(logger, 'a');
+    component.stop = (): Promise<void> => {
+      stopCalls++;
+
+      return Promise.resolve();
+    };
+    await manager.registerComponent(component);
+    await manager.startComponent('a');
+
+    Object.defineProperty(component, 'shutdownGracefulTimeoutMS', {
+      get: (): never => {
+        throw new Error('getter exploded');
+      },
+    });
+
+    const { release } = claimReports();
+    let result;
+
+    try {
+      result = await manager.stopComponent('a');
+    } finally {
+      release();
+    }
+
+    // Not stalled: `stop()` never ran, so the component is still running as it was.
+    expect(result.code).toBe('unknown_error');
+    expect(stopCalls).toBe(0);
+    expect(manager.getComponentStatus('a')?.state).toBe('running');
+  });
+
+  test('a halted shutdown pass does not report success over components it never reached', async () => {
+    const { logger, manager } = setup({
+      shutdownOptions: { haltOnStall: true },
+    });
+
+    class Dependent extends BaseComponent {
+      public async start(): Promise<void> {}
+      public async stop(): Promise<void> {}
+    }
+
+    const dependency = new Plain(logger, 'dependency');
+    const dependent = new Dependent(logger, {
+      name: 'dependent',
+      dependencies: ['dependency'],
+    });
+    let finishStop = (): void => {};
+    let stopEntered = (): void => {};
+    const entered = new Promise<void>((resolve) => {
+      stopEntered = resolve;
+    });
+    dependent.stop = (): Promise<void> => {
+      stopEntered();
+
+      return new Promise<void>((resolve) => {
+        finishStop = resolve;
+      });
+    };
+    await manager.registerComponent(dependency);
+    await manager.registerComponent(dependent);
+    await manager.startAllComponents();
+
+    // A concurrent stop owns `dependent`, so the pass halts on it and never reaches
+    // `dependency`; the concurrent stop then finishes before the pass reconciles.
+    const concurrentStop = manager.stopComponent('dependent');
+    await entered;
+    const pass = manager.stopAllComponents();
+    finishStop();
+    await concurrentStop;
+    const result = await pass;
+
+    expect(manager.isComponentRunning('dependency')).toBe(true);
+    expect(result.success).toBe(false);
+  });
+
+  test('signals a refused start attached come off once the shutdown that refused it ends', async () => {
+    const { logger, manager } = setup({
+      attachSignalsBeforeStartup: true,
+      detachSignalsOnStop: true,
+    });
+    await manager.registerComponent(new Plain(logger, 'a'));
+
+    let isAttached = false;
+    manager.attachSignals = (): void => {
+      isAttached = true;
+      fakeAttachedSignals(manager);
+      (
+        manager as unknown as {
+          lifecycleEvents: { lifecycleManagerSignalsAttached: () => void };
+        }
+      ).lifecycleEvents.lifecycleManagerSignalsAttached();
+    };
+    manager.detachSignals = (): void => {
+      isAttached = false;
+      (
+        manager as unknown as { processSignalManager: unknown }
+      ).processSignalManager = undefined;
+    };
+
+    const passes: Promise<unknown>[] = [];
+    manager.once('lifecycle-manager:signals-attached', () => {
+      passes.push(manager.stopAllComponents());
+    });
+
+    const result = await manager.startComponent('a');
+    await Promise.all(passes);
+
+    // The start was refused and skipped its detach while the pass ran; the pass, with
+    // nothing to stop, detaches once it ends cleanly instead of leaving them attached.
+    expect(result.code).toBe('shutdown_in_progress');
+    expect(isAttached).toBe(false);
   });
 
   test('getValue() resolves an unexpected failure as an error result', async () => {
