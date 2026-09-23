@@ -911,6 +911,22 @@ describe('LifecycleManager - public methods never reject', () => {
     }
   });
 
+  test('a component registered again after unregistering is known by its current name', async () => {
+    const { logger, manager } = setup();
+    const component = new Plain(logger, 'first-name');
+    await manager.registerComponent(component);
+    await manager.unregisterComponent('first-name');
+
+    // `name` is protected, so a subclass can change it between registrations.
+    (component as unknown as { name: string }).name = 'second-name';
+
+    const result = await manager.registerComponent(component);
+
+    expect(result.componentName).toBe('second-name');
+    expect(result.startupOrder).toEqual(['second-name']);
+    expect(manager.getComponentNames()).toEqual(['second-name']);
+  });
+
   test('getValue() resolves an unexpected failure as an error result', async () => {
     const { logger, manager } = setup();
     const component = new Plain(logger, 'a');

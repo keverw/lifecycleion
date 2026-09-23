@@ -2164,6 +2164,9 @@ export class LifecycleManager
     this.pendingForceStopWaiters.delete(name);
     this.stalledComponents.delete(name);
     this.runningComponents.delete(name);
+    // A component instance can be registered again later, and `name` is only protected,
+    // not readonly - a re-registration must read it fresh rather than find this one.
+    this.registeredNames.delete(component);
     this.updateStartedFlag();
 
     for (const [hookName, hook] of [
@@ -7304,8 +7307,9 @@ export class LifecycleManager
    * A component's name, as recorded when it was registered.
    *
    * Read once, at registration - where it is validated, and where a `getName()` that
-   * throws fails the registration and nothing else - and never again. The name is fixed
-   * for a component's lifetime, and the manager looks it up in dozens of places,
+   * throws fails the registration and nothing else - and not again while it stays
+   * registered (unregistering drops it, so a later registration reads it fresh). It is
+   * fixed for that time, and the manager looks it up in dozens of places,
    * including the middle of broadcasts, health checks and shutdown passes. Re-reading it
    * each time meant a component that broke that contract could crash any of them, and
    * each one needed its own guard. Falls back to asking the component only for one that
