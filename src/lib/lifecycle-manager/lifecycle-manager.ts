@@ -1208,10 +1208,8 @@ export class LifecycleManager
             params: { exitCode, timeoutMS: this.shutdownOptions?.timeoutMS },
           });
 
-          // Stop all components with global timeout
-          await this.stopAllComponents({
-            ...this.shutdownOptions,
-          });
+          // Stop all components with the manager's `shutdownOptions` defaults
+          await this.stopAllComponents();
         }
 
         // Proceed with exit
@@ -1660,7 +1658,9 @@ export class LifecycleManager
 
     // Send to each component
     for (const component of targetComponents) {
-      const name = component.getName();
+      // Per component, so one that breaks its contract becomes its own `error` entry
+      // rather than crashing the broadcast and losing every answer already collected.
+      const name = this.readComponentNameSafely(component);
       const isRunning = this.isComponentRunning(name);
       const isStalled = this.stalledComponents.has(name);
       const isStopped = !isRunning && !isStalled;
@@ -1681,8 +1681,8 @@ export class LifecycleManager
         continue;
       }
 
-      // Send message using internal method
-      const messageResult = await this.sendMessageInternal(
+      // Through the per-message safety net, for the same reason as the name read above.
+      const messageResult = await this.sendMessageSettled(
         name,
         payload,
         from,
@@ -2565,7 +2565,15 @@ export class LifecycleManager
             // Continuing would retry the attach on every later component, and an all-
             // optional registry would report success with nothing running.
             clearTimeout(timeoutHandle);
-            await this.rollbackStartup(startedComponents);
+
+            // The failed component itself is included if stopping it again did not take:
+            // it is not in `startedComponents`, and leaving it running is exactly what a
+            // failed attach must not do.
+            await this.rollbackStartup(
+              this.runningComponents.has(name)
+                ? [...startedComponents, name]
+                : startedComponents,
+            );
 
             return {
               ...this.refusedStartupResult(
@@ -2829,11 +2837,7 @@ export class LifecycleManager
     // Always the manual method for the public API, as it is not from a signal. A direct
     // stop call made while a shutdown is running expresses the same intent a signal
     // does, so a refusal is recorded on the running pass.
-    const acceptance = this.acceptShutdownPass(
-      'manual',
-      { ...this.shutdownOptions, ...options },
-      true,
-    );
+    const acceptance = this.acceptShutdownPass('manual', options, true);
 
     return acceptance.accepted ? acceptance.promise : acceptance.result;
   }
@@ -2848,11 +2852,7 @@ export class LifecycleManager
     const stopPhase = this.acceptShutdownPass(
       'manual',
       {
-        ...this.shutdownOptions,
-        timeoutMS:
-          options?.shutdownTimeoutMS ??
-          this.shutdownOptions?.timeoutMS ??
-          30000,
+        timeoutMS: options?.shutdownTimeoutMS,
         // Always retry/halt during restart for deterministic shutdown behavior.
         retryStalled: true,
         haltOnStall: true,
@@ -2899,7 +2899,7 @@ export class LifecycleManager
 
     // A stop phase that crashed leaves the components in no state anyone can vouch for,
     // so starting them again on top of it is not a restart. It used to reject here.
-    if (shutdownResult.code === 'unknown_error' && stopPhase.accepted) {
+    if (shutdownResult.code === 'unknown_error') {
       this.logger.warn('Restart abandoned: the shutdown phase failed', {
         params: { reason: shutdownResult.reason },
       });
@@ -3832,11 +3832,15 @@ export class LifecycleManager
     isRequestToStayDown: boolean,
   ): ShutdownPassAcceptance {
     const passOptions: ShutdownPassOptions = {
+      // The one place a pass's options meet the manager's `shutdownOptions` defaults:
+      // callers pass only their own overrides.
       timeoutMS: toTimerDelayMS(
         options?.timeoutMS ?? this.shutdownOptions?.timeoutMS ?? 30000,
       ),
-      retryStalled: options?.retryStalled ?? true,
-      haltOnStall: options?.haltOnStall ?? true,
+      retryStalled:
+        options?.retryStalled ?? this.shutdownOptions?.retryStalled ?? true,
+      haltOnStall:
+        options?.haltOnStall ?? this.shutdownOptions?.haltOnStall ?? true,
     };
 
     // Reject if already shutting down
@@ -4438,6 +4442,26 @@ export class LifecycleManager
     try {
       return await this.startComponentAttempt(name, options, bulkStartup);
     } catch (error) {
+      // A crash after the component was already marked running - building its status
+      // for the result, say - still fails the start, so it is stopped again: a failed
+      // start means a component that is not running, which is what every caller,
+      // bulk rollback included, acts on.
+      if (this.runningComponents.has(name)) {
+        reportCallbackError('lifecycle-manager component start', error);
+
+        const stopResult = await this.stopComponentInternal(name);
+
+        return this.crashedComponentResult(
+          name,
+          toError(error),
+          `Start failed unexpectedly after the component was running: ${describeError(error)}; ${
+            stopResult.success
+              ? 'component stopped again'
+              : `stopping it again also failed: ${stopResult.reason ?? 'unknown reason'}`
+          }`,
+        );
+      }
+
       // Back to the state it had before this attempt - `registered`, `stopped`,
       // `failed` - so a crashed retry does not erase that history from the status APIs.
       if (
@@ -4917,6 +4941,14 @@ export class LifecycleManager
         status: this.getComponentStatus(name),
       };
     } catch (error) {
+      // Everything below describes a start that never got as far as running. A throw
+      // after the component was marked running - building its status for the result,
+      // say - is not that: it is left to `startComponentInternal()`, which stops the
+      // component again so the failed start it reports is true.
+      if (this.runningComponents.has(name)) {
+        throw error;
+      }
+
       component._clearUnexpectedStopHandler();
       const err = toError(error);
 
@@ -5071,6 +5103,10 @@ export class LifecycleManager
         this.componentErrors.set(name, err);
         this.runningComponents.delete(name);
         this.updateStartedFlag();
+        // Settled like every other stall: a force-stop waiter for this name is released,
+        // and signals come off if this was the last running component.
+        this.resolvePendingForceStopWaiters(name);
+        this.detachSignalsAfterLastStop();
         this.lifecycleEvents.componentStalled(name, stallInfo, {
           reason: 'error',
           code: 'unknown_error',
@@ -6932,10 +6968,13 @@ export class LifecycleManager
       this.lifecycleEvents.signalShutdown(method, true);
 
       // No window to consume: `acceptShutdownPass()` spends it on the request that starts
-      // the pass, so a pass being in progress means there is none left to arm from.
-      if (this.handleRepeatedShutdownRequest(method, null)) {
-        return;
-      }
+      // the pass. A window armed by this very pass - from a listener on its completed
+      // event, before the latch comes down - that has already expired is cleared by
+      // this call. Either way the request is answered here: falling through would emit
+      // `signal:shutdown` a second time and reseed escalation under a running pass.
+      this.handleRepeatedShutdownRequest(method, null);
+
+      return;
     }
 
     let didEmitShutdownSignal = false;
@@ -6991,11 +7030,7 @@ export class LifecycleManager
     // A signal means the process should stay down, so a refusal is recorded on the
     // running pass - including one started from inside this request's own escalation
     // bookkeeping, which was not there when `handleShutdownRequest()` checked the latch.
-    const acceptance = this.acceptShutdownPass(
-      method,
-      { ...this.shutdownOptions },
-      true,
-    );
+    const acceptance = this.acceptShutdownPass(method, undefined, true);
 
     if (!acceptance.accepted) {
       return;
