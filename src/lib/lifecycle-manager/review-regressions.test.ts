@@ -727,4 +727,43 @@ describe('LifecycleManager - review regressions', () => {
     await manager.broadcastMessage('hi', options);
     expect(reads).toBe(1);
   });
+
+  test('a bulk startup refused on a component its late-startup cleanup is stopping keeps it stopping', async () => {
+    const { logger, manager } = setup();
+    const p = new Plain(logger, 'p');
+    const t = new Plain(logger, 't');
+    Object.assign(t, { optional: true, startupTimeoutMS: 30 });
+    const firstStart = deferred();
+    let tStartCalls = 0;
+    t.start = (): Promise<void> => {
+      tStartCalls++;
+      return tStartCalls === 1 ? firstStart.promise : Promise.resolve();
+    };
+    let tStopCalls = 0;
+    t.stop = async (): Promise<void> => {
+      tStopCalls++;
+      await sleep(150);
+    };
+    await manager.registerComponent(p);
+    await manager.registerComponent(t);
+
+    await manager.startAllComponents();
+    await manager.stopAllComponents();
+
+    // The second startup is still on `p` when `t`'s first start finishes late and its
+    // cleanup starts stopping it.
+    p.start = (): Promise<void> => sleep(60);
+    const secondStartup = manager.startAllComponents();
+    await sleep(20);
+    firstStart.resolve();
+    await secondStartup;
+
+    expect(manager.getComponentStatus('t')?.state).toBe('stopping');
+
+    const stop = await manager.stopComponent('t');
+    expect(stop.code).toBe('component_already_stopping');
+    expect(tStopCalls).toBe(1);
+
+    await sleep(200);
+  });
 });

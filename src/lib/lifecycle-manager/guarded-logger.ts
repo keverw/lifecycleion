@@ -114,7 +114,12 @@ export function createGuardedLoggerService(
   } | null = null;
 
   // See the note on the proxy's target above. Inherits from `logger` so `instanceof`
-  // and `in` still answer as they would for the service.
+  // and `in` still answer as they would for the service. Only reads, assignments and
+  // deletes are forwarded: `Object.keys()`, `Object.getOwnPropertyDescriptor()` and
+  // `Object.defineProperty()` see the empty target, not the service. The manager never
+  // does any of those; forwarding them would bring back the invariants the empty
+  // target exists to avoid, so add traps only if the guarded logger is ever handed to
+  // code that does.
   const shadow = Object.create(logger) as LoggerService;
   const target = logger;
 
