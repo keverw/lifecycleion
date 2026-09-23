@@ -1313,7 +1313,8 @@ automatically. If startup fails before anything is running, handlers attached
 via `attachSignalsBeforeStartup` are detached during startup cleanup. Handlers
 stay attached while any component is stalled - a stalled component is not
 counted as running, but Ctrl+C is how the operator retries or forces it - and
-come off once the last stall clears, by a later stop or by unregistering it.
+come off once the last stall clears: by a later stop, by the original `stop()`
+or `onShutdownForce()` finishing late, or by unregistering it.
 
 #### `detachSignals()`
 
