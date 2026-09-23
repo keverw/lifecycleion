@@ -191,7 +191,16 @@ export function runCallbackSafely(
       // Every untrusted-callback surface funnels through here: `safeHandleCallback`,
       // `EventEmitter`, `ProcessSignalManager`, `LRUCache.onChange`,
       // `PromiseProtectedResolver`.
-      void Promise.resolve(result).catch(safeOnError);
+      //
+      // And through `Promise.prototype.then` itself rather than `.catch`: `Promise.resolve`
+      // hands a native promise back unchanged, own properties included, and `.catch`
+      // calls `this.then` - so a promise carrying its own no-op `then` swallowed its
+      // rejection, which then went unhandled.
+      // eslint-disable-next-line @typescript-eslint/unbound-method
+      void Reflect.apply(Promise.prototype.then, Promise.resolve(result), [
+        undefined,
+        safeOnError,
+      ]);
     }
   } catch (error) {
     safeOnError(error);

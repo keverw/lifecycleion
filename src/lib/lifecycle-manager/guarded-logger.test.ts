@@ -418,6 +418,33 @@ describe('createGuardedLoggerService', () => {
     expect(reports.length).toBe(1);
   });
 
+  test('a rejected native promise with a no-op then from entity() is still reported', async () => {
+    const logger = new Logger({
+      sinks: [new ArraySink()],
+      callProcessExit: false,
+    });
+    const service = logger.service('svc');
+    const thrown = new Error('entity rejected');
+    service.entity = (): LoggerService => {
+      const promise: object = Promise.reject(thrown);
+      Object.defineProperty(promise, 'then', { value: () => undefined });
+
+      return promise as unknown as LoggerService;
+    };
+
+    const guarded = createGuardedLoggerService(service);
+
+    const reports = await collectReports(() => {
+      guarded.entity('ent').info('one');
+    });
+
+    expect(
+      reports.some(
+        (report) => report instanceof Error && report.cause === thrown,
+      ),
+    ).toBe(true);
+  });
+
   test('a native promise with a throwing then from entity() is contained', async () => {
     const logger = new Logger({
       sinks: [new ArraySink()],

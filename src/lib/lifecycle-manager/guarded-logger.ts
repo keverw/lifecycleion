@@ -301,12 +301,14 @@ function guardEntity(
   // that read runs code the logger owns: a `then` getter that throws would otherwise
   // escape here, past every other guard.
   //
-  // The `.then` below is inside the same guard: `Promise.resolve()` hands a native
-  // promise back as it is, own `then` property included, so that call runs the
-  // logger's code too.
+  // `Promise.prototype.then` is applied directly rather than called as `.then`:
+  // `Promise.resolve()` hands a native promise back as it is, own `then` property
+  // included, and a no-op one there would swallow the rejection, leaving it unhandled.
   try {
     if (isPromise(child)) {
-      void Promise.resolve(child).then(
+      // The intrinsic, applied to the adopted promise - the point of the call.
+      // eslint-disable-next-line @typescript-eslint/unbound-method
+      void Reflect.apply(Promise.prototype.then, Promise.resolve(child), [
         () => {
           reportCallbackError(
             label,
@@ -316,7 +318,7 @@ function guardEntity(
         (error: unknown) => {
           reportCallbackError(label, error);
         },
-      );
+      ]);
 
       return parent;
     }

@@ -284,6 +284,49 @@ describe('runCallbackSafely', () => {
     expect(failures).toEqual([]);
   });
 
+  it('reports a rejected native promise that carries its own no-op then', async () => {
+    const failures: unknown[] = [];
+    const thrown = new Error('rejected');
+    const promise: object = Promise.reject(thrown);
+    Object.defineProperty(promise, 'then', { value: () => undefined });
+
+    runCallbackSafely(
+      'cb',
+      () => promise,
+      [],
+      (error) => failures.push(error),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(failures).toEqual([thrown]);
+  });
+
+  it('reports a rejected native promise that carries its own throwing then and catch', async () => {
+    const failures: unknown[] = [];
+    const thrown = new Error('rejected');
+    const promise: object = Promise.reject(thrown);
+    Object.defineProperty(promise, 'then', {
+      value: (): never => {
+        throw new Error('then exploded');
+      },
+    });
+    Object.defineProperty(promise, 'catch', {
+      value: (): never => {
+        throw new Error('catch exploded');
+      },
+    });
+
+    runCallbackSafely(
+      'cb',
+      () => promise,
+      [],
+      (error) => failures.push(error),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(failures).toEqual([thrown]);
+  });
+
   it('reports a revoked proxy as not a function instead of throwing', () => {
     const failures: unknown[] = [];
     const { proxy, revoke } = Proxy.revocable({}, {});
