@@ -21,8 +21,8 @@ const GUARDED_LOGGER_LABEL = 'lifecycle-manager logger';
  * How many guarded `entity()` children one guarded logger keeps. The manager only ever
  * passes component names, so an ordinary app never gets near this; the cap is for one
  * that registers and unregisters uniquely named components - per job, per tenant - where
- * the cache would otherwise grow for the manager's whole lifetime. Past it, the oldest
- * name is dropped and simply rebuilt if it is logged about again.
+ * the cache would otherwise grow for the manager's whole lifetime. Past it, the least
+ * recently used name is dropped and simply rebuilt if it is logged about again.
  */
 const MAX_CACHED_ENTITY_CHILDREN = 256;
 
@@ -158,6 +158,11 @@ export function createGuardedLoggerService(
               const cached = children.get(entityName);
 
               if (cached !== undefined) {
+                // Moved to the back of the insertion order, so eviction drops the
+                // least recently used name rather than the oldest one.
+                children.delete(entityName);
+                children.set(entityName, cached);
+
                 return cached;
               }
 
@@ -165,7 +170,8 @@ export function createGuardedLoggerService(
 
               if (child !== guarded) {
                 if (children.size >= MAX_CACHED_ENTITY_CHILDREN) {
-                  // A `Map` iterates in insertion order, so this is the oldest name.
+                  // A `Map` iterates in insertion order, and hits move to the back, so this is
+                  // the least recently used name.
                   const oldest = children.keys().next();
 
                   if (oldest.done !== true) {

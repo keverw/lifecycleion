@@ -1540,28 +1540,12 @@ export class LifecycleManager
         this.logger.entity(componentName).warn('Message handler timed out', {
           params: { from, timeoutMS },
         });
-        // Prevent unhandled rejection if handler throws after timeout
-        // Logged, not discarded. Preventing the unhandled rejection is why this
-        // `catch` exists and it stays; swallowing the *cause* was a separate
-        // decision, and it left the caller knowing the operation timed out and
-        // never why it ultimately failed. The timeout warning is logged just
-        // above, so this is that line's missing second half.
-        Promise.resolve(handlerPromise)
-          .catch((error: unknown) => {
-            this.logger
-              .entity(componentName)
-              .debug('Message handler failed after it had already timed out', {
-                params: { error: toError(error), from },
-              });
-          })
-          // Terminal, for the reason the shutdown-warning chain carries one: nothing
-          // retains this chain, so a throw out of the reporting handler above becomes an
-          // unhandled rejection mid-lifecycle - fatal under Node's default
-          // `--unhandled-rejections=throw`. Logging is guarded, but a floating chain
-          // should not have to rely on that.
-          .catch(() => {
-            // Nothing left to report with.
-          });
+        this.observeFailureAfterTimeout(
+          handlerPromise,
+          componentName,
+          'Message handler failed after it had already timed out',
+          { from },
+        );
         return {
           sent: true,
           componentFound: true,
@@ -1679,9 +1663,8 @@ export class LifecycleManager
 
     // Send to each component
     for (const component of targetComponents) {
-      // Per component, so one that breaks its contract becomes its own `error` entry
-      // rather than crashing the broadcast and losing every answer already collected.
-      const name = this.readComponentNameSafely(component);
+      // The recorded name, so no component's own `getName()` runs mid-broadcast.
+      const name = this.nameOf(component);
       const isRunning = this.isComponentRunning(name);
       const isStalled = this.stalledComponents.has(name);
       const isStopped = !isRunning && !isStalled;
@@ -2552,8 +2535,8 @@ export class LifecycleManager
               startedComponents: startedComponents.filter((name) =>
                 this.isComponentRunning(name),
               ),
-              failedOptionalComponents: [],
-              skippedDueToDependency: [],
+              failedOptionalComponents,
+              skippedDueToDependency: Array.from(skippedDueToDependency),
               reason: 'Shutdown triggered during startup',
               code: 'shutdown_in_progress',
               durationMS: Date.now() - startTime,
@@ -3251,28 +3234,11 @@ export class LifecycleManager
         this.logger.entity(name).warn('Health check timed out', {
           params: { timeoutMS },
         });
-        // Prevent unhandled rejection if health check throws after timeout
-        // Logged, not discarded. Preventing the unhandled rejection is why this
-        // `catch` exists and it stays; swallowing the *cause* was a separate
-        // decision, and it left the caller knowing the operation timed out and
-        // never why it ultimately failed. The timeout warning is logged just
-        // above, so this is that line's missing second half.
-        Promise.resolve(healthCheckPromise)
-          .catch((error: unknown) => {
-            this.logger
-              .entity(name)
-              .debug('Health check failed after it had already timed out', {
-                params: { error: toError(error) },
-              });
-          })
-          // Terminal, for the reason the shutdown-warning chain carries one: nothing
-          // retains this chain, so a throw out of the reporting handler above becomes an
-          // unhandled rejection mid-lifecycle - fatal under Node's default
-          // `--unhandled-rejections=throw`. Logging is guarded, but a floating chain
-          // should not have to rely on that.
-          .catch(() => {
-            // Nothing left to report with.
-          });
+        this.observeFailureAfterTimeout(
+          healthCheckPromise,
+          name,
+          'Health check failed after it had already timed out',
+        );
       }
       const healthResult: ComponentHealthResult =
         typeof result === 'boolean' ? { healthy: result } : result;
@@ -3661,6 +3627,11 @@ export class LifecycleManager
       // Commit registration - the registry entry and every state map together, before
       // any of the component's own code runs, so the component is never in the registry
       // without its state.
+      // An instance registered before keeps its old recorded name after unregistering,
+      // for work still in flight; a rollback below puts that back rather than dropping
+      // it.
+      const previousRecordedName = this.registeredNames.get(component);
+
       this.components.splice(insertIndex, 0, component);
       this.registeredNames.set(component, componentName);
       this.componentStates.set(componentName, 'registered');
@@ -3709,7 +3680,12 @@ export class LifecycleManager
         this.components = this.components.filter(
           (registered) => registered !== component,
         );
-        this.registeredNames.delete(component);
+        if (previousRecordedName === undefined) {
+          this.registeredNames.delete(component);
+        } else {
+          this.registeredNames.set(component, previousRecordedName);
+        }
+
         this.componentStates.delete(componentName);
         this.componentTimestamps.delete(componentName);
         this.componentErrors.delete(componentName);
@@ -4533,7 +4509,21 @@ export class LifecycleManager
    * Retry shutdown for a stalled component.
    * Attempts the force phase directly to avoid re-running a failing stop().
    */
-  private async retryStalledComponent(
+  /**
+   * A stalled component's force-phase retry, under the same net as any other stop: the
+   * force phase claims `force-stopping` before reading the component's own
+   * `shutdownForceTimeoutMS`, and a throw there used to take the whole shutdown pass
+   * down with it and leave the component `force-stopping` for good.
+   */
+  private retryStalledComponent(
+    name: string,
+  ): Promise<ComponentOperationResult> {
+    return this.withComponentStopNet(name, () =>
+      this.retryStalledComponentAttempt(name),
+    );
+  }
+
+  private async retryStalledComponentAttempt(
     name: string,
   ): Promise<ComponentOperationResult> {
     const component = this.getComponent(name);
@@ -4579,6 +4569,33 @@ export class LifecycleManager
       gracefulError: undefined,
       startedAt: Date.now(),
     });
+  }
+
+  /**
+   * Watch a component's promise that the manager already stopped waiting for - it timed
+   * out - so its eventual rejection is logged rather than left unhandled.
+   *
+   * The `catch` is what prevents the unhandled rejection, fatal under Node's default
+   * `--unhandled-rejections=throw`; logging the reason, rather than discarding it, is the
+   * second half of the timeout warning the caller has already logged. The chain ends in a
+   * terminal `catch` because nothing retains it: logging is guarded, but a floating chain
+   * should not have to rely on that.
+   */
+  private observeFailureAfterTimeout(
+    promise: unknown,
+    name: string,
+    message: string,
+    params: Record<string, unknown> = {},
+  ): void {
+    Promise.resolve(promise)
+      .catch((error: unknown) => {
+        this.logger.entity(name).debug(message, {
+          params: { error: toError(error), ...params },
+        });
+      })
+      .catch(() => {
+        // Nothing left to report with.
+      });
   }
 
   /**
@@ -4972,28 +4989,11 @@ export class LifecycleManager
               }
             }
 
-            // Prevent unhandled rejection if start() throws after timeout
-            // Logged, not discarded. Preventing the unhandled rejection is why this
-            // `catch` exists and it stays; swallowing the *cause* was a separate
-            // decision, and it left the caller knowing the operation timed out and
-            // never why it ultimately failed. The timeout warning is logged just
-            // above, so this is that line's missing second half.
-            Promise.resolve(startPromise)
-              .catch((error: unknown) => {
-                this.logger
-                  .entity(name)
-                  .debug('start() failed after it had already timed out', {
-                    params: { error: toError(error) },
-                  });
-              })
-              // Terminal, for the reason the shutdown-warning chain carries one: nothing
-              // retains this chain, so a throw out of the reporting handler above becomes an
-              // unhandled rejection mid-lifecycle - fatal under Node's default
-              // `--unhandled-rejections=throw`. Logging is guarded, but a floating chain
-              // should not have to rely on that.
-              .catch(() => {
-                // Nothing left to report with.
-              });
+            this.observeFailureAfterTimeout(
+              startPromise,
+              name,
+              'start() failed after it had already timed out',
+            );
           }, toTimerDelayMS(timeoutMS));
         });
 
@@ -5260,15 +5260,28 @@ export class LifecycleManager
    * Internal stop component method - bypasses bulk operation checks
    * Implements individual component graceful -> force shutdown (global warning handled elsewhere)
    */
-  private async stopComponentInternal(
+  private stopComponentInternal(
     name: string,
     options?: StopComponentOptions,
+  ): Promise<ComponentOperationResult> {
+    return this.withComponentStopNet(name, () =>
+      this.stopComponentAttempt(name, options),
+    );
+  }
+
+  /**
+   * The net under every per-component stop - `stopComponentInternal()` and a stalled
+   * component's force-phase retry alike.
+   */
+  private async withComponentStopNet(
+    name: string,
+    run: () => Promise<ComponentOperationResult>,
   ): Promise<ComponentOperationResult> {
     const startedAt = Date.now();
     const stateBeforeStop = this.componentStates.get(name);
 
     try {
-      return await this.stopComponentAttempt(name, options);
+      return await run();
     } catch (error) {
       // The attempt claims `stopping` / `force-stopping` before work that runs the
       // component's own code - its timeout getters, its hooks - and not all of it sits
@@ -6328,9 +6341,14 @@ export class LifecycleManager
   }
 
   private autoDetachSignalsIfIdle(trigger: string): void {
+    // Not while a shutdown pass is running: it still needs SIGINT/SIGTERM for
+    // escalation, and a startup refused because a listener started that pass would
+    // otherwise pull the handlers out from under it. The pass's own stops detach them
+    // once the last component is down.
     if (
       !this.detachSignalsOnStop ||
       this.isStarting ||
+      this.isShuttingDown ||
       this.runningComponents.size > 0 ||
       !this.processSignalManager?.getStatus().isAttached
     ) {
@@ -6352,73 +6370,84 @@ export class LifecycleManager
       .warn('Startup timed out, stopping component if startup completes later');
 
     Promise.resolve(startPromise)
-      .then(async () => {
-        // An abort hook can settle start() inside the timeout callback. Let the
-        // timed-out start's catch record its state before beginning late cleanup.
-        await Promise.resolve();
-        const timeoutState = this.componentStates.get(name);
-        const timeoutError = this.componentErrors.get(name) ?? null;
+      .then(
+        async () => {
+          // An abort hook can settle start() inside the timeout callback. Let the
+          // timed-out start's catch record its state before beginning late cleanup.
+          await Promise.resolve();
+          const timeoutState = this.componentStates.get(name);
+          const timeoutError = this.componentErrors.get(name) ?? null;
 
-        if (
-          this.getComponent(name) !== component ||
-          this.componentStartAttemptTokens.get(name) !== startAttemptToken ||
-          this.isComponentRunning(name) ||
-          (timeoutState !== 'starting-timed-out' && timeoutState !== 'failed')
-        ) {
-          return;
-        }
+          if (
+            this.getComponent(name) !== component ||
+            this.componentStartAttemptTokens.get(name) !== startAttemptToken ||
+            this.isComponentRunning(name) ||
+            (timeoutState !== 'starting-timed-out' && timeoutState !== 'failed')
+          ) {
+            return;
+          }
 
-        // Late startup completed after the manager had already timed out. Mark
-        // it running briefly so the normal stop path can clean it up.
-        // Lock recovery only while cleanup is actually running. An abandoned
-        // start may never settle; the attempt token protects a replacement run.
-        this.pendingBulkStartupCleanup.set(name, startAttemptToken);
-        this.componentStates.set(name, 'running');
-        this.runningComponents.add(name);
-        this.stalledComponents.delete(name);
-        this.updateStartedFlag();
+          // Late startup completed after the manager had already timed out. Mark
+          // it running briefly so the normal stop path can clean it up.
+          // Lock recovery only while cleanup is actually running. An abandoned
+          // start may never settle; the attempt token protects a replacement run.
+          this.pendingBulkStartupCleanup.set(name, startAttemptToken);
+          this.componentStates.set(name, 'running');
+          this.runningComponents.add(name);
+          this.stalledComponents.delete(name);
+          this.updateStartedFlag();
 
-        const timestamps = this.componentTimestamps.get(name) ?? {
-          startedAt: null,
-          stoppedAt: null,
-        };
+          const timestamps = this.componentTimestamps.get(name) ?? {
+            startedAt: null,
+            stoppedAt: null,
+          };
 
-        timestamps.startedAt = Date.now();
-        this.componentTimestamps.set(name, timestamps);
+          timestamps.startedAt = Date.now();
+          this.componentTimestamps.set(name, timestamps);
 
-        this.logger
-          .entity(name)
-          .warn(
-            'Component completed startup after timeout, stopping automatically',
-          );
-
-        const stopResult = await this.stopComponentInternal(name);
-
-        if (!stopResult.success) {
           this.logger
             .entity(name)
-            .warn('Automatic stop after startup timeout failed', {
-              params: {
-                error: stopResult.error,
-                code: stopResult.code,
-              },
-            });
-          return;
-        }
+            .warn(
+              'Component completed startup after timeout, stopping automatically',
+            );
 
-        this.componentStates.set(name, timeoutState);
-        this.componentErrors.set(name, timeoutError);
-      })
+          const stopResult = await this.stopComponentInternal(name);
+
+          if (!stopResult.success) {
+            this.logger
+              .entity(name)
+              .warn('Automatic stop after startup timeout failed', {
+                params: {
+                  error: stopResult.error,
+                  code: stopResult.code,
+                },
+              });
+            return;
+          }
+
+          this.componentStates.set(name, timeoutState);
+          this.componentErrors.set(name, timeoutError);
+        },
+        (startError: unknown) => {
+          // A rejection from `start()` itself needs nothing further - the component is
+          // already recorded as timed out.
+          this.logger
+            .entity(name)
+            .debug('start() failed after it had already timed out', {
+              params: { error: toError(startError) },
+            });
+        },
+      )
       .catch((error: unknown) => {
-        // A rejection from `start()` itself needs nothing further - the component is
-        // already recorded as timed out. But this `catch` also covers the recovery body
-        // above, including the `stopComponentInternal` that exists to stop a late-starting
-        // component, and a failure there means that stop silently did not happen.
+        // The recovery body above failed - after the component was marked running, and
+        // around the `stopComponentInternal` that exists to stop it. That stop may not
+        // have happened, so this is reported, not just logged at debug.
         this.logger
           .entity(name)
-          .debug('Late startup completion handling ended in a failure', {
+          .warn('Late startup completion handling failed', {
             params: { error: toError(error) },
           });
+        reportCallbackError('lifecycle-manager late startup cleanup', error);
       })
       // Terminal, for the reason the shutdown-warning chain carries one: nothing
       // retains this chain, so a throw out of the reporting handler above becomes an
@@ -7754,9 +7783,12 @@ export class LifecycleManager
       armedUntil,
     };
 
-    // The guard matters here: this runs on the shutdown-request path and in the expiry
-    // timer, ahead of the reset below, so a logger that threw would otherwise leave the
-    // stale state armed.
+    // Reset before anything is said about it: a `shutdown-escalation-expired` listener
+    // that starts a shutdown must find no state, so its pass seeds a fresh cycle. Reset
+    // after the emit, as it was, wiped the state that pass had just seeded - `firstMethod`
+    // stayed `null` for the whole pass, and `onForceShutdown` could never fire.
+    this.resetRepeatedShutdownRequestState();
+
     this.logger.warn(
       'Repeated shutdown escalation window expired, clearing previous shutdown state',
       {
@@ -7776,8 +7808,6 @@ export class LifecycleManager
         armedUntil: expiredState.armedUntil,
       });
     }
-
-    this.resetRepeatedShutdownRequestState();
   }
 
   /**
@@ -7995,7 +8025,32 @@ export class LifecycleManager
       if (!canDispatch(component)) {
         continue;
       }
-      const handler = descriptor.pickHandler(component);
+      // Both read the component's own properties, so both are read here, per
+      // component: one that throws becomes that component's `error` entry, before any
+      // `*-started` event for it, rather than ending the broadcast for every component
+      // after it.
+      let handler: (() => unknown) | undefined;
+      let timeoutMS: number;
+
+      try {
+        handler = descriptor.pickHandler(component);
+        timeoutMS = component.signalTimeoutMS;
+      } catch (error) {
+        const err = toError(error);
+
+        this.logger.entity(name).error(descriptor.errorLog, {
+          params: { error: err },
+        });
+
+        results.push({
+          name,
+          called: false,
+          error: err,
+          timedOut: false,
+          code: 'error',
+        });
+        continue;
+      }
 
       if (!handler) {
         results.push({
@@ -8021,7 +8076,6 @@ export class LifecycleManager
         continue;
       }
 
-      const timeoutMS = component.signalTimeoutMS;
       let timeoutHandle: NodeJS.Timeout | undefined;
       const timeoutResult = { timedOut: true } as const;
 
@@ -8029,7 +8083,7 @@ export class LifecycleManager
         const handlerResult = handler();
         const handlerPromise: Promise<unknown> = isPromise(handlerResult)
           ? handlerResult
-          : Promise.resolve(handlerResult as unknown);
+          : Promise.resolve(handlerResult);
 
         const outcome: unknown =
           toTimerDelayMS(timeoutMS) > 0
@@ -8047,31 +8101,11 @@ export class LifecycleManager
           this.logger.entity(name).warn(descriptor.timeoutLog, {
             params: { timeoutMS },
           });
-          // Prevent unhandled rejection if handler throws after timeout
-          // Logged, not discarded. Preventing the unhandled rejection is why this
-          // `catch` exists and it stays; swallowing the *cause* was a separate
-          // decision, and it left the caller knowing the operation timed out and
-          // never why it ultimately failed. The timeout warning is logged just
-          // above, so this is that line's missing second half.
-          Promise.resolve(handlerPromise)
-            .catch((error: unknown) => {
-              this.logger
-                .entity(name)
-                .debug(
-                  'Lifecycle handler failed after it had already timed out',
-                  {
-                    params: { error: toError(error) },
-                  },
-                );
-            })
-            // Terminal, for the reason the shutdown-warning chain carries one: nothing
-            // retains this chain, so a throw out of the reporting handler above becomes an
-            // unhandled rejection mid-lifecycle - fatal under Node's default
-            // `--unhandled-rejections=throw`. Logging is guarded, but a floating chain
-            // should not have to rely on that.
-            .catch(() => {
-              // Nothing left to report with.
-            });
+          this.observeFailureAfterTimeout(
+            handlerPromise,
+            name,
+            'Lifecycle handler failed after it had already timed out',
+          );
           results.push({
             name,
             called: true,
@@ -8112,7 +8146,10 @@ export class LifecycleManager
       }
     }
 
-    const calledResults = results.filter((result) => result.called);
+    // Called handlers, plus any component that failed before its handler could be called.
+    const calledResults = results.filter(
+      (result) => result.called || result.code === 'error',
+    );
     const hasError = calledResults.some((result) => result.error);
     const isAllError =
       calledResults.length > 0 && calledResults.every((result) => result.error);

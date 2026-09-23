@@ -503,10 +503,10 @@ describe('LifecycleManager - hostile thrown values', () => {
     );
   });
 
-  test('a late startup completion whose handling fails is logged as such, not dropped or fatal', async () => {
+  test('a late startup completion whose handling fails is reported, not dropped or fatal', async () => {
     // The recovery body stops a component that finished starting after the manager gave
-    // up on it. A failure there means that stop silently did not happen, which is what
-    // `'Late startup completion handling ended in a failure'` exists to say.
+    // up on it. A failure there means that stop may not have happened, so it is logged
+    // as a warning and reported on the global channel.
     const lifecycle = new LifecycleManager({ logger });
 
     internalStepThatThrows(
@@ -529,8 +529,14 @@ describe('LifecycleManager - hostile thrown values', () => {
     const onUnhandled = (reason: unknown): void => {
       rejections.push(reason);
     };
+    const reports: unknown[] = [];
+    const onError = (event: Event): void => {
+      reports.push((event as ErrorEvent).error);
+      event.preventDefault();
+    };
 
     process.on('unhandledRejection', onUnhandled);
+    globalThis.addEventListener('error', onError);
 
     try {
       await lifecycle.registerComponent(new LateStart());
@@ -541,17 +547,25 @@ describe('LifecycleManager - hostile thrown values', () => {
 
       const report = await untilLogged(
         arraySink,
-        'Late startup completion handling ended in a failure',
+        'Late startup completion handling failed',
         2000,
       );
 
-      expect(report?.type).toBe('debug');
+      expect(report?.type).toBe('warn');
       expect((report?.params?.['error'] as Error).message).toBe(
         'automatic stop exploded',
       );
+      expect(
+        reports.some((entry) =>
+          (entry as Error).message.includes(
+            'lifecycle-manager late startup cleanup',
+          ),
+        ),
+      ).toBe(true);
       expect(rejections).toEqual([]);
     } finally {
       process.off('unhandledRejection', onUnhandled);
+      globalThis.removeEventListener('error', onError);
     }
   });
 

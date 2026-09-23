@@ -1091,6 +1091,136 @@ describe('LifecycleManager - public methods never reject', () => {
     await shutdown;
   });
 
+  test('a stalled component whose force timeout getter throws does not kill the shutdown pass', async () => {
+    const { logger, manager } = setup();
+    const stalled = new Plain(logger, 'stalled');
+    stalled.stop = (): Promise<void> =>
+      Promise.reject(new Error('stop failed'));
+    stalled.onShutdownForce = (): void => {
+      throw new Error('force failed');
+    };
+    await manager.registerComponent(stalled);
+    await manager.registerComponent(new Plain(logger, 'other'));
+    await manager.startAllComponents();
+
+    await manager.stopAllComponents({ haltOnStall: false });
+    expect(manager.getComponentStatus('stalled')?.state).toBe('stalled');
+
+    await manager.startComponent('other');
+    Object.defineProperty(stalled, 'shutdownForceTimeoutMS', {
+      get: (): never => {
+        throw new Error('getter exploded');
+      },
+    });
+
+    const { release } = claimReports();
+    let result;
+
+    try {
+      // `retryStalled` defaults to true, so the stalled component's force phase reruns.
+      result = await manager.stopAllComponents({ haltOnStall: false });
+    } finally {
+      release();
+    }
+
+    expect(result.code).not.toBe('unknown_error');
+    expect(result.stoppedComponents).toContain('other');
+    expect(manager.getComponentStatus('stalled')?.state).toBe('stalled');
+  });
+
+  test('a signal handler getter that throws fails only its own broadcast entry', async () => {
+    const { logger, manager } = setup();
+    const bad = new Plain(logger, 'bad');
+    const good = new Plain(logger, 'good');
+    let wasReloaded = false;
+    (good as unknown as { onReload: () => void }).onReload = (): void => {
+      wasReloaded = true;
+    };
+    await manager.registerComponent(bad);
+    await manager.registerComponent(good);
+    await manager.startAllComponents();
+
+    Object.defineProperty(bad, 'onReload', {
+      get: (): never => {
+        throw new Error('getter exploded');
+      },
+    });
+
+    const result = await manager.triggerReload();
+
+    expect(wasReloaded).toBe(true);
+    expect(result.results.find((entry) => entry.name === 'bad')?.code).toBe(
+      'error',
+    );
+    expect(result.results.find((entry) => entry.name === 'good')?.code).toBe(
+      'called',
+    );
+    expect(result.code).toBe('partial_error');
+  });
+
+  test('a shutdown started from an escalation-expired listener seeds its own cycle', async () => {
+    const { logger, manager } = setup({
+      shutdownOptions: { timeoutMS: 50, retryStalled: false },
+      repeatedShutdownRequestPolicy: {
+        forceAfterCount: 3,
+        withinMS: 1000,
+        armedAfterFailureMS: 60_000,
+        onForceShutdown: () => {},
+      },
+    });
+    const component = new Plain(logger, 'a');
+    component.stop = (): Promise<void> => new Promise<void>(() => {});
+    await manager.registerComponent(component);
+    await manager.startAllComponents();
+
+    await manager.stopAllComponents();
+    expect(manager.getShutdownEscalationStatus().isArmed).toBe(true);
+
+    const passes: Promise<unknown>[] = [];
+    manager.once('lifecycle-manager:shutdown-escalation-expired', () => {
+      passes.push(manager.stopAllComponents());
+    });
+
+    (
+      manager as unknown as {
+        repeatedShutdownRequestState: { remainsArmedUntil: number };
+      }
+    ).repeatedShutdownRequestState.remainsArmedUntil = Date.now() - 1;
+
+    // Reading the status normalizes the lapsed window, which expires it.
+    manager.getShutdownEscalationStatus();
+
+    // The listener's pass found no stale state, so it seeded a fresh cycle that the
+    // expiry's reset did not wipe afterwards.
+    expect(manager.getShutdownEscalationStatus().firstMethod).toBe('manual');
+
+    await Promise.all(passes);
+  });
+
+  test('a failed re-registration keeps the name recorded from the earlier registration', async () => {
+    const { logger, manager } = setup();
+    const component = new Plain(logger, 'a');
+    await manager.registerComponent(component);
+    await manager.unregisterComponent('a');
+
+    (component as unknown as { _markRegistered: () => void })._markRegistered =
+      (): never => {
+        throw new Error('hook exploded');
+      };
+    await manager.registerComponent(component);
+
+    component.getName = (): never => {
+      throw new Error('getter exploded');
+    };
+
+    // Work still in flight from the first registration names it without asking.
+    const nameOf = (
+      manager as unknown as { nameOf: (component: BaseComponent) => string }
+    ).nameOf.bind(manager);
+
+    expect(nameOf(component)).toBe('a');
+  });
+
   test('getValue() resolves an unexpected failure as an error result', async () => {
     const { logger, manager } = setup();
     const component = new Plain(logger, 'a');
