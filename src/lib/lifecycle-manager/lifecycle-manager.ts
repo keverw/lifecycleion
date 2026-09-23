@@ -88,6 +88,7 @@ import { isPromise } from '../is-promise';
 import {
   reportCallbackError,
   safeHandleCallback,
+  safeHandleCallbackAndWait,
 } from '../safe-handle-callback';
 import { createGuardedLoggerService } from './guarded-logger';
 import { describeError, isErrorValue, toError } from '../to-error';
@@ -143,6 +144,7 @@ function toTimerDelayMS(requested: number): number {
  * happen on the side of the latch where a throw costs nothing.
  */
 interface ShutdownPassOptions {
+  /** Already clamped to a usable timer delay by `toTimerDelayMS()`; `0` means no timer. */
   readonly timeoutMS: number;
   readonly retryStalled: boolean;
   readonly haltOnStall: boolean;
@@ -2497,6 +2499,24 @@ export class LifecycleManager
                 durationMS: Date.now() - startTime,
               };
             }
+          } else if (result.code === 'signal_attach_failed') {
+            // Fatal to the whole startup, optional component or not: the process was
+            // configured to handle signals and cannot, so it does not come up at all.
+            // Continuing would retry the attach on every later component, and an all-
+            // optional registry would report success with nothing running.
+            clearTimeout(timeoutHandle);
+            await this.rollbackStartup(startedComponents);
+
+            return {
+              ...this.refusedStartupResult(
+                'signal_attach_failed',
+                result.reason ?? 'Could not attach process signals',
+                Date.now() - startTime,
+              ),
+              failedOptionalComponents,
+              skippedDueToDependency: Array.from(skippedDueToDependency),
+              error: result.error,
+            };
           } else {
             // Check if component is optional
             if (component.isOptional()) {
@@ -2687,6 +2707,37 @@ export class LifecycleManager
           durationMS,
           timedOut: hasTimedOut,
         };
+      } catch (error) {
+        // Something unplanned threw mid-startup - a component getter, say. Handled here
+        // rather than left to the public safety net, which cannot see what this startup
+        // had already started: rolled back like any other failed startup, so a failure
+        // never leaves a partial set running behind a result that says otherwise.
+        clearTimeout(timeoutHandle);
+        reportCallbackError('lifecycle-manager startAllComponents', error);
+
+        try {
+          await this.rollbackStartup(startedComponents);
+        } catch (rollbackError) {
+          reportCallbackError(
+            'lifecycle-manager startup rollback',
+            rollbackError,
+          );
+        }
+
+        return {
+          ...this.refusedStartupResult(
+            'unknown_error',
+            `startAllComponents() failed unexpectedly: ${describeError(error)}`,
+            Date.now() - startTime,
+          ),
+          // Whatever the rollback could not stop, so the result matches the registry.
+          startedComponents: startedComponents.filter((name) =>
+            this.runningComponents.has(name),
+          ),
+          failedOptionalComponents,
+          skippedDueToDependency: Array.from(skippedDueToDependency),
+          error: toError(error),
+        };
       } finally {
         // Release the deadline callback when startup settles so it cannot report
         // a timeout after this operation has completed.
@@ -2715,32 +2766,16 @@ export class LifecycleManager
   private async stopAllComponentsOperation(
     options?: StopAllOptions,
   ): Promise<ShutdownResult> {
-    // always use manual method for external public API as not from a signal
-    const acceptance = this.acceptShutdownPass('manual', {
-      ...this.shutdownOptions,
-      ...options,
-    });
+    // Always the manual method for the public API, as it is not from a signal. A direct
+    // stop call made while a shutdown is running expresses the same intent a signal
+    // does, so a refusal is recorded on the running pass.
+    const acceptance = this.acceptShutdownPass(
+      'manual',
+      { ...this.shutdownOptions, ...options },
+      true,
+    );
 
-    if (acceptance.accepted) {
-      return acceptance.promise;
-    }
-
-    // Noted here rather than inside `acceptShutdownPass()`, whose refusals a restart's
-    // own stop phase also reaches: a restart refused by somebody else's pass would then
-    // note that pass and cancel a startup nobody asked to skip. `restartAllComponents()`
-    // calls the acceptance step directly, so this placement cannot reach it.
-    //
-    // After the acceptance rather than before it, because the pass that refuses this
-    // call need not exist on entry: the acceptance step runs escalation bookkeeping
-    // before its second latch check, and a callback that starts a pass from there - an
-    // `onForceShutdown` that calls `restartAllComponents()` is the realistic case - is
-    // precisely the pass this request has to reach. Noting first would mark nothing at
-    // all, and that restart would bring everything back up under an operator who is
-    // still asking for the process to go down. Whichever of the two refusals answered,
-    // the latch is held, so `activeShutdownPass` is the pass that is running.
-    this.noteShutdownRequestDuringActivePass();
-
-    return acceptance.result;
+    return acceptance.accepted ? acceptance.promise : acceptance.result;
   }
 
   private async restartAllComponentsOperation(
@@ -2749,14 +2784,21 @@ export class LifecycleManager
     this.logger.info('Restarting all components');
 
     // Phase 1: Stop all components (explicit defaults for restart semantics)
-    const stopPhase = this.acceptShutdownPass('manual', {
-      ...this.shutdownOptions,
-      timeoutMS:
-        options?.shutdownTimeoutMS ?? this.shutdownOptions?.timeoutMS ?? 30000,
-      // Always retry/halt during restart for deterministic shutdown behavior.
-      retryStalled: true,
-      haltOnStall: true,
-    });
+    const stopPhase = this.acceptShutdownPass(
+      'manual',
+      {
+        ...this.shutdownOptions,
+        timeoutMS:
+          options?.shutdownTimeoutMS ??
+          this.shutdownOptions?.timeoutMS ??
+          30000,
+        // Always retry/halt during restart for deterministic shutdown behavior.
+        retryStalled: true,
+        haltOnStall: true,
+      },
+      // Not a request to stay down: see `acceptShutdownPass()`.
+      false,
+    );
 
     // A refused stop phase is somebody else's pass: this restart has nothing of its own
     // for a request to cancel, so it behaves exactly as it did before cancellation
@@ -3628,32 +3670,50 @@ export class LifecycleManager
           params: { error: err },
         });
 
-      this.lifecycleEvents.componentRegistrationRejected({
-        name: componentName,
-        reason: code,
-        // Guarded like every other failure-path read of a normalized throw: a
-        // brand-claiming value reaches `.message` unchanged, and a throw here would
-        // reject `registerComponent`/`insertComponentAt` rather than answering with the
-        // rejected result below.
-        message: describeError(err),
-        registrationIndexBefore,
-        registrationIndexAfter: registrationIndexBefore,
-        startupOrder: [],
-        requestedPosition: isInsertAction
-          ? { position, targetComponentName }
-          : undefined,
-        manualPositionRespected: false,
-        targetFound:
-          position === 'before' || position === 'after' ? false : undefined,
-        ...(err instanceof DependencyCycleError
-          ? { cycle: err.additionalInfo.cycle }
-          : {}),
-      });
-
       // Read back from the registry rather than assumed: a throw after the commit - from
-      // an auto-start, say - leaves the component registered, and the result must say so.
+      // an auto-start, say - leaves the component registered, and both the event and the
+      // result must say so.
       const registrationIndexNow = this.components.indexOf(component);
       const isRegistered = registrationIndexNow !== -1;
+
+      if (isRegistered) {
+        // Committed, so it is a registration as far as anyone tracking the registry is
+        // concerned; the failure is reported through the result and the log line above.
+        this.lifecycleEvents.componentRegistered({
+          name: componentName,
+          index: registrationIndexNow,
+          action: isInsertAction ? 'insert' : 'register',
+          registrationIndexBefore,
+          registrationIndexAfter: registrationIndexNow,
+          startupOrder: [],
+          requestedPosition: isInsertAction
+            ? { position, targetComponentName }
+            : undefined,
+          duringStartup: this.isStarting,
+        });
+      } else {
+        this.lifecycleEvents.componentRegistrationRejected({
+          name: componentName,
+          reason: code,
+          // Guarded like every other failure-path read of a normalized throw: a
+          // brand-claiming value reaches `.message` unchanged, and a throw here would
+          // reject `registerComponent`/`insertComponentAt` rather than answering with the
+          // rejected result below.
+          message: describeError(err),
+          registrationIndexBefore,
+          registrationIndexAfter: registrationIndexBefore,
+          startupOrder: [],
+          requestedPosition: isInsertAction
+            ? { position, targetComponentName }
+            : undefined,
+          manualPositionRespected: false,
+          targetFound:
+            position === 'before' || position === 'after' ? false : undefined,
+          ...(err instanceof DependencyCycleError
+            ? { cycle: err.additionalInfo.cycle }
+            : {}),
+        });
+      }
 
       return {
         action: 'insert',
@@ -3692,10 +3752,21 @@ export class LifecycleManager
    * throw to the caller with no pass started and nothing to release - which the public
    * callers' {@link settleOperation} net turns into an `unknown_error` result. The pass takes the
    * latch itself, as the first statement inside its `try`.
+   *
+   * `isRequestToStayDown` says whether a refusal should be recorded on the running pass
+   * (see {@link noteShutdownRequestDuringActivePass}), so that a restart owning that pass
+   * skips its startup phase. True for every shutdown request - a signal, a direct
+   * `stopAllComponents()` - and false only for a restart's own stop phase: a restart
+   * refused by somebody else's pass is not asking anything to stay down. Recorded here,
+   * on both refusals, rather than by each caller afterwards, because the pass that
+   * refuses a request need not exist on entry: the escalation bookkeeping below can start
+   * one from inside `onForceShutdown`, and that is precisely the pass the request has to
+   * reach.
    */
   private acceptShutdownPass(
     method: ShutdownMethod,
-    options?: StopAllOptions,
+    options: StopAllOptions | undefined,
+    isRequestToStayDown: boolean,
   ): ShutdownPassAcceptance {
     const passOptions: ShutdownPassOptions = {
       timeoutMS: toTimerDelayMS(
@@ -3714,10 +3785,7 @@ export class LifecycleManager
         },
       );
 
-      return {
-        accepted: false,
-        result: this.refusedShutdownResult(),
-      };
+      return this.refuseShutdownPass(isRequestToStayDown);
     }
 
     this.normalizeRepeatedShutdownRequestStateArmedStatus();
@@ -3765,10 +3833,7 @@ export class LifecycleManager
         },
       );
 
-      return {
-        accepted: false,
-        result: this.refusedShutdownResult(),
-      };
+      return this.refuseShutdownPass(isRequestToStayDown);
     }
 
     const pass: ShutdownPass = { shutdownRequested: false };
@@ -3933,7 +3998,7 @@ export class LifecycleManager
       };
       // Start global timeout clock (halts further stop attempts after it fires)
       const timeoutPromise =
-        toTimerDelayMS(effectiveTimeout) > 0
+        effectiveTimeout > 0
           ? new Promise<'timeout'>((resolve) => {
               timeoutHandle = setTimeout(() => {
                 hasTimedOut = true;
@@ -3943,7 +4008,7 @@ export class LifecycleManager
                   'Shutdown timeout exceeded, halting further stop attempts',
                   { params: { timeoutMS: effectiveTimeout } },
                 );
-              }, toTimerDelayMS(effectiveTimeout));
+              }, effectiveTimeout);
             })
           : null;
 
@@ -6738,19 +6803,16 @@ export class LifecycleManager
    * hand a result to. The outcome arrives on `lifecycle-manager:shutdown-completed`.
    */
   private startShutdownPass(method: ShutdownSignal): void {
-    const acceptance = this.acceptShutdownPass(method, {
-      ...this.shutdownOptions,
-    });
+    // A signal means the process should stay down, so a refusal is recorded on the
+    // running pass - including one started from inside this request's own escalation
+    // bookkeeping, which was not there when `handleShutdownRequest()` checked the latch.
+    const acceptance = this.acceptShutdownPass(
+      method,
+      { ...this.shutdownOptions },
+      true,
+    );
 
     if (!acceptance.accepted) {
-      // The same late refusal `stopAllComponents()` notes, for the same reason: the
-      // caller checked the latch before the acceptance step, so a pass started from
-      // inside that step's escalation bookkeeping - an `onForceShutdown` that calls
-      // `restartAllComponents()` - was not there to be noted then. A signal means the
-      // process should stay down, and this is not a path a restart takes for its own
-      // stop phase.
-      this.noteShutdownRequestDuringActivePass();
-
       return;
     }
 
@@ -6772,24 +6834,30 @@ export class LifecycleManager
    * starting everything back up afterwards, so the request is recorded on the pass and
    * phase 2 is skipped instead.
    *
-   * Called from the three request paths on the branch where they are refused because a
-   * shutdown is already running: `handleShutdownRequest()` for a signal, the public
-   * `stopAllComponents()` - a direct stop call in that window expresses the same intent
-   * as a signal - and the `enableLoggerExitHook()` callback, where `logger.exit()` says
-   * the process is going down. The signal path checks the latch itself and then reaches
-   * the acceptance step, which can refuse it a second time over a pass its own
-   * escalation bookkeeping started, so `startShutdownPass()` calls this again on that
-   * refusal; `stopAllComponents()` only notes after the acceptance step, for the same
-   * reason - on entry there may have been no pass to note.
-   *
-   * Deliberately not `acceptShutdownPass()`'s own refusal, which a restart's stop phase
-   * also reaches: a restart refused by somebody else's pass is not a request to stay
-   * down. Every call site above is one a restart never takes for its stop phase.
+   * Reached from `acceptShutdownPass()`'s refusals for every request that asks to stay
+   * down (its `isRequestToStayDown`), and directly from the two places that see a running
+   * pass without going through it: `handleShutdownRequest()`'s own latch check for a
+   * signal, and the `enableLoggerExitHook()` callback, where `logger.exit()` says the
+   * process is going down.
    */
   private noteShutdownRequestDuringActivePass(): void {
     if (this.activeShutdownPass !== null) {
       this.activeShutdownPass.shutdownRequested = true;
     }
+  }
+
+  /**
+   * Both of `acceptShutdownPass()`'s refusals, so they cannot drift apart on whether the
+   * refusal is recorded against the running pass.
+   */
+  private refuseShutdownPass(
+    isRequestToStayDown: boolean,
+  ): ShutdownPassAcceptance {
+    if (isRequestToStayDown) {
+      this.noteShutdownRequestDuringActivePass();
+    }
+
+    return { accepted: false, result: this.refusedShutdownResult() };
   }
 
   /**
@@ -7336,18 +7404,13 @@ export class LifecycleManager
     if (descriptor.customCallback) {
       // Guarded: the callback is the caller's, and a throw or rejection from it rejected
       // `triggerReload()` and friends. It is reported, and the result says `error`.
-      try {
-        const result = descriptor.customCallback(descriptor.broadcast);
+      const outcome = await safeHandleCallbackAndWait(
+        `lifecycle-manager ${descriptor.signal} request callback`,
+        descriptor.customCallback,
+        descriptor.broadcast,
+      );
 
-        if (isPromise(result)) {
-          await result;
-        }
-      } catch (error) {
-        reportCallbackError(
-          `lifecycle-manager ${descriptor.signal} request callback`,
-          error,
-        );
-
+      if (!outcome.success) {
         return {
           signal: descriptor.signal,
           results: [],

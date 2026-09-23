@@ -859,6 +859,21 @@ describe('runCallbackSafely - thisArg', () => {
 
     expect(calls).toEqual([[1, 2]]);
   });
+
+  it('calls the callback itself, not an apply property it carries', () => {
+    const calls: unknown[][] = [];
+    const callback = Object.assign((...args: unknown[]) => calls.push(args), {
+      // Shadows `Function.prototype.apply`. Reading it off the callback would run this
+      // instead of the callback.
+      apply: (): void => {},
+    });
+
+    runCallbackSafely('shadowed-apply', callback, [1, 2], () => {
+      throw new Error('should not be reached');
+    });
+
+    expect(calls).toEqual([[1, 2]]);
+  });
 });
 
 describe('runCallbackSafely - a throwing onError is contained', () => {

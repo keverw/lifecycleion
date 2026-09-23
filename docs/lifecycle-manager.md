@@ -735,7 +735,7 @@ interface StartupResult {
     | 'partial_state' // Some components already running
     | 'required_component_failed' // Required component failed to start
     | 'shutdown_requested_during_restart' // restartAllComponents() skipped its startup phase
-    | 'signal_attach_failed' // attachSignalsBeforeStartup could not attach process signals
+    | 'signal_attach_failed' // attachSignalsBeforeStartup / attachSignalsOnStart could not attach process signals
     | 'startup_timeout'
     | 'unknown_error';
   error?: Error; // Error object (when success is false due to dependency cycle or unknown error)
@@ -1294,8 +1294,8 @@ If `attachSignalsOnStart` is enabled, handlers are auto-attached when the first
 component successfully starts. If attaching fails, that component is stopped
 again and its start fails with `code: 'signal_attach_failed'` - a process
 configured to handle signals does not stay up without them. In
-`startAllComponents()` that counts as a failed component, so a required one
-rolls the startup back.
+`startAllComponents()` that fails the whole startup with the same code and
+rolls it back, whether or not the component is optional.
 
 If `detachSignalsOnStop` is enabled, currently attached handlers are detached
 when the last running component stops, whether they were attached manually or

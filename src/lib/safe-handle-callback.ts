@@ -168,9 +168,12 @@ export function runCallbackSafely(
   }
 
   try {
-    // Invoked through `apply` so an extracted method can still be given its receiver.
-    // With `thisArg` omitted this is the same bare call as before.
-    const result = (callback as (...args: unknown[]) => unknown).apply(
+    // `Reflect.apply` so an extracted method can still be given its receiver - and not
+    // `callback.apply(...)`, which reads `apply` off the untrusted callback itself: one
+    // with its own `apply` property would run that instead. With `thisArg` omitted this
+    // is the same bare call as before.
+    const result: unknown = Reflect.apply(
+      callback as (...args: unknown[]) => unknown,
       thisArg,
       args,
     );

@@ -136,7 +136,7 @@ describe('LifecycleManager - public methods never reject', () => {
     expect(manager.isComponentRunning('a')).toBe(false);
   });
 
-  test('a signal attach that throws under attachSignalsOnStart fails a required bulk start', async () => {
+  test('a signal attach that throws under attachSignalsOnStart fails bulk startup', async () => {
     const { logger, manager } = setup({ attachSignalsOnStart: true });
     await manager.registerComponent(new Plain(logger, 'a'));
 
@@ -147,7 +147,7 @@ describe('LifecycleManager - public methods never reject', () => {
     const result = await manager.startAllComponents();
 
     expect(result.success).toBe(false);
-    expect(result.code).toBe('required_component_failed');
+    expect(result.code).toBe('signal_attach_failed');
     expect(manager.isComponentRunning('a')).toBe(false);
     expect(manager.getSystemState()).not.toBe('starting');
   });
@@ -293,6 +293,108 @@ describe('LifecycleManager - public methods never reject', () => {
     expect(result.registered).toBe(true);
     expect(result.registrationIndexAfter).toBe(0);
     expect(manager.hasComponent('a')).toBe(true);
+  });
+
+  test('a registration that fails after the commit emits registered, not rejected', async () => {
+    const { logger, manager } = setup();
+    const internals = manager as unknown as {
+      startComponentInternal: () => Promise<unknown>;
+    };
+
+    internals.startComponentInternal = (): never => {
+      throw new Error('auto-start exploded');
+    };
+
+    const events: string[] = [];
+    manager.on('component:registered', () => {
+      events.push('registered');
+    });
+    manager.on('component:registration-rejected', () => {
+      events.push('rejected');
+    });
+
+    const result = await manager.registerComponent(new Plain(logger, 'a'), {
+      autoStart: true,
+    });
+
+    // The event agrees with the registry and the result.
+    expect(result.registered).toBe(true);
+    expect(events).toEqual(['registered']);
+  });
+
+  test('a crash partway through bulk startup rolls back what it started', async () => {
+    const { logger, manager } = setup();
+    const first = new Plain(logger, 'first');
+    const second = new Plain(logger, 'second');
+    await manager.registerComponent(first);
+    await manager.registerComponent(second);
+
+    // `second` fails to start, and the optional check on that failure path is what
+    // throws - after `first` is already running.
+    second.start = (): Promise<void> =>
+      Promise.reject(new Error('start failed'));
+    second.isOptional = (): never => {
+      throw new Error('getter exploded');
+    };
+
+    const { reports, release } = claimReports();
+    let result;
+
+    try {
+      result = await manager.startAllComponents();
+    } finally {
+      release();
+    }
+
+    expect(result.success).toBe(false);
+    expect(result.code).toBe('unknown_error');
+    expect(result.error?.message).toBe('getter exploded');
+    // Rolled back, and the result matches: nothing is claimed that is not running, and
+    // nothing is left running that is not claimed.
+    expect(result.startedComponents).toEqual([]);
+    expect(manager.isComponentRunning('first')).toBe(false);
+    expect(manager.getSystemState()).not.toBe('starting');
+    expect(hasReport(reports, 'lifecycle-manager startAllComponents')).toBe(
+      true,
+    );
+  });
+
+  test('an attachSignalsOnStart failure fails bulk startup even for optional components', async () => {
+    const { logger, manager } = setup({ attachSignalsOnStart: true });
+
+    class OptionalPlain extends BaseComponent {
+      constructor(name: string) {
+        super(logger, { name, dependencies: [], optional: true });
+      }
+
+      public async start(): Promise<void> {}
+      public async stop(): Promise<void> {}
+    }
+
+    await manager.registerComponent(new OptionalPlain('a'));
+    await manager.registerComponent(new OptionalPlain('b'));
+
+    let attachCalls = 0;
+    manager.attachSignals = (): never => {
+      attachCalls++;
+      throw new Error('attach exploded');
+    };
+
+    let didEmitStarted = false;
+    manager.on('lifecycle-manager:started', () => {
+      didEmitStarted = true;
+    });
+
+    const result = await manager.startAllComponents();
+
+    // Not a failed optional component to skip past: the startup as a whole cannot come
+    // up with the signal handling it was configured for.
+    expect(result.success).toBe(false);
+    expect(result.code).toBe('signal_attach_failed');
+    expect(result.error?.message).toBe('attach exploded');
+    expect(attachCalls).toBe(1);
+    expect(didEmitStarted).toBe(false);
+    expect(manager.getRunningComponentNames()).toEqual([]);
   });
 
   test('a throwing reload callback resolves triggerReload with an error result', async () => {
