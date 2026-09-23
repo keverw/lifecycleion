@@ -1271,6 +1271,8 @@ interface GetValueOptions {
 }
 ```
 
+`getValue()` is synchronous and never throws. A component's own `getValue()` handler that throws resolves as `code: 'error'`, and so does an unexpected failure in the lookup itself, which also carries the thrown value on `error` and is reported on the global `'error'` channel.
+
 ### Signal Integration
 
 #### `attachSignals()`
@@ -1467,6 +1469,7 @@ Terminology used below:
 - **Escalation state** is the logical repeated-shutdown context for one shutdown cycle
 - **Armed window** is the short post-failure period after an unsuccessful shutdown returns, before the next retry starts
 - During an active retry, the escalation state is still preserved, but the armed window is not active because shutdown is running again
+- During a `restartAllComponents()` stop phase, the first shutdown signal is the operator's initial request: it cancels the restart and starts the escalation cycle (`firstMethod` is that signal) without being counted. Signals after it count as presses, as they would against any running shutdown
 
 This applies to shutdown requests from:
 
@@ -2462,6 +2465,7 @@ Every async method answers with a result object, including when something goes w
 | `startAllComponents()`, `stopAllComponents()`, `restartAllComponents()`  | `code: 'unknown_error'` with `error`                 |
 | `startComponent()`, `stopComponent()`, `restartComponent()`              | `code: 'unknown_error'` with `error`                 |
 | `sendMessageToComponent()`, `checkComponentHealth()`, `checkAllHealth()` | `code: 'error'`                                      |
+| `getValue()` (synchronous)                                               | `code: 'error'` with `error`                         |
 | `triggerReload()`, `triggerInfo()`, `triggerDebug()`                     | `code: 'error'`, including when your callback throws |
 | `broadcastMessage()`                                                     | an empty array                                       |
 

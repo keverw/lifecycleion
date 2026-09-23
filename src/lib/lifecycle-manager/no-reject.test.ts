@@ -228,29 +228,30 @@ describe('LifecycleManager - public methods never reject', () => {
     expect(manager.getComponentStatus('a')?.state).toBe('registered');
   });
 
-  test('a throwing component getter resolves checkAllHealth with an error report', async () => {
+  test('a getName() that throws after registration no longer reaches the manager', async () => {
     const { logger, manager } = setup();
     const component = new Plain(logger, 'a');
     await manager.registerComponent(component);
     await manager.startAllComponents();
 
-    const originalGetName = component.getName.bind(component);
+    // The name was recorded at registration, so nothing asks for it again: every
+    // operation that used to re-read it - and crash on it - carries on.
     component.getName = (): never => {
       throw new Error('getter exploded');
     };
 
-    const { release } = claimReports();
-    let report;
+    const report = await manager.checkAllHealth();
+    expect(report.healthy).toBe(true);
+    expect(report.components.map((entry) => entry.name)).toEqual(['a']);
 
-    try {
-      report = await manager.checkAllHealth();
-    } finally {
-      component.getName = originalGetName;
-      release();
-    }
+    const broadcast = await manager.broadcastMessage('hi');
+    expect(broadcast.map((entry) => entry.name)).toEqual(['a']);
 
-    expect(report.healthy).toBe(false);
-    expect(report.code).toBe('error');
+    expect(manager.getComponentNames()).toEqual(['a']);
+    expect((await manager.stopAllComponents()).stoppedComponents).toEqual([
+      'a',
+    ]);
+    expect((await manager.unregisterComponent('a')).success).toBe(true);
   });
 
   test('registering something that is not a component resolves with unknown_error', async () => {
@@ -613,9 +614,12 @@ describe('LifecycleManager - public methods never reject', () => {
     await manager.registerComponent(target);
     await manager.startAllComponents();
 
-    target.getName = (): never => {
-      throw new Error('getter exploded');
-    };
+    // Read while the message is being delivered, outside any guard of its own.
+    Object.defineProperty(target, 'onMessage', {
+      get: (): never => {
+        throw new Error('getter exploded');
+      },
+    });
 
     const lifecycle = (
       sender as unknown as {
@@ -905,6 +909,57 @@ describe('LifecycleManager - public methods never reject', () => {
     } finally {
       release();
     }
+  });
+
+  test('getValue() resolves an unexpected failure as an error result', async () => {
+    const { logger, manager } = setup();
+    const component = new Plain(logger, 'a');
+    await manager.registerComponent(component);
+    await manager.startComponent('a');
+
+    Object.defineProperty(component, 'getValue', {
+      get: (): never => {
+        throw new Error('getter exploded');
+      },
+    });
+
+    const { reports, release } = claimReports();
+    let result;
+
+    try {
+      result = manager.getValue('a', 'key');
+    } finally {
+      release();
+    }
+
+    expect(result.code).toBe('error');
+    expect(result.error?.message).toBe('getter exploded');
+    expect(hasReport(reports, 'lifecycle-manager getValue')).toBe(true);
+  });
+
+  test('an unregister hook that throws still removes the component completely', async () => {
+    const { logger, manager } = setup();
+    const component = new Plain(logger, 'a');
+    await manager.registerComponent(component);
+
+    (
+      component as unknown as { _markUnregistered: () => void }
+    )._markUnregistered = (): never => {
+      throw new Error('hook exploded');
+    };
+
+    const { release } = claimReports();
+    let result;
+
+    try {
+      result = await manager.unregisterComponent('a');
+    } finally {
+      release();
+    }
+
+    expect(result.success).toBe(true);
+    expect(manager.hasComponent('a')).toBe(false);
+    expect(manager.getComponentStatus('a')).toBeUndefined();
   });
 
   test('a throwing reload callback resolves triggerReload with an error result', async () => {

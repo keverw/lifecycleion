@@ -164,6 +164,17 @@ interface ShutdownPass {
    * owns the pass skips its startup phase and the components stay stopped.
    */
   shutdownRequested: boolean;
+
+  /**
+   * Set when this pass seeded the escalation state itself - it is the start of a fresh
+   * cycle rather than a retry inside one. A restart's stop phase seeds as `'manual'`;
+   * the first signal that asks it to stay down then takes over that seed as the cycle's
+   * initial request instead of being counted as a press. See `handleShutdownRequest()`.
+   */
+  didSeedEscalation: boolean;
+
+  /** A `restartAllComponents()` stop phase, rather than a request to stay down. */
+  readonly isRestartStopPhase: boolean;
 }
 
 /**
@@ -259,6 +270,9 @@ export class LifecycleManager
   // `isShuttingDown` hid it behind "already in progress" can be recorded against the
   // pass that refused it. See {@link ShutdownPass}.
   private activeShutdownPass: ShutdownPass | null = null;
+  // Each registered component's name, read once when it is committed to the registry.
+  // See {@link nameOf}.
+  private readonly registeredNames = new WeakMap<BaseComponent, string>();
   // Resolver for the first logger.exit() deferred during an already-running shutdown.
   private pendingLoggerExitResolve:
     ((result: BeforeExitResult) => void) | null = null;
@@ -510,7 +524,7 @@ export class LifecycleManager
    * Check if a component is registered
    */
   public hasComponent(name: string): boolean {
-    return this.components.some((c) => c.getName() === name);
+    return this.components.some((c) => this.nameOf(c) === name);
   }
 
   /**
@@ -524,7 +538,7 @@ export class LifecycleManager
    * Get all registered component names
    */
   public getComponentNames(): string[] {
-    return this.components.map((c) => c.getName());
+    return this.components.map((c) => this.nameOf(c));
   }
 
   /**
@@ -613,7 +627,7 @@ export class LifecycleManager
    */
   public getAllComponentStatuses(): ComponentStatus[] {
     return this.components
-      .map((component) => this.getComponentStatus(component.getName()))
+      .map((component) => this.getComponentStatus(this.nameOf(component)))
       .filter((status): status is ComponentStatus => status !== undefined);
   }
 
@@ -786,7 +800,7 @@ export class LifecycleManager
 
     // Check for missing dependencies
     for (const component of this.components) {
-      const componentName = component.getName();
+      const componentName = this.nameOf(component);
       const isComponentOptional = component.isOptional();
       const dependencies = component.getDependencies();
 
@@ -802,7 +816,7 @@ export class LifecycleManager
     }
 
     // Build adjacency graph for cycle detection
-    const names = this.components.map((c) => c.getName());
+    const names = this.components.map((c) => this.nameOf(c));
     const adjacency = new Map<string, Set<string>>();
 
     for (const name of names) {
@@ -811,7 +825,7 @@ export class LifecycleManager
 
     // Build edges: dependency -> dependent (only when dependency is registered)
     for (const component of this.components) {
-      const dependent = component.getName();
+      const dependent = this.nameOf(component);
       for (const dep of component.getDependencies()) {
         if (adjacency.has(dep)) {
           adjacency.get(dep)?.add(dependent);
@@ -1369,7 +1383,7 @@ export class LifecycleManager
     key: string,
     options?: GetValueOptions,
   ): ValueResult<T> {
-    return this.getValueInternal<T>(componentName, key, null, options);
+    return this.getValueSettled<T>(componentName, key, null, options);
   }
 
   // ============================================================================
@@ -1391,7 +1405,7 @@ export class LifecycleManager
   ): Promise<MessageResult> {
     // Find component
     const component = this.components.find(
-      (c) => c.getName() === componentName,
+      (c) => this.nameOf(c) === componentName,
     );
 
     if (!component) {
@@ -1632,7 +1646,7 @@ export class LifecycleManager
     if (hasExplicitTargets && options.componentNames) {
       const names = options.componentNames;
       targetComponents = targetComponents.filter((c) =>
-        names.includes(c.getName()),
+        names.includes(this.nameOf(c)),
       );
     }
 
@@ -1642,11 +1656,11 @@ export class LifecycleManager
     // Filter by running/stalled/stopped state unless explicitly included
     if (!allowStopped && !allowStalled && !hasExplicitTargets) {
       targetComponents = targetComponents.filter((c) =>
-        this.isComponentRunning(c.getName()),
+        this.isComponentRunning(this.nameOf(c)),
       );
     } else if (!hasExplicitTargets) {
       targetComponents = targetComponents.filter((c) => {
-        const name = c.getName();
+        const name = this.nameOf(c);
         const isRunning = this.isComponentRunning(name);
 
         if (isRunning) {
@@ -1733,7 +1747,7 @@ export class LifecycleManager
 
     // Find component
     const component = this.components.find(
-      (c) => c.getName() === componentName,
+      (c) => this.nameOf(c) === componentName,
     );
 
     if (!component) {
@@ -1878,6 +1892,38 @@ export class LifecycleManager
   // ============================================================================
   // Private Helper Methods
   // ============================================================================
+
+  /**
+   * `getValueInternal()` under a synchronous version of the public-method safety net
+   * (see {@link settleOperation}): `getValue()` answers synchronously, so it gets a
+   * `try`/`catch` rather than a settled promise, but the same promise - an unexpected
+   * failure comes back as `code: 'error'` with the original on `error`, and is reported
+   * on the global `'error'` channel. Shared by `getValue()` and the component-scoped
+   * `ComponentLifecycle.getValue()`.
+   */
+  private getValueSettled<T = unknown>(
+    componentName: string,
+    key: string,
+    from: string | null,
+    options?: GetValueOptions,
+  ): ValueResult<T> {
+    try {
+      return this.getValueInternal<T>(componentName, key, from, options);
+    } catch (error) {
+      reportCallbackError('lifecycle-manager getValue', error);
+
+      return {
+        found: false,
+        value: undefined,
+        componentFound: this.componentStates.has(componentName),
+        componentRunning: this.runningComponents.has(componentName),
+        handlerImplemented: false,
+        requestedBy: from,
+        code: 'error',
+        error: toError(error),
+      };
+    }
+  }
 
   /**
    * `sendMessageInternal()` under the public-method safety net (see
@@ -2103,11 +2149,12 @@ export class LifecycleManager
     }
 
     // Remove from registry
-    this.components = this.components.filter((c) => c.getName() !== name);
+    this.components = this.components.filter((c) => this.nameOf(c) !== name);
 
-    // Clean up state
-    component._clearUnexpectedStopHandler();
-    component._markUnregistered();
+    // Clean up state - the manager's own maps first, all of them, so the component is
+    // either fully registered or fully gone. The component's hooks run after, contained:
+    // they can be overridden, and one that threw used to leave the component out of the
+    // registry but still in every state map.
     this.componentStates.delete(name);
     this.componentTimestamps.delete(name);
     this.componentErrors.delete(name);
@@ -2118,6 +2165,20 @@ export class LifecycleManager
     this.stalledComponents.delete(name);
     this.runningComponents.delete(name);
     this.updateStartedFlag();
+
+    for (const [hookName, hook] of [
+      [
+        '_clearUnexpectedStopHandler',
+        (): void => component._clearUnexpectedStopHandler(),
+      ],
+      ['_markUnregistered', (): void => component._markUnregistered()],
+    ] as const) {
+      try {
+        hook();
+      } catch (error) {
+        reportCallbackError(`lifecycle-manager unregister ${hookName}`, error);
+      }
+    }
 
     this.detachSignalsAfterLastStop(
       'last component unregistered',
@@ -2202,8 +2263,8 @@ export class LifecycleManager
       return {
         success: true,
         startedComponents: this.components
-          .filter((c) => this.runningComponents.has(c.getName()))
-          .map((c) => c.getName()),
+          .filter((c) => this.runningComponents.has(this.nameOf(c)))
+          .map((c) => this.nameOf(c)),
         failedOptionalComponents: [],
         skippedDueToDependency: [],
         durationMS: Date.now() - startTime,
@@ -2220,8 +2281,8 @@ export class LifecycleManager
       return {
         success: false,
         startedComponents: this.components
-          .filter((c) => this.runningComponents.has(c.getName()))
-          .map((c) => c.getName()),
+          .filter((c) => this.runningComponents.has(this.nameOf(c)))
+          .map((c) => this.nameOf(c)),
         failedOptionalComponents: [],
         skippedDueToDependency: [],
         reason: `${runningCount} of ${totalCount} components already running`,
@@ -3060,7 +3121,7 @@ export class LifecycleManager
     const startTime = Date.now();
 
     // Check if component exists
-    const component = this.components.find((c) => c.getName() === name);
+    const component = this.components.find((c) => this.nameOf(c) === name);
 
     if (!component) {
       return {
@@ -3225,12 +3286,12 @@ export class LifecycleManager
 
     // Get all running components
     const runningComponents = this.components.filter((c) =>
-      this.isComponentRunning(c.getName()),
+      this.isComponentRunning(this.nameOf(c)),
     );
 
     // Check health of all running components in parallel
     const healthChecks = runningComponents.map((c) =>
-      this.checkComponentHealth(c.getName()),
+      this.checkComponentHealth(this.nameOf(c)),
     );
 
     const results = await Promise.all(healthChecks);
@@ -3552,6 +3613,7 @@ export class LifecycleManager
 
       // Commit registration
       this.components.splice(insertIndex, 0, component);
+      this.registeredNames.set(component, componentName);
 
       // Create callbacks for component-scoped lifecycle
       const internalCallbacks: LifecycleInternalCallbacks = {
@@ -3571,7 +3633,7 @@ export class LifecycleManager
           key: string,
           from: string | null,
           options?: GetValueOptions,
-        ) => this.getValueInternal<T>(compName, key, from, options),
+        ) => this.getValueSettled<T>(compName, key, from, options),
       };
 
       // Assign lifecycle reference to component
@@ -3661,20 +3723,18 @@ export class LifecycleManager
         if (totalComponents === 1) {
           positionDescription = 'only component';
         } else if (registrationIndexAfter === 0) {
-          const nextComponent = this.components[1]?.getName();
+          const nextComponent = this.nameOfAt(1);
           positionDescription = nextComponent
             ? `at start, before ${nextComponent}`
             : 'at start';
         } else if (registrationIndexAfter === totalComponents - 1) {
-          const prevComponent = this.components[totalComponents - 2]?.getName();
+          const prevComponent = this.nameOfAt(totalComponents - 2);
           positionDescription = prevComponent
             ? `at end, after ${prevComponent}`
             : 'at end';
         } else {
-          const prevComponent =
-            this.components[registrationIndexAfter - 1]?.getName();
-          const nextComponent =
-            this.components[registrationIndexAfter + 1]?.getName();
+          const prevComponent = this.nameOfAt(registrationIndexAfter - 1);
+          const nextComponent = this.nameOfAt(registrationIndexAfter + 1);
           if (prevComponent && nextComponent) {
             positionDescription = `after ${prevComponent}, before ${nextComponent}`;
           } else if (prevComponent) {
@@ -3915,7 +3975,11 @@ export class LifecycleManager
       return this.refuseShutdownPass(isRequestToStayDown);
     }
 
-    const pass: ShutdownPass = { shutdownRequested: false };
+    const pass: ShutdownPass = {
+      shutdownRequested: false,
+      didSeedEscalation: false,
+      isRestartStopPhase: !isRequestToStayDown,
+    };
 
     // An async method, but it runs synchronously up to its first `await`, which is well
     // past the latch: the caller this returns to already sees a shutdown in progress.
@@ -4015,6 +4079,7 @@ export class LifecycleManager
         this.repeatedShutdownRequestPolicy &&
         this.repeatedShutdownRequestState.firstRequestAt === null
       ) {
+        pass.didSeedEscalation = true;
         this.seedRepeatedShutdownRequestState(method);
       }
       isDuringStartup = this.isStarting;
@@ -4042,7 +4107,7 @@ export class LifecycleManager
           { params: { error: err, method } },
         );
 
-        shutdownOrder = this.components.map((c) => c.getName()).reverse();
+        shutdownOrder = this.components.map((c) => this.nameOf(c)).reverse();
       }
 
       const stalledComponentNames = new Set(this.stalledComponents.keys());
@@ -5930,7 +5995,7 @@ export class LifecycleManager
    * Get a component by name
    */
   private getComponent(name: string): BaseComponent | undefined {
-    return this.components.find((c) => c.getName() === name);
+    return this.components.find((c) => this.nameOf(c) === name);
   }
 
   /**
@@ -5943,7 +6008,7 @@ export class LifecycleManager
     for (const component of this.components) {
       const dependencies = component.getDependencies();
       if (dependencies.includes(name)) {
-        dependents.push(component.getName());
+        dependents.push(this.nameOf(component));
       }
     }
     return dependents;
@@ -6700,7 +6765,7 @@ export class LifecycleManager
   }
 
   private getComponentIndex(name: string): number | null {
-    const idx = this.components.findIndex((c) => c.getName() === name);
+    const idx = this.components.findIndex((c) => this.nameOf(c) === name);
     return idx === -1 ? null : idx;
   }
 
@@ -6777,7 +6842,7 @@ export class LifecycleManager
   private getStartupOrderInternal(
     components: BaseComponent[] = this.components,
   ): string[] {
-    const names = components.map((c) => c.getName());
+    const names = components.map((c) => this.nameOf(c));
     const regIndex = new Map<string, number>(
       names.map((name, idx) => [name, idx]),
     );
@@ -6792,7 +6857,7 @@ export class LifecycleManager
 
     // Build edges: dependency -> dependent (only when dependency is registered)
     for (const component of components) {
-      const dependent = component.getName();
+      const dependent = this.nameOf(component);
       for (const dep of component.getDependencies()) {
         if (!regIndex.has(dep)) {
           continue;
@@ -6981,8 +7046,30 @@ export class LifecycleManager
    */
   private handleShutdownRequest(method: ShutdownSignal): void {
     if (this.isShuttingDown) {
+      const pass = this.activeShutdownPass;
+      // The first signal asking a restart's stop phase to stay down is where the
+      // operator's shutdown actually begins: the restart only seeded escalation as a
+      // `'manual'` placeholder. It takes that seed over as the cycle's initial request -
+      // the same as a signal that starts a pass - rather than counting as press one,
+      // which fired force a press early and reported `firstMethod: 'manual'`. Only a
+      // seed this pass made itself: a restart that inherited a live cycle keeps it.
+      const isFirstStayDownForRestart =
+        pass !== null &&
+        pass.isRestartStopPhase &&
+        pass.didSeedEscalation &&
+        !pass.shutdownRequested;
+
       this.noteShutdownRequestDuringActivePass();
       this.lifecycleEvents.signalShutdown(method, true);
+
+      if (isFirstStayDownForRestart && this.repeatedShutdownRequestPolicy) {
+        this.seedRepeatedShutdownRequestState(method);
+        this.logger.info('Shutdown signal received during restart', {
+          params: { method },
+        });
+
+        return;
+      }
 
       // No window to consume: `acceptShutdownPass()` spends it on the request that starts
       // the pass. A window armed by this very pass - from a listener on its completed
@@ -7214,10 +7301,40 @@ export class LifecycleManager
   }
 
   /**
+   * A component's name, as recorded when it was registered.
+   *
+   * Read once, at registration - where it is validated, and where a `getName()` that
+   * throws fails the registration and nothing else - and never again. The name is fixed
+   * for a component's lifetime, and the manager looks it up in dozens of places,
+   * including the middle of broadcasts, health checks and shutdown passes. Re-reading it
+   * each time meant a component that broke that contract could crash any of them, and
+   * each one needed its own guard. Falls back to asking the component only for one that
+   * is not registered - a candidate still being validated.
+   */
+  private nameOf(component: BaseComponent): string {
+    return this.registeredNames.get(component) ?? component.getName();
+  }
+
+  /**
+   * {@link nameOf} for the registry entry at `index`, or `undefined` when there is none.
+   */
+  private nameOfAt(index: number): string | undefined {
+    const component = this.components[index];
+
+    return component === undefined ? undefined : this.nameOf(component);
+  }
+
+  /**
    * A component's name for a failure result, without letting an overridden `getName()`
    * that throws turn the failure report into a second failure.
    */
   private readComponentNameSafely(component: unknown): string {
+    const registeredName = this.registeredNames.get(component as BaseComponent);
+
+    if (registeredName !== undefined) {
+      return registeredName;
+    }
+
     try {
       const name: unknown = (component as BaseComponent).getName();
 
@@ -7742,9 +7859,9 @@ export class LifecycleManager
     const results: ComponentSignalResult[] = [];
 
     const canDispatch = (component: BaseComponent): boolean =>
-      this.getComponent(component.getName()) === component &&
-      this.componentStates.get(component.getName()) === 'running' &&
-      this.runningComponents.has(component.getName());
+      this.getComponent(this.nameOf(component)) === component &&
+      this.componentStates.get(this.nameOf(component)) === 'running' &&
+      this.runningComponents.has(this.nameOf(component));
     const targets = this.components.filter(canDispatch);
 
     if (this.isStarting) {
@@ -7752,7 +7869,7 @@ export class LifecycleManager
     }
 
     for (const component of targets) {
-      const name = component.getName();
+      const name = this.nameOf(component);
       if (!canDispatch(component)) {
         continue;
       }

@@ -174,7 +174,7 @@ describe('LifecycleManager - shutdown during restartAllComponents()', () => {
     expect(manager.isComponentRunning('gated')).toBe(false);
   });
 
-  test('a signal during the stop phase still counts toward escalation', async () => {
+  test('a repeat signal during the stop phase counts toward escalation', async () => {
     const logger = new Logger({
       sinks: [new ArraySink()],
       callProcessExit: false,
@@ -199,8 +199,11 @@ describe('LifecycleManager - shutdown during restartAllComponents()', () => {
     const restart = manager.restartAllComponents();
     await component.stopping.promise;
 
-    // Escalation counting is untouched by the cancellation: a repeat signal against the
-    // restart's stop phase still reaches the force handler exactly as it does today.
+    // The first signal is the operator's initial request - it cancels the restart and
+    // seeds the cycle, uncounted. A repeat is a press like any other.
+    sendSignal(manager, 'SIGTERM');
+    expect(forceShutdownCalls).toBe(0);
+
     sendSignal(manager, 'SIGTERM');
     expect(forceShutdownCalls).toBe(1);
 
@@ -830,5 +833,49 @@ describe('LifecycleManager - shutdown during restartAllComponents()', () => {
     expect(second.startupSkippedByShutdownRequest).toBeUndefined();
     expect(second.success).toBe(true);
     expect(manager.isComponentRunning('gated')).toBe(true);
+  });
+
+  test('the first signal during a restart stop phase starts the escalation cycle', async () => {
+    const logger = new Logger({
+      sinks: [new ArraySink()],
+      callProcessExit: false,
+    });
+    const forced: Array<{ requestCount: number; firstMethod: string | null }> =
+      [];
+    const manager = new LifecycleManager({
+      logger,
+      shutdownWarningTimeoutMS: -1,
+      repeatedShutdownRequestPolicy: {
+        forceAfterCount: 2,
+        withinMS: 5000,
+        onForceShutdown: (context): void => {
+          forced.push({
+            requestCount: context.requestCount,
+            firstMethod: context.firstMethod,
+          });
+        },
+      },
+    });
+    const component = new GatedStop(logger, 'gated');
+    await manager.registerComponent(component);
+    await manager.startAllComponents();
+
+    const restart = manager.restartAllComponents();
+    await component.stopping.promise;
+
+    // The first press cancels the restart and is where the operator's shutdown begins:
+    // it seeds the cycle, the way a signal that starts a pass does, and is not counted.
+    sendSignal(manager, 'SIGINT');
+    expect(manager.getShutdownEscalationStatus().requestCount).toBe(0);
+    expect(manager.getShutdownEscalationStatus().firstMethod).toBe('SIGINT');
+
+    sendSignal(manager, 'SIGINT');
+    expect(forced).toEqual([]);
+
+    sendSignal(manager, 'SIGINT');
+    expect(forced).toEqual([{ requestCount: 2, firstMethod: 'SIGINT' }]);
+
+    component.releaseStop();
+    expect((await restart).startupSkippedByShutdownRequest).toBe(true);
   });
 });
