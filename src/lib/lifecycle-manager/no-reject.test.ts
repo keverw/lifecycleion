@@ -1269,6 +1269,187 @@ describe('LifecycleManager - public methods never reject', () => {
     expect(manager.getComponentStatus('a')?.state).toBe('registered');
   });
 
+  test('a start that crashes before claiming leaves a concurrent start alone', async () => {
+    const { logger, manager } = setup();
+    const component = new Plain(logger, 'a');
+    let startCalls = 0;
+    let releaseStart = (): void => {};
+    component.start = (): Promise<void> => {
+      startCalls++;
+
+      return new Promise<void>((resolve) => {
+        releaseStart = resolve;
+      });
+    };
+    await manager.registerComponent(component);
+
+    const originalGetDependencies = component.getDependencies.bind(component);
+    let shouldThrow = true;
+    component.getDependencies = (): string[] => {
+      if (shouldThrow) {
+        shouldThrow = false;
+        throw new Error('getter exploded');
+      }
+
+      return originalGetDependencies();
+    };
+
+    const { release } = claimReports();
+
+    try {
+      const first = manager.startComponent('a');
+      const second = manager.startComponent('a');
+
+      expect((await first).code).toBe('unknown_error');
+
+      // The second start claimed the component while the first was crashing; the first
+      // did not own it, so it did not reset it under the second.
+      expect(manager.getComponentStatus('a')?.state).toBe('starting');
+      expect((await manager.startComponent('a')).code).toBe(
+        'component_already_starting',
+      );
+
+      releaseStart();
+      expect((await second).success).toBe(true);
+      expect(startCalls).toBe(1);
+    } finally {
+      release();
+    }
+  });
+
+  test('an unarmed manual stop does not wipe a cycle a nested shutdown just seeded', async () => {
+    const { logger, manager } = setup({
+      shutdownOptions: { timeoutMS: 50, retryStalled: false },
+      repeatedShutdownRequestPolicy: {
+        forceAfterCount: 3,
+        withinMS: 1000,
+        armedAfterFailureMS: 60_000,
+        onForceShutdown: () => {},
+      },
+    });
+    const component = new Plain(logger, 'a');
+    component.stop = (): Promise<void> => new Promise<void>(() => {});
+    await manager.registerComponent(component);
+    await manager.startAllComponents();
+
+    await manager.stopAllComponents();
+
+    const nested: Promise<unknown>[] = [];
+    manager.once('lifecycle-manager:shutdown-escalation-expired', () => {
+      nested.push(manager.stopAllComponents());
+    });
+    (
+      manager as unknown as {
+        repeatedShutdownRequestState: { remainsArmedUntil: number };
+      }
+    ).repeatedShutdownRequestState.remainsArmedUntil = Date.now() - 1;
+
+    const outer = manager.stopAllComponents();
+
+    // The listener's pass seeded a live cycle; the refused outer request left it alone.
+    expect(manager.getShutdownEscalationStatus().firstMethod).toBe('manual');
+    expect((await outer).code).toBe('already_in_progress');
+    await Promise.all(nested);
+  });
+
+  test('a signal that expires the window into a nested shutdown is answered as in progress', async () => {
+    const { logger, manager } = setup({
+      shutdownOptions: { timeoutMS: 50, retryStalled: false },
+      repeatedShutdownRequestPolicy: {
+        forceAfterCount: 3,
+        withinMS: 1000,
+        armedAfterFailureMS: 60_000,
+        onForceShutdown: () => {},
+      },
+    });
+    const component = new Plain(logger, 'a');
+    component.stop = (): Promise<void> => new Promise<void>(() => {});
+    await manager.registerComponent(component);
+    await manager.startAllComponents();
+
+    await manager.stopAllComponents();
+
+    const nested: Promise<unknown>[] = [];
+    manager.once('lifecycle-manager:shutdown-escalation-expired', () => {
+      nested.push(manager.stopAllComponents());
+    });
+    (
+      manager as unknown as {
+        repeatedShutdownRequestState: { remainsArmedUntil: number };
+      }
+    ).repeatedShutdownRequestState.remainsArmedUntil = Date.now() - 1;
+
+    const signals: unknown[] = [];
+    manager.on('signal:shutdown', (payload) => {
+      signals.push(payload);
+    });
+
+    (
+      manager as unknown as { handleShutdownRequest: (method: string) => void }
+    ).handleShutdownRequest('SIGTERM');
+
+    expect(signals).toEqual([
+      { method: 'SIGTERM', isAlreadyShuttingDown: true },
+    ]);
+    expect(manager.getShutdownEscalationStatus().firstMethod).toBe('manual');
+    await Promise.all(nested);
+  });
+
+  test('a throwing onStartupAborted getter cannot escape the startup timer', async () => {
+    const { logger, manager } = setup();
+    const component = new Plain(logger, 'a');
+    await manager.registerComponent(component);
+
+    Object.defineProperty(component, 'onStartupAborted', {
+      get: (): never => {
+        throw new Error('getter exploded');
+      },
+    });
+
+    const { release } = claimReports();
+    let result;
+
+    try {
+      result = await manager.startComponent('a');
+    } finally {
+      release();
+    }
+
+    // Read before the start, so it fails there - not later, inside the timer.
+    expect(result.code).toBe('unknown_error');
+    expect(manager.getComponentStatus('a')?.state).toBe('registered');
+  });
+
+  test('a throwing broadcast option fails the broadcast before it announces itself', async () => {
+    const { logger, manager } = setup();
+    await manager.registerComponent(new Plain(logger, 'a'));
+    await manager.startAllComponents();
+
+    let startedEvents = 0;
+    manager.on('component:broadcast-started', () => {
+      startedEvents++;
+    });
+
+    const options = {};
+    Object.defineProperty(options, 'componentNames', {
+      get: (): never => {
+        throw new Error('option exploded');
+      },
+    });
+
+    const { release } = claimReports();
+    let results;
+
+    try {
+      results = await manager.broadcastMessage('hi', options);
+    } finally {
+      release();
+    }
+
+    expect(results).toEqual([]);
+    expect(startedEvents).toBe(0);
+  });
+
   test('getValue() resolves an unexpected failure as an error result', async () => {
     const { logger, manager } = setup();
     const component = new Plain(logger, 'a');

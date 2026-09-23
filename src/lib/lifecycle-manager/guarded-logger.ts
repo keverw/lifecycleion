@@ -107,6 +107,9 @@ export function createGuardedLoggerService(
     call: (entityName: string) => LoggerService;
   } | null = null;
 
+  // Frozen methods already reported; see the descriptor check in the trap.
+  const reportedFrozen = new Set<string>();
+
   const guarded: LoggerService = new Proxy(logger, {
     get(target, property, receiver): unknown {
       // `Object.hasOwn`, not `in`: `in` walks `Object.prototype`, so `toString` and
@@ -135,6 +138,37 @@ export function createGuardedLoggerService(
       // Contained, because the read itself runs code the caller owns: a logger whose
       // `warn` is a getter that throws would otherwise escape every guard below, the
       // read happening before there is a wrapper to route through.
+      // A Proxy may not answer a read of an own property that is both non-writable and
+      // non-configurable - a frozen logger's method, say - with anything but its actual
+      // value: the engine throws a `TypeError` on the read itself, outside every guard
+      // here. Such a method cannot be wrapped, so it is handed back as it is, and the
+      // loss of the guard for it is reported once.
+      let descriptor: PropertyDescriptor | undefined;
+
+      try {
+        descriptor = Reflect.getOwnPropertyDescriptor(target, property);
+      } catch {
+        descriptor = undefined;
+      }
+
+      if (
+        descriptor !== undefined &&
+        descriptor.configurable === false &&
+        descriptor.writable === false
+      ) {
+        if (!reportedFrozen.has(property)) {
+          reportedFrozen.add(property);
+          reportCallbackError(
+            `${GUARDED_LOGGER_LABEL}.${property}`,
+            new Error(
+              `${GUARDED_LOGGER_LABEL}.${property} is frozen and cannot be guarded`,
+            ),
+          );
+        }
+
+        return descriptor.value;
+      }
+
       let method: unknown;
 
       try {

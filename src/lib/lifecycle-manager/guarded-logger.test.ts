@@ -311,6 +311,33 @@ describe('createGuardedLoggerService', () => {
     expect(calls).toEqual(['job-1']);
   });
 
+  test('a frozen log method is handed back as is rather than throwing on the read', async () => {
+    const sink = new ArraySink();
+    const logger = new Logger({ sinks: [sink], callProcessExit: false });
+    const service = logger.service('svc');
+    const originalWarn = service.warn.bind(service);
+
+    Object.defineProperty(service, 'warn', {
+      value: originalWarn,
+      writable: false,
+      configurable: false,
+    });
+
+    const guarded = createGuardedLoggerService(service);
+
+    const reports = await collectReports(() => {
+      guarded.warn('still logged');
+      guarded.warn('logged again');
+    });
+
+    expect(sink.logs.map((log) => log.message)).toEqual([
+      'still logged',
+      'logged again',
+    ]);
+    // Reported once that the method could not be guarded.
+    expect(reports.length).toBe(1);
+  });
+
   test('a failed entity() is not cached, so every failure is reported', async () => {
     const sink = new ArraySink();
     const logger = new Logger({ sinks: [sink], callProcessExit: false });
