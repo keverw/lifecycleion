@@ -1518,4 +1518,144 @@ describe('LifecycleManager - review regressions', () => {
       release();
     }
   });
+
+  test('a rollback that could not stop a component still reports it as started', async () => {
+    const { logger, manager } = setup();
+    const a = new Plain(logger, 'a');
+    const b = new Plain(logger, 'b');
+    b.start = (): Promise<void> => Promise.reject(new Error('b failed'));
+    await manager.registerComponent(a);
+    await manager.registerComponent(b);
+
+    // Read before the stop claims it: the rollback's stop of `a` fails, `a` still up.
+    manager.once('component:started', () => {
+      Object.defineProperty(a, 'shutdownGracefulTimeoutMS', {
+        get: (): never => {
+          throw new Error('getter exploded');
+        },
+      });
+    });
+
+    const { release } = claimReports();
+    let startup;
+
+    try {
+      startup = await manager.startAllComponents();
+    } finally {
+      release();
+    }
+
+    expect(startup.code).toBe('required_component_failed');
+    expect(manager.isComponentRunning('a')).toBe(true);
+    expect(startup.startedComponents).toEqual(['a']);
+  });
+
+  test('a crashed unregister reports wasRegistered as of the call, without public lookups', async () => {
+    const { logger, manager } = setup();
+    await manager.registerComponent(new Plain(logger, 'a'));
+
+    const internals = manager as unknown as {
+      refuseUnregisterWhileInFlight: () => never;
+      hasComponent: () => never;
+    };
+    internals.refuseUnregisterWhileInFlight = (): never => {
+      throw new Error('crash mid-unregister');
+    };
+    internals.hasComponent = (): never => {
+      throw new Error('hasComponent exploded');
+    };
+
+    const { release } = claimReports();
+    let result;
+
+    try {
+      result = await manager.unregisterComponent('a');
+    } finally {
+      release();
+    }
+
+    expect(result.code).toBe('unknown_error');
+    expect(result.wasRegistered).toBe(true);
+  });
+
+  test('one component with a throwing getDependencies() does not block stopping another', async () => {
+    const { logger, manager } = setup();
+    const hostile = new Plain(logger, 'hostile');
+    await manager.registerComponent(hostile);
+    await manager.registerComponent(new Plain(logger, 'a'));
+    await manager.startAllComponents();
+    hostile.getDependencies = (): never => {
+      throw new Error('getDependencies exploded');
+    };
+
+    const { release } = claimReports();
+    let stop;
+
+    try {
+      stop = await manager.stopComponent('a');
+    } finally {
+      release();
+    }
+
+    expect(stop.success).toBe(true);
+  });
+
+  test('a component another stop owned that ended outside stopped still settles the pass', async () => {
+    const { logger, manager } = setup({
+      shutdownOptions: { haltOnStall: false },
+    });
+    const xStopGate = deferred();
+    const x = new Plain(logger, 'x');
+    Object.assign(x, { optional: true, startupTimeoutMS: 20 });
+    x.start = (): Promise<void> => sleep(40);
+    x.stop = (): Promise<void> => xStopGate.promise;
+    const slow = new Plain(logger, 'slow');
+    // `x`'s cleanup stop finishes while the pass is stopping `slow`.
+    slow.stop = async (): Promise<void> => {
+      xStopGate.resolve();
+      await sleep(20);
+    };
+    await manager.registerComponent(slow);
+    await manager.registerComponent(x);
+    await manager.startAllComponents();
+
+    await sleep(40);
+    expect(manager.getComponentStatus('x')?.state).toBe('stopping');
+
+    const result = await manager.stopAllComponents();
+
+    // Back to `failed` - what the timed-out optional start left - not `stopped`.
+    expect(manager.getComponentStatus('x')?.state).toBe('failed');
+    expect(result.success).toBe(true);
+  });
+
+  test('a throwing getValue getter still pairs value-requested with value-returned', async () => {
+    const { logger, manager } = setup();
+    const a = new Plain(logger, 'a');
+    await manager.registerComponent(a);
+    await manager.startComponent('a');
+    Object.defineProperty(a, 'getValue', {
+      get: (): never => {
+        throw new Error('getter exploded');
+      },
+    });
+
+    const events: string[] = [];
+    manager.on('component:value-requested', () => {
+      events.push('requested');
+    });
+    manager.on('component:value-returned', () => {
+      events.push('returned');
+    });
+
+    const { release } = claimReports();
+
+    try {
+      expect(manager.getValue('a', 'k').code).toBe('error');
+    } finally {
+      release();
+    }
+
+    expect(events).toEqual(['requested', 'returned']);
+  });
 });
