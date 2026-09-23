@@ -75,6 +75,28 @@ const GUARDED_LOG_METHODS: Record<
 export function createGuardedLoggerService(
   logger: LoggerService,
 ): LoggerService {
+  // Each wrapper is built once per method it wraps and then reused, rather than on
+  // every read: the manager's logger is its own private service logger, so in practice
+  // every method stays the same for the manager's lifetime and each is wrapped once.
+  // Keyed on the resolved method rather than on the property name alone, so a method
+  // replaced after construction - which the hostile-logger tests do - still gets a
+  // wrapper of its own on the next read.
+  const methodWrappers = new Map<
+    string,
+    { method: unknown; wrapper: (...args: unknown[]) => void }
+  >();
+
+  // Guarded children of `entity()`, by entity name, for the `entity` method that built
+  // them. `LoggerService.entity()` builds a fresh logger from the same parts plus the
+  // name on every call, so one child per name answers every later call the same way.
+  // Bounded by the component names the manager has logged about. Dropped whenever the
+  // resolved `entity` changes, and a call that failed - and fell back to this parent -
+  // is never cached, so each failure is still reported when it happens.
+  let entityCache: {
+    method: unknown;
+    call: (entityName: string) => LoggerService;
+  } | null = null;
+
   const guarded: LoggerService = new Proxy(logger, {
     get(target, property, receiver): unknown {
       // `Object.hasOwn`, not `in`: `in` walks `Object.prototype`, so `toString` and
@@ -89,8 +111,8 @@ export function createGuardedLoggerService(
         return passthrough;
       }
 
-      // Resolved on every read rather than built once, because a read is what precedes
-      // every call: a caller - and several tests - may replace a method on the underlying
+      // Resolved on every read - a cheap property read - even though the wrapper built
+      // from it is cached below, because a read is what precedes every call: a caller - and several tests - may replace a method on the underlying
       // service after construction, and a wrapper built once would keep calling the one
       // it replaced.
       //
@@ -118,11 +140,43 @@ export function createGuardedLoggerService(
       }
 
       if (property === 'entity') {
-        return (entityName: string): LoggerService =>
-          guardEntity(target, method, entityName, guarded);
+        if (entityCache === null || entityCache.method !== method) {
+          const children = new Map<string, LoggerService>();
+
+          entityCache = {
+            method,
+            call: (entityName: string): LoggerService => {
+              const cached = children.get(entityName);
+
+              if (cached !== undefined) {
+                return cached;
+              }
+
+              const child = guardEntity(target, method, entityName, guarded);
+
+              if (child !== guarded) {
+                children.set(entityName, child);
+              }
+
+              return child;
+            },
+          };
+        }
+
+        return entityCache.call;
       }
 
-      return guardLogMethod(target, method, property);
+      const cachedWrapper = methodWrappers.get(property);
+
+      if (cachedWrapper !== undefined && cachedWrapper.method === method) {
+        return cachedWrapper.wrapper;
+      }
+
+      const wrapper = guardLogMethod(target, method, property);
+
+      methodWrappers.set(property, { method, wrapper });
+
+      return wrapper;
     },
   });
 

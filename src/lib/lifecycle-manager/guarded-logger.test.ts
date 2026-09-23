@@ -206,6 +206,72 @@ describe('createGuardedLoggerService', () => {
     expect(sink.logs[0]?.entityName).toBeUndefined();
   });
 
+  test('reuses a method wrapper until the method it wraps changes', () => {
+    const sink = new ArraySink();
+    const logger = new Logger({ sinks: [sink], callProcessExit: false });
+    const service = logger.service('svc');
+    const guarded = createGuardedLoggerService(service);
+
+    // Read through `Reflect.get`: this is about the identity of what a read returns,
+    // not a call, so detaching the method is the point.
+    const readInfo = (): unknown => Reflect.get(guarded, 'info');
+    const first = readInfo();
+    expect(readInfo()).toBe(first);
+
+    const seen: string[] = [];
+    service.info = (message: string): void => {
+      seen.push(message);
+    };
+
+    // A new method gets a wrapper of its own, and it is the one that runs.
+    expect(readInfo()).not.toBe(first);
+    guarded.info('after swap');
+    expect(seen).toEqual(['after swap']);
+  });
+
+  test('reuses a guarded entity child per name until entity() changes', () => {
+    const sink = new ArraySink();
+    const logger = new Logger({ sinks: [sink], callProcessExit: false });
+    const service = logger.service('svc');
+    const originalEntity = service.entity.bind(service);
+    const guarded = createGuardedLoggerService(service);
+
+    const first = guarded.entity('ent');
+    expect(guarded.entity('ent')).toBe(first);
+    expect(guarded.entity('other')).not.toBe(first);
+
+    const names: string[] = [];
+    service.entity = (name: string): LoggerService => {
+      names.push(name);
+
+      return originalEntity(name);
+    };
+
+    // A new `entity` starts a fresh cache, so it is actually called.
+    guarded.entity('ent').info('after swap');
+    expect(names).toEqual(['ent']);
+    expect(sink.logs.at(-1)?.entityName).toBe('ent');
+  });
+
+  test('a failed entity() is not cached, so every failure is reported', async () => {
+    const sink = new ArraySink();
+    const logger = new Logger({ sinks: [sink], callProcessExit: false });
+    const service = logger.service('svc');
+
+    service.entity = (): never => {
+      throw new Error('entity exploded');
+    };
+
+    const guarded = createGuardedLoggerService(service);
+
+    const reports = await collectReports(() => {
+      guarded.entity('ent').info('one');
+      guarded.entity('ent').info('two');
+    });
+
+    expect(reports.length).toBe(2);
+  });
+
   test('entity() is called itself, not a call property it carries', () => {
     const sink = new ArraySink();
     const logger = new Logger({ sinks: [sink], callProcessExit: false });
