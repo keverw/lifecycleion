@@ -253,6 +253,34 @@ describe('createGuardedLoggerService', () => {
     expect(sink.logs.at(-1)?.entityName).toBe('ent');
   });
 
+  test('the entity cache is capped, dropping the oldest name first', () => {
+    const sink = new ArraySink();
+    const logger = new Logger({ sinks: [sink], callProcessExit: false });
+    const service = logger.service('svc');
+    const originalEntity = service.entity.bind(service);
+    const calls: string[] = [];
+
+    service.entity = (name: string): LoggerService => {
+      calls.push(name);
+
+      return originalEntity(name);
+    };
+
+    const guarded = createGuardedLoggerService(service);
+
+    for (let index = 0; index <= 256; index++) {
+      guarded.entity(`job-${index}`);
+    }
+
+    calls.length = 0;
+
+    // The newest is still cached; the oldest was evicted and is rebuilt.
+    guarded.entity('job-256');
+    guarded.entity('job-0');
+
+    expect(calls).toEqual(['job-0']);
+  });
+
   test('a failed entity() is not cached, so every failure is reported', async () => {
     const sink = new ArraySink();
     const logger = new Logger({ sinks: [sink], callProcessExit: false });

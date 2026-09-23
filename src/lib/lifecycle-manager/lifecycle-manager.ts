@@ -1232,7 +1232,7 @@ export class LifecycleManager
     return this.settleOperation(
       'triggerReload',
       () => this.handleReloadRequest(),
-      () => this.crashedSignalBroadcastResult('reload'),
+      (error) => this.crashedSignalBroadcastResult('reload', error),
     );
   }
 
@@ -1244,7 +1244,7 @@ export class LifecycleManager
     return this.settleOperation(
       'triggerInfo',
       () => this.handleInfoRequest(),
-      () => this.crashedSignalBroadcastResult('info'),
+      (error) => this.crashedSignalBroadcastResult('info', error),
     );
   }
 
@@ -1256,7 +1256,7 @@ export class LifecycleManager
     return this.settleOperation(
       'triggerDebug',
       () => this.handleDebugRequest(),
-      () => this.crashedSignalBroadcastResult('debug'),
+      (error) => this.crashedSignalBroadcastResult('debug', error),
     );
   }
 
@@ -1280,20 +1280,7 @@ export class LifecycleManager
     payload: unknown,
     options?: SendMessageOptions,
   ): Promise<MessageResult> {
-    return this.settleOperation(
-      'sendMessageToComponent',
-      () => this.sendMessageInternal(componentName, payload, null, options),
-      (error) => ({
-        sent: false,
-        componentFound: this.componentStates.has(componentName),
-        componentRunning: this.runningComponents.has(componentName),
-        handlerImplemented: false,
-        data: undefined,
-        error,
-        timedOut: false,
-        code: 'error',
-      }),
-    );
+    return this.sendMessageSettled(componentName, payload, null, options);
   }
 
   /**
@@ -1310,13 +1297,7 @@ export class LifecycleManager
     payload: unknown,
     options?: BroadcastOptions,
   ): Promise<BroadcastResult[]> {
-    // A crash leaves no per-component answers to return; it is reported on the global
-    // channel instead.
-    return this.settleOperation(
-      'broadcastMessage',
-      () => this.broadcastMessageInternal(payload, null, options),
-      () => [],
-    );
+    return this.broadcastMessageSettled(payload, null, options);
   }
 
   // ============================================================================
@@ -1352,13 +1333,14 @@ export class LifecycleManager
     return this.settleOperation(
       'checkAllHealth',
       () => this.checkAllHealthOperation(),
-      () => ({
+      (error) => ({
         healthy: false,
         components: [],
         checkedAt: Date.now(),
         durationMS: 0,
         timedOut: false,
         code: 'error',
+        error,
       }),
     );
   }
@@ -1891,6 +1873,51 @@ export class LifecycleManager
   // ============================================================================
 
   /**
+   * `sendMessageInternal()` under the public-method safety net (see
+   * {@link settleOperation}). Shared by `sendMessageToComponent()` and the
+   * component-scoped `ComponentLifecycle.sendMessageToComponent()`, so a message sent
+   * from inside a component resolves the same way one sent from outside does.
+   */
+  private sendMessageSettled(
+    componentName: string,
+    payload: unknown,
+    from: string | null,
+    options?: SendMessageOptions,
+  ): Promise<MessageResult> {
+    return this.settleOperation(
+      'sendMessageToComponent',
+      () => this.sendMessageInternal(componentName, payload, from, options),
+      (error) => ({
+        sent: false,
+        componentFound: this.componentStates.has(componentName),
+        componentRunning: this.runningComponents.has(componentName),
+        handlerImplemented: false,
+        data: undefined,
+        error,
+        timedOut: false,
+        code: 'error',
+      }),
+    );
+  }
+
+  /**
+   * `broadcastMessageInternal()` under the public-method safety net, shared the same way
+   * as {@link sendMessageSettled}. A crash leaves no per-component answers to return; it
+   * is reported on the global channel instead.
+   */
+  private broadcastMessageSettled(
+    payload: unknown,
+    from: string | null,
+    options?: BroadcastOptions,
+  ): Promise<BroadcastResult[]> {
+    return this.settleOperation(
+      'broadcastMessage',
+      () => this.broadcastMessageInternal(payload, from, options),
+      () => [],
+    );
+  }
+
+  /**
    * `registerComponentInternal()` under the public-method safety net (see
    * {@link settleOperation}). Its own `catch` covers the registration body, but the name
    * and index reads ahead of it run the component's own getters.
@@ -2202,6 +2229,9 @@ export class LifecycleManager
     // than run a second one alongside this. Everything else this startup resets waits
     // until the attach has succeeded, so a refusal only has the latch to release.
     this.isStarting = true;
+    this.autoAttachedSignalsDuringStartup = false;
+
+    const shutdownTokenBeforeAttach = this.shutdownToken;
 
     // Tracked so failure cleanup does not detach handlers that were attached earlier by
     // some other path.
@@ -2226,9 +2256,32 @@ export class LifecycleManager
     const didAutoAttachSignalsForBulkStartup =
       bulkSignalAttach?.outcome === 'attached';
 
+    // The other thing a `signals-attached` listener can do: start a shutdown. That pass
+    // is running now, with its own token, method, and escalation state - adopting the
+    // new token as this startup's baseline, and resetting that state under it, would
+    // have hidden it from every check below. Refuse as a startup arriving during a
+    // shutdown is refused.
+    if (
+      this.isShuttingDown ||
+      this.shutdownToken !== shutdownTokenBeforeAttach
+    ) {
+      this.isStarting = false;
+
+      if (didAutoAttachSignalsForBulkStartup) {
+        this.autoDetachSignalsIfIdle('refused bulk startup');
+      }
+
+      this.autoAttachedSignalsDuringStartup = false;
+
+      return this.refusedStartupResult(
+        'shutdown_in_progress',
+        LIFECYCLE_MANAGER_MESSAGE_SHUTDOWN_IN_PROGRESS,
+        Date.now() - startTime,
+      );
+    }
+
     // Clear previous shutdown state
     const shutdownTokenAtBulkStart = this.shutdownToken;
-    this.autoAttachedSignalsDuringStartup = false;
     this.unexpectedStopsDuringStartup.clear();
     this.resetRepeatedShutdownRequestState();
     this.shutdownMethod = null; // Clear previous shutdown method on fresh start
@@ -3500,12 +3553,12 @@ export class LifecycleManager
           payload: unknown,
           from: string | null,
           options?: SendMessageOptions,
-        ) => this.sendMessageInternal(compName, payload, from, options),
+        ) => this.sendMessageSettled(compName, payload, from, options),
         broadcastMessageInternal: (
           payload: unknown,
           from: string | null,
           opts?: BroadcastOptions,
-        ) => this.broadcastMessageInternal(payload, from, opts),
+        ) => this.broadcastMessageSettled(payload, from, opts),
         getValueInternal: <T = unknown>(
           compName: string,
           key: string,
@@ -3815,9 +3868,11 @@ export class LifecycleManager
     // second operator press.
     const consumedArmedUntil = this.consumeRepeatedShutdownArmedWindow();
 
-    // Only a request to stay down is an operator's retry. A restart's stop phase neither
-    // advances the escalation count - it would force-kill a process it was asked to
-    // restart - nor clears it.
+    // Only a request to stay down is an operator's retry. A restart's stop phase does not
+    // advance the escalation count - it would force-kill a process it was asked to
+    // restart - and does not clear it as a request either. It is still a shutdown pass,
+    // so its outcome settles escalation as any pass's does: a clean stop resets it, a
+    // failed one re-arms it with the count carried over.
     if (isManualRetryWhileArmed && isRequestToStayDown) {
       if (repeatedShutdownPolicy.countManualRetriesTowardEscalation) {
         this.handleRepeatedShutdownRequest(method, consumedArmedUntil);
@@ -3882,8 +3937,9 @@ export class LifecycleManager
     let timeoutHandle: NodeJS.Timeout | undefined;
     let pendingShutdownOperation: Promise<void> | null = null;
     let isDuringStartup = false;
-    // Set once the normal path has a result and is about to emit it; from then on that
-    // result is the pass's answer, whatever throws after it.
+    // Set once the normal path has its result. Nothing after that point is expected to
+    // throw - the emit goes through `safeEmit` - but if something ever did, the `catch`
+    // answers with this rather than emitting a second, contradictory result.
     let completedResult: ShutdownResult | null = null;
     // Declared out here so a pass that dies mid-flight can still report what it stopped.
     const stoppedComponents = new Set<string>();
@@ -4188,25 +4244,18 @@ export class LifecycleManager
       // snapshot exists, not necessarily that every component stopped cleanly.
       // Callers must inspect success / stalledComponents / timedOut to decide
       // what to do next.
-      //
-      // Marked before the emit, not after: if emitting throws once listeners have
-      // already run, the `catch` below must not hand them a second, contradictory result.
       completedResult = result;
 
-      try {
-        this.lifecycleEvents.lifecycleManagerShutdownCompleted({
-          ...result,
-          method,
-          duringStartup: isDuringStartup,
-        });
-      } finally {
-        // Even if the emit throws: the `catch` below skips a pass that already completed,
-        // so nothing else would close out this cycle's escalation tracking.
-        if (isSuccess) {
-          this.resetRepeatedShutdownRequestState();
-        } else {
-          this.armRepeatedShutdownAfterFailure();
-        }
+      this.lifecycleEvents.lifecycleManagerShutdownCompleted({
+        ...result,
+        method,
+        duringStartup: isDuringStartup,
+      });
+
+      if (isSuccess) {
+        this.resetRepeatedShutdownRequestState();
+      } else {
+        this.armRepeatedShutdownAfterFailure();
       }
 
       return result;
@@ -4218,7 +4267,6 @@ export class LifecycleManager
       reportCallbackError(`shutdown after ${method}`, error);
 
       if (completedResult !== null) {
-        // The result was already out; whatever threw afterwards does not change it.
         return completedResult;
       }
 
@@ -4253,16 +4301,11 @@ export class LifecycleManager
 
       this.lastShutdownResult = result;
 
-      try {
-        this.lifecycleEvents.lifecycleManagerShutdownCompleted({
-          ...result,
-          method,
-          duringStartup: isDuringStartup,
-        });
-      } catch (emitError) {
-        // Must not replace the original failure this pass is reporting.
-        reportCallbackError('lifecycle-manager:shutdown-completed', emitError);
-      }
+      this.lifecycleEvents.lifecycleManagerShutdownCompleted({
+        ...result,
+        method,
+        duringStartup: isDuringStartup,
+      });
 
       // After the completed event, in the same order as a stalled or timed-out pass,
       // so a listener sees the same sequence whichever way the pass failed. Armed
@@ -4378,7 +4421,7 @@ export class LifecycleManager
    * `try`. The public safety net would still answer with `unknown_error`, but it cannot
    * see the component, which stayed `starting` for good: every later start answered
    * `component_already_starting`. A start that crashes before the component is running
-   * is put back to `registered`, as a failed start is; one already running is left
+   * is put back to the state it had before the attempt; one already running is left
    * running, which is what the registry says.
    */
   private async startComponentInternal(
@@ -4390,14 +4433,20 @@ export class LifecycleManager
       hasExpired: () => boolean;
     },
   ): Promise<ComponentOperationResult> {
+    const stateBeforeStart = this.componentStates.get(name);
+
     try {
       return await this.startComponentAttempt(name, options, bulkStartup);
     } catch (error) {
+      // Back to the state it had before this attempt - `registered`, `stopped`,
+      // `failed` - so a crashed retry does not erase that history from the status APIs.
       if (
         this.componentStates.get(name) === 'starting' &&
-        !this.runningComponents.has(name)
+        !this.runningComponents.has(name) &&
+        stateBeforeStart !== undefined &&
+        stateBeforeStart !== 'starting'
       ) {
-        this.componentStates.set(name, 'registered');
+        this.componentStates.set(name, stateBeforeStart);
       }
 
       reportCallbackError('lifecycle-manager component start', error);
@@ -4572,19 +4621,23 @@ export class LifecycleManager
     // all a refusal has to release. Tracked so failure cleanup only detaches what this
     // start attempt attached.
     const stateBeforeStart = currentState;
-
-    this.componentStates.set(name, 'starting');
-
-    const componentSignalAttach = this.attachSignalsBeforeStartup
-      ? this.autoAttachSignals('component startup')
-      : null;
-
-    if (componentSignalAttach?.outcome === 'failed') {
+    const restoreStateBeforeStart = (): void => {
       if (stateBeforeStart === undefined) {
         this.componentStates.delete(name);
       } else {
         this.componentStates.set(name, stateBeforeStart);
       }
+    };
+
+    this.componentStates.set(name, 'starting');
+
+    const shutdownTokenBeforeAttach = this.shutdownToken;
+    const componentSignalAttach = this.attachSignalsBeforeStartup
+      ? this.autoAttachSignals('component startup')
+      : null;
+
+    if (componentSignalAttach?.outcome === 'failed') {
+      restoreStateBeforeStart();
 
       return {
         success: false,
@@ -4598,10 +4651,30 @@ export class LifecycleManager
     const didAutoAttachSignalsForComponentStartup =
       componentSignalAttach?.outcome === 'attached';
 
-    // Set state to starting. The unexpected-stop record from the previous run is cleared
-    // with it: that flag describes a stop that already happened, and a start that reads
-    // it later would take an old failure for a new one.
-    this.componentStates.set(name, 'starting');
+    // A `signals-attached` listener that started a shutdown: refused as any start that
+    // arrives during a shutdown is, rather than adopting that pass's token as this
+    // start's baseline and starting the component underneath it.
+    if (
+      this.isShuttingDown ||
+      this.shutdownToken !== shutdownTokenBeforeAttach
+    ) {
+      restoreStateBeforeStart();
+
+      if (didAutoAttachSignalsForComponentStartup) {
+        this.autoDetachSignalsIfIdle('refused component startup');
+      }
+
+      return {
+        success: false,
+        componentName: name,
+        reason: LIFECYCLE_MANAGER_MESSAGE_SHUTDOWN_IN_PROGRESS,
+        code: 'shutdown_in_progress',
+      };
+    }
+
+    // The unexpected-stop record from the previous run is cleared with the `starting`
+    // claim above: that flag describes a stop that already happened, and a start that
+    // reads it later would take an old failure for a new one.
     this.componentUnexpectedStopHadError.delete(name);
     this.logger.entity(name).info('Starting component');
     this.lifecycleEvents.componentStarting(name);
@@ -5901,10 +5974,12 @@ export class LifecycleManager
    *
    * A failure here fails the start: on Node and Bun an attach only throws when something
    * is really wrong - a `process.on` or raw-mode stdin failure - and a process that was
-   * configured to handle `SIGTERM` must not come up without doing so. Every caller runs
-   * this before it takes any start state (`isStarting`, a component's `starting`), so a
-   * refusal has nothing to release. Caught rather than thrown so each caller can answer
-   * with its own result; an explicit `attachSignals()` call still throws to its caller.
+   * configured to handle `SIGTERM` must not come up without doing so. Every caller takes
+   * its start state first (`isStarting`, or a component's `starting`) so that a
+   * `signals-attached` listener re-entering the manager finds the work already claimed,
+   * and releases that state if this fails. Caught rather than thrown so each caller can
+   * answer with its own result; an explicit `attachSignals()` call still throws to its
+   * caller.
    *
    * @returns `attached` when this call attached them, `failed` with the error when it
    * could not, and `unchanged` when they were already attached
@@ -7038,13 +7113,15 @@ export class LifecycleManager
   }
 
   /**
-   * The `SignalBroadcastResult` for a `trigger*()` call that crashed before it had any
-   * per-component results to report.
+   * The `SignalBroadcastResult` for a `trigger*()` call that failed as a whole - its
+   * custom `on*Requested` callback threw or rejected, or the call itself crashed - so
+   * there are no per-component results to report.
    */
   private crashedSignalBroadcastResult(
     signal: SignalBroadcastResult['signal'],
+    error: Error,
   ): SignalBroadcastResult {
-    return { signal, results: [], timedOut: false, code: 'error' };
+    return { signal, results: [], timedOut: false, code: 'error', error };
   }
 
   /**
@@ -7521,12 +7598,10 @@ export class LifecycleManager
       );
 
       if (!outcome.success) {
-        return {
-          signal: descriptor.signal,
-          results: [],
-          timedOut: false,
-          code: 'error',
-        };
+        return this.crashedSignalBroadcastResult(
+          descriptor.signal,
+          outcome.error,
+        );
       }
 
       // Return empty result (custom callback handled it)

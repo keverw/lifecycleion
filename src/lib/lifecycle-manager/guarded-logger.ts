@@ -18,6 +18,15 @@ import {
 const GUARDED_LOGGER_LABEL = 'lifecycle-manager logger';
 
 /**
+ * How many guarded `entity()` children one guarded logger keeps. The manager only ever
+ * passes component names, so an ordinary app never gets near this; the cap is for one
+ * that registers and unregisters uniquely named components - per job, per tenant - where
+ * the cache would otherwise grow for the manager's whole lifetime. Past it, the oldest
+ * name is dropped and simply rebuilt if it is logged about again.
+ */
+const MAX_CACHED_ENTITY_CHILDREN = 256;
+
+/**
  * Every `LoggerService` method whose call is routed through `runCallbackSafely`.
  *
  * `entity()` is absent because it returns a value and needs its own handling; everything
@@ -89,9 +98,9 @@ export function createGuardedLoggerService(
   // Guarded children of `entity()`, by entity name, for the `entity` method that built
   // them. `LoggerService.entity()` builds a fresh logger from the same parts plus the
   // name on every call, so one child per name answers every later call the same way.
-  // Bounded by the component names the manager has logged about. Dropped whenever the
-  // resolved `entity` changes, and a call that failed - and fell back to this parent -
-  // is never cached, so each failure is still reported when it happens.
+  // Capped at `MAX_CACHED_ENTITY_CHILDREN`. Dropped whenever the resolved `entity`
+  // changes, and a call that failed - and fell back to this parent - is never cached, so
+  // each failure is still reported when it happens.
   let entityCache: {
     method: unknown;
     call: (entityName: string) => LoggerService;
@@ -112,9 +121,9 @@ export function createGuardedLoggerService(
       }
 
       // Resolved on every read - a cheap property read - even though the wrapper built
-      // from it is cached below, because a read is what precedes every call: a caller - and several tests - may replace a method on the underlying
-      // service after construction, and a wrapper built once would keep calling the one
-      // it replaced.
+      // from it is cached below, because a read is what precedes every call: a caller -
+      // and several tests - may replace a method on the underlying service after
+      // construction, and a wrapper built once would keep calling the one it replaced.
       //
       // Resolving here rather than inside the wrapper matters for the other half of that
       // swap. A test captures `logger.warn` (a wrapper), installs a throwing one, then
@@ -155,6 +164,15 @@ export function createGuardedLoggerService(
               const child = guardEntity(target, method, entityName, guarded);
 
               if (child !== guarded) {
+                if (children.size >= MAX_CACHED_ENTITY_CHILDREN) {
+                  // A `Map` iterates in insertion order, so this is the oldest name.
+                  const oldest = children.keys().next();
+
+                  if (oldest.done !== true) {
+                    children.delete(oldest.value);
+                  }
+                }
+
                 children.set(entityName, child);
               }
 

@@ -562,6 +562,9 @@ export interface HealthReport {
 
   /** Machine-readable outcome code */
   code: 'ok' | 'degraded' | 'timeout' | 'error';
+
+  /** The thrown value, when the check itself failed unexpectedly (`code: 'error'`) */
+  error?: Error;
 }
 
 /**
@@ -579,6 +582,13 @@ export interface SignalBroadcastResult {
 
   /** Machine-readable outcome code */
   code: 'ok' | 'partial_timeout' | 'timeout' | 'partial_error' | 'error';
+
+  /**
+   * The thrown value, when the broadcast itself failed rather than a component's handler
+   * - a custom `on*Requested` callback that threw or rejected, or an unexpected failure
+   * (`code: 'error'`). Per-component failures are on `results`.
+   */
+  error?: Error;
 }
 
 /**

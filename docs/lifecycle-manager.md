@@ -1228,6 +1228,7 @@ interface HealthReport {
   durationMS: number;
   timedOut: boolean;
   code: 'ok' | 'degraded' | 'timeout' | 'error';
+  error?: Error; // Set when the check itself failed unexpectedly
 }
 ```
 

@@ -544,6 +544,103 @@ describe('LifecycleManager - public methods never reject', () => {
     expect(forceShutdownCalls).toBe(0);
   });
 
+  test('a signals-attached listener that starts a shutdown refuses the bulk startup', async () => {
+    const { logger, manager } = setup({ attachSignalsBeforeStartup: true });
+    const component = new Plain(logger, 'a');
+    let startCalls = 0;
+    component.start = (): Promise<void> => {
+      startCalls++;
+
+      return Promise.resolve();
+    };
+    await manager.registerComponent(component);
+
+    manager.attachSignals = (): void => {
+      fakeAttachedSignals(manager);
+      (
+        manager as unknown as {
+          lifecycleEvents: { lifecycleManagerSignalsAttached: () => void };
+        }
+      ).lifecycleEvents.lifecycleManagerSignalsAttached();
+    };
+
+    const nested: Promise<unknown>[] = [];
+    manager.once('lifecycle-manager:signals-attached', () => {
+      nested.push(manager.stopAllComponents());
+    });
+
+    const result = await manager.startAllComponents();
+    await Promise.all(nested);
+
+    expect(result.code).toBe('shutdown_in_progress');
+    expect(startCalls).toBe(0);
+    expect(manager.getSystemState()).not.toBe('starting');
+  });
+
+  test('a crashed start keeps the state the component had before it', async () => {
+    const { logger, manager } = setup();
+    const component = new Plain(logger, 'a');
+    await manager.registerComponent(component);
+    await manager.startComponent('a');
+    await manager.stopComponent('a');
+    expect(manager.getComponentStatus('a')?.state).toBe('stopped');
+
+    // Read after the component is claimed as `starting`, outside the attempt's `try`.
+    Object.defineProperty(component, 'startupTimeoutMS', {
+      get: (): never => {
+        throw new Error('getter exploded');
+      },
+    });
+
+    const { release } = claimReports();
+    let result;
+
+    try {
+      result = await manager.startComponent('a');
+    } finally {
+      release();
+    }
+
+    expect(result.code).toBe('unknown_error');
+    expect(manager.getComponentStatus('a')?.state).toBe('stopped');
+  });
+
+  test('component-scoped messaging resolves on an unexpected failure', async () => {
+    const { logger, manager } = setup();
+    const sender = new Plain(logger, 'sender');
+    const target = new Plain(logger, 'target');
+    await manager.registerComponent(sender);
+    await manager.registerComponent(target);
+    await manager.startAllComponents();
+
+    target.getName = (): never => {
+      throw new Error('getter exploded');
+    };
+
+    const lifecycle = (
+      sender as unknown as {
+        lifecycle: {
+          sendMessageToComponent(
+            name: string,
+            payload: unknown,
+          ): Promise<{ code: string; error: Error | null }>;
+        };
+      }
+    ).lifecycle;
+
+    const { release } = claimReports();
+    let result;
+
+    try {
+      result = await lifecycle.sendMessageToComponent('target', 'hi');
+    } finally {
+      release();
+    }
+
+    expect(result.code).toBe('error');
+    expect(result.error?.message).toBe('getter exploded');
+  });
+
   test('a throwing reload callback resolves triggerReload with an error result', async () => {
     const { manager } = setup({
       onReloadRequested: (): never => {
@@ -562,6 +659,7 @@ describe('LifecycleManager - public methods never reject', () => {
 
     expect(result.signal).toBe('reload');
     expect(result.code).toBe('error');
+    expect(result.error?.message).toBe('reload exploded');
     expect(hasReport(reports, 'reload request callback')).toBe(true);
   });
 
