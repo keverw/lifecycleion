@@ -311,7 +311,7 @@ describe('createGuardedLoggerService', () => {
     expect(calls).toEqual(['job-1']);
   });
 
-  test('a frozen log method is handed back as is rather than throwing on the read', async () => {
+  test('a frozen log method is still guarded', async () => {
     const sink = new ArraySink();
     const logger = new Logger({ sinks: [sink], callProcessExit: false });
     const service = logger.service('svc');
@@ -322,20 +322,126 @@ describe('createGuardedLoggerService', () => {
       writable: false,
       configurable: false,
     });
+    Object.defineProperty(service, 'error', {
+      value: (): never => {
+        throw new Error('error exploded');
+      },
+      writable: false,
+      configurable: false,
+    });
 
     const guarded = createGuardedLoggerService(service);
 
     const reports = await collectReports(() => {
       guarded.warn('still logged');
       guarded.warn('logged again');
+      guarded.error('lost');
     });
 
     expect(sink.logs.map((log) => log.message)).toEqual([
       'still logged',
       'logged again',
     ]);
-    // Reported once that the method could not be guarded.
+    // The throwing one is contained and reported like any other.
     expect(reports.length).toBe(1);
+  });
+
+  test('a frozen setter-only log method does not throw at the call site', async () => {
+    const logger = new Logger({
+      sinks: [new ArraySink()],
+      callProcessExit: false,
+    });
+    const service = logger.service('svc');
+
+    Object.defineProperty(service, 'warn', {
+      set: (): void => {},
+      configurable: false,
+    });
+
+    const guarded = createGuardedLoggerService(service);
+
+    const reports = await collectReports(() => {
+      guarded.warn('nowhere to go');
+    });
+
+    // `warn` reads as `undefined`, which the wrapper reports as not a function.
+    expect(reports.length).toBe(1);
+  });
+
+  test('a fully frozen service is guarded', async () => {
+    const logger = new Logger({
+      sinks: [new ArraySink()],
+      callProcessExit: false,
+    });
+    const service = logger.service('svc');
+    service.info = (): never => {
+      throw new Error('info exploded');
+    };
+    Object.freeze(service);
+
+    const guarded = createGuardedLoggerService(service);
+
+    const reports = await collectReports(() => {
+      guarded.info('one');
+    });
+
+    expect(reports.length).toBe(1);
+    expect(guarded instanceof service.constructor).toBe(true);
+  });
+
+  test('an entity child with hostile traps does not throw from entity()', async () => {
+    const logger = new Logger({
+      sinks: [new ArraySink()],
+      callProcessExit: false,
+    });
+    const service = logger.service('svc');
+    const hostileChild = new Proxy(
+      {},
+      {
+        getPrototypeOf: (): never => {
+          throw new Error('trap exploded');
+        },
+        get: (): never => {
+          throw new Error('trap exploded');
+        },
+      },
+    );
+    service.entity = (): LoggerService => hostileChild as LoggerService;
+
+    const guarded = createGuardedLoggerService(service);
+
+    const reports = await collectReports(() => {
+      guarded.entity('ent').info('one');
+    });
+
+    // Only the `info` read fails, and that inside the guard.
+    expect(reports.length).toBe(1);
+  });
+
+  test('a native promise with a throwing then from entity() is contained', async () => {
+    const logger = new Logger({
+      sinks: [new ArraySink()],
+      callProcessExit: false,
+    });
+    const service = logger.service('svc');
+    service.entity = (): LoggerService => {
+      const promise: object = Promise.resolve();
+      Object.defineProperty(promise, 'then', {
+        value: (): never => {
+          throw new Error('then exploded');
+        },
+      });
+
+      return promise as unknown as LoggerService;
+    };
+
+    const guarded = createGuardedLoggerService(service);
+
+    const reports = await collectReports(() => {
+      guarded.entity('ent').info('one');
+    });
+
+    expect(reports.length).toBeGreaterThanOrEqual(1);
   });
 
   test('a failed entity() is not cached, so every failure is reported', async () => {

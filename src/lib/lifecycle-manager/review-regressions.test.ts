@@ -198,9 +198,9 @@ describe('LifecycleManager - review regressions', () => {
     await manager.startAllComponents();
     manager.attachSignals();
 
-    let wasAttachedInListener: boolean | null = null;
+    const attachedInListener: boolean[] = [];
     manager.once('lifecycle-manager:shutdown-completed', () => {
-      wasAttachedInListener = signals.isAttached();
+      attachedInListener.push(signals.isAttached());
       // A listener that attaches again is not undone once the pass ends.
       manager.attachSignals();
     });
@@ -208,7 +208,7 @@ describe('LifecycleManager - review regressions', () => {
     const result = await manager.stopAllComponents();
 
     expect(result.success).toBe(true);
-    expect(wasAttachedInListener).toBe(false);
+    expect(attachedInListener).toEqual([false]);
     expect(signals.isAttached()).toBe(true);
   });
 
@@ -252,5 +252,35 @@ describe('LifecycleManager - review regressions', () => {
     startGate.reject(new Error('no'));
     expect((await bStart).success).toBe(false);
     expect(signals.isAttached()).toBe(false);
+  });
+
+  test('a component whose getName() returns a non-string is refused at registration', async () => {
+    const { logger, manager } = setup();
+    const component = new Plain(logger, 'a');
+    let calls = 0;
+    component.getName = (): string => {
+      calls++;
+      if (calls === 1) {
+        return undefined as unknown as string;
+      }
+      throw new Error('getName exploded');
+    };
+
+    const { release } = claimReports();
+    let registration;
+
+    try {
+      registration = await manager.registerComponent(component);
+    } finally {
+      release();
+    }
+
+    expect(registration.success).toBe(false);
+    expect(registration.code).toBe('unknown_error');
+    expect(manager.getComponentNames()).toEqual([]);
+
+    // Nothing recorded, so nothing later can fall through to the throwing getName().
+    const unregister = await manager.unregisterComponent('a');
+    expect(unregister.success).toBe(false);
   });
 });

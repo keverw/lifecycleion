@@ -1,6 +1,5 @@
 import type { LoggerService } from '../logger/logger-service';
 import { isPromise } from '../is-promise';
-import { LRUCache } from '../lru-cache';
 import {
   reportCallbackError,
   runCallbackSafely,
@@ -65,11 +64,18 @@ const GUARDED_LOG_METHODS: Record<
  * there is one wrapper, applied once in the constructor, instead of ~140 call sites that
  * each have to remember.
  *
- * A `Proxy` over the instance rather than a hand-written subclass or object literal:
- * `LoggerService` is a concrete class with private members, so the proxy is the only
- * shape that keeps the nominal type without copying its internals - and an assignment
- * through it (`logger.warn = fn`, which the hostile-logger tests use) still lands on the
+ * A `Proxy` rather than a hand-written subclass or object literal: `LoggerService` is a
+ * concrete class with private members, so the proxy is the only shape that keeps the
+ * nominal type without copying its internals - and an assignment through it
+ * (`logger.warn = fn`, which the hostile-logger tests use) still lands on the
  * underlying service.
+ *
+ * Its target is a fresh object inheriting from the service, not the service itself. A
+ * proxy may not answer a read of its target's non-configurable own properties with
+ * anything but their actual values, so over a frozen service - or one with a frozen
+ * method - the engine would throw on the read itself, outside every guard here, or hand
+ * the method back unguarded. The fresh object has no own properties to hold the proxy
+ * to, so every method is guarded whatever the service does to its own.
  *
  * Every failure is reported on the global `'error'` channel through
  * {@link reportCallbackError}, never through the logger: the logger is the likeliest
@@ -107,11 +113,20 @@ export function createGuardedLoggerService(
     call: (entityName: string) => LoggerService;
   } | null = null;
 
-  // Frozen methods already reported; see the descriptor check in the trap.
-  const reportedFrozen = new Set<string>();
+  // See the note on the proxy's target above. Inherits from `logger` so `instanceof`
+  // and `in` still answer as they would for the service.
+  const shadow = Object.create(logger) as LoggerService;
+  const target = logger;
 
-  const guarded: LoggerService = new Proxy(logger, {
-    get(target, property, receiver): unknown {
+  const guarded: LoggerService = new Proxy(shadow, {
+    // Assignments and deletes go to the service, where every read below looks.
+    set(_shadow, property, value): boolean {
+      return Reflect.set(target, property, value);
+    },
+    deleteProperty(_shadow, property): boolean {
+      return Reflect.deleteProperty(target, property);
+    },
+    get(_shadow, property, receiver): unknown {
       // `Object.hasOwn`, not `in`: `in` walks `Object.prototype`, so `toString` and
       // friends would come back as log methods and be wrapped. Everything else -
       // including the service's own fields - passes straight through untouched.
@@ -138,42 +153,6 @@ export function createGuardedLoggerService(
       // Contained, because the read itself runs code the caller owns: a logger whose
       // `warn` is a getter that throws would otherwise escape every guard below, the
       // read happening before there is a wrapper to route through.
-      // A Proxy may not answer a read of an own property that is both non-writable and
-      // non-configurable - a frozen logger's method, say - with anything but its actual
-      // value: the engine throws a `TypeError` on the read itself, outside every guard
-      // here. Such a method cannot be wrapped, so it is handed back as it is, and the
-      // loss of the guard for it is reported once.
-      //
-      // Only an own property can be frozen this way, and `LoggerService`'s methods live
-      // on its prototype, so the lookup is skipped in the ordinary case.
-      let descriptor: PropertyDescriptor | undefined;
-
-      try {
-        descriptor = Object.hasOwn(target, property)
-          ? Reflect.getOwnPropertyDescriptor(target, property)
-          : undefined;
-      } catch {
-        descriptor = undefined;
-      }
-
-      if (
-        descriptor !== undefined &&
-        descriptor.configurable === false &&
-        descriptor.writable === false
-      ) {
-        if (!reportedFrozen.has(property)) {
-          reportedFrozen.add(property);
-          reportCallbackError(
-            `${GUARDED_LOGGER_LABEL}.${property}`,
-            new Error(
-              `${GUARDED_LOGGER_LABEL}.${property} is frozen and cannot be guarded`,
-            ),
-          );
-        }
-
-        return descriptor.value;
-      }
-
       let method: unknown;
 
       try {
@@ -190,12 +169,12 @@ export function createGuardedLoggerService(
 
       if (property === 'entity') {
         if (entityCache === null || entityCache.method !== method) {
-          // The repo's own `LRUCache` rather than a hand-rolled capped `Map`: its
-          // per-hit bookkeeping is small next to the log write it guards, and one LRU
-          // implementation is easier to keep right than two.
-          const children = new LRUCache<string, LoggerService>(
-            MAX_CACHED_ENTITY_CHILDREN,
-          );
+          // A plain `Map` kept in recency order, not the repo's `LRUCache`: that one
+          // sizes every value it stores, which for a logger child means
+          // `JSON.stringify` - running the child's getters and `toJSON`, caller code,
+          // outside every guard here - and costs more per hit than the lookup it saves.
+          // String keys, so nothing below can throw.
+          const children = new Map<string, LoggerService>();
 
           entityCache = {
             method,
@@ -203,12 +182,24 @@ export function createGuardedLoggerService(
               const cached = children.get(entityName);
 
               if (cached !== undefined) {
+                // Re-inserted, so the oldest entry is the least recently used one.
+                children.delete(entityName);
+                children.set(entityName, cached);
+
                 return cached;
               }
 
               const child = guardEntity(target, method, entityName, guarded);
 
               if (child !== guarded) {
+                if (children.size >= MAX_CACHED_ENTITY_CHILDREN) {
+                  const oldest = children.keys().next();
+
+                  if (!oldest.done) {
+                    children.delete(oldest.value);
+                  }
+                }
+
                 children.set(entityName, child);
               }
 
@@ -304,11 +295,25 @@ function guardEntity(
   // Contained, because detecting and adopting a thenable each read `child.then`, and
   // that read runs code the logger owns: a `then` getter that throws would otherwise
   // escape here, past every other guard.
-  let adopted: Promise<unknown> | null = null;
-
+  //
+  // The `.then` below is inside the same guard: `Promise.resolve()` hands a native
+  // promise back as it is, own `then` property included, so that call runs the
+  // logger's code too.
   try {
     if (isPromise(child)) {
-      adopted = Promise.resolve(child);
+      void Promise.resolve(child).then(
+        () => {
+          reportCallbackError(
+            label,
+            new Error(`${label} did not return a logger`),
+          );
+        },
+        (error: unknown) => {
+          reportCallbackError(label, error);
+        },
+      );
+
+      return parent;
     }
   } catch (error) {
     reportCallbackError(label, error);
@@ -316,23 +321,11 @@ function guardEntity(
     return parent;
   }
 
-  if (adopted !== null) {
-    void adopted.then(
-      () => {
-        reportCallbackError(
-          label,
-          new Error(`${label} did not return a logger`),
-        );
-      },
-      (error: unknown) => {
-        reportCallbackError(label, error);
-      },
-    );
-
-    return parent;
-  }
-
-  if (child === null || typeof child !== 'object') {
+  // A function is an object too, and may well be a logger with call behavior.
+  if (
+    child === null ||
+    (typeof child !== 'object' && typeof child !== 'function')
+  ) {
     // A logger handing back a non-logger, which nothing else would surface.
     reportCallbackError(label, new Error(`${label} did not return a logger`));
 

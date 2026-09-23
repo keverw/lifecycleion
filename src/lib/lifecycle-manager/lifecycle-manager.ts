@@ -3457,7 +3457,18 @@ export class LifecycleManager
     isInsertAction = false,
     _options?: RegisterOptions,
   ): Promise<InsertComponentAtResult> {
-    const componentName = component.getName();
+    const componentName: unknown = component.getName();
+
+    // The name is recorded here and trusted from then on - see `nameOf()` - so a
+    // `getName()` that breaks its contract is refused now rather than recorded as a
+    // name every later lookup would fall through. Thrown, and answered like a throwing
+    // `getName()`: with `unknown_error`.
+    if (typeof componentName !== 'string') {
+      throw new TypeError(
+        `Component getName() must return a string, got ${typeof componentName}`,
+      );
+    }
+
     const registrationIndexBefore = this.getComponentIndex(componentName);
 
     try {
@@ -7749,7 +7760,9 @@ export class LifecycleManager
    * instance that was never registered.
    */
   private nameOf(component: BaseComponent): string {
-    return this.registeredNames.get(component) ?? component.getName();
+    const recordedName = this.registeredNames.get(component);
+
+    return recordedName !== undefined ? recordedName : component.getName();
   }
 
   /**

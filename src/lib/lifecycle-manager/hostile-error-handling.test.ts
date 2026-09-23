@@ -246,27 +246,45 @@ describe('LifecycleManager - hostile thrown values', () => {
       callProcessExit: false,
     });
 
-    // Everything else on the logger keeps working; only the `entity(...)` call these
-    // detached chains report through throws. `LifecycleManager` takes
+    // Everything else on the logger keeps working; only the entity loggers these
+    // detached chains report through throw. `LifecycleManager` takes
     // `rootLogger.service(name)` once in its constructor, so the service it is handed is
-    // where this goes.
+    // where this goes. The entity *child's* methods are what break, not `entity()`
+    // itself: the manager keeps one guarded child per name, built the first time the
+    // component is logged about - long before the window below - so a broken
+    // `entity()` would never be called again and the test would pass without reaching
+    // the path it is about.
     const realService = throwingLogger.service.bind(throwingLogger);
 
     // Armed only for the window the late rejection lands in. Broken from the start, the
     // manager's ordinary logging throws too and the test stops being about the detached
     // chain at all.
     let isLoggerBroken = false;
+    let brokenCalls = 0;
 
     throwingLogger.service = (serviceName: string): LoggerService => {
       const service = realService(serviceName);
       const realEntity = service.entity.bind(service);
 
       service.entity = (entityName: string): LoggerService => {
-        if (isLoggerBroken) {
-          throw new Error('the logger itself is broken');
+        const child = realEntity(entityName);
+
+        for (const method of ['debug', 'info', 'warn', 'error'] as const) {
+          const realMethod = child[method].bind(child);
+
+          child[method] = (
+            ...args: Parameters<LoggerService['info']>
+          ): void => {
+            if (isLoggerBroken) {
+              brokenCalls++;
+              throw new Error('the logger itself is broken');
+            }
+
+            realMethod(...args);
+          };
         }
 
-        return realEntity(entityName);
+        return child;
       };
 
       return service;
@@ -313,6 +331,8 @@ describe('LifecycleManager - hostile thrown values', () => {
 
       isLoggerBroken = false;
 
+      // The late rejection's report went through the broken logger.
+      expect(brokenCalls).toBeGreaterThan(0);
       expect(rejections).toEqual([]);
 
       await lifecycle.stopAllComponents();
