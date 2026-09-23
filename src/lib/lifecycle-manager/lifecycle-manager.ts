@@ -87,6 +87,7 @@ import {
 import { isPromise } from '../is-promise';
 import {
   reportCallbackError,
+  runCallbackSafely,
   safeHandleCallback,
   safeHandleCallbackAndWait,
 } from '../safe-handle-callback';
@@ -525,17 +526,21 @@ export class LifecycleManager
     name: string,
     options?: UnregisterOptions,
   ): Promise<UnregisterComponentResult> {
+    // What the operation got through before it crashed, so the failure result describes
+    // the component as it actually is: stopped, even though unregistering then failed.
+    const progress = { wasStopped: false };
+
     return this.settleOperation(
       'unregisterComponent',
-      () => this.unregisterComponentOperation(name, options),
+      () => this.unregisterComponentOperation(name, options, progress),
       (error, reason) => ({
         success: false,
         componentName: name,
         reason,
         code: 'unknown_error',
         error,
-        wasStopped: false,
-        wasRegistered: this.componentStates.has(name),
+        wasStopped: progress.wasStopped,
+        wasRegistered: this.hasComponent(name),
       }),
     );
   }
@@ -1076,9 +1081,27 @@ export class LifecycleManager
         // async handlers execute but their return values are not accessible.
         // Use triggerReload(), triggerInfo(), triggerDebug() for programmatic
         // access to results.
-        onReloadRequested: () => this.handleReloadRequest('signal'),
-        onInfoRequested: () => this.handleInfoRequest('signal'),
-        onDebugRequested: () => this.handleDebugRequest('signal'),
+        // Settled like `triggerReload()` and friends, so a signal-driven broadcast
+        // resolves under this manager's own label rather than relying on
+        // `ProcessSignalManager` to catch its rejection.
+        onReloadRequested: () =>
+          this.settleOperation(
+            'reload signal',
+            () => this.handleReloadRequest('signal'),
+            (error) => this.crashedSignalBroadcastResult('reload', error),
+          ),
+        onInfoRequested: () =>
+          this.settleOperation(
+            'info signal',
+            () => this.handleInfoRequest('signal'),
+            (error) => this.crashedSignalBroadcastResult('info', error),
+          ),
+        onDebugRequested: () =>
+          this.settleOperation(
+            'debug signal',
+            () => this.handleDebugRequest('signal'),
+            (error) => this.crashedSignalBroadcastResult('debug', error),
+          ),
       });
     }
 
@@ -1688,47 +1711,56 @@ export class LifecycleManager
 
     this.lifecycleEvents.componentBroadcastStarted(from, payload);
 
-    // Send to each component
-    for (const component of targetComponents) {
-      // The recorded name, so no component's own `getName()` runs mid-broadcast.
-      const name = this.nameOf(component);
-      const isRunning = this.isComponentRunning(name);
-      const isStalled = this.stalledComponents.has(name);
-      const isStopped = !isRunning && !isStalled;
-      const allowNonRunning =
-        (isStalled && allowStalled) || (isStopped && allowStopped);
+    // Every step in the loop is already per component, so nothing here is expected to
+    // throw. If something ever does, the answers already collected are kept - and
+    // `broadcast-completed` still follows `broadcast-started` - rather than all of them
+    // being replaced by the outer safety net's empty result.
+    try {
+      // Send to each component
+      for (const component of targetComponents) {
+        // The recorded name, so no component's own `getName()` runs mid-broadcast.
+        const name = this.nameOf(component);
+        const isRunning = this.isComponentRunning(name);
+        const isStalled = this.stalledComponents.has(name);
+        const isStopped = !isRunning && !isStalled;
+        const allowNonRunning =
+          (isStalled && allowStalled) || (isStopped && allowStopped);
 
-      // Skip if not running and not explicitly allowed
-      if (!isRunning && !allowNonRunning) {
+        // Skip if not running and not explicitly allowed
+        if (!isRunning && !allowNonRunning) {
+          results.push({
+            name,
+            sent: false,
+            running: false,
+            data: undefined,
+            error: null,
+            timedOut: false,
+            code: isStalled ? 'stalled' : 'stopped',
+          });
+          continue;
+        }
+
+        // Through the per-message safety net, for the same reason as the name read above.
+        const messageResult = await this.sendMessageSettled(
+          name,
+          payload,
+          from,
+          options,
+        );
+
         results.push({
           name,
-          sent: false,
-          running: false,
-          data: undefined,
-          error: null,
-          timedOut: false,
-          code: isStalled ? 'stalled' : 'stopped',
+          sent: messageResult.sent,
+          running: messageResult.componentRunning,
+          data: messageResult.data,
+          error: messageResult.error,
+          timedOut: messageResult.timedOut,
+          code:
+            messageResult.code === 'not_found' ? 'error' : messageResult.code,
         });
-        continue;
       }
-
-      // Through the per-message safety net, for the same reason as the name read above.
-      const messageResult = await this.sendMessageSettled(
-        name,
-        payload,
-        from,
-        options,
-      );
-
-      results.push({
-        name,
-        sent: messageResult.sent,
-        running: messageResult.componentRunning,
-        data: messageResult.data,
-        error: messageResult.error,
-        timedOut: messageResult.timedOut,
-        code: messageResult.code === 'not_found' ? 'error' : messageResult.code,
-      });
+    } catch (error) {
+      reportCallbackError('lifecycle-manager broadcastMessage', error);
     }
 
     this.lifecycleEvents.componentBroadcastCompleted(
@@ -2035,7 +2067,8 @@ export class LifecycleManager
 
   private async unregisterComponentOperation(
     name: string,
-    options?: UnregisterOptions,
+    options: UnregisterOptions | undefined,
+    progress: { wasStopped: boolean },
   ): Promise<UnregisterComponentResult> {
     // Block unregistration during bulk operations
     if (
@@ -2163,6 +2196,7 @@ export class LifecycleManager
       }
 
       wasStopped = true;
+      progress.wasStopped = true;
 
       // The stop's `await` let other code run. A `component:stopped` listener may have
       // unregistered this component already - and registered a replacement under the
@@ -2451,17 +2485,13 @@ export class LifecycleManager
       timeoutHandle = setTimeout(expireStartup, bulkDelay);
     }
 
-    // Every rollback in this startup goes through here, so one that throws partway - and
-    // lands in the `catch` below, which rolls back too - cannot stop the same components
-    // twice or emit their `component:startup-rollback` events again.
-    let hasRolledBack = false;
+    // Every rollback in this startup goes through here, tracking which names it has
+    // already rolled back: one that throws partway - and lands in the `catch` below,
+    // which rolls back too - neither stops the same component twice nor skips the ones
+    // it had not reached.
+    const rolledBackNames = new Set<string>();
     const rollBackOnce = async (names: string[]): Promise<void> => {
-      if (hasRolledBack) {
-        return;
-      }
-
-      hasRolledBack = true;
-      await this.rollbackStartup(names);
+      await this.rollbackStartup(names, rolledBackNames);
     };
 
     const operation = async (): Promise<StartupResult> => {
@@ -4185,6 +4215,11 @@ export class LifecycleManager
     // here only so the sweep below can settle them from either path; the `catch` never
     // reads it.
     const stoppingComponents = new Set<string>();
+    // Components whose stop failed without leaving them stalled - a stop that crashed
+    // before it claimed the component, say, so it is still running. Only stalls,
+    // pending stops and timeouts used to fail the pass, so a pass that could not stop
+    // one of these reported success with it still up.
+    const failedStopComponents = new Set<string>();
     // Shared by both paths so they cannot drift: a candidate that is no longer stalled
     // has no stall info and drops out.
     const collectStalledComponents = (
@@ -4385,6 +4420,7 @@ export class LifecycleManager
             continue;
           } else {
             // Component failed to stop - track as stalled but continue
+            failedStopComponents.add(name);
             this.logger
               .entity(name)
               .error(
@@ -4428,10 +4464,18 @@ export class LifecycleManager
         collectStoppedComponents(finalStalledNames);
 
       const durationMS = Date.now() - startTime;
+      // A failed stop that ended in a stall is already reported as one; one that did
+      // not, and whose component is not stopped either, fails the pass on its own.
+      const unstoppedFailedComponents = Array.from(failedStopComponents).filter(
+        (name) =>
+          !finalStalledNames.has(name) &&
+          this.componentStates.get(name) !== 'stopped',
+      );
       const isSuccess =
         !hasTimedOut &&
         stalledComponents.length === 0 &&
-        stoppingComponents.size === 0;
+        stoppingComponents.size === 0 &&
+        unstoppedFailedComponents.length === 0;
 
       // The guard matters here: a logger that threw would otherwise land in the `catch`
       // below and replace the result of a pass that finished - even a clean one - with
@@ -4465,7 +4509,11 @@ export class LifecycleManager
             ? {
                 reason: `Shutdown is still in progress for: ${Array.from(stoppingComponents).join(', ')}`,
               }
-            : {}),
+            : unstoppedFailedComponents.length > 0
+              ? {
+                  reason: `Failed to stop: ${unstoppedFailedComponents.join(', ')}`,
+                }
+              : {}),
       };
 
       // Store for getLastShutdownResult() - useful for debugging and metrics
@@ -4654,6 +4702,41 @@ export class LifecycleManager
         startedAt: Date.now(),
       },
       claim,
+    );
+  }
+
+  /**
+   * Call a component's timeout hook - `onStartupAborted`, `onGracefulStopTimeout`,
+   * `onShutdownForceAborted` - from inside the timer that fired.
+   *
+   * Takes the hook already read: each caller reads it before its timer starts, because
+   * the timer callback runs outside every guard, and a hook behind a getter that threw
+   * there was an uncaught exception - fatal to a Node process - that also skipped the
+   * timeout's rejection and its late-settlement watcher, leaving the operation waiting
+   * forever. A sync throw and a returned rejection are both logged and contained.
+   */
+  private invokeAbortHook(
+    component: BaseComponent,
+    hook: unknown,
+    hookName: string,
+    name: string,
+  ): void {
+    if (typeof hook !== 'function') {
+      return;
+    }
+
+    runCallbackSafely(
+      `${name}.${hookName}`,
+      hook,
+      [],
+      (error) => {
+        this.logger
+          .entity(name)
+          .warn(`Error in ${hookName} callback: {{error.message}}`, {
+            params: { error: toError(error) },
+          });
+      },
+      component,
     );
   }
 
@@ -5086,39 +5169,12 @@ export class LifecycleManager
                 startAttemptToken,
               );
             }
-            // Call abort callback if implemented
-            if (typeof onStartupAborted === 'function') {
-              try {
-                Promise.resolve(
-                  Reflect.apply(onStartupAborted, component, []) as unknown,
-                ).catch((error: unknown) => {
-                  try {
-                    const err = toError(error);
-
-                    this.logger
-                      .entity(name)
-                      .warn(
-                        'Error in onStartupAborted callback: {{error.message}}',
-                        { params: { error: err } },
-                      );
-                  } catch {
-                    // Terminal rejection handler: reporting must not create another
-                    // unhandled rejection from this timer path.
-                  }
-                });
-              } catch (error) {
-                const err = toError(error);
-
-                this.logger
-                  .entity(name)
-                  .warn(
-                    'Error in onStartupAborted callback: {{error.message}}',
-                    {
-                      params: { error: err },
-                    },
-                  );
-              }
-            }
+            this.invokeAbortHook(
+              component,
+              onStartupAborted,
+              'onStartupAborted',
+              name,
+            );
 
             this.observeFailureAfterTimeout(
               startPromise,
@@ -5444,10 +5500,10 @@ export class LifecycleManager
         this.componentErrors.set(name, err);
         this.runningComponents.delete(name);
         this.updateStartedFlag();
-        // Settled like every other stall: a force-stop waiter for this name is released,
-        // and signals come off if this was the last running component.
+        // A force-stop waiter for this name is released. Signals stay attached, as they
+        // do for every other stall: a stalled component was not confirmed stopped, and
+        // during a shutdown the operator's next Ctrl+C still has to reach escalation.
         this.resolvePendingForceStopWaiters(name);
-        this.detachSignalsAfterLastStop();
         this.lifecycleEvents.componentStalled(name, stallInfo, {
           reason: 'error',
           code: 'unknown_error',
@@ -5760,6 +5816,13 @@ export class LifecycleManager
     options: StopComponentOptions | undefined,
     claim: symbol,
   ): Promise<ComponentOperationResult> {
+    // Read before the stop claims the component: the timer that calls it runs outside
+    // every guard. See `invokeAbortHook()`.
+    const onGracefulStopTimeout: unknown = Reflect.get(
+      component,
+      'onGracefulStopTimeout',
+    );
+
     // Set state to stopping — clear the unexpected-stop handler before any async
     // work so a concurrent reportUnexpectedStop() call has no effect from here on.
     component._clearUnexpectedStopHandler();
@@ -5780,38 +5843,12 @@ export class LifecycleManager
       if (toTimerDelayMS(timeoutMS) > 0) {
         const timeoutPromise = new Promise<never>((_, reject) => {
           timeoutHandle = setTimeout(() => {
-            // Call abort callback if implemented
-            if (component.onGracefulStopTimeout) {
-              try {
-                Promise.resolve(component.onGracefulStopTimeout()).catch(
-                  (error: unknown) => {
-                    try {
-                      const err = toError(error);
-
-                      this.logger
-                        .entity(name)
-                        .warn(
-                          'Error in onGracefulStopTimeout callback: {{error.message}}',
-                          { params: { error: err } },
-                        );
-                    } catch {
-                      // See the startup-abort hook above.
-                    }
-                  },
-                );
-              } catch (error) {
-                const err = toError(error);
-
-                this.logger
-                  .entity(name)
-                  .warn(
-                    'Error in onGracefulStopTimeout callback: {{error.message}}',
-                    {
-                      params: { error: err },
-                    },
-                  );
-              }
-            }
+            this.invokeAbortHook(
+              component,
+              onGracefulStopTimeout,
+              'onGracefulStopTimeout',
+              name,
+            );
 
             // Detect if stop() eventually resolves after the timeout so the stall
             // can be cleared automatically without a manual retry.
@@ -5959,6 +5996,13 @@ export class LifecycleManager
     },
     claim: symbol,
   ): Promise<ComponentOperationResult> {
+    // Read before the claim, for the reason `shutdownComponentGraceful()` reads its
+    // timeout hook up front.
+    const onShutdownForceAborted: unknown = Reflect.get(
+      component,
+      'onShutdownForceAborted',
+    );
+
     this.claimComponent(name, 'force-stopping', claim);
     this.logger.entity(name).info('Force shutdown started', {
       params: {
@@ -6049,38 +6093,12 @@ export class LifecycleManager
       if (toTimerDelayMS(timeoutMS) > 0) {
         const timeoutPromise = new Promise<never>((_, reject) => {
           timeoutHandle = setTimeout(() => {
-            // Call abort callback if implemented
-            if (component.onShutdownForceAborted) {
-              try {
-                Promise.resolve(component.onShutdownForceAborted()).catch(
-                  (error: unknown) => {
-                    try {
-                      const err = toError(error);
-
-                      this.logger
-                        .entity(name)
-                        .warn(
-                          'Error in onShutdownForceAborted callback: {{error.message}}',
-                          { params: { error: err } },
-                        );
-                    } catch {
-                      // See the startup-abort hook above.
-                    }
-                  },
-                );
-              } catch (error) {
-                const err = toError(error);
-
-                this.logger
-                  .entity(name)
-                  .warn(
-                    'Error in onShutdownForceAborted callback: {{error.message}}',
-                    {
-                      params: { error: err },
-                    },
-                  );
-              }
-            }
+            this.invokeAbortHook(
+              component,
+              onShutdownForceAborted,
+              'onShutdownForceAborted',
+              name,
+            );
 
             // Detect if onShutdownForce() eventually resolves after the timeout
             // so the stall can be cleared automatically, same as stop().
@@ -6326,15 +6344,27 @@ export class LifecycleManager
    * Rollback startup by stopping all started components in reverse order
    * Used when a required component fails to start during startAllComponents()
    */
-  private async rollbackStartup(startedComponents: string[]): Promise<void> {
+  private async rollbackStartup(
+    startedComponents: string[],
+    rolledBackNames: Set<string> = new Set(),
+  ): Promise<void> {
+    // Stop components in reverse order - skipping any an earlier rollback of this same
+    // startup already reached, which is marked before its stop, so a stop that throws is
+    // not retried either.
+    const componentsToRollback = [...startedComponents]
+      .reverse()
+      .filter((name) => !rolledBackNames.has(name));
+
+    if (componentsToRollback.length === 0) {
+      return;
+    }
+
     this.logger.warn('Rolling back startup, stopping started components', {
-      params: { components: startedComponents },
+      params: { components: componentsToRollback },
     });
 
-    // Stop components in reverse order
-    const componentsToRollback = [...startedComponents].reverse();
-
     for (const name of componentsToRollback) {
+      rolledBackNames.add(name);
       this.logger.entity(name).info('Rolling back component');
       this.lifecycleEvents.componentStartupRollback(name);
 
@@ -7341,6 +7371,24 @@ export class LifecycleManager
    * In all cases `signal:shutdown` is emitted exactly once.
    */
   /**
+   * Emit `signal:shutdown` for a signal that is about to start (or retry) a pass.
+   *
+   * The signal has already set up escalation for its cycle by now, and the emit runs
+   * listener code: counted as escalation handling, so a listener that calls
+   * `stopAllComponents()` from here continues that cycle rather than having its
+   * unarmed-manual-stop reset wipe the signal's `firstMethod` and count.
+   */
+  private emitSignalShutdownForNewRequest(method: ShutdownSignal): void {
+    this.escalationHandlingDepth++;
+
+    try {
+      this.lifecycleEvents.signalShutdown(method, false);
+    } finally {
+      this.escalationHandlingDepth--;
+    }
+  }
+
+  /**
    * A shutdown signal that lands while a pass is running: noted on the pass, emitted
    * once as already-shutting-down, and counted - or, for a restart's first one, taken
    * over as the cycle's initial request.
@@ -7408,7 +7456,7 @@ export class LifecycleManager
       // cleared the window a moment later regardless.
       const consumedArmedUntil = this.consumeRepeatedShutdownArmedWindow();
 
-      this.lifecycleEvents.signalShutdown(method, false);
+      this.emitSignalShutdownForNewRequest(method);
       didEmitShutdownSignal = true;
       shouldSeedRepeatedShutdownState = false;
       this.handleRepeatedShutdownRequest(method, consumedArmedUntil);
@@ -7432,7 +7480,7 @@ export class LifecycleManager
     });
 
     if (!didEmitShutdownSignal) {
-      this.lifecycleEvents.signalShutdown(method, false);
+      this.emitSignalShutdownForNewRequest(method);
     }
 
     // Signal handlers cannot consume a return value, so the acknowledgement is dropped;
