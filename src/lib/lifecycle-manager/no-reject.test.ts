@@ -224,7 +224,8 @@ describe('LifecycleManager - public methods never reject', () => {
     expect(result.code).toBe('unknown_error');
     expect(result.componentName).toBe('a');
     expect(result.error?.message).toBe('getter exploded');
-    expect(hasReport(reports, 'lifecycle-manager startComponent')).toBe(true);
+    expect(hasReport(reports, 'lifecycle-manager component start')).toBe(true);
+    expect(manager.getComponentStatus('a')?.state).toBe('registered');
   });
 
   test('a throwing component getter resolves checkAllHealth with an error report', async () => {
@@ -395,6 +396,152 @@ describe('LifecycleManager - public methods never reject', () => {
     expect(attachCalls).toBe(1);
     expect(didEmitStarted).toBe(false);
     expect(manager.getRunningComponentNames()).toEqual([]);
+  });
+
+  test('a signals-attached listener cannot start a second bulk startup', async () => {
+    const { logger, manager } = setup({ attachSignalsBeforeStartup: true });
+    const component = new Plain(logger, 'a');
+    let startCalls = 0;
+    component.start = (): Promise<void> => {
+      startCalls++;
+
+      return Promise.resolve();
+    };
+    await manager.registerComponent(component);
+
+    manager.attachSignals = (): void => {
+      fakeAttachedSignals(manager);
+      (
+        manager as unknown as {
+          lifecycleEvents: { lifecycleManagerSignalsAttached: () => void };
+        }
+      ).lifecycleEvents.lifecycleManagerSignalsAttached();
+    };
+
+    const nested: Promise<{ code?: string }>[] = [];
+    manager.once('lifecycle-manager:signals-attached', () => {
+      nested.push(manager.startAllComponents());
+    });
+
+    const result = await manager.startAllComponents();
+
+    // The latch was already up when the listener ran, so the nested call is refused
+    // rather than running alongside this one.
+    expect(result.success).toBe(true);
+    expect((await nested[0])?.code).toBe('already_in_progress');
+    expect(startCalls).toBe(1);
+  });
+
+  test('a signals-attached listener cannot start the same component twice', async () => {
+    const { logger, manager } = setup({ attachSignalsBeforeStartup: true });
+    const component = new Plain(logger, 'a');
+    let startCalls = 0;
+    component.start = (): Promise<void> => {
+      startCalls++;
+
+      return Promise.resolve();
+    };
+    await manager.registerComponent(component);
+
+    manager.attachSignals = (): void => {
+      fakeAttachedSignals(manager);
+      (
+        manager as unknown as {
+          lifecycleEvents: { lifecycleManagerSignalsAttached: () => void };
+        }
+      ).lifecycleEvents.lifecycleManagerSignalsAttached();
+    };
+
+    const nested: Promise<{ code?: string }>[] = [];
+    manager.once('lifecycle-manager:signals-attached', () => {
+      nested.push(manager.startComponent('a'));
+    });
+
+    const result = await manager.startComponent('a');
+
+    expect(result.success).toBe(true);
+    expect((await nested[0])?.code).toBe('component_already_starting');
+    expect(startCalls).toBe(1);
+  });
+
+  test('a failed signal attach puts the component back as it was', async () => {
+    const { logger, manager } = setup({ attachSignalsBeforeStartup: true });
+    await manager.registerComponent(new Plain(logger, 'a'));
+
+    manager.attachSignals = (): never => {
+      throw new Error('attach exploded');
+    };
+
+    const result = await manager.startComponent('a');
+
+    expect(result.code).toBe('signal_attach_failed');
+    expect(manager.getComponentStatus('a')?.state).toBe('registered');
+  });
+
+  test('a stop that crashes after claiming the component leaves it stalled, not stopping', async () => {
+    const { logger, manager } = setup();
+
+    const component = new Plain(logger, 'a');
+    await manager.registerComponent(component);
+    await manager.startComponent('a');
+
+    // Read once the component is already claimed as `stopping`, outside any `try`.
+    Object.defineProperty(component, 'shutdownGracefulTimeoutMS', {
+      get: (): never => {
+        throw new Error('getter exploded');
+      },
+    });
+
+    const { release } = claimReports();
+    let result;
+
+    try {
+      result = await manager.stopComponent('a');
+    } finally {
+      release();
+    }
+
+    expect(result.success).toBe(false);
+    expect(result.code).toBe('unknown_error');
+
+    // `stalled` rather than stuck in `stopping`: it can be retried or unregistered.
+    expect(manager.getComponentStatus('a')?.state).toBe('stalled');
+    expect(
+      (await manager.unregisterComponent('a', { stopIfRunning: false }))
+        .success,
+    ).toBe(true);
+  });
+
+  test('a restart stop phase does not count toward escalation', async () => {
+    let forceShutdownCalls = 0;
+    const { logger, manager } = setup({
+      shutdownOptions: { timeoutMS: 50, retryStalled: false },
+      repeatedShutdownRequestPolicy: {
+        forceAfterCount: 1,
+        withinMS: 5000,
+        armedAfterFailureMS: 60_000,
+        countManualRetriesTowardEscalation: true,
+        onForceShutdown: () => {
+          forceShutdownCalls++;
+        },
+      },
+    });
+
+    let isStuck = true;
+    const component = new Plain(logger, 'a');
+    component.stop = (): Promise<void> =>
+      isStuck ? new Promise<void>(() => {}) : Promise.resolve();
+    await manager.registerComponent(component);
+    await manager.startAllComponents();
+
+    expect((await manager.stopAllComponents()).success).toBe(false);
+    expect(manager.getShutdownEscalationStatus().isArmed).toBe(true);
+
+    isStuck = false;
+    await manager.restartAllComponents();
+
+    // A stop call here would reach `forceAfterCount` and force-kill; a restart must not.
+    expect(forceShutdownCalls).toBe(0);
   });
 
   test('a throwing reload callback resolves triggerReload with an error result', async () => {

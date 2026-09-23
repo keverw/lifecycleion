@@ -182,7 +182,11 @@ function guardEntity(
   runCallbackSafely(
     label,
     () => {
-      child = (method as (name: string) => unknown).call(target, entityName);
+      // `Reflect.apply`, not `method.call(...)`: that reads `call` off the untrusted
+      // method, so one carrying its own `call` property would run that instead.
+      child = Reflect.apply(method as (name: string) => unknown, target, [
+        entityName,
+      ]);
 
       // Deliberately not returned: `runCallbackSafely` would adopt a promise and report
       // its rejection, and the settle handler below would then report it a second time.

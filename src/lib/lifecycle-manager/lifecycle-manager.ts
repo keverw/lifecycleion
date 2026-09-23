@@ -939,11 +939,17 @@ export class LifecycleManager
   public restartAllComponents(
     options?: RestartAllOptions,
   ): Promise<RestartResult> {
+    // Filled in once the stop phase has answered, so a crash after it - in the startup
+    // phase's bookkeeping, say - still reports the shutdown that actually happened, the
+    // same result `shutdown-completed` and `getLastShutdownResult()` already carry.
+    const phases: { shutdownResult?: ShutdownResult } = {};
+
     return this.settleOperation(
       'restartAllComponents',
-      () => this.restartAllComponentsOperation(options),
+      () => this.restartAllComponentsOperation(options, phases),
       (error, reason) => ({
-        shutdownResult: this.crashedShutdownResult(error, reason),
+        shutdownResult:
+          phases.shutdownResult ?? this.crashedShutdownResult(error, reason),
         startupResult: {
           ...this.refusedStartupResult('unknown_error', reason),
           error,
@@ -2079,17 +2085,10 @@ export class LifecycleManager
     this.runningComponents.delete(name);
     this.updateStartedFlag();
 
-    // Auto-detach signals if this was the last component and option is enabled
-    if (
-      this.detachSignalsOnStop &&
-      this.runningComponents.size === 0 &&
-      this.processSignalManager
-    ) {
-      this.logger.info(
-        'Auto-detaching process signals on last component unregistered',
-      );
-      this.autoDetachSignals('last component unregistered');
-    }
+    this.detachSignalsAfterLastStop(
+      'last component unregistered',
+      'Auto-detaching process signals on last component unregistered',
+    );
 
     this.logger.entity(name).info('Component unregistered');
     this.lifecycleEvents.componentUnregistered(name, false);
@@ -2197,14 +2196,23 @@ export class LifecycleManager
       };
     }
 
-    // Attached before anything else is touched, so a failure refuses the startup with no
-    // state to release. Tracked so failure cleanup does not detach handlers that were
-    // attached earlier by some other path.
+    // The latch goes up before the attach, not after it: attaching emits
+    // `lifecycle-manager:signals-attached` synchronously, and a listener that calls
+    // `startAllComponents()` from there must find a startup already in progress rather
+    // than run a second one alongside this. Everything else this startup resets waits
+    // until the attach has succeeded, so a refusal only has the latch to release.
+    this.isStarting = true;
+
+    // Tracked so failure cleanup does not detach handlers that were attached earlier by
+    // some other path.
     const bulkSignalAttach = this.attachSignalsBeforeStartup
       ? this.autoAttachSignals('bulk startup')
       : null;
 
     if (bulkSignalAttach?.outcome === 'failed') {
+      this.isStarting = false;
+      this.autoAttachedSignalsDuringStartup = false;
+
       return {
         ...this.refusedStartupResult(
           'signal_attach_failed',
@@ -2218,8 +2226,7 @@ export class LifecycleManager
     const didAutoAttachSignalsForBulkStartup =
       bulkSignalAttach?.outcome === 'attached';
 
-    // Set starting flag and clear previous shutdown state
-    this.isStarting = true;
+    // Clear previous shutdown state
     const shutdownTokenAtBulkStart = this.shutdownToken;
     this.autoAttachedSignalsDuringStartup = false;
     this.unexpectedStopsDuringStartup.clear();
@@ -2779,7 +2786,8 @@ export class LifecycleManager
   }
 
   private async restartAllComponentsOperation(
-    options?: RestartAllOptions,
+    options: RestartAllOptions | undefined,
+    phases: { shutdownResult?: ShutdownResult },
   ): Promise<RestartResult> {
     this.logger.info('Restarting all components');
 
@@ -2806,6 +2814,8 @@ export class LifecycleManager
     const shutdownResult = stopPhase.accepted
       ? await stopPhase.promise
       : stopPhase.result;
+
+    phases.shutdownResult = shutdownResult;
 
     // Requests that land after the pass ends reach a later pass instead, and one made
     // during phase 2 aborts that startup on its own via `shutdownToken`.
@@ -3805,7 +3815,10 @@ export class LifecycleManager
     // second operator press.
     const consumedArmedUntil = this.consumeRepeatedShutdownArmedWindow();
 
-    if (isManualRetryWhileArmed) {
+    // Only a request to stay down is an operator's retry. A restart's stop phase neither
+    // advances the escalation count - it would force-kill a process it was asked to
+    // restart - nor clears it.
+    if (isManualRetryWhileArmed && isRequestToStayDown) {
       if (repeatedShutdownPolicy.countManualRetriesTowardEscalation) {
         this.handleRepeatedShutdownRequest(method, consumedArmedUntil);
       } else {
@@ -4357,7 +4370,47 @@ export class LifecycleManager
    * Internal start component method - bypasses bulk operation checks
    * Used by both startComponent() and startAllComponents()
    */
+  /**
+   * `startComponentAttempt()` with a net under it that settles the component's state.
+   *
+   * The attempt claims `starting` before work that runs the component's own code - its
+   * `startupTimeoutMS`, its handlers - and not all of that sits inside the attempt's own
+   * `try`. The public safety net would still answer with `unknown_error`, but it cannot
+   * see the component, which stayed `starting` for good: every later start answered
+   * `component_already_starting`. A start that crashes before the component is running
+   * is put back to `registered`, as a failed start is; one already running is left
+   * running, which is what the registry says.
+   */
   private async startComponentInternal(
+    name: string,
+    options?: StartComponentOptions,
+    bulkStartup?: {
+      deadline: number;
+      onTimeout: () => void;
+      hasExpired: () => boolean;
+    },
+  ): Promise<ComponentOperationResult> {
+    try {
+      return await this.startComponentAttempt(name, options, bulkStartup);
+    } catch (error) {
+      if (
+        this.componentStates.get(name) === 'starting' &&
+        !this.runningComponents.has(name)
+      ) {
+        this.componentStates.set(name, 'registered');
+      }
+
+      reportCallbackError('lifecycle-manager component start', error);
+
+      return this.crashedComponentResult(
+        name,
+        toError(error),
+        `Start failed unexpectedly: ${describeError(error)}`,
+      );
+    }
+  }
+
+  private async startComponentAttempt(
     name: string,
     options?: StartComponentOptions,
     bulkStartup?: {
@@ -4512,14 +4565,27 @@ export class LifecycleManager
       };
     }
 
-    // Attached before the component is marked `starting`, so a failure refuses the start
-    // with nothing to release. Tracked so failure cleanup only detaches what this start
-    // attempt attached.
+    // The component is claimed as `starting` before the attach, not after it: attaching
+    // emits `lifecycle-manager:signals-attached` synchronously, and a listener that
+    // starts or stops this component from there must find it already starting rather
+    // than slip in between. The state it had is put back if the attach fails, which is
+    // all a refusal has to release. Tracked so failure cleanup only detaches what this
+    // start attempt attached.
+    const stateBeforeStart = currentState;
+
+    this.componentStates.set(name, 'starting');
+
     const componentSignalAttach = this.attachSignalsBeforeStartup
       ? this.autoAttachSignals('component startup')
       : null;
 
     if (componentSignalAttach?.outcome === 'failed') {
+      if (stateBeforeStart === undefined) {
+        this.componentStates.delete(name);
+      } else {
+        this.componentStates.set(name, stateBeforeStart);
+      }
+
       return {
         success: false,
         componentName: name,
@@ -4900,6 +4966,55 @@ export class LifecycleManager
    * Implements individual component graceful -> force shutdown (global warning handled elsewhere)
    */
   private async stopComponentInternal(
+    name: string,
+    options?: StopComponentOptions,
+  ): Promise<ComponentOperationResult> {
+    const startedAt = Date.now();
+
+    try {
+      return await this.stopComponentAttempt(name, options);
+    } catch (error) {
+      // The attempt claims `stopping` / `force-stopping` before work that runs the
+      // component's own code - its timeout getters, its hooks - and not all of it sits
+      // inside a `try`. Left alone, a throw there held that state for good: every later
+      // start or stop answered `component_already_stopping`, and it could never be
+      // unregistered. Nobody can vouch for what the component did stop, which is what
+      // `stalled` means, and a stalled component can be retried or unregistered.
+      const err = toError(error);
+      const state = this.componentStates.get(name);
+
+      if (state === 'stopping' || state === 'force-stopping') {
+        const stallInfo: ComponentStallInfo = {
+          name,
+          phase: state === 'stopping' ? 'graceful' : 'force',
+          reason: 'error',
+          startedAt,
+          stalledAt: Date.now(),
+          error: err,
+        };
+
+        this.stalledComponents.set(name, stallInfo);
+        this.componentStates.set(name, 'stalled');
+        this.componentErrors.set(name, err);
+        this.runningComponents.delete(name);
+        this.updateStartedFlag();
+        this.lifecycleEvents.componentStalled(name, stallInfo, {
+          reason: 'error',
+          code: 'unknown_error',
+        });
+      }
+
+      reportCallbackError('lifecycle-manager component stop', error);
+
+      return this.crashedComponentResult(
+        name,
+        err,
+        `Stop failed unexpectedly: ${describeError(error)}`,
+      );
+    }
+  }
+
+  private async stopComponentAttempt(
     name: string,
     options?: StopComponentOptions,
   ): Promise<ComponentOperationResult> {
@@ -5291,15 +5406,7 @@ export class LifecycleManager
       this.componentUnexpectedStopHadError.delete(name);
       this.updateStartedFlag();
 
-      // Auto-detach signals if this was the last component and option is enabled
-      if (
-        this.detachSignalsOnStop &&
-        this.runningComponents.size === 0 &&
-        this.processSignalManager
-      ) {
-        this.logger.info(LIFECYCLE_MANAGER_LOG_AUTO_DETACH_LAST_COMPONENT_STOP);
-        this.autoDetachSignals('last component stop');
-      }
+      this.detachSignalsAfterLastStop();
 
       const timestamps = this.componentTimestamps.get(name) ?? {
         startedAt: null,
@@ -5586,15 +5693,7 @@ export class LifecycleManager
       this.componentUnexpectedStopHadError.delete(name);
       this.updateStartedFlag();
 
-      // Auto-detach signals if this was the last component and option is enabled
-      if (
-        this.detachSignalsOnStop &&
-        this.runningComponents.size === 0 &&
-        this.processSignalManager
-      ) {
-        this.logger.info(LIFECYCLE_MANAGER_LOG_AUTO_DETACH_LAST_COMPONENT_STOP);
-        this.autoDetachSignals('last component stop');
-      }
+      this.detachSignalsAfterLastStop();
 
       const timestamps = this.componentTimestamps.get(name) ?? {
         startedAt: null,
@@ -5855,6 +5954,11 @@ export class LifecycleManager
       .entity(name)
       .warn('Stopping component: process signals could not be attached');
 
+    // `stopComponentInternal()` answers every failure it can foresee with a result and
+    // turns anything else into a stall, so the component's state is settled either way;
+    // this result only has to describe it. No `status`: this runs inside the start's
+    // `try`, and a throw from building one would land in the start's `catch`, which
+    // would mark a component this stop may not have stopped as `registered`.
     const stopResult = await this.stopComponentInternal(name);
     const attachReason = `Could not attach process signals: ${describeError(error)}`;
 
@@ -5866,8 +5970,28 @@ export class LifecycleManager
         : `${attachReason}; stopping it again also failed: ${stopResult.reason ?? 'unknown reason'}`,
       code: 'signal_attach_failed',
       error,
-      status: this.getComponentStatus(name),
     };
+  }
+
+  /**
+   * The `detachSignalsOnStop` check every stop and unregister path runs once it has
+   * settled: detach when nothing is left running. `detachSignals()` is idempotent, so a
+   * path that reaches this twice for one stop is harmless.
+   */
+  private detachSignalsAfterLastStop(
+    trigger = 'last component stop',
+    logMessage: string = LIFECYCLE_MANAGER_LOG_AUTO_DETACH_LAST_COMPONENT_STOP,
+  ): void {
+    if (
+      !this.detachSignalsOnStop ||
+      this.runningComponents.size > 0 ||
+      !this.processSignalManager
+    ) {
+      return;
+    }
+
+    this.logger.info(logMessage);
+    this.autoDetachSignals(trigger);
   }
 
   /**
@@ -6211,16 +6335,7 @@ export class LifecycleManager
     this.updateStartedFlag();
     this.resolvePendingForceStopWaiters(name);
 
-    // Mirror the same signal-detach check that runs on a normal successful stop.
-    // detachSignals() is idempotent (guards on isAttached), so a double-call is safe.
-    if (
-      this.detachSignalsOnStop &&
-      this.runningComponents.size === 0 &&
-      this.processSignalManager
-    ) {
-      this.logger.info(LIFECYCLE_MANAGER_LOG_AUTO_DETACH_LAST_COMPONENT_STOP);
-      this.autoDetachSignals('last component stop');
-    }
+    this.detachSignalsAfterLastStop();
 
     const timestamps = this.componentTimestamps.get(name) ?? {
       startedAt: null,
@@ -6311,14 +6426,9 @@ export class LifecycleManager
     // Mirror the normal stop path: if this was the last running component, the
     // manager should release process signal handlers instead of staying attached
     // to an otherwise idle application.
-    if (
-      this.detachSignalsOnStop &&
-      !this.isStarting &&
-      this.runningComponents.size === 0 &&
-      this.processSignalManager
-    ) {
-      this.logger.info(LIFECYCLE_MANAGER_LOG_AUTO_DETACH_LAST_COMPONENT_STOP);
-      this.autoDetachSignals('last component stop');
+    // Not during bulk startup: the startup's own cleanup decides what to detach.
+    if (!this.isStarting) {
+      this.detachSignalsAfterLastStop();
     }
 
     const timestamps = this.componentTimestamps.get(name) ?? {

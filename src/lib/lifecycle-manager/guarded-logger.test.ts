@@ -206,6 +206,24 @@ describe('createGuardedLoggerService', () => {
     expect(sink.logs[0]?.entityName).toBeUndefined();
   });
 
+  test('entity() is called itself, not a call property it carries', () => {
+    const sink = new ArraySink();
+    const logger = new Logger({ sinks: [sink], callProcessExit: false });
+    const service = logger.service('svc');
+    const originalEntity = service.entity.bind(service);
+
+    // Shadows `Function.prototype.call`. Reading it off `entity` would run this, and
+    // its return value would become the child logger.
+    service.entity = Object.assign(
+      (name: string): LoggerService => originalEntity(name),
+      { call: (): LoggerService => null as unknown as LoggerService },
+    );
+
+    createGuardedLoggerService(service).entity('ent').info('entity line');
+
+    expect(sink.logs[0]?.entityName).toBe('ent');
+  });
+
   test('entity() that returns a non-logger is reported and falls back', async () => {
     const sink = new ArraySink();
     const logger = new Logger({ sinks: [sink], callProcessExit: false });
