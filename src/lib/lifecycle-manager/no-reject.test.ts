@@ -1158,6 +1158,26 @@ describe('LifecycleManager - public methods never reject', () => {
     expect(result.code).toBe('partial_error');
   });
 
+  test('a component without a signal handler answers no_handler whatever its timeout getter does', async () => {
+    const { logger, manager } = setup();
+    const component = new Plain(logger, 'a');
+    await manager.registerComponent(component);
+    await manager.startAllComponents();
+
+    Object.defineProperty(component, 'signalTimeoutMS', {
+      get: (): never => {
+        throw new Error('getter exploded');
+      },
+    });
+
+    const result = await manager.triggerReload();
+
+    expect(result.results).toEqual([
+      expect.objectContaining({ name: 'a', code: 'no_handler' }),
+    ]);
+    expect(result.code).toBe('ok');
+  });
+
   test('a shutdown started from an escalation-expired listener seeds its own cycle', async () => {
     const { logger, manager } = setup({
       shutdownOptions: { timeoutMS: 50, retryStalled: false },

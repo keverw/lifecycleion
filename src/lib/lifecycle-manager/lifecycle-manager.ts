@@ -4506,11 +4506,8 @@ export class LifecycleManager
   }
 
   /**
-   * Retry shutdown for a stalled component.
-   * Attempts the force phase directly to avoid re-running a failing stop().
-   */
-  /**
-   * A stalled component's force-phase retry, under the same net as any other stop: the
+   * Retry shutdown for a stalled component: the force phase directly, to avoid re-running
+   * a failing `stop()`. Under the same net as any other stop: the
    * force phase claims `force-stopping` before reading the component's own
    * `shutdownForceTimeoutMS`, and a throw there used to take the whole shutdown pass
    * down with it and leave the component `force-stopping` for good.
@@ -8030,11 +8027,16 @@ export class LifecycleManager
       // `*-started` event for it, rather than ending the broadcast for every component
       // after it.
       let handler: (() => unknown) | undefined;
-      let timeoutMS: number;
+      let timeoutMS = 0;
 
       try {
         handler = descriptor.pickHandler(component);
-        timeoutMS = component.signalTimeoutMS;
+
+        // Only when there is a handler to time: a component without one answers
+        // `no_handler`, whatever its timeout getter would have done.
+        if (handler) {
+          timeoutMS = component.signalTimeoutMS;
+        }
       } catch (error) {
         const err = toError(error);
 
