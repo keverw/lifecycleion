@@ -5,6 +5,7 @@ import { DOUBLE_EOL } from './constants';
 import { installGlobalEventTarget } from './global-event-target';
 import { reportToHost } from './internal/report-to-host';
 import { reportToConsole } from './internal/report-to-console';
+import { adoptPromise } from './internal/adopt-promise';
 
 // Node.js has a global `ErrorEvent` constructor (Node 25+) but does not make `globalThis`
 // an EventTarget, so the global event methods must be supplied before anything can be
@@ -192,15 +193,11 @@ export function runCallbackSafely(
       // `EventEmitter`, `ProcessSignalManager`, `LRUCache.onChange`,
       // `PromiseProtectedResolver`.
       //
-      // And through `Promise.prototype.then` itself rather than `.catch`: `Promise.resolve`
-      // hands a native promise back unchanged, own properties included, and `.catch`
-      // calls `this.then` - so a promise carrying its own no-op `then` swallowed its
+      // And through `adoptPromise()` rather than `.catch`: `Promise.resolve` hands a
+      // native promise back unchanged, own properties included, and `.catch` calls
+      // `this.then` - so a promise carrying its own no-op `then` swallowed its
       // rejection, which then went unhandled.
-      // eslint-disable-next-line @typescript-eslint/unbound-method
-      void Reflect.apply(Promise.prototype.then, Promise.resolve(result), [
-        undefined,
-        safeOnError,
-      ]);
+      void adoptPromise(result).then(undefined, safeOnError);
     }
   } catch (error) {
     safeOnError(error);

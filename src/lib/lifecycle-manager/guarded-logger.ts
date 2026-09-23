@@ -1,5 +1,6 @@
 import type { LoggerService } from '../logger/logger-service';
 import { isPromise } from '../is-promise';
+import { adoptPromise } from '../internal/adopt-promise';
 import {
   reportCallbackError,
   runCallbackSafely,
@@ -301,14 +302,12 @@ function guardEntity(
   // that read runs code the logger owns: a `then` getter that throws would otherwise
   // escape here, past every other guard.
   //
-  // `Promise.prototype.then` is applied directly rather than called as `.then`:
-  // `Promise.resolve()` hands a native promise back as it is, own `then` property
-  // included, and a no-op one there would swallow the rejection, leaving it unhandled.
+  // Through `adoptPromise()` rather than `.then`: `Promise.resolve()` hands a native
+  // promise back as it is, own `then` property included, and a no-op one there would
+  // swallow the rejection, leaving it unhandled.
   try {
     if (isPromise(child)) {
-      // The intrinsic, applied to the adopted promise - the point of the call.
-      // eslint-disable-next-line @typescript-eslint/unbound-method
-      void Reflect.apply(Promise.prototype.then, Promise.resolve(child), [
+      void adoptPromise(child).then(
         () => {
           reportCallbackError(
             label,
@@ -318,7 +317,7 @@ function guardEntity(
         (error: unknown) => {
           reportCallbackError(label, error);
         },
-      ]);
+      );
 
       return parent;
     }

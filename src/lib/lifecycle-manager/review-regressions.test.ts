@@ -1658,4 +1658,170 @@ describe('LifecycleManager - review regressions', () => {
 
     expect(events).toEqual(['requested', 'returned']);
   });
+
+  test('an auto-start still pending when its bulk startup rolls back is stopped too', async () => {
+    const { logger, manager } = setup();
+    const c = new Plain(logger, 'c');
+    c.start = (): Promise<void> =>
+      sleep(5).then(() => {
+        throw new Error('c failed');
+      });
+    const late = new Plain(logger, 'late', ['a']);
+    late.start = (): Promise<void> => sleep(40);
+    let lateStopCalls = 0;
+    late.stop = (): Promise<void> => {
+      lateStopCalls++;
+      return Promise.resolve();
+    };
+    await manager.registerComponent(new Plain(logger, 'a'));
+    await manager.registerComponent(c);
+
+    const registrations: Promise<unknown>[] = [];
+    manager.once('component:started', () => {
+      registrations.push(manager.registerComponent(late, { autoStart: true }));
+    });
+
+    const startup = await manager.startAllComponents();
+    await Promise.all(registrations);
+
+    expect(startup.success).toBe(false);
+    expect(manager.getRunningComponentNames()).toEqual([]);
+    expect(lateStopCalls).toBe(1);
+  });
+
+  test('a start() promise with its own no-op then still fails the start promptly', async () => {
+    const { logger, manager } = setup();
+    const a = new Plain(logger, 'a');
+    Object.assign(a, { startupTimeoutMS: 2000 });
+    a.start = (): Promise<void> => {
+      const promise: object = Promise.reject(new Error('start failed'));
+      Object.defineProperty(promise, 'then', { value: () => undefined });
+
+      return promise as Promise<void>;
+    };
+    await manager.registerComponent(a);
+
+    const rejections: unknown[] = [];
+    const onUnhandled = (reason: unknown): void => {
+      rejections.push(reason);
+    };
+    process.on('unhandledRejection', onUnhandled);
+
+    const startedAt = Date.now();
+    let result;
+
+    try {
+      result = await manager.startComponent('a');
+      await sleep(10);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
+
+    expect(result.success).toBe(false);
+    expect(result.error?.message).toBe('start failed');
+    expect(Date.now() - startedAt).toBeLessThan(500);
+    expect(rejections).toEqual([]);
+  });
+
+  test('an async getValue handler answers error and its rejection is handled', async () => {
+    const { logger, manager } = setup();
+    const a = new Plain(logger, 'a');
+    (a as unknown as { getValue: () => Promise<never> }).getValue =
+      (): Promise<never> => Promise.reject(new Error('x'));
+    await manager.registerComponent(a);
+    await manager.startComponent('a');
+
+    const rejections: unknown[] = [];
+    const onUnhandled = (reason: unknown): void => {
+      rejections.push(reason);
+    };
+    process.on('unhandledRejection', onUnhandled);
+
+    let result;
+
+    try {
+      result = manager.getValue('a', 'k');
+      await sleep(10);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
+
+    expect(result.code).toBe('error');
+    expect(rejections).toEqual([]);
+  });
+
+  test('a throwing options getter still records a stay-down request during a restart', async () => {
+    const { logger, manager } = setup();
+    const stopGate = deferred();
+    const a = new Plain(logger, 'a');
+    let startCalls = 0;
+    a.start = (): Promise<void> => {
+      startCalls++;
+      return Promise.resolve();
+    };
+    a.stop = (): Promise<void> => stopGate.promise;
+    await manager.registerComponent(a);
+    await manager.startAllComponents();
+
+    const restart = manager.restartAllComponents();
+    await sleep(5);
+
+    const stop = await manager.stopAllComponents({
+      get timeoutMS(): number {
+        throw new Error('options exploded');
+      },
+    });
+    stopGate.resolve();
+    const result = await restart;
+
+    expect(stop.code).toBe('already_in_progress');
+    expect(result.startupSkippedByShutdownRequest).toBe(true);
+    expect(startCalls).toBe(1);
+  });
+
+  test('an unregister refused for a bulk operation does not call hasComponent()', async () => {
+    const { logger, manager } = setup();
+    const stopGate = deferred();
+    const a = new Plain(logger, 'a');
+    a.stop = (): Promise<void> => stopGate.promise;
+    await manager.registerComponent(a);
+    await manager.startAllComponents();
+
+    const pass = manager.stopAllComponents();
+    (manager as unknown as { hasComponent: () => never }).hasComponent =
+      (): never => {
+        throw new Error('hasComponent exploded');
+      };
+
+    const { release } = claimReports();
+
+    try {
+      const unregister = await manager.unregisterComponent('a');
+      expect(unregister.code).toBe('bulk_operation_in_progress');
+      expect(unregister.wasRegistered).toBe(true);
+    } finally {
+      stopGate.resolve();
+      await pass;
+      release();
+    }
+  });
+
+  test('onMessage is read once and called as read', async () => {
+    const { logger, manager } = setup();
+    const a = new Plain(logger, 'a');
+    let reads = 0;
+    Object.defineProperty(a, 'onMessage', {
+      get: (): (() => string) | undefined => {
+        reads++;
+        return reads === 1 ? (): string => 'pong' : undefined;
+      },
+    });
+    await manager.registerComponent(a);
+    await manager.startComponent('a');
+
+    const result = await manager.sendMessageToComponent('a', 'ping');
+
+    expect(result.code).toBe('sent');
+    expect(result.data).toBe('pong');
+  });
 });

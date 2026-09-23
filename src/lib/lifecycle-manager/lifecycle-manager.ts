@@ -85,6 +85,7 @@ import {
   type ShutdownSignal,
 } from '../process-signal-manager';
 import { isPromise } from '../is-promise';
+import { adoptPromise } from '../internal/adopt-promise';
 import {
   reportCallbackError,
   runCallbackSafely,
@@ -272,7 +273,12 @@ export class LifecycleManager
   private autoAttachedSignalsDuringStartup = false;
   // The running bulk startup's started list, or `null` outside one. See
   // `startAllComponentsOperation()`.
-  private activeBulkStartupStarted: string[] | null = null;
+  private activeBulkStartup: {
+    readonly started: string[];
+    // Set as its rollback begins: the rollback works from the list as it stood then,
+    // so an auto-start that lands afterwards has to stop itself.
+    isRollingBack: boolean;
+  } | null = null;
   private isStarted = false;
   // Unique token used to detect shutdowns that happened during async start().
   private shutdownToken = ulid();
@@ -1549,8 +1555,30 @@ export class LifecycleManager
       }
     }
 
+    // Read once, guarded, and that value is what gets called - as `getValueInternal()`
+    // reads its handler. Unguarded, a getter that threw escaped to the generic safety
+    // net, and one that answered differently the second time failed as a handler error.
+    let messageHandler: unknown;
+
+    try {
+      messageHandler = Reflect.get(component, 'onMessage');
+    } catch (error) {
+      reportCallbackError('lifecycle-manager sendMessageToComponent', error);
+
+      return {
+        sent: false,
+        componentFound: true,
+        componentRunning: isRunning,
+        handlerImplemented: false,
+        data: undefined,
+        error: toError(error),
+        timedOut: false,
+        code: 'error',
+      };
+    }
+
     // Check if handler implemented
-    if (!component.onMessage) {
+    if (typeof messageHandler !== 'function') {
       return {
         sent: false,
         componentFound: true,
@@ -1575,7 +1603,7 @@ export class LifecycleManager
     try {
       let result: unknown;
       try {
-        result = component.onMessage(payload, from);
+        result = Reflect.apply(messageHandler, component, [payload, from]);
       } catch (error) {
         const err = toError(error);
 
@@ -1606,9 +1634,8 @@ export class LifecycleManager
         };
       }
 
-      const handlerPromise = isPromise(result)
-        ? result
-        : Promise.resolve(result);
+      // Adopted, not raced as it is: see `adoptPromise()`.
+      const handlerPromise = adoptPromise(result);
 
       const outcome =
         toTimerDelayMS(timeoutMS) > 0
@@ -1961,10 +1988,32 @@ export class LifecycleManager
 
     // Get value
     try {
-      const componentResult = Reflect.apply(getValueHandler, component, [
+      const rawResult: unknown = Reflect.apply(getValueHandler, component, [
         key,
         from,
-      ]) as ReturnType<NonNullable<BaseComponent['getValue']>>;
+      ]);
+
+      // `getValue()` answers synchronously, so a handler that returns a promise - an
+      // `async getValue` - is a contract break, not a value: read as one it came back
+      // `not_found`, and a rejection it carried went unhandled. Its settlement is
+      // observed, so nothing floats, and the call fails with `code: 'error'`.
+      if (isPromise(rawResult)) {
+        void adoptPromise(rawResult).catch((error: unknown) => {
+          this.logger
+            .entity(componentName)
+            .warn('Asynchronous getValue handler rejected: {{error.message}}', {
+              params: { error: toError(error), key, from },
+            });
+        });
+
+        throw new TypeError(
+          'getValue() must answer synchronously; the handler returned a promise',
+        );
+      }
+
+      const componentResult = rawResult as ReturnType<
+        NonNullable<BaseComponent['getValue']>
+      >;
       const wasFound = componentResult.found;
       const value = componentResult.value;
 
@@ -2164,7 +2213,7 @@ export class LifecycleManager
       return this.refuseUnregisterForBulkOperation(
         name,
         false,
-        this.hasComponent(name),
+        this.isNameRegistered(name),
       );
     }
 
@@ -2665,14 +2714,16 @@ export class LifecycleManager
     // which rolls back too - neither stops the same component twice nor skips the ones
     // it had not reached.
     const rolledBackNames = new Set<string>();
+    const bulkStartup = { started: startedComponents, isRollingBack: false };
     const rollBackOnce = async (names: string[]): Promise<void> => {
+      bulkStartup.isRollingBack = true;
       await this.rollbackStartup(names, rolledBackNames);
     };
 
     const operation = async (): Promise<StartupResult> => {
       // Exposed while this startup runs, so an `autoStart` registration made from one of
       // its listeners joins it - and its rollback - rather than escaping both.
-      this.activeBulkStartupStarted = startedComponents;
+      this.activeBulkStartup = bulkStartup;
 
       // The answer for a startup a shutdown cut short, wherever it notices: what is still
       // running of what it started, and what it had already given up on.
@@ -3208,7 +3259,7 @@ export class LifecycleManager
         }
 
         this.autoAttachedSignalsDuringStartup = false;
-        this.activeBulkStartupStarted = null;
+        this.activeBulkStartup = null;
         this.unexpectedStopsDuringStartup.clear();
       }
     };
@@ -3520,7 +3571,8 @@ export class LifecycleManager
         message: 'Health check timed out',
       };
 
-      const healthCheckPromise = component.healthCheck();
+      // Adopted, not raced as it is: see `adoptPromise()`.
+      const healthCheckPromise = adoptPromise(component.healthCheck());
       // Match startup and signal timeout semantics: zero means no timer. Racing against
       // `setTimeout(..., 0)` made the outcome depend on whether an otherwise healthy
       // check happened to settle before or after its first asynchronous turn.
@@ -4062,22 +4114,44 @@ export class LifecycleManager
           this.logger
             .entity(componentName)
             .info('AutoStart: starting component (during bulk startup)');
+
+          // Taken before the start's `await`, not after: the startup this start belongs
+          // to may roll back while it is still in flight, and the one active by then -
+          // if any - is not it.
+          const bulkStartup = this.activeBulkStartup;
+
           startResult = await this.startComponentInternal(componentName, {
             allowDuringBulkStartup: true,
           });
           didAutoStartAttempt = true;
 
-          // Part of that startup now: a later failure rolls it back with the rest -
+          // Part of that startup: a later failure rolls it back with the rest -
           // dependents first, since it was started after them - rather than leaving it
-          // running on top of dependencies the rollback stopped.
-          const bulkStarted = this.activeBulkStartupStarted;
+          // running on top of dependencies the rollback stopped. One that lands after
+          // the rollback began is past it, so it stops itself and fails the auto-start.
+          if (startResult.success && bulkStartup !== null) {
+            if (bulkStartup.isRollingBack) {
+              this.logger
+                .entity(componentName)
+                .warn(
+                  'AutoStart: the bulk startup rolled back, stopping component',
+                );
 
-          if (
-            startResult.success &&
-            bulkStarted !== null &&
-            !bulkStarted.includes(componentName)
-          ) {
-            bulkStarted.push(componentName);
+              const stopResult =
+                await this.stopComponentInternal(componentName);
+
+              startResult = {
+                success: false,
+                componentName,
+                reason: stopResult.success
+                  ? 'The bulk startup this auto-start joined rolled back; component stopped again'
+                  : `The bulk startup this auto-start joined rolled back; stopping it again also failed: ${stopResult.reason ?? 'unknown reason'}`,
+                code: 'startup_in_progress',
+                status: this.getComponentStatus(componentName),
+              };
+            } else if (!bulkStartup.started.includes(componentName)) {
+              bulkStartup.started.push(componentName);
+            }
           }
         } else if (this.isStarted) {
           // Manager is already running - start the component directly
@@ -4289,6 +4363,20 @@ export class LifecycleManager
     options: StopAllOptions | undefined,
     isRequestToStayDown: boolean,
   ): ShutdownPassAcceptance {
+    // Reject if already shutting down - before reading `options`: they are the caller's,
+    // and a getter that threw there skipped this refusal, so a request to stay down
+    // was never recorded on the running pass and a restart started everything again.
+    if (this.isShuttingDown) {
+      this.logger.warn(
+        'Cannot stop all components: shutdown already in progress',
+        {
+          params: { method },
+        },
+      );
+
+      return this.refuseShutdownPass(isRequestToStayDown);
+    }
+
     const passOptions: ShutdownPassOptions = {
       // The one place a pass's options meet the manager's `shutdownOptions` defaults:
       // callers pass only their own overrides.
@@ -4300,18 +4388,6 @@ export class LifecycleManager
       haltOnStall:
         options?.haltOnStall ?? this.shutdownOptions?.haltOnStall ?? true,
     };
-
-    // Reject if already shutting down
-    if (this.isShuttingDown) {
-      this.logger.warn(
-        'Cannot stop all components: shutdown already in progress',
-        {
-          params: { method },
-        },
-      );
-
-      return this.refuseShutdownPass(isRequestToStayDown);
-    }
 
     this.normalizeRepeatedShutdownRequestStateArmedStatus();
 
@@ -5059,7 +5135,7 @@ export class LifecycleManager
     source: 'graceful' | 'force',
     failureMessage: string,
   ): void {
-    Promise.resolve(promise)
+    adoptPromise(promise)
       .then(
         () => this.handleLateStopResolution(name, stopAttemptToken, source),
         (error: unknown) => {
@@ -5076,6 +5152,26 @@ export class LifecycleManager
       .catch(() => {
         // Nothing left to report with.
       });
+  }
+
+  /**
+   * Reject a stop's timeout one macrotask after its timeout hook ran, not at once.
+   *
+   * A hook that releases what `stop()` or `onShutdownForce()` awaits settles it
+   * synchronously, but the settlement reaches the race through several promise hops -
+   * the component's own `async` function, then `adoptPromise()` - while a rejection made
+   * in the same turn gets there in one. The stop finished, yet the timeout won, and the
+   * component was stalled or sent on to a force phase it no longer needed. Past a
+   * macrotask every such hop has run, so a released stop wins the race as the success it
+   * is, however many hops it took.
+   */
+  private rejectAfterTimeoutHook(
+    reject: (error: Error) => void,
+    error: Error,
+  ): void {
+    setTimeout(() => {
+      reject(error);
+    }, 0);
   }
 
   /**
@@ -5129,7 +5225,7 @@ export class LifecycleManager
     message: string,
     params: Record<string, unknown> = {},
   ): void {
-    Promise.resolve(promise)
+    adoptPromise(promise)
       .catch((error: unknown) => {
         this.logger.entity(name).debug(message, {
           params: { error: toError(error), ...params },
@@ -5582,7 +5678,9 @@ export class LifecycleManager
       );
 
       // Race against timeout
-      const startPromise = component.start();
+      // Adopted, not raced as it is: a native promise carrying its own no-op `then`
+      // never settled the race, and its rejection went unhandled. See `adoptPromise()`.
+      const startPromise = adoptPromise(component.start());
 
       if (toTimerDelayMS(timeoutMS) > 0) {
         const timeoutPromise = new Promise<never>((_, reject) => {
@@ -6208,7 +6306,7 @@ export class LifecycleManager
       for (const { name, component } of warningTargets) {
         this.lifecycleEvents.componentShutdownWarning(name);
         Promise.resolve()
-          .then(() => component.onShutdownWarning?.())
+          .then(() => adoptPromise(component.onShutdownWarning?.()))
           .then(() => {
             this.lifecycleEvents.componentShutdownWarningCompleted(name);
           })
@@ -6249,7 +6347,7 @@ export class LifecycleManager
       this.lifecycleEvents.componentShutdownWarning(name);
 
       const warningPromise = Promise.resolve().then(() =>
-        component.onShutdownWarning?.(),
+        adoptPromise(component.onShutdownWarning?.()),
       );
 
       warningPromises.push(
@@ -6353,7 +6451,8 @@ export class LifecycleManager
 
     try {
       // Race against graceful timeout
-      const stopPromise = component.stop();
+      // Adopted, for the reason `startComponentAttempt()` adopts `start()`'s.
+      const stopPromise = adoptPromise(component.stop());
 
       if (toTimerDelayMS(timeoutMS) > 0) {
         const timeoutPromise = new Promise<never>((_, reject) => {
@@ -6374,7 +6473,8 @@ export class LifecycleManager
               'graceful',
               'Component stop failed after timeout',
             );
-            reject(
+            this.rejectAfterTimeoutHook(
+              reject,
               new ComponentStopTimeoutError({
                 componentName: name,
                 timeoutMS,
@@ -6582,15 +6682,14 @@ export class LifecycleManager
 
     try {
       // The value read and checked above, not a second read.
-      const forcePromise: unknown = Reflect.apply(
-        onShutdownForce as () => unknown,
-        component,
-        [],
+      // Adopted, for the reason `startComponentAttempt()` adopts `start()`'s.
+      const forcePromise = adoptPromise(
+        Reflect.apply(onShutdownForce as () => unknown, component, []),
       );
 
       // A late graceful completion can win the race and abandon this attempt. Observe
       // its rejection immediately, including when the force timeout is disabled.
-      void Promise.resolve(forcePromise).catch(() => {});
+      void forcePromise.catch(() => {});
 
       if (toTimerDelayMS(timeoutMS) > 0) {
         const timeoutPromise = new Promise<never>((_, reject) => {
@@ -6613,7 +6712,7 @@ export class LifecycleManager
               'force',
               'Force shutdown failed after timeout',
             );
-            reject(forceTimeoutError);
+            this.rejectAfterTimeoutHook(reject, forceTimeoutError);
           }, toTimerDelayMS(timeoutMS));
         });
 
@@ -6633,9 +6732,7 @@ export class LifecycleManager
       ) {
         // Graceful completion won. Report abandoned cleanup failures without
         // changing this or a subsequent run's state.
-        void Promise.resolve(forcePromise).catch(
-          reportFailureAfterGracefulStop,
-        );
+        void forcePromise.catch(reportFailureAfterGracefulStop);
         return {
           success: true,
           componentName: name,
@@ -7067,7 +7164,7 @@ export class LifecycleManager
       .entity(name)
       .warn('Startup timed out, stopping component if startup completes later');
 
-    Promise.resolve(startPromise)
+    adoptPromise(startPromise)
       .then(
         async () => {
           // An abort hook can settle start() inside the timeout callback. Let the
@@ -8976,9 +9073,8 @@ export class LifecycleManager
 
       try {
         const handlerResult = handler();
-        const handlerPromise: Promise<unknown> = isPromise(handlerResult)
-          ? handlerResult
-          : Promise.resolve(handlerResult);
+        // Adopted, not raced as it is: see `adoptPromise()`.
+        const handlerPromise = adoptPromise(handlerResult);
 
         const outcome: unknown =
           toTimerDelayMS(timeoutMS) > 0
