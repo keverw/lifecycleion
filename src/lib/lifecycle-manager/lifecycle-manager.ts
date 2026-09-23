@@ -1546,10 +1546,12 @@ export class LifecycleManager
       };
     }
 
+    // Read before the sent event, for the reason `getValueInternal()` reads its options
+    // up front: a throwing getter must not leave `message-sent` without its pair.
+    const timeoutMS = options?.timeout ?? this.messageTimeoutMS;
+
     // Send message
     this.lifecycleEvents.componentMessageSent({ componentName, from, payload });
-
-    const timeoutMS = options?.timeout ?? this.messageTimeoutMS;
     let timeoutHandle: NodeJS.Timeout | undefined;
     const timeoutResult = { timedOut: true } as const;
 
@@ -1690,13 +1692,13 @@ export class LifecycleManager
     // `broadcast-completed` after it. From the loop on, every step is per component.
     let targetComponents = this.components;
 
-    const hasExplicitTargets =
-      options?.componentNames !== undefined &&
-      options.componentNames.length > 0;
+    // Read once: a getter behind it would otherwise run - and could answer differently -
+    // on each read.
+    const names = options?.componentNames;
+    const hasExplicitTargets = names !== undefined && names.length > 0;
 
     // Filter by names if specified
-    if (hasExplicitTargets && options.componentNames) {
-      const names = options.componentNames;
+    if (hasExplicitTargets) {
       targetComponents = targetComponents.filter((c) =>
         names.includes(this.nameOf(c)),
       );
@@ -1813,6 +1815,11 @@ export class LifecycleManager
     from: string | null,
     options?: GetValueOptions,
   ): ValueResult<T> {
+    // Read before the requested event, so an options getter that throws fails the call
+    // before anything was announced rather than leaving `value-requested` unpaired.
+    const allowStopped = options?.includeStopped === true;
+    const allowStalled = options?.includeStalled === true;
+
     this.lifecycleEvents.componentValueRequested(componentName, key, from);
 
     // Find component
@@ -1851,8 +1858,6 @@ export class LifecycleManager
     const isRunning = !isUnavailable && this.isComponentRunning(componentName);
     const isStalled =
       !isUnavailable && this.stalledComponents.has(componentName);
-    const allowStopped = options?.includeStopped === true;
-    const allowStalled = options?.includeStalled === true;
     const isStopped = !isRunning && !isStalled;
 
     if (
@@ -2326,19 +2331,16 @@ export class LifecycleManager
     // overwrites the entry when it commits.
     this.updateStartedFlag();
 
-    for (const [hookName, hook] of [
-      [
-        '_clearUnexpectedStopHandler',
-        (): void => component._clearUnexpectedStopHandler(),
-      ],
-      ['_markUnregistered', (): void => component._markUnregistered()],
-    ] as const) {
-      try {
-        hook();
-      } catch (error) {
-        reportCallbackError(`lifecycle-manager unregister ${hookName}`, error);
-      }
+    try {
+      component._clearUnexpectedStopHandler();
+    } catch (error) {
+      reportCallbackError(
+        'lifecycle-manager unregister _clearUnexpectedStopHandler',
+        error,
+      );
     }
+
+    this.markComponentUnregistered(component, 'lifecycle-manager unregister');
 
     this.detachSignalsAfterLastStop(
       'last component unregistered',
@@ -3005,6 +3007,29 @@ export class LifecycleManager
           };
         }
 
+        // The loop checks for a shutdown after each start, but the events it emits for
+        // the last component - `start-failed-optional`, `start-skipped` - come after that
+        // check, and a listener there can start one. Reporting success and emitting
+        // `started` would then describe a startup that a shutdown is already undoing.
+        if (
+          this.isShuttingDown ||
+          this.shutdownToken !== shutdownTokenAtBulkStart
+        ) {
+          this.logger.warn('Shutdown signal received during startup, aborting');
+
+          return {
+            success: false,
+            startedComponents: startedComponents.filter((name) =>
+              this.isComponentRunning(name),
+            ),
+            failedOptionalComponents,
+            skippedDueToDependency: Array.from(skippedDueToDependency),
+            reason: 'Shutdown triggered during startup',
+            code: 'shutdown_in_progress',
+            durationMS: Date.now() - startTime,
+          };
+        }
+
         this.updateStartedFlag();
         const skippedComponentsArray = [
           ...Array.from(skippedDueToDependency),
@@ -3172,9 +3197,28 @@ export class LifecycleManager
 
       return {
         shutdownResult,
+        startupResult: {
+          ...this.refusedStartupResult(
+            'unknown_error',
+            'Startup skipped: the restart shutdown phase failed unexpectedly',
+          ),
+          error: shutdownResult.error,
+        },
+        success: false,
+      };
+    }
+
+    // A stop phase that timed out left components still stopping, and those still
+    // count as running: startup would find everything "already running" and report
+    // success, listing components whose `start()` never ran.
+    if (shutdownResult.timedOut === true) {
+      this.logger.warn('Restart abandoned: the shutdown phase timed out');
+
+      return {
+        shutdownResult,
         startupResult: this.refusedStartupResult(
-          'unknown_error',
-          'Startup skipped: the restart shutdown phase failed unexpectedly',
+          'partial_state',
+          'Startup skipped: the restart shutdown phase timed out with components still stopping',
         ),
         success: false,
       };
@@ -3875,32 +3919,11 @@ export class LifecycleManager
 
         // The component's side too: a hook that marked it registered before throwing
         // would otherwise leave it believing it is, and its next registration refused as
-        // `duplicate_instance`. Its own `_markUnregistered()` first, so an override that
-        // extends it still runs; if that throws as well, the two fields it would have
-        // cleared are cleared directly.
-        try {
-          component._markUnregistered();
-        } catch (unmarkError) {
-          reportCallbackError(
-            'lifecycle-manager registration rollback _markUnregistered',
-            unmarkError,
-          );
-
-          try {
-            const fields = component as unknown as {
-              _isRegistered: boolean;
-              lifecycle?: ComponentLifecycleRef;
-            };
-
-            fields._isRegistered = false;
-            fields.lifecycle = undefined;
-          } catch (clearError) {
-            reportCallbackError(
-              'lifecycle-manager registration rollback',
-              clearError,
-            );
-          }
-        }
+        // `duplicate_instance`.
+        this.markComponentUnregistered(
+          component,
+          'lifecycle-manager registration rollback',
+        );
 
         throw error;
       }
@@ -3938,14 +3961,10 @@ export class LifecycleManager
       let startResult: ComponentOperationResult | undefined;
 
       if (shouldAutoStart) {
-        if (this.isStarted) {
-          // Manager is already running - start the component directly
-          this.logger
-            .entity(componentName)
-            .info('AutoStart: starting component (manager is running)');
-          startResult = await this.startComponentInternal(componentName);
-          didAutoStartAttempt = true;
-        } else if (this.isStarting) {
+        // Bulk startup first: `isStarted` turns true as soon as its first component is
+        // running, and a start without `allowDuringBulkStartup` is refused with
+        // `startup_in_progress` for the rest of it.
+        if (this.isStarting) {
           // Manager is currently starting - allow during bulk startup
           this.logger
             .entity(componentName)
@@ -3953,6 +3972,13 @@ export class LifecycleManager
           startResult = await this.startComponentInternal(componentName, {
             allowDuringBulkStartup: true,
           });
+          didAutoStartAttempt = true;
+        } else if (this.isStarted) {
+          // Manager is already running - start the component directly
+          this.logger
+            .entity(componentName)
+            .info('AutoStart: starting component (manager is running)');
+          startResult = await this.startComponentInternal(componentName);
           didAutoStartAttempt = true;
         } else {
           // Manager is not running - attempt to start just this component
@@ -4584,6 +4610,22 @@ export class LifecycleManager
         },
       );
 
+      // Every way the pass fell short, not just the first: a `haltOnStall` break used
+      // to name only the components it never reached, leaving out the one that stalled.
+      const failureReasonParts = [
+        ...(stalledComponents.length > 0
+          ? [`Stalled: ${Array.from(finalStalledNames).join(', ')}`]
+          : []),
+        ...(stoppingComponents.size > 0
+          ? [
+              `Shutdown is still in progress for: ${Array.from(stoppingComponents).join(', ')}`,
+            ]
+          : []),
+        ...(stillRunningComponents.length > 0
+          ? [`Failed to stop: ${stillRunningComponents.join(', ')}`]
+          : []),
+      ];
+
       const result: ShutdownResult = {
         success: isSuccess,
         stoppedComponents: settledStoppedComponents,
@@ -4595,15 +4637,9 @@ export class LifecycleManager
               code: 'shutdown_timeout' as const,
               reason: `Shutdown timeout exceeded (${effectiveTimeout}ms)`,
             }
-          : stoppingComponents.size > 0
-            ? {
-                reason: `Shutdown is still in progress for: ${Array.from(stoppingComponents).join(', ')}`,
-              }
-            : stillRunningComponents.length > 0
-              ? {
-                  reason: `Failed to stop: ${stillRunningComponents.join(', ')}`,
-                }
-              : {}),
+          : failureReasonParts.length > 0
+            ? { reason: failureReasonParts.join('; ') }
+            : {}),
       };
 
       // Store for getLastShutdownResult() - useful for debugging and metrics
@@ -5297,6 +5333,13 @@ export class LifecycleManager
     // reads it later would take an old failure for a new one.
     this.componentUnexpectedStopHadError.delete(name);
     this.logger.entity(name).info('Starting component');
+
+    // Taken before the starting event, not after: a listener there that calls
+    // `stopAllComponents()` starts a pass this start must notice, so the component is
+    // sent through the stop pipeline once `start()` settles rather than coming up after
+    // the shutdown.
+    const shutdownTokenAtStart = this.shutdownToken;
+
     this.lifecycleEvents.componentStarting(name);
 
     const componentTimeout = toTimerDelayMS(configuredStartupTimeoutMS);
@@ -5312,7 +5355,6 @@ export class LifecycleManager
       : configuredStartupTimeoutMS;
     const startAttemptToken = ulid();
     this.componentStartAttemptTokens.set(name, startAttemptToken);
-    const shutdownTokenAtStart = this.shutdownToken;
 
     let timeoutHandle: NodeJS.Timeout | undefined;
 
@@ -6175,12 +6217,14 @@ export class LifecycleManager
     claim: symbol,
   ): Promise<ComponentOperationResult> {
     // Read before the claim, for the reason `shutdownComponentGraceful()` reads its
-    // timeout hook up front.
-    const onShutdownForceAborted: unknown = Reflect.get(
-      component,
-      'onShutdownForceAborted',
-    );
-    const timeoutMS = component.shutdownForceTimeoutMS;
+    // timeout hook up front - and only for a component that has a force handler. The
+    // rest never use them, and a getter that threw there replaced the real graceful
+    // error with its own and skipped the `shutdown-force` event.
+    const hasForceHandler = Boolean(Reflect.get(component, 'onShutdownForce'));
+    const onShutdownForceAborted: unknown = hasForceHandler
+      ? Reflect.get(component, 'onShutdownForceAborted')
+      : undefined;
+    const timeoutMS = hasForceHandler ? component.shutdownForceTimeoutMS : 0;
 
     this.claimComponent(name, 'force-stopping', claim);
     this.logger.entity(name).info('Force shutdown started', {
@@ -6199,7 +6243,7 @@ export class LifecycleManager
     });
 
     // If component doesn't implement onShutdownForce, mark as stalled immediately
-    if (!component.onShutdownForce) {
+    if (!hasForceHandler) {
       const stallInfo: ComponentStallInfo = {
         name,
         phase: 'graceful', // Failed in graceful phase
@@ -6259,7 +6303,8 @@ export class LifecycleManager
     };
 
     try {
-      const forcePromise = component.onShutdownForce();
+      // Present: checked above, through `hasForceHandler`.
+      const forcePromise = component.onShutdownForce?.();
 
       // A late graceful completion can win the race and abandon this attempt. Observe
       // its rejection immediately, including when the force timeout is disabled.
@@ -6796,14 +6841,10 @@ export class LifecycleManager
           this.componentStates.set(name, timeoutState);
           this.componentErrors.set(name, timeoutError);
         },
-        (startError: unknown) => {
+        () => {
           // A rejection from `start()` itself needs nothing further - the component is
-          // already recorded as timed out.
-          this.logger
-            .entity(name)
-            .debug('start() failed after it had already timed out', {
-              params: { error: toError(startError) },
-            });
+          // already recorded as timed out, and `observeFailureAfterTimeout()`, which the
+          // same timeout set up, already logs it.
         },
       )
       .catch((error: unknown) => {
@@ -6911,6 +6952,35 @@ export class LifecycleManager
     this.componentStopAttemptTokens.set(name, next);
     this.stopSettledBeforeStall.delete(name);
     return next;
+  }
+
+  /**
+   * Tell a component it is no longer registered. Its own `_markUnregistered()` first, so
+   * an override that extends it still runs; if that throws, the two fields it would have
+   * cleared are cleared directly. Left set, the instance believed it was still
+   * registered, and registering it again was refused as `duplicate_instance`.
+   */
+  private markComponentUnregistered(
+    component: BaseComponent,
+    label: string,
+  ): void {
+    try {
+      component._markUnregistered();
+    } catch (unmarkError) {
+      reportCallbackError(`${label} _markUnregistered`, unmarkError);
+
+      try {
+        const fields = component as unknown as {
+          _isRegistered: boolean;
+          lifecycle?: ComponentLifecycleRef;
+        };
+
+        fields._isRegistered = false;
+        fields.lifecycle = undefined;
+      } catch (clearError) {
+        reportCallbackError(label, clearError);
+      }
+    }
   }
 
   /**

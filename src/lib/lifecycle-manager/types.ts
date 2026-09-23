@@ -652,7 +652,10 @@ export interface ValueResult<T = unknown> {
   /** Machine-readable outcome code */
   code: 'found' | 'not_found' | 'stopped' | 'stalled' | 'no_handler' | 'error';
 
-  /** The thrown value, when the lookup itself failed unexpectedly (`code: 'error'`) */
+  /**
+   * The failure behind `code: 'error'`: what the component's `getValue()` handler threw, or
+   * what the lookup itself threw unexpectedly.
+   */
   error?: Error;
 }
 

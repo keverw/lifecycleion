@@ -502,7 +502,7 @@ interface LifecycleManagerOptions {
   shutdownWarningTimeoutMS?: number; // Global warning phase timeout in ms (default: 500, 0 = fire-and-forget, <0 = skip)
   messageTimeoutMS?: number; // Default message timeout in ms (default: 5000, 0 = disabled)
   attachSignalsBeforeStartup?: boolean; // Auto-attach signals before startAllComponents()/startComponent() begins work, even if startup later fails (default: false)
-  attachSignalsOnStart?: boolean; // Auto-attach signals when the first component successfully starts (default: false)
+  attachSignalsOnStart?: boolean; // Auto-attach signals when a component successfully starts and none are attached (default: false)
   detachSignalsOnStop?: boolean; // Auto-detach signals when last component stops (default: false)
   enableLoggerExitHook?: boolean; // Auto-enable logger exit hook integration (default: false)
 
@@ -670,6 +670,7 @@ interface UnregisterOptions {
 
 - `forceStop` only applies when `stopIfRunning` is true (passes through to `stopComponent` as `allowStopWithRunningDependents`).
 - If a component is stalled and `stopIfRunning` is true, unregister is blocked.
+- While a start or a force-phase stop is in flight, unregister is refused with `component_starting` / `component_stopping`: the operation writes its outcome when it settles, so the component has to be left registered until then.
 - Successfully unregistering a component automatically clears its `lifecycle` reference (setting it to `undefined`) and marks it as unregistered, which allows the same component instance to be registered again (either with the same manager or with a different one).
 
 **Returns:**
@@ -1300,8 +1301,8 @@ If `attachSignalsBeforeStartup` is enabled, handlers are auto-attached before
 is covered even if startup fails. If attaching fails, the start is refused with
 `code: 'signal_attach_failed'` before any work begins.
 
-If `attachSignalsOnStart` is enabled, handlers are auto-attached when the first
-component successfully starts. If attaching fails, that component is stopped
+If `attachSignalsOnStart` is enabled, handlers are auto-attached when a
+component successfully starts and none are attached. If attaching fails, that component is stopped
 again and its start fails with `code: 'signal_attach_failed'` - a process
 configured to handle signals does not stay up without them. In
 `startAllComponents()` that fails the whole startup with the same code and
@@ -1314,7 +1315,12 @@ via `attachSignalsBeforeStartup` are detached during startup cleanup. Handlers
 stay attached while any component is stalled - a stalled component is not
 counted as running, but Ctrl+C is how the operator retries or forces it - and
 come off once the last stall clears: by a later stop, by the original `stop()`
-or `onShutdownForce()` finishing late, or by unregistering it.
+or `onShutdownForce()` finishing late, or by unregistering it. They also stay
+while anything is still in flight - a startup or shutdown, a component starting
+or stopping - and come off once it ends, if nothing is left. A clean
+`stopAllComponents()` detaches them before it emits
+`lifecycle-manager:shutdown-completed`; a failed one keeps them, so the next
+Ctrl+C still reaches escalation.
 
 #### `detachSignals()`
 
@@ -1478,7 +1484,7 @@ Terminology used below:
 - **Escalation state** is the logical repeated-shutdown context for one shutdown cycle
 - **Armed window** is the short post-failure period after an unsuccessful shutdown returns, before the next retry starts
 - During an active retry, the escalation state is still preserved, but the armed window is not active because shutdown is running again
-- During a `restartAllComponents()` stop phase, the first shutdown signal is the operator's initial request: it cancels the restart and starts the escalation cycle (`firstMethod` is that signal) without being counted. Signals after it count as presses, as they would against any running shutdown
+- A `restartAllComponents()` stop phase does not start an escalation cycle of its own. The first shutdown signal during it is the operator's initial request: it cancels the restart and starts the cycle (`firstMethod` is that signal) without being counted. Signals after it count as presses, as they would against any running shutdown. A restart whose stop phase fails with no signal leaves nothing armed
 
 This applies to shutdown requests from:
 
@@ -1688,7 +1694,7 @@ If you want the process to exit automatically:
 
 - **Via signals**: Handle the exit explicitly in the application entrypoint by listening to the `lifecycle-manager:shutdown-completed` event (e.g., calling `logger.exit(0)` or `process.exit(0)`).
 - **Via logger hooks**: Enable logger exit hook integration (`enableLoggerExitHook: true`). When enabled, calling `logger.exit()` or logging a fatal error with `exitCode` will trigger `LifecycleManager` to stop all components first, and then delegate back to the logger to proceed with its configured exit behavior (respecting any overrides like `callProcessExit: false`). See [Exit Behavior in docs/logger.md](logger.md#exit-behavior) for details on configuring simulated exits.
-- **Via repeated signals (Ctrl+C escalation)**: Configure `repeatedShutdownRequestPolicy.onForceShutdown` to call `logger.exit(1)` or `process.exit(1)` when the threshold (like multiple Ctrl+C presses) is crossed.
+- **Via repeated signals (Ctrl+C escalation)**: Configure `repeatedShutdownRequestPolicy.onForceShutdown` to call `logger.exit(1)` or `process.exit(1)` when the threshold (like multiple Ctrl+C presses) is crossed. With `enableLoggerExitHook`, a `logger.exit()` made synchronously from `onForceShutdown` - before any `await` - proceeds at once instead of waiting for the running shutdown; one made later is deferred like any exit during a shutdown.
 
 #### Logger Requirements
 
@@ -2575,6 +2581,8 @@ type RegistrationFailureCode =
 type UnregisterFailureCode =
   | 'component_not_found'
   | 'component_running'
+  | 'component_starting' // A start is in flight; wait for it to settle
+  | 'component_stopping' // A force-phase stop is in flight; wait for it to settle
   | 'stop_failed'
   | 'bulk_operation_in_progress'
   | 'unknown_error';

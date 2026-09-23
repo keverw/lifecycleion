@@ -1,6 +1,5 @@
 import { errorToString } from './error-to-string';
 import { isPromise } from './is-promise';
-import { isFunction } from './is-function';
 import { toError } from './to-error';
 import { DOUBLE_EOL } from './constants';
 import { installGlobalEventTarget } from './global-event-target';
@@ -159,7 +158,10 @@ export function runCallbackSafely(
     }
   };
 
-  if (!isFunction(callback)) {
+  // `typeof`, not `isFunction()`: its `instanceof Function` fallback reads the value's
+  // prototype, which throws for a revoked proxy - outside every guard here. Anything
+  // callable is `typeof 'function'` anyway.
+  if (typeof callback !== 'function') {
     safeOnError(
       new Error(`Callback provided for ${callbackName} is not a function`),
     );
@@ -258,7 +260,8 @@ export async function safeHandleCallbackAndWait<T>(
     return { success: false, error: toError(error) };
   };
 
-  if (isFunction(callback)) {
+  // `typeof`, for the reason `runCallbackSafely()` gives.
+  if (typeof callback === 'function') {
     try {
       // We need to cast callback to the appropriate function type now
       const result = (callback as (...args: unknown[]) => unknown)(...args);

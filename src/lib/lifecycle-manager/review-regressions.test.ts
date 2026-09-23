@@ -476,4 +476,255 @@ describe('LifecycleManager - review regressions', () => {
       await sleep(10);
     }
   });
+
+  test('a haltOnStall break names the stalled component as well as the ones it skipped', async () => {
+    const { logger, manager } = setup();
+    await manager.registerComponent(new Plain(logger, 'db'));
+    await manager.registerComponent(new Stalls(logger, 'api', ['db']));
+    await manager.startAllComponents();
+
+    const { release } = claimReports();
+    let result;
+
+    try {
+      result = await manager.stopAllComponents();
+    } finally {
+      release();
+    }
+
+    expect(result.success).toBe(false);
+    expect(result.reason).toBe('Stalled: api; Failed to stop: db');
+  });
+
+  test('a restart whose stop phase timed out does not report a startup that never ran', async () => {
+    const { logger, manager } = setup();
+    const stopGate = deferred();
+    const a = new Plain(logger, 'a');
+    let startCalls = 0;
+    a.start = (): Promise<void> => {
+      startCalls++;
+      return Promise.resolve();
+    };
+    a.stop = (): Promise<void> => stopGate.promise;
+    await manager.registerComponent(a);
+    await manager.startAllComponents();
+
+    const restart = await manager.restartAllComponents({
+      shutdownTimeoutMS: 20,
+    });
+
+    expect(restart.success).toBe(false);
+    expect(restart.startupResult.success).toBe(false);
+    expect(restart.startupResult.startedComponents).toEqual([]);
+    expect(startCalls).toBe(1);
+
+    stopGate.resolve();
+    await sleep(10);
+  });
+
+  test('a restart whose stop phase crashed carries the error on its startup result', async () => {
+    const { logger, manager } = setup();
+    await manager.registerComponent(new Plain(logger, 'a'));
+    await manager.startAllComponents();
+
+    (
+      manager as unknown as { runShutdownWarningPhase: () => Promise<never> }
+    ).runShutdownWarningPhase = (): Promise<never> =>
+      Promise.reject(new Error('warning phase exploded'));
+
+    const { release } = claimReports();
+    let restart;
+
+    try {
+      restart = await manager.restartAllComponents();
+    } finally {
+      release();
+    }
+
+    expect(restart.shutdownResult.code).toBe('unknown_error');
+    expect(restart.startupResult.code).toBe('unknown_error');
+    expect(restart.startupResult.error).toBeInstanceOf(Error);
+  });
+
+  test('a shutdown started from a component:starting listener stops the component once it is up', async () => {
+    const { logger, manager } = setup();
+    const a = new Plain(logger, 'a');
+    // Still starting when the pass - with nothing running to stop - has ended.
+    a.start = (): Promise<void> => sleep(20);
+    await manager.registerComponent(a);
+
+    const passes: Promise<unknown>[] = [];
+    manager.once('component:starting', () => {
+      passes.push(manager.stopAllComponents());
+    });
+
+    await manager.startComponent('a');
+    await Promise.all(passes);
+    await sleep(10);
+
+    expect(manager.isComponentRunning('a')).toBe(false);
+  });
+
+  test('options read up front: a throwing getter announces nothing', async () => {
+    const { logger, manager } = setup();
+    const a = new Plain(logger, 'a');
+    (a as unknown as { onMessage: () => string }).onMessage = (): string =>
+      'ok';
+    (a as unknown as { getValue: () => string }).getValue = (): string => 'v';
+    await manager.registerComponent(a);
+    await manager.startComponent('a');
+
+    const events: string[] = [];
+    manager.on('component:message-sent', () => {
+      events.push('message-sent');
+    });
+    manager.on('component:value-requested', () => {
+      events.push('value-requested');
+    });
+    const hostileOptions = {
+      get timeout(): number {
+        throw new Error('options exploded');
+      },
+      get includeStopped(): boolean {
+        throw new Error('options exploded');
+      },
+    };
+
+    const { release } = claimReports();
+
+    try {
+      const message = await manager.sendMessageToComponent(
+        'a',
+        'hi',
+        hostileOptions,
+      );
+      const value = manager.getValue('a', 'k', hostileOptions);
+      expect(message.sent).toBe(false);
+      expect(value.found).toBe(false);
+    } finally {
+      release();
+    }
+
+    expect(events).toEqual([]);
+  });
+
+  test("a shutdown started from the last component's start-failed-optional listener fails the startup", async () => {
+    const { logger, manager } = setup();
+    const optional = new Plain(logger, 'optional');
+    Object.assign(optional, { optional: true });
+    optional.start = (): Promise<void> => Promise.reject(new Error('no'));
+    await manager.registerComponent(new Plain(logger, 'a'));
+    await manager.registerComponent(optional);
+
+    const passes: Promise<unknown>[] = [];
+    let startedEvents = 0;
+    manager.once('component:start-failed-optional', () => {
+      passes.push(manager.stopAllComponents());
+    });
+    manager.on('lifecycle-manager:started', () => {
+      startedEvents++;
+    });
+
+    const startup = await manager.startAllComponents();
+    await Promise.all(passes);
+
+    expect(startup.success).toBe(false);
+    expect(startup.code).toBe('shutdown_in_progress');
+    expect(startedEvents).toBe(0);
+  });
+
+  test('autoStart during a bulk startup, after its first component is up, starts the component', async () => {
+    const { logger, manager } = setup();
+    await manager.registerComponent(new Plain(logger, 'a'));
+    await manager.registerComponent(new Plain(logger, 'b'));
+
+    const registrations: Promise<{ autoStartSucceeded?: boolean }>[] = [];
+    manager.once('component:started', () => {
+      registrations.push(
+        manager.registerComponent(new Plain(logger, 'late'), {
+          autoStart: true,
+        }),
+      );
+    });
+
+    await manager.startAllComponents();
+    const [registration] = await Promise.all(registrations);
+
+    expect(registration.autoStartSucceeded).toBe(true);
+    expect(manager.isComponentRunning('late')).toBe(true);
+  });
+
+  test('an unregister whose _markUnregistered throws can still be registered again', async () => {
+    const { logger, manager } = setup();
+    const component = new Plain(logger, 'a');
+    await manager.registerComponent(component);
+
+    const original = component._markUnregistered.bind(component);
+    component._markUnregistered = (): never => {
+      throw new Error('hook exploded');
+    };
+
+    const { release } = claimReports();
+
+    try {
+      expect((await manager.unregisterComponent('a')).success).toBe(true);
+    } finally {
+      release();
+    }
+
+    component._markUnregistered = original;
+    const again = await manager.registerComponent(component);
+    expect(again.success).toBe(true);
+  });
+
+  test('force getters are not read for a component without a force handler', async () => {
+    const { logger, manager } = setup();
+    const a = new Plain(logger, 'a');
+    a.stop = (): Promise<void> => Promise.reject(new Error('stop failed'));
+    (a as unknown as { onShutdownForce: undefined }).onShutdownForce =
+      undefined;
+    Object.defineProperty(a, 'shutdownForceTimeoutMS', {
+      get: (): never => {
+        throw new Error('getter exploded');
+      },
+    });
+    await manager.registerComponent(a);
+    await manager.startComponent('a');
+
+    let forceEvents = 0;
+    manager.on('component:shutdown-force', () => {
+      forceEvents++;
+    });
+
+    const { release } = claimReports();
+    let result;
+
+    try {
+      result = await manager.stopComponent('a');
+    } finally {
+      release();
+    }
+
+    expect(result.success).toBe(false);
+    expect(result.reason).toBe('stop failed');
+    expect(forceEvents).toBe(1);
+    expect(manager.getComponentStatus('a')?.state).toBe('stalled');
+  });
+
+  test('broadcastMessage reads componentNames once', async () => {
+    const { logger, manager } = setup();
+    await manager.registerComponent(new Plain(logger, 'a'));
+    await manager.startAllComponents();
+
+    let reads = 0;
+    const options = {
+      get componentNames(): string[] {
+        reads++;
+        return ['a'];
+      },
+    };
+
+    await manager.broadcastMessage('hi', options);
+    expect(reads).toBe(1);
+  });
 });
