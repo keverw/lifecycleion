@@ -1028,6 +1028,34 @@ describe('LifecycleManager - public methods never reject', () => {
     expect(manager.getComponentStatus('a')).toBeUndefined();
   });
 
+  test('a rolled-back registration leaves the component free to register again', async () => {
+    const { logger, manager } = setup();
+    const component = new Plain(logger, 'a');
+    const markRegistered = component._markRegistered.bind(component);
+    let shouldThrow = true;
+
+    // Marks the component registered, then fails - the partial mutation rollback must undo.
+    (component as unknown as { _markRegistered: () => void })._markRegistered =
+      (): void => {
+        markRegistered();
+
+        if (shouldThrow) {
+          throw new Error('hook exploded');
+        }
+      };
+
+    const failed = await manager.registerComponent(component);
+
+    expect(failed.registered).toBe(false);
+    expect(component._isRegisteredWithManager()).toBe(false);
+
+    shouldThrow = false;
+    const retry = await manager.registerComponent(component);
+
+    expect(retry.success).toBe(true);
+    expect(manager.hasComponent('a')).toBe(true);
+  });
+
   test('an unregister does not remove a component once a bulk operation has started', async () => {
     const { logger, manager } = setup();
     const gated = new Plain(logger, 'a');

@@ -3709,10 +3709,40 @@ export class LifecycleManager
         this.components = this.components.filter(
           (registered) => registered !== component,
         );
+        this.registeredNames.delete(component);
         this.componentStates.delete(componentName);
         this.componentTimestamps.delete(componentName);
         this.componentErrors.delete(componentName);
         this.componentStartAttemptTokens.delete(componentName);
+
+        // The component's side too: a hook that marked it registered before throwing
+        // would otherwise leave it believing it is, and its next registration refused as
+        // `duplicate_instance`. Its own `_markUnregistered()` first, so an override that
+        // extends it still runs; if that throws as well, the two fields it would have
+        // cleared are cleared directly.
+        try {
+          component._markUnregistered();
+        } catch (unmarkError) {
+          reportCallbackError(
+            'lifecycle-manager registration rollback _markUnregistered',
+            unmarkError,
+          );
+
+          try {
+            const fields = component as unknown as {
+              _isRegistered: boolean;
+              lifecycle?: ComponentLifecycleRef;
+            };
+
+            fields._isRegistered = false;
+            fields.lifecycle = undefined;
+          } catch (clearError) {
+            reportCallbackError(
+              'lifecycle-manager registration rollback',
+              clearError,
+            );
+          }
+        }
 
         throw error;
       }
