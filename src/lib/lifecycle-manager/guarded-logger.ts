@@ -143,10 +143,15 @@ export function createGuardedLoggerService(
       // value: the engine throws a `TypeError` on the read itself, outside every guard
       // here. Such a method cannot be wrapped, so it is handed back as it is, and the
       // loss of the guard for it is reported once.
+      //
+      // Only an own property can be frozen this way, and `LoggerService`'s methods live
+      // on its prototype, so the lookup is skipped in the ordinary case.
       let descriptor: PropertyDescriptor | undefined;
 
       try {
-        descriptor = Reflect.getOwnPropertyDescriptor(target, property);
+        descriptor = Object.hasOwn(target, property)
+          ? Reflect.getOwnPropertyDescriptor(target, property)
+          : undefined;
       } catch {
         descriptor = undefined;
       }

@@ -1710,6 +1710,51 @@ describe('LifecycleManager - public methods never reject', () => {
     expect(isAttached).toBe(false);
   });
 
+  test('a shutdown pass that leaves a stall keeps signals attached for escalation', async () => {
+    const { logger, manager } = setup({
+      detachSignalsOnStop: true,
+      shutdownOptions: { haltOnStall: false },
+    });
+    const stalls = new Plain(logger, 'stalls');
+    stalls.stop = (): Promise<void> => Promise.reject(new Error('stop failed'));
+    stalls.onShutdownForce = (): void => {
+      throw new Error('force failed');
+    };
+    await manager.registerComponent(new Plain(logger, 'first'));
+    await manager.registerComponent(stalls);
+    await manager.startAllComponents();
+
+    fakeAttachedSignals(manager);
+    let detachCalls = 0;
+    manager.detachSignals = (): void => {
+      detachCalls++;
+    };
+
+    const result = await manager.stopAllComponents();
+
+    // `stalls` stalls first (reverse order), then `first` stops as the last running
+    // component - which used to detach mid-pass, although the pass then failed.
+    expect(result.success).toBe(false);
+    expect(manager.getComponentStatus('first')?.state).toBe('stopped');
+    expect(detachCalls).toBe(0);
+  });
+
+  test('a getValue() handler that throws reports the error on the result', async () => {
+    const { logger, manager } = setup();
+    const component = new Plain(logger, 'a');
+    (component as unknown as { getValue: () => never }).getValue =
+      (): never => {
+        throw new Error('db down');
+      };
+    await manager.registerComponent(component);
+    await manager.startComponent('a');
+
+    const result = manager.getValue('a', 'key');
+
+    expect(result.code).toBe('error');
+    expect(result.error?.message).toBe('db down');
+  });
+
   test('getValue() resolves an unexpected failure as an error result', async () => {
     const { logger, manager } = setup();
     const component = new Plain(logger, 'a');

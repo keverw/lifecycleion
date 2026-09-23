@@ -1935,6 +1935,7 @@ export class LifecycleManager
         handlerImplemented: true,
         requestedBy: from,
         code: 'error',
+        error: err,
       };
     }
   }
@@ -2217,7 +2218,9 @@ export class LifecycleManager
           reason: 'Component was unregistered while it was being stopped',
           code: 'component_not_found',
           wasStopped: true,
-          wasRegistered: this.hasComponent(name),
+          // Registered when this call started, which is what this field reports - the
+          // name may belong to a replacement by now, which is not this call's component.
+          wasRegistered: true,
         };
       }
 
@@ -4227,11 +4230,6 @@ export class LifecycleManager
     // here only so the sweep below can settle them from either path; the `catch` never
     // reads it.
     const stoppingComponents = new Set<string>();
-    // Components whose stop failed without leaving them stalled - a stop that crashed
-    // before it claimed the component, say, so it is still running. Only stalls,
-    // pending stops and timeouts used to fail the pass, so a pass that could not stop
-    // one of these reported success with it still up.
-    const failedStopComponents = new Set<string>();
     // Shared by both paths so they cannot drift: a candidate that is no longer stalled
     // has no stall info and drops out.
     const collectStalledComponents = (
@@ -4432,7 +4430,6 @@ export class LifecycleManager
             continue;
           } else {
             // Component failed to stop - track as stalled but continue
-            failedStopComponents.add(name);
             this.logger
               .entity(name)
               .error(
@@ -4476,28 +4473,23 @@ export class LifecycleManager
         collectStoppedComponents(finalStalledNames);
 
       const durationMS = Date.now() - startTime;
-      // A failed stop that ended in a stall is already reported as one; one that did
-      // not, and whose component is not stopped either, fails the pass on its own.
-      const unstoppedFailedComponents = Array.from(failedStopComponents).filter(
-        (name) =>
-          !finalStalledNames.has(name) &&
-          this.componentStates.get(name) !== 'stopped',
-      );
-      // Anything in this pass's stop list still running that nothing above accounts for:
-      // components after a `haltOnStall` break the loop never reached, whose running
-      // dependents are gone by now. A halt used to report success over them.
+      // Every candidate is settled against the registry once, here, whatever the loop
+      // did or did not do with it: stopped, stalled (`stalledComponents`), still owned by
+      // a concurrent stop (`stoppingComponents`), or still running. The last is the one
+      // the loop cannot see on its own - a stop that failed without stalling, a
+      // component a `haltOnStall` break never reached - and it fails the pass. Anything
+      // else not running - a component a late-startup cleanup already stopped, say - is
+      // simply not running, not a failure.
       const stillRunningComponents = runningComponentsToStop.filter(
         (name) =>
           this.runningComponents.has(name) &&
           !stoppingComponents.has(name) &&
-          !finalStalledNames.has(name) &&
-          !unstoppedFailedComponents.includes(name),
+          !finalStalledNames.has(name),
       );
       const isSuccess =
         !hasTimedOut &&
         stalledComponents.length === 0 &&
         stoppingComponents.size === 0 &&
-        unstoppedFailedComponents.length === 0 &&
         stillRunningComponents.length === 0;
 
       // The guard matters here: a logger that threw would otherwise land in the `catch`
@@ -4532,15 +4524,11 @@ export class LifecycleManager
             ? {
                 reason: `Shutdown is still in progress for: ${Array.from(stoppingComponents).join(', ')}`,
               }
-            : unstoppedFailedComponents.length > 0
+            : stillRunningComponents.length > 0
               ? {
-                  reason: `Failed to stop: ${unstoppedFailedComponents.join(', ')}`,
+                  reason: `Failed to stop: ${stillRunningComponents.join(', ')}`,
                 }
-              : stillRunningComponents.length > 0
-                ? {
-                    reason: `Shutdown halted before stopping: ${stillRunningComponents.join(', ')}`,
-                  }
-                : {}),
+              : {}),
       };
 
       // Store for getLastShutdownResult() - useful for debugging and metrics
@@ -4740,6 +4728,44 @@ export class LifecycleManager
       },
       claim,
     );
+  }
+
+  /**
+   * Watch a stop that the manager already gave up waiting on - `stop()` or
+   * `onShutdownForce()` past its timeout - so that if it settles late, the stall it
+   * caused is cleared (`handleLateStopResolution`), and if it fails, that is logged.
+   *
+   * The first `catch` is there because `handleLateStopResolution` mutates state in
+   * sequence: a throw partway leaves the component half-transitioned, which is better
+   * said outright than inferred from a stuck state later. The chain ends in a terminal
+   * `catch` because nothing retains it: an unhandled rejection is fatal under Node's
+   * default `--unhandled-rejections=throw`, and logging is guarded, but a floating
+   * chain should not have to rely on that.
+   */
+  private observeLateStopResolution(
+    promise: unknown,
+    name: string,
+    stopAttemptToken: string,
+    source: 'graceful' | 'force',
+    failureMessage: string,
+  ): void {
+    Promise.resolve(promise)
+      .then(
+        () => this.handleLateStopResolution(name, stopAttemptToken, source),
+        (error: unknown) => {
+          this.logger.entity(name).warn(failureMessage, {
+            params: { error: toError(error) },
+          });
+        },
+      )
+      .catch((error: unknown) => {
+        this.logger.entity(name).warn('Late stop resolution failed', {
+          params: { error: toError(error) },
+        });
+      })
+      .catch(() => {
+        // Nothing left to report with.
+      });
   }
 
   /**
@@ -5345,7 +5371,10 @@ export class LifecycleManager
         const signalAttach = this.autoAttachSignals('first component start');
 
         if (signalAttach.outcome === 'failed') {
-          return this.rollBackStartForSignalAttach(name, signalAttach.error);
+          return await this.rollBackStartForSignalAttach(
+            name,
+            signalAttach.error,
+          );
         }
       }
 
@@ -5890,39 +5919,13 @@ export class LifecycleManager
 
             // Detect if stop() eventually resolves after the timeout so the stall
             // can be cleared automatically without a manual retry.
-            Promise.resolve(stopPromise)
-              .then(
-                () =>
-                  this.handleLateStopResolution(
-                    name,
-                    stopAttemptToken,
-                    'graceful',
-                  ),
-                (error: unknown) => {
-                  this.logger
-                    .entity(name)
-                    .warn('Component stop failed after timeout', {
-                      params: { error: toError(error) },
-                    });
-                },
-              )
-              // Suppressed so it cannot become an unhandled rejection, and logged because
-              // `handleLateStopResolution` mutates state in sequence: a throw partway
-              // leaves the component half-transitioned, which is better said outright than
-              // inferred from a stuck state later.
-              .catch((error: unknown) => {
-                this.logger.entity(name).warn('Late stop resolution failed', {
-                  params: { error: toError(error) },
-                });
-              })
-              // Terminal, for the reason the shutdown-warning chain carries one: nothing
-              // retains this chain, so a throw out of the reporting handler above becomes an
-              // unhandled rejection mid-lifecycle - fatal under Node's default
-              // `--unhandled-rejections=throw`. Logging is guarded, but a floating chain
-              // should not have to rely on that.
-              .catch(() => {
-                // Nothing left to report with.
-              });
+            this.observeLateStopResolution(
+              stopPromise,
+              name,
+              stopAttemptToken,
+              'graceful',
+              'Component stop failed after timeout',
+            );
             reject(
               new ComponentStopTimeoutError({
                 componentName: name,
@@ -6142,39 +6145,13 @@ export class LifecycleManager
             // so the stall can be cleared automatically, same as stop().
             const forceAttemptToken =
               this.componentStopAttemptTokens.get(name) ?? ulid();
-            Promise.resolve(forcePromise)
-              .then(
-                () =>
-                  this.handleLateStopResolution(
-                    name,
-                    forceAttemptToken,
-                    'force',
-                  ),
-                (error: unknown) => {
-                  this.logger
-                    .entity(name)
-                    .warn('Force shutdown failed after timeout', {
-                      params: { error: toError(error) },
-                    });
-                },
-              )
-              // Suppressed so it cannot become an unhandled rejection, and logged because
-              // `handleLateStopResolution` mutates state in sequence: a throw partway
-              // leaves the component half-transitioned, which is better said outright than
-              // inferred from a stuck state later.
-              .catch((error: unknown) => {
-                this.logger.entity(name).warn('Late stop resolution failed', {
-                  params: { error: toError(error) },
-                });
-              })
-              // Terminal, for the reason the shutdown-warning chain carries one: nothing
-              // retains this chain, so a throw out of the reporting handler above becomes an
-              // unhandled rejection mid-lifecycle - fatal under Node's default
-              // `--unhandled-rejections=throw`. Logging is guarded, but a floating chain
-              // should not have to rely on that.
-              .catch(() => {
-                // Nothing left to report with.
-              });
+            this.observeLateStopResolution(
+              forcePromise,
+              name,
+              forceAttemptToken,
+              'force',
+              'Force shutdown failed after timeout',
+            );
             reject(
               new Error(LIFECYCLE_MANAGER_MESSAGE_FORCE_SHUTDOWN_TIMED_OUT),
             );
@@ -6517,8 +6494,13 @@ export class LifecycleManager
     trigger = 'last component stop',
     logMessage: string = LIFECYCLE_MANAGER_LOG_AUTO_DETACH_LAST_COMPONENT_STOP,
   ): void {
+    // Not during a shutdown pass: the pass decides once it ends, detaching only after a
+    // clean one. Mid-pass, the last running component stopping says nothing about the
+    // components that stalled, and a failed pass must keep the handlers so the
+    // operator's next Ctrl+C still reaches escalation.
     if (
       !this.detachSignalsOnStop ||
+      this.isShuttingDown ||
       this.runningComponents.size > 0 ||
       !this.processSignalManager
     ) {
