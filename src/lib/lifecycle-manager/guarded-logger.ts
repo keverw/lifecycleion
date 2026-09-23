@@ -140,18 +140,16 @@ function guardLogMethod(
   const label = `${GUARDED_LOGGER_LABEL}.${property}`;
 
   return (...args: unknown[]): void => {
-    // `runCallbackSafely` also covers a logger method that returns a rejecting promise.
-    //
-    // TODO: the closure only exists to keep the method bound to `target`. Once
-    // `runCallbackSafely` accepts a `thisArg` (PR #28), pass `method` with its args and
-    // `target` as `thisArg` instead.
+    // `runCallbackSafely` also covers a logger method that returns a rejecting promise, and
+    // a `method` that is not a function at all. `target` as `thisArg` keeps it bound.
     runCallbackSafely(
       label,
-      () => (method as (...callArgs: unknown[]) => unknown).apply(target, args),
-      [],
+      method,
+      args,
       (error) => {
         reportCallbackError(label, error);
       },
+      target,
     );
   };
 }

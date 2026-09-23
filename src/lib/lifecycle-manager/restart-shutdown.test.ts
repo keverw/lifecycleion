@@ -3,7 +3,7 @@ import { Logger } from '../logger';
 import { ArraySink } from '../logger/sinks/array';
 import { BaseComponent } from './base-component';
 import { LifecycleManager } from './lifecycle-manager';
-import type { RestartResult, ShutdownTriggerResult } from './types';
+import type { RestartResult, ShutdownResult } from './types';
 import { sleep } from '../sleep';
 
 function setup(shutdownTimeoutMS?: number) {
@@ -120,8 +120,8 @@ describe('LifecycleManager - shutdown during restartAllComponents()', () => {
 
     // The restart's own stop phase is the shutdown this caller gets, so the request is
     // still refused - what changes is that the restart no longer starts everything back up.
-    const ack = await manager.triggerShutdown();
-    expect(ack.initiated).toBe(false);
+    const ack = await manager.stopAllComponents();
+    expect(ack.success).toBe(false);
     expect(ack.code).toBe('already_in_progress');
 
     component.releaseStop();
@@ -261,7 +261,7 @@ describe('LifecycleManager - shutdown during restartAllComponents()', () => {
     const restart = manager.restartAllComponents();
     await component.stopping.promise;
 
-    const ack = await manager.triggerShutdown();
+    const ack = await manager.stopAllComponents();
     expect(ack.code).toBe('already_in_progress');
 
     const result = await restart;
@@ -330,14 +330,14 @@ describe('LifecycleManager - shutdown during restartAllComponents()', () => {
     // `isShuttingDown` is false and the request starts a real pass of its own.
     await first.starting.promise;
 
+    // Started without awaiting: this pass has to wait on the start parked below.
     const done = shutdownCompleted(manager);
-    const ack = await manager.triggerShutdown();
-    expect(ack.initiated).toBe(true);
-    expect(ack.code).toBe('initiated');
+    const pending = manager.stopAllComponents();
 
     first.releaseStart();
     const result = await restart;
     await done;
+    expect((await pending).code).not.toBe('already_in_progress');
 
     // Nothing was recorded during the stop phase - this case belongs to
     // `startAllComponents()`, which aborts the pass through `shutdownToken`.
@@ -439,7 +439,7 @@ describe('LifecycleManager - shutdown during restartAllComponents()', () => {
     const first = manager.restartAllComponents();
     await component.stopping.promise;
 
-    const ack = await manager.triggerShutdown();
+    const ack = await manager.stopAllComponents();
     expect(ack.code).toBe('already_in_progress');
 
     await manager.restartAllComponents();
@@ -465,7 +465,7 @@ describe('LifecycleManager - shutdown during restartAllComponents()', () => {
     // arriving now must still cancel its startup.
     await manager.restartAllComponents();
 
-    const ack = await manager.triggerShutdown();
+    const ack = await manager.stopAllComponents();
     expect(ack.code).toBe('already_in_progress');
 
     component.releaseStop();
@@ -484,7 +484,7 @@ describe('LifecycleManager - shutdown during restartAllComponents()', () => {
 
     const firstRestart = manager.restartAllComponents();
     await component.stopping.promise;
-    await manager.triggerShutdown();
+    await manager.stopAllComponents();
     component.releaseStop();
 
     const firstResult = await firstRestart;
@@ -510,7 +510,7 @@ describe('LifecycleManager - shutdown during restartAllComponents()', () => {
     const first = manager.restartAllComponents();
     await component.stopping.promise;
 
-    const ack = await manager.triggerShutdown();
+    const ack = await manager.stopAllComponents();
     expect(ack.code).toBe('already_in_progress');
 
     // The narrow gap the latch does not cover: the stop pass releases `isShuttingDown`
@@ -553,7 +553,7 @@ describe('LifecycleManager - shutdown during restartAllComponents()', () => {
       });
     });
 
-    const acks: Array<Promise<ShutdownTriggerResult>> = [];
+    const acks: Array<Promise<ShutdownResult>> = [];
     let passCount = 0;
 
     manager.on('lifecycle-manager:shutdown-initiated', () => {
@@ -561,7 +561,7 @@ describe('LifecycleManager - shutdown during restartAllComponents()', () => {
 
       // The second pass is the follow-up restart's own stop phase.
       if (passCount === 2) {
-        acks.push(manager.triggerShutdown());
+        acks.push(manager.stopAllComponents());
       }
     });
 
@@ -607,8 +607,9 @@ describe('LifecycleManager - shutdown during restartAllComponents()', () => {
     });
 
     // The bookkeeping the acceptance step runs before it takes the latch. A throw there
-    // is a manager bug, and it reaches the caller as one rather than being reported as a
-    // pass that started or a refusal that did not happen.
+    // is a manager bug, and it reaches the caller as one - an `unknown_error` result
+    // carrying the thrown value - rather than as a pass that started or a refusal that
+    // did not happen.
     const internals = manager as unknown as {
       normalizeRepeatedShutdownRequestStateArmedStatus: () => boolean;
       isShuttingDown: boolean;
@@ -620,14 +621,34 @@ describe('LifecycleManager - shutdown during restartAllComponents()', () => {
       throw new Error('acceptance exploded');
     };
 
+    const reports: unknown[] = [];
+    const onError = (event: Event): void => {
+      reports.push((event as ErrorEvent).error);
+      event.preventDefault();
+    };
+
+    globalThis.addEventListener('error', onError);
+
+    let crashed: ShutdownResult;
+
     try {
-      // eslint-disable-next-line @typescript-eslint/await-thenable
-      await expect(manager.stopAllComponents()).rejects.toThrow(
-        'acceptance exploded',
-      );
+      crashed = await manager.stopAllComponents();
     } finally {
       internals.normalizeRepeatedShutdownRequestStateArmedStatus = original;
+      globalThis.removeEventListener('error', onError);
     }
+
+    expect(crashed.success).toBe(false);
+    expect(crashed.code).toBe('unknown_error');
+    expect(crashed.error?.message).toBe('acceptance exploded');
+    expect(crashed.stoppedComponents).toEqual([]);
+    expect(
+      reports.some((report) =>
+        (report as Error).message.includes(
+          'lifecycle-manager stopAllComponents',
+        ),
+      ),
+    ).toBe(true);
 
     // No pass was accepted, so there is nothing to announce, nothing that owes a result,
     // and nothing latched.
@@ -771,14 +792,29 @@ describe('LifecycleManager - shutdown during restartAllComponents()', () => {
       throw new Error('stop phase exploded');
     };
 
+    const onError = (event: Event): void => {
+      event.preventDefault();
+    };
+
+    globalThis.addEventListener('error', onError);
+
+    let crashed: RestartResult;
+
     try {
-      // eslint-disable-next-line @typescript-eslint/await-thenable
-      await expect(manager.restartAllComponents()).rejects.toThrow(
-        'stop phase exploded',
-      );
+      crashed = await manager.restartAllComponents();
     } finally {
       internals.isComponentRunning = original;
+      globalThis.removeEventListener('error', onError);
     }
+
+    // Resolves rather than rejects, with the pass's own failure, and never starts
+    // anything on top of a stop phase nobody can vouch for.
+    expect(crashed.success).toBe(false);
+    expect(crashed.shutdownResult.code).toBe('unknown_error');
+    expect(crashed.shutdownResult.error?.message).toBe('stop phase exploded');
+    expect(crashed.startupResult.code).toBe('unknown_error');
+    expect(crashed.startupResult.startedComponents).toEqual([]);
+    expect(component.startCount).toBe(1);
 
     // The pass's `finally` dropped it along with the latch, so the next restart runs a
     // pass of its own rather than being refused by a leaked one.

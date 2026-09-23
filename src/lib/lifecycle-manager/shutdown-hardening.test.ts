@@ -33,6 +33,29 @@ function shutdownCompleted(manager: LifecycleManager): Promise<void> {
   });
 }
 
+// Claims every report on the global `'error'` channel until `release()`: asserts they
+// were made, and keeps the `console.error` fall-through out of the test output.
+function claimReports(): { reports: unknown[]; release: () => void } {
+  const reports: unknown[] = [];
+  const onError = (event: Event): void => {
+    reports.push((event as ErrorEvent).error);
+    event.preventDefault();
+  };
+
+  globalThis.addEventListener('error', onError);
+
+  return {
+    reports,
+    release: () => {
+      globalThis.removeEventListener('error', onError);
+    },
+  };
+}
+
+function hasReport(reports: unknown[], text: string): boolean {
+  return reports.some((report) => (report as Error).message.includes(text));
+}
+
 class SlowStop extends BaseComponent {
   public stopEntered = false;
   constructor(
@@ -49,8 +72,8 @@ class SlowStop extends BaseComponent {
   }
 }
 
-describe('LifecycleManager - triggerShutdown()', () => {
-  test('acknowledges immediately while the shutdown runs in the background', async () => {
+describe('LifecycleManager - stopAllComponents() in the background', () => {
+  test('can be started without awaiting and read later', async () => {
     const { logger, manager } = setup();
     const component = new SlowStop(logger, 'slow', 120);
     await manager.registerComponent(component);
@@ -61,27 +84,28 @@ describe('LifecycleManager - triggerShutdown()', () => {
       completed.push(true);
     });
 
-    const done = shutdownCompleted(manager);
-    const ack = await manager.triggerShutdown();
+    // The pattern the docs recommend for a caller that cannot block: the promise is the
+    // handle, and nothing it can resolve with is a rejection.
+    const pending = manager.stopAllComponents();
 
-    expect(ack.initiated).toBe(true);
-    expect(ack.code).toBe('initiated');
-    expect(typeof ack.reason).toBe('string');
+    // The pass is latched before the call returns, so the manager already reports it.
+    expect(manager.getSystemState()).toBe('shutting-down');
+    expect(completed.length).toBe(0);
 
-    // Acknowledged before the component's stop could have finished. Still mid-stop: a
-    // component in `stopping` stays in runningComponents until its stop settles, so the
-    // state is the meaningful signal here.
+    // Parked in the component's stop while the caller carries on.
+    await sleep(20);
     expect(manager.getComponentStatus('slow')?.state).toBe('stopping');
     expect(component.stopEntered).toBe(true);
     expect(completed.length).toBe(0);
 
-    await done;
+    const result = await pending;
+    expect(result.success).toBe(true);
+    expect(result.stoppedComponents).toEqual(['slow']);
     expect(completed.length).toBe(1);
     expect(manager.getComponentStatus('slow')?.state).toBe('stopped');
-    expect(manager.getLastShutdownResult()?.success).toBe(true);
   });
 
-  test('reports already_in_progress without starting a second pass', async () => {
+  test('a second call answers already_in_progress at once, without a second pass', async () => {
     const { logger, manager } = setup();
     await manager.registerComponent(new SlowStop(logger, 'slow', 120));
     await manager.startAllComponents();
@@ -91,17 +115,17 @@ describe('LifecycleManager - triggerShutdown()', () => {
       initiatedCount++;
     });
 
-    const done = shutdownCompleted(manager);
-    const first = await manager.triggerShutdown();
-    const second = await manager.triggerShutdown();
+    const first = manager.stopAllComponents();
+    const second = await manager.stopAllComponents();
 
-    expect(first.initiated).toBe(true);
-    expect(second.initiated).toBe(false);
+    expect(second.success).toBe(false);
     expect(second.code).toBe('already_in_progress');
 
-    await done;
+    // The refusal came back while the first pass was still running.
+    expect(manager.getSystemState()).toBe('shutting-down');
+
+    expect((await first).success).toBe(true);
     expect(initiatedCount).toBe(1);
-    expect(manager.getLastShutdownResult()?.success).toBe(true);
   });
 
   test('does not emit signal:shutdown for a manual request', async () => {
@@ -118,40 +142,10 @@ describe('LifecycleManager - triggerShutdown()', () => {
       initiated.push(payload);
     });
 
-    const done = shutdownCompleted(manager);
-    await manager.triggerShutdown();
-    await done;
+    await manager.stopAllComponents();
 
     expect(signals.length).toBe(0);
     expect(initiated.length).toBe(1);
-  });
-
-  test('a failing shutdown still resolves the acknowledgement', async () => {
-    // Short global timeout: the pass must settle inside the test, not 30s later.
-    const { logger, manager } = setup(100);
-
-    class Hanging extends BaseComponent {
-      public async start(): Promise<void> {}
-      public stop(): Promise<void> {
-        return new Promise<void>(() => {});
-      }
-    }
-
-    await manager.registerComponent(
-      new Hanging(logger, { name: 'hanging', dependencies: [] }),
-    );
-    await manager.startAllComponents();
-
-    const done = shutdownCompleted(manager);
-    const ack = await manager.triggerShutdown();
-    expect(ack.initiated).toBe(true);
-
-    // The acknowledgement says nothing about the outcome; the component is
-    // still stopping at this point.
-    expect(manager.getComponentStatus('hanging')?.state).toBe('stopping');
-
-    await done;
-    expect(manager.getLastShutdownResult()?.success).toBe(false);
   });
 
   test('a throwing logger neither fails the request nor skips the force handler', async () => {
@@ -175,8 +169,7 @@ describe('LifecycleManager - triggerShutdown()', () => {
 
     await manager.registerComponent(new SlowStop(logger, 'slow', 120));
     await manager.startAllComponents();
-    const done = shutdownCompleted(manager);
-    await manager.triggerShutdown();
+    const pending = manager.stopAllComponents();
 
     // The manager's logger is guarded, and the escalation warns inside
     // `handleRepeatedShutdownRequest` sit between advancing `requestCount` and invoking
@@ -219,7 +212,7 @@ describe('LifecycleManager - triggerShutdown()', () => {
       ),
     ).toBe(true);
 
-    await done;
+    expect((await pending).success).toBe(true);
   });
 
   test('a logger that throws on the first request does not wedge the shutdown latch', async () => {
@@ -242,30 +235,28 @@ describe('LifecycleManager - triggerShutdown()', () => {
 
     globalThis.addEventListener('error', onError);
 
-    const done = shutdownCompleted(manager);
-    let ack;
+    let result;
 
     try {
-      ack = await manager.triggerShutdown();
+      result = await manager.stopAllComponents();
     } finally {
       service.info = originalInfo;
       globalThis.removeEventListener('error', onError);
     }
 
-    expect(ack.initiated).toBe(true);
+    expect(result.success).toBe(true);
     expect(
       reports.some((report) =>
         (report as Error).message.includes('lifecycle-manager logger.info'),
       ),
     ).toBe(true);
 
-    await done;
     expect(manager.getComponentStatus('slow')?.state).toBe('stopped');
     expect(manager.getSystemState()).not.toBe('shutting-down');
   });
 });
 
-describe('LifecycleManager - triggerShutdown() escalation', () => {
+describe('LifecycleManager - manual shutdown escalation', () => {
   test('manual requests do not count toward escalation by default', async () => {
     const logger = new Logger({
       sinks: [new ArraySink()],
@@ -289,22 +280,19 @@ describe('LifecycleManager - triggerShutdown() escalation', () => {
 
     // `countManualRetriesTowardEscalation` defaults to false, so hammering this from
     // concurrent handlers must never reach the force handler.
-    const done = shutdownCompleted(manager);
-    const acks = [
-      await manager.triggerShutdown(),
-      await manager.triggerShutdown(),
-      await manager.triggerShutdown(),
-      await manager.triggerShutdown(),
+    const first = manager.stopAllComponents();
+    const refusals = [
+      await manager.stopAllComponents(),
+      await manager.stopAllComponents(),
+      await manager.stopAllComponents(),
     ];
 
-    expect(acks[0].initiated).toBe(true);
     expect(
-      acks.slice(1).every((ack) => ack.code === 'already_in_progress'),
+      refusals.every((refusal) => refusal.code === 'already_in_progress'),
     ).toBe(true);
     expect(forceShutdownCalls).toBe(0);
 
-    await done;
-    expect(manager.getLastShutdownResult()?.success).toBe(true);
+    expect((await first).success).toBe(true);
   });
 
   test('manual requests never count while a shutdown is running, even when opted in', async () => {
@@ -329,16 +317,15 @@ describe('LifecycleManager - triggerShutdown() escalation', () => {
     await manager.registerComponent(new SlowStop(logger, 'slow', 150));
     await manager.startAllComponents();
 
-    const done = shutdownCompleted(manager);
-    // The flag covers a deliberate retry after a failed pass, not overlapping callers:
-    // the same as `stopAllComponents()`, which refuses in this window.
-    await manager.triggerShutdown();
-    await manager.triggerShutdown();
-    await manager.triggerShutdown();
+    // The flag covers a deliberate retry after a failed pass, not overlapping callers,
+    // which are refused in this window without being counted.
+    const first = manager.stopAllComponents();
+    await manager.stopAllComponents();
+    await manager.stopAllComponents();
 
     expect(forceShutdownCalls).toBe(0);
     expect(manager.getShutdownEscalationStatus().requestCount).toBe(0);
-    await done;
+    await first;
   });
 
   test('counts a manual retry once while armed after a failed shutdown', async () => {
@@ -381,27 +368,22 @@ describe('LifecycleManager - triggerShutdown() escalation', () => {
     expect(failed.success).toBe(false);
     expect(manager.getShutdownEscalationStatus().isArmed).toBe(true);
 
-    // `acceptShutdownPass` owns the manual-retry-while-armed split, so this
-    // must advance the count by exactly one - the same as `stopAllComponents()`.
-    // Counting it in the request path too would reach forceAfterCount on this one
-    // call and force-kill from a single programmatic request.
-    let done = shutdownCompleted(manager);
-    await manager.triggerShutdown();
+    // `acceptShutdownPass` owns the manual-retry-while-armed split, so this must
+    // advance the count by exactly one. The count is taken synchronously, before the
+    // call's first `await`, so it is visible without awaiting the pass.
+    let pending = manager.stopAllComponents();
 
     expect(manager.getShutdownEscalationStatus().requestCount).toBe(1);
     expect(forceShutdownCalls).toBe(0);
-    await done;
+    await pending;
 
-    // The next armed retry reaches `forceAfterCount`: the force handler runs, and
-    // because the retry pass still starts, the acknowledgement is `initiated` - the
-    // same as `stopAllComponents()`.
+    // The next armed retry reaches `forceAfterCount`: the force handler runs, and the
+    // retry pass still starts rather than being refused.
     expect(manager.getShutdownEscalationStatus().isArmed).toBe(true);
-    done = shutdownCompleted(manager);
-    const ack = await manager.triggerShutdown();
+    pending = manager.stopAllComponents();
 
     expect(forceShutdownCalls).toBe(1);
-    expect(ack.code).toBe('initiated');
-    await done;
+    expect((await pending).code).not.toBe('already_in_progress');
   });
 
   test('a force handler that triggers shutdown does not get a second concurrent pass', async () => {
@@ -409,7 +391,7 @@ describe('LifecycleManager - triggerShutdown() escalation', () => {
       sinks: [new ArraySink()],
       callProcessExit: false,
     });
-    const nestedAcks: string[] = [];
+    const nestedStops: Promise<ShutdownResult>[] = [];
     const manager = new LifecycleManager({
       logger,
       shutdownWarningTimeoutMS: -1,
@@ -421,9 +403,7 @@ describe('LifecycleManager - triggerShutdown() escalation', () => {
         // Runs synchronously, from inside the retry's own pre-latch bookkeeping: the
         // pass this starts finds no latch and really does begin stopping.
         onForceShutdown: () => {
-          void manager.triggerShutdown().then((ack) => {
-            nestedAcks.push(ack.code);
-          });
+          nestedStops.push(manager.stopAllComponents());
         },
       },
     });
@@ -460,7 +440,7 @@ describe('LifecycleManager - triggerShutdown() escalation', () => {
 
     // The nested request is the one that owns the pass; the outer call is refused for
     // the shutdown that request started, rather than running a second one alongside it.
-    expect(nestedAcks).toEqual(['initiated']);
+    expect(nestedStops).toHaveLength(1);
     expect(outer.code).toBe('already_in_progress');
     expect(outer.stoppedComponents).toEqual([]);
     expect(initiatedCount).toBe(1);
@@ -475,72 +455,7 @@ describe('LifecycleManager - triggerShutdown() escalation', () => {
     expect(completedCount).toBe(1);
     expect(initiatedCount).toBe(1);
     expect(internals.isShuttingDown).toBe(false);
-  });
-
-  test('a shutdown request from inside the force handler is not counted again', async () => {
-    const logger = new Logger({
-      sinks: [new ArraySink()],
-      callProcessExit: false,
-    });
-    const nestedAcks: string[] = [];
-    let forceShutdownCalls = 0;
-    const manager = new LifecycleManager({
-      logger,
-      shutdownWarningTimeoutMS: -1,
-      shutdownOptions: { timeoutMS: 50, retryStalled: false },
-      repeatedShutdownRequestPolicy: {
-        forceAfterCount: 1,
-        withinMS: 5000,
-        armedAfterFailureMS: 60_000,
-        countManualRetriesTowardEscalation: true,
-        onForceShutdown: () => {
-          forceShutdownCalls++;
-          void manager.triggerShutdown().then((ack) => {
-            nestedAcks.push(ack.code);
-          });
-        },
-      },
-    });
-
-    class Hanging extends BaseComponent {
-      public async start(): Promise<void> {}
-      public stop(): Promise<void> {
-        return new Promise<void>(() => {});
-      }
-    }
-
-    await manager.registerComponent(
-      new Hanging(logger, { name: 'hanging', dependencies: [] }),
-    );
-    await manager.startAllComponents();
-
-    // Fail the first attempt so post-failure escalation is armed; the retry below is
-    // what reaches forceAfterCount.
-    const failed = await manager.stopAllComponents();
-    expect(failed.success).toBe(false);
-    expect(manager.getShutdownEscalationStatus().isArmed).toBe(true);
-
-    let initiatedCount = 0;
-    manager.on('lifecycle-manager:shutdown-initiated', () => {
-      initiatedCount++;
-    });
-
-    const done = shutdownCompleted(manager);
-    const outer = await manager.stopAllComponents();
-
-    expect(forceShutdownCalls).toBe(1);
-    expect(nestedAcks).toEqual(['initiated']);
-    expect(outer.code).toBe('already_in_progress');
-    expect(initiatedCount).toBe(1);
-
-    // One operator-level request, so one press: the retry consumed the armed window
-    // before the force handler ran, so the shutdown that handler started found no
-    // window left to count itself against.
-    expect(manager.getShutdownEscalationStatus().requestCount).toBe(1);
-
-    await done;
-
-    expect(manager.getShutdownEscalationStatus().requestCount).toBe(1);
+    expect((await nestedStops[0])?.code).not.toBe('already_in_progress');
   });
 
   test('a stopAllComponents() from inside the force handler is not counted again', async () => {
@@ -608,7 +523,7 @@ describe('LifecycleManager - triggerShutdown() escalation', () => {
   });
 });
 
-describe('LifecycleManager - triggerShutdown() hardening', () => {
+describe('LifecycleManager - shutdown hardening', () => {
   test('a throwing logger does not block a request after the armed window lapsed', async () => {
     const logger = new Logger({
       sinks: [new ArraySink()],
@@ -668,17 +583,15 @@ describe('LifecycleManager - triggerShutdown() hardening', () => {
 
     globalThis.addEventListener('error', onError);
 
-    const done = shutdownCompleted(manager);
-    let ack;
+    let pending;
 
     try {
-      ack = await manager.triggerShutdown();
+      pending = manager.stopAllComponents();
     } finally {
       service.warn = originalWarn;
       globalThis.removeEventListener('error', onError);
     }
 
-    expect(ack.initiated).toBe(true);
     expect(manager.getShutdownEscalationStatus().isArmed).toBe(false);
     expect(
       reports.some((report) =>
@@ -686,7 +599,7 @@ describe('LifecycleManager - triggerShutdown() hardening', () => {
       ),
     ).toBe(true);
 
-    await done;
+    expect((await pending).code).not.toBe('already_in_progress');
   });
 
   test('a logger that rejects asynchronously is reported, not left floating', async () => {
@@ -708,18 +621,16 @@ describe('LifecycleManager - triggerShutdown() hardening', () => {
 
     globalThis.addEventListener('error', onError);
 
-    const done = shutdownCompleted(manager);
-    let ack;
+    let result;
 
     try {
-      ack = await manager.triggerShutdown();
-      await done;
+      result = await manager.stopAllComponents();
     } finally {
       service.info = originalInfo;
       globalThis.removeEventListener('error', onError);
     }
 
-    expect(ack.initiated).toBe(true);
+    expect(result.success).toBe(true);
     expect(
       reports.some((report) =>
         (report as Error).message.includes('lifecycle-manager logger.info'),
@@ -744,23 +655,26 @@ describe('LifecycleManager - triggerShutdown() hardening', () => {
       throw new Error('setup exploded');
     };
 
+    const { reports, release } = claimReports();
+    let crashed;
+
     try {
-      // eslint-disable-next-line @typescript-eslint/await-thenable
-      await expect(manager.stopAllComponents()).rejects.toThrow(
-        'setup exploded',
-      );
+      crashed = await manager.stopAllComponents();
     } finally {
       internals.isComponentRunning = original;
+      release();
     }
 
+    // Resolves with the failure rather than rejecting, and reports it.
+    expect(crashed.success).toBe(false);
+    expect(crashed.code).toBe('unknown_error');
+    expect(crashed.error?.message).toBe('setup exploded');
+    expect(hasReport(reports, 'shutdown after manual')).toBe(true);
     expect(manager.getSystemState()).not.toBe('shutting-down');
 
-    // The pass had already announced itself, so it owes a result: rejecting the promise
-    // alone would leave a listener on `shutdown-completed` waiting forever.
+    // The pass had already announced itself, so it owes the event side the same result.
     await done;
-    const failed = manager.getLastShutdownResult();
-    expect(failed?.success).toBe(false);
-    expect(failed?.reason).toContain('setup exploded');
+    expect(manager.getLastShutdownResult()).toBe(crashed);
 
     const retry = await manager.stopAllComponents();
     expect(retry.success).toBe(true);
@@ -771,13 +685,10 @@ describe('LifecycleManager - triggerShutdown() hardening', () => {
     await manager.registerComponent(new SlowStop(logger, 'slow', 10));
     await manager.startAllComponents();
 
-    const reports: unknown[] = [];
-    const onError = (event: Event): void => {
-      reports.push((event as ErrorEvent).error);
-      event.preventDefault();
-    };
-
-    globalThis.addEventListener('error', onError);
+    const completedResults: unknown[] = [];
+    manager.on('lifecycle-manager:shutdown-completed', (payload) => {
+      completedResults.push(payload);
+    });
 
     const internals = manager as unknown as {
       isComponentRunning: (name: string) => boolean;
@@ -787,26 +698,28 @@ describe('LifecycleManager - triggerShutdown() hardening', () => {
       throw new Error('setup exploded');
     };
 
-    const done = shutdownCompleted(manager);
-    let ack;
+    const { reports, release } = claimReports();
+    let crashed;
 
     try {
-      ack = await manager.triggerShutdown();
-      await done;
+      // Not awaited up front: a caller that fired this and moved on must never be handed
+      // an unhandled rejection by a pass that dies.
+      const pending = manager.stopAllComponents();
+      crashed = await pending;
     } finally {
       internals.isComponentRunning = original;
-      globalThis.removeEventListener('error', onError);
+      release();
     }
 
-    // `shutdown-initiated` is already out by the time this throws, so the pass did start
-    // and the acknowledgement is honest; the outcome arrives on the completed event.
-    expect(ack.code).toBe('initiated');
-    expect(manager.getLastShutdownResult()?.success).toBe(false);
-    expect(
-      reports.some((report) =>
-        (report as Error).message.includes('shutdown after manual'),
-      ),
-    ).toBe(true);
+    // The caller, the event, and `getLastShutdownResult()` all get the same answer.
+    expect(crashed.code).toBe('unknown_error');
+    expect(completedResults).toHaveLength(1);
+    expect(completedResults[0]).toMatchObject({
+      success: false,
+      code: 'unknown_error',
+    });
+    expect(manager.getLastShutdownResult()).toBe(crashed);
+    expect(hasReport(reports, 'shutdown after manual')).toBe(true);
     expect(manager.getSystemState()).not.toBe('shutting-down');
   });
 
@@ -836,13 +749,7 @@ describe('LifecycleManager - triggerShutdown() hardening', () => {
       events.push('completed');
     });
 
-    const reports: unknown[] = [];
-    const onError = (event: Event): void => {
-      reports.push((event as ErrorEvent).error);
-      event.preventDefault();
-    };
-
-    globalThis.addEventListener('error', onError);
+    const { reports, release } = claimReports();
 
     // Escalation seeding is the earliest thing in the pass that could plausibly throw:
     // it runs after the pass has announced itself to the requester but before the
@@ -855,20 +762,17 @@ describe('LifecycleManager - triggerShutdown() hardening', () => {
       throw new Error('seed exploded');
     };
 
-    const done = shutdownCompleted(manager);
-    let ack;
+    let crashed;
 
     try {
-      ack = await manager.triggerShutdown();
-      await done;
+      crashed = await manager.stopAllComponents();
     } finally {
       internals.seedRepeatedShutdownRequestState = original;
-      globalThis.removeEventListener('error', onError);
+      release();
     }
 
-    // The pass started, so the acknowledgement is `initiated` and the request never
-    // rejects - the outcome arrives on the completed event instead.
-    expect(ack.code).toBe('initiated');
+    // The pass started, so the call gets the pass's own failure, never a rejection.
+    expect(crashed.code).toBe('unknown_error');
 
     // `shutdown-initiated` never made it out, but the pass still owes a result: a
     // listener with nothing to pair the completion to beats a pass that reports nothing.
@@ -883,11 +787,7 @@ describe('LifecycleManager - triggerShutdown() hardening', () => {
     // so there is no cycle to carry over and nothing to arm.
     expect(manager.getShutdownEscalationStatus().firstRequestAt).toBe(null);
     expect(manager.getShutdownEscalationStatus().isArmed).toBe(false);
-    expect(
-      reports.some((report) =>
-        (report as Error).message.includes('shutdown after manual'),
-      ),
-    ).toBe(true);
+    expect(hasReport(reports, 'shutdown after manual')).toBe(true);
 
     // The latch is released, so the retry runs a clean pass.
     expect(manager.getSystemState()).not.toBe('shutting-down');
@@ -935,16 +835,18 @@ describe('LifecycleManager - triggerShutdown() hardening', () => {
       return original.call(this, name);
     };
 
+    const { release } = claimReports();
+    let result;
+
     try {
-      // eslint-disable-next-line @typescript-eslint/await-thenable
-      await expect(manager.stopAllComponents()).rejects.toThrow(
-        'stop loop exploded',
-      );
+      result = await manager.stopAllComponents();
     } finally {
       internals.stopComponentInternal = original;
+      release();
     }
 
-    const result = manager.getLastShutdownResult();
+    expect(result.error?.message).toBe('stop loop exploded');
+    expect(manager.getLastShutdownResult()).toBe(result);
     expect(result?.success).toBe(false);
     expect(result?.code).toBe('unknown_error');
     expect(result?.stoppedComponents.length).toBe(1);
@@ -997,20 +899,13 @@ describe('LifecycleManager - triggerShutdown() hardening', () => {
       throw new Error('setup exploded');
     };
 
-    const onError = (event: Event): void => {
-      event.preventDefault();
-    };
-
-    globalThis.addEventListener('error', onError);
+    const { release } = claimReports();
 
     try {
-      // eslint-disable-next-line @typescript-eslint/await-thenable
-      await expect(manager.stopAllComponents()).rejects.toThrow(
-        'setup exploded',
-      );
+      expect((await manager.stopAllComponents()).code).toBe('unknown_error');
     } finally {
       internals.isComponentRunning = original;
-      globalThis.removeEventListener('error', onError);
+      release();
     }
 
     // A stalled pass emits `shutdown-completed` and only then arms; a listener on the
@@ -1053,16 +948,9 @@ describe('LifecycleManager - triggerShutdown() hardening', () => {
       throw new Error('stop loop exploded');
     };
 
-    // Each dead pass rejects the floating promise `startShutdownPass()` holds, which
-    // reports it on the global channel; claiming the reports keeps them out of the
-    // test output and asserts they were made.
-    const reports: unknown[] = [];
-    const onError = (event: Event): void => {
-      reports.push((event as ErrorEvent).error);
-      event.preventDefault();
-    };
-
-    globalThis.addEventListener('error', onError);
+    // Each dead pass reports itself on the global channel; claiming the reports keeps
+    // them out of the test output and asserts they were made.
+    const { reports, release } = claimReports();
 
     try {
       // The first press seeds the cycle and its pass crashes rather than stalling.
@@ -1086,13 +974,9 @@ describe('LifecycleManager - triggerShutdown() hardening', () => {
       done = shutdownCompleted(manager);
       internals.handleShutdownRequest('SIGTERM');
       await done;
-
-      // Each pass reports its rejection a microtask after the completed event, so let
-      // the last one land while the listener that claims it is still attached.
-      await sleep(5);
     } finally {
       internals.stopComponentInternal = original;
-      globalThis.removeEventListener('error', onError);
+      release();
     }
 
     expect(forced.length).toBe(1);
@@ -1103,11 +987,7 @@ describe('LifecycleManager - triggerShutdown() hardening', () => {
     // pass: the crash is what left that window open.
     expect(forced[0]?.wasArmedAfterFailure).toBe(true);
     expect(forced[0]?.isShuttingDown).toBe(false);
-    expect(
-      reports.some((report) =>
-        (report as Error).message.includes('shutdown after SIGTERM'),
-      ),
-    ).toBe(true);
+    expect(hasReport(reports, 'shutdown after SIGTERM')).toBe(true);
   });
 
   test('a pass that dies before it has a stop list reports no stalls of its own', async () => {
@@ -1140,13 +1020,13 @@ describe('LifecycleManager - triggerShutdown() hardening', () => {
       throw new Error('setup exploded');
     };
 
+    const { release } = claimReports();
+
     try {
-      // eslint-disable-next-line @typescript-eslint/await-thenable
-      await expect(manager.stopAllComponents()).rejects.toThrow(
-        'setup exploded',
-      );
+      await manager.stopAllComponents();
     } finally {
       internals.isComponentRunning = original;
+      release();
     }
 
     // The stall predates this pass and was never in its view, so it stays with the
@@ -1212,13 +1092,13 @@ describe('LifecycleManager - triggerShutdown() hardening', () => {
       return original(name);
     };
 
+    const { release } = claimReports();
+
     try {
-      // eslint-disable-next-line @typescript-eslint/await-thenable
-      await expect(manager.stopAllComponents()).rejects.toThrow(
-        'stop loop exploded',
-      );
+      await manager.stopAllComponents();
     } finally {
       internals.isComponentRunning = original;
+      release();
     }
 
     // Both paths run the same reconciliation sweep, so the crash reports what the
@@ -1227,72 +1107,6 @@ describe('LifecycleManager - triggerShutdown() hardening', () => {
     expect(crashed?.code).toBe('unknown_error');
     expect(crashed?.stoppedComponents).toEqual(['first']);
     expect(manager.getComponentStatus('first')?.state).toBe('stopped');
-  });
-
-  test('a throw on the request path rejects rather than escaping the promise', async () => {
-    const { logger, manager } = setup();
-    await manager.registerComponent(new SlowStop(logger, 'slow', 10));
-    await manager.startAllComponents();
-
-    const events: string[] = [];
-
-    manager.on('lifecycle-manager:shutdown-initiated', () => {
-      events.push('initiated');
-    });
-    manager.on('lifecycle-manager:shutdown-completed', () => {
-      events.push('completed');
-    });
-
-    // The pre-latch half of the request, where a manager bug - an option read that
-    // throws, say - would surface. The method is declared to return a promise, so the
-    // caller's `.catch()` has to be the thing that sees it.
-    const internals = manager as unknown as {
-      acceptShutdownPass: (method: string) => unknown;
-      isShuttingDown: boolean;
-      activeShutdownPass: unknown;
-    };
-    const original = internals.acceptShutdownPass;
-
-    internals.acceptShutdownPass = (): never => {
-      throw new Error('acceptance exploded');
-    };
-
-    let didThrowSynchronously = false;
-    let rejection: unknown;
-
-    try {
-      // Calling without awaiting: a synchronous throw would land here instead of on the
-      // promise, which is exactly the shape this guards against.
-      const pending = manager.triggerShutdown();
-      rejection = await pending.then(
-        () => null,
-        (error: unknown) => error,
-      );
-    } catch (error) {
-      didThrowSynchronously = true;
-      rejection = error;
-    } finally {
-      internals.acceptShutdownPass = original;
-    }
-
-    expect(didThrowSynchronously).toBe(false);
-    expect((rejection as Error).message).toBe('acceptance exploded');
-
-    // Fail-fast: the failure is reported as itself, never laundered into an
-    // `already_in_progress` acknowledgement for a pass that never existed.
-    expect(events).toEqual([]);
-    expect(internals.isShuttingDown).toBe(false);
-    expect(internals.activeShutdownPass).toBeNull();
-    expect(manager.getSystemState()).not.toBe('shutting-down');
-    expect(manager.getLastShutdownResult()).toBeNull();
-
-    // The manager is idle, not wedged: the next request runs a pass of its own.
-    const done = shutdownCompleted(manager);
-    const ack = await manager.triggerShutdown();
-
-    expect(ack.code).toBe('initiated');
-    await done;
-    expect(events).toEqual(['initiated', 'completed']);
   });
 
   test('a logger that throws on the final log line does not fail a clean shutdown', async () => {
@@ -1326,7 +1140,7 @@ describe('LifecycleManager - triggerShutdown() hardening', () => {
     expect(manager.getLastShutdownResult()?.success).toBe(true);
   });
 
-  test('a component can trigger shutdown through its lifecycle reference', async () => {
+  test('a component can start shutdown through its lifecycle reference without awaiting it', async () => {
     const { logger, manager } = setup();
     const component = new SlowStop(logger, 'slow', 10);
     await manager.registerComponent(component);
@@ -1334,14 +1148,13 @@ describe('LifecycleManager - triggerShutdown() hardening', () => {
 
     const lifecycle = (
       component as unknown as {
-        lifecycle: { triggerShutdown(): Promise<{ code: string }> };
+        lifecycle: { stopAllComponents(): Promise<ShutdownResult> };
       }
     ).lifecycle;
-    const done = shutdownCompleted(manager);
-    const ack = await lifecycle.triggerShutdown();
+    const pending = lifecycle.stopAllComponents();
 
-    expect(ack.code).toBe('initiated');
-    await done;
+    expect(manager.getSystemState()).toBe('shutting-down');
+    expect((await pending).success).toBe(true);
     expect(manager.getComponentStatus('slow')?.state).toBe('stopped');
   });
 });

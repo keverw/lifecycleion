@@ -13,7 +13,6 @@ import type {
   RestartAllOptions,
   ShutdownResult,
   SignalBroadcastResult,
-  ShutdownTriggerResult,
   StartComponentOptions,
   StartupOptions,
   StartupOrderResult,
@@ -193,10 +192,6 @@ export class ComponentLifecycle implements ComponentLifecycleRef {
 
   public getShutdownEscalationStatus(): ShutdownEscalationStatus {
     return this.manager.getShutdownEscalationStatus();
-  }
-
-  public triggerShutdown(): Promise<ShutdownTriggerResult> {
-    return this.manager.triggerShutdown();
   }
 
   public triggerReload(): Promise<SignalBroadcastResult> {

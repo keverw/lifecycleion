@@ -31,7 +31,6 @@ import type {
   RestartAllOptions,
   DependencyValidationResult,
   ShutdownMethod,
-  ShutdownTriggerResult,
   SignalBroadcastResult,
   ComponentSignalResult,
   LifecycleSignalStatus,
@@ -419,7 +418,7 @@ export class LifecycleManager
     component: BaseComponent,
     options?: RegisterOptions,
   ): Promise<RegisterComponentResult> {
-    const result = await this.registerComponentInternal(
+    const result = await this.registerComponentSettled(
       component,
       'end',
       undefined,
@@ -459,7 +458,7 @@ export class LifecycleManager
     targetComponentName?: string,
     options?: RegisterOptions,
   ): Promise<InsertComponentAtResult> {
-    return await this.registerComponentInternal(
+    return this.registerComponentSettled(
       component,
       position,
       targetComponentName,
@@ -482,176 +481,23 @@ export class LifecycleManager
    * - If stopIfRunning is true and the component is stalled, unregister is aborted
    * @returns True if component was unregistered, false otherwise
    */
-  public async unregisterComponent(
+  public unregisterComponent(
     name: string,
     options?: UnregisterOptions,
   ): Promise<UnregisterComponentResult> {
-    // Block unregistration during bulk operations
-    if (
-      this.isStarting ||
-      this.isShuttingDown ||
-      this.pendingBulkStartupCleanup.has(name)
-    ) {
-      this.logger
-        .entity(name)
-        .warn(LIFECYCLE_MANAGER_MESSAGE_BULK_OPERATION_IN_PROGRESS, {
-          params: {
-            isStarting: this.isStarting,
-            isShuttingDown: this.isShuttingDown,
-          },
-        });
-
-      return {
+    return this.settleOperation(
+      'unregisterComponent',
+      () => this.unregisterComponentOperation(name, options),
+      (error, reason) => ({
         success: false,
         componentName: name,
-        reason: LIFECYCLE_MANAGER_MESSAGE_BULK_OPERATION_IN_PROGRESS,
-        code: 'bulk_operation_in_progress',
+        reason,
+        code: 'unknown_error',
+        error,
         wasStopped: false,
-        wasRegistered: this.hasComponent(name),
-      };
-    }
-
-    const component = this.getComponent(name);
-
-    if (!component) {
-      this.logger
-        .entity(name)
-        .warn(LIFECYCLE_MANAGER_MESSAGE_COMPONENT_NOT_FOUND);
-      return {
-        success: false,
-        componentName: name,
-        reason: LIFECYCLE_MANAGER_MESSAGE_COMPONENT_NOT_FOUND,
-        code: 'component_not_found',
-        wasStopped: false,
-        wasRegistered: false,
-      };
-    }
-
-    // Default stopIfRunning to true (opt-out behavior)
-    const shouldStopIfRunning = options?.stopIfRunning !== false;
-
-    const isStalled = this.stalledComponents.has(name);
-
-    if (isStalled && shouldStopIfRunning) {
-      this.logger
-        .entity(name)
-        .warn('Cannot unregister stalled component when stopIfRunning is set');
-      return {
-        success: false,
-        componentName: name,
-        reason: LIFECYCLE_MANAGER_MESSAGE_COMPONENT_STALLED,
-        code: 'stop_failed',
-        stopFailureReason: 'stalled',
-        wasStopped: false,
-        wasRegistered: true,
-      };
-    }
-
-    const isRunning = this.isComponentRunning(name);
-
-    // If running and stopIfRunning explicitly set to false, reject
-    if (isRunning && !shouldStopIfRunning) {
-      this.logger
-        .entity(name)
-        .warn(
-          'Cannot unregister running component. Call stopComponent() first or pass { stopIfRunning: true }',
-        );
-
-      return {
-        success: false,
-        componentName: name,
-        reason:
-          'Component is running. Use stopIfRunning: true option or stop manually first',
-        code: 'component_running',
-        wasStopped: false,
-        wasRegistered: true,
-      };
-    }
-
-    // If running and stopIfRunning is true (default), stop first
-    let wasStopped = false;
-    if (isRunning && shouldStopIfRunning) {
-      this.logger.entity(name).info('Stopping component before unregistering');
-      const stopResult = await this.stopComponent(name, {
-        allowStopWithRunningDependents: options?.forceStop,
-      });
-
-      // If stop fails and leaves the component stalled, do NOT unregister.
-      // Caller expectation: success with stopIfRunning implies the component is stopped and unregistered.
-      const stateAfterStopAttempt = this.componentStates.get(name);
-      const isRunningAfterStopAttempt = this.isComponentRunning(name);
-
-      const isSafelyStopped =
-        stopResult.success ||
-        (!isRunningAfterStopAttempt && stateAfterStopAttempt === 'stopped');
-
-      if (!isSafelyStopped) {
-        this.logger
-          .entity(name)
-          .warn('Failed to stop component before unregistering', {
-            params: {
-              reason: stopResult.reason,
-              code: stopResult.code,
-              state: stateAfterStopAttempt,
-            },
-          });
-
-        return {
-          success: false,
-          componentName: name,
-          reason: stopResult.reason ?? 'Failed to stop component',
-          code: 'stop_failed',
-          stopFailureReason:
-            stopResult.code === 'component_shutdown_timeout'
-              ? 'timeout'
-              : 'error',
-          error: stopResult.error,
-          wasStopped: false,
-          wasRegistered: true,
-        };
-      }
-
-      wasStopped = true;
-    }
-
-    // Remove from registry
-    this.components = this.components.filter((c) => c.getName() !== name);
-
-    // Clean up state
-    component._clearUnexpectedStopHandler();
-    component._markUnregistered();
-    this.componentStates.delete(name);
-    this.componentTimestamps.delete(name);
-    this.componentErrors.delete(name);
-    this.componentUnexpectedStopHadError.delete(name);
-    this.componentStartAttemptTokens.delete(name);
-    this.componentStopAttemptTokens.delete(name);
-    this.pendingForceStopWaiters.delete(name);
-    this.stalledComponents.delete(name);
-    this.runningComponents.delete(name);
-    this.updateStartedFlag();
-
-    // Auto-detach signals if this was the last component and option is enabled
-    if (
-      this.detachSignalsOnStop &&
-      this.runningComponents.size === 0 &&
-      this.processSignalManager
-    ) {
-      this.logger.info(
-        'Auto-detaching process signals on last component unregistered',
-      );
-      this.detachSignals();
-    }
-
-    this.logger.entity(name).info('Component unregistered');
-    this.lifecycleEvents.componentUnregistered(name, false);
-
-    return {
-      success: true,
-      componentName: name,
-      wasStopped,
-      wasRegistered: true,
-    };
+        wasRegistered: this.componentStates.has(name),
+      }),
+    );
   }
 
   // ============================================================================
@@ -1028,7 +874,1233 @@ export class LifecycleManager
    * - Dependents still attempt to start if an optional dependency fails
    * - Handles shutdown during startup (aborts; shutdown owns cleanup)
    */
-  public async startAllComponents(
+  public startAllComponents(options?: StartupOptions): Promise<StartupResult> {
+    return this.settleOperation(
+      'startAllComponents',
+      () => this.startAllComponentsOperation(options),
+      (error, reason) => ({
+        ...this.refusedStartupResult('unknown_error', reason),
+        error,
+      }),
+    );
+  }
+
+  /**
+   * Stop all running components in reverse dependency order
+   *
+   * Components stop in reverse topological order (dependents before dependencies).
+   *
+   * Never rejects. Stalls and timeouts are reported in the resolved `ShutdownResult`, and
+   * so is a pass that throws outright: it resolves with `code: 'unknown_error'` and the
+   * thrown value on `error`, and is reported on the global `'error'` channel. Such a pass
+   * still emits `lifecycle-manager:shutdown-completed` with the same result and updates
+   * `getLastShutdownResult()`, so listeners are never left waiting on it either.
+   *
+   * Not awaiting it is safe, so a caller that cannot block - an HTTP handler, an event
+   * listener - can start the shutdown and read the outcome later from the same promise:
+   *
+   * ```ts
+   * const pending = manager.stopAllComponents();
+   * // ...carry on...
+   * pending.then((result) => { ... });
+   * ```
+   *
+   * Called during a `restartAllComponents()` stop phase this still refuses with
+   * `already_in_progress`, but it cancels the restart's startup phase - a direct stop
+   * call in that window means the components should stay down.
+   *
+   * @param options - Optional shutdown options
+   */
+  public stopAllComponents(options?: StopAllOptions): Promise<ShutdownResult> {
+    return this.settleOperation(
+      'stopAllComponents',
+      () => this.stopAllComponentsOperation(options),
+      (error, reason) => this.crashedShutdownResult(error, reason),
+    );
+  }
+
+  /**
+   * Restart all components (stop then start)
+   *
+   * Never rejects: see {@link stopAllComponents}. A stop phase that throws outright
+   * resolves with its `unknown_error` result and the startup phase is skipped, since
+   * nothing can be said about what state it left the components in.
+   *
+   * A shutdown request that arrives while the stop phase is running wins: the startup
+   * phase is skipped and the result says so through
+   * `startupSkippedByShutdownRequest`. See {@link ShutdownPass}.
+   *
+   * A restart that starts while a shutdown is already running has its stop phase refused
+   * and so owns no pass; it never reports a skipped startup, and gets whatever that
+   * refusal and `startAllComponents()` answer.
+   */
+  public restartAllComponents(
+    options?: RestartAllOptions,
+  ): Promise<RestartResult> {
+    return this.settleOperation(
+      'restartAllComponents',
+      () => this.restartAllComponentsOperation(options),
+      (error, reason) => ({
+        shutdownResult: this.crashedShutdownResult(error, reason),
+        startupResult: {
+          ...this.refusedStartupResult('unknown_error', reason),
+          error,
+        },
+        success: false,
+      }),
+    );
+  }
+
+  // ============================================================================
+  // Individual Component Lifecycle
+  // ============================================================================
+
+  /**
+   * Start a specific component
+   */
+  public startComponent(
+    name: string,
+    options?: StartComponentOptions,
+  ): Promise<ComponentOperationResult> {
+    return this.settleOperation(
+      'startComponent',
+      () => this.startComponentInternal(name, options),
+      (error, reason) => this.crashedComponentResult(name, error, reason),
+    );
+  }
+
+  /**
+   * Stop a specific component
+   */
+  public stopComponent(
+    name: string,
+    options?: StopComponentOptions,
+  ): Promise<ComponentOperationResult> {
+    return this.settleOperation(
+      'stopComponent',
+      () => this.stopComponentOperation(name, options),
+      (error, reason) => this.crashedComponentResult(name, error, reason),
+    );
+  }
+
+  /**
+   * Restart a component (stop then start)
+   */
+  public restartComponent(
+    name: string,
+    options?: RestartComponentOptions,
+  ): Promise<ComponentOperationResult> {
+    return this.settleOperation(
+      'restartComponent',
+      () => this.restartComponentOperation(name, options),
+      (error, reason) => this.crashedComponentResult(name, error, reason),
+    );
+  }
+
+  // ============================================================================
+  // Signal Integration
+  // ============================================================================
+
+  /**
+   * Attach signal handlers for graceful shutdown, reload, info, and debug.
+   * Creates ProcessSignalManager instance if needed and attaches it.
+   * Idempotent - calling multiple times has no effect.
+   */
+  public attachSignals(): void {
+    // Check if already attached (not just if instance exists)
+    if (this.processSignalManager?.getStatus().isAttached) {
+      return; // Already attached
+    }
+
+    // Create instance if it doesn't exist
+    if (!this.processSignalManager) {
+      this.processSignalManager = new ProcessSignalManager({
+        onShutdownRequested: (method: ShutdownSignal) => {
+          this.handleShutdownRequest(method);
+        },
+        // Note: Signal-triggered handlers are fire-and-forget by design.
+        // Node.js signal handlers (process.on) cannot return values, so these
+        // async handlers execute but their return values are not accessible.
+        // Use triggerReload(), triggerInfo(), triggerDebug() for programmatic
+        // access to results.
+        onReloadRequested: () => this.handleReloadRequest('signal'),
+        onInfoRequested: () => this.handleInfoRequest('signal'),
+        onDebugRequested: () => this.handleDebugRequest('signal'),
+      });
+    }
+
+    this.processSignalManager.attach();
+    this.lifecycleEvents.lifecycleManagerSignalsAttached();
+  }
+
+  /**
+   * Detach signal handlers.
+   * Idempotent - calling multiple times has no effect.
+   */
+  public detachSignals(): void {
+    if (!this.processSignalManager?.getStatus().isAttached) {
+      return; // Not attached
+    }
+
+    this.processSignalManager.detach();
+    this.lifecycleEvents.lifecycleManagerSignalsDetached();
+  }
+
+  /**
+   * Get status information about signal handling.
+   */
+  public getSignalStatus(): LifecycleSignalStatus {
+    if (!this.processSignalManager) {
+      return {
+        isAttached: false,
+        handlers: {
+          shutdown: false,
+          reload: false,
+          info: false,
+          debug: false,
+        },
+        listeningFor: {
+          shutdownSignals: false,
+          reloadSignal: false,
+          infoSignal: false,
+          debugSignal: false,
+          keypresses: false,
+        },
+        shutdownMethod: this.shutdownMethod,
+      };
+    }
+
+    return {
+      ...this.processSignalManager.getStatus(),
+      shutdownMethod: this.shutdownMethod,
+    };
+  }
+
+  /**
+   * Get status information about repeated shutdown escalation configuration and runtime state.
+   */
+  public getShutdownEscalationStatus(): ShutdownEscalationStatus {
+    if (this.repeatedShutdownRequestPolicy === undefined) {
+      return {
+        configured: false,
+        isShuttingDown: this.isShuttingDown,
+        isArmed: false,
+        forceAfterCount: null,
+        withinMS: null,
+        armedAfterFailureMS: null,
+        armedAfterFailureMSSource: null,
+        requestCount: 0,
+        firstMethod: null,
+        latestMethod: null,
+        firstRequestAt: null,
+        latestRequestAt: null,
+        repeatedWindowStartedAt: null,
+        armedUntil: null,
+        hasTriggeredForceShutdown: false,
+      };
+    }
+
+    this.normalizeRepeatedShutdownRequestStateArmedStatus();
+
+    const armedUntil = this.repeatedShutdownRequestState.remainsArmedUntil;
+    const isArmed = armedUntil !== null;
+
+    return {
+      configured: true,
+      isShuttingDown: this.isShuttingDown,
+      isArmed,
+      forceAfterCount: this.repeatedShutdownRequestPolicy.forceAfterCount,
+      withinMS: this.repeatedShutdownRequestPolicy.withinMS,
+      armedAfterFailureMS:
+        this.repeatedShutdownRequestPolicy.armedAfterFailureMS,
+      armedAfterFailureMSSource: this.repeatedShutdownRequestPolicy
+        .hasExplicitArmedAfterFailureMS
+        ? 'explicit'
+        : 'derived',
+      countManualRetriesTowardEscalation:
+        this.repeatedShutdownRequestPolicy.countManualRetriesTowardEscalation,
+      requestCount: this.repeatedShutdownRequestState.requestCount,
+      firstMethod: this.repeatedShutdownRequestState.firstMethod,
+      latestMethod: this.repeatedShutdownRequestState.latestMethod,
+      firstRequestAt: this.repeatedShutdownRequestState.firstRequestAt,
+      latestRequestAt: this.repeatedShutdownRequestState.latestRequestAt,
+      repeatedWindowStartedAt:
+        this.repeatedShutdownRequestState.repeatedWindowStartedAt,
+      armedUntil: isArmed ? armedUntil : null,
+      hasTriggeredForceShutdown:
+        this.repeatedShutdownRequestState.hasTriggeredForceShutdown,
+    };
+  }
+
+  /**
+   * Enable Logger exit hook integration
+   *
+   * Sets up the logger's beforeExit callback to trigger graceful component shutdown.
+   * When `logger.exit(code)` is called (or `logger.error('msg', { exitCode: 1 })`),
+   * the LifecycleManager will stop all components before the process exits.
+   *
+   * The shutdown is subject to the configured shutdown timeout (default: 30000ms).
+   * If shutdown exceeds this timeout, the process will exit anyway to prevent hanging.
+   *
+   * This method is idempotent and can be called multiple times safely.
+   *
+   * **Note:** This overwrites any existing beforeExit callback on the logger.
+   * If you need custom exit logic, set it up manually with `logger.setBeforeExitCallback()`.
+   *
+   * @example
+   * ```typescript
+   * const logger = new Logger();
+   * const lifecycle = new LifecycleManager({
+   *   logger,
+   *   enableLoggerExitHook: true, // Auto-enable
+   *   shutdownOptions: { timeoutMS: 30000 },   // Max 30s for shutdown
+   * });
+   *
+   * // Or enable manually later
+   * lifecycle.enableLoggerExitHook();
+   *
+   * // Now logger.exit() will trigger graceful shutdown
+   * logger.error('Fatal error', { exitCode: 1 });
+   * // Components stop gracefully (up to shutdown timeout) before process exits
+   * ```
+   */
+  public enableLoggerExitHook(): void {
+    this.rootLogger.setBeforeExitCallback(
+      async (exitCode: number, isFirstExit: boolean) => {
+        // Defer the first logger.exit() that arrives during an already-running
+        // shutdown. Later duplicate exit calls stay ignored so they cannot
+        // override the eventual exit code after shutdown completes.
+        if (this.isShuttingDown) {
+          // The process is on its way out, so a restart stopping right now must not
+          // start everything back up behind the exit.
+          this.noteShutdownRequestDuringActivePass();
+
+          if (isFirstExit && this.pendingLoggerExitResolve === null) {
+            this.logger.debug(
+              LIFECYCLE_MANAGER_LOG_LOGGER_EXIT_DURING_SHUTDOWN,
+              {
+                params: { exitCode },
+              },
+            );
+
+            return await new Promise<BeforeExitResult>((resolve) => {
+              this.pendingLoggerExitResolve = resolve;
+            });
+          }
+
+          this.logger.debug(LIFECYCLE_MANAGER_LOG_LOGGER_EXIT_DURING_SHUTDOWN, {
+            params: { exitCode },
+          });
+
+          return { action: 'wait' as const };
+        }
+
+        if (isFirstExit) {
+          this.logger.info('Logger exit triggered, stopping components...', {
+            params: { exitCode, timeoutMS: this.shutdownOptions?.timeoutMS },
+          });
+
+          // Stop all components with global timeout
+          await this.stopAllComponents({
+            ...this.shutdownOptions,
+          });
+        }
+
+        // Proceed with exit
+        return { action: 'proceed' as const };
+      },
+    );
+
+    this.logger.debug('Logger exit hook enabled', {
+      params: { timeoutMS: this.shutdownOptions?.timeoutMS },
+    });
+  }
+
+  /**
+   * Manually trigger a reload event.
+   * @returns Result of broadcasting reload to components
+   */
+  public triggerReload(): Promise<SignalBroadcastResult> {
+    return this.settleOperation(
+      'triggerReload',
+      () => this.handleReloadRequest(),
+      () => this.crashedSignalBroadcastResult('reload'),
+    );
+  }
+
+  /**
+   * Manually trigger an info event.
+   * @returns Result of broadcasting info to components
+   */
+  public triggerInfo(): Promise<SignalBroadcastResult> {
+    return this.settleOperation(
+      'triggerInfo',
+      () => this.handleInfoRequest(),
+      () => this.crashedSignalBroadcastResult('info'),
+    );
+  }
+
+  /**
+   * Manually trigger a debug event.
+   * @returns Result of broadcasting debug to components
+   */
+  public triggerDebug(): Promise<SignalBroadcastResult> {
+    return this.settleOperation(
+      'triggerDebug',
+      () => this.handleDebugRequest(),
+      () => this.crashedSignalBroadcastResult('debug'),
+    );
+  }
+
+  // ============================================================================
+  // Component Messaging
+  // ============================================================================
+
+  /**
+   * Send a message to a specific component
+   *
+   * Delivers a message to the component's onMessage handler if implemented.
+   * The 'from' parameter is automatically tracked based on calling context.
+   *
+   * @param componentName - Name of target component
+   * @param payload - Message payload (any type)
+   * @param options - Optional message options (timeout override)
+   * @returns Result with sent status, data returned from handler, and any errors
+   */
+  public sendMessageToComponent(
+    componentName: string,
+    payload: unknown,
+    options?: SendMessageOptions,
+  ): Promise<MessageResult> {
+    return this.settleOperation(
+      'sendMessageToComponent',
+      () => this.sendMessageInternal(componentName, payload, null, options),
+      (error) => ({
+        sent: false,
+        componentFound: this.componentStates.has(componentName),
+        componentRunning: this.runningComponents.has(componentName),
+        handlerImplemented: false,
+        data: undefined,
+        error,
+        timedOut: false,
+        code: 'error',
+      }),
+    );
+  }
+
+  /**
+   * Broadcast a message to multiple components
+   *
+   * Sends the same message to multiple components (by default, all running components).
+   * The 'from' parameter is automatically tracked based on calling context.
+   *
+   * @param payload - Message payload (any type)
+   * @param options - Filtering options and message timeout override
+   * @returns Array of results, one per component
+   */
+  public broadcastMessage(
+    payload: unknown,
+    options?: BroadcastOptions,
+  ): Promise<BroadcastResult[]> {
+    // A crash leaves no per-component answers to return; it is reported on the global
+    // channel instead.
+    return this.settleOperation(
+      'broadcastMessage',
+      () => this.broadcastMessageInternal(payload, null, options),
+      () => [],
+    );
+  }
+
+  // ============================================================================
+  // Health Checks
+  // ============================================================================
+
+  /**
+   * Check the health of a specific component
+   *
+   * Calls the component's healthCheck() method if implemented.
+   * Times out after component's healthCheckTimeoutMS. A timeout of 0 is disabled.
+   *
+   * @param name - Component name
+   * @returns Health check result with status, message, details, and timing
+   */
+  public checkComponentHealth(name: string): Promise<HealthCheckResult> {
+    return this.settleOperation(
+      'checkComponentHealth',
+      () => this.checkComponentHealthOperation(name),
+      (error) => this.crashedHealthCheckResult(name, error),
+    );
+  }
+
+  /**
+   * Check the health of all running components
+   *
+   * Runs health checks on all running components in parallel.
+   * Overall health is true only if ALL components are healthy.
+   *
+   * @returns Aggregate health report with individual component results
+   */
+  public checkAllHealth(): Promise<HealthReport> {
+    return this.settleOperation(
+      'checkAllHealth',
+      () => this.checkAllHealthOperation(),
+      () => ({
+        healthy: false,
+        components: [],
+        checkedAt: Date.now(),
+        durationMS: 0,
+        timedOut: false,
+        code: 'error',
+      }),
+    );
+  }
+
+  // ============================================================================
+  // Shared Values (getValue Pattern)
+  // ============================================================================
+
+  /**
+   * Request a value from a component by key
+   *
+   * Calls the component's getValue(key, from) method if implemented.
+   * The 'from' parameter is automatically tracked based on calling context.
+   *
+   * @param componentName - Name of component to request value from
+   * @param key - Value key to request
+   * @returns Result with found status, value, and metadata
+   */
+  public getValue<T = unknown>(
+    componentName: string,
+    key: string,
+    options?: GetValueOptions,
+  ): ValueResult<T> {
+    return this.getValueInternal<T>(componentName, key, null, options);
+  }
+
+  // ============================================================================
+  // Internal Methods (Private - accessed via callbacks)
+  // ============================================================================
+
+  /**
+   * Internal message sending with explicit 'from' parameter
+   *
+   * @param componentName - Target component name
+   * @param payload - Message payload
+   * @param from - Sender component name (null if external)
+   */
+  private async sendMessageInternal(
+    componentName: string,
+    payload: unknown,
+    from: string | null,
+    options?: SendMessageOptions,
+  ): Promise<MessageResult> {
+    // Find component
+    const component = this.components.find(
+      (c) => c.getName() === componentName,
+    );
+
+    if (!component) {
+      return {
+        sent: false,
+        componentFound: false,
+        componentRunning: false,
+        handlerImplemented: false,
+        data: undefined,
+        error: null,
+        timedOut: false,
+        code: 'not_found',
+      };
+    }
+
+    // Startup and teardown are unavailable states, not handler failures.
+    const state = this.componentStates.get(componentName);
+    if (
+      state === 'starting' ||
+      state === 'starting-timed-out' ||
+      state === 'stopping' ||
+      state === 'force-stopping'
+    ) {
+      return {
+        sent: false,
+        componentFound: true,
+        componentRunning: false,
+        handlerImplemented: false,
+        data: undefined,
+        error: null,
+        timedOut: false,
+        code: 'stopped',
+      };
+    }
+
+    const isRunning = this.isComponentRunning(componentName);
+    const isStalled = this.stalledComponents.has(componentName);
+    const allowStopped = options?.includeStopped === true;
+    const allowStalled = options?.includeStalled === true;
+    const isStopped = !isRunning && !isStalled;
+
+    // Check if running or explicitly allowed
+    if (!isRunning) {
+      if ((isStalled && allowStalled) || (isStopped && allowStopped)) {
+        // Allowed to send to non-running component
+      } else {
+        return {
+          sent: false,
+          componentFound: true,
+          componentRunning: false,
+          handlerImplemented: false,
+          data: undefined,
+          error: null,
+          timedOut: false,
+          code: isStalled ? 'stalled' : 'stopped',
+        };
+      }
+    }
+
+    // Check if handler implemented
+    if (!component.onMessage) {
+      return {
+        sent: false,
+        componentFound: true,
+        componentRunning: isRunning,
+        handlerImplemented: false,
+        data: undefined,
+        error: null,
+        timedOut: false,
+        code: 'no_handler',
+      };
+    }
+
+    // Send message
+    this.lifecycleEvents.componentMessageSent({ componentName, from, payload });
+
+    const timeoutMS = options?.timeout ?? this.messageTimeoutMS;
+    let timeoutHandle: NodeJS.Timeout | undefined;
+    const timeoutResult = { timedOut: true } as const;
+
+    try {
+      let result: unknown;
+      try {
+        result = component.onMessage(payload, from);
+      } catch (error) {
+        const err = toError(error);
+
+        this.logger
+          .entity(componentName)
+          .error(LIFECYCLE_MANAGER_LOG_MESSAGE_HANDLER_FAILED, {
+            params: { error: err, from },
+          });
+
+        this.lifecycleEvents.componentMessageFailed(componentName, from, err, {
+          timedOut: false,
+          code: 'error',
+          componentFound: true,
+          componentRunning: isRunning,
+          handlerImplemented: true,
+          data: undefined,
+        });
+
+        return {
+          sent: true,
+          componentFound: true,
+          componentRunning: isRunning,
+          handlerImplemented: true,
+          data: undefined,
+          error: err,
+          timedOut: false,
+          code: 'error',
+        };
+      }
+
+      const handlerPromise = isPromise(result)
+        ? result
+        : Promise.resolve(result);
+
+      const outcome =
+        toTimerDelayMS(timeoutMS) > 0
+          ? await Promise.race([
+              handlerPromise,
+              new Promise<typeof timeoutResult>((resolve) => {
+                timeoutHandle = setTimeout(() => {
+                  resolve(timeoutResult);
+                }, toTimerDelayMS(timeoutMS));
+              }),
+            ])
+          : await handlerPromise;
+
+      if (outcome === timeoutResult) {
+        this.logger.entity(componentName).warn('Message handler timed out', {
+          params: { from, timeoutMS },
+        });
+        // Prevent unhandled rejection if handler throws after timeout
+        // Logged, not discarded. Preventing the unhandled rejection is why this
+        // `catch` exists and it stays; swallowing the *cause* was a separate
+        // decision, and it left the caller knowing the operation timed out and
+        // never why it ultimately failed. The timeout warning is logged just
+        // above, so this is that line's missing second half.
+        Promise.resolve(handlerPromise)
+          .catch((error: unknown) => {
+            this.logger
+              .entity(componentName)
+              .debug('Message handler failed after it had already timed out', {
+                params: { error: toError(error), from },
+              });
+          })
+          // Terminal, for the reason the shutdown-warning chain carries one: nothing
+          // retains this chain, so a throw out of the reporting handler above becomes an
+          // unhandled rejection mid-lifecycle - fatal under Node's default
+          // `--unhandled-rejections=throw`. Logging is guarded, but a floating chain
+          // should not have to rely on that.
+          .catch(() => {
+            // Nothing left to report with.
+          });
+        return {
+          sent: true,
+          componentFound: true,
+          componentRunning: isRunning,
+          handlerImplemented: true,
+          data: undefined,
+          error: null,
+          timedOut: true,
+          code: 'timeout',
+        };
+      }
+
+      return {
+        sent: true,
+        componentFound: true,
+        componentRunning: isRunning,
+        handlerImplemented: true,
+        data: outcome,
+        error: null,
+        timedOut: false,
+        code: 'sent',
+      };
+    } catch (error) {
+      const err = toError(error);
+
+      this.logger
+        .entity(componentName)
+        .error(LIFECYCLE_MANAGER_LOG_MESSAGE_HANDLER_FAILED, {
+          params: { error: err, from, timeoutMS },
+        });
+
+      this.lifecycleEvents.componentMessageFailed(componentName, from, err, {
+        timedOut: false,
+        code: 'error',
+        componentFound: true,
+        componentRunning: isRunning,
+        handlerImplemented: true,
+        data: undefined,
+      });
+
+      return {
+        sent: true,
+        componentFound: true,
+        componentRunning: isRunning,
+        handlerImplemented: true,
+        data: undefined,
+        error: err,
+        timedOut: false,
+        code: 'error',
+      };
+    } finally {
+      if (timeoutHandle) {
+        clearTimeout(timeoutHandle);
+      }
+    }
+  }
+
+  /**
+   * Internal broadcast with explicit 'from' parameter
+   *
+   * @param payload - Message payload
+   * @param from - Sender component name (null if external)
+   * @param options - Filtering options
+   */
+  private async broadcastMessageInternal(
+    payload: unknown,
+    from: string | null,
+    options?: BroadcastOptions,
+  ): Promise<BroadcastResult[]> {
+    this.lifecycleEvents.componentBroadcastStarted(from, payload);
+
+    const results: BroadcastResult[] = [];
+
+    // Determine which components to broadcast to
+    let targetComponents = this.components;
+
+    const hasExplicitTargets =
+      options?.componentNames !== undefined &&
+      options.componentNames.length > 0;
+
+    // Filter by names if specified
+    if (hasExplicitTargets && options.componentNames) {
+      const names = options.componentNames;
+      targetComponents = targetComponents.filter((c) =>
+        names.includes(c.getName()),
+      );
+    }
+
+    const allowStopped = options?.includeStopped === true;
+    const allowStalled = options?.includeStalled === true;
+
+    // Filter by running/stalled/stopped state unless explicitly included
+    if (!allowStopped && !allowStalled && !hasExplicitTargets) {
+      targetComponents = targetComponents.filter((c) =>
+        this.isComponentRunning(c.getName()),
+      );
+    } else if (!hasExplicitTargets) {
+      targetComponents = targetComponents.filter((c) => {
+        const name = c.getName();
+        const isRunning = this.isComponentRunning(name);
+
+        if (isRunning) {
+          return true;
+        }
+
+        const isStalled = this.stalledComponents.has(name);
+
+        if (isStalled) {
+          return allowStalled;
+        }
+
+        return allowStopped;
+      });
+    }
+
+    // Send to each component
+    for (const component of targetComponents) {
+      const name = component.getName();
+      const isRunning = this.isComponentRunning(name);
+      const isStalled = this.stalledComponents.has(name);
+      const isStopped = !isRunning && !isStalled;
+      const allowNonRunning =
+        (isStalled && allowStalled) || (isStopped && allowStopped);
+
+      // Skip if not running and not explicitly allowed
+      if (!isRunning && !allowNonRunning) {
+        results.push({
+          name,
+          sent: false,
+          running: false,
+          data: undefined,
+          error: null,
+          timedOut: false,
+          code: isStalled ? 'stalled' : 'stopped',
+        });
+        continue;
+      }
+
+      // Send message using internal method
+      const messageResult = await this.sendMessageInternal(
+        name,
+        payload,
+        from,
+        options,
+      );
+
+      results.push({
+        name,
+        sent: messageResult.sent,
+        running: messageResult.componentRunning,
+        data: messageResult.data,
+        error: messageResult.error,
+        timedOut: messageResult.timedOut,
+        code: messageResult.code === 'not_found' ? 'error' : messageResult.code,
+      });
+    }
+
+    this.lifecycleEvents.componentBroadcastCompleted(
+      from,
+      results.length,
+      results,
+    );
+
+    return results;
+  }
+
+  /**
+   * Internal getValue with explicit 'from' parameter
+   *
+   * @param componentName - Target component name
+   * @param key - Value key
+   * @param from - Requester component name (null if external)
+   */
+  private getValueInternal<T = unknown>(
+    componentName: string,
+    key: string,
+    from: string | null,
+    options?: GetValueOptions,
+  ): ValueResult<T> {
+    this.lifecycleEvents.componentValueRequested(componentName, key, from);
+
+    // Find component
+    const component = this.components.find(
+      (c) => c.getName() === componentName,
+    );
+
+    if (!component) {
+      this.lifecycleEvents.componentValueReturned(componentName, key, from, {
+        found: false,
+        value: undefined,
+        componentFound: false,
+        componentRunning: false,
+        handlerImplemented: false,
+        requestedBy: from,
+        code: 'not_found',
+      });
+      return {
+        found: false,
+        value: undefined,
+        componentFound: false,
+        componentRunning: false,
+        handlerImplemented: false,
+        requestedBy: from,
+        code: 'not_found',
+      };
+    }
+
+    // Neither override permits entering a provider during startup or teardown.
+    const state = this.componentStates.get(componentName);
+    const isUnavailable =
+      state === 'starting' ||
+      state === 'starting-timed-out' ||
+      state === 'stopping' ||
+      state === 'force-stopping';
+    const isRunning = !isUnavailable && this.isComponentRunning(componentName);
+    const isStalled =
+      !isUnavailable && this.stalledComponents.has(componentName);
+    const allowStopped = options?.includeStopped === true;
+    const allowStalled = options?.includeStalled === true;
+    const isStopped = !isRunning && !isStalled;
+
+    if (
+      isUnavailable ||
+      (!isRunning &&
+        !((isStopped && allowStopped) || (isStalled && allowStalled)))
+    ) {
+      const code = isStalled ? 'stalled' : 'stopped';
+      this.lifecycleEvents.componentValueReturned(componentName, key, from, {
+        found: false,
+        value: undefined,
+        componentFound: true,
+        componentRunning: false,
+        handlerImplemented: false,
+        requestedBy: from,
+        code,
+      });
+      return {
+        found: false,
+        value: undefined,
+        componentFound: true,
+        componentRunning: false,
+        handlerImplemented: false,
+        requestedBy: from,
+        code,
+      };
+    }
+
+    // Check if handler implemented
+    if (!component.getValue) {
+      this.lifecycleEvents.componentValueReturned(componentName, key, from, {
+        found: false,
+        value: undefined,
+        componentFound: true,
+        componentRunning: isRunning,
+        handlerImplemented: false,
+        requestedBy: from,
+        code: 'no_handler',
+      });
+      return {
+        found: false,
+        value: undefined,
+        componentFound: true,
+        componentRunning: isRunning,
+        handlerImplemented: false,
+        requestedBy: from,
+        code: 'no_handler',
+      };
+    }
+
+    // Get value
+    try {
+      const componentResult = component.getValue(key, from);
+      const wasFound = componentResult.found;
+      const value = componentResult.value;
+
+      this.lifecycleEvents.componentValueReturned(componentName, key, from, {
+        found: wasFound,
+        value,
+        componentFound: true,
+        componentRunning: isRunning,
+        handlerImplemented: true,
+        requestedBy: from,
+        code: wasFound ? 'found' : 'not_found',
+      });
+
+      return {
+        found: wasFound,
+        value: value as T | undefined,
+        componentFound: true,
+        componentRunning: isRunning,
+        handlerImplemented: true,
+        requestedBy: from,
+        code: wasFound ? 'found' : 'not_found',
+      };
+    } catch (error) {
+      const err = toError(error);
+
+      this.logger
+        .entity(componentName)
+        .error('getValue handler failed: {{error.message}}', {
+          params: { error: err, key, from },
+        });
+
+      this.lifecycleEvents.componentValueReturned(componentName, key, from, {
+        found: false,
+        value: undefined,
+        componentFound: true,
+        componentRunning: isRunning,
+        handlerImplemented: true,
+        requestedBy: from,
+        code: 'error',
+      });
+
+      return {
+        found: false,
+        value: undefined,
+        componentFound: true,
+        componentRunning: isRunning,
+        handlerImplemented: true,
+        requestedBy: from,
+        code: 'error',
+      };
+    }
+  }
+
+  // ============================================================================
+  // Private Helper Methods
+  // ============================================================================
+
+  /**
+   * `registerComponentInternal()` under the public-method safety net (see
+   * {@link settleOperation}). Its own `catch` covers the registration body, but the name
+   * and index reads ahead of it run the component's own getters.
+   */
+  private registerComponentSettled(
+    component: BaseComponent,
+    position: InsertPosition,
+    targetComponentName: string | undefined,
+    isInsertAction: boolean,
+    options?: RegisterOptions,
+  ): Promise<InsertComponentAtResult> {
+    return this.settleOperation(
+      isInsertAction ? 'insertComponentAt' : 'registerComponent',
+      () =>
+        this.registerComponentInternal(
+          component,
+          position,
+          targetComponentName,
+          isInsertAction,
+          options,
+        ),
+      (error, reason) => {
+        const registrationIndex = this.components.indexOf(component);
+
+        return {
+          action: 'insert',
+          success: false,
+          // Whatever the registry actually holds, not what the failure implies: a throw
+          // after the commit leaves the component registered.
+          registered: registrationIndex !== -1,
+          componentName: this.readComponentNameSafely(component),
+          reason,
+          code: 'unknown_error',
+          error,
+          registrationIndexBefore: null,
+          registrationIndexAfter:
+            registrationIndex === -1 ? null : registrationIndex,
+          startupOrder: [],
+          requestedPosition: { position, targetComponentName },
+          manualPositionRespected: false,
+        };
+      },
+    );
+  }
+
+  private async unregisterComponentOperation(
+    name: string,
+    options?: UnregisterOptions,
+  ): Promise<UnregisterComponentResult> {
+    // Block unregistration during bulk operations
+    if (
+      this.isStarting ||
+      this.isShuttingDown ||
+      this.pendingBulkStartupCleanup.has(name)
+    ) {
+      this.logger
+        .entity(name)
+        .warn(LIFECYCLE_MANAGER_MESSAGE_BULK_OPERATION_IN_PROGRESS, {
+          params: {
+            isStarting: this.isStarting,
+            isShuttingDown: this.isShuttingDown,
+          },
+        });
+
+      return {
+        success: false,
+        componentName: name,
+        reason: LIFECYCLE_MANAGER_MESSAGE_BULK_OPERATION_IN_PROGRESS,
+        code: 'bulk_operation_in_progress',
+        wasStopped: false,
+        wasRegistered: this.hasComponent(name),
+      };
+    }
+
+    const component = this.getComponent(name);
+
+    if (!component) {
+      this.logger
+        .entity(name)
+        .warn(LIFECYCLE_MANAGER_MESSAGE_COMPONENT_NOT_FOUND);
+      return {
+        success: false,
+        componentName: name,
+        reason: LIFECYCLE_MANAGER_MESSAGE_COMPONENT_NOT_FOUND,
+        code: 'component_not_found',
+        wasStopped: false,
+        wasRegistered: false,
+      };
+    }
+
+    // Default stopIfRunning to true (opt-out behavior)
+    const shouldStopIfRunning = options?.stopIfRunning !== false;
+
+    const isStalled = this.stalledComponents.has(name);
+
+    if (isStalled && shouldStopIfRunning) {
+      this.logger
+        .entity(name)
+        .warn('Cannot unregister stalled component when stopIfRunning is set');
+      return {
+        success: false,
+        componentName: name,
+        reason: LIFECYCLE_MANAGER_MESSAGE_COMPONENT_STALLED,
+        code: 'stop_failed',
+        stopFailureReason: 'stalled',
+        wasStopped: false,
+        wasRegistered: true,
+      };
+    }
+
+    const isRunning = this.isComponentRunning(name);
+
+    // If running and stopIfRunning explicitly set to false, reject
+    if (isRunning && !shouldStopIfRunning) {
+      this.logger
+        .entity(name)
+        .warn(
+          'Cannot unregister running component. Call stopComponent() first or pass { stopIfRunning: true }',
+        );
+
+      return {
+        success: false,
+        componentName: name,
+        reason:
+          'Component is running. Use stopIfRunning: true option or stop manually first',
+        code: 'component_running',
+        wasStopped: false,
+        wasRegistered: true,
+      };
+    }
+
+    // If running and stopIfRunning is true (default), stop first
+    let wasStopped = false;
+    if (isRunning && shouldStopIfRunning) {
+      this.logger.entity(name).info('Stopping component before unregistering');
+      const stopResult = await this.stopComponent(name, {
+        allowStopWithRunningDependents: options?.forceStop,
+      });
+
+      // If stop fails and leaves the component stalled, do NOT unregister.
+      // Caller expectation: success with stopIfRunning implies the component is stopped and unregistered.
+      const stateAfterStopAttempt = this.componentStates.get(name);
+      const isRunningAfterStopAttempt = this.isComponentRunning(name);
+
+      const isSafelyStopped =
+        stopResult.success ||
+        (!isRunningAfterStopAttempt && stateAfterStopAttempt === 'stopped');
+
+      if (!isSafelyStopped) {
+        this.logger
+          .entity(name)
+          .warn('Failed to stop component before unregistering', {
+            params: {
+              reason: stopResult.reason,
+              code: stopResult.code,
+              state: stateAfterStopAttempt,
+            },
+          });
+
+        return {
+          success: false,
+          componentName: name,
+          reason: stopResult.reason ?? 'Failed to stop component',
+          code: 'stop_failed',
+          stopFailureReason:
+            stopResult.code === 'component_shutdown_timeout'
+              ? 'timeout'
+              : 'error',
+          error: stopResult.error,
+          wasStopped: false,
+          wasRegistered: true,
+        };
+      }
+
+      wasStopped = true;
+    }
+
+    // Remove from registry
+    this.components = this.components.filter((c) => c.getName() !== name);
+
+    // Clean up state
+    component._clearUnexpectedStopHandler();
+    component._markUnregistered();
+    this.componentStates.delete(name);
+    this.componentTimestamps.delete(name);
+    this.componentErrors.delete(name);
+    this.componentUnexpectedStopHadError.delete(name);
+    this.componentStartAttemptTokens.delete(name);
+    this.componentStopAttemptTokens.delete(name);
+    this.pendingForceStopWaiters.delete(name);
+    this.stalledComponents.delete(name);
+    this.runningComponents.delete(name);
+    this.updateStartedFlag();
+
+    // Auto-detach signals if this was the last component and option is enabled
+    if (
+      this.detachSignalsOnStop &&
+      this.runningComponents.size === 0 &&
+      this.processSignalManager
+    ) {
+      this.logger.info(
+        'Auto-detaching process signals on last component unregistered',
+      );
+      this.autoDetachSignals('last component unregistered');
+    }
+
+    this.logger.entity(name).info('Component unregistered');
+    this.lifecycleEvents.componentUnregistered(name, false);
+
+    return {
+      success: true,
+      componentName: name,
+      wasStopped,
+      wasRegistered: true,
+    };
+  }
+
+  private async startAllComponentsOperation(
     options?: StartupOptions,
   ): Promise<StartupResult> {
     const startTime = Date.now();
@@ -1625,24 +2697,7 @@ export class LifecycleManager
     return operation();
   }
 
-  /**
-   * Stop all running components in reverse dependency order
-   *
-   * Components stop in reverse topological order (dependents before dependencies).
-   *
-   * Stalls and timeouts are reported in the resolved `ShutdownResult`; the promise
-   * rejects only when the pass itself throws. Such a pass still emits a failed
-   * `lifecycle-manager:shutdown-completed` and updates `getLastShutdownResult()`, so
-   * listeners are never left waiting on a pass that has already died.
-   *
-   * Called during a `restartAllComponents()` stop phase this still refuses with
-   * `already_in_progress`, but it cancels the restart's startup phase - the intent is
-   * the same one `triggerShutdown()` expresses there.
-   *
-   * @param options - Optional shutdown options
-   */
-
-  public async stopAllComponents(
+  private async stopAllComponentsOperation(
     options?: StopAllOptions,
   ): Promise<ShutdownResult> {
     // always use manual method for external public API as not from a signal
@@ -1673,18 +2728,7 @@ export class LifecycleManager
     return acceptance.result;
   }
 
-  /**
-   * Restart all components (stop then start)
-   *
-   * A shutdown request that arrives while the stop phase is running wins: the startup
-   * phase is skipped and the result says so through
-   * `startupSkippedByShutdownRequest`. See {@link ShutdownPass}.
-   *
-   * A restart that starts while a shutdown is already running has its stop phase refused
-   * and so owns no pass; it never reports a skipped startup, and gets whatever that
-   * refusal and `startAllComponents()` answer.
-   */
-  public async restartAllComponents(
+  private async restartAllComponentsOperation(
     options?: RestartAllOptions,
   ): Promise<RestartResult> {
     this.logger.info('Restarting all components');
@@ -1701,7 +2745,7 @@ export class LifecycleManager
 
     // A refused stop phase is somebody else's pass: this restart has nothing of its own
     // for a request to cancel, so it behaves exactly as it did before cancellation
-    // existed. A pass that dies rejects here, as it always has.
+    // existed.
     const shutdownResult = stopPhase.accepted
       ? await stopPhase.promise
       : stopPhase.result;
@@ -1733,6 +2777,23 @@ export class LifecycleManager
       };
     }
 
+    // A stop phase that crashed leaves the components in no state anyone can vouch for,
+    // so starting them again on top of it is not a restart. It used to reject here.
+    if (shutdownResult.code === 'unknown_error' && stopPhase.accepted) {
+      this.logger.warn('Restart abandoned: the shutdown phase failed', {
+        params: { reason: shutdownResult.reason },
+      });
+
+      return {
+        shutdownResult,
+        startupResult: this.refusedStartupResult(
+          'unknown_error',
+          'Startup skipped: the restart shutdown phase failed unexpectedly',
+        ),
+        success: false,
+      };
+    }
+
     const startupResult = await this.startAllComponents(
       options?.startupOptions,
     );
@@ -1753,24 +2814,7 @@ export class LifecycleManager
     };
   }
 
-  // ============================================================================
-  // Individual Component Lifecycle
-  // ============================================================================
-
-  /**
-   * Start a specific component
-   */
-  public async startComponent(
-    name: string,
-    options?: StartComponentOptions,
-  ): Promise<ComponentOperationResult> {
-    return this.startComponentInternal(name, options);
-  }
-
-  /**
-   * Stop a specific component
-   */
-  public async stopComponent(
+  private async stopComponentOperation(
     name: string,
     options?: StopComponentOptions,
   ): Promise<ComponentOperationResult> {
@@ -1825,10 +2869,7 @@ export class LifecycleManager
     return this.stopComponentInternal(name, options);
   }
 
-  /**
-   * Restart a component (stop then start)
-   */
-  public async restartComponent(
+  private async restartComponentOperation(
     name: string,
     options?: RestartComponentOptions,
   ): Promise<ComponentOperationResult> {
@@ -1886,371 +2927,9 @@ export class LifecycleManager
     };
   }
 
-  // ============================================================================
-  // Signal Integration
-  // ============================================================================
-
-  /**
-   * Attach signal handlers for graceful shutdown, reload, info, and debug.
-   * Creates ProcessSignalManager instance if needed and attaches it.
-   * Idempotent - calling multiple times has no effect.
-   */
-  public attachSignals(): void {
-    // Check if already attached (not just if instance exists)
-    if (this.processSignalManager?.getStatus().isAttached) {
-      return; // Already attached
-    }
-
-    // Create instance if it doesn't exist
-    if (!this.processSignalManager) {
-      this.processSignalManager = new ProcessSignalManager({
-        onShutdownRequested: (method: ShutdownSignal) => {
-          this.handleShutdownRequest(method);
-        },
-        // Note: Signal-triggered handlers are fire-and-forget by design.
-        // Node.js signal handlers (process.on) cannot return values, so these
-        // async handlers execute but their return values are not accessible.
-        // Use triggerReload(), triggerInfo(), triggerDebug() for programmatic
-        // access to results.
-        onReloadRequested: () => this.handleReloadRequest('signal'),
-        onInfoRequested: () => this.handleInfoRequest('signal'),
-        onDebugRequested: () => this.handleDebugRequest('signal'),
-      });
-    }
-
-    this.processSignalManager.attach();
-    this.lifecycleEvents.lifecycleManagerSignalsAttached();
-  }
-
-  /**
-   * Detach signal handlers.
-   * Idempotent - calling multiple times has no effect.
-   */
-  public detachSignals(): void {
-    if (!this.processSignalManager?.getStatus().isAttached) {
-      return; // Not attached
-    }
-
-    this.processSignalManager.detach();
-    this.lifecycleEvents.lifecycleManagerSignalsDetached();
-  }
-
-  /**
-   * Get status information about signal handling.
-   */
-  public getSignalStatus(): LifecycleSignalStatus {
-    if (!this.processSignalManager) {
-      return {
-        isAttached: false,
-        handlers: {
-          shutdown: false,
-          reload: false,
-          info: false,
-          debug: false,
-        },
-        listeningFor: {
-          shutdownSignals: false,
-          reloadSignal: false,
-          infoSignal: false,
-          debugSignal: false,
-          keypresses: false,
-        },
-        shutdownMethod: this.shutdownMethod,
-      };
-    }
-
-    return {
-      ...this.processSignalManager.getStatus(),
-      shutdownMethod: this.shutdownMethod,
-    };
-  }
-
-  /**
-   * Get status information about repeated shutdown escalation configuration and runtime state.
-   */
-  public getShutdownEscalationStatus(): ShutdownEscalationStatus {
-    if (this.repeatedShutdownRequestPolicy === undefined) {
-      return {
-        configured: false,
-        isShuttingDown: this.isShuttingDown,
-        isArmed: false,
-        forceAfterCount: null,
-        withinMS: null,
-        armedAfterFailureMS: null,
-        armedAfterFailureMSSource: null,
-        requestCount: 0,
-        firstMethod: null,
-        latestMethod: null,
-        firstRequestAt: null,
-        latestRequestAt: null,
-        repeatedWindowStartedAt: null,
-        armedUntil: null,
-        hasTriggeredForceShutdown: false,
-      };
-    }
-
-    this.normalizeRepeatedShutdownRequestStateArmedStatus();
-
-    const armedUntil = this.repeatedShutdownRequestState.remainsArmedUntil;
-    const isArmed = armedUntil !== null;
-
-    return {
-      configured: true,
-      isShuttingDown: this.isShuttingDown,
-      isArmed,
-      forceAfterCount: this.repeatedShutdownRequestPolicy.forceAfterCount,
-      withinMS: this.repeatedShutdownRequestPolicy.withinMS,
-      armedAfterFailureMS:
-        this.repeatedShutdownRequestPolicy.armedAfterFailureMS,
-      armedAfterFailureMSSource: this.repeatedShutdownRequestPolicy
-        .hasExplicitArmedAfterFailureMS
-        ? 'explicit'
-        : 'derived',
-      countManualRetriesTowardEscalation:
-        this.repeatedShutdownRequestPolicy.countManualRetriesTowardEscalation,
-      requestCount: this.repeatedShutdownRequestState.requestCount,
-      firstMethod: this.repeatedShutdownRequestState.firstMethod,
-      latestMethod: this.repeatedShutdownRequestState.latestMethod,
-      firstRequestAt: this.repeatedShutdownRequestState.firstRequestAt,
-      latestRequestAt: this.repeatedShutdownRequestState.latestRequestAt,
-      repeatedWindowStartedAt:
-        this.repeatedShutdownRequestState.repeatedWindowStartedAt,
-      armedUntil: isArmed ? armedUntil : null,
-      hasTriggeredForceShutdown:
-        this.repeatedShutdownRequestState.hasTriggeredForceShutdown,
-    };
-  }
-
-  /**
-   * Enable Logger exit hook integration
-   *
-   * Sets up the logger's beforeExit callback to trigger graceful component shutdown.
-   * When `logger.exit(code)` is called (or `logger.error('msg', { exitCode: 1 })`),
-   * the LifecycleManager will stop all components before the process exits.
-   *
-   * The shutdown is subject to the configured shutdown timeout (default: 30000ms).
-   * If shutdown exceeds this timeout, the process will exit anyway to prevent hanging.
-   *
-   * This method is idempotent and can be called multiple times safely.
-   *
-   * **Note:** This overwrites any existing beforeExit callback on the logger.
-   * If you need custom exit logic, set it up manually with `logger.setBeforeExitCallback()`.
-   *
-   * @example
-   * ```typescript
-   * const logger = new Logger();
-   * const lifecycle = new LifecycleManager({
-   *   logger,
-   *   enableLoggerExitHook: true, // Auto-enable
-   *   shutdownOptions: { timeoutMS: 30000 },   // Max 30s for shutdown
-   * });
-   *
-   * // Or enable manually later
-   * lifecycle.enableLoggerExitHook();
-   *
-   * // Now logger.exit() will trigger graceful shutdown
-   * logger.error('Fatal error', { exitCode: 1 });
-   * // Components stop gracefully (up to shutdown timeout) before process exits
-   * ```
-   */
-  public enableLoggerExitHook(): void {
-    this.rootLogger.setBeforeExitCallback(
-      async (exitCode: number, isFirstExit: boolean) => {
-        // Defer the first logger.exit() that arrives during an already-running
-        // shutdown. Later duplicate exit calls stay ignored so they cannot
-        // override the eventual exit code after shutdown completes.
-        if (this.isShuttingDown) {
-          // The process is on its way out, so a restart stopping right now must not
-          // start everything back up behind the exit.
-          this.noteShutdownRequestDuringActivePass();
-
-          if (isFirstExit && this.pendingLoggerExitResolve === null) {
-            this.logger.debug(
-              LIFECYCLE_MANAGER_LOG_LOGGER_EXIT_DURING_SHUTDOWN,
-              {
-                params: { exitCode },
-              },
-            );
-
-            return await new Promise<BeforeExitResult>((resolve) => {
-              this.pendingLoggerExitResolve = resolve;
-            });
-          }
-
-          this.logger.debug(LIFECYCLE_MANAGER_LOG_LOGGER_EXIT_DURING_SHUTDOWN, {
-            params: { exitCode },
-          });
-
-          return { action: 'wait' as const };
-        }
-
-        if (isFirstExit) {
-          this.logger.info('Logger exit triggered, stopping components...', {
-            params: { exitCode, timeoutMS: this.shutdownOptions?.timeoutMS },
-          });
-
-          // Stop all components with global timeout
-          await this.stopAllComponents({
-            ...this.shutdownOptions,
-          });
-        }
-
-        // Proceed with exit
-        return { action: 'proceed' as const };
-      },
-    );
-
-    this.logger.debug('Logger exit hook enabled', {
-      params: { timeoutMS: this.shutdownOptions?.timeoutMS },
-    });
-  }
-
-  /**
-   * Manually request shutdown without waiting for it to finish.
-   *
-   * Starts the same background shutdown pass a `SIGINT`/`SIGTERM` handler starts,
-   * without the signal bookkeeping (`signal:shutdown`, escalation counting): components
-   * stop in the background while this resolves as soon as the request has been accepted.
-   * Use it when a caller needs to start shutdown from application code and
-   * cannot block, such as inside an HTTP handler or an event listener.
-   *
-   * The returned acknowledgement reports whether this call started a new
-   * shutdown pass (`initiated: true`) or joined one already running
-   * (`already_in_progress`). It does NOT report whether components stopped
-   * cleanly - subscribe to `lifecycle-manager:shutdown-completed`, or call
-   * `getLastShutdownResult()`, for the outcome. An `initiated` acknowledgement is
-   * safe to wait on: once a pass announces itself with
-   * `lifecycle-manager:shutdown-initiated`, it always reports a result, even when it
-   * fails outright.
-   *
-   * During a `restartAllComponents()` stop phase the acknowledgement is
-   * `already_in_progress` - that running pass is the shutdown this caller asked for -
-   * and the restart's startup phase is cancelled, so the components stay stopped.
-   *
-   * Prefer this over `void stopAllComponents()`: a floating shutdown promise
-   * with no rejection handler becomes an unhandled rejection if the logger
-   * throws while the shutdown is being logged, which is fatal under Node's
-   * default `--unhandled-rejections=throw`. This path attaches that handler.
-   *
-   * Escalation matches `stopAllComponents()`. Calls made while a shutdown is running
-   * never count toward `repeatedShutdownRequestPolicy`: escalation means an operator
-   * pressing Ctrl+C again, and concurrent callers of this method are not expressing
-   * that, so they cannot force-kill the process by volume. Only a retry made while
-   * escalation is still armed after a failed shutdown counts, once, and only when
-   * `countManualRetriesTowardEscalation` is enabled.
-   *
-   * A caller-supplied `LoggerService` that throws while the request is being logged
-   * does not fail the request: the manager guards its own logger at construction, so
-   * no log line anywhere in a lifecycle operation can throw or reject at its call
-   * site, and a logger failure alone never rejects the acknowledgement. Those
-   * failures are reported on the global error channel instead.
-   *
-   * No shutdown outcome rejects the promise: every request either starts a pass or
-   * joins one, and a pass that dies reports itself through
-   * `lifecycle-manager:shutdown-completed` and the global error channel rather than
-   * through the acknowledgement. The request path itself does not throw either, so
-   * `void triggerShutdown()` is safe. Were a bug in the manager ever to make it throw,
-   * it surfaces as a rejection of this promise - reaching a `.catch()` rather than
-   * escaping past it - and never as an `already_in_progress` that never happened.
-   *
-   * @returns Acknowledgement that the request was accepted, not the result of the shutdown
-   */
-  public triggerShutdown(): Promise<ShutdownTriggerResult> {
-    // The request path is synchronous and, as written, cannot throw: field reads,
-    // guarded logger lines, and `acceptShutdownPass()`, whose own user-visible callbacks
-    // - the escalation events and `onForceShutdown` - are each guarded too, and whose
-    // pass reports its throws as a rejection of a promise this method does not return.
-    //
-    // The executor is kept anyway, because the declared return type is the contract the
-    // caller writes against: a bug in the manager - an unguarded option read before the
-    // latch, say - must arrive as a rejection this method's `.catch()` can see rather
-    // than as a synchronous throw past it. Still fail-fast either way: the failure is
-    // reported as itself, never laundered into an `already_in_progress` acknowledgement
-    // for a pass that never existed. An `async` method would do the same thing, but
-    // there is nothing here to await and `@typescript-eslint/require-await` says so.
-    return new Promise<ShutdownTriggerResult>((resolve) => {
-      resolve(this.requestManualShutdown());
-    });
-  }
-
-  /**
-   * Manually trigger a reload event.
-   * @returns Result of broadcasting reload to components
-   */
-  public async triggerReload(): Promise<SignalBroadcastResult> {
-    return this.handleReloadRequest();
-  }
-
-  /**
-   * Manually trigger an info event.
-   * @returns Result of broadcasting info to components
-   */
-  public async triggerInfo(): Promise<SignalBroadcastResult> {
-    return this.handleInfoRequest();
-  }
-
-  /**
-   * Manually trigger a debug event.
-   * @returns Result of broadcasting debug to components
-   */
-  public async triggerDebug(): Promise<SignalBroadcastResult> {
-    return this.handleDebugRequest();
-  }
-
-  // ============================================================================
-  // Component Messaging
-  // ============================================================================
-
-  /**
-   * Send a message to a specific component
-   *
-   * Delivers a message to the component's onMessage handler if implemented.
-   * The 'from' parameter is automatically tracked based on calling context.
-   *
-   * @param componentName - Name of target component
-   * @param payload - Message payload (any type)
-   * @param options - Optional message options (timeout override)
-   * @returns Result with sent status, data returned from handler, and any errors
-   */
-  public async sendMessageToComponent(
-    componentName: string,
-    payload: unknown,
-    options?: SendMessageOptions,
-  ): Promise<MessageResult> {
-    return this.sendMessageInternal(componentName, payload, null, options);
-  }
-
-  /**
-   * Broadcast a message to multiple components
-   *
-   * Sends the same message to multiple components (by default, all running components).
-   * The 'from' parameter is automatically tracked based on calling context.
-   *
-   * @param payload - Message payload (any type)
-   * @param options - Filtering options and message timeout override
-   * @returns Array of results, one per component
-   */
-  public async broadcastMessage(
-    payload: unknown,
-    options?: BroadcastOptions,
-  ): Promise<BroadcastResult[]> {
-    return this.broadcastMessageInternal(payload, null, options);
-  }
-
-  // ============================================================================
-  // Health Checks
-  // ============================================================================
-
-  /**
-   * Check the health of a specific component
-   *
-   * Calls the component's healthCheck() method if implemented.
-   * Times out after component's healthCheckTimeoutMS. A timeout of 0 is disabled.
-   *
-   * @param name - Component name
-   * @returns Health check result with status, message, details, and timing
-   */
-  public async checkComponentHealth(name: string): Promise<HealthCheckResult> {
+  private async checkComponentHealthOperation(
+    name: string,
+  ): Promise<HealthCheckResult> {
     const startTime = Date.now();
 
     // Check if component exists
@@ -2414,15 +3093,7 @@ export class LifecycleManager
     }
   }
 
-  /**
-   * Check the health of all running components
-   *
-   * Runs health checks on all running components in parallel.
-   * Overall health is true only if ALL components are healthy.
-   *
-   * @returns Aggregate health report with individual component results
-   */
-  public async checkAllHealth(): Promise<HealthReport> {
+  private async checkAllHealthOperation(): Promise<HealthReport> {
     const startTime = Date.now();
 
     // Get all running components
@@ -2465,533 +3136,6 @@ export class LifecycleManager
       code,
     };
   }
-
-  // ============================================================================
-  // Shared Values (getValue Pattern)
-  // ============================================================================
-
-  /**
-   * Request a value from a component by key
-   *
-   * Calls the component's getValue(key, from) method if implemented.
-   * The 'from' parameter is automatically tracked based on calling context.
-   *
-   * @param componentName - Name of component to request value from
-   * @param key - Value key to request
-   * @returns Result with found status, value, and metadata
-   */
-  public getValue<T = unknown>(
-    componentName: string,
-    key: string,
-    options?: GetValueOptions,
-  ): ValueResult<T> {
-    return this.getValueInternal<T>(componentName, key, null, options);
-  }
-
-  // ============================================================================
-  // Internal Methods (Private - accessed via callbacks)
-  // ============================================================================
-
-  /**
-   * Internal message sending with explicit 'from' parameter
-   *
-   * @param componentName - Target component name
-   * @param payload - Message payload
-   * @param from - Sender component name (null if external)
-   */
-  private async sendMessageInternal(
-    componentName: string,
-    payload: unknown,
-    from: string | null,
-    options?: SendMessageOptions,
-  ): Promise<MessageResult> {
-    // Find component
-    const component = this.components.find(
-      (c) => c.getName() === componentName,
-    );
-
-    if (!component) {
-      return {
-        sent: false,
-        componentFound: false,
-        componentRunning: false,
-        handlerImplemented: false,
-        data: undefined,
-        error: null,
-        timedOut: false,
-        code: 'not_found',
-      };
-    }
-
-    // Startup and teardown are unavailable states, not handler failures.
-    const state = this.componentStates.get(componentName);
-    if (
-      state === 'starting' ||
-      state === 'starting-timed-out' ||
-      state === 'stopping' ||
-      state === 'force-stopping'
-    ) {
-      return {
-        sent: false,
-        componentFound: true,
-        componentRunning: false,
-        handlerImplemented: false,
-        data: undefined,
-        error: null,
-        timedOut: false,
-        code: 'stopped',
-      };
-    }
-
-    const isRunning = this.isComponentRunning(componentName);
-    const isStalled = this.stalledComponents.has(componentName);
-    const allowStopped = options?.includeStopped === true;
-    const allowStalled = options?.includeStalled === true;
-    const isStopped = !isRunning && !isStalled;
-
-    // Check if running or explicitly allowed
-    if (!isRunning) {
-      if ((isStalled && allowStalled) || (isStopped && allowStopped)) {
-        // Allowed to send to non-running component
-      } else {
-        return {
-          sent: false,
-          componentFound: true,
-          componentRunning: false,
-          handlerImplemented: false,
-          data: undefined,
-          error: null,
-          timedOut: false,
-          code: isStalled ? 'stalled' : 'stopped',
-        };
-      }
-    }
-
-    // Check if handler implemented
-    if (!component.onMessage) {
-      return {
-        sent: false,
-        componentFound: true,
-        componentRunning: isRunning,
-        handlerImplemented: false,
-        data: undefined,
-        error: null,
-        timedOut: false,
-        code: 'no_handler',
-      };
-    }
-
-    // Send message
-    this.lifecycleEvents.componentMessageSent({ componentName, from, payload });
-
-    const timeoutMS = options?.timeout ?? this.messageTimeoutMS;
-    let timeoutHandle: NodeJS.Timeout | undefined;
-    const timeoutResult = { timedOut: true } as const;
-
-    try {
-      let result: unknown;
-      try {
-        result = component.onMessage(payload, from);
-      } catch (error) {
-        const err = toError(error);
-
-        this.logger
-          .entity(componentName)
-          .error(LIFECYCLE_MANAGER_LOG_MESSAGE_HANDLER_FAILED, {
-            params: { error: err, from },
-          });
-
-        this.lifecycleEvents.componentMessageFailed(componentName, from, err, {
-          timedOut: false,
-          code: 'error',
-          componentFound: true,
-          componentRunning: isRunning,
-          handlerImplemented: true,
-          data: undefined,
-        });
-
-        return {
-          sent: true,
-          componentFound: true,
-          componentRunning: isRunning,
-          handlerImplemented: true,
-          data: undefined,
-          error: err,
-          timedOut: false,
-          code: 'error',
-        };
-      }
-
-      const handlerPromise = isPromise(result)
-        ? result
-        : Promise.resolve(result);
-
-      const outcome =
-        toTimerDelayMS(timeoutMS) > 0
-          ? await Promise.race([
-              handlerPromise,
-              new Promise<typeof timeoutResult>((resolve) => {
-                timeoutHandle = setTimeout(() => {
-                  resolve(timeoutResult);
-                }, toTimerDelayMS(timeoutMS));
-              }),
-            ])
-          : await handlerPromise;
-
-      if (outcome === timeoutResult) {
-        this.logger.entity(componentName).warn('Message handler timed out', {
-          params: { from, timeoutMS },
-        });
-        // Prevent unhandled rejection if handler throws after timeout
-        // Logged, not discarded. Preventing the unhandled rejection is why this
-        // `catch` exists and it stays; swallowing the *cause* was a separate
-        // decision, and it left the caller knowing the operation timed out and
-        // never why it ultimately failed. The timeout warning is logged just
-        // above, so this is that line's missing second half.
-        Promise.resolve(handlerPromise)
-          .catch((error: unknown) => {
-            this.logger
-              .entity(componentName)
-              .debug('Message handler failed after it had already timed out', {
-                params: { error: toError(error), from },
-              });
-          })
-          // Terminal, for the reason the shutdown-warning chain carries one: nothing
-          // retains this chain, so a throw out of the reporting handler above becomes an
-          // unhandled rejection mid-lifecycle - fatal under Node's default
-          // `--unhandled-rejections=throw`. Logging is guarded, but a floating chain
-          // should not have to rely on that.
-          .catch(() => {
-            // Nothing left to report with.
-          });
-        return {
-          sent: true,
-          componentFound: true,
-          componentRunning: isRunning,
-          handlerImplemented: true,
-          data: undefined,
-          error: null,
-          timedOut: true,
-          code: 'timeout',
-        };
-      }
-
-      return {
-        sent: true,
-        componentFound: true,
-        componentRunning: isRunning,
-        handlerImplemented: true,
-        data: outcome,
-        error: null,
-        timedOut: false,
-        code: 'sent',
-      };
-    } catch (error) {
-      const err = toError(error);
-
-      this.logger
-        .entity(componentName)
-        .error(LIFECYCLE_MANAGER_LOG_MESSAGE_HANDLER_FAILED, {
-          params: { error: err, from, timeoutMS },
-        });
-
-      this.lifecycleEvents.componentMessageFailed(componentName, from, err, {
-        timedOut: false,
-        code: 'error',
-        componentFound: true,
-        componentRunning: isRunning,
-        handlerImplemented: true,
-        data: undefined,
-      });
-
-      return {
-        sent: true,
-        componentFound: true,
-        componentRunning: isRunning,
-        handlerImplemented: true,
-        data: undefined,
-        error: err,
-        timedOut: false,
-        code: 'error',
-      };
-    } finally {
-      if (timeoutHandle) {
-        clearTimeout(timeoutHandle);
-      }
-    }
-  }
-
-  /**
-   * Internal broadcast with explicit 'from' parameter
-   *
-   * @param payload - Message payload
-   * @param from - Sender component name (null if external)
-   * @param options - Filtering options
-   */
-  private async broadcastMessageInternal(
-    payload: unknown,
-    from: string | null,
-    options?: BroadcastOptions,
-  ): Promise<BroadcastResult[]> {
-    this.lifecycleEvents.componentBroadcastStarted(from, payload);
-
-    const results: BroadcastResult[] = [];
-
-    // Determine which components to broadcast to
-    let targetComponents = this.components;
-
-    const hasExplicitTargets =
-      options?.componentNames !== undefined &&
-      options.componentNames.length > 0;
-
-    // Filter by names if specified
-    if (hasExplicitTargets && options.componentNames) {
-      const names = options.componentNames;
-      targetComponents = targetComponents.filter((c) =>
-        names.includes(c.getName()),
-      );
-    }
-
-    const allowStopped = options?.includeStopped === true;
-    const allowStalled = options?.includeStalled === true;
-
-    // Filter by running/stalled/stopped state unless explicitly included
-    if (!allowStopped && !allowStalled && !hasExplicitTargets) {
-      targetComponents = targetComponents.filter((c) =>
-        this.isComponentRunning(c.getName()),
-      );
-    } else if (!hasExplicitTargets) {
-      targetComponents = targetComponents.filter((c) => {
-        const name = c.getName();
-        const isRunning = this.isComponentRunning(name);
-
-        if (isRunning) {
-          return true;
-        }
-
-        const isStalled = this.stalledComponents.has(name);
-
-        if (isStalled) {
-          return allowStalled;
-        }
-
-        return allowStopped;
-      });
-    }
-
-    // Send to each component
-    for (const component of targetComponents) {
-      const name = component.getName();
-      const isRunning = this.isComponentRunning(name);
-      const isStalled = this.stalledComponents.has(name);
-      const isStopped = !isRunning && !isStalled;
-      const allowNonRunning =
-        (isStalled && allowStalled) || (isStopped && allowStopped);
-
-      // Skip if not running and not explicitly allowed
-      if (!isRunning && !allowNonRunning) {
-        results.push({
-          name,
-          sent: false,
-          running: false,
-          data: undefined,
-          error: null,
-          timedOut: false,
-          code: isStalled ? 'stalled' : 'stopped',
-        });
-        continue;
-      }
-
-      // Send message using internal method
-      const messageResult = await this.sendMessageInternal(
-        name,
-        payload,
-        from,
-        options,
-      );
-
-      results.push({
-        name,
-        sent: messageResult.sent,
-        running: messageResult.componentRunning,
-        data: messageResult.data,
-        error: messageResult.error,
-        timedOut: messageResult.timedOut,
-        code: messageResult.code === 'not_found' ? 'error' : messageResult.code,
-      });
-    }
-
-    this.lifecycleEvents.componentBroadcastCompleted(
-      from,
-      results.length,
-      results,
-    );
-
-    return results;
-  }
-
-  /**
-   * Internal getValue with explicit 'from' parameter
-   *
-   * @param componentName - Target component name
-   * @param key - Value key
-   * @param from - Requester component name (null if external)
-   */
-  private getValueInternal<T = unknown>(
-    componentName: string,
-    key: string,
-    from: string | null,
-    options?: GetValueOptions,
-  ): ValueResult<T> {
-    this.lifecycleEvents.componentValueRequested(componentName, key, from);
-
-    // Find component
-    const component = this.components.find(
-      (c) => c.getName() === componentName,
-    );
-
-    if (!component) {
-      this.lifecycleEvents.componentValueReturned(componentName, key, from, {
-        found: false,
-        value: undefined,
-        componentFound: false,
-        componentRunning: false,
-        handlerImplemented: false,
-        requestedBy: from,
-        code: 'not_found',
-      });
-      return {
-        found: false,
-        value: undefined,
-        componentFound: false,
-        componentRunning: false,
-        handlerImplemented: false,
-        requestedBy: from,
-        code: 'not_found',
-      };
-    }
-
-    // Neither override permits entering a provider during startup or teardown.
-    const state = this.componentStates.get(componentName);
-    const isUnavailable =
-      state === 'starting' ||
-      state === 'starting-timed-out' ||
-      state === 'stopping' ||
-      state === 'force-stopping';
-    const isRunning = !isUnavailable && this.isComponentRunning(componentName);
-    const isStalled =
-      !isUnavailable && this.stalledComponents.has(componentName);
-    const allowStopped = options?.includeStopped === true;
-    const allowStalled = options?.includeStalled === true;
-    const isStopped = !isRunning && !isStalled;
-
-    if (
-      isUnavailable ||
-      (!isRunning &&
-        !((isStopped && allowStopped) || (isStalled && allowStalled)))
-    ) {
-      const code = isStalled ? 'stalled' : 'stopped';
-      this.lifecycleEvents.componentValueReturned(componentName, key, from, {
-        found: false,
-        value: undefined,
-        componentFound: true,
-        componentRunning: false,
-        handlerImplemented: false,
-        requestedBy: from,
-        code,
-      });
-      return {
-        found: false,
-        value: undefined,
-        componentFound: true,
-        componentRunning: false,
-        handlerImplemented: false,
-        requestedBy: from,
-        code,
-      };
-    }
-
-    // Check if handler implemented
-    if (!component.getValue) {
-      this.lifecycleEvents.componentValueReturned(componentName, key, from, {
-        found: false,
-        value: undefined,
-        componentFound: true,
-        componentRunning: isRunning,
-        handlerImplemented: false,
-        requestedBy: from,
-        code: 'no_handler',
-      });
-      return {
-        found: false,
-        value: undefined,
-        componentFound: true,
-        componentRunning: isRunning,
-        handlerImplemented: false,
-        requestedBy: from,
-        code: 'no_handler',
-      };
-    }
-
-    // Get value
-    try {
-      const componentResult = component.getValue(key, from);
-      const wasFound = componentResult.found;
-      const value = componentResult.value;
-
-      this.lifecycleEvents.componentValueReturned(componentName, key, from, {
-        found: wasFound,
-        value,
-        componentFound: true,
-        componentRunning: isRunning,
-        handlerImplemented: true,
-        requestedBy: from,
-        code: wasFound ? 'found' : 'not_found',
-      });
-
-      return {
-        found: wasFound,
-        value: value as T | undefined,
-        componentFound: true,
-        componentRunning: isRunning,
-        handlerImplemented: true,
-        requestedBy: from,
-        code: wasFound ? 'found' : 'not_found',
-      };
-    } catch (error) {
-      const err = toError(error);
-
-      this.logger
-        .entity(componentName)
-        .error('getValue handler failed: {{error.message}}', {
-          params: { error: err, key, from },
-        });
-
-      this.lifecycleEvents.componentValueReturned(componentName, key, from, {
-        found: false,
-        value: undefined,
-        componentFound: true,
-        componentRunning: isRunning,
-        handlerImplemented: true,
-        requestedBy: from,
-        code: 'error',
-      });
-
-      return {
-        found: false,
-        value: undefined,
-        componentFound: true,
-        componentRunning: isRunning,
-        handlerImplemented: true,
-        requestedBy: from,
-        code: 'error',
-      };
-    }
-  }
-
-  // ============================================================================
-  // Private Helper Methods
-  // ============================================================================
 
   private updateStartedFlag(): void {
     this.isStarted =
@@ -3491,16 +3635,23 @@ export class LifecycleManager
           : {}),
       });
 
+      // Read back from the registry rather than assumed: a throw after the commit - from
+      // an auto-start, say - leaves the component registered, and the result must say so.
+      const registrationIndexNow = this.components.indexOf(component);
+      const isRegistered = registrationIndexNow !== -1;
+
       return {
         action: 'insert',
         success: false,
-        registered: false,
+        registered: isRegistered,
         componentName,
         reason: describeError(err),
         code,
         error: err,
         registrationIndexBefore,
-        registrationIndexAfter: registrationIndexBefore,
+        registrationIndexAfter: isRegistered
+          ? registrationIndexNow
+          : registrationIndexBefore,
         startupOrder: [],
         requestedPosition: { position, targetComponentName },
         manualPositionRespected: false,
@@ -3517,13 +3668,14 @@ export class LifecycleManager
    * Decide whether a shutdown pass may start, and start it when it may.
    *
    * Synchronous, and split from the pass itself, because every caller has to know which
-   * of the two happened before it does anything else: the acknowledgement
-   * `triggerShutdown()` returns, the `ShutdownResult` a refused `stopAllComponents()`
-   * reports, and whether a `restartAllComponents()` owns a pass a request could cancel
+   * of the two happened before it does anything else: the `ShutdownResult` a refused
+   * `stopAllComponents()` reports, whether a signal needs to note a running pass, and
+   * whether a `restartAllComponents()` owns a pass a request could cancel
    * all fall out of this one answer rather than being inferred afterwards.
    *
    * Everything that can throw is on this side of the latch, so a throw is a synchronous
-   * throw to the caller with no pass started and nothing to release. The pass takes the
+   * throw to the caller with no pass started and nothing to release - which the public
+   * callers' {@link settleOperation} net turns into an `unknown_error` result. The pass takes the
    * latch itself, as the first statement inside its `try`.
    */
   private acceptShutdownPass(
@@ -3581,8 +3733,8 @@ export class LifecycleManager
     // The bookkeeping above runs user code before the latch is taken: an expiring armed
     // window emits `shutdown-escalation-expired`, and a counted manual retry can reach
     // `onForceShutdown` and `shutdown-escalation-forced`. A listener or callback that
-    // starts its own shutdown from there - `triggerShutdown()` inside `onForceShutdown`
-    // is the realistic case - gets a pass that finds no latch, announces itself and
+    // starts its own shutdown from there - `stopAllComponents()` inside
+    // `onForceShutdown` is the realistic case - gets a pass that finds no latch, announces itself and
     // starts stopping, and control then returns here. Refuse rather than run a second
     // pass concurrently with it: the nested pass is the shutdown this call asked for,
     // which is exactly what `already_in_progress` says. That nested acceptance counts
@@ -3637,7 +3789,9 @@ export class LifecycleManager
     let timeoutHandle: NodeJS.Timeout | undefined;
     let pendingShutdownOperation: Promise<void> | null = null;
     let isDuringStartup = false;
-    let didEmitShutdownCompleted = false;
+    // Set once the normal path has a result and is about to emit it; from then on that
+    // result is the pass's answer, whatever throws after it.
+    let completedResult: ShutdownResult | null = null;
     // Declared out here so a pass that dies mid-flight can still report what it stopped.
     const stoppedComponents = new Set<string>();
     // Every component this pass could end up reporting as stalled, filled in once the
@@ -3944,7 +4098,7 @@ export class LifecycleManager
       //
       // Marked before the emit, not after: if emitting throws once listeners have
       // already run, the `catch` below must not hand them a second, contradictory result.
-      didEmitShutdownCompleted = true;
+      completedResult = result;
 
       try {
         this.lifecycleEvents.lifecycleManagerShutdownCompleted({
@@ -3964,66 +4118,71 @@ export class LifecycleManager
 
       return result;
     } catch (error) {
-      // The rejection still reaches `stopAllComponents()`, but it is the only place a
-      // dead pass would otherwise show up: `startShutdownPass()` drops it on the global
-      // error channel, so nothing on the event side would ever learn the pass is over.
-      if (!didEmitShutdownCompleted) {
-        // The pass announced itself first thing, and callers block on that
-        // announcement's pair, so a pass that dies anywhere in here still owes them a
-        // result - otherwise they wait forever. In the one case where the
-        // `shutdown-initiated` emit is itself what threw, this is a `shutdown-completed`
-        // without its opening half; a listener that never ran is still better served by
-        // an event it can ignore than by a pass that reports nothing.
-        //
-        // Scoped exactly as the normal path scopes it, and empty for a pass that died
-        // before it had a stop list: a stall this pass never had in view belongs to
-        // whatever left it behind, not to this failure.
-        const stalledComponents = collectStalledComponents(stallCandidateNames);
-        const result: ShutdownResult = {
-          success: false,
-          // Reconciled the same way too, so a component that stopped without the stop
-          // loop recording it - during the warning phase, or after the throw - is still
-          // reported rather than dropped because the pass died before reaching it.
-          stoppedComponents: collectStoppedComponents(
-            new Set(stalledComponents.map((stallInfo) => stallInfo.name)),
-          ),
-          stalledComponents,
-          durationMS: Date.now() - startTime,
-          reason: `Shutdown failed before it could report a result: ${describeError(error)}`,
-          // Not a stall or a timeout: the pass itself threw, which points at a bug in
-          // the manager (or a hostile logger) rather than at a component.
-          code: 'unknown_error',
-        };
+      // A pass that dies resolves with a failed result rather than rejecting, so a caller
+      // that fired `stopAllComponents()` without awaiting it can never be handed an
+      // unhandled rejection. The failure itself is not lost: it goes on the global
+      // channel here, rides on the result as `error`, and the completed event carries it.
+      reportCallbackError(`shutdown after ${method}`, error);
 
-        this.lastShutdownResult = result;
-
-        try {
-          this.lifecycleEvents.lifecycleManagerShutdownCompleted({
-            ...result,
-            method,
-            duringStartup: isDuringStartup,
-          });
-        } catch (emitError) {
-          // Must not replace the original failure rethrown below.
-          reportCallbackError(
-            'lifecycle-manager:shutdown-completed',
-            emitError,
-          );
-        }
-
-        // After the completed event, in the same order as a stalled or timed-out pass,
-        // so a listener sees the same sequence whichever way the pass failed. Armed
-        // exactly as that path arms it: a crash is the worst way for a pass to end, so it
-        // is the last place to take the escape hatch away - dropping the cycle here would
-        // reseed the operator's next press as a fresh one, `requestCount` would never
-        // reach `forceAfterCount`, and `onForceShutdown` - the one thing left that can
-        // still get the process down - would be unreachable. Carrying the count and the
-        // force-shutdown flag over is this method's job, and it still declines when the
-        // window is disabled or force has already fired.
-        this.armRepeatedShutdownAfterFailure();
+      if (completedResult !== null) {
+        // The result was already out; whatever threw afterwards does not change it.
+        return completedResult;
       }
 
-      throw error;
+      // The pass announced itself first thing, and callers block on that
+      // announcement's pair, so a pass that dies anywhere in here still owes them a
+      // result - otherwise they wait forever. In the one case where the
+      // `shutdown-initiated` emit is itself what threw, this is a `shutdown-completed`
+      // without its opening half; a listener that never ran is still better served by
+      // an event it can ignore than by a pass that reports nothing.
+      //
+      // Scoped exactly as the normal path scopes it, and empty for a pass that died
+      // before it had a stop list: a stall this pass never had in view belongs to
+      // whatever left it behind, not to this failure.
+      const stalledComponents = collectStalledComponents(stallCandidateNames);
+      const result: ShutdownResult = {
+        success: false,
+        // Reconciled the same way too, so a component that stopped without the stop
+        // loop recording it - during the warning phase, or after the throw - is still
+        // reported rather than dropped because the pass died before reaching it.
+        stoppedComponents: collectStoppedComponents(
+          new Set(stalledComponents.map((stallInfo) => stallInfo.name)),
+        ),
+        stalledComponents,
+        durationMS: Date.now() - startTime,
+        reason: `Shutdown failed before it could report a result: ${describeError(error)}`,
+        // Not a stall or a timeout: the pass itself threw, which points at a bug in
+        // the manager (or a component that broke its contract) rather than at a
+        // component's stop.
+        code: 'unknown_error',
+        error: toError(error),
+      };
+
+      this.lastShutdownResult = result;
+
+      try {
+        this.lifecycleEvents.lifecycleManagerShutdownCompleted({
+          ...result,
+          method,
+          duringStartup: isDuringStartup,
+        });
+      } catch (emitError) {
+        // Must not replace the original failure this pass is reporting.
+        reportCallbackError('lifecycle-manager:shutdown-completed', emitError);
+      }
+
+      // After the completed event, in the same order as a stalled or timed-out pass,
+      // so a listener sees the same sequence whichever way the pass failed. Armed
+      // exactly as that path arms it: a crash is the worst way for a pass to end, so it
+      // is the last place to take the escape hatch away - dropping the cycle here would
+      // reseed the operator's next press as a fresh one, `requestCount` would never
+      // reach `forceAfterCount`, and `onForceShutdown` - the one thing left that can
+      // still get the process down - would be unreachable. Carrying the count and the
+      // force-shutdown flag over is this method's job, and it still declines when the
+      // window is disabled or force has already fired.
+      this.armRepeatedShutdownAfterFailure();
+
+      return result;
     } finally {
       if (timeoutHandle) {
         clearTimeout(timeoutHandle);
@@ -5038,7 +5197,7 @@ export class LifecycleManager
         this.processSignalManager
       ) {
         this.logger.info(LIFECYCLE_MANAGER_LOG_AUTO_DETACH_LAST_COMPONENT_STOP);
-        this.detachSignals();
+        this.autoDetachSignals('last component stop');
       }
 
       const timestamps = this.componentTimestamps.get(name) ?? {
@@ -5333,7 +5492,7 @@ export class LifecycleManager
         this.processSignalManager
       ) {
         this.logger.info(LIFECYCLE_MANAGER_LOG_AUTO_DETACH_LAST_COMPONENT_STOP);
-        this.detachSignals();
+        this.autoDetachSignals('last component stop');
       }
 
       const timestamps = this.componentTimestamps.get(name) ?? {
@@ -5537,17 +5696,70 @@ export class LifecycleManager
     this.logger.info('Rollback completed');
   }
 
+  /**
+   * Attach signals on the manager's own initiative, as part of a startup.
+   *
+   * Contained: this runs in the middle of a start, after state such as `isStarting` or a
+   * component's `starting` has been taken and before the `try` that would release it,
+   * and a throw from `ProcessSignalManager.attach()` - a `process.on` or raw-mode stdin
+   * failure - left that state held for good. The startup carries on without signal
+   * handlers and the failure is reported on the global channel: signals are a
+   * convenience on top of the start the caller asked for, not a precondition of it.
+   * An explicit `attachSignals()` call still throws to its caller.
+   *
+   * @returns true when this call attached them
+   */
   private autoAttachSignals(trigger: string): boolean {
     if (this.processSignalManager?.getStatus().isAttached) {
       return false;
     }
 
     this.logger.info(`Auto-attaching process signals on ${trigger}`);
-    this.attachSignals();
+
+    try {
+      this.attachSignals();
+    } catch (error) {
+      this.logger.error(
+        'Could not attach process signals on {{trigger}}: {{error.message}}',
+        { params: { trigger, error: toError(error) } },
+      );
+      reportCallbackError(
+        `lifecycle-manager signal attach on ${trigger}`,
+        error,
+      );
+
+      return false;
+    }
+
     if (this.isStarting) {
       this.autoAttachedSignalsDuringStartup = true;
     }
     return true;
+  }
+
+  /**
+   * Detach signals on the manager's own initiative, once nothing is left running.
+   *
+   * Contained for the reason {@link autoAttachSignals} is: every caller is partway through
+   * settling a stop, an unregister, or a failed start, and a detach that throws there
+   * derailed the rest - a clean graceful stop was sent on to the force phase, and an
+   * unregister rejected after it had already removed the component.
+   * `ProcessSignalManager.detach()` marks itself detached even when it throws, so there
+   * is nothing to retry.
+   */
+  private autoDetachSignals(trigger: string): void {
+    try {
+      this.detachSignals();
+    } catch (error) {
+      this.logger.error(
+        'Could not detach process signals after {{trigger}}: {{error.message}}',
+        { params: { trigger, error: toError(error) } },
+      );
+      reportCallbackError(
+        `lifecycle-manager signal detach after ${trigger}`,
+        error,
+      );
+    }
   }
 
   private autoDetachSignalsIfIdle(trigger: string): void {
@@ -5561,7 +5773,7 @@ export class LifecycleManager
     }
 
     this.logger.info(`Auto-detaching process signals after ${trigger}`);
-    this.detachSignals();
+    this.autoDetachSignals(trigger);
   }
 
   private monitorLateStartupCompletion(
@@ -5874,7 +6086,7 @@ export class LifecycleManager
       this.processSignalManager
     ) {
       this.logger.info(LIFECYCLE_MANAGER_LOG_AUTO_DETACH_LAST_COMPONENT_STOP);
-      this.detachSignals();
+      this.autoDetachSignals('last component stop');
     }
 
     const timestamps = this.componentTimestamps.get(name) ?? {
@@ -5973,7 +6185,7 @@ export class LifecycleManager
       this.processSignalManager
     ) {
       this.logger.info(LIFECYCLE_MANAGER_LOG_AUTO_DETACH_LAST_COMPONENT_STOP);
-      this.detachSignals();
+      this.autoDetachSignals('last component stop');
     }
 
     const timestamps = this.componentTimestamps.get(name) ?? {
@@ -6453,50 +6665,11 @@ export class LifecycleManager
   }
 
   /**
-   * Manual front-end behind `triggerShutdown()`. Kept apart from the signal path:
-   * `signal:shutdown` describes a real OS signal, so it is never emitted here, and a
-   * request that starts a pass needs no escalation bookkeeping of its own because
-   * `acceptShutdownPass` already seeds the state and owns the manual-retry-while-armed
-   * continue-or-reset choice. Counting it here as well would advance `requestCount`
-   * twice for one `triggerShutdown()`.
+   * Final step of a signal-driven shutdown request: starts the pass in the background and
+   * returns without waiting for components to stop, since a signal handler has nobody to
+   * hand a result to. The outcome arrives on `lifecycle-manager:shutdown-completed`.
    */
-  private requestManualShutdown(): ShutdownTriggerResult {
-    if (this.isShuttingDown) {
-      this.noteShutdownRequestDuringActivePass();
-
-      // Never counted toward escalation, whatever `countManualRetriesTowardEscalation`
-      // says - the same as `stopAllComponents()`, which refuses in this window.
-      // Escalation represents an operator pressing Ctrl+C again because the first one
-      // did not take. A programmatic request carries no such intent - and
-      // `triggerShutdown()` is built for concurrent callers, so a handful of overlapping
-      // HTTP handlers must not add up to a force kill. The flag covers a deliberate
-      // retry after a failed pass, which `acceptShutdownPass` owns.
-      this.logger.warn(
-        'Shutdown already in progress, ignoring manual request',
-        {
-          params: { method: 'manual' },
-        },
-      );
-
-      return this.refusedTriggerResult();
-    }
-
-    this.logger.info('Manual shutdown requested', {
-      params: { method: 'manual' },
-    });
-
-    return this.startShutdownPass('manual');
-  }
-
-  /**
-   * Shared final step of a shutdown request: initiates `stopAllComponents()` in the
-   * background and says whether this request started a new shutdown pass - it never
-   * waits for components to stop.
-   *
-   * @returns the acknowledgement: `initiated` when this request started the pass,
-   * `already_in_progress` when one was already running
-   */
-  private startShutdownPass(method: ShutdownMethod): ShutdownTriggerResult {
+  private startShutdownPass(method: ShutdownSignal): void {
     const acceptance = this.acceptShutdownPass(method, {
       ...this.shutdownOptions,
     });
@@ -6505,30 +6678,21 @@ export class LifecycleManager
       // The same late refusal `stopAllComponents()` notes, for the same reason: the
       // caller checked the latch before the acceptance step, so a pass started from
       // inside that step's escalation bookkeeping - an `onForceShutdown` that calls
-      // `restartAllComponents()` - was not there to be noted then. A signal and a
-      // `triggerShutdown()` both mean the process should stay down, and neither path is
-      // one a restart takes for its own stop phase.
+      // `restartAllComponents()` - was not there to be noted then. A signal means the
+      // process should stay down, and this is not a path a restart takes for its own
+      // stop phase.
       this.noteShutdownRequestDuringActivePass();
 
-      return this.refusedTriggerResult();
+      return;
     }
 
-    // Initiate shutdown asynchronously (don't await in signal handler). With a handler
-    // on the rejection: `runShutdownPass` rethrows from its `catch`, so any failure
-    // inside the pass rejects this floating promise with nothing attached. On
-    // `SIGINT`/`SIGTERM` that is an unhandled rejection - fatal under Node's default
-    // `--unhandled-rejections=throw`, taking the process down before the components
-    // it was about to stop were stopped. Reported on the global channel rather than
-    // through the logger, which is where every other failure in this file goes.
+    // `runShutdownPass()` resolves even when the pass dies, reporting the failure itself.
+    // The handler stays anyway: this promise floats, and on `SIGINT`/`SIGTERM` an
+    // unhandled rejection is fatal under Node's default `--unhandled-rejections=throw`,
+    // taking the process down before the components it was about to stop were stopped.
     acceptance.promise.catch((error: unknown) => {
       reportCallbackError(`shutdown after ${method}`, error);
     });
-
-    return {
-      initiated: true,
-      code: 'initiated',
-      reason: 'Shutdown initiated',
-    };
   }
 
   /**
@@ -6540,15 +6704,15 @@ export class LifecycleManager
    * starting everything back up afterwards, so the request is recorded on the pass and
    * phase 2 is skipped instead.
    *
-   * Called from the four request paths on the branch where they are refused because a
-   * shutdown is already running: `handleShutdownRequest()` for a signal,
-   * `requestManualShutdown()` for `triggerShutdown()`, the public `stopAllComponents()`
-   * - a direct stop call in that window expresses the same intent as a signal - and the
-   * `enableLoggerExitHook()` callback, where `logger.exit()` says the process is going
-   * down. The first two check the latch themselves and then reach the acceptance step,
-   * which can refuse them a second time over a pass its own escalation bookkeeping
-   * started; `startShutdownPass()` and `stopAllComponents()` call this again on that
-   * refusal, because on entry there was no pass to note.
+   * Called from the three request paths on the branch where they are refused because a
+   * shutdown is already running: `handleShutdownRequest()` for a signal, the public
+   * `stopAllComponents()` - a direct stop call in that window expresses the same intent
+   * as a signal - and the `enableLoggerExitHook()` callback, where `logger.exit()` says
+   * the process is going down. The signal path checks the latch itself and then reaches
+   * the acceptance step, which can refuse it a second time over a pass its own
+   * escalation bookkeeping started, so `startShutdownPass()` calls this again on that
+   * refusal; `stopAllComponents()` only notes after the acceptance step, for the same
+   * reason - on entry there may have been no pass to note.
    *
    * Deliberately not `acceptShutdownPass()`'s own refusal, which a restart's stop phase
    * also reaches: a restart refused by somebody else's pass is not a request to stay
@@ -6561,27 +6725,10 @@ export class LifecycleManager
   }
 
   /**
-   * The acknowledgement a request gets when it did not start a pass because one is
-   * already running - the `ShutdownTriggerResult` half of the refusal.
-   *
-   * Named for what it returns rather than for the situation, because
-   * {@link refusedShutdownResult} describes the same situation in the other result
-   * type and the two were an anagram apart.
-   */
-  private refusedTriggerResult(): ShutdownTriggerResult {
-    return {
-      initiated: false,
-      code: 'already_in_progress',
-      reason: LIFECYCLE_MANAGER_MESSAGE_SHUTDOWN_IN_PROGRESS,
-    };
-  }
-
-  /**
    * The refusal `acceptShutdownPass()` returns when it will not run a pass because one
    * is already running - whether the latch was already set on entry or was taken by a
    * nested request while this one was still being set up. Shared so the two refusals
-   * cannot drift into reporting different things for the same situation, and worded from
-   * the same constant as {@link refusedTriggerResult} for the same reason.
+   * cannot drift into reporting different things for the same situation.
    */
   private refusedShutdownResult(): ShutdownResult {
     return {
@@ -6592,6 +6739,117 @@ export class LifecycleManager
       reason: LIFECYCLE_MANAGER_MESSAGE_SHUTDOWN_IN_PROGRESS,
       code: 'already_in_progress',
     };
+  }
+
+  /**
+   * The safety net under every public async method: whatever `run` throws or rejects with
+   * comes back as the failed result `toFailure` builds, and the original is reported on the
+   * global `'error'` channel.
+   *
+   * The public methods answer with result objects rather than rejections, so a caller can
+   * start one without awaiting it - `const pending = manager.stopAllComponents()` - and read
+   * the outcome whenever it likes, or drop it with `void`. A rejection would break that:
+   * with nothing attached it is an unhandled rejection, fatal under Node's default
+   * `--unhandled-rejections=throw`. Nothing that lands here is an expected outcome - it is
+   * a bug in the manager, or a component that broke its contract with a throwing getter -
+   * so it is reported rather than swallowed, and the result says `unknown_error`.
+   *
+   * `toFailure` runs on the failure path with nothing left above it, so it must build its
+   * result from values it can read without running caller code.
+   */
+  private async settleOperation<T>(
+    operation: string,
+    run: () => Promise<T>,
+    toFailure: (error: Error, reason: string) => T,
+  ): Promise<T> {
+    try {
+      return await run();
+    } catch (error) {
+      reportCallbackError(`lifecycle-manager ${operation}`, error);
+
+      return toFailure(
+        toError(error),
+        `${operation}() failed unexpectedly: ${describeError(error)}`,
+      );
+    }
+  }
+
+  /**
+   * The `ShutdownResult` for a shutdown call that crashed before any pass could report its
+   * own result - so nothing stopped that this call knows of. A pass that dies reports
+   * itself from inside `runShutdownPass()` instead, with what it did stop.
+   */
+  private crashedShutdownResult(error: Error, reason: string): ShutdownResult {
+    return {
+      success: false,
+      stoppedComponents: [],
+      stalledComponents: [],
+      durationMS: 0,
+      reason,
+      code: 'unknown_error',
+      error,
+    };
+  }
+
+  /**
+   * The `SignalBroadcastResult` for a `trigger*()` call that crashed before it had any
+   * per-component results to report.
+   */
+  private crashedSignalBroadcastResult(
+    signal: SignalBroadcastResult['signal'],
+  ): SignalBroadcastResult {
+    return { signal, results: [], timedOut: false, code: 'error' };
+  }
+
+  /**
+   * The `HealthCheckResult` for a health check that crashed outside the component's own
+   * `healthCheck()` - which is timed and caught on its own.
+   */
+  private crashedHealthCheckResult(
+    name: string,
+    error: Error,
+  ): HealthCheckResult {
+    return {
+      name,
+      healthy: false,
+      checkedAt: Date.now(),
+      durationMS: 0,
+      error,
+      timedOut: false,
+      code: 'error',
+    };
+  }
+
+  /**
+   * The `ComponentOperationResult` for a per-component operation that crashed. Carries no
+   * `status`: building one reads component state through code that may be what threw.
+   */
+  private crashedComponentResult(
+    name: string,
+    error: Error,
+    reason: string,
+  ): ComponentOperationResult {
+    return {
+      success: false,
+      componentName: name,
+      reason,
+      code: 'unknown_error',
+      error,
+    };
+  }
+
+  /**
+   * A component's name for a failure result, without letting an overridden `getName()`
+   * that throws turn the failure report into a second failure.
+   */
+  private readComponentNameSafely(component: unknown): string {
+    try {
+      const name: unknown = (component as BaseComponent).getName();
+
+      return typeof name === 'string' ? name : String(name);
+    } catch {
+      return '<unknown>';
+    }
   }
 
   /**
@@ -7008,10 +7266,26 @@ export class LifecycleManager
     descriptor.emitSignal();
 
     if (descriptor.customCallback) {
-      const result = descriptor.customCallback(descriptor.broadcast);
+      // Guarded: the callback is the caller's, and a throw or rejection from it rejected
+      // `triggerReload()` and friends. It is reported, and the result says `error`.
+      try {
+        const result = descriptor.customCallback(descriptor.broadcast);
 
-      if (isPromise(result)) {
-        await result;
+        if (isPromise(result)) {
+          await result;
+        }
+      } catch (error) {
+        reportCallbackError(
+          `lifecycle-manager ${descriptor.signal} request callback`,
+          error,
+        );
+
+        return {
+          signal: descriptor.signal,
+          results: [],
+          timedOut: false,
+          code: 'error',
+        };
       }
 
       // Return empty result (custom callback handled it)

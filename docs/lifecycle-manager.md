@@ -39,7 +39,6 @@ A comprehensive lifecycle orchestration system that manages startup, shutdown, a
     - [`getSignalStatus()`](#getsignalstatus)
     - [`getShutdownEscalationStatus()`](#getshutdownescalationstatus)
     - [Manual Signal Triggers](#manual-signal-triggers)
-    - [Background Shutdown](#background-shutdown)
     - [Custom Signal Handlers](#custom-signal-handlers)
     - [Repeated Shutdown Request Policy](#repeated-shutdown-request-policy)
   - [Logger Integration](#logger-integration)
@@ -67,6 +66,8 @@ A comprehensive lifecycle orchestration system that manages startup, shutdown, a
 - [Error Handling](#error-handling)
   - [Result Objects vs Exceptions](#result-objects-vs-exceptions)
     - [Operations Return Result Objects](#operations-return-result-objects)
+    - [Promises Never Reject](#promises-never-reject)
+    - [Running Operations in the Background](#running-operations-in-the-background)
     - [Exceptions (Programmer Errors)](#exceptions-programmer-errors)
   - [Failure Codes](#failure-codes)
 - [Advanced Usage](#advanced-usage)
@@ -920,10 +921,17 @@ interface ShutdownResult {
   timedOut?: boolean;
   reason?: string;
   code?: 'already_in_progress' | 'shutdown_timeout' | 'unknown_error';
+  error?: Error; // The thrown value, when the pass itself failed (unknown_error)
 }
 ```
 
 **Note:** If `timedOut` is `true`, `success` will be `false` even if no components stalled.
+
+A pass that throws outright - a bug in the manager, or a component getter that throws - resolves with `code: 'unknown_error'` and the thrown value on `error`, rather than rejecting. It still emits `lifecycle-manager:shutdown-completed` with the same result and updates `getLastShutdownResult()`, lists the components it had already stopped, and arms the escalation window like any other failed pass.
+
+**Background use:** the promise never rejects, so a caller that cannot block - an HTTP handler, an event listener - can start a shutdown without awaiting it and read the outcome later. See [Running Operations in the Background](#running-operations-in-the-background). A call made while a shutdown is already running resolves at once with `already_in_progress`.
+
+**Escalation:** calls made while a shutdown is running **never** count toward [`repeatedShutdownRequestPolicy`](#repeated-shutdown-request-policy), whatever `countManualRetriesTowardEscalation` says. Escalation represents an operator pressing Ctrl+C again; overlapping programmatic callers are not expressing that, so a burst of them can never force-kill the process. The flag only covers a deliberate retry after a failed pass: with it enabled, a call made while escalation is still armed counts once and can reach `forceAfterCount`, and the retry pass still starts. A manual call does not emit `signal:shutdown`, which describes a real OS signal; observe `lifecycle-manager:shutdown-initiated` instead.
 
 #### `restartAllComponents(options?)`
 
@@ -952,7 +960,9 @@ interface RestartResult {
 
 **Important:** `restartAllComponents` hardcodes `retryStalled: true` and `haltOnStall: true` for the shutdown phase to ensure clean restart. Only `shutdownTimeoutMS` can be customized.
 
-**A shutdown request during the shutdown phase wins.** A [`triggerShutdown()`](#background-shutdown) call, a `SIGINT`/`SIGTERM`, a `logger.exit()` under [`enableLoggerExitHook()`](#enableloggerexithook), or a direct `stopAllComponents()` call made while the restart is stopping asks the process to stay down, so the restart skips its startup phase instead of bringing every component back up. The result then carries `startupSkippedByShutdownRequest: true`, `startupResult.code` is `shutdown_requested_during_restart`, and `success` is `false` - the restart did not complete. This is checked before the shutdown phase's own outcome, so a stalled or failed stop phase paired with a request still reports the request. `getLastShutdownResult()` is left in place (a completed restart clears it), so the shutdown phase's outcome is still readable afterwards.
+**A shutdown request during the shutdown phase wins.** A `SIGINT`/`SIGTERM`, a `logger.exit()` under [`enableLoggerExitHook()`](#enableloggerexithook), or a direct `stopAllComponents()` call made while the restart is stopping asks the process to stay down, so the restart skips its startup phase instead of bringing every component back up. The result then carries `startupSkippedByShutdownRequest: true`, `startupResult.code` is `shutdown_requested_during_restart`, and `success` is `false` - the restart did not complete. This is checked before the shutdown phase's own outcome, so a stalled or failed stop phase paired with a request still reports the request. `getLastShutdownResult()` is left in place (a completed restart clears it), so the shutdown phase's outcome is still readable afterwards.
+
+**A shutdown phase that throws outright** resolves the restart rather than rejecting it: `shutdownResult` carries the pass's `unknown_error` result, and the startup phase is skipped - with `startupResult.code` also `unknown_error` - since nothing can be said about the state the components were left in.
 
 Only the restart that actually runs the shutdown phase can be cancelled this way. A `restartAllComponents()` call made while a shutdown is already running - including one started by another restart - has its own shutdown phase refused with `already_in_progress` and then gets whatever `startAllComponents()` answers, usually `shutdown_in_progress`; it never reports `startupSkippedByShutdownRequest`, and it does not disturb the restart whose shutdown phase is running. The reverse holds too: every restart that does run a shutdown phase is cancellable on its own terms, including one that starts in the moment between a previous pass finishing and the restart that owned it resuming.
 
@@ -1409,33 +1419,7 @@ triggerInfo(): Promise<SignalBroadcastResult>
 triggerDebug(): Promise<SignalBroadcastResult>
 ```
 
-**Note:** For programmatic shutdown that waits for the outcome, use [`stopAllComponents()`](#stopallcomponentsoptions), which returns a `ShutdownResult`.
-
-#### Background Shutdown
-
-```typescript
-triggerShutdown(): Promise<ShutdownTriggerResult>
-```
-
-Starts shutdown without waiting for it to finish - the same background shutdown pass a `SIGINT`/`SIGTERM` handler starts, without the signal bookkeeping. It resolves as soon as the request is accepted, so it suits callers that cannot block - an HTTP handler, or an event listener.
-
-```typescript
-type ShutdownTriggerResult =
-  // This request started a new shutdown pass
-  | { initiated: true; code: 'initiated'; reason: string }
-  // This request joined a pass that was already running
-  | { initiated: false; code: 'already_in_progress'; reason: string };
-```
-
-The acknowledgement says only that the request was accepted. It does not report whether components stopped cleanly - subscribe to `lifecycle-manager:shutdown-completed`, or call `getLastShutdownResult()`, for that. An `initiated` acknowledgement is safe to wait on: once a pass announces itself with `lifecycle-manager:shutdown-initiated` it always reports a result, even if the pass itself fails outright.
-
-**During `restartAllComponents()`:** a request made while the restart's stop phase is running wins - the restart skips its startup phase and the components stay stopped. The acknowledgement is still `already_in_progress`: that running stop phase _is_ the shutdown the caller asked for, so there is no second pass to start. The restart resolves with `startupSkippedByShutdownRequest: true`; see [`restartAllComponents()`](#restartallcomponentsoptions). A shutdown signal, a `logger.exit()` under [`enableLoggerExitHook()`](#enableloggerexithook), and a direct `stopAllComponents()` call all behave the same way in that window. A request that lands during the restart's startup phase instead starts a pass of its own, which aborts the startup - `startupResult.code` is then `shutdown_in_progress`.
-
-**Prefer this over `void stopAllComponents()`.** A floating shutdown promise with no rejection handler becomes an unhandled rejection if the logger throws while the shutdown is being logged, which is fatal under Node's default `--unhandled-rejections=throw` - taking the process down before the components it was about to stop have stopped. `triggerShutdown()` attaches that handler and reports through the global error channel instead. The same applies to `void stopComponent(name)`: attach a `.catch()` if you use it.
-
-A `LoggerService` that throws while the request is being logged does not fail the request either: the manager guards its own logger, so escalation bookkeeping still runs and the acknowledgement still resolves, and the logger failure is reported on the global error channel. That guarantee is not specific to this path - see [Logger Requirements](#logger-requirements). No shutdown outcome rejects the promise: every request either starts a pass or joins one, and a pass that dies reports itself through `lifecycle-manager:shutdown-completed` and the global error channel rather than through the acknowledgement. The request path itself is synchronous and does not throw either - every callback it runs is guarded - so `void triggerShutdown()` is safe. If a bug in the manager ever made it throw, it surfaces as a rejection of the returned promise, where a `.catch()` can see it, rather than as a synchronous throw past the caller or as an `already_in_progress` that never happened.
-
-Escalation matches `stopAllComponents()`. Calls made while a shutdown is running **never** count toward [`repeatedShutdownRequestPolicy`](#repeated-shutdown-request-policy), whatever `countManualRetriesTowardEscalation` says: escalation represents an operator pressing Ctrl+C again, concurrent callers of this method are not expressing that, and so a burst of overlapping requests can never force-kill the process on its own. The flag only covers a deliberate retry after a failed pass. With it enabled, a request made while escalation is still armed after a failed shutdown counts once and can reach `forceAfterCount`: `onForceShutdown` runs, and because the retry pass still starts, the acknowledgement is `initiated` - the same behavior as `stopAllComponents()`. Because `signal:shutdown` describes a real OS signal, a manual request does not emit it; observe `lifecycle-manager:shutdown-initiated` instead.
+**Note:** For programmatic shutdown, use [`stopAllComponents()`](#stopallcomponentsoptions). It returns a `ShutdownResult`, and it is safe to start without awaiting - see [Running Operations in the Background](#running-operations-in-the-background).
 
 #### Custom Signal Handlers
 
@@ -2284,7 +2268,7 @@ class ApiComponent extends BaseComponent {
 - **Messaging**: `sendMessageToComponent()`, `broadcastMessage()`
 - **Value sharing**: `getValue()`
 - **Health checks**: `checkComponentHealth()`, `checkAllHealth()`
-- **Signal management**: `attachSignals()`, `detachSignals()`, `getSignalStatus()`, `triggerShutdown()`, `triggerReload()`, `triggerInfo()`, `triggerDebug()`
+- **Signal management**: `attachSignals()`, `detachSignals()`, `getSignalStatus()`, `triggerReload()`, `triggerInfo()`, `triggerDebug()`
 
 **Note:** While lifecycle control methods are available through the lifecycle reference, use them with caution. For startup/shutdown ordering, prefer declaring dependencies in your component's configuration rather than manually controlling other components' lifecycles.
 
@@ -2322,7 +2306,7 @@ lifecycle.on('lifecycle-manager:shutdown-completed', (data) => {
 - `lifecycle-manager:shutdown-warning` - Global warning phase started
 - `lifecycle-manager:shutdown-warning-completed` - Warning phase completed
 - `lifecycle-manager:shutdown-warning-timeout` - Warning phase timed out
-- `lifecycle-manager:shutdown-completed` - Shutdown attempt completed, includes the `ShutdownResult` fields at the top level plus `method` / `duringStartup`. This is the best single event for centralized logging or follow-up policy when shutdown times out or leaves stalled components. If the global shutdown timeout was hit, the payload reflects the result at the moment the public call stopped waiting. A component stop already in flight is not cancelled: its per-component state continues to reject an overlapping start or stop, while the process-wide shutdown latch is released so exit handling and later shutdown/escalation attempts can proceed. It always pairs with `lifecycle-manager:shutdown-initiated`: a pass that throws outright - which also rejects `stopAllComponents()` - still emits it with `success: false` and a `reason` naming the cause, so a caller waiting on it is never left hanging.
+- `lifecycle-manager:shutdown-completed` - Shutdown attempt completed, includes the `ShutdownResult` fields at the top level plus `method` / `duringStartup`. This is the best single event for centralized logging or follow-up policy when shutdown times out or leaves stalled components. If the global shutdown timeout was hit, the payload reflects the result at the moment the public call stopped waiting. A component stop already in flight is not cancelled: its per-component state continues to reject an overlapping start or stop, while the process-wide shutdown latch is released so exit handling and later shutdown/escalation attempts can proceed. It always pairs with `lifecycle-manager:shutdown-initiated`: a pass that throws outright still emits it with `success: false`, `code: 'unknown_error'` and a `reason` naming the cause - the same result `stopAllComponents()` resolves with - so a caller waiting on it is never left hanging.
 
 **Component Registration:**
 
@@ -2458,9 +2442,48 @@ if (result.success && result.status) {
 }
 ```
 
+#### Promises Never Reject
+
+Every async method answers with a result object, including when something goes wrong that the manager did not plan for - a bug in the manager, or a component that breaks its contract with a getter (`getName()`, `getDependencies()`, `isOptional()`) that throws. The promise resolves with a failed result and the original error is reported on the global `'error'` channel (see [safe-handle-callback](./safe-handle-callback.md)):
+
+| Method                                                                   | Unexpected failure resolves with                     |
+| ------------------------------------------------------------------------ | ---------------------------------------------------- |
+| `registerComponent()`, `insertComponentAt()`                             | `code: 'unknown_error'`, `registered` as it stands   |
+| `unregisterComponent()`                                                  | `code: 'unknown_error'`                              |
+| `startAllComponents()`, `stopAllComponents()`, `restartAllComponents()`  | `code: 'unknown_error'` with `error`                 |
+| `startComponent()`, `stopComponent()`, `restartComponent()`              | `code: 'unknown_error'` with `error`                 |
+| `sendMessageToComponent()`, `checkComponentHealth()`, `checkAllHealth()` | `code: 'error'`                                      |
+| `triggerReload()`, `triggerInfo()`, `triggerDebug()`                     | `code: 'error'`, including when your callback throws |
+| `broadcastMessage()`                                                     | an empty array                                       |
+
+Branch on `code` as usual; `unknown_error` is never an expected outcome, so treat it as a bug to report rather than a condition to retry around.
+
+Signal handling is a convenience on top of the operations, not a precondition for them. If attaching or detaching process signals fails during a start or stop that attaches or detaches them automatically (`attachSignalsOnStart`, `attachSignalsBeforeStartup`, `detachSignalsOnStop`), the operation carries on and the failure is logged and reported. An explicit `attachSignals()` / `detachSignals()` call still throws to its caller.
+
+#### Running Operations in the Background
+
+There is no `wait: false` option; there doesn't need to be. Because no promise rejects, you can start any operation without awaiting it and still read its result later from the same promise:
+
+```typescript
+// Inside an HTTP handler that must respond now
+const pending = lifecycle.stopAllComponents();
+
+res.status(202).send('shutting down');
+
+pending.then((result) => {
+  if (!result.success) {
+    console.error('Shutdown did not complete cleanly:', result.reason);
+  }
+});
+```
+
+If you don't need the result, `void lifecycle.stopAllComponents()` is safe too - there is no rejection to go unhandled. Events and state getters still report the outcome: `lifecycle-manager:shutdown-completed`, `getLastShutdownResult()`, and `getSystemState()`.
+
+A call that is refused - `already_in_progress`, `shutdown_in_progress`, and so on - resolves almost immediately, so you still find out quickly whether what you asked for was accepted.
+
 #### Exceptions (Programmer Errors)
 
-Exceptions are limited to invalid construction or unexpected internal bugs. In normal use of the public API, failures are returned as result objects.
+Exceptions are limited to invalid construction and explicit synchronous calls such as `attachSignals()`. The async public API never rejects - see [Promises Never Reject](#promises-never-reject).
 
 Explicit exceptions you may see:
 
@@ -2530,7 +2553,8 @@ type UnregisterFailureCode =
   | 'component_not_found'
   | 'component_running'
   | 'stop_failed'
-  | 'bulk_operation_in_progress';
+  | 'bulk_operation_in_progress'
+  | 'unknown_error';
 
 // Startup order failure codes
 type StartupOrderFailureCode = 'dependency_cycle' | 'unknown_error';

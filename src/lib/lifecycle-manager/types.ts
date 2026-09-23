@@ -104,40 +104,6 @@ export interface ComponentStallInfo {
 export type ShutdownMethod = 'manual' | 'SIGINT' | 'SIGTERM' | 'SIGTRAP';
 
 /**
- * Acknowledgement returned by `triggerShutdown()`.
- *
- * Reports whether the request started a new shutdown pass. The shutdown runs
- * in the background, so this never describes how components actually stopped -
- * use the `lifecycle-manager:shutdown-completed` event or
- * `getLastShutdownResult()` for that.
- *
- * A union rather than one shape with two independent fields: `initiated` and `code` are
- * the same answer said twice, so the type ties them together and a caller that checks
- * either one has narrowed the other.
- */
-export type ShutdownTriggerResult =
-  | {
-      /** True when this request started a new shutdown pass */
-      initiated: true;
-
-      /** Machine-readable outcome code */
-      code: 'initiated';
-
-      /** Human-readable explanation of the outcome */
-      reason: string;
-    }
-  | {
-      /** False when this request joined a pass that was already running */
-      initiated: false;
-
-      /** Machine-readable outcome code */
-      code: 'already_in_progress';
-
-      /** Human-readable explanation of the outcome */
-      reason: string;
-    };
-
-/**
  * Base interface for all operation results
  *
  * Provides consistent structure across all operations with common fields
@@ -271,7 +237,8 @@ export type UnregisterFailureCode =
   | 'component_not_found'
   | 'component_running'
   | 'stop_failed'
-  | 'bulk_operation_in_progress';
+  | 'bulk_operation_in_progress'
+  | 'unknown_error';
 
 /**
  * Additional details for why unregister stop failed
@@ -374,6 +341,9 @@ export interface ShutdownResult {
 
   /** Error code (when success is false) */
   code?: 'already_in_progress' | 'shutdown_timeout' | 'unknown_error';
+
+  /** The thrown value, when the pass itself failed (`code: 'unknown_error'`) */
+  error?: Error;
 }
 
 /**
@@ -731,7 +701,6 @@ export interface LifecycleCommon
   detachSignals(): void;
   getSignalStatus(): LifecycleSignalStatus;
   getShutdownEscalationStatus(): ShutdownEscalationStatus;
-  triggerShutdown(): Promise<ShutdownTriggerResult>;
   triggerReload(): Promise<SignalBroadcastResult>;
   triggerInfo(): Promise<SignalBroadcastResult>;
   triggerDebug(): Promise<SignalBroadcastResult>;
