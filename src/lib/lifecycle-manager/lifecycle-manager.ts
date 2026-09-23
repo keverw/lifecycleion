@@ -2195,6 +2195,27 @@ export class LifecycleManager
       };
     }
 
+    // Attached before anything else is touched, so a failure refuses the startup with no
+    // state to release. Tracked so failure cleanup does not detach handlers that were
+    // attached earlier by some other path.
+    const bulkSignalAttach = this.attachSignalsBeforeStartup
+      ? this.autoAttachSignals('bulk startup')
+      : null;
+
+    if (bulkSignalAttach?.outcome === 'failed') {
+      return {
+        ...this.refusedStartupResult(
+          'signal_attach_failed',
+          `Could not attach process signals: ${describeError(bulkSignalAttach.error)}`,
+          Date.now() - startTime,
+        ),
+        error: bulkSignalAttach.error,
+      };
+    }
+
+    const didAutoAttachSignalsForBulkStartup =
+      bulkSignalAttach?.outcome === 'attached';
+
     // Set starting flag and clear previous shutdown state
     this.isStarting = true;
     const shutdownTokenAtBulkStart = this.shutdownToken;
@@ -2203,12 +2224,6 @@ export class LifecycleManager
     this.resetRepeatedShutdownRequestState();
     this.shutdownMethod = null; // Clear previous shutdown method on fresh start
     this.lastShutdownResult = null; // Clear last shutdown result on fresh start
-
-    // Track whether this startup attempt attached signals so failure cleanup
-    // does not detach handlers that were attached earlier by some other path.
-    const didAutoAttachSignalsForBulkStartup = this.attachSignalsBeforeStartup
-      ? this.autoAttachSignals('bulk startup')
-      : false;
 
     this.logger.info('Starting all components');
 
@@ -4432,6 +4447,26 @@ export class LifecycleManager
       };
     }
 
+    // Attached before the component is marked `starting`, so a failure refuses the start
+    // with nothing to release. Tracked so failure cleanup only detaches what this start
+    // attempt attached.
+    const componentSignalAttach = this.attachSignalsBeforeStartup
+      ? this.autoAttachSignals('component startup')
+      : null;
+
+    if (componentSignalAttach?.outcome === 'failed') {
+      return {
+        success: false,
+        componentName: name,
+        reason: `Could not attach process signals: ${describeError(componentSignalAttach.error)}`,
+        code: 'signal_attach_failed',
+        error: componentSignalAttach.error,
+      };
+    }
+
+    const didAutoAttachSignalsForComponentStartup =
+      componentSignalAttach?.outcome === 'attached';
+
     // Set state to starting. The unexpected-stop record from the previous run is cleared
     // with it: that flag describes a stop that already happened, and a start that reads
     // it later would take an old failure for a new one.
@@ -4458,12 +4493,6 @@ export class LifecycleManager
     );
     const shutdownTokenAtStart = this.shutdownToken;
 
-    // Same ownership rule as bulk startup: only auto-detach on failure if this
-    // specific component start attempt was the one that attached signals.
-    const didAutoAttachSignalsForComponentStartup = this
-      .attachSignalsBeforeStartup
-      ? this.autoAttachSignals('component startup')
-      : false;
     let timeoutHandle: NodeJS.Timeout | undefined;
 
     try {
@@ -4655,11 +4684,6 @@ export class LifecycleManager
       }
       this.updateStartedFlag();
 
-      // Auto-attach signals if this is the first component and option is enabled
-      if (this.attachSignalsOnStart && this.runningComponents.size === 1) {
-        this.autoAttachSignals('first component start');
-      }
-
       const timestamps = this.componentTimestamps.get(name) ?? {
         startedAt: null,
         stoppedAt: null,
@@ -4670,6 +4694,18 @@ export class LifecycleManager
       this.logger.entity(name).success('Component started');
       const status = this.getComponentStatus(name);
       this.lifecycleEvents.componentStarted(name, status);
+
+      // `attachSignalsOnStart` attaches once the first component is actually up, not
+      // before. A process configured to handle signals must not stay up without them, so
+      // a failed attach takes this component back down and fails the start - after its
+      // `started` event, so observers see an ordinary start followed by a stop.
+      if (this.attachSignalsOnStart && this.runningComponents.size === 1) {
+        const signalAttach = this.autoAttachSignals('first component start');
+
+        if (signalAttach.outcome === 'failed') {
+          return this.rollBackStartForSignalAttach(name, signalAttach.error);
+        }
+      }
 
       return {
         success: true,
@@ -5697,21 +5733,25 @@ export class LifecycleManager
   }
 
   /**
-   * Attach signals on the manager's own initiative, as part of a startup.
+   * Attach signals on the manager's own initiative, ahead of a start.
    *
-   * Contained: this runs in the middle of a start, after state such as `isStarting` or a
-   * component's `starting` has been taken and before the `try` that would release it,
-   * and a throw from `ProcessSignalManager.attach()` - a `process.on` or raw-mode stdin
-   * failure - left that state held for good. The startup carries on without signal
-   * handlers and the failure is reported on the global channel: signals are a
-   * convenience on top of the start the caller asked for, not a precondition of it.
-   * An explicit `attachSignals()` call still throws to its caller.
+   * A failure here fails the start: on Node and Bun an attach only throws when something
+   * is really wrong - a `process.on` or raw-mode stdin failure - and a process that was
+   * configured to handle `SIGTERM` must not come up without doing so. Every caller runs
+   * this before it takes any start state (`isStarting`, a component's `starting`), so a
+   * refusal has nothing to release. Caught rather than thrown so each caller can answer
+   * with its own result; an explicit `attachSignals()` call still throws to its caller.
    *
-   * @returns true when this call attached them
+   * @returns `attached` when this call attached them, `failed` with the error when it
+   * could not, and `unchanged` when they were already attached
    */
-  private autoAttachSignals(trigger: string): boolean {
+  private autoAttachSignals(
+    trigger: string,
+  ):
+    | { outcome: 'attached' | 'unchanged' }
+    | { outcome: 'failed'; error: Error } {
     if (this.processSignalManager?.getStatus().isAttached) {
-      return false;
+      return { outcome: 'unchanged' };
     }
 
     this.logger.info(`Auto-attaching process signals on ${trigger}`);
@@ -5719,22 +5759,50 @@ export class LifecycleManager
     try {
       this.attachSignals();
     } catch (error) {
+      const err = toError(error);
+
       this.logger.error(
         'Could not attach process signals on {{trigger}}: {{error.message}}',
-        { params: { trigger, error: toError(error) } },
-      );
-      reportCallbackError(
-        `lifecycle-manager signal attach on ${trigger}`,
-        error,
+        { params: { trigger, error: err } },
       );
 
-      return false;
+      return { outcome: 'failed', error: err };
     }
 
     if (this.isStarting) {
       this.autoAttachedSignalsDuringStartup = true;
     }
-    return true;
+
+    return { outcome: 'attached' };
+  }
+
+  /**
+   * Stop a component that started but could not be left running because
+   * `attachSignalsOnStart` failed to attach process signals, and answer its start with
+   * `signal_attach_failed`. The stop is the normal graceful-then-force one; if it does not
+   * complete, the reason says so and the component is left as that stop left it.
+   */
+  private async rollBackStartForSignalAttach(
+    name: string,
+    error: Error,
+  ): Promise<ComponentOperationResult> {
+    this.logger
+      .entity(name)
+      .warn('Stopping component: process signals could not be attached');
+
+    const stopResult = await this.stopComponentInternal(name);
+    const attachReason = `Could not attach process signals: ${describeError(error)}`;
+
+    return {
+      success: false,
+      componentName: name,
+      reason: stopResult.success
+        ? `${attachReason}; component stopped again`
+        : `${attachReason}; stopping it again also failed: ${stopResult.reason ?? 'unknown reason'}`,
+      code: 'signal_attach_failed',
+      error,
+      status: this.getComponentStatus(name),
+    };
   }
 
   /**

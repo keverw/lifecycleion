@@ -735,6 +735,7 @@ interface StartupResult {
     | 'partial_state' // Some components already running
     | 'required_component_failed' // Required component failed to start
     | 'shutdown_requested_during_restart' // restartAllComponents() skipped its startup phase
+    | 'signal_attach_failed' // attachSignalsBeforeStartup could not attach process signals
     | 'startup_timeout'
     | 'unknown_error';
   error?: Error; // Error object (when success is false due to dependency cycle or unknown error)
@@ -1286,10 +1287,15 @@ attachSignals(): void
 
 If `attachSignalsBeforeStartup` is enabled, handlers are auto-attached before
 `startAllComponents()` or `startComponent()` begins work, so the startup window
-is covered even if startup fails.
+is covered even if startup fails. If attaching fails, the start is refused with
+`code: 'signal_attach_failed'` before any work begins.
 
 If `attachSignalsOnStart` is enabled, handlers are auto-attached when the first
-component successfully starts.
+component successfully starts. If attaching fails, that component is stopped
+again and its start fails with `code: 'signal_attach_failed'` - a process
+configured to handle signals does not stay up without them. In
+`startAllComponents()` that counts as a failed component, so a required one
+rolls the startup back.
 
 If `detachSignalsOnStop` is enabled, currently attached handlers are detached
 when the last running component stops, whether they were attached manually or
@@ -2458,7 +2464,7 @@ Every async method answers with a result object, including when something goes w
 
 Branch on `code` as usual; `unknown_error` is never an expected outcome, so treat it as a bug to report rather than a condition to retry around.
 
-Signal handling is a convenience on top of the operations, not a precondition for them. If attaching or detaching process signals fails during a start or stop that attaches or detaches them automatically (`attachSignalsOnStart`, `attachSignalsBeforeStartup`, `detachSignalsOnStop`), the operation carries on and the failure is logged and reported. An explicit `attachSignals()` / `detachSignals()` call still throws to its caller.
+Automatic signal handling follows the configuration. A start that is configured to attach process signals (`attachSignalsBeforeStartup`, `attachSignalsOnStart`) fails with `code: 'signal_attach_failed'` when attaching throws, rather than bringing the process up without them - see [`attachSignals()`](#attachsignals). A detach that throws once the last component stops (`detachSignalsOnStop`) does not fail the stop or unregister it follows: the operation carries on and the failure is logged and reported. An explicit `attachSignals()` / `detachSignals()` call still throws to its caller.
 
 #### Running Operations in the Background
 
@@ -2535,6 +2541,7 @@ type ComponentOperationFailureCode =
   | 'component_shutdown_timeout'
   | 'restart_stop_failed'
   | 'restart_start_failed'
+  | 'signal_attach_failed'
   | 'unknown_error';
 
 // Registration failure codes

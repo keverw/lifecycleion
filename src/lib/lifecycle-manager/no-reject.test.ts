@@ -73,36 +73,70 @@ function fakeAttachedSignals(manager: LifecycleManager): void {
 }
 
 describe('LifecycleManager - public methods never reject', () => {
-  test('a signal attach that throws does not wedge bulk startup', async () => {
+  test('a signal attach that throws refuses bulk startup without wedging it', async () => {
     const { logger, manager } = setup({ attachSignalsBeforeStartup: true });
-    await manager.registerComponent(new Plain(logger, 'a'));
+    const component = new Plain(logger, 'a');
+    await manager.registerComponent(component);
 
     manager.attachSignals = (): never => {
       throw new Error('attach exploded');
     };
 
-    const { reports, release } = claimReports();
-    let result;
+    const result = await manager.startAllComponents();
 
-    try {
-      result = await manager.startAllComponents();
-    } finally {
-      release();
-    }
+    // A process configured to handle signals does not come up without them, and the
+    // refusal happens before anything is started or latched.
+    expect(result.success).toBe(false);
+    expect(result.code).toBe('signal_attach_failed');
+    expect(result.error?.message).toBe('attach exploded');
+    expect(result.startedComponents).toEqual([]);
+    expect(manager.isComponentRunning('a')).toBe(false);
+    expect(manager.getSystemState()).not.toBe('starting');
 
-    // Signals are a convenience on top of the start, so the start still happens - and
-    // `isStarting` used to stay set for good, refusing every later start.
-    expect(result.success).toBe(true);
+    // `isStarting` used to stay set for good here, refusing every later start with
+    // `already_in_progress`. Once attaching works, startup goes ahead. Faked rather than
+    // real, so the test never installs process-wide handlers.
+    manager.attachSignals = (): void => {
+      fakeAttachedSignals(manager);
+    };
+
+    const retry = await manager.startAllComponents();
+
+    expect(retry.success).toBe(true);
     expect(manager.isComponentRunning('a')).toBe(true);
-    expect(hasReport(reports, 'signal attach on bulk startup')).toBe(true);
-
-    expect((await manager.stopAllComponents()).success).toBe(true);
-    expect((await manager.startAllComponents()).code).not.toBe(
-      'already_in_progress',
-    );
   });
 
-  test('a signal attach that throws does not leave a component starting', async () => {
+  test('a signal attach that throws takes the first started component back down', async () => {
+    const { logger, manager } = setup({ attachSignalsOnStart: true });
+    const component = new Plain(logger, 'a');
+    await manager.registerComponent(component);
+
+    const events: string[] = [];
+    manager.on('component:started', () => {
+      events.push('started');
+    });
+    manager.on('component:stopped', () => {
+      events.push('stopped');
+    });
+
+    manager.attachSignals = (): never => {
+      throw new Error('attach exploded');
+    };
+
+    const result = await manager.startComponent('a');
+
+    // `attachSignalsOnStart` still attaches only once a component is actually up. When it
+    // cannot, that component does not stay up without signal handling.
+    expect(result.success).toBe(false);
+    expect(result.code).toBe('signal_attach_failed');
+    expect(result.error?.message).toBe('attach exploded');
+    expect(result.reason).toContain('component stopped again');
+    expect(events).toEqual(['started', 'stopped']);
+    expect(manager.getComponentStatus('a')?.state).toBe('stopped');
+    expect(manager.isComponentRunning('a')).toBe(false);
+  });
+
+  test('a signal attach that throws under attachSignalsOnStart fails a required bulk start', async () => {
     const { logger, manager } = setup({ attachSignalsOnStart: true });
     await manager.registerComponent(new Plain(logger, 'a'));
 
@@ -110,17 +144,12 @@ describe('LifecycleManager - public methods never reject', () => {
       throw new Error('attach exploded');
     };
 
-    const { release } = claimReports();
-    let result;
+    const result = await manager.startAllComponents();
 
-    try {
-      result = await manager.startComponent('a');
-    } finally {
-      release();
-    }
-
-    expect(result.success).toBe(true);
-    expect(manager.getComponentStatus('a')?.state).toBe('running');
+    expect(result.success).toBe(false);
+    expect(result.code).toBe('required_component_failed');
+    expect(manager.isComponentRunning('a')).toBe(false);
+    expect(manager.getSystemState()).not.toBe('starting');
   });
 
   test('a signal detach that throws does not send a clean stop to the force phase', async () => {

@@ -228,6 +228,7 @@ export type ComponentOperationFailureCode =
   | 'component_shutdown_timeout'
   | 'restart_stop_failed'
   | 'restart_start_failed'
+  | 'signal_attach_failed'
   | 'unknown_error';
 
 /**
@@ -304,6 +305,7 @@ export interface StartupResult {
     | 'partial_state'
     | 'required_component_failed'
     | 'shutdown_requested_during_restart'
+    | 'signal_attach_failed'
     | 'startup_timeout'
     | 'unknown_error';
 
