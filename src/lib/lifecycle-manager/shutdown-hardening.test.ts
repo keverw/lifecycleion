@@ -128,24 +128,52 @@ describe('LifecycleManager - stopAllComponents() in the background', () => {
     expect(initiatedCount).toBe(1);
   });
 
-  test('a shutdown-completed listener already sees the pass as over', async () => {
+  test('a shutdown-completed listener runs while the pass still holds the latch', async () => {
     const { logger, manager } = setup();
     await manager.registerComponent(new SlowStop(logger, 'slow', 10));
     await manager.startAllComponents();
 
-    const seen: Array<{ state: string; isShuttingDown: boolean }> = [];
-    manager.on('lifecycle-manager:shutdown-completed', () => {
-      seen.push({
-        state: manager.getSystemState(),
-        isShuttingDown: manager.getShutdownEscalationStatus().isShuttingDown,
-      });
+    const seen: Array<{ state: string; code?: string }> = [];
+    const refusals: Promise<ShutdownResult>[] = [];
+    manager.once('lifecycle-manager:shutdown-completed', () => {
+      const refusal = manager.stopAllComponents();
+      refusals.push(refusal);
+      seen.push({ state: manager.getSystemState() });
     });
 
     await manager.stopAllComponents();
 
-    // The status getters agree with the event, although the latch is released a moment
-    // later.
-    expect(seen).toEqual([{ state: 'ready', isShuttingDown: false }]);
+    // Status and operations agree: both still see the pass.
+    expect(seen).toEqual([{ state: 'shutting-down' }]);
+    expect((await refusals[0])?.code).toBe('already_in_progress');
+  });
+
+  test('a retry deferred out of a shutdown-completed listener runs a new pass', async () => {
+    const { logger, manager } = setup();
+    await manager.registerComponent(new SlowStop(logger, 'slow', 10));
+    await manager.startAllComponents();
+
+    let initiatedCount = 0;
+    manager.on('lifecycle-manager:shutdown-initiated', () => {
+      initiatedCount++;
+    });
+
+    const retries: Promise<ShutdownResult>[] = [];
+    manager.once('lifecycle-manager:shutdown-completed', () => {
+      setImmediate(() => {
+        retries.push(manager.stopAllComponents());
+      });
+    });
+
+    await manager.stopAllComponents();
+    await new Promise<void>((resolve) => {
+      setImmediate(resolve);
+    });
+
+    // Accepted once the latch has dropped: a pass of its own, not a refusal.
+    expect(retries).toHaveLength(1);
+    expect((await retries[0])?.code).not.toBe('already_in_progress');
+    expect(initiatedCount).toBe(2);
   });
 
   test('does not emit signal:shutdown for a manual request', async () => {

@@ -164,15 +164,6 @@ interface ShutdownPass {
    * owns the pass skips its startup phase and the components stay stopped.
    */
   shutdownRequested: boolean;
-
-  /**
-   * Set once the pass has its result and is about to report it on
-   * `lifecycle-manager:shutdown-completed`. The latch stays up until the pass's `finally`
-   * - escalation is armed after that event, and a request from one of its listeners
-   * still belongs to this pass - but the public status getters stop saying
-   * `shutting-down` from here, so a listener reading them sees the pass as over.
-   */
-  hasReportedResult: boolean;
 }
 
 /**
@@ -633,7 +624,7 @@ export class LifecycleManager
     const totalCount = this.getComponentCount();
     const runningCount = this.getRunningComponentCount();
 
-    if (this.isShutdownInProgressForStatus()) {
+    if (this.isShuttingDown) {
       return 'shutting-down';
     }
 
@@ -685,7 +676,7 @@ export class LifecycleManager
       systemState: this.getSystemState(),
       isStarted: this.isStarted,
       isStarting: this.isStarting,
-      isShuttingDown: this.isShutdownInProgressForStatus(),
+      isShuttingDown: this.isShuttingDown,
       counts: {
         total: this.getComponentCount(),
         running,
@@ -920,6 +911,12 @@ export class LifecycleManager
    * `already_in_progress`, but it cancels the restart's startup phase - a direct stop
    * call in that window means the components should stay down.
    *
+   * The same refusal applies inside `lifecycle-manager:shutdown-completed` and
+   * `shutdown-escalation-armed` listeners: they run while the pass still holds its
+   * latch, and `getSystemState()` says `shutting-down` there too. To act on a result,
+   * defer out of the listener (`setImmediate`, `queueMicrotask`) or `await` the promise
+   * this method returned.
+   *
    * @param options - Optional shutdown options
    */
   public stopAllComponents(options?: StopAllOptions): Promise<ShutdownResult> {
@@ -948,9 +945,10 @@ export class LifecycleManager
   public restartAllComponents(
     options?: RestartAllOptions,
   ): Promise<RestartResult> {
-    // Filled in once the stop phase has answered, so a crash after it - in the startup
-    // phase's bookkeeping, say - still reports the shutdown that actually happened, the
-    // same result `shutdown-completed` and `getLastShutdownResult()` already carry.
+    // Filled in once the stop phase has answered, so a crash after it still reports the
+    // shutdown that actually happened - the same result `shutdown-completed` and
+    // `getLastShutdownResult()` already carry. Reachable: the startup phase reads
+    // `options.startupOptions` only then, and a getter there that throws lands here.
     const phases: { shutdownResult?: ShutdownResult } = {};
 
     return this.settleOperation(
@@ -1100,7 +1098,7 @@ export class LifecycleManager
     if (this.repeatedShutdownRequestPolicy === undefined) {
       return {
         configured: false,
-        isShuttingDown: this.isShutdownInProgressForStatus(),
+        isShuttingDown: this.isShuttingDown,
         isArmed: false,
         forceAfterCount: null,
         withinMS: null,
@@ -1124,7 +1122,7 @@ export class LifecycleManager
 
     return {
       configured: true,
-      isShuttingDown: this.isShutdownInProgressForStatus(),
+      isShuttingDown: this.isShuttingDown,
       isArmed,
       forceAfterCount: this.repeatedShutdownRequestPolicy.forceAfterCount,
       withinMS: this.repeatedShutdownRequestPolicy.withinMS,
@@ -3917,10 +3915,7 @@ export class LifecycleManager
       return this.refuseShutdownPass(isRequestToStayDown);
     }
 
-    const pass: ShutdownPass = {
-      shutdownRequested: false,
-      hasReportedResult: false,
-    };
+    const pass: ShutdownPass = { shutdownRequested: false };
 
     // An async method, but it runs synchronously up to its first `await`, which is well
     // past the latch: the caller this returns to already sees a shutdown in progress.
@@ -4261,7 +4256,6 @@ export class LifecycleManager
       // Callers must inspect success / stalledComponents / timedOut to decide
       // what to do next.
       completedResult = result;
-      pass.hasReportedResult = true;
 
       this.lifecycleEvents.lifecycleManagerShutdownCompleted({
         ...result,
@@ -4317,7 +4311,6 @@ export class LifecycleManager
       };
 
       this.lastShutdownResult = result;
-      pass.hasReportedResult = true;
 
       this.lifecycleEvents.lifecycleManagerShutdownCompleted({
         ...result,
@@ -7057,21 +7050,6 @@ export class LifecycleManager
     acceptance.promise.catch((error: unknown) => {
       reportCallbackError(`shutdown after ${method}`, error);
     });
-  }
-
-  /**
-   * Whether the public status getters should report a shutdown in progress.
-   *
-   * The latch (`isShuttingDown`) stays up until the running pass's `finally`, after its
-   * `shutdown-completed` listeners and escalation arming have run - it guards the
-   * manager's own ordering. What a caller reads should instead match what the event
-   * said: once a pass has reported its result it is over, so `getSystemState()` and the
-   * status objects stop saying `shutting-down` from that moment.
-   */
-  private isShutdownInProgressForStatus(): boolean {
-    return (
-      this.isShuttingDown && this.activeShutdownPass?.hasReportedResult !== true
-    );
   }
 
   /**
