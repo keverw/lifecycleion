@@ -128,6 +128,26 @@ describe('LifecycleManager - stopAllComponents() in the background', () => {
     expect(initiatedCount).toBe(1);
   });
 
+  test('a shutdown-completed listener already sees the pass as over', async () => {
+    const { logger, manager } = setup();
+    await manager.registerComponent(new SlowStop(logger, 'slow', 10));
+    await manager.startAllComponents();
+
+    const seen: Array<{ state: string; isShuttingDown: boolean }> = [];
+    manager.on('lifecycle-manager:shutdown-completed', () => {
+      seen.push({
+        state: manager.getSystemState(),
+        isShuttingDown: manager.getShutdownEscalationStatus().isShuttingDown,
+      });
+    });
+
+    await manager.stopAllComponents();
+
+    // The status getters agree with the event, although the latch is released a moment
+    // later.
+    expect(seen).toEqual([{ state: 'ready', isShuttingDown: false }]);
+  });
+
   test('does not emit signal:shutdown for a manual request', async () => {
     const { logger, manager } = setup();
     await manager.registerComponent(new SlowStop(logger, 'slow', 10));

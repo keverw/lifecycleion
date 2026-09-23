@@ -164,6 +164,15 @@ interface ShutdownPass {
    * owns the pass skips its startup phase and the components stay stopped.
    */
   shutdownRequested: boolean;
+
+  /**
+   * Set once the pass has its result and is about to report it on
+   * `lifecycle-manager:shutdown-completed`. The latch stays up until the pass's `finally`
+   * - escalation is armed after that event, and a request from one of its listeners
+   * still belongs to this pass - but the public status getters stop saying
+   * `shutting-down` from here, so a listener reading them sees the pass as over.
+   */
+  hasReportedResult: boolean;
 }
 
 /**
@@ -624,7 +633,7 @@ export class LifecycleManager
     const totalCount = this.getComponentCount();
     const runningCount = this.getRunningComponentCount();
 
-    if (this.isShuttingDown) {
+    if (this.isShutdownInProgressForStatus()) {
       return 'shutting-down';
     }
 
@@ -676,7 +685,7 @@ export class LifecycleManager
       systemState: this.getSystemState(),
       isStarted: this.isStarted,
       isStarting: this.isStarting,
-      isShuttingDown: this.isShuttingDown,
+      isShuttingDown: this.isShutdownInProgressForStatus(),
       counts: {
         total: this.getComponentCount(),
         running,
@@ -1091,7 +1100,7 @@ export class LifecycleManager
     if (this.repeatedShutdownRequestPolicy === undefined) {
       return {
         configured: false,
-        isShuttingDown: this.isShuttingDown,
+        isShuttingDown: this.isShutdownInProgressForStatus(),
         isArmed: false,
         forceAfterCount: null,
         withinMS: null,
@@ -1115,7 +1124,7 @@ export class LifecycleManager
 
     return {
       configured: true,
-      isShuttingDown: this.isShuttingDown,
+      isShuttingDown: this.isShutdownInProgressForStatus(),
       isArmed,
       forceAfterCount: this.repeatedShutdownRequestPolicy.forceAfterCount,
       withinMS: this.repeatedShutdownRequestPolicy.withinMS,
@@ -3908,7 +3917,10 @@ export class LifecycleManager
       return this.refuseShutdownPass(isRequestToStayDown);
     }
 
-    const pass: ShutdownPass = { shutdownRequested: false };
+    const pass: ShutdownPass = {
+      shutdownRequested: false,
+      hasReportedResult: false,
+    };
 
     // An async method, but it runs synchronously up to its first `await`, which is well
     // past the latch: the caller this returns to already sees a shutdown in progress.
@@ -4249,6 +4261,7 @@ export class LifecycleManager
       // Callers must inspect success / stalledComponents / timedOut to decide
       // what to do next.
       completedResult = result;
+      pass.hasReportedResult = true;
 
       this.lifecycleEvents.lifecycleManagerShutdownCompleted({
         ...result,
@@ -4304,6 +4317,7 @@ export class LifecycleManager
       };
 
       this.lastShutdownResult = result;
+      pass.hasReportedResult = true;
 
       this.lifecycleEvents.lifecycleManagerShutdownCompleted({
         ...result,
@@ -7043,6 +7057,21 @@ export class LifecycleManager
     acceptance.promise.catch((error: unknown) => {
       reportCallbackError(`shutdown after ${method}`, error);
     });
+  }
+
+  /**
+   * Whether the public status getters should report a shutdown in progress.
+   *
+   * The latch (`isShuttingDown`) stays up until the running pass's `finally`, after its
+   * `shutdown-completed` listeners and escalation arming have run - it guards the
+   * manager's own ordering. What a caller reads should instead match what the event
+   * said: once a pass has reported its result it is over, so `getSystemState()` and the
+   * status objects stop saying `shutting-down` from that moment.
+   */
+  private isShutdownInProgressForStatus(): boolean {
+    return (
+      this.isShuttingDown && this.activeShutdownPass?.hasReportedResult !== true
+    );
   }
 
   /**
