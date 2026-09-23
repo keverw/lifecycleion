@@ -8022,10 +8022,10 @@ export class LifecycleManager
       if (!canDispatch(component)) {
         continue;
       }
-      // Both read the component's own properties, so both are read here, per
-      // component: one that throws becomes that component's `error` entry, before any
-      // `*-started` event for it, rather than ending the broadcast for every component
-      // after it.
+      // The handler, and its timeout when there is one, are the component's own
+      // properties, so they are read here, per component: one that throws becomes that
+      // component's `error` entry, before any `*-started` event for it, rather than
+      // ending the broadcast for every component after it.
       let handler: (() => unknown) | undefined;
       let timeoutMS = 0;
 
