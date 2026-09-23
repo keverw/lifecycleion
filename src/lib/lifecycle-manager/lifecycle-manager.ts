@@ -175,6 +175,14 @@ interface ShutdownPass {
 
   /** A `restartAllComponents()` stop phase, rather than a request to stay down. */
   readonly isRestartStopPhase: boolean;
+
+  /**
+   * Set once a signal has taken over a restart's `'manual'` seed as the cycle's initial
+   * request. Tracked apart from `shutdownRequested`, which a `stopAllComponents()` or
+   * `logger.exit()` sets too: those do not count as presses, so the first *signal* is
+   * still the one that starts the operator's cycle.
+   */
+  didSignalTakeOverSeed: boolean;
 }
 
 /**
@@ -273,6 +281,10 @@ export class LifecycleManager
   // Each registered component's name, read once when it is committed to the registry.
   // See {@link nameOf}.
   private readonly registeredNames = new WeakMap<BaseComponent, string>();
+  // How deep the manager is inside escalation handling - `onForceShutdown` and the
+  // escalation events it emits. A shutdown request made from in there continues the
+  // cycle being handled rather than starting one. See `acceptShutdownPass()`.
+  private escalationHandlingDepth = 0;
   // Resolver for the first logger.exit() deferred during an already-running shutdown.
   private pendingLoggerExitResolve:
     ((result: BeforeExitResult) => void) | null = null;
@@ -2137,6 +2149,21 @@ export class LifecycleManager
 
       wasStopped = true;
 
+      // The stop's `await` let other code run. A `component:stopped` listener may have
+      // unregistered this component already - and registered a replacement under the
+      // same name - so nothing below may act on the name alone: it would remove the
+      // replacement and wipe its state.
+      if (this.getComponent(name) !== component) {
+        return {
+          success: false,
+          componentName: name,
+          reason: 'Component was unregistered while it was being stopped',
+          code: 'component_not_found',
+          wasStopped: true,
+          wasRegistered: true,
+        };
+      }
+
       // Checked again after the stop's `await`: a bulk startup or shutdown that began
       // while this component was stopping now owns the registry, and removing a
       // component from under it is what the guard at the top exists to prevent. The
@@ -2704,8 +2731,12 @@ export class LifecycleManager
                 result.error,
               );
 
-              // Mark as failed state
-              this.componentStates.set(name, 'failed');
+              // Mark as failed state - unless stopping it again after a crash already
+              // left it stalled, which `stalledComponents` still says and the state
+              // must agree with.
+              if (!this.stalledComponents.has(name)) {
+                this.componentStates.set(name, 'failed');
+              }
               if (result.error) {
                 this.componentErrors.set(name, result.error);
               }
@@ -4011,6 +4042,23 @@ export class LifecycleManager
     // second operator press.
     const consumedArmedUntil = this.consumeRepeatedShutdownArmedWindow();
 
+    // A manual request that did not come through an armed window, and is not being made
+    // from inside escalation handling, starts a cycle of its own. Any state still left
+    // from an earlier one is finished: a failed pass whose arming was disabled
+    // (`armedAfterFailureMS` <= 0), or one whose force had already fired, keeps its
+    // state with nothing to expire it. Inherited, a restart's or a manual stop's pass
+    // counted presses against that old cycle - and with `hasTriggeredForceShutdown` still
+    // set, force could never fire for it. Signals need no such step: they reseed when
+    // not armed before they get here.
+    if (
+      method === 'manual' &&
+      consumedArmedUntil === null &&
+      this.escalationHandlingDepth === 0 &&
+      this.repeatedShutdownRequestState.firstRequestAt !== null
+    ) {
+      this.resetRepeatedShutdownRequestState();
+    }
+
     // Only a request to stay down is an operator's retry. A restart's stop phase does not
     // advance the escalation count - it would force-kill a process it was asked to
     // restart - and does not clear it as a request either. It is still a shutdown pass,
@@ -4051,6 +4099,7 @@ export class LifecycleManager
       shutdownRequested: false,
       didSeedEscalation: false,
       isRestartStopPhase: !isRequestToStayDown,
+      didSignalTakeOverSeed: false,
     };
 
     // An async method, but it runs synchronously up to its first `await`, which is well
@@ -7204,12 +7253,13 @@ export class LifecycleManager
         pass !== null &&
         pass.isRestartStopPhase &&
         pass.didSeedEscalation &&
-        !pass.shutdownRequested;
+        !pass.didSignalTakeOverSeed;
 
       this.noteShutdownRequestDuringActivePass();
       this.lifecycleEvents.signalShutdown(method, true);
 
       if (isFirstStayDownForRestart && this.repeatedShutdownRequestPolicy) {
+        pass.didSignalTakeOverSeed = true;
         this.seedRepeatedShutdownRequestState(method);
         this.logger.info('Shutdown signal received during restart', {
           params: { method },
@@ -7532,6 +7582,22 @@ export class LifecycleManager
    * escalation flow, false when the caller should treat it as a fresh shutdown request
    */
   private handleRepeatedShutdownRequest(
+    method: ShutdownMethod,
+    consumedArmedUntil: number | null,
+  ): boolean {
+    this.escalationHandlingDepth++;
+
+    try {
+      return this.handleRepeatedShutdownRequestInner(
+        method,
+        consumedArmedUntil,
+      );
+    } finally {
+      this.escalationHandlingDepth--;
+    }
+  }
+
+  private handleRepeatedShutdownRequestInner(
     method: ShutdownMethod,
     consumedArmedUntil: number | null,
   ): boolean {

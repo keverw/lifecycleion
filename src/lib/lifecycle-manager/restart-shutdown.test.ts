@@ -878,4 +878,88 @@ describe('LifecycleManager - shutdown during restartAllComponents()', () => {
     component.releaseStop();
     expect((await restart).startupSkippedByShutdownRequest).toBe(true);
   });
+
+  test('a manual stop before the first signal does not stop that signal starting the cycle', async () => {
+    const logger = new Logger({
+      sinks: [new ArraySink()],
+      callProcessExit: false,
+    });
+    const manager = new LifecycleManager({
+      logger,
+      shutdownWarningTimeoutMS: -1,
+      repeatedShutdownRequestPolicy: {
+        forceAfterCount: 3,
+        withinMS: 5000,
+        onForceShutdown: (): void => {},
+      },
+    });
+    const component = new GatedStop(logger, 'gated');
+    await manager.registerComponent(component);
+    await manager.startAllComponents();
+
+    const restart = manager.restartAllComponents();
+    await component.stopping.promise;
+
+    // A stay-down request, but not a press: the signal after it is still the first one.
+    await manager.stopAllComponents();
+    sendSignal(manager, 'SIGINT');
+
+    expect(manager.getShutdownEscalationStatus().firstMethod).toBe('SIGINT');
+    expect(manager.getShutdownEscalationStatus().requestCount).toBe(0);
+
+    component.releaseStop();
+    await restart;
+  });
+
+  test('a restart after a cycle whose force already fired can force again', async () => {
+    const logger = new Logger({
+      sinks: [new ArraySink()],
+      callProcessExit: false,
+    });
+    let forceShutdownCalls = 0;
+    const manager = new LifecycleManager({
+      logger,
+      shutdownWarningTimeoutMS: -1,
+      shutdownOptions: { timeoutMS: 50 },
+      repeatedShutdownRequestPolicy: {
+        forceAfterCount: 1,
+        withinMS: 5000,
+        // A force handler that does not exit the process.
+        onForceShutdown: (): void => {
+          forceShutdownCalls++;
+        },
+      },
+    });
+
+    class Hanging extends BaseComponent {
+      public start(): Promise<void> {
+        return Promise.resolve();
+      }
+      public stop(): Promise<void> {
+        return new Promise<void>(() => {});
+      }
+    }
+
+    await manager.registerComponent(
+      new Hanging(logger, { name: 'hanging', dependencies: [] }),
+    );
+    await manager.startAllComponents();
+
+    // The first cycle: a signal starts a pass that hangs, a repeat forces it.
+    const firstDone = shutdownCompleted(manager);
+    sendSignal(manager, 'SIGINT');
+    sendSignal(manager, 'SIGINT');
+    expect(forceShutdownCalls).toBe(1);
+    await firstDone;
+
+    // Force already fired, so nothing armed: the state that is left belongs to a
+    // finished cycle. A later restart starts a fresh one, so a press against it still
+    // reaches the force handler.
+    const restart = manager.restartAllComponents();
+    sendSignal(manager, 'SIGINT');
+    sendSignal(manager, 'SIGINT');
+
+    expect(forceShutdownCalls).toBe(2);
+    await restart;
+  });
 });

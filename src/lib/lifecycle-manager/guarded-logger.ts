@@ -1,5 +1,6 @@
 import type { LoggerService } from '../logger/logger-service';
 import { isPromise } from '../is-promise';
+import { LRUCache } from '../lru-cache';
 import {
   reportCallbackError,
   runCallbackSafely,
@@ -150,7 +151,9 @@ export function createGuardedLoggerService(
 
       if (property === 'entity') {
         if (entityCache === null || entityCache.method !== method) {
-          const children = new Map<string, LoggerService>();
+          const children = new LRUCache<string, LoggerService>(
+            MAX_CACHED_ENTITY_CHILDREN,
+          );
 
           entityCache = {
             method,
@@ -158,27 +161,12 @@ export function createGuardedLoggerService(
               const cached = children.get(entityName);
 
               if (cached !== undefined) {
-                // Moved to the back of the insertion order, so eviction drops the
-                // least recently used name rather than the oldest one.
-                children.delete(entityName);
-                children.set(entityName, cached);
-
                 return cached;
               }
 
               const child = guardEntity(target, method, entityName, guarded);
 
               if (child !== guarded) {
-                if (children.size >= MAX_CACHED_ENTITY_CHILDREN) {
-                  // A `Map` iterates in insertion order, and hits move to the back, so this is
-                  // the least recently used name.
-                  const oldest = children.keys().next();
-
-                  if (oldest.done !== true) {
-                    children.delete(oldest.value);
-                  }
-                }
-
                 children.set(entityName, child);
               }
 
@@ -252,30 +240,19 @@ function guardEntity(
 ): LoggerService {
   const label = `${GUARDED_LOGGER_LABEL}.entity`;
   let child: unknown;
-  // Tracked explicitly rather than inferred from an `undefined` child: an `entity()`
-  // that simply *returns* `undefined` is a logger handing back a non-logger, and reading
-  // it as "it threw, already reported" swallowed it silently.
-  let didFail = false;
 
-  runCallbackSafely(
-    label,
-    () => {
-      // `Reflect.apply`, not `method.call(...)`: that reads `call` off the untrusted
-      // method, so one carrying its own `call` property would run that instead.
-      child = Reflect.apply(method as (name: string) => unknown, target, [
-        entityName,
-      ]);
+  try {
+    // `Reflect.apply`, not `method.call(...)`: that reads `call` off the untrusted
+    // method, so one carrying its own `call` property would run that instead. A `method`
+    // that is not a function throws here too, and is reported the same way.
+    child = Reflect.apply(method as (name: string) => unknown, target, [
+      entityName,
+    ]);
+  } catch (error) {
+    reportCallbackError(label, error);
 
-      // Deliberately not returned: `runCallbackSafely` would adopt a promise and report
-      // its rejection, and the settle handler below would then report it a second time.
-    },
-    [],
-    (error) => {
-      didFail = true;
-
-      reportCallbackError(label, error);
-    },
-  );
+    return parent;
+  }
 
   // A promise is an object, so it is checked first; it is a non-logger like any other,
   // since nothing in the chain can call it. Reported once it settles rather than now: a
@@ -314,11 +291,8 @@ function guardEntity(
   }
 
   if (child === null || typeof child !== 'object') {
-    // A failure was already reported above; anything else is a logger handing back a
-    // non-logger, which nothing else would surface.
-    if (!didFail) {
-      reportCallbackError(label, new Error(`${label} did not return a logger`));
-    }
+    // A logger handing back a non-logger, which nothing else would surface.
+    reportCallbackError(label, new Error(`${label} did not return a logger`));
 
     return parent;
   }

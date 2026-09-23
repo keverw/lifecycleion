@@ -1241,6 +1241,34 @@ describe('LifecycleManager - public methods never reject', () => {
     expect(nameOf(component)).toBe('a');
   });
 
+  test('an unregister does not remove a replacement registered while it was stopping', async () => {
+    const { logger, manager } = setup();
+    await manager.registerComponent(new Plain(logger, 'a'));
+    await manager.startComponent('a');
+
+    const replacement = new Plain(logger, 'a');
+    const nested: Promise<unknown>[] = [];
+    manager.once('component:stopped', () => {
+      nested.push(
+        manager
+          .unregisterComponent('a')
+          .then(() => manager.registerComponent(replacement)),
+      );
+    });
+
+    const result = await manager.unregisterComponent('a');
+    await Promise.all(nested);
+
+    expect(result.success).toBe(false);
+    expect(result.code).toBe('component_not_found');
+    expect(
+      (
+        manager as unknown as { getComponent: (name: string) => unknown }
+      ).getComponent('a'),
+    ).toBe(replacement);
+    expect(manager.getComponentStatus('a')?.state).toBe('registered');
+  });
+
   test('getValue() resolves an unexpected failure as an error result', async () => {
     const { logger, manager } = setup();
     const component = new Plain(logger, 'a');

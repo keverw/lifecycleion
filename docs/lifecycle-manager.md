@@ -973,7 +973,12 @@ Only the restart that actually runs the shutdown phase can be cancelled this way
 const result = await lifecycle.restartAllComponents();
 
 if (result.startupSkippedByShutdownRequest) {
-  // Something asked us to shut down mid-restart. Everything is stopped; do not restart.
+  // Something asked us to shut down mid-restart, so nothing was started again.
+  if (!result.shutdownResult.success) {
+    // The shutdown phase stalled or timed out: some components may still be running.
+    console.warn('Restart cancelled with components still running');
+  }
+
   return;
 }
 ```
@@ -2343,7 +2348,7 @@ lifecycle.on('lifecycle-manager:shutdown-completed', (data) => {
 - `signal:reload` - Reload signal received
 - `signal:info` - Info signal received
 - `signal:debug` - Debug signal received
-- `lifecycle-manager:shutdown-escalation-armed` - Failed/timed-out shutdown left escalation armed briefly for follow-up force presses Like `shutdown-completed`, it fires while the failed pass still holds its shutdown latch, so defer any follow-up operation out of the listener.
+- `lifecycle-manager:shutdown-escalation-armed` - Failed/timed-out shutdown left escalation armed briefly for follow-up force presses. Like `shutdown-completed`, it fires while the failed pass still holds its shutdown latch, so defer any follow-up operation out of the listener.
 - `lifecycle-manager:shutdown-escalation-expired` - Armed escalation window expired and was cleared
 - `lifecycle-manager:shutdown-escalation-forced` - Repeated shutdown requests crossed the force threshold and `onForceShutdown()` was invoked. The payload includes `wasArmedAfterFailure` to indicate whether the threshold was crossed during an active shutdown or from the post-failure armed window
 
