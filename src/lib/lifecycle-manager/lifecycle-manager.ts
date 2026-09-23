@@ -3020,6 +3020,16 @@ export class LifecycleManager
           this.autoAttachedSignalsDuringStartup
         ) {
           this.autoDetachSignalsIfIdle('failed bulk startup');
+        } else if (
+          this.shutdownToken !== shutdownTokenAtBulkStart &&
+          this.lastShutdownResult?.success === true
+        ) {
+          // A shutdown pass ran during this startup and ended cleanly. Its own stops
+          // skipped the detach while it ran, and its end skipped it too because this
+          // startup still held `isStarting` - so it falls to here, or handlers attached
+          // earlier stay up with nothing running. A failed pass keeps them, as it does
+          // anywhere else, for escalation.
+          this.autoDetachSignalsIfIdle('shutdown during bulk startup');
         }
 
         this.autoAttachedSignalsDuringStartup = false;

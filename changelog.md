@@ -263,7 +263,7 @@
 - A component's stop timeouts (`shutdownGracefulTimeoutMS`, `shutdownForceTimeoutMS`, and a per-call `timeout`) are read before the stop claims it, so a throwing getter fails the stop with the component still running instead of marking it stalled although `stop()` never ran.
 - `broadcastMessage()` reads its options once and sends every target the same values.
 - A startup that fails with `signal_attach_failed` reports in `startedComponents` any component its rollback could not stop.
-- During a shutdown pass, stopping the last running component no longer detaches process signals (`detachSignalsOnStop`) while stalled components remain; the pass detaches only once it ends cleanly, so a failed pass keeps Ctrl+C reaching escalation.
+- During a shutdown pass, stopping the last running component no longer detaches process signals (`detachSignalsOnStop`) while stalled components remain; the pass detaches only once it ends cleanly - or, for a clean pass that ran during a bulk startup, the startup detaches as it finishes - so a failed pass keeps Ctrl+C reaching escalation.
 - A shutdown pass settles each component against the registry once when it finishes - stopped, stalled, still stopping elsewhere, or still running - and fails only for the last three. A component that had already gone down some other way (a late-startup cleanup, say) no longer fails the pass as "not running".
 - A `getValue()` whose handler throws now returns that error on `ValueResult.error`, as health checks and messages do.
 - A `startAllComponents()` that crashes partway through - a component getter that throws, say - now rolls back the components it had started, as any other failed startup does, and resolves with `'unknown_error'`.

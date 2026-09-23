@@ -1755,6 +1755,37 @@ describe('LifecycleManager - public methods never reject', () => {
     expect(result.error?.message).toBe('db down');
   });
 
+  test('a clean shutdown during bulk startup still detaches signals attached earlier', async () => {
+    const { logger, manager } = setup({ detachSignalsOnStop: true });
+    let finishStart = (): void => {};
+    const slow = new Plain(logger, 'slow');
+    slow.start = (): Promise<void> =>
+      new Promise<void>((resolve) => {
+        finishStart = resolve;
+      });
+    await manager.registerComponent(new Plain(logger, 'fast'));
+    await manager.registerComponent(slow);
+
+    // Attached earlier, not by this startup.
+    fakeAttachedSignals(manager);
+    let detachCalls = 0;
+    manager.detachSignals = (): void => {
+      detachCalls++;
+    };
+
+    const startup = manager.startAllComponents();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    // The pass runs and ends while the startup still holds `isStarting`.
+    const pass = manager.stopAllComponents();
+    finishStart();
+    await pass;
+    await startup;
+
+    expect(manager.getRunningComponentNames()).toEqual([]);
+    expect(detachCalls).toBe(1);
+  });
+
   test('getValue() resolves an unexpected failure as an error result', async () => {
     const { logger, manager } = setup();
     const component = new Plain(logger, 'a');
