@@ -283,4 +283,197 @@ describe('LifecycleManager - review regressions', () => {
     const unregister = await manager.unregisterComponent('a');
     expect(unregister.success).toBe(false);
   });
+
+  test('unregister is refused while the component is starting', async () => {
+    const { logger, manager } = setup();
+    const startGate = deferred();
+    const a = new Plain(logger, 'a');
+    a.start = (): Promise<void> => startGate.promise;
+    await manager.registerComponent(a);
+
+    const start = manager.startComponent('a');
+    const unregister = await manager.unregisterComponent('a');
+
+    expect(unregister.success).toBe(false);
+    expect(unregister.code).toBe('component_starting');
+
+    startGate.resolve();
+    expect((await start).success).toBe(true);
+    expect(manager.hasComponent('a')).toBe(true);
+    expect((await manager.stopAllComponents()).stoppedComponents).toEqual([
+      'a',
+    ]);
+  });
+
+  test('a start superseded by a restart from an unexpected-stop listener does not mark it running', async () => {
+    const { logger, manager } = setup();
+    const startGate = deferred();
+    let startCalls = 0;
+
+    class Flaky extends Plain {
+      public override start(): Promise<void> {
+        startCalls++;
+        if (startCalls === 1) {
+          this.reportUnexpectedStop(new Error('lost'));
+          return startGate.promise;
+        }
+        return Promise.reject(new Error('restart failed'));
+      }
+    }
+
+    await manager.registerComponent(new Flaky(logger, 'a'));
+
+    const restarts: Promise<unknown>[] = [];
+    manager.once('component:unexpected-stop', () => {
+      restarts.push(manager.startComponent('a'));
+    });
+
+    const first = manager.startComponent('a');
+    await Promise.all(restarts);
+    startGate.resolve();
+    const result = await first;
+
+    expect(result.success).toBe(false);
+    expect(manager.isComponentRunning('a')).toBe(false);
+  });
+
+  test('a stop released by its own timeout hook clears the stall that follows', async () => {
+    const { logger, manager } = setup();
+    const stopGate = deferred();
+    const a = new Plain(logger, 'a');
+    a.stop = async (): Promise<void> => {
+      await stopGate.promise;
+    };
+    (a as unknown as { onShutdownForce: undefined }).onShutdownForce =
+      undefined;
+    (
+      a as unknown as { onGracefulStopTimeout: () => void }
+    ).onGracefulStopTimeout = (): void => {
+      stopGate.resolve();
+    };
+    await manager.registerComponent(a);
+    await manager.startComponent('a');
+
+    const result = await manager.stopComponent('a', { timeout: 10 });
+    expect(result.success).toBe(false);
+    await sleep(10);
+
+    // `stop()` did finish, so the stall resolves as any late stop does.
+    expect(manager.getStalledComponentNames()).toEqual([]);
+    expect(manager.getComponentStatus('a')?.state).toBe('stopped');
+  });
+
+  test('a force retry still running is not started again by the next pass', async () => {
+    const { logger, manager } = setup();
+    const forceGate = deferred();
+    const a = new Stalls(logger, 'a');
+    (a as unknown as { onShutdownForce: () => Promise<void> }).onShutdownForce =
+      (): Promise<void> => {
+        a.forceCalls++;
+        if (a.forceCalls === 1) {
+          return Promise.reject(new Error('force failed'));
+        }
+        return forceGate.promise;
+      };
+    await manager.registerComponent(a);
+    await manager.startComponent('a');
+
+    const { release } = claimReports();
+
+    try {
+      await manager.stopComponent('a');
+      expect(manager.getComponentStatus('a')?.state).toBe('stalled');
+
+      // The retry's `onShutdownForce()` hangs past the pass timeout.
+      const first = await manager.stopAllComponents({ timeoutMS: 20 });
+      expect(first.timedOut).toBe(true);
+
+      await manager.stopAllComponents({ timeoutMS: 20 });
+      expect(a.forceCalls).toBe(2);
+    } finally {
+      forceGate.resolve();
+      await sleep(10);
+      release();
+    }
+  });
+
+  test('a force attempt resuming after a late graceful stop and a restart leaves the restart alone', async () => {
+    const { logger, manager } = setup();
+    const stopGate = deferred();
+    const forceGate = deferred();
+    const forceEntered = deferred();
+    const a = new Plain(logger, 'a');
+    let stopCalls = 0;
+    a.stop = async (): Promise<void> => {
+      stopCalls++;
+      if (stopCalls === 1) {
+        await stopGate.promise;
+      }
+    };
+    (a as unknown as { onShutdownForce: () => Promise<void> }).onShutdownForce =
+      (): Promise<void> => {
+        forceEntered.resolve();
+        return forceGate.promise;
+      };
+    Object.assign(a, { shutdownGracefulTimeoutMS: 10 });
+    await manager.registerComponent(a);
+    await manager.startComponent('a');
+
+    const restarts: Promise<unknown>[] = [];
+    let stoppedEvents = 0;
+    manager.on('component:stopped', () => {
+      stoppedEvents++;
+      if (stoppedEvents === 1) {
+        restarts.push(manager.startComponent('a'));
+      }
+    });
+
+    const stop = manager.stopComponent('a');
+    await forceEntered.promise;
+
+    // The graceful stop finishes late; a listener starts the component again.
+    stopGate.resolve();
+    await sleep(5);
+    await Promise.all(restarts);
+    await stop;
+
+    expect(manager.getComponentStatus('a')?.state).toBe('running');
+    expect(manager.isComponentRunning('a')).toBe(true);
+    expect(stoppedEvents).toBe(1);
+
+    forceGate.resolve();
+    await manager.stopAllComponents();
+  });
+
+  test('logger.exit() from onForceShutdown exits without waiting out the pass', async () => {
+    const stopGate = deferred();
+    const { logger, manager } = setup({
+      enableLoggerExitHook: true,
+      shutdownOptions: { timeoutMS: 5000 },
+      repeatedShutdownRequestPolicy: {
+        forceAfterCount: 1,
+        onForceShutdown: (): void => {
+          logger.exit(1);
+        },
+      },
+    });
+    const a = new Plain(logger, 'a');
+    a.stop = (): Promise<void> => stopGate.promise;
+    await manager.registerComponent(a);
+    await manager.startAllComponents();
+
+    try {
+      sendSignal(manager, 'SIGINT');
+      await sleep(5);
+      sendSignal(manager, 'SIGINT');
+      await sleep(20);
+
+      // The pass is still waiting on `stop()`, but the force already exited.
+      expect(manager.getSystemState()).toBe('shutting-down');
+      expect(logger.didExit).toBe(true);
+    } finally {
+      stopGate.resolve();
+      await sleep(10);
+    }
+  });
 });

@@ -237,6 +237,8 @@ export type ComponentOperationFailureCode =
 export type UnregisterFailureCode =
   | 'component_not_found'
   | 'component_running'
+  | 'component_starting'
+  | 'component_stopping'
   | 'stop_failed'
   | 'bulk_operation_in_progress'
   | 'unknown_error';
