@@ -161,7 +161,7 @@ interface ShutdownPassOptions {
 interface ShutdownPass {
   /**
    * Set when a shutdown request lands while this pass is running, so the restart that
-   * owns the pass skips its startup phase and the components stay stopped.
+   * owns the pass skips its startup phase and nothing is started again.
    */
   shutdownRequested: boolean;
 
@@ -2005,12 +2005,19 @@ export class LifecycleManager
           reason,
           code: 'unknown_error',
           error,
+          // Unknown: reading it means asking the component for its name, which may be
+          // what threw.
           registrationIndexBefore: null,
           registrationIndexAfter:
             registrationIndex === -1 ? null : registrationIndex,
           startupOrder: [],
           requestedPosition: { position, targetComponentName },
           manualPositionRespected: false,
+          targetFound:
+            position === 'before' || position === 'after' ? false : undefined,
+          duringStartup: this.isStarting,
+          autoStartAttempted: false,
+          startResult: undefined,
         };
       },
     );
@@ -2146,6 +2153,34 @@ export class LifecycleManager
       }
 
       wasStopped = true;
+
+      // Checked again after the stop's `await`: a bulk startup or shutdown that began
+      // while this component was stopping now owns the registry, and removing a
+      // component from under it is what the guard at the top exists to prevent. The
+      // component stays registered, stopped.
+      if (
+        this.isStarting ||
+        this.isShuttingDown ||
+        this.pendingBulkStartupCleanup.has(name)
+      ) {
+        this.logger
+          .entity(name)
+          .warn(LIFECYCLE_MANAGER_MESSAGE_BULK_OPERATION_IN_PROGRESS, {
+            params: {
+              isStarting: this.isStarting,
+              isShuttingDown: this.isShuttingDown,
+            },
+          });
+
+        return {
+          success: false,
+          componentName: name,
+          reason: LIFECYCLE_MANAGER_MESSAGE_BULK_OPERATION_IN_PROGRESS,
+          code: 'bulk_operation_in_progress',
+          wasStopped: true,
+          wasRegistered: true,
+        };
+      }
     }
 
     // Remove from registry
@@ -2164,9 +2199,10 @@ export class LifecycleManager
     this.pendingForceStopWaiters.delete(name);
     this.stalledComponents.delete(name);
     this.runningComponents.delete(name);
-    // A component instance can be registered again later, and `name` is only protected,
-    // not readonly - a re-registration must read it fresh rather than find this one.
-    this.registeredNames.delete(component);
+    // `registeredNames` keeps this entry: work still in flight - a broadcast that
+    // captured the instance, a late-stop monitor - can still name it without asking the
+    // component. A later registration of the same instance reads its name fresh and
+    // overwrites the entry when it commits.
     this.updateStartedFlag();
 
     for (const [hookName, hook] of [
@@ -2203,6 +2239,12 @@ export class LifecycleManager
     options?: StartupOptions,
   ): Promise<StartupResult> {
     const startTime = Date.now();
+    // Every option is read up front, before the startup takes its latch: `options` is
+    // the caller's object, and a getter that threw once `isStarting` was set left it set
+    // for good.
+    const shouldIgnoreStalledComponents =
+      options?.ignoreStalledComponents === true;
+    const effectiveTimeout = options?.timeoutMS ?? this.startupTimeoutMS;
 
     // Reject if already starting
     if (this.isStarting) {
@@ -2242,7 +2284,7 @@ export class LifecycleManager
     }
 
     // Check for stalled components
-    if (this.stalledComponents.size > 0 && !options?.ignoreStalledComponents) {
+    if (this.stalledComponents.size > 0 && !shouldIgnoreStalledComponents) {
       const stalledNames = Array.from(this.stalledComponents.keys());
       this.logger.warn('Cannot start: stalled components exist', {
         params: { stalled: stalledNames },
@@ -2364,7 +2406,6 @@ export class LifecycleManager
     const failedOptionalComponents: Array<{ name: string; error: Error }> = [];
     const skippedDueToDependency = new Set<string>();
     const skippedDueToStall = new Set<string>();
-    const effectiveTimeout = options?.timeoutMS ?? this.startupTimeoutMS;
     let hasTimedOut = false;
     let timeoutHandle: NodeJS.Timeout | undefined;
 
@@ -3576,7 +3617,10 @@ export class LifecycleManager
       let startupOrder: string[];
 
       try {
-        startupOrder = this.getStartupOrderInternal(nextComponents);
+        startupOrder = this.getStartupOrderInternal(nextComponents, {
+          component,
+          name: componentName,
+        });
       } catch (error) {
         if (error instanceof DependencyCycleError) {
           this.logger
@@ -3614,9 +3658,19 @@ export class LifecycleManager
         throw error;
       }
 
-      // Commit registration
+      // Commit registration - the registry entry and every state map together, before
+      // any of the component's own code runs, so the component is never in the registry
+      // without its state.
       this.components.splice(insertIndex, 0, component);
       this.registeredNames.set(component, componentName);
+      this.componentStates.set(componentName, 'registered');
+      this.componentTimestamps.set(componentName, {
+        startedAt: null,
+        stoppedAt: null,
+      });
+      this.componentErrors.set(componentName, null);
+      this.componentUnexpectedStopHadError.delete(componentName);
+      this.componentStartAttemptTokens.set(componentName, ulid());
 
       // Create callbacks for component-scoped lifecycle
       const internalCallbacks: LifecycleInternalCallbacks = {
@@ -3639,20 +3693,29 @@ export class LifecycleManager
         ) => this.getValueSettled<T>(compName, key, from, options),
       };
 
-      // Assign lifecycle reference to component
-      (component as unknown as { lifecycle: ComponentLifecycleRef }).lifecycle =
-        new ComponentLifecycle(this, componentName, internalCallbacks);
-      component._markRegistered();
+      // The component's side of the registration. It can be overridden, so a throw here
+      // rolls the commit above back out - all or nothing, as unregister is - and the
+      // registration fails as unregistered.
+      try {
+        (
+          component as unknown as { lifecycle: ComponentLifecycleRef }
+        ).lifecycle = new ComponentLifecycle(
+          this,
+          componentName,
+          internalCallbacks,
+        );
+        component._markRegistered();
+      } catch (error) {
+        this.components = this.components.filter(
+          (registered) => registered !== component,
+        );
+        this.componentStates.delete(componentName);
+        this.componentTimestamps.delete(componentName);
+        this.componentErrors.delete(componentName);
+        this.componentStartAttemptTokens.delete(componentName);
 
-      // Initialize state
-      this.componentStates.set(componentName, 'registered');
-      this.componentTimestamps.set(componentName, {
-        startedAt: null,
-        stoppedAt: null,
-      });
-      this.componentErrors.set(componentName, null);
-      this.componentUnexpectedStopHadError.delete(componentName);
-      this.componentStartAttemptTokens.set(componentName, ulid());
+        throw error;
+      }
 
       // Check if manual position was respected for logging
       const isManualPositionRespected = this.isManualPositionRespected({
@@ -4489,9 +4552,21 @@ export class LifecycleManager
   }
 
   /**
-   * Internal start component method - bypasses bulk operation checks
-   * Used by both startComponent() and startAllComponents()
+   * Put a component's state back to what it was before an attempt claimed it - removing
+   * the entry when there was none - so every refusal and crash path restores it the same
+   * way.
    */
+  private restoreComponentState(
+    name: string,
+    state: ComponentState | undefined,
+  ): void {
+    if (state === undefined) {
+      this.componentStates.delete(name);
+    } else {
+      this.componentStates.set(name, state);
+    }
+  }
+
   /**
    * `startComponentAttempt()` with a net under it that settles the component's state.
    *
@@ -4545,10 +4620,9 @@ export class LifecycleManager
       if (
         this.componentStates.get(name) === 'starting' &&
         !this.runningComponents.has(name) &&
-        stateBeforeStart !== undefined &&
         stateBeforeStart !== 'starting'
       ) {
-        this.componentStates.set(name, stateBeforeStart);
+        this.restoreComponentState(name, stateBeforeStart);
       }
 
       reportCallbackError('lifecycle-manager component start', error);
@@ -4561,6 +4635,10 @@ export class LifecycleManager
     }
   }
 
+  /**
+   * The start itself, under `startComponentInternal()`'s net - bypasses bulk operation checks
+   * Used by both startComponent() and startAllComponents()
+   */
   private async startComponentAttempt(
     name: string,
     options?: StartComponentOptions,
@@ -4722,13 +4800,14 @@ export class LifecycleManager
     // than slip in between. The state it had is put back if the attach fails, which is
     // all a refusal has to release. Tracked so failure cleanup only detaches what this
     // start attempt attached.
+    // Read before the component is claimed: it is the component's own property, and a
+    // getter that threw between the claim and the `try` below skipped that `try`'s
+    // cleanup, leaving auto-attached signals attached behind a `component:starting`
+    // with no terminal event.
+    const configuredStartupTimeoutMS = component.startupTimeoutMS;
     const stateBeforeStart = currentState;
     const restoreStateBeforeStart = (): void => {
-      if (stateBeforeStart === undefined) {
-        this.componentStates.delete(name);
-      } else {
-        this.componentStates.set(name, stateBeforeStart);
-      }
+      this.restoreComponentState(name, stateBeforeStart);
     };
 
     this.componentStates.set(name, 'starting');
@@ -4781,7 +4860,7 @@ export class LifecycleManager
     this.logger.entity(name).info('Starting component');
     this.lifecycleEvents.componentStarting(name);
 
-    const componentTimeout = toTimerDelayMS(component.startupTimeoutMS);
+    const componentTimeout = toTimerDelayMS(configuredStartupTimeoutMS);
     const remainingBudget =
       bulkStartup === undefined
         ? undefined
@@ -4791,17 +4870,20 @@ export class LifecycleManager
       (componentTimeout === 0 || remainingBudget <= componentTimeout);
     const timeoutMS = useBulkDeadline
       ? remainingBudget
-      : component.startupTimeoutMS;
+      : configuredStartupTimeoutMS;
     const startAttemptToken = ulid();
     this.componentStartAttemptTokens.set(name, startAttemptToken);
-    component._setUnexpectedStopHandler((error) =>
-      this.handleComponentUnexpectedStop(name, startAttemptToken, error),
-    );
     const shutdownTokenAtStart = this.shutdownToken;
 
     let timeoutHandle: NodeJS.Timeout | undefined;
 
     try {
+      // Inside the `try`, so a failure here is a failed start like any other - reported
+      // with `component:start-failed`, and its auto-attached signals detached.
+      component._setUnexpectedStopHandler((error) =>
+        this.handleComponentUnexpectedStop(name, startAttemptToken, error),
+      );
+
       // Race against timeout
       const startPromise = component.start();
 
@@ -6844,8 +6926,14 @@ export class LifecycleManager
    */
   private getStartupOrderInternal(
     components: BaseComponent[] = this.components,
+    candidate?: { component: BaseComponent; name: string },
   ): string[] {
-    const names = components.map((c) => this.nameOf(c));
+    // Each name is resolved once, here. A registration candidate is not recorded yet, so
+    // it is named by the value registration already read from it rather than asked
+    // again - a second `getName()` could answer differently, or throw.
+    const names = components.map((c) =>
+      c === candidate?.component ? candidate.name : this.nameOf(c),
+    );
     const regIndex = new Map<string, number>(
       names.map((name, idx) => [name, idx]),
     );
@@ -6859,8 +6947,8 @@ export class LifecycleManager
     }
 
     // Build edges: dependency -> dependent (only when dependency is registered)
-    for (const component of components) {
-      const dependent = this.nameOf(component);
+    for (const [index, component] of components.entries()) {
+      const dependent = names[index];
       for (const dep of component.getDependencies()) {
         if (!regIndex.has(dep)) {
           continue;
@@ -7307,13 +7395,13 @@ export class LifecycleManager
    * A component's name, as recorded when it was registered.
    *
    * Read once, at registration - where it is validated, and where a `getName()` that
-   * throws fails the registration and nothing else - and not again while it stays
-   * registered (unregistering drops it, so a later registration reads it fresh). It is
-   * fixed for that time, and the manager looks it up in dozens of places,
-   * including the middle of broadcasts, health checks and shutdown passes. Re-reading it
-   * each time meant a component that broke that contract could crash any of them, and
-   * each one needed its own guard. Falls back to asking the component only for one that
-   * is not registered - a candidate still being validated.
+   * throws fails the registration and nothing else - and never again. The manager looks
+   * names up in dozens of places, including the middle of broadcasts, health checks and
+   * shutdown passes; re-reading each time meant a component that broke its contract
+   * could crash any of them. The entry outlives an unregister, so work still in flight
+   * can name the instance, and a later registration of the same instance reads the name
+   * fresh and overwrites it on commit. Falls back to asking the component only for an
+   * instance that was never registered.
    */
   private nameOf(component: BaseComponent): string {
     return this.registeredNames.get(component) ?? component.getName();

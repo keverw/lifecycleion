@@ -927,6 +927,142 @@ describe('LifecycleManager - public methods never reject', () => {
     expect(manager.getComponentNames()).toEqual(['second-name']);
   });
 
+  test('registration reads the candidate name once', async () => {
+    const { logger, manager } = setup();
+    const component = new Plain(logger, 'a');
+    let reads = 0;
+    const originalGetName = component.getName.bind(component);
+    component.getName = (): string => {
+      reads++;
+
+      if (reads > 1) {
+        throw new Error('second read exploded');
+      }
+
+      return originalGetName();
+    };
+
+    const result = await manager.registerComponent(component);
+
+    expect(result.success).toBe(true);
+    expect(result.startupOrder).toEqual(['a']);
+    expect(reads).toBe(1);
+  });
+
+  test('a throwing startup option does not leave bulk startup wedged', async () => {
+    const { logger, manager } = setup();
+    await manager.registerComponent(new Plain(logger, 'a'));
+
+    const options = {};
+    Object.defineProperty(options, 'timeoutMS', {
+      get: (): never => {
+        throw new Error('option exploded');
+      },
+    });
+
+    const { release } = claimReports();
+    let result;
+
+    try {
+      result = await manager.startAllComponents(options);
+    } finally {
+      release();
+    }
+
+    expect(result.code).toBe('unknown_error');
+    expect(manager.getSystemState()).not.toBe('starting');
+    expect((await manager.startAllComponents()).success).toBe(true);
+  });
+
+  test('a throwing startupTimeoutMS is read before the component is claimed', async () => {
+    const { logger, manager } = setup({ attachSignalsBeforeStartup: true });
+    const component = new Plain(logger, 'a');
+    await manager.registerComponent(component);
+
+    let attachCalls = 0;
+    manager.attachSignals = (): void => {
+      attachCalls++;
+      fakeAttachedSignals(manager);
+    };
+    const starting: unknown[] = [];
+    manager.on('component:starting', (payload) => {
+      starting.push(payload);
+    });
+
+    Object.defineProperty(component, 'startupTimeoutMS', {
+      get: (): never => {
+        throw new Error('getter exploded');
+      },
+    });
+
+    const { release } = claimReports();
+    let result;
+
+    try {
+      result = await manager.startComponent('a');
+    } finally {
+      release();
+    }
+
+    // Nothing was claimed, attached, or announced for a start that never began.
+    expect(result.code).toBe('unknown_error');
+    expect(attachCalls).toBe(0);
+    expect(starting).toEqual([]);
+    expect(manager.getComponentStatus('a')?.state).toBe('registered');
+  });
+
+  test('a registration hook that throws rolls the whole registration back', async () => {
+    const { logger, manager } = setup();
+    const component = new Plain(logger, 'a');
+
+    (component as unknown as { _markRegistered: () => void })._markRegistered =
+      (): never => {
+        throw new Error('hook exploded');
+      };
+
+    const result = await manager.registerComponent(component);
+
+    expect(result.success).toBe(false);
+    expect(result.registered).toBe(false);
+    expect(manager.hasComponent('a')).toBe(false);
+    expect(manager.getComponentStatus('a')).toBeUndefined();
+  });
+
+  test('an unregister does not remove a component once a bulk operation has started', async () => {
+    const { logger, manager } = setup();
+    const gated = new Plain(logger, 'a');
+    let finishStop = (): void => {};
+    let stopEntered = (): void => {};
+    const entered = new Promise<void>((resolve) => {
+      stopEntered = resolve;
+    });
+    gated.stop = (): Promise<void> => {
+      stopEntered();
+
+      return new Promise<void>((resolve) => {
+        finishStop = resolve;
+      });
+    };
+    await manager.registerComponent(gated);
+    await manager.registerComponent(new Plain(logger, 'b'));
+    await manager.startAllComponents();
+
+    const unregister = manager.unregisterComponent('a');
+    await entered;
+
+    // A shutdown begins while the unregister is waiting on the stop.
+    const shutdown = manager.stopAllComponents();
+
+    finishStop();
+    const result = await unregister;
+
+    expect(result.code).toBe('bulk_operation_in_progress');
+    expect(result.wasStopped).toBe(true);
+    expect(manager.hasComponent('a')).toBe(true);
+
+    await shutdown;
+  });
+
   test('getValue() resolves an unexpected failure as an error result', async () => {
     const { logger, manager } = setup();
     const component = new Plain(logger, 'a');

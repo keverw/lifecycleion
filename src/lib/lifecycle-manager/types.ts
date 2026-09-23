@@ -372,8 +372,10 @@ export interface RestartResult {
 
   /**
    * Present and `true` when a shutdown request arrived during the shutdown phase and
-   * the startup phase was skipped, leaving every component stopped. `startupResult`
-   * then carries the `shutdown_requested_during_restart` code and `success` is false.
+   * the startup phase was skipped, so nothing is started again. `startupResult` then
+   * carries the `shutdown_requested_during_restart` code and `success` is false. Whether
+   * every component actually stopped is `shutdownResult`'s to say: a shutdown phase that
+   * stalled or timed out can leave some running, as any failed shutdown can.
    */
   startupSkippedByShutdownRequest?: boolean;
 

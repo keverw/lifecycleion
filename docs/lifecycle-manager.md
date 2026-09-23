@@ -963,7 +963,7 @@ interface RestartResult {
 
 **Important:** `restartAllComponents` hardcodes `retryStalled: true` and `haltOnStall: true` for the shutdown phase to ensure clean restart. Only `shutdownTimeoutMS` can be customized.
 
-**A shutdown request during the shutdown phase wins.** A `SIGINT`/`SIGTERM`, a `logger.exit()` under [`enableLoggerExitHook()`](#enableloggerexithook), or a direct `stopAllComponents()` call made while the restart is stopping asks the process to stay down, so the restart skips its startup phase instead of bringing every component back up. The result then carries `startupSkippedByShutdownRequest: true`, `startupResult.code` is `shutdown_requested_during_restart`, and `success` is `false` - the restart did not complete. This is checked before the shutdown phase's own outcome, so a stalled or failed stop phase paired with a request still reports the request. `getLastShutdownResult()` is left in place (a completed restart clears it), so the shutdown phase's outcome is still readable afterwards.
+**A shutdown request during the shutdown phase wins.** A `SIGINT`/`SIGTERM`, a `logger.exit()` under [`enableLoggerExitHook()`](#enableloggerexithook), or a direct `stopAllComponents()` call made while the restart is stopping asks the process to stay down, so the restart skips its startup phase instead of bringing every component back up. The result then carries `startupSkippedByShutdownRequest: true`, `startupResult.code` is `shutdown_requested_during_restart`, and `success` is `false` - the restart did not complete. This is checked before the shutdown phase's own outcome, so a stalled or failed stop phase paired with a request still reports the request. `getLastShutdownResult()` is left in place (a completed restart clears it), so the shutdown phase's outcome is still readable afterwards. Skipping startup does not stop anything the shutdown phase could not: if `shutdownResult.success` is `false` - a stall or a timeout - some components may still be running, exactly as after any failed shutdown.
 
 **A shutdown phase that throws outright** resolves the restart rather than rejecting it: `shutdownResult` carries the pass's `unknown_error` result, and the startup phase is skipped - with `startupResult.code` also `unknown_error` - since nothing can be said about the state the components were left in.
 
@@ -1594,7 +1594,7 @@ enableLoggerExitHook(): void
 - When `logger.error('message', { exitCode: 1 })` is called, components shut down before exit
 - Uses the constructor's `shutdownOptions.timeoutMS` (default: 30000ms) to prevent hanging
 - Overwrites any existing `beforeExit` callback on the logger
-- An exit that lands while a shutdown is already running waits for it rather than starting a second pass - and if that shutdown is a [`restartAllComponents()`](#restartallcomponentsoptions) stop phase, it cancels the restart's startup phase, so the components stay stopped behind the exit
+- An exit that lands while a shutdown is already running waits for it rather than starting a second pass - and if that shutdown is a [`restartAllComponents()`](#restartallcomponentsoptions) stop phase, it cancels the restart's startup phase, so nothing is started again behind the exit
 - **Exit behavior depends on logger configuration:** `logger.exit()` only calls `process.exit()` when the logger is created with `callProcessExit: true` (default). Test-optimized and frontend-optimized loggers disable process exit.
 
 **Constructor Options:**
