@@ -10,6 +10,7 @@ import {
   Stalls,
 } from './test-helpers';
 import type { ForceShutdownContext } from './types';
+import { LIFECYCLE_MANAGER_MESSAGE_FORCE_SHUTDOWN_TIMED_OUT } from './constants';
 
 describe('LifecycleManager - review regressions', () => {
   test('a stall cleared by a late stop after a failed forced restart detaches signals', async () => {
@@ -765,5 +766,238 @@ describe('LifecycleManager - review regressions', () => {
     expect(tStopCalls).toBe(1);
 
     await sleep(200);
+  });
+
+  test('unregister does not orphan a component a stopped listener starts again', async () => {
+    const { logger, manager } = setup();
+    const startGate = deferred();
+    const db = new Plain(logger, 'db');
+    let startCalls = 0;
+    db.start = (): Promise<void> => {
+      startCalls++;
+      return startCalls === 1 ? Promise.resolve() : startGate.promise;
+    };
+    await manager.registerComponent(db);
+    await manager.startComponent('db');
+
+    const restarts: Promise<unknown>[] = [];
+    manager.once('component:stopped', () => {
+      restarts.push(manager.startComponent('db'));
+    });
+
+    const unregister = await manager.unregisterComponent('db');
+
+    // The restart owns the component now; removing it would orphan whatever its
+    // `start()` brings up.
+    expect(unregister.success).toBe(false);
+    expect(unregister.code).toBe('component_starting');
+    expect(unregister.wasStopped).toBe(true);
+
+    startGate.resolve();
+    await Promise.all(restarts);
+    expect(manager.hasComponent('db')).toBe(true);
+    expect(manager.isComponentRunning('db')).toBe(true);
+    expect(startCalls).toBe(2);
+  });
+
+  test('unregister during a graceful stop is refused as component_stopping', async () => {
+    const { logger, manager } = setup();
+    const stopGate = deferred();
+    const a = new Plain(logger, 'a');
+    a.stop = (): Promise<void> => stopGate.promise;
+    await manager.registerComponent(a);
+    await manager.startComponent('a');
+
+    const stop = manager.stopComponent('a');
+    const unregister = await manager.unregisterComponent('a');
+
+    expect(unregister.code).toBe('component_stopping');
+
+    stopGate.resolve();
+    await stop;
+  });
+
+  test('a start that throws after a listener restarted it leaves the restart alone', async () => {
+    const { logger, manager } = setup();
+    const secondStart = deferred();
+    let startCalls = 0;
+
+    class Flaky extends Plain {
+      public override start(): Promise<void> {
+        startCalls++;
+        if (startCalls === 1) {
+          this.reportUnexpectedStop(new Error('lost'));
+          return Promise.reject(new Error('start failed'));
+        }
+        return secondStart.promise;
+      }
+    }
+
+    const component = new Flaky(logger, 'a');
+    await manager.registerComponent(component);
+
+    const restarts: Promise<unknown>[] = [];
+    manager.once('component:unexpected-stop', () => {
+      restarts.push(manager.startComponent('a'));
+    });
+    let startFailedEvents = 0;
+    manager.on('component:start-failed', () => {
+      startFailedEvents++;
+    });
+
+    const first = await manager.startComponent('a');
+    expect(first.success).toBe(false);
+
+    // The restart still owns the component: still starting, no spurious failure.
+    expect(manager.getComponentStatus('a')?.state).toBe('starting');
+    expect(startFailedEvents).toBe(0);
+
+    secondStart.resolve();
+    await Promise.all(restarts);
+    expect(manager.isComponentRunning('a')).toBe(true);
+  });
+
+  test('a throwing onShutdownWarning getter does not abort the shutdown pass', async () => {
+    const { logger, manager } = setup({ shutdownWarningTimeoutMS: 50 });
+    const hostile = new Plain(logger, 'hostile');
+    Object.defineProperty(hostile, 'onShutdownWarning', {
+      get: (): never => {
+        throw new Error('getter exploded');
+      },
+    });
+    await manager.registerComponent(new Plain(logger, 'a'));
+    await manager.registerComponent(hostile);
+    await manager.startAllComponents();
+
+    const { reports, release } = claimReports();
+    let result;
+
+    try {
+      result = await manager.stopAllComponents();
+    } finally {
+      release();
+    }
+
+    expect(result.success).toBe(true);
+    expect(manager.getRunningComponentNames()).toEqual([]);
+    expect(reports).toHaveLength(1);
+  });
+
+  test('a stop deferred out of shutdown-completed with queueMicrotask still cancels the restart', async () => {
+    const { logger, manager } = setup();
+    await manager.registerComponent(new Plain(logger, 'a'));
+    await manager.startAllComponents();
+
+    const passes: Promise<unknown>[] = [];
+    manager.once('lifecycle-manager:shutdown-completed', () => {
+      queueMicrotask(() => {
+        passes.push(manager.stopAllComponents());
+      });
+    });
+
+    const restart = await manager.restartAllComponents();
+    await Promise.all(passes);
+
+    expect(restart.success).toBe(false);
+    expect(restart.startupSkippedByShutdownRequest).toBe(true);
+    expect(restart.startupResult.code).toBe(
+      'shutdown_requested_during_restart',
+    );
+    expect(manager.isComponentRunning('a')).toBe(false);
+  });
+
+  test('an onShutdownForce rejection carrying the timeout text is not a timeout', async () => {
+    const { logger, manager } = setup();
+    const a = new Plain(logger, 'a');
+    a.stop = (): Promise<void> => Promise.reject(new Error('stop failed'));
+    (a as unknown as { onShutdownForce: () => Promise<void> }).onShutdownForce =
+      (): Promise<void> =>
+        Promise.reject(
+          new Error(LIFECYCLE_MANAGER_MESSAGE_FORCE_SHUTDOWN_TIMED_OUT),
+        );
+    await manager.registerComponent(a);
+    await manager.startComponent('a');
+
+    let forceTimeoutEvents = 0;
+    manager.on('component:shutdown-force-timeout', () => {
+      forceTimeoutEvents++;
+    });
+
+    const { release } = claimReports();
+    let result;
+
+    try {
+      result = await manager.stopComponent('a');
+    } finally {
+      release();
+    }
+
+    expect(result.code).toBe('unknown_error');
+    expect(manager.getStalledComponents()[0]?.reason).toBe('error');
+    expect(forceTimeoutEvents).toBe(0);
+  });
+
+  test('a broadcast that crashes partway keeps the answers already collected', async () => {
+    const { logger, manager } = setup();
+    for (const name of ['a', 'b']) {
+      const component = new Plain(logger, name);
+      (component as unknown as { onMessage: () => string }).onMessage =
+        (): string => `from ${name}`;
+      await manager.registerComponent(component);
+    }
+    await manager.startAllComponents();
+
+    const internals = manager as unknown as {
+      sendMessageSettled: (...args: unknown[]) => Promise<unknown>;
+    };
+    const original = internals.sendMessageSettled.bind(manager);
+    let calls = 0;
+    internals.sendMessageSettled = (...args: unknown[]): Promise<unknown> => {
+      calls++;
+      if (calls === 2) {
+        throw new Error('crash mid-broadcast');
+      }
+      return original(...args);
+    };
+
+    const { release } = claimReports();
+    let results;
+
+    try {
+      results = await manager.broadcastMessage('hi');
+    } finally {
+      release();
+    }
+
+    expect(results.map((result) => result.name)).toEqual(['a']);
+    expect(results[0]?.data).toBe('from a');
+  });
+
+  test('a start or stop releases its claim once it settles, crash paths included', async () => {
+    const { logger, manager } = setup();
+    await manager.registerComponent(new Plain(logger, 'a'));
+    const internals = manager as unknown as {
+      componentClaims: Map<string, unknown>;
+      issueStopAttemptToken: () => string;
+    };
+
+    await manager.startComponent('a');
+    expect(internals.componentClaims.size).toBe(0);
+
+    // A step that runs once the stop has claimed the component.
+    internals.issueStopAttemptToken = (): never => {
+      throw new Error('step exploded');
+    };
+
+    const { release } = claimReports();
+
+    try {
+      const stop = await manager.stopComponent('a');
+      expect(stop.code).toBe('unknown_error');
+    } finally {
+      release();
+    }
+
+    expect(internals.componentClaims.size).toBe(0);
   });
 });

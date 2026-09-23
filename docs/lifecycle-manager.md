@@ -670,7 +670,7 @@ interface UnregisterOptions {
 
 - `forceStop` only applies when `stopIfRunning` is true (passes through to `stopComponent` as `allowStopWithRunningDependents`).
 - If a component is stalled and `stopIfRunning` is true, unregister is blocked.
-- While a start or a force-phase stop is in flight, unregister is refused with `component_starting` / `component_stopping`: the operation writes its outcome when it settles, so the component has to be left registered until then.
+- While a start or stop is in flight, unregister is refused with `component_starting` / `component_stopping`: the operation writes its outcome when it settles, so the component has to be left registered until then. This is checked again after unregister's own stop, since a `component:stopped` listener may have started the component again.
 - Successfully unregistering a component automatically clears its `lifecycle` reference (setting it to `undefined`) and marks it as unregistered, which allows the same component instance to be registered again (either with the same manager or with a different one).
 
 **Returns:**
@@ -2582,7 +2582,7 @@ type UnregisterFailureCode =
   | 'component_not_found'
   | 'component_running'
   | 'component_starting' // A start is in flight; wait for it to settle
-  | 'component_stopping' // A force-phase stop is in flight; wait for it to settle
+  | 'component_stopping' // A stop is in flight; wait for it to settle
   | 'stop_failed'
   | 'bulk_operation_in_progress'
   | 'unknown_error';
