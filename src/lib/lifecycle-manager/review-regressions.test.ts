@@ -2403,4 +2403,99 @@ describe('LifecycleManager - review regressions', () => {
 
     expect(receivers).toEqual([a]);
   });
+
+  test("one component's bad dependency entry does not break the startup or shutdown order", async () => {
+    const { logger, manager } = setup();
+    const stopOrder: string[] = [];
+    const api = new Plain(logger, 'api', ['db']);
+    api.stop = (): Promise<void> => {
+      stopOrder.push('api');
+      return Promise.resolve();
+    };
+    const db = new Plain(logger, 'db');
+    db.stop = (): Promise<void> => {
+      stopOrder.push('db');
+      return Promise.resolve();
+    };
+    const broken = new Plain(logger, 'broken');
+    Object.assign(broken, { optional: true });
+    broken.getDependencies = (): string[] => [undefined as unknown as string];
+    await manager.registerComponent(api);
+    await manager.registerComponent(db);
+    await manager.registerComponent(broken);
+
+    const { release } = claimReports();
+
+    try {
+      const startup = await manager.startAllComponents();
+
+      // The optional component fails its own start; the rest start in order.
+      expect(startup.success).toBe(true);
+      expect(startup.failedOptionalComponents.map((f) => f.name)).toEqual([
+        'broken',
+      ]);
+
+      // An unrelated registration is unaffected.
+      expect(
+        (await manager.registerComponent(new Plain(logger, 'other'))).success,
+      ).toBe(true);
+
+      await manager.stopAllComponents();
+    } finally {
+      release();
+    }
+
+    expect(stopOrder).toEqual(['api', 'db']);
+  });
+
+  test('a dependency entry String() cannot render does not discard the valid ones', async () => {
+    const { logger, manager } = setup();
+    const hostile = new Plain(logger, 'hostile');
+    await manager.registerComponent(new Plain(logger, 'a'));
+    await manager.registerComponent(hostile);
+    await manager.startAllComponents();
+    hostile.getDependencies = (): string[] => [
+      'a',
+      Object.create(null) as string,
+    ];
+
+    const { release } = claimReports();
+
+    try {
+      // `a` is still known to have a running dependent.
+      expect((await manager.stopComponent('a')).code).toBe(
+        'has_running_dependents',
+      );
+    } finally {
+      release();
+    }
+  });
+
+  test('a re-registered instance has a broken dependency list reported again', async () => {
+    const { logger, manager } = setup();
+    const hostile = new Plain(logger, 'hostile');
+    await manager.registerComponent(hostile);
+    await manager.registerComponent(new Plain(logger, 'a'));
+    await manager.startAllComponents();
+    hostile.getDependencies = (): string[] => [7 as unknown as string];
+
+    const { reports, release } = claimReports();
+
+    try {
+      await manager.stopComponent('a');
+      await manager.stopComponent('hostile');
+      await manager.unregisterComponent('hostile');
+      await manager.registerComponent(hostile);
+      await manager.startComponent('a');
+      await manager.stopComponent('a');
+    } finally {
+      release();
+    }
+
+    expect(
+      reports.filter((report) =>
+        (report as Error).message.includes('dependencies of hostile'),
+      ).length,
+    ).toBeGreaterThanOrEqual(2);
+  });
 });

@@ -893,10 +893,12 @@ export class LifecycleManager
       const name = this.nameOf(component);
 
       let isOptional = false;
+      let isUnreadable = false;
 
       try {
         isOptional = component.isOptional() === true;
       } catch (error) {
+        isUnreadable = true;
         // Startup reads it too, unguarded, and fails on it: invalid, like an unreadable
         // dependency list.
         reportCallbackError(
@@ -921,9 +923,7 @@ export class LifecycleManager
 
         // One entry per component, as the field is documented: one whose `isOptional()`
         // already failed keeps that first error, and is counted once.
-        if (
-          !unreadableDependencies.some((entry) => entry.componentName === name)
-        ) {
+        if (!isUnreadable) {
           unreadableDependencies.push({
             componentName: name,
             error: toError(readFailure),
@@ -2470,6 +2470,8 @@ export class LifecycleManager
     this.componentStopAttemptTokens.delete(name);
     this.pendingForceStopWaiters.delete(name);
     this.deferredAutoStartNames.delete(name);
+    // A later registration of the same instance reports a broken list afresh.
+    this.reportedDependencyReadFailures.delete(component);
     this.stalledComponents.delete(name);
     this.runningComponents.delete(name);
     this.componentClaims.delete(name);
@@ -2900,7 +2902,8 @@ export class LifecycleManager
           }
 
           // Check if any required dependency failed or was skipped
-          const dependencies = this.readOwnDependencies(component);
+          // Tolerant here: the component's own start below fails it on a broken list.
+          const dependencies = this.readDependencies(component, 'startup');
           let shouldSkip = false;
           let skipReason = '';
 
@@ -5428,9 +5431,8 @@ export class LifecycleManager
    * returns something that is not an array (an override that forgot to `return`), is
    * reported on the global channel and read as declaring none.
    *
-   * Not for a component's own start or for startup ordering: there a broken
-   * `getDependencies()` fails that operation, which is the right answer - see
-   * {@link readOwnDependencies}.
+   * Also what startup ordering reads, so one broken list cannot break the order for every
+   * component. Not for a component's own start: there a broken list fails that start.
    */
   private readDependencies(
     component: BaseComponent,
@@ -5459,28 +5461,6 @@ export class LifecycleManager
     }
 
     return 'dependencies' in read ? read.dependencies : [];
-  }
-
-  /**
-   * A component's declared dependencies for an operation that must fail when they are
-   * broken - its own start, or startup ordering - rather than read them as none. Read
-   * through the same guarded, bounded reader as {@link readDependencies}, and throws what
-   * it found wrong: iterated raw, a proxy reporting `length: Infinity` blocked the event
-   * loop, and `validateDependencies()` could call valid what startup refused, or the
-   * other way round.
-   */
-  private readOwnDependencies(component: BaseComponent): string[] {
-    const read = this.tryReadDependencies(component);
-
-    if (!('dependencies' in read)) {
-      throw read.error;
-    }
-
-    if (read.invalidEntry !== undefined) {
-      throw read.invalidEntry;
-    }
-
-    return read.dependencies;
   }
 
   /** {@link readDependencies} without the report, for a caller that records the failure. */
@@ -5518,11 +5498,12 @@ export class LifecycleManager
           if (typeof dependency === 'string') {
             copy.push(dependency);
           } else {
-            // Kept out of the copy, but not silently: startup iterates the raw list and
-            // fails on such an entry - `Missing dependency "undefined"` - so every
-            // caller hears about it.
+            // Kept out of the copy, but not silently: the component's own start fails
+            // on it, and validation lists it, so every caller hears about it.
+            // Described by type, not `String()`: that throws for some values - a
+            // null-prototype object - and would discard the valid entries too.
             invalidEntry ??= new TypeError(
-              `getDependencies() returned a non-string entry: ${String(dependency)}`,
+              `getDependencies() returned a non-string entry (${dependency === null ? 'null' : typeof dependency})`,
             );
           }
         }
@@ -5781,8 +5762,28 @@ export class LifecycleManager
       };
     }
 
+    // Its own list read strictly: a broken one fails this start, naming the component,
+    // rather than being read as fewer dependencies than it declares.
+    const ownDependencies = this.tryReadDependencies(component);
+
+    // Thrown as it is: the start's result carries `componentName`.
+    if (!('dependencies' in ownDependencies)) {
+      throw ownDependencies.error;
+    }
+
+    if (ownDependencies.invalidEntry !== undefined) {
+      return {
+        success: false,
+        componentName: name,
+        reason: `Invalid dependency declared by "${name}": ${describeError(ownDependencies.invalidEntry)}`,
+        code: 'missing_dependency',
+        error: ownDependencies.invalidEntry,
+        status: this.getComponentStatus(name),
+      };
+    }
+
     // Ensure dependencies are registered and running before starting.
-    for (const dependencyName of this.readOwnDependencies(component)) {
+    for (const dependencyName of ownDependencies.dependencies) {
       const dependency = this.getComponent(dependencyName);
       if (!dependency) {
         return {
@@ -8188,7 +8189,27 @@ export class LifecycleManager
     // Build edges: dependency -> dependent (only when dependency is registered)
     for (const [index, component] of components.entries()) {
       const dependent = names[index];
-      for (const dep of this.readOwnDependencies(component)) {
+      // Tolerant, bounded reads for everything already registered: one component's broken
+      // list must not break the order - and with it every registration and the shutdown
+      // pass's dependency order - for the whole registry; that component fails its own
+      // start instead. A registration candidate's list is read strictly, so a component
+      // whose `getDependencies()` throws, or reports an implausible length, is refused
+      // at the door.
+      let dependencies: string[];
+
+      if (component === candidate?.component) {
+        const read = this.tryReadDependencies(component);
+
+        if (!('dependencies' in read)) {
+          throw read.error;
+        }
+
+        dependencies = read.dependencies;
+      } else {
+        dependencies = this.readDependencies(component, 'ordering');
+      }
+
+      for (const dep of dependencies) {
         if (!regIndex.has(dep)) {
           continue;
         }
