@@ -1,4 +1,17 @@
 /**
+ * Whether `value` has `Promise.prototype` on its prototype chain - the shape of a native
+ * promise from this realm, or a subclass's. `instanceof` walks the chain without reading
+ * any property of `value`; a proxy's `getPrototypeOf` trap that throws answers `false`.
+ */
+function inheritsFromPromise(value: unknown): boolean {
+  try {
+    return value instanceof Promise;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Adopt a value from untrusted code - a component hook's return, a callback's result - as
  * a fresh native promise that settles as it does, and that is safe to chain on.
  *
@@ -13,67 +26,24 @@
  * calls back never settles, which no caller can do anything about. A `then` - or a native
  * promise's `constructor` getter - that throws rejects the result rather than throwing.
  *
- * Known limit: a native promise whose `constructor` misbehaves - a getter that throws,
- * a value that is not a constructor, a broken species - cannot be adopted without
- * modifying it. Every way the language offers to attach a reaction to one - `then`,
- * `await`, `Promise.resolve()`, the combinators - reads `constructor` first, so the
- * result rejects with that error, and a rejection of the promise itself is left
- * unhandled. Shadowing the property for the call would get past it in some shapes, but
- * not a non-configurable own property or a frozen promise, and this never writes to the
- * value it is handed. Such a promise's failure is still reported - as an unhandled
- * rejection rather than through the caller. (A native promise from another realm with a
- * broken `constructor` is not recognized as one, and is adopted through its own `then`.)
+ * Anything on the `Promise.prototype` chain is read only through the intrinsic `then`,
+ * never through its own: a native promise whose `constructor` misbehaves - a getter that
+ * throws, a value that is not a constructor, a species that throws or never builds a
+ * promise - rejects with that error, and so does an `Object.create(Promise.prototype)`
+ * fake, which the intrinsic refuses as not a promise. No check tells the two apart
+ * without reading the value's own properties, which is what the broken promise breaks;
+ * a fake claiming to be a promise is not one worth adopting.
+ *
+ * Known limit: such a broken native promise cannot be adopted without modifying it.
+ * Every way the language offers to attach a reaction to one - `then`, `await`,
+ * `Promise.resolve()`, the combinators - reads `constructor` first, so a rejection of
+ * the promise itself is left unhandled. Shadowing the property for the call would get
+ * past it in some shapes, but not a non-configurable own property or a frozen promise,
+ * and this never writes to the value it is handed. Such a promise's failure is still
+ * reported - as an unhandled rejection rather than through the caller. (A native promise
+ * from another realm with a broken `constructor` is not recognized as one, and is
+ * adopted through its own `then`.)
  */
-/**
- * Whether `value` has `Promise.prototype` on its prototype chain - the shape of a native
- * promise from this realm, or a subclass's. `instanceof` walks the chain without reading
- * any property of `value`; a proxy's `getPrototypeOf` trap that throws answers `false`.
- */
-function inheritsFromPromise(value: unknown): boolean {
-  try {
-    return value instanceof Promise;
-  } catch {
-    return false;
-  }
-}
-
-/**
- * Whether `SpeciesConstructor(value, Promise)` would succeed: `value.constructor` is
- * `undefined`, or an object whose `Symbol.species` is `undefined`, `null`, or a
- * constructor. Mirrors the spec's steps, reading the same properties; any read that
- * throws answers `false`.
- */
-function hasSoundSpecies(value: unknown): boolean {
-  try {
-    const constructor: unknown = Reflect.get(value as object, 'constructor');
-
-    if (constructor === undefined) {
-      return true;
-    }
-
-    if (
-      constructor === null ||
-      (typeof constructor !== 'object' && typeof constructor !== 'function')
-    ) {
-      return false;
-    }
-
-    const species: unknown = Reflect.get(constructor, Symbol.species);
-
-    if (species === undefined || species === null) {
-      return true;
-    }
-
-    // `IsConstructor`, without calling it: `Reflect.construct` checks its `newTarget`
-    // before anything runs, and constructs an empty `Object` when it passes.
-    Reflect.construct(Object, [], species as new () => unknown);
-
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 export function adoptPromise<T>(
   value: T | PromiseLike<T>,
 ): Promise<Awaited<T>> {
@@ -89,15 +59,11 @@ export function adoptPromise<T>(
 
       return;
     } catch (error) {
-      // A native promise whose `constructor` misbehaves - a throwing getter, a
-      // non-object, a broken species - lands here too, and must not fall through:
-      // `Promise.resolve()` would see a foreign `constructor`, wrap it, and call its own
-      // `then` - the very thing this exists to avoid, and a no-op one hung the caller.
-      // No check tells a native promise apart without reading it, so the failure is
-      // told apart instead: an object on the promise chain whose species lookup is
-      // sound failed the brand check - an `Object.create(Promise.prototype)` fake,
-      // adopted below as a thenable - and one whose lookup is broken is what failed.
-      if (inheritsFromPromise(value) && !hasSoundSpecies(value)) {
+      // Never past here for anything on the promise chain: `Promise.resolve()` would see
+      // a foreign `constructor`, wrap it, and call its own `then` - the very thing this
+      // exists to avoid, and a no-op one hung the caller. Decided by the value's shape,
+      // not by re-reading its `constructor`, which can answer differently each time.
+      if (inheritsFromPromise(value)) {
         // As thrown - the getter's own value, like any rejection this passes through.
         // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
         reject(error);

@@ -60,15 +60,38 @@ describe('adoptPromise', () => {
     expect(outcome).not.toBe('resolved');
   });
 
-  test('adopts a promise-prototype fake with its own then as a thenable', async () => {
+  test('rejects a promise-prototype fake rather than calling its own then', async () => {
+    let isOwnThenCalled = false;
     const fake: object = Object.create(Promise.prototype) as object;
     Object.defineProperty(fake, 'then', {
-      value: (resolve: (value: number) => void): void => {
-        resolve(4);
+      value: (): void => {
+        isOwnThenCalled = true;
       },
     });
 
-    expect(await adoptPromise<unknown>(fake)).toBe(4);
+    expect(await settle(adoptPromise(fake))).not.toBe('resolved');
+    expect(isOwnThenCalled).toBe(false);
+  });
+
+  test('rejects, not hangs, for a species that throws when constructed', async () => {
+    const promise = Promise.resolve(1);
+    let isOwnThenCalled = false;
+    void Object.defineProperty(promise, 'then', {
+      value: (): void => {
+        isOwnThenCalled = true;
+      },
+    });
+    class Bad {
+      constructor() {
+        throw new Error('species boom');
+      }
+    }
+    void Object.defineProperty(promise, 'constructor', {
+      value: { [Symbol.species]: Bad },
+    });
+
+    expect(await settle(adoptPromise(promise))).toBe('species boom');
+    expect(isOwnThenCalled).toBe(false);
   });
 
   test('adopts a non-promise thenable through its then', async () => {

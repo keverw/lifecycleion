@@ -159,7 +159,7 @@ interface ShutdownPassOptions {
 const MAX_DECLARED_DEPENDENCIES = 10_000;
 
 /**
- * How many rounds of reads `LifecycleManager.readRegistryDependencies()` makes before it
+ * How many rounds of reads `LifecycleManager.readRegistry()` makes before it
  * gives up on a registry that every read changes. Each round reads only the components
  * registered by the round before, so ordinary lazy wiring settles in one or two.
  */
@@ -910,35 +910,14 @@ export class LifecycleManager
     // over the registry as it was when the loop began listed components that were gone
     // and missed ones that had arrived - `valid: true` for a registry whose startup then
     // failed. The graph is the live registry once the reads settle.
-    const reads = new Map<
-      BaseComponent,
-      { isOptional: boolean; read: DependencyRead }
-    >();
-
-    // The last round only checks for components left unread; it reads none.
-    for (let round = 0; round <= MAX_REGISTRY_READ_ROUNDS; round++) {
-      const unread = this.components.filter(
-        (component) => !reads.has(component),
-      );
-
-      if (unread.length === 0 || round === MAX_REGISTRY_READ_ROUNDS) {
-        break;
-      }
-
-      for (const component of unread) {
-        reads.set(component, {
-          // The one rule startup applies, through the one helper: a throw is reported
-          // once and read as required.
-          isOptional: this.isComponentOptional(component),
-          // Reported once per registration, like every other read of it: the failure
-          // is in the result already, and a caller polling this would flood the channel.
-          read: this.readDependenciesReported(
-            component,
-            'validateDependencies',
-          ),
-        });
-      }
-    }
+    const { reads } = this.readRegistry((component) => ({
+      // The one rule startup applies, through the one helper: a throw is reported once
+      // and read as required.
+      isOptional: this.isComponentOptional(component),
+      // Reported once per registration, like every other read of it: the failure is in
+      // the result already, and a caller polling this would flood the channel.
+      read: this.readDependenciesReported(component, 'validateDependencies'),
+    }));
 
     for (const component of this.components) {
       const name = this.nameOf(component);
@@ -3897,21 +3876,45 @@ export class LifecycleManager
       // a second component under a taken name, inserted at a stale index, and trusted a
       // cycle check made against a registry that had since changed. A refusal may still
       // log and emit its event - it returns straight after.
+      //
+      // The checks that need none of the caller's code come first: a registration they
+      // refuse reads nothing - no component's `getDependencies()` during a shutdown that
+      // may be tearing them down - and answers with its own code, not with whatever
+      // the reads would have made of it. They are made again below, in order.
+      const isRefusedWithoutReads =
+        !this.isInsertPosition(position) || this.isShuttingDown;
+      // Read first and again last, and either answer counts: first, so a component it
+      // registers is read with the rest; last, so a read that registered this instance
+      // with another manager is seen. What that last read registers is read in turn.
+      let isRegisteredWithAManager =
+        !isRefusedWithoutReads && component._isRegisteredWithManager();
       // Strict: a `getDependencies()` that throws, or reports an implausible length,
       // refuses the registration - once the checks ahead of it have passed, as before. A
       // non-string entry does not - its own start fails on it - but is reported once the
       // registration commits: a refused one must not spend the report the next
       // registration makes.
-      const candidateRead = this.tryReadDependencies(component);
-      const dependencySnapshot = this.readRegistryDependencies('registration');
-      // Last, so a read above that registered this instance elsewhere is seen.
-      const isRegisteredWithAManager = component._isRegisteredWithManager();
+      const candidateRead: DependencyRead = isRefusedWithoutReads
+        ? { dependencies: [] }
+        : this.tryReadDependencies(component);
+      const readRegistered = (registered: BaseComponent): string[] =>
+        this.readDependencies(registered, 'registration');
+      let registryRead = isRefusedWithoutReads
+        ? { reads: new Map<BaseComponent, string[]>(), isSettled: true }
+        : this.readRegistry(readRegistered);
+
+      if (!isRefusedWithoutReads && registryRead.isSettled) {
+        isRegisteredWithAManager =
+          component._isRegisteredWithManager() || isRegisteredWithAManager;
+        registryRead = this.readRegistry(readRegistered, registryRead.reads);
+      }
+
+      const dependencySnapshot = registryRead.reads;
       registrationIndexBefore = this.getComponentIndex(componentName);
 
       // A registry that kept changing under the reads above - each read registering
       // another component whose own list then had to be read - is refused as a broken
       // contract, the way a throwing `getName()` is.
-      if (dependencySnapshot === null) {
+      if (!registryRead.isSettled) {
         throw new Error(
           `The registry kept changing while "${componentName}" was being registered; registration refused`,
         );
@@ -4105,11 +4108,9 @@ export class LifecycleManager
         let startupOrder: string[];
 
         try {
-          startupOrder = this.getStartupOrderInternal(
-            undefined,
-            undefined,
-            dependencySnapshot,
-          );
+          // Read afresh: this refusal has already emitted its event, whose listeners
+          // may have changed the registry since the snapshot.
+          startupOrder = this.getStartupOrderInternal();
         } catch (error) {
           // Defensive: This should never happen in normal operation since we validate
           // cycles before registration. However, if this.components somehow contains
@@ -7466,7 +7467,7 @@ export class LifecycleManager
    */
   private isRequiredDependencyDuringStartup(
     componentName: string,
-    // Registration's lists, read before its checks; see `readRegistryDependencies()`.
+    // Registration's lists, read before its checks; see `readRegistry()`.
     dependencySnapshot: ReadonlyMap<BaseComponent, string[]>,
   ): boolean {
     // Not before the startup's loop has begun - a `signals-attached` listener
@@ -8456,41 +8457,38 @@ export class LifecycleManager
   }
 
   /**
-   * Every registered component's dependency list, read tolerantly, until reading stops
-   * changing the registry: a read that registers another component has that one's list
-   * read too. The registry itself is the live one afterwards - a component unregistered
-   * meanwhile is simply not in it - and every component in it has a list here, so the
-   * checks that use these run none of the caller's code. `null` when the registry was
-   * still changing after `MAX_REGISTRY_READ_ROUNDS` rounds of reads.
+   * `read` applied to every registered component, until reading stops changing the
+   * registry: a read that registers another component has that one read too. The
+   * registry itself is the live one afterwards - a component unregistered meanwhile is
+   * simply not in it - and, once `isSettled`, every component in it has an answer here,
+   * so the checks that use them run none of the caller's code. Not settled when the
+   * registry was still growing after `MAX_REGISTRY_READ_ROUNDS` rounds of reads.
    */
-  private readRegistryDependencies(
-    context: string,
-  ): Map<BaseComponent, string[]> | null {
-    const dependencySnapshot = new Map<BaseComponent, string[]>();
-
-    // The last round only checks for components left unread; it reads none.
-    for (let round = 0; round <= MAX_REGISTRY_READ_ROUNDS; round++) {
+  private readRegistry<T>(
+    read: (component: BaseComponent) => T,
+    // Answers already read, to continue from: only components missing here are read.
+    reads: Map<BaseComponent, T> = new Map(),
+  ): {
+    reads: Map<BaseComponent, T>;
+    isSettled: boolean;
+  } {
+    for (let round = 0; ; round++) {
       const unread = this.components.filter(
-        (component) => !dependencySnapshot.has(component),
+        (component) => !reads.has(component),
       );
 
       if (unread.length === 0) {
-        return dependencySnapshot;
+        return { reads, isSettled: true };
       }
 
       if (round === MAX_REGISTRY_READ_ROUNDS) {
-        break;
+        return { reads, isSettled: false };
       }
 
       for (const component of unread) {
-        dependencySnapshot.set(
-          component,
-          this.readDependencies(component, context),
-        );
+        reads.set(component, read(component));
       }
     }
-
-    return null;
   }
 
   /**
@@ -8538,11 +8536,14 @@ export class LifecycleManager
       // pass's dependency order - for the whole registry; that component fails its own
       // start instead. A registration candidate's list was read strictly, by
       // registration.
+      // With a snapshot, every component in `components` has a list in it - see
+      // `readRegistry()` - and none is read here.
       const dependencies =
         component === candidate?.component
           ? candidate.dependencies
-          : (dependencySnapshot?.get(component) ??
-            this.readDependencies(component, 'ordering'));
+          : dependencySnapshot !== undefined
+            ? (dependencySnapshot.get(component) ?? [])
+            : this.readDependencies(component, 'ordering');
 
       for (const dep of dependencies) {
         if (!regIndex.has(dep)) {

@@ -3116,4 +3116,82 @@ describe('LifecycleManager - review regressions', () => {
     expect(result.code).toBe('unknown_error');
     expect(rejected).toHaveLength(1);
   });
+
+  test('a component registered by _isRegisteredWithManager() is checked with the rest', async () => {
+    const { logger, manager } = setup();
+    const trigger = new Plain(logger, 'trigger');
+    const db = new Plain(logger, 'db');
+    let registration: Promise<{ code?: string }> | undefined;
+    db._isRegisteredWithManager = (): boolean => {
+      // Registers a component that requires `db`, mid-startup.
+      void manager.registerComponent(new Plain(logger, 'api', ['db']));
+
+      return false;
+    };
+    trigger.start = (): Promise<void> => {
+      registration = manager.registerComponent(db);
+
+      return Promise.resolve();
+    };
+    await manager.registerComponent(trigger);
+
+    await manager.startAllComponents();
+    const result = await registration;
+
+    expect(result?.code).toBe('startup_in_progress');
+  });
+
+  test("a registration refused during a shutdown reads no component's list for its checks", async () => {
+    const { logger, manager } = setup();
+    const a = new Plain(logger, 'a');
+    const stopGate = deferred();
+    a.stop = (): Promise<void> => stopGate.promise;
+    await manager.registerComponent(a);
+    await manager.startAllComponents();
+    let registeredReads = 0;
+    a.getDependencies = (): string[] => {
+      registeredReads++;
+
+      return [];
+    };
+    let candidateReads = 0;
+    const candidate = new Plain(logger, 'x');
+    candidate.getDependencies = (): string[] => {
+      candidateReads++;
+
+      return [];
+    };
+
+    const shutdown = manager.stopAllComponents();
+    // Only the registration's reads: the shutdown pass reads lists to order its stops.
+    registeredReads = 0;
+    const result = await manager.registerComponent(candidate);
+    stopGate.resolve();
+    await shutdown;
+
+    expect(result.code).toBe('shutdown_in_progress');
+    expect(candidateReads).toBe(0);
+    // One read, for the startup order the refusal result reports - not a snapshot too.
+    expect(registeredReads).toBe(1);
+  });
+
+  test('an instance registered with another manager by its own read is refused', async () => {
+    const { logger, manager } = setup();
+    const other = setup().manager;
+    const c = new Plain(logger, 'c');
+    let hasReentered = false;
+    c.getDependencies = (): string[] => {
+      if (!hasReentered) {
+        hasReentered = true;
+        void other.registerComponent(c);
+      }
+
+      return [];
+    };
+
+    const result = await manager.registerComponent(c);
+
+    expect(result.code).toBe('duplicate_instance');
+    expect(manager.getComponentNames()).toEqual([]);
+  });
 });
