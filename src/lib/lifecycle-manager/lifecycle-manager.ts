@@ -314,6 +314,10 @@ export class LifecycleManager
   // Each registered component's name, read once when it is committed to the registry.
   // See {@link nameOf}.
   private readonly registeredNames = new WeakMap<BaseComponent, string>();
+  // Bumped on every change to `this.components`, so a registration can tell whether the
+  // registry moved under it while it ran the caller's code. See
+  // `registerNamedComponent()`.
+  private registryVersion = 0;
   // How deep the manager is inside escalation handling - `onForceShutdown` and the
   // escalation events it emits. A shutdown request made from in there continues the
   // cycle being handled rather than starting one. See `acceptShutdownPass()`.
@@ -2447,6 +2451,7 @@ export class LifecycleManager
 
     // Remove from registry
     this.components = this.components.filter((c) => this.nameOf(c) !== name);
+    this.registryVersion++;
 
     // Clean up state - the manager's own maps first, all of them, so the component is
     // either fully registered or fully gone. The component's hooks run after, contained:
@@ -3849,6 +3854,64 @@ export class LifecycleManager
       );
     }
 
+    return this.registerNamedComponent(
+      component,
+      componentName,
+      position,
+      targetComponentName,
+      isInsertAction,
+      _options,
+      false,
+    );
+  }
+
+  /**
+   * Registration, once the name is read. Every check it makes runs before the commit,
+   * but so does the caller's code - the logger, `_isRegisteredWithManager()`, and every
+   * component's `getDependencies()` - which can register, unregister, start a bulk
+   * startup or begin a shutdown re-entrantly. Committing on checks made before that
+   * registered a second component under a taken name, inserted at a stale index, and
+   * trusted a cycle check made against a registry that had since changed. So the
+   * registry, shutdown and startup state are compared again right before the commit,
+   * and a registration that finds them moved runs its checks once more from the top. A
+   * registry that moves under that second run too is refused as a broken contract, the
+   * way a throwing `getName()` is, rather than retried without end.
+   */
+  private async registerNamedComponent(
+    component: BaseComponent,
+    componentName: string,
+    position: InsertPosition,
+    targetComponentName: string | undefined,
+    isInsertAction: boolean,
+    _options: RegisterOptions | undefined,
+    isRetry: boolean,
+  ): Promise<InsertComponentAtResult> {
+    const registryVersionAtStart = this.registryVersion;
+    const wasStartingAtStart = this.isStarting;
+    // A shutdown that began meanwhile counts too: this run passed the shutdown check
+    // before it began.
+    const hasStateMoved = (): boolean =>
+      this.registryVersion !== registryVersionAtStart ||
+      this.isStarting !== wasStartingAtStart ||
+      this.isShuttingDown;
+    // The checks from the top once more; a second move is a refusal. See above.
+    const retry = (): Promise<InsertComponentAtResult> => {
+      if (isRetry) {
+        throw new Error(
+          `The registry changed again while "${componentName}" was being registered; registration refused`,
+        );
+      }
+
+      return this.registerNamedComponent(
+        component,
+        componentName,
+        position,
+        targetComponentName,
+        isInsertAction,
+        _options,
+        true,
+      );
+    };
     const registrationIndexBefore = this.getComponentIndex(componentName);
 
     try {
@@ -4096,6 +4159,11 @@ export class LifecycleManager
           dependencies: candidateRead.dependencies,
         });
       } catch (error) {
+        // A cycle found in a registry that has since moved may no longer be one.
+        if (error instanceof DependencyCycleError && hasStateMoved()) {
+          return await retry();
+        }
+
         if (error instanceof DependencyCycleError) {
           this.logger
             .entity(componentName)
@@ -4138,6 +4206,12 @@ export class LifecycleManager
       // An instance registered before keeps its old recorded name after unregistering,
       // for work still in flight; a rollback below puts that back rather than dropping
       // it.
+      // Last check before the commit; see the method's note. Nothing between here and
+      // the splice below runs the caller's code.
+      if (hasStateMoved()) {
+        return await retry();
+      }
+
       const previousRecordedName = this.registeredNames.get(component);
       // What the report-once marks held before this attempt, so a rollback clears only
       // marks it made itself.
@@ -4147,6 +4221,7 @@ export class LifecycleManager
         this.reportedOptionalReadFailures.has(component);
 
       this.components.splice(insertIndex, 0, component);
+      this.registryVersion++;
       this.registeredNames.set(component, componentName);
       this.componentStates.set(componentName, 'registered');
       this.componentTimestamps.set(componentName, {
@@ -4194,6 +4269,7 @@ export class LifecycleManager
         this.components = this.components.filter(
           (registered) => registered !== component,
         );
+        this.registryVersion++;
         if (previousRecordedName === undefined) {
           this.registeredNames.delete(component);
         } else {

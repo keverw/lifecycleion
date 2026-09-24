@@ -2866,4 +2866,124 @@ describe('LifecycleManager - review regressions', () => {
     expect(result.code).toBe('dependency_not_running');
     expect(manager.isComponentRunning('api')).toBe(false);
   });
+
+  test('a registration re-entered under the same name does not register it twice', async () => {
+    const { logger, manager } = setup();
+    const a = new Plain(logger, 'a');
+    await manager.registerComponent(a);
+    let hasReentered = false;
+    a.getDependencies = (): string[] => {
+      if (!hasReentered) {
+        hasReentered = true;
+        void manager.registerComponent(new Plain(logger, 'x'));
+      }
+
+      return [];
+    };
+
+    const result = await manager.registerComponent(new Plain(logger, 'x'));
+
+    expect(result.code).toBe('duplicate_name');
+    expect(manager.getComponentNames()).toEqual(['a', 'x']);
+  });
+
+  test('an insert whose target is unregistered by a dependency read is refused', async () => {
+    const { logger, manager } = setup();
+    const a = new Plain(logger, 'a');
+    await manager.registerComponent(a);
+    await manager.registerComponent(new Plain(logger, 'b'));
+    let hasReentered = false;
+    a.getDependencies = (): string[] => {
+      if (!hasReentered) {
+        hasReentered = true;
+        void manager.unregisterComponent('b');
+      }
+
+      return [];
+    };
+
+    const result = await manager.insertComponentAt(
+      new Plain(logger, 'c'),
+      'before',
+      'b',
+    );
+
+    expect(result.code).toBe('target_not_found');
+    expect(manager.getComponentNames()).toEqual(['a']);
+  });
+
+  test('a registry that keeps moving under a registration refuses it', async () => {
+    const { logger, manager } = setup();
+    const a = new Plain(logger, 'a');
+    await manager.registerComponent(a);
+    let isInside = false;
+    let count = 0;
+    a.getDependencies = (): string[] => {
+      if (!isInside) {
+        isInside = true;
+        void manager.registerComponent(new Plain(logger, `extra-${count++}`));
+        isInside = false;
+      }
+
+      return [];
+    };
+
+    const { reports, release } = claimReports();
+    let result;
+
+    try {
+      result = await manager.registerComponent(new Plain(logger, 'x'));
+    } finally {
+      release();
+    }
+
+    expect(result.success).toBe(false);
+    expect(result.code).toBe('unknown_error');
+    expect(manager.getComponentNames()).not.toContain('x');
+    expect(result.reason).toContain('registration refused');
+    expect(hasReport(reports, 'lifecycle-manager registerComponent')).toBe(
+      true,
+    );
+  });
+
+  test('a registration refuses once a shutdown begins during its dependency reads', async () => {
+    const { logger, manager } = setup();
+    const a = new Plain(logger, 'a');
+    await manager.registerComponent(a);
+    let shutdown: Promise<unknown> | undefined;
+    a.getDependencies = (): string[] => {
+      shutdown ??= manager.stopAllComponents();
+
+      return [];
+    };
+
+    const result = await manager.registerComponent(new Plain(logger, 'x'));
+    await shutdown;
+
+    expect(result.code).toBe('shutdown_in_progress');
+    expect(manager.getComponentNames()).toEqual(['a']);
+  });
+
+  test('a cycle found against a registry that moved is checked again', async () => {
+    const { logger, manager } = setup();
+    const a = new Plain(logger, 'a', ['x']);
+    await manager.registerComponent(a);
+    let hasReentered = false;
+    a.getDependencies = (): string[] => {
+      if (!hasReentered) {
+        hasReentered = true;
+        void manager.unregisterComponent('a');
+      }
+
+      return ['x'];
+    };
+
+    // `a` depends on `x` and `x` on `a` - a cycle, until `a` is gone.
+    const result = await manager.registerComponent(
+      new Plain(logger, 'x', ['a']),
+    );
+
+    expect(result.success).toBe(true);
+    expect(manager.getComponentNames()).toEqual(['x']);
+  });
 });

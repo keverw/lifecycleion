@@ -565,7 +565,7 @@ interface RegisterComponentResult {
 **Registration Constraints:**
 
 - **Single Manager Binding**: A component instance can only be registered with one `LifecycleManager` at a time. Attempting to register a component instance that is already registered (either with the same manager under a different name, or with a different manager instance) will fail with `code: 'duplicate_instance'`.
-- **Unique Name Constraint**: The component name must be unique within a manager instance. Registering a component with a name that is already taken will fail with `code: 'duplicate_name'`.
+- **Unique Name Constraint**: The component name must be unique within a manager instance. Registering a component with a name that is already taken will fail with `code: 'duplicate_name'`. That holds even when a component's own code registers the name while the registration is in progress, for example from `getDependencies()`: registration checks again right before it commits.
 - **Bulk Operation Guard**: Registration/insertion is blocked while the manager is shutting down (`isShuttingDown = true`), failing with `code: 'shutdown_in_progress'`. During startup (`isStarting = true`), registration/insertion is only blocked when the new component is a required dependency of an already-registered component, failing with `code: 'startup_in_progress'`.
 
 **Example:**
