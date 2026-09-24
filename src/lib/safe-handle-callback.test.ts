@@ -969,6 +969,35 @@ describe('runCallbackSafely - a throwing onError is contained', () => {
     expect(String(captured[0][0])).toContain('cb');
   });
 
+  it('renders both errors through the masking renderer, not raw', () => {
+    const captured = withCapturedConsoleError((entries) => {
+      runCallbackSafely(
+        'cb',
+        () => {
+          throw Object.assign(new Error('original failure'), {
+            additionalInfo: { password: 'hunter2-secret' },
+            sensitiveFieldNames: ['password'],
+          });
+        },
+        [],
+        () => {
+          throw new Error('reporter failure');
+        },
+      );
+
+      return entries;
+    });
+
+    // No raw error reaches the console: Node's `console.error` prints an error's own
+    // fields - `additionalInfo` included - unmasked.
+    expect(captured[0]?.some((arg) => arg instanceof Error)).toBe(false);
+
+    const printed = Bun.inspect(captured);
+    expect(printed).toContain('reporter failure');
+    expect(printed).toContain('original failure');
+    expect(printed).not.toContain('hunter2-secret');
+  });
+
   it('does not let a rejected-promise onError throw become an unhandled rejection', async () => {
     // The sync helper restores `console.error` as soon as `run` returns, so an async body
     // would finish reporting after the swap was undone. Captured inline instead.

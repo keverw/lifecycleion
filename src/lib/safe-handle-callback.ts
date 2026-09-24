@@ -151,10 +151,14 @@ export function runCallbackSafely(
     try {
       onError(error);
     } catch (reportingError) {
+      // Rendered, not passed raw: `console.error` of the errors themselves prints every
+      // `additionalInfo` and `cause` field in the clear, which the masking in
+      // `errorToString` - what `reportCallbackError()` renders with - exists to prevent.
+      // `errorToString` guards its own reads and does not throw.
       reportToConsole(
-        `Error handler for ${callbackName} threw while reporting a failure`,
-        reportingError,
-        error,
+        `Error handler for ${callbackName} threw while reporting a failure${DOUBLE_EOL}` +
+          `${errorToString(reportingError)}${DOUBLE_EOL}` +
+          `Original failure:${DOUBLE_EOL}${errorToString(error)}`,
       );
     }
   };

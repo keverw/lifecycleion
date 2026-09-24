@@ -3,6 +3,7 @@ import { sleep } from '../sleep';
 import {
   claimReports,
   deferred,
+  fakeAttachedSignals,
   hasReport,
   fakeSignals,
   Plain,
@@ -1880,5 +1881,79 @@ describe('LifecycleManager - review regressions', () => {
 
     expect(manager.isComponentRunning('a')).toBe(false);
     expect(signals.isAttached()).toBe(false);
+  });
+
+  test('validateDependencies() does not throw for a component whose getters throw', async () => {
+    const { logger, manager } = setup();
+    const hostile = new Plain(logger, 'hostile');
+    await manager.registerComponent(hostile);
+    await manager.registerComponent(new Plain(logger, 'a', ['missing']));
+    hostile.getDependencies = (): never => {
+      throw new Error('getDependencies exploded');
+    };
+
+    const { reports, release } = claimReports();
+    let result;
+
+    try {
+      result = manager.validateDependencies();
+    } finally {
+      release();
+    }
+
+    expect(result.missingDependencies).toHaveLength(1);
+    expect(hasReport(reports, 'validateDependencies hostile')).toBe(true);
+  });
+
+  test('an auto-start registered from signals-attached is left to the bulk startup', async () => {
+    const { logger, manager } = setup({ attachSignalsBeforeStartup: true });
+    manager.attachSignals = (): void => {
+      fakeAttachedSignals(manager);
+      (
+        manager as unknown as {
+          lifecycleEvents: { lifecycleManagerSignalsAttached: () => void };
+        }
+      ).lifecycleEvents.lifecycleManagerSignalsAttached();
+    };
+    const y = new Plain(logger, 'y');
+    let startCalls = 0;
+    y.start = (): Promise<void> => {
+      startCalls++;
+      return sleep(10);
+    };
+    await manager.registerComponent(new Plain(logger, 'a'));
+
+    const registrations: Promise<unknown>[] = [];
+    manager.once('lifecycle-manager:signals-attached', () => {
+      registrations.push(
+        manager.insertComponentAt(y, 'start', undefined, { autoStart: true }),
+      );
+    });
+
+    const startup = await manager.startAllComponents();
+    await Promise.all(registrations);
+
+    expect(startup.success).toBe(true);
+    expect(startCalls).toBe(1);
+    expect(manager.isComponentRunning('y')).toBe(true);
+  });
+
+  test('healthCheck is read once and called as read', async () => {
+    const { logger, manager } = setup();
+    const a = new Plain(logger, 'a');
+    let reads = 0;
+    Object.defineProperty(a, 'healthCheck', {
+      get: (): (() => boolean) | undefined => {
+        reads++;
+        return reads === 1 ? (): boolean => true : undefined;
+      },
+    });
+    await manager.registerComponent(a);
+    await manager.startComponent('a');
+
+    const report = await manager.checkComponentHealth('a');
+
+    expect(report.healthy).toBe(true);
+    expect(report.code).not.toBe('error');
   });
 });

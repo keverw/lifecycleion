@@ -867,14 +867,42 @@ export class LifecycleManager
       missingDependency: string;
     }> = [];
 
-    // Check for missing dependencies
-    for (const component of this.components) {
-      const componentName = this.nameOf(component);
-      const isComponentOptional = component.isOptional();
-      const dependencies = component.getDependencies();
+    // Each component read once, guarded: the reads run its own code, and one whose
+    // `getDependencies()` or `isOptional()` threw made this - documented as not
+    // throwing - throw to its caller. Such a component is reported on the global
+    // channel and checked as if it declared no dependencies.
+    const graph: Array<{
+      name: string;
+      isOptional: boolean;
+      dependencies: string[];
+    }> = [];
 
+    for (const component of this.components) {
+      const name = this.nameOf(component);
+
+      try {
+        graph.push({
+          name,
+          isOptional: component.isOptional(),
+          dependencies: component.getDependencies(),
+        });
+      } catch (error) {
+        reportCallbackError(
+          `lifecycle-manager validateDependencies ${name}`,
+          error,
+        );
+        graph.push({ name, isOptional: false, dependencies: [] });
+      }
+    }
+
+    // Check for missing dependencies
+    for (const {
+      name: componentName,
+      isOptional: isComponentOptional,
+      dependencies,
+    } of graph) {
       for (const dep of dependencies) {
-        if (!this.hasComponent(dep)) {
+        if (!this.isNameRegistered(dep)) {
           missingDependencies.push({
             componentName,
             componentIsOptional: isComponentOptional,
@@ -885,17 +913,15 @@ export class LifecycleManager
     }
 
     // Build adjacency graph for cycle detection
-    const names = this.components.map((c) => this.nameOf(c));
     const adjacency = new Map<string, Set<string>>();
 
-    for (const name of names) {
+    for (const { name } of graph) {
       adjacency.set(name, new Set());
     }
 
     // Build edges: dependency -> dependent (only when dependency is registered)
-    for (const component of this.components) {
-      const dependent = this.nameOf(component);
-      for (const dep of component.getDependencies()) {
+    for (const { name: dependent, dependencies } of graph) {
+      for (const dep of dependencies) {
         if (adjacency.has(dep)) {
           adjacency.get(dep)?.add(dependent);
         }
@@ -1612,38 +1638,11 @@ export class LifecycleManager
     const timeoutResult = { timedOut: true } as const;
 
     try {
-      let result: unknown;
-      try {
-        result = Reflect.apply(messageHandler, component, [payload, from]);
-      } catch (error) {
-        const err = toError(error);
-
-        this.logger
-          .entity(componentName)
-          .error(LIFECYCLE_MANAGER_LOG_MESSAGE_HANDLER_FAILED, {
-            params: { error: err, from },
-          });
-
-        this.lifecycleEvents.componentMessageFailed(componentName, from, err, {
-          timedOut: false,
-          code: 'error',
-          componentFound: true,
-          componentRunning: isRunning,
-          handlerImplemented: true,
-          data: undefined,
-        });
-
-        return {
-          sent: true,
-          componentFound: true,
-          componentRunning: isRunning,
-          handlerImplemented: true,
-          data: undefined,
-          error: err,
-          timedOut: false,
-          code: 'error',
-        };
-      }
+      // A synchronous throw lands in the `catch` below, answered as a rejection is.
+      const result: unknown = Reflect.apply(messageHandler, component, [
+        payload,
+        from,
+      ]);
 
       // Adopted, not raced as it is: see `adoptPromise()`.
       const handlerPromise = adoptPromise(result);
@@ -2899,13 +2898,8 @@ export class LifecycleManager
             {
               allowDuringBulkStartup: true,
             },
-            deadline === undefined
-              ? undefined
-              : {
-                  deadline,
-                  onTimeout: expireStartup,
-                  hasExpired: () => hasTimedOut,
-                },
+            // The same context an auto-start that joins this startup gets.
+            bulkStartup.deadlineContext,
           );
 
           if (this.shutdownToken !== shutdownTokenAtBulkStart) {
@@ -3570,8 +3564,31 @@ export class LifecycleManager
       };
     }
 
+    // Read once, guarded, and that value is what gets called - as `onMessage` and
+    // `getValue` are read.
+    let healthCheckHandler: unknown;
+
+    try {
+      healthCheckHandler = Reflect.get(component, 'healthCheck');
+    } catch (error) {
+      const err = toError(error);
+
+      reportCallbackError('lifecycle-manager checkComponentHealth', error);
+
+      return {
+        name,
+        healthy: false,
+        message: 'Health check could not be read',
+        checkedAt: startTime,
+        durationMS: Date.now() - startTime,
+        error: err,
+        timedOut: false,
+        code: 'error',
+      };
+    }
+
     // Check if component implements healthCheck
-    if (!component.healthCheck) {
+    if (typeof healthCheckHandler !== 'function') {
       // No health check implemented - assume healthy
       return {
         name,
@@ -3597,7 +3614,11 @@ export class LifecycleManager
       };
 
       // Adopted, not raced as it is: see `adoptPromise()`.
-      const healthCheckPromise = adoptPromise(component.healthCheck());
+      const healthCheckPromise = adoptPromise(
+        Reflect.apply(healthCheckHandler, component, []) as ReturnType<
+          NonNullable<BaseComponent['healthCheck']>
+        >,
+      );
       // Match startup and signal timeout semantics: zero means no timer. Racing against
       // `setTimeout(..., 0)` made the outcome depend on whether an otherwise healthy
       // check happened to settle before or after its first asynchronous turn.
@@ -4134,7 +4155,16 @@ export class LifecycleManager
         // Bulk startup first: `isStarted` turns true as soon as its first component is
         // running, and a start without `allowDuringBulkStartup` is refused with
         // `startup_in_progress` for the rest of it.
-        if (this.isStarting) {
+        if (this.isStarting && this.activeBulkStartup === null) {
+          // A bulk startup that has taken its latch but not begun its loop - an
+          // `attachSignalsBeforeStartup` listener on `signals-attached` registering this.
+          // The loop about to run reads the registry after this and starts it in order;
+          // starting it here as well had the loop find it `component_already_starting`,
+          // which failed - and rolled back - the whole startup.
+          this.logger
+            .entity(componentName)
+            .info('AutoStart: left to the bulk startup about to run');
+        } else if (this.isStarting) {
           // Manager is currently starting - allow during bulk startup
           this.logger
             .entity(componentName)
