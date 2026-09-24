@@ -42,6 +42,8 @@ export interface LifecycleManagerEventMap {
   };
   /**
    * Follows `component:message-sent` for a handler that threw, rejected, or timed out.
+   * For a timeout, `error` is one describing it - the event always carries an `Error` -
+   * while the `MessageResult` answers `error: null` with `timedOut: true`.
    * The one exception: an `onMessage` getter that throws fails the call before anything is
    * sent, so this arrives alone, with `handlerImplemented: false`.
    */

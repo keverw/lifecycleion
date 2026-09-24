@@ -17,6 +17,26 @@ import {
 import type { ForceShutdownContext } from './types';
 import { LIFECYCLE_MANAGER_MESSAGE_FORCE_SHUTDOWN_TIMED_OUT } from './constants';
 
+// Makes the first `component:registered` emit throw - a failure after a registration
+// has committed, which nothing in the manager produces on purpose.
+function crashFirstRegisteredEvent(manager: LifecycleManager): void {
+  const events = (
+    manager as unknown as {
+      lifecycleEvents: { componentRegistered: (...args: unknown[]) => void };
+    }
+  ).lifecycleEvents;
+  const original = events.componentRegistered.bind(events);
+  let hasCrashed = false;
+  events.componentRegistered = (...args: unknown[]): void => {
+    if (!hasCrashed) {
+      hasCrashed = true;
+      throw new Error('crash after commit');
+    }
+
+    original(...args);
+  };
+}
+
 describe('LifecycleManager - review regressions', () => {
   test('a stall cleared by a late stop after a failed forced restart detaches signals', async () => {
     const { logger, manager } = setup({
@@ -3236,14 +3256,7 @@ describe('LifecycleManager - review regressions', () => {
 
       return Promise.resolve();
     };
-    await manager.registerComponent(new Plain(logger, 'first'));
-    // Describing the position for the success result crashes, after the auto-start ran.
-    manager.once('component:started', () => {
-      (manager as unknown as { nameOfAt: () => never }).nameOfAt =
-        (): never => {
-          throw new Error('crash after commit');
-        };
-    });
+    crashFirstRegisteredEvent(manager);
 
     const { release } = claimReports();
     let result;
@@ -3254,9 +3267,121 @@ describe('LifecycleManager - review regressions', () => {
       release();
     }
 
+    expect(result.success).toBe(false);
     expect(startCalls).toBe(1);
     expect(result.registered).toBe(true);
     expect(result.autoStartAttempted).toBe(true);
+    expect(result.autoStartSucceeded).toBe(true);
+  });
+
+  test('a failure after the commit of an insert reports where it landed', async () => {
+    const { logger, manager } = setup();
+    await manager.registerComponent(new Plain(logger, 'a'));
+    await manager.registerComponent(new Plain(logger, 'b'));
+    const events: Array<{ name: string; targetFound?: boolean }> = [];
+    manager.on(
+      'component:registered',
+      (event: { name: string; targetFound?: boolean }) => {
+        events.push(event);
+      },
+    );
+    crashFirstRegisteredEvent(manager);
+
+    const { release } = claimReports();
+    let result;
+
+    try {
+      result = await manager.insertComponentAt(
+        new Plain(logger, 'c'),
+        'after',
+        'a',
+      );
+    } finally {
+      release();
+    }
+
+    expect(result.success).toBe(false);
+    expect(result.registered).toBe(true);
+    expect(result.targetFound).toBe(true);
+    expect(result.manualPositionRespected).toBe(true);
+    expect(result.actualPosition?.index).toBe(1);
+    expect(events.find((event) => event.name === 'c')?.targetFound).toBe(true);
+  });
+
+  test('a failure after the commit reports an auto-start left to the bulk startup', async () => {
+    const { logger, manager } = setup({ attachSignalsBeforeStartup: true });
+    manager.attachSignals = (): void => {
+      fakeAttachedSignals(manager);
+      (
+        manager as unknown as {
+          lifecycleEvents: { lifecycleManagerSignalsAttached: () => void };
+        }
+      ).lifecycleEvents.lifecycleManagerSignalsAttached();
+    };
+    await manager.registerComponent(new Plain(logger, 'a'));
+    const events: Array<{ name: string; autoStartDeferred?: boolean }> = [];
+    manager.on(
+      'component:registered',
+      (event: { name: string; autoStartDeferred?: boolean }) => {
+        events.push(event);
+      },
+    );
+    let registration: Promise<{ autoStartDeferred?: boolean }> | undefined;
+    manager.once('lifecycle-manager:signals-attached', () => {
+      crashFirstRegisteredEvent(manager);
+      registration = manager.insertComponentAt(
+        new Plain(logger, 'y'),
+        'start',
+        undefined,
+        { autoStart: true },
+      );
+    });
+
+    const { release } = claimReports();
+
+    try {
+      await manager.startAllComponents();
+      expect((await registration)?.autoStartDeferred).toBe(true);
+    } finally {
+      release();
+    }
+
+    expect(events.find((event) => event.name === 'y')?.autoStartDeferred).toBe(
+      true,
+    );
+  });
+
+  test('a bulk startup stops reading lists once a read begins a shutdown', async () => {
+    const { logger, manager } = setup();
+    const a = new Plain(logger, 'a');
+    const b = new Plain(logger, 'b');
+    await manager.registerComponent(a);
+    await manager.registerComponent(b);
+    let shutdown: Promise<unknown> | undefined;
+    let isArmed = false;
+    a.getDependencies = (): string[] => {
+      if (isArmed) {
+        isArmed = false;
+        shutdown = manager.stopAllComponents();
+      }
+
+      return [];
+    };
+    let startupReadsOfB = 0;
+    b.getDependencies = (): string[] => {
+      if (new Error().stack?.includes('startAllComponents') === true) {
+        startupReadsOfB++;
+      }
+
+      return [];
+    };
+
+    isArmed = true;
+    const startup = await manager.startAllComponents();
+    await shutdown;
+
+    expect(startup.code).toBe('shutdown_in_progress');
+    expect(startupReadsOfB).toBe(0);
   });
 
   test('an instance registered elsewhere by a list read after its last answer is refused', async () => {
