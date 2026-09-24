@@ -139,6 +139,16 @@ describe('safeHandleCallback', () => {
 });
 
 describe('safeHandleCallbackAndWait', () => {
+  it('waits on a native promise whose own then is not a function', async () => {
+    const promise: object = Promise.reject(new Error('rejected'));
+    Object.defineProperty(promise, 'then', { value: 1 });
+
+    const result = await safeHandleCallbackAndWait('cb', () => promise);
+
+    expect(result.success).toBe(false);
+    expect(result.error?.message).toBe('rejected');
+  });
+
   it('should call a synchronous callback successfully', async () => {
     const callbackName = 'syncCallback';
 
@@ -282,6 +292,44 @@ describe('runCallbackSafely', () => {
 
     expect(received).toEqual([[1, 'two']]);
     expect(failures).toEqual([]);
+  });
+
+  it('reports a rejected native promise whose own then is not a function', async () => {
+    const failures: unknown[] = [];
+    const thrown = new Error('rejected');
+    const promise: object = Promise.reject(thrown);
+    Object.defineProperty(promise, 'then', { value: 1 });
+
+    runCallbackSafely(
+      'cb',
+      () => promise,
+      [],
+      (error) => failures.push(error),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(failures).toEqual([thrown]);
+  });
+
+  it('reports the rejection of a native promise whose then getter throws', async () => {
+    const failures: unknown[] = [];
+    const thrown = new Error('rejected');
+    const promise: object = Promise.reject(thrown);
+    Object.defineProperty(promise, 'then', {
+      get: (): never => {
+        throw new Error('then getter exploded');
+      },
+    });
+
+    runCallbackSafely(
+      'cb',
+      () => promise,
+      [],
+      (error) => failures.push(error),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(failures).toEqual([thrown]);
   });
 
   it('reports a rejected native promise that carries its own no-op then', async () => {

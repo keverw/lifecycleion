@@ -1,6 +1,5 @@
 import type { LoggerService } from '../logger/logger-service';
-import { isPromise } from '../is-promise';
-import { adoptPromise } from '../internal/adopt-promise';
+import { adoptPromise, isAdoptable } from '../internal/adopt-promise';
 import {
   reportCallbackError,
   runCallbackSafely,
@@ -306,7 +305,7 @@ function guardEntity(
   // promise back as it is, own `then` property included, and a no-op one there would
   // swallow the rejection, leaving it unhandled.
   try {
-    if (isPromise(child)) {
+    if (isAdoptable(child)) {
       void adoptPromise(child).then(
         () => {
           reportCallbackError(

@@ -84,8 +84,7 @@ import {
   ProcessSignalManager,
   type ShutdownSignal,
 } from '../process-signal-manager';
-import { isPromise } from '../is-promise';
-import { adoptPromise } from '../internal/adopt-promise';
+import { adoptPromise, isAdoptable } from '../internal/adopt-promise';
 import {
   reportCallbackError,
   runCallbackSafely,
@@ -2103,7 +2102,7 @@ export class LifecycleManager
       // `async getValue` - is a contract break, not a value: read as one it came back
       // `not_found`, and a rejection it carried went unhandled. Its settlement is
       // observed, so nothing floats, and the call fails with `code: 'error'`.
-      if (isPromise(rawResult)) {
+      if (isAdoptable(rawResult)) {
         void adoptPromise(rawResult).catch((error: unknown) => {
           this.logger
             .entity(componentName)
@@ -2871,8 +2870,15 @@ export class LifecycleManager
           const componentsToOrder = this.components;
 
           for (const component of componentsToOrder) {
-            // Any read can begin a shutdown; the lists left are not read under it -
-            // their components may be tearing down - and the startup is over.
+            startupReads.set(
+              component,
+              this.readDependenciesReported(component, 'startup'),
+            );
+
+            // Any read can begin a shutdown - the last one included, which must not
+            // go on to clear the deferred auto-starts as if this startup would start
+            // them. The lists left are not read under it, since their components may
+            // be tearing down, and the startup is over.
             if (
               this.isShuttingDown ||
               this.shutdownToken !== shutdownTokenAtBulkStart
@@ -2883,11 +2889,6 @@ export class LifecycleManager
 
               return abortedByShutdown();
             }
-
-            startupReads.set(
-              component,
-              this.readDependenciesReported(component, 'startup'),
-            );
           }
 
           startupOrder = this.getStartupOrderInternal(
@@ -2952,11 +2953,12 @@ export class LifecycleManager
 
           const component = this.getComponent(name);
           if (!component) {
-            // Should not happen since unregisterComponent() is blocked during startup
-            this.logger
-              .entity(name)
-              .error('Component not found in startup order');
-            continue;
+            // Should not happen since unregisterComponent() is blocked during startup.
+            // Thrown into the crash path, as a component never read is below: skipped,
+            // it was in no result list, and the startup could still report success.
+            throw new Error(
+              `Component "${name}" is in the startup order but not registered`,
+            );
           }
 
           // Skip stalled components during bulk startup (even with ignoreStalledComponents:true bulk option)
@@ -3936,10 +3938,7 @@ export class LifecycleManager
     let committed:
       | Pick<
           InsertComponentAtResult,
-          | 'startupOrder'
-          | 'actualPosition'
-          | 'manualPositionRespected'
-          | 'targetFound'
+          'startupOrder' | 'manualPositionRespected' | 'targetFound'
         >
       | undefined;
     let didAutoStartAttempt = false;
@@ -3978,12 +3977,14 @@ export class LifecycleManager
       };
 
       if (canRead()) {
-        // Read first, so a component it registers is read with the rest.
-        isRegisteredWithAManager = component._isRegisteredWithManager();
+        candidateRead = this.tryReadDependencies(component);
       }
 
       if (canRead()) {
-        candidateRead = this.tryReadDependencies(component);
+        // Before the registry's lists, so a component it registers is read with the
+        // rest, and after the candidate's own, which could register this instance
+        // elsewhere with nothing else read to ask again after.
+        isRegisteredWithAManager = component._isRegisteredWithManager();
       }
 
       // The registry's lists, and the instance's answer each time they settle, until
@@ -4428,45 +4429,8 @@ export class LifecycleManager
         position === 'before' || position === 'after'
           ? this.getComponentIndex(targetComponentName ?? '') !== null
           : undefined;
-      // Generate position description
-      let positionDescription: string | undefined;
-
-      if (registrationIndexAfter !== null) {
-        const totalComponents = this.components.length;
-
-        if (totalComponents === 1) {
-          positionDescription = 'only component';
-        } else if (registrationIndexAfter === 0) {
-          const nextComponent = this.nameOfAt(1);
-          positionDescription = nextComponent
-            ? `at start, before ${nextComponent}`
-            : 'at start';
-        } else if (registrationIndexAfter === totalComponents - 1) {
-          const prevComponent = this.nameOfAt(totalComponents - 2);
-          positionDescription = prevComponent
-            ? `at end, after ${prevComponent}`
-            : 'at end';
-        } else {
-          const prevComponent = this.nameOfAt(registrationIndexAfter - 1);
-          const nextComponent = this.nameOfAt(registrationIndexAfter + 1);
-          if (prevComponent && nextComponent) {
-            positionDescription = `after ${prevComponent}, before ${nextComponent}`;
-          } else if (prevComponent) {
-            positionDescription = `after ${prevComponent}`;
-          } else if (nextComponent) {
-            positionDescription = `before ${nextComponent}`;
-          }
-        }
-      }
-
-      const actualPosition =
-        registrationIndexAfter !== null
-          ? { index: registrationIndexAfter, description: positionDescription }
-          : undefined;
-
       committed = {
         startupOrder,
-        actualPosition,
         manualPositionRespected: isManualPositionRespected,
         targetFound: isTargetFound,
       };
@@ -4608,13 +4572,19 @@ export class LifecycleManager
         ? startResult?.success === true
         : undefined;
 
+      // Where it is now, not where it landed: an auto-start can register or remove
+      // components around it.
+      const registrationIndexNow = this.getComponentIndex(componentName);
+      const actualPosition =
+        this.describeRegistryPosition(registrationIndexNow);
+
       // Emit registration event
       this.lifecycleEvents.componentRegistered({
         name: componentName,
-        index: registrationIndexAfter,
+        index: registrationIndexNow,
         action: isInsertAction ? 'insert' : 'register',
         registrationIndexBefore,
-        registrationIndexAfter,
+        registrationIndexAfter: registrationIndexNow,
         startupOrder,
         requestedPosition: isInsertAction
           ? { position, targetComponentName }
@@ -4634,7 +4604,7 @@ export class LifecycleManager
         registered: true,
         componentName,
         registrationIndexBefore: null,
-        registrationIndexAfter,
+        registrationIndexAfter: registrationIndexNow,
         startupOrder,
         requestedPosition: { position, targetComponentName },
         actualPosition,
@@ -4670,8 +4640,30 @@ export class LifecycleManager
       // result must say so.
       const registrationIndexNow = this.components.indexOf(component);
       const isRegistered = registrationIndexNow !== -1;
+      // What a committed registration reports - where it is, the order it computed,
+      // the target it found, and an auto-start it attempted or left to the bulk
+      // startup - on both the event and the result, built once so they cannot drift.
+      const committedReport = isRegistered
+        ? {
+            startupOrder: committed?.startupOrder ?? [],
+            actualPosition: this.describeRegistryPosition(registrationIndexNow),
+            manualPositionRespected:
+              committed?.manualPositionRespected ?? false,
+            targetFound:
+              committed !== undefined
+                ? committed.targetFound
+                : position === 'before' || position === 'after'
+                  ? false
+                  : undefined,
+            autoStartAttempted: didAutoStartAttempt,
+            ...(isAutoStartDeferred ? { autoStartDeferred: true } : {}),
+            ...(didAutoStartAttempt
+              ? { autoStartSucceeded: startResult?.success === true }
+              : {}),
+          }
+        : undefined;
 
-      if (isRegistered) {
+      if (committedReport !== undefined) {
         // Committed, so it is a registration as far as anyone tracking the registry is
         // concerned; the failure is reported through the result and the log line above.
         this.lifecycleEvents.componentRegistered({
@@ -4680,22 +4672,11 @@ export class LifecycleManager
           action: isInsertAction ? 'insert' : 'register',
           registrationIndexBefore,
           registrationIndexAfter: registrationIndexNow,
-          startupOrder: committed?.startupOrder ?? [],
           requestedPosition: isInsertAction
             ? { position, targetComponentName }
             : undefined,
-          actualPosition:
-            committed?.actualPosition?.index === registrationIndexNow
-              ? committed.actualPosition
-              : undefined,
-          manualPositionRespected: committed?.manualPositionRespected ?? false,
-          targetFound: committed?.targetFound,
           duringStartup: this.isStarting,
-          autoStartAttempted: didAutoStartAttempt,
-          ...(isAutoStartDeferred ? { autoStartDeferred: true } : {}),
-          ...(didAutoStartAttempt
-            ? { autoStartSucceeded: startResult?.success === true }
-            : {}),
+          ...committedReport,
         });
       } else {
         this.lifecycleEvents.componentRegistrationRejected({
@@ -4733,38 +4714,64 @@ export class LifecycleManager
         registrationIndexAfter: isRegistered
           ? registrationIndexNow
           : registrationIndexBefore,
-        // A committed registration reports what it did before the failure - where it
-        // landed, the order it computed, the target it found, and an auto-start it
-        // attempted or left to the bulk startup - rather than the refusal's defaults.
-        startupOrder:
-          (isRegistered ? committed?.startupOrder : undefined) ?? [],
         requestedPosition: { position, targetComponentName },
-        // Only while it still describes where the component is: an auto-start can
-        // register others ahead of it, and the index reported above is re-read.
-        ...(isRegistered &&
-        committed?.actualPosition?.index === registrationIndexNow
-          ? { actualPosition: committed.actualPosition }
-          : {}),
-        manualPositionRespected:
-          (isRegistered ? committed?.manualPositionRespected : undefined) ??
-          false,
-        targetFound:
-          isRegistered && committed !== undefined
-            ? committed.targetFound
-            : position === 'before' || position === 'after'
-              ? false
-              : undefined,
         duringStartup: this.isStarting,
-        autoStartAttempted: isRegistered && didAutoStartAttempt,
-        ...(isRegistered && isAutoStartDeferred
-          ? { autoStartDeferred: true }
-          : {}),
-        ...(isRegistered && didAutoStartAttempt
-          ? { autoStartSucceeded: startResult?.success === true }
-          : {}),
+        // A committed registration reports what it did before the failure rather than
+        // the refusal's defaults.
+        ...(committedReport ?? {
+          startupOrder: [],
+          manualPositionRespected: false,
+          targetFound:
+            position === 'before' || position === 'after' ? false : undefined,
+          autoStartAttempted: false,
+        }),
         startResult: isRegistered ? startResult : undefined,
       };
     }
+  }
+
+  /**
+   * Where the registry entry at `index` sits, described by its neighbours, as a
+   * registration reports it. Read at report time, from the registry as it is then: an
+   * auto-start can register or remove components around the new one, and a position
+   * captured before it described a registry that had moved on.
+   */
+  private describeRegistryPosition(
+    index: number | null,
+  ): InsertComponentAtResult['actualPosition'] {
+    let positionDescription: string | undefined;
+
+    if (index !== null) {
+      const totalComponents = this.components.length;
+
+      if (totalComponents === 1) {
+        positionDescription = 'only component';
+      } else if (index === 0) {
+        const nextComponent = this.nameOfAt(1);
+        positionDescription = nextComponent
+          ? `at start, before ${nextComponent}`
+          : 'at start';
+      } else if (index === totalComponents - 1) {
+        const prevComponent = this.nameOfAt(totalComponents - 2);
+        positionDescription = prevComponent
+          ? `at end, after ${prevComponent}`
+          : 'at end';
+      } else {
+        const prevComponent = this.nameOfAt(index - 1);
+        const nextComponent = this.nameOfAt(index + 1);
+        if (prevComponent && nextComponent) {
+          positionDescription = `after ${prevComponent}, before ${nextComponent}`;
+        } else if (prevComponent) {
+          positionDescription = `after ${prevComponent}`;
+        } else if (nextComponent) {
+          positionDescription = `before ${nextComponent}`;
+        }
+      }
+    }
+
+    return index !== null
+      ? { index, description: positionDescription }
+      : undefined;
   }
 
   /**
@@ -8608,10 +8615,20 @@ export class LifecycleManager
     reads: Map<BaseComponent, T>;
     isSettled: boolean;
   } {
+    // Whether the round before read anything: `onSettled` is for what the reads may
+    // have changed, and a registry that was already read has nothing new to ask about.
+    let didRead = false;
+
     for (let round = 0; ; round++) {
       let unread = this.components.filter((component) => !reads.has(component));
 
-      if (unread.length === 0 && onSettled !== undefined && canContinue()) {
+      if (
+        unread.length === 0 &&
+        didRead &&
+        onSettled !== undefined &&
+        canContinue()
+      ) {
+        didRead = false;
         onSettled();
         unread = this.components.filter((component) => !reads.has(component));
       }
@@ -8630,6 +8647,7 @@ export class LifecycleManager
         }
 
         reads.set(component, read(component));
+        didRead = true;
       }
     }
   }

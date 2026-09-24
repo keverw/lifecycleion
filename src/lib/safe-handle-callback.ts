@@ -1,11 +1,10 @@
 import { errorToString } from './error-to-string';
-import { isPromise } from './is-promise';
 import { toError } from './to-error';
 import { DOUBLE_EOL } from './constants';
 import { installGlobalEventTarget } from './global-event-target';
 import { reportToHost } from './internal/report-to-host';
 import { reportToConsole } from './internal/report-to-console';
-import { adoptPromise } from './internal/adopt-promise';
+import { adoptPromise, isAdoptable } from './internal/adopt-promise';
 
 // Node.js has a global `ErrorEvent` constructor (Node 25+) but does not make `globalThis`
 // an EventTarget, so the global event methods must be supplied before anything can be
@@ -185,11 +184,11 @@ export function runCallbackSafely(
       args,
     );
 
-    if (isPromise(result)) {
+    if (isAdoptable(result)) {
       // Fire-and-forget: a rejection is reported, never awaited.
       //
       // Adopted through `Promise.resolve` rather than calling `result.catch` directly, as
-      // `ArraySink` does and for the same reason: `isPromise` accepts any thenable, and a
+      // `ArraySink` does and for the same reason: `isAdoptable` accepts any thenable, and a
       // `then`-only one has no `catch`. Calling it threw a `TypeError` that the
       // surrounding `catch` reported *in place of* the real failure - and because `then`
       // was never called, the callback's actual rejection was dropped and went nowhere.
@@ -277,7 +276,7 @@ export async function safeHandleCallbackAndWait<T>(
       // one path for how an untrusted callback is invoked and how its promise is read.
       const result: unknown = Reflect.apply(callback, undefined, args);
 
-      if (isPromise(result)) {
+      if (isAdoptable(result)) {
         // Wait for the async callback to complete
         const value = await adoptPromise<T>(result as PromiseLike<T>);
 

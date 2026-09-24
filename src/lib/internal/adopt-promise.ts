@@ -1,3 +1,5 @@
+import { isPromise } from '../is-promise';
+
 /**
  * Whether `value` has `Promise.prototype` on its prototype chain - the shape of a native
  * promise from this realm, or a subclass's. `instanceof` walks the chain without reading
@@ -9,6 +11,18 @@ function inheritsFromPromise(value: unknown): boolean {
   } catch {
     return false;
   }
+}
+
+/**
+ * Whether a value from untrusted code should go through {@link adoptPromise}: anything on
+ * the `Promise.prototype` chain, decided without reading it, or else a thenable, decided
+ * by its `then`. `isPromise()` alone reads `then` first, so a native promise whose own
+ * `then` is not a function - or a getter that throws - was never adopted, and its
+ * rejection went unhandled. A throwing `then` getter on anything else still throws here,
+ * for the caller to report.
+ */
+export function isAdoptable(value: unknown): boolean {
+  return inheritsFromPromise(value) || isPromise(value);
 }
 
 /**
