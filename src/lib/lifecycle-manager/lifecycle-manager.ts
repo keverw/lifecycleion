@@ -280,6 +280,8 @@ export class LifecycleManager
   // `readDependencies()`.
   private readonly reportedDependencyReadFailures =
     new WeakSet<BaseComponent>();
+  // The same, for `isOptional()`; see `isComponentOptional()`.
+  private readonly reportedOptionalReadFailures = new WeakSet<BaseComponent>();
   private activeBulkStartup: {
     readonly started: string[];
     // Set as its rollback begins: the rollback works from the list as it stood then,
@@ -896,15 +898,19 @@ export class LifecycleManager
       let isUnreadable = false;
 
       try {
+        // The same rule startup applies: see `isComponentOptional()`.
         isOptional = component.isOptional() === true;
       } catch (error) {
         isUnreadable = true;
         // Startup reads it too, unguarded, and fails on it: invalid, like an unreadable
         // dependency list.
-        reportCallbackError(
-          `lifecycle-manager validateDependencies isOptional of ${name}`,
-          error,
-        );
+        if (!this.reportedOptionalReadFailures.has(component)) {
+          this.reportedOptionalReadFailures.add(component);
+          reportCallbackError(
+            `lifecycle-manager validateDependencies isOptional of ${name}`,
+            error,
+          );
+        }
         unreadableDependencies.push({
           componentName: name,
           error: toError(error),
@@ -916,8 +922,11 @@ export class LifecycleManager
         'dependencies' in read ? read.invalidEntry : read.error;
 
       if (readFailure !== undefined) {
-        reportCallbackError(
-          `lifecycle-manager validateDependencies dependencies of ${name}`,
+        // Once per registration, like every other read of it: the failure is in the
+        // result already, and a caller polling this would flood the channel.
+        this.reportDependencyReadFailureOnce(
+          component,
+          'validateDependencies',
           readFailure,
         );
 
@@ -2472,6 +2481,7 @@ export class LifecycleManager
     this.deferredAutoStartNames.delete(name);
     // A later registration of the same instance reports a broken list afresh.
     this.reportedDependencyReadFailures.delete(component);
+    this.reportedOptionalReadFailures.delete(component);
     this.stalledComponents.delete(name);
     this.runningComponents.delete(name);
     this.componentClaims.delete(name);
@@ -2915,10 +2925,15 @@ export class LifecycleManager
             }
 
             const depComponent = this.getComponent(depName);
-            const isDependencyOptional = depComponent?.isOptional() ?? false;
+            // Read only where it decides something - a dependency that was skipped or
+            // failed - and guarded: a healthy dependency's `isOptional()` that threw used
+            // to crash, and roll back, the whole startup.
+            const isDependencyOptional = (): boolean =>
+              depComponent !== undefined &&
+              this.isComponentOptional(depComponent);
 
             if (skippedDueToDependency.has(depName)) {
-              if (!isDependencyOptional) {
+              if (!isDependencyOptional()) {
                 shouldSkip = true;
                 skipReason = `Dependency "${depName}" was skipped`;
                 break;
@@ -2928,7 +2943,7 @@ export class LifecycleManager
 
             if (depComponent) {
               const depState = this.componentStates.get(depName);
-              if (depState === 'failed' && !isDependencyOptional) {
+              if (depState === 'failed' && !isDependencyOptional()) {
                 shouldSkip = true;
                 skipReason = `Dependency "${depName}" failed to start`;
                 break;
@@ -3007,7 +3022,7 @@ export class LifecycleManager
                 result.reason || `Component "${name}" stopped unexpectedly`,
               );
 
-            if (component.isOptional()) {
+            if (this.isComponentOptional(component)) {
               if (
                 !failedOptionalComponents.some((entry) => entry.name === name)
               ) {
@@ -3079,7 +3094,7 @@ export class LifecycleManager
             };
           } else {
             // Check if component is optional
-            if (component.isOptional()) {
+            if (this.isComponentOptional(component)) {
               this.logger
                 .entity(name)
                 .warn(
@@ -5449,18 +5464,59 @@ export class LifecycleManager
       return read.dependencies;
     }
 
-    // Reported once per instance, and labelled only then: this runs for every component
-    // on every stop, restart and unregister, and recursively in a shutdown pass, so a
-    // report per read flooded the channel with the same failure.
-    if (!this.reportedDependencyReadFailures.has(component)) {
-      this.reportedDependencyReadFailures.add(component);
-      reportCallbackError(
-        `lifecycle-manager ${context} dependencies of ${this.nameOf(component)}`,
-        'dependencies' in read ? read.invalidEntry : read.error,
-      );
-    }
+    this.reportDependencyReadFailureOnce(
+      component,
+      context,
+      'dependencies' in read ? read.invalidEntry : read.error,
+    );
 
     return 'dependencies' in read ? read.dependencies : [];
+  }
+
+  /**
+   * Whether a component is optional, as startup and validation both decide it: only an
+   * `isOptional()` that answers exactly `true`. One that throws counts as required - the
+   * conservative answer, since a required failure is rolled back - and is reported once
+   * per registration rather than crashing the startup that asked.
+   */
+  private isComponentOptional(component: BaseComponent): boolean {
+    try {
+      return component.isOptional() === true;
+    } catch (error) {
+      if (!this.reportedOptionalReadFailures.has(component)) {
+        this.reportedOptionalReadFailures.add(component);
+        reportCallbackError(
+          `lifecycle-manager isOptional of ${this.nameOf(component)}`,
+          error,
+        );
+      }
+
+      return false;
+    }
+  }
+
+  /**
+   * Report a broken `getDependencies()` once per registration of the component, labelled
+   * only then: its lists are read for every component on every stop, restart and
+   * unregister, recursively in a shutdown pass, and on every start - a report per read
+   * flooded the channel with the same failure.
+   */
+  private reportDependencyReadFailureOnce(
+    component: BaseComponent,
+    context: string,
+    failure: unknown,
+    // For a registration candidate, not recorded yet: named by what registration read.
+    name: string = this.nameOf(component),
+  ): void {
+    if (this.reportedDependencyReadFailures.has(component)) {
+      return;
+    }
+
+    this.reportedDependencyReadFailures.add(component);
+    reportCallbackError(
+      `lifecycle-manager ${context} dependencies of ${name}`,
+      failure,
+    );
   }
 
   /** {@link readDependencies} without the report, for a caller that records the failure. */
@@ -5762,73 +5818,10 @@ export class LifecycleManager
       };
     }
 
-    // Its own list read strictly: a broken one fails this start, naming the component,
-    // rather than being read as fewer dependencies than it declares.
-    const ownDependencies = this.tryReadDependencies(component);
-
-    // Thrown as it is: the start's result carries `componentName`.
-    if (!('dependencies' in ownDependencies)) {
-      throw ownDependencies.error;
-    }
-
-    if (ownDependencies.invalidEntry !== undefined) {
-      return {
-        success: false,
-        componentName: name,
-        reason: `Invalid dependency declared by "${name}": ${describeError(ownDependencies.invalidEntry)}`,
-        code: 'missing_dependency',
-        error: ownDependencies.invalidEntry,
-        status: this.getComponentStatus(name),
-      };
-    }
-
-    // Ensure dependencies are registered and running before starting.
-    for (const dependencyName of ownDependencies.dependencies) {
-      const dependency = this.getComponent(dependencyName);
-      if (!dependency) {
-        return {
-          success: false,
-          componentName: name,
-          reason: `Missing dependency "${dependencyName}"`,
-          code: 'missing_dependency',
-          status: this.getComponentStatus(name),
-        };
-      }
-
-      if (!this.isComponentRunning(dependencyName)) {
-        const isDependencyOptional = dependency.isOptional();
-
-        // Check if we can skip this dependency
-        if (allowNonRunningDependencies) {
-          // Explicit override - allow skipping both optional and required dependencies
-          this.logger
-            .entity(name)
-            .warn(
-              `Starting with non-running dependency "${dependencyName}" (allowNonRunningDependencies=true)`,
-            );
-          continue;
-        }
-
-        if (isDependencyOptional) {
-          // Optional dependencies never block startup
-          this.logger
-            .entity(name)
-            .warn(
-              `Starting with non-running optional dependency "${dependencyName}"`,
-            );
-          continue;
-        }
-
-        return {
-          success: false,
-          componentName: name,
-          reason: `Dependency "${dependencyName}" is not running`,
-          code: 'dependency_not_running',
-          status: this.getComponentStatus(name),
-        };
-      }
-    }
-
+    // Ahead of the dependency checks: a component already running, starting or stopping
+    // answers as such, whatever its dependency list says now. Checked after them, a
+    // running component whose list had since broken failed instead - and a bulk startup
+    // took that for a required failure and rolled back everything else.
     const currentState = this.componentStates.get(name);
     if (currentState === 'starting') {
       return {
@@ -5859,6 +5852,84 @@ export class LifecycleManager
         code: 'component_already_running',
         status: this.getComponentStatus(name),
       };
+    }
+
+    // Its own list read strictly: a broken one fails this start as `missing_dependency`,
+    // naming the component, rather than being read as fewer dependencies than it
+    // declares. Reported once per registration, as other reads of it are.
+    const ownDependencies = this.tryReadDependencies(component);
+
+    if (
+      !('dependencies' in ownDependencies) ||
+      ownDependencies.invalidEntry !== undefined
+    ) {
+      const ownDependencyFailure =
+        'dependencies' in ownDependencies
+          ? ownDependencies.invalidEntry
+          : ownDependencies.error;
+      const err = toError(ownDependencyFailure);
+
+      this.reportDependencyReadFailureOnce(
+        component,
+        'start',
+        ownDependencyFailure,
+      );
+
+      return {
+        success: false,
+        componentName: name,
+        reason: `Could not read the dependencies declared by "${name}": ${describeError(err)}`,
+        code: 'missing_dependency',
+        error: err,
+        status: this.getComponentStatus(name),
+      };
+    }
+
+    // Ensure dependencies are registered and running before starting.
+    for (const dependencyName of ownDependencies.dependencies) {
+      const dependency = this.getComponent(dependencyName);
+      if (!dependency) {
+        return {
+          success: false,
+          componentName: name,
+          reason: `Missing dependency "${dependencyName}"`,
+          code: 'missing_dependency',
+          status: this.getComponentStatus(name),
+        };
+      }
+
+      if (!this.isComponentRunning(dependencyName)) {
+        const isDependencyOptional = this.isComponentOptional(dependency);
+
+        // Check if we can skip this dependency
+        if (allowNonRunningDependencies) {
+          // Explicit override - allow skipping both optional and required dependencies
+          this.logger
+            .entity(name)
+            .warn(
+              `Starting with non-running dependency "${dependencyName}" (allowNonRunningDependencies=true)`,
+            );
+          continue;
+        }
+
+        if (isDependencyOptional) {
+          // Optional dependencies never block startup
+          this.logger
+            .entity(name)
+            .warn(
+              `Starting with non-running optional dependency "${dependencyName}"`,
+            );
+          continue;
+        }
+
+        return {
+          success: false,
+          componentName: name,
+          reason: `Dependency "${dependencyName}" is not running`,
+          code: 'dependency_not_running',
+          status: this.getComponentStatus(name),
+        };
+      }
     }
 
     // The component is claimed as `starting` before the attach, not after it: attaching
@@ -7559,7 +7630,7 @@ export class LifecycleManager
         new Error(`Component "${name}" stopped unexpectedly during startup`);
       const component = this.getComponent(name);
 
-      if (component?.isOptional()) {
+      if (component !== undefined && this.isComponentOptional(component)) {
         if (!failedOptionalComponents.some((entry) => entry.name === name)) {
           failedOptionalComponents.push({ name, error });
         }
@@ -8202,6 +8273,17 @@ export class LifecycleManager
 
         if (!('dependencies' in read)) {
           throw read.error;
+        }
+
+        // A non-string entry does not refuse the registration - the component's own
+        // start fails on it - but it is reported now rather than first found later.
+        if (read.invalidEntry !== undefined) {
+          this.reportDependencyReadFailureOnce(
+            component,
+            'registration',
+            read.invalidEntry,
+            candidate.name,
+          );
         }
 
         dependencies = read.dependencies;

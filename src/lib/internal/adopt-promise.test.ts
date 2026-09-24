@@ -47,4 +47,12 @@ describe('adoptPromise', () => {
 
     expect(await adoptPromise<unknown>(thenable)).toBe(3);
   });
+
+  test('ignores an own constructor paired with an own no-op then', async () => {
+    const promise: object = Promise.reject(new Error('real rejection'));
+    Object.defineProperty(promise, 'constructor', { value: Object });
+    Object.defineProperty(promise, 'then', { value: () => undefined });
+
+    expect(await settle(adoptPromise(promise))).toBe('real rejection');
+  });
 });

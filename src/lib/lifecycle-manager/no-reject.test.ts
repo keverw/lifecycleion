@@ -148,9 +148,11 @@ describe('LifecycleManager - public methods never reject', () => {
     const component = new Plain(logger, 'a');
     await manager.registerComponent(component);
 
-    component.getDependencies = (): never => {
-      throw new Error('getter exploded');
-    };
+    Object.defineProperty(component, 'startupTimeoutMS', {
+      get: (): never => {
+        throw new Error('getter exploded');
+      },
+    });
 
     const { reports, release } = claimReports();
     let result;
@@ -272,11 +274,12 @@ describe('LifecycleManager - public methods never reject', () => {
     await manager.registerComponent(first);
     await manager.registerComponent(second);
 
-    // `second` fails to start, and the optional check on that failure path is what
-    // throws - after `first` is already running.
-    second.start = (): Promise<void> =>
-      Promise.reject(new Error('start failed'));
-    second.isOptional = (): never => {
+    // A step the startup runs after starting both - once `first` and `second` are
+    // running - throws.
+    void second;
+    (
+      manager as unknown as { consumeUnexpectedStopsDuringStartup: () => never }
+    ).consumeUnexpectedStopsDuringStartup = (): never => {
       throw new Error('getter exploded');
     };
 
@@ -1227,16 +1230,18 @@ describe('LifecycleManager - public methods never reject', () => {
     };
     await manager.registerComponent(component);
 
-    const originalGetDependencies = component.getDependencies.bind(component);
+    // Read before the start claims the component - and only the first time.
     let shouldThrow = true;
-    component.getDependencies = (): string[] => {
-      if (shouldThrow) {
-        shouldThrow = false;
-        throw new Error('getter exploded');
-      }
+    Object.defineProperty(component, 'startupTimeoutMS', {
+      get: (): number => {
+        if (shouldThrow) {
+          shouldThrow = false;
+          throw new Error('getter exploded');
+        }
 
-      return originalGetDependencies();
-    };
+        return 30_000;
+      },
+    });
 
     const { release } = claimReports();
 

@@ -17,6 +17,20 @@ export function adoptPromise<T>(
   value: T | PromiseLike<T>,
 ): Promise<Awaited<T>> {
   return new Promise<Awaited<T>>((resolve, reject) => {
+    // A native promise is read directly, before `Promise.resolve()` gets a say:
+    // `Promise.resolve()` only hands one back unchanged when its `constructor` is
+    // `Promise`, so one carrying its own `constructor` was wrapped instead - and the
+    // wrapper then called its own `then`. Applying the intrinsic throws for anything
+    // that is not a native promise, which falls through to the standard adoption.
+    try {
+      // eslint-disable-next-line @typescript-eslint/unbound-method
+      Reflect.apply(Promise.prototype.then, value, [resolve, reject]);
+
+      return;
+    } catch {
+      // Not a native promise - or one whose `constructor` misbehaves; adopted below.
+    }
+
     // The intrinsic, applied to the adopted promise - the point of the call.
     // eslint-disable-next-line @typescript-eslint/unbound-method
     Reflect.apply(Promise.prototype.then, Promise.resolve(value), [

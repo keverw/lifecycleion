@@ -2498,4 +2498,110 @@ describe('LifecycleManager - review regressions', () => {
       ).length,
     ).toBeGreaterThanOrEqual(2);
   });
+
+  test('a broken own dependency list fails its start as missing_dependency, reported once', async () => {
+    const { logger, manager } = setup();
+    const broken = new Plain(logger, 'broken');
+    await manager.registerComponent(broken);
+    broken.getDependencies = (): string[] => undefined as unknown as string[];
+
+    const { reports, release } = claimReports();
+
+    try {
+      for (let index = 0; index < 3; index++) {
+        const result = await manager.startComponent('broken');
+        expect(result.code).toBe('missing_dependency');
+      }
+    } finally {
+      release();
+    }
+
+    expect(
+      reports.filter((report) =>
+        (report as Error).message.includes('dependencies of broken'),
+      ),
+    ).toHaveLength(1);
+  });
+
+  test('a running component whose dependency list broke answers already running', async () => {
+    const { logger, manager } = setup();
+    const a = new Plain(logger, 'a');
+    await manager.registerComponent(a);
+    await manager.startComponent('a');
+    a.getDependencies = (): never => {
+      throw new Error('getDependencies exploded');
+    };
+
+    const { release } = claimReports();
+
+    try {
+      expect((await manager.startComponent('a')).code).toBe(
+        'component_already_running',
+      );
+    } finally {
+      release();
+    }
+  });
+
+  test('a healthy dependency whose isOptional() throws does not fail the startup', async () => {
+    const { logger, manager } = setup();
+    const db = new Plain(logger, 'db');
+    db.isOptional = (): never => {
+      throw new Error('isOptional exploded');
+    };
+    await manager.registerComponent(db);
+    await manager.registerComponent(new Plain(logger, 'api', ['db']));
+
+    const { release } = claimReports();
+    let startup;
+
+    try {
+      startup = await manager.startAllComponents();
+    } finally {
+      release();
+    }
+
+    expect(startup.success).toBe(true);
+  });
+
+  test('a registration candidate with a non-string dependency entry is reported', async () => {
+    const { logger, manager } = setup();
+    const c = new Plain(logger, 'c');
+    c.getDependencies = (): string[] => ['db', 42 as unknown as string];
+
+    const { reports, release } = claimReports();
+
+    try {
+      expect((await manager.registerComponent(c)).success).toBe(true);
+    } finally {
+      release();
+    }
+
+    expect(hasReport(reports, 'registration dependencies of c')).toBe(true);
+  });
+
+  test('validateDependencies() reports a broken list once across calls', async () => {
+    const { logger, manager } = setup();
+    const hostile = new Plain(logger, 'hostile');
+    await manager.registerComponent(hostile);
+    hostile.getDependencies = (): never => {
+      throw new Error('getDependencies exploded');
+    };
+
+    const { reports, release } = claimReports();
+
+    try {
+      for (let index = 0; index < 3; index++) {
+        expect(manager.validateDependencies().valid).toBe(false);
+      }
+    } finally {
+      release();
+    }
+
+    expect(
+      reports.filter((report) =>
+        (report as Error).message.includes('dependencies of hostile'),
+      ),
+    ).toHaveLength(1);
+  });
 });
