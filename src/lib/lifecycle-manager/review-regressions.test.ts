@@ -3776,4 +3776,38 @@ describe('LifecycleManager - review regressions', () => {
     expect(result.registered).toBe(false);
     expect(result.registrationIndexAfter).toBeNull();
   });
+
+  test('the safety net reports an auto-start that ran when the catch itself throws', async () => {
+    const { logger, manager } = setup();
+    await manager.registerComponent(new Plain(logger, 'a'));
+    await manager.startAllComponents();
+    // After the auto-start, the success path's event throws, so the catch is entered;
+    // describing the position there throws too, into the safety net.
+    crashFirstRegisteredEvent(manager, 'c');
+    manager.once('component:started', () => {
+      (
+        manager as unknown as { describeRegistryPosition: () => never }
+      ).describeRegistryPosition = (): never => {
+        throw new Error('catch exploded');
+      };
+    });
+
+    const { release } = claimReports();
+    let result;
+
+    try {
+      result = await manager.registerComponent(new Plain(logger, 'c'), {
+        autoStart: true,
+      });
+    } finally {
+      release();
+    }
+
+    expect(manager.isComponentRunning('c')).toBe(true);
+    expect(result.success).toBe(false);
+    expect(result.registered).toBe(true);
+    expect(result.autoStartAttempted).toBe(true);
+    expect(result.autoStartSucceeded).toBe(true);
+    expect(result.startResult?.success).toBe(true);
+  });
 });

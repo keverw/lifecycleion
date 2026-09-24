@@ -169,6 +169,28 @@ type DependencyRead =
   { dependencies: string[]; invalidEntry?: TypeError } | { error: unknown };
 
 /**
+ * What a registration has done so far, shared with the safety net that wraps it: a
+ * failure the registration's own catch could not answer - that catch throwing - must
+ * still report a commit and an auto-start that happened, or a caller told otherwise
+ * could register or start the component a second time.
+ */
+interface RegistrationProgress {
+  hasCommitted: boolean;
+  didAutoStartAttempt: boolean;
+  isAutoStartDeferred: boolean;
+  startResult: ComponentOperationResult | undefined;
+}
+
+function newRegistrationProgress(): RegistrationProgress {
+  return {
+    hasCommitted: false,
+    didAutoStartAttempt: false,
+    isAutoStartDeferred: false,
+    startResult: undefined,
+  };
+}
+
+/**
  * The list a read yields, tolerantly: its string entries, or none for a read that
  * failed. Also takes a list already unwrapped, or nothing.
  */
@@ -2288,8 +2310,9 @@ export class LifecycleManager
     isInsertAction: boolean,
     options?: RegisterOptions,
   ): Promise<InsertComponentAtResult> {
-    // Shared with the registration, so this net answers `registered` as it would.
-    const progress = { hasCommitted: false };
+    // Shared with the registration, so this net answers `registered` and the auto-start
+    // fields as it would.
+    const progress = newRegistrationProgress();
 
     return this.settleOperation(
       isInsertAction ? 'insertComponentAt' : 'registerComponent',
@@ -2331,8 +2354,23 @@ export class LifecycleManager
           targetFound:
             position === 'before' || position === 'after' ? false : undefined,
           duringStartup: this.isStarting,
-          autoStartAttempted: false,
-          startResult: undefined,
+          // What this call's auto-start did, as the registration's own catch reports it:
+          // told `false` for one that ran, a caller could start the component again.
+          ...(progress.hasCommitted
+            ? {
+                autoStartAttempted: progress.didAutoStartAttempt,
+                ...(progress.isAutoStartDeferred
+                  ? { autoStartDeferred: true }
+                  : {}),
+                ...(progress.didAutoStartAttempt
+                  ? {
+                      autoStartSucceeded:
+                        progress.startResult?.success === true,
+                    }
+                  : {}),
+                startResult: progress.startResult,
+              }
+            : { autoStartAttempted: false, startResult: undefined }),
         };
       },
     );
@@ -3945,8 +3983,9 @@ export class LifecycleManager
     targetComponentName?: string,
     isInsertAction = false,
     _options?: RegisterOptions,
-    // Whether this call committed, kept where the safety net above it can read it.
-    progress: { hasCommitted: boolean } = { hasCommitted: false },
+    // Whether this call committed, and the auto-start it attempted or deferred, kept
+    // where the safety net above it can read them.
+    progress: RegistrationProgress = newRegistrationProgress(),
   ): Promise<InsertComponentAtResult> {
     const componentName: unknown = component.getName();
 
@@ -3964,7 +4003,8 @@ export class LifecycleManager
     let registrationIndexBefore = this.getComponentIndex(componentName);
     // What a committed registration has done so far, for a failure after the commit to
     // report rather than contradict: a caller told `autoStartAttempted: false` for an
-    // auto-start that ran could start the component a second time. Whether it committed
+    // auto-start that ran could start the component a second time - from this catch, or
+    // from the safety net above, should this catch itself throw. Whether it committed
     // is `progress.hasCommitted`: set by this registration's own commit, not inferred
     // from the registry, since a re-entrant registration of the same instance - from its
     // own `getDependencies()` - can put it there while this one goes on to fail before
@@ -3977,9 +4017,6 @@ export class LifecycleManager
         'startupOrder' | 'manualPositionRespected' | 'targetFound'
       >
     > = {};
-    let didAutoStartAttempt = false;
-    let isAutoStartDeferred = false;
-    let startResult: ComponentOperationResult | undefined;
 
     try {
       // Everything of the caller's code registration needs is read first - whether the
@@ -4504,7 +4541,7 @@ export class LifecycleManager
           this.logger
             .entity(componentName)
             .info('AutoStart: left to the bulk startup about to run');
-          isAutoStartDeferred = true;
+          progress.isAutoStartDeferred = true;
           this.deferredAutoStartNames.add(componentName);
         } else if (this.isStarting) {
           // Manager is currently starting - allow during bulk startup
@@ -4512,9 +4549,9 @@ export class LifecycleManager
             .entity(componentName)
             .info('AutoStart: starting component (during bulk startup)');
 
-          // Attempted either way - a refusal below counts, with `startResult` saying
+          // Attempted either way - a refusal below counts, with `progress.startResult` saying
           // why - and set before the start's `await`, so a failure after it knows.
-          didAutoStartAttempt = true;
+          progress.didAutoStartAttempt = true;
 
           // Taken before the start's `await`, not after: the startup this start belongs
           // to may roll back while it is still in flight, and the one active by then -
@@ -4525,7 +4562,7 @@ export class LifecycleManager
           if (bulkStartup?.isRollingBack === true) {
             // Already being undone: starting it now would run `start()` while the
             // rollback stops its dependencies, only to stop it again.
-            startResult = {
+            progress.startResult = {
               success: false,
               componentName,
               reason:
@@ -4534,7 +4571,7 @@ export class LifecycleManager
               status: this.getComponentStatus(componentName),
             };
           } else {
-            startResult = await this.startComponentInternal(
+            progress.startResult = await this.startComponentInternal(
               componentName,
               { allowDuringBulkStartup: true },
               // Not held to a deadline that has already passed: the startup has
@@ -4565,7 +4602,7 @@ export class LifecycleManager
           // dependents first, since it was started after them - rather than leaving it
           // running on top of dependencies the rollback stopped. One that lands after
           // the rollback began is past it, so it stops itself and fails the auto-start.
-          if (startResult.success && bulkStartup !== null) {
+          if (progress.startResult.success && bulkStartup !== null) {
             if (bulkStartup.isRollingBack) {
               this.logger
                 .entity(componentName)
@@ -4576,7 +4613,7 @@ export class LifecycleManager
               const stopResult =
                 await this.stopComponentInternal(componentName);
 
-              startResult = {
+              progress.startResult = {
                 success: false,
                 componentName,
                 reason: stopResult.success
@@ -4599,20 +4636,22 @@ export class LifecycleManager
           this.logger
             .entity(componentName)
             .info('AutoStart: starting component (manager is running)');
-          didAutoStartAttempt = true;
-          startResult = await this.startComponentInternal(componentName);
+          progress.didAutoStartAttempt = true;
+          progress.startResult =
+            await this.startComponentInternal(componentName);
         } else {
           // Manager is not running - attempt to start just this component
           this.logger
             .entity(componentName)
             .info('AutoStart: starting component (manager not running)');
-          didAutoStartAttempt = true;
-          startResult = await this.startComponentInternal(componentName);
+          progress.didAutoStartAttempt = true;
+          progress.startResult =
+            await this.startComponentInternal(componentName);
         }
       }
 
-      const didAutoStartSucceed = didAutoStartAttempt
-        ? startResult?.success === true
+      const didAutoStartSucceed = progress.didAutoStartAttempt
+        ? progress.startResult?.success === true
         : undefined;
 
       // Where it is now, not where it landed: an auto-start can register or remove
@@ -4639,8 +4678,8 @@ export class LifecycleManager
         manualPositionRespected: isManualPositionRespected,
         targetFound: isTargetFound,
         duringStartup: this.isStarting,
-        autoStartAttempted: didAutoStartAttempt,
-        ...(isAutoStartDeferred ? { autoStartDeferred: true } : {}),
+        autoStartAttempted: progress.didAutoStartAttempt,
+        ...(progress.isAutoStartDeferred ? { autoStartDeferred: true } : {}),
         autoStartSucceeded: didAutoStartSucceed,
       });
 
@@ -4657,10 +4696,10 @@ export class LifecycleManager
         manualPositionRespected: isManualPositionRespected,
         targetFound: isTargetFound,
         duringStartup: this.isStarting,
-        autoStartAttempted: didAutoStartAttempt,
-        ...(isAutoStartDeferred ? { autoStartDeferred: true } : {}),
+        autoStartAttempted: progress.didAutoStartAttempt,
+        ...(progress.isAutoStartDeferred ? { autoStartDeferred: true } : {}),
         autoStartSucceeded: didAutoStartSucceed,
-        startResult,
+        startResult: progress.startResult,
       };
     } catch (error) {
       // Handle unexpected errors during registration
@@ -4703,10 +4742,12 @@ export class LifecycleManager
                 : position === 'before' || position === 'after'
                   ? false
                   : undefined,
-            autoStartAttempted: didAutoStartAttempt,
-            ...(isAutoStartDeferred ? { autoStartDeferred: true } : {}),
-            ...(didAutoStartAttempt
-              ? { autoStartSucceeded: startResult?.success === true }
+            autoStartAttempted: progress.didAutoStartAttempt,
+            ...(progress.isAutoStartDeferred
+              ? { autoStartDeferred: true }
+              : {}),
+            ...(progress.didAutoStartAttempt
+              ? { autoStartSucceeded: progress.startResult?.success === true }
               : {}),
           }
         : undefined;
@@ -4773,7 +4814,7 @@ export class LifecycleManager
             position === 'before' || position === 'after' ? false : undefined,
           autoStartAttempted: false,
         }),
-        startResult: isRegistered ? startResult : undefined,
+        startResult: isRegistered ? progress.startResult : undefined,
       };
     }
   }
