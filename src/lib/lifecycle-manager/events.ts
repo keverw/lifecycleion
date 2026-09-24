@@ -108,7 +108,7 @@ export interface LifecycleManagerEventMap {
     targetFound?: boolean;
     duringStartup?: boolean;
     autoStartAttempted?: boolean;
-    /** Left to the bulk startup about to run; see `RegistrationResultBase`. */
+    /** Left to a bulk startup that has not begun its loop; see `RegistrationResultBase`. */
     autoStartDeferred?: boolean;
     autoStartSucceeded?: boolean;
   };
@@ -385,7 +385,7 @@ export class LifecycleManagerEvents {
     targetFound?: boolean;
     duringStartup?: boolean;
     autoStartAttempted?: boolean;
-    /** Left to the bulk startup about to run; see `RegistrationResultBase`. */
+    /** Left to a bulk startup that has not begun its loop; see `RegistrationResultBase`. */
     autoStartDeferred?: boolean;
     autoStartSucceeded?: boolean;
   }): void {

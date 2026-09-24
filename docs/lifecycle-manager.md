@@ -628,7 +628,7 @@ interface InsertComponentAtResult {
 **Position Debugging Fields:**
 
 - `requestedPosition` - What you asked for (position type and optional target component)
-- `actualPosition` - Where it actually ended up after dependency resolution. Only present when `registered: true`
+- `actualPosition` - Where it actually ended up after dependency resolution, read when the call returns. Present when the component is still registered then - not when a listener removed it again during its auto-start
   - `index` - The registry array index (0-based)
   - `description` - Human-readable position like `"at start"`, `"at end"`, `"after database, before api"`, or `"only component"`
 - `manualPositionRespected` - `true` if the explicit position was honored, `false` if dependency ordering forced a different position

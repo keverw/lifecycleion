@@ -2288,6 +2288,9 @@ export class LifecycleManager
     isInsertAction: boolean,
     options?: RegisterOptions,
   ): Promise<InsertComponentAtResult> {
+    // Shared with the registration, so this net answers `registered` as it would.
+    const progress = { hasCommitted: false };
+
     return this.settleOperation(
       isInsertAction ? 'insertComponentAt' : 'registerComponent',
       () =>
@@ -2297,6 +2300,7 @@ export class LifecycleManager
           targetComponentName,
           isInsertAction,
           options,
+          progress,
         ),
       (error, reason) => {
         const registrationIndex = this.components.indexOf(component);
@@ -2304,9 +2308,10 @@ export class LifecycleManager
         return {
           action: 'insert',
           success: false,
-          // Whatever the registry actually holds, not what the failure implies: a throw
-          // after the commit leaves the component registered.
-          registered: registrationIndex !== -1,
+          // Whether this call committed, as the registration's own catch decides it -
+          // not registry membership, which a re-entrant registration of the same
+          // instance can produce while this one committed nothing.
+          registered: progress.hasCommitted,
           componentName: this.readComponentNameSafely(component),
           reason,
           code: 'unknown_error',
@@ -2314,8 +2319,12 @@ export class LifecycleManager
           // Unknown: reading it means asking the component for its name, which may be
           // what threw.
           registrationIndexBefore: null,
+          // Only this call's own entry: an instance a re-entrant registration put there
+          // is not where this one landed.
           registrationIndexAfter:
-            registrationIndex === -1 ? null : registrationIndex,
+            progress.hasCommitted && registrationIndex !== -1
+              ? registrationIndex
+              : null,
           startupOrder: [],
           requestedPosition: { position, targetComponentName },
           manualPositionRespected: false,
@@ -3936,6 +3945,8 @@ export class LifecycleManager
     targetComponentName?: string,
     isInsertAction = false,
     _options?: RegisterOptions,
+    // Whether this call committed, kept where the safety net above it can read it.
+    progress: { hasCommitted: boolean } = { hasCommitted: false },
   ): Promise<InsertComponentAtResult> {
     const componentName: unknown = component.getName();
 
@@ -3953,11 +3964,12 @@ export class LifecycleManager
     let registrationIndexBefore = this.getComponentIndex(componentName);
     // What a committed registration has done so far, for a failure after the commit to
     // report rather than contradict: a caller told `autoStartAttempted: false` for an
-    // auto-start that ran could start the component a second time.
-    // Set by this registration's own commit, not inferred from the registry: a
-    // re-entrant registration of the same instance - from its own `getDependencies()` -
-    // can put it there while this one goes on to fail before committing anything.
-    let hasCommitted = false;
+    // auto-start that ran could start the component a second time. Whether it committed
+    // is `progress.hasCommitted`: set by this registration's own commit, not inferred
+    // from the registry, since a re-entrant registration of the same instance - from its
+    // own `getDependencies()` - can put it there while this one goes on to fail before
+    // committing anything.
+    //
     // Filled in as each part is known, so a failure part-way reports what was.
     const committed: Partial<
       Pick<
@@ -4346,7 +4358,7 @@ export class LifecycleManager
       // A new array rather than a splice, as unregister does: a loop over the registry
       // that a re-entrant registration lands in keeps walking the array it started on.
       this.components = nextComponents;
-      hasCommitted = true;
+      progress.hasCommitted = true;
       committed.startupOrder = startupOrder;
       this.registeredNames.set(component, componentName);
       this.componentStates.set(componentName, 'registered');
@@ -4396,7 +4408,7 @@ export class LifecycleManager
           (registered) => registered !== component,
         );
         // Rolled back, so this registration did not commit after all.
-        hasCommitted = false;
+        progress.hasCommitted = false;
         if (previousRecordedName === undefined) {
           this.registeredNames.delete(component);
         } else {
@@ -4451,8 +4463,9 @@ export class LifecycleManager
         startupOrder,
       });
 
-      // Get the final registration index after insertion
-      const registrationIndexAfter = this.getComponentIndex(componentName);
+      // Get the final registration index after insertion - by instance, as the result
+      // and event read it.
+      const registrationIndexAfter = this.components.indexOf(component);
       const isTargetFound =
         position === 'before' || position === 'after'
           ? this.getComponentIndex(targetComponentName ?? '') !== null
@@ -4482,8 +4495,10 @@ export class LifecycleManager
           (this.activeBulkStartup === null || this.activeBulkStartup.isOrdering)
         ) {
           // A bulk startup that has taken its latch but not begun its loop - an
-          // `attachSignalsBeforeStartup` listener on `signals-attached` registering this.
-          // The loop about to run reads the registry after this and starts it in order;
+          // `attachSignalsBeforeStartup` listener on `signals-attached` registering this -
+          // or is still reading the registry to compute its order, from one of whose
+          // `getDependencies()` reads this was registered. Either way its order is
+          // computed with this component in it, and its loop starts it in turn;
           // starting it here as well had the loop find it `component_already_starting`,
           // which failed - and rolled back - the whole startup.
           this.logger
@@ -4666,13 +4681,14 @@ export class LifecycleManager
           params: { error: err },
         });
 
-      // Read back from the registry rather than assumed: a throw after the commit - from
-      // an auto-start, say - leaves the component registered, and both the event and the
-      // result must say so.
+      // `registered` is whether this call added the component, as on success: a throw
+      // after the commit - from an auto-start, say - leaves it added, and both the event
+      // and the result must say so. Where it is now is read back from the registry, and
+      // is `null` if a listener has removed it since.
       const indexOfComponent = this.components.indexOf(component);
       const registrationIndexNow =
         indexOfComponent === -1 ? null : indexOfComponent;
-      const isRegistered = hasCommitted;
+      const isRegistered = progress.hasCommitted;
       // What a committed registration reports - where it is, the order it computed,
       // the target it found, and an auto-start it attempted or left to the bulk
       // startup - on both the event and the result, built once so they cannot drift.

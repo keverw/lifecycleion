@@ -889,7 +889,12 @@ export type RegistrationFailureCode =
  * Common result shape for component registration operations
  */
 export interface RegistrationResultBase extends BaseOperationResult {
-  /** Whether the component was added to the registry */
+  /**
+   * Whether this call added the component to the registry. It stays `true` for one that
+   * failed after it was added - an auto-start that crashed, say - and for one a listener
+   * has removed again since, whose `registrationIndexAfter` is then `null` and which has
+   * no `actualPosition`.
+   */
   registered: boolean;
 
   /** Component name */
@@ -919,8 +924,10 @@ export interface RegistrationResultBase extends BaseOperationResult {
 
   /**
    * `true` when `autoStart` was requested while a bulk startup held its latch but had not
-   * begun starting components - from a `signals-attached` listener, say. The component
-   * is left to that startup rather than started here, so `autoStartAttempted` is `false`;
+   * begun starting components - from a `signals-attached` listener, say, or from a
+   * `getDependencies()` the startup read while computing its order. The component is
+   * ordered with the rest and left to that startup rather than started here, so
+   * `autoStartAttempted` is `false`;
    * whether it starts is that startup's result to say. One refused or failed before its
    * loop - a shutdown started meanwhile - never starts it.
    */

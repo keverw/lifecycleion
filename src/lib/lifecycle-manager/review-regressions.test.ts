@@ -3726,4 +3726,54 @@ describe('LifecycleManager - review regressions', () => {
     expect(result.registrationIndexAfter).toBeNull();
     expect(result.actualPosition).toBeUndefined();
   });
+
+  test('the safety net answers registered as the registration would', async () => {
+    const { logger, manager } = setup();
+    let calls = 0;
+
+    class Candidate extends Plain {
+      public override _isRegisteredWithManager(): boolean {
+        // The outer registration's ask, after the inner one committed.
+        if (++calls === 2) {
+          throw new Error('isRegistered exploded');
+        }
+
+        return super._isRegisteredWithManager();
+      }
+    }
+
+    const c = new Candidate(logger, 'c');
+    let hasReentered = false;
+    c.getDependencies = (): string[] => {
+      if (!hasReentered) {
+        hasReentered = true;
+        void manager.registerComponent(c);
+      }
+
+      return [];
+    };
+    // The outer call's rejection event throws, past its own catch, into the net.
+    const events = (
+      manager as unknown as {
+        lifecycleEvents: { componentRegistrationRejected: () => void };
+      }
+    ).lifecycleEvents;
+    events.componentRegistrationRejected = (): void => {
+      throw new Error('rejection event exploded');
+    };
+
+    const { release } = claimReports();
+    let result;
+
+    try {
+      result = await manager.registerComponent(c);
+    } finally {
+      release();
+    }
+
+    expect(manager.getComponentNames()).toEqual(['c']);
+    expect(result.code).toBe('unknown_error');
+    expect(result.registered).toBe(false);
+    expect(result.registrationIndexAfter).toBeNull();
+  });
 });
